@@ -1,0 +1,1 @@
+{"snapshot_date":"2026-04-04","requested_nm_ids":[999000001],"source":{"endpoint":"GET /api/v1/supplier/sales?dateFrom=2026-04-04","mode":"official_api_empty_after_nm_filter"},"data":{"items":[]}}

@@ -1,0 +1,1 @@
+{"snapshot_date":"2026-04-04","requested_nm_ids":[210183919,210184534],"source":{"endpoint":"GET /api/v1/supplier/sales?dateFrom=2026-04-04","mode":"official_api_bootstrap_sample"},"data":{"items":[{"nmId":210183919,"spp_avg":0.24621052631578932,"spp_count":190},{"nmId":210184534,"spp_avg":0.24250000000000005,"spp_count":72}]}}
