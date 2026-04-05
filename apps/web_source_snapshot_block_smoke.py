@@ -10,7 +10,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from packages.application.web_source_snapshot_block import transform_legacy_payload
+from packages.adapters.web_source_snapshot_block import ArtifactBackedWebSourceSnapshotSource
+from packages.application.web_source_snapshot_block import WebSourceSnapshotBlock
+from packages.contracts.web_source_snapshot_block import WebSourceSnapshotRequest
 
 
 ARTIFACTS = ROOT / "artifacts" / "web_source_snapshot_block"
@@ -20,10 +22,17 @@ def _load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _check_case(name: str, legacy_path: Path, target_path: Path) -> None:
-    legacy_payload = _load_json(legacy_path)
+def _check_case(name: str, target_path: Path) -> None:
     expected_target = _load_json(target_path)
-    actual_target = asdict(transform_legacy_payload(legacy_payload))
+    source = ArtifactBackedWebSourceSnapshotSource(ARTIFACTS)
+    block = WebSourceSnapshotBlock(source)
+    request = WebSourceSnapshotRequest(
+        snapshot_type="search_analytics_snapshot",
+        date_from="2026-04-04",
+        date_to="2026-04-04",
+        scenario=name.replace("-", "_"),
+    )
+    actual_target = asdict(block.execute(request))
     if actual_target != expected_target:
         raise SystemExit(
             f"{name}: smoke-check failed\n"
@@ -36,12 +45,10 @@ def _check_case(name: str, legacy_path: Path, target_path: Path) -> None:
 def main() -> None:
     _check_case(
         "normal",
-        ARTIFACTS / "legacy" / "normal__template__legacy__fixture.json",
         ARTIFACTS / "target" / "normal__template__target__fixture.json",
     )
     _check_case(
         "not-found",
-        ARTIFACTS / "legacy" / "not-found__template__legacy__fixture.json",
         ARTIFACTS / "target" / "not-found__template__target__fixture.json",
     )
     print("smoke-check passed")

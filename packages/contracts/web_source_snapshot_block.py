@@ -11,6 +11,7 @@ class WebSourceSnapshotRequest:
     snapshot_type: str
     date_from: str
     date_to: str
+    scenario: Literal["normal", "not_found"] = "normal"
 
 
 @dataclass(frozen=True)
