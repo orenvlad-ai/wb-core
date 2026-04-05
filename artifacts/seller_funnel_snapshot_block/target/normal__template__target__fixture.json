@@ -1,0 +1,505 @@
+{
+  "result": {
+    "kind": "success",
+    "date": "2026-04-04",
+    "count": 62,
+    "items": [
+      {
+        "nm_id": 210183919,
+        "name": "Защитное стекло на iPhone 13 14 13pro 16e 17е автоустановка",
+        "vendor_code": "smk_iPhone14",
+        "view_count": 15153,
+        "open_card_count": 1524,
+        "ctr": 10
+      },
+      {
+        "nm_id": 259460529,
+        "name": "Защитное стекло на iPhone 15 и iPhone 16 c автоустановкой",
+        "vendor_code": "smk_iPhone15_16",
+        "view_count": 14646,
+        "open_card_count": 1593,
+        "ctr": 11
+      },
+      {
+        "nm_id": 391662965,
+        "name": "Защитное стекло антишпион на iPhone 15 / 16",
+        "vendor_code": "(Anti-Spy) iPhone 15 / 16",
+        "view_count": 12833,
+        "open_card_count": 1276,
+        "ctr": 10
+      },
+      {
+        "nm_id": 259466031,
+        "name": "Защитное стекло на iPhone 16 Pro / 17 с автоустановкой",
+        "vendor_code": "smk_iPhone16Pro",
+        "view_count": 9296,
+        "open_card_count": 1209,
+        "ctr": 13
+      },
+      {
+        "nm_id": 497414624,
+        "name": "Защитное стекло на iPhone 17 Pro Max с автоустановкой",
+        "vendor_code": "(Clean) iPhone 17 Pro Max",
+        "view_count": 8803,
+        "open_card_count": 1194,
+        "ctr": 14
+      },
+      {
+        "nm_id": 259465495,
+        "name": "Защитное стекло на iPhone 16 Pro Max с автоустановкой",
+        "vendor_code": "smk_iPhone16ProMax",
+        "view_count": 7093,
+        "open_card_count": 983,
+        "ctr": 14
+      },
+      {
+        "nm_id": 391662410,
+        "name": "Защитное стекло антишпион на iPhone 14 13 13Pro 16E 17E",
+        "vendor_code": "(Anti-Spy) iPhone 14 / 13 / 13Pro",
+        "view_count": 6634,
+        "open_card_count": 920,
+        "ctr": 14
+      },
+      {
+        "nm_id": 428854502,
+        "name": "Защитное стекло матовое на iPhone 14 13 13Pro 16e 17e",
+        "vendor_code": "(Matte) iPhone 14 / 13 / 13Pro",
+        "view_count": 6097,
+        "open_card_count": 956,
+        "ctr": 16
+      },
+      {
+        "nm_id": 497414010,
+        "name": "Защитное стекло на iPhone 17 Pro с автоустановкой",
+        "vendor_code": "(Clean) iPhone 17 Pro",
+        "view_count": 5968,
+        "open_card_count": 652,
+        "ctr": 11
+      },
+      {
+        "nm_id": 259473237,
+        "name": "Защитное стекло на iPhone 15 Pro с автоустановкой",
+        "vendor_code": "smk_iPhone15Pro",
+        "view_count": 5336,
+        "open_card_count": 560,
+        "ctr": 10
+      },
+      {
+        "nm_id": 391660889,
+        "name": "Защитное стекло антишпион на iPhone 16 Pro / 17",
+        "vendor_code": "(Anti-Spy) iPhone 16 Pro",
+        "view_count": 5215,
+        "open_card_count": 756,
+        "ctr": 14
+      },
+      {
+        "nm_id": 428855306,
+        "name": "Защитное стекло матовое на iPhone 15 / 16",
+        "vendor_code": "(Matte) iPhone 15 / 16",
+        "view_count": 5043,
+        "open_card_count": 1126,
+        "ctr": 22
+      },
+      {
+        "nm_id": 245720334,
+        "name": "Защитное стекло на iPhone 15 Pro Max с автоустановкой",
+        "vendor_code": "smk_iPhone15ProMax",
+        "view_count": 4992,
+        "open_card_count": 765,
+        "ctr": 15
+      },
+      {
+        "nm_id": 391661710,
+        "name": "Защитное стекло антишпион на iPhone 16 ProMax",
+        "vendor_code": "(Anti-Spy) iPhone 16 ProMax",
+        "view_count": 4647,
+        "open_card_count": 751,
+        "ctr": 16
+      },
+      {
+        "nm_id": 428854140,
+        "name": "Защитное стекло матовое на iPhone 16 Pro / 17",
+        "vendor_code": "(Matte) iPhone 16 Pro",
+        "view_count": 4237,
+        "open_card_count": 835,
+        "ctr": 20
+      },
+      {
+        "nm_id": 497416559,
+        "name": "Защитное стекло антишпион на iPhone 17 Pro Max",
+        "vendor_code": "(Anti-Spy) iPhone 17 Pro Max",
+        "view_count": 3996,
+        "open_card_count": 713,
+        "ctr": 18
+      },
+      {
+        "nm_id": 428854299,
+        "name": "Защитное стекло матовое на iPhone 16 ProMax",
+        "vendor_code": "(Matte) iPhone 16 ProMax",
+        "view_count": 3871,
+        "open_card_count": 727,
+        "ctr": 19
+      },
+      {
+        "nm_id": 210184534,
+        "name": "Защитное стекло на iPhone 14 Pro с автоустановкой",
+        "vendor_code": "smk_iPhone14Pro",
+        "view_count": 3802,
+        "open_card_count": 437,
+        "ctr": 11
+      },
+      {
+        "nm_id": 497417474,
+        "name": "Защитное стекло матовое на iPhone 17 Pro Max",
+        "vendor_code": "(Matte) iPhone 17 Pro Max",
+        "view_count": 3658,
+        "open_card_count": 694,
+        "ctr": 19
+      },
+      {
+        "nm_id": 391663632,
+        "name": "Защитное стекло антишпион на iPhone 15 Pro Max",
+        "vendor_code": "(Anti-Spy) iPhone 15 Pro Max",
+        "view_count": 3585,
+        "open_card_count": 517,
+        "ctr": 14
+      },
+      {
+        "nm_id": 210183142,
+        "name": "Защитное стекло на iPhone 14 Pro Max с автоустановкой",
+        "vendor_code": "smk_iPhone14ProMax",
+        "view_count": 3548,
+        "open_card_count": 433,
+        "ctr": 12
+      },
+      {
+        "nm_id": 428850065,
+        "name": "Защитное стекло антишпион на iPhone 14 Pro Max",
+        "vendor_code": "(Anti-Spy) iPhone 14 Pro Max",
+        "view_count": 3161,
+        "open_card_count": 357,
+        "ctr": 11
+      },
+      {
+        "nm_id": 428849827,
+        "name": "Защитное стекло антишпион на iPhone 14 Pro",
+        "vendor_code": "(Anti-Spy) iPhone 14 Pro",
+        "view_count": 2619,
+        "open_card_count": 310,
+        "ctr": 12
+      },
+      {
+        "nm_id": 428855560,
+        "name": "Защитное стекло матовое на iPhone 15 Pro Max",
+        "vendor_code": "(Matte) iPhone 15 Pro Max",
+        "view_count": 2536,
+        "open_card_count": 539,
+        "ctr": 21
+      },
+      {
+        "nm_id": 391659990,
+        "name": "Защитное стекло антишпион на iPhone 15 Pro",
+        "vendor_code": "(Anti-Spy) iPhone 15 Pro",
+        "view_count": 2512,
+        "open_card_count": 326,
+        "ctr": 13
+      },
+      {
+        "nm_id": 428855978,
+        "name": "Защитное стекло матовое на iPhone 14 Pro Max",
+        "vendor_code": "(Matte) iPhone 14 Pro Max",
+        "view_count": 2052,
+        "open_card_count": 364,
+        "ctr": 18
+      },
+      {
+        "nm_id": 497416271,
+        "name": "Защитное стекло антишпион на iPhone 17 Pro",
+        "vendor_code": "(Anti-Spy) iPhone 17 Pro",
+        "view_count": 2036,
+        "open_card_count": 301,
+        "ctr": 15
+      },
+      {
+        "nm_id": 497417163,
+        "name": "Защитное стекло матовое на iPhone 17 Pro",
+        "vendor_code": "(Matte) iPhone 17 Pro",
+        "view_count": 1785,
+        "open_card_count": 303,
+        "ctr": 17
+      },
+      {
+        "nm_id": 428855758,
+        "name": "Защитное стекло матовое на iPhone 14 Pro",
+        "vendor_code": "(Matte) iPhone 14 Pro",
+        "view_count": 1772,
+        "open_card_count": 307,
+        "ctr": 17
+      },
+      {
+        "nm_id": 428853741,
+        "name": "Защитное стекло матовое на iPhone 15 Pro",
+        "vendor_code": "(Matte) iPhone 15 Pro",
+        "view_count": 1739,
+        "open_card_count": 300,
+        "ctr": 17
+      },
+      {
+        "nm_id": 497413772,
+        "name": "Защитное стекло на iPhone Air с автоустановкой",
+        "vendor_code": "(Clean) iPhone 17 Air",
+        "view_count": 796,
+        "open_card_count": 96,
+        "ctr": 12
+      },
+      {
+        "nm_id": 497415593,
+        "name": "Защитное стекло антишпион на iPhone Air",
+        "vendor_code": "(Anti-Spy) iPhone 17 Air",
+        "view_count": 285,
+        "open_card_count": 36,
+        "ctr": 13
+      },
+      {
+        "nm_id": 497416931,
+        "name": "Защитное стекло матовое на iPhone Air",
+        "vendor_code": "(Matte) iPhone 17 Air",
+        "view_count": 267,
+        "open_card_count": 32,
+        "ctr": 12
+      },
+      {
+        "nm_id": 274811552,
+        "name": "Защитное стекло на iPhone 11 Pro Max с автоустановкой",
+        "vendor_code": "smk_iPhone11ProMax",
+        "view_count": 154,
+        "open_card_count": 2,
+        "ctr": 1
+      },
+      {
+        "nm_id": 274811358,
+        "name": "Защитное стекло на iPhone 13 ProMax/14Plus с автоустановкой",
+        "vendor_code": "smk_iPhone13ProMax/14Plus",
+        "view_count": 123,
+        "open_card_count": 8,
+        "ctr": 7
+      },
+      {
+        "nm_id": 274810794,
+        "name": "Защитное стекло на iPhone 11 Pro с автоустановкой",
+        "vendor_code": "smk_iPhone11Pro",
+        "view_count": 119,
+        "open_card_count": 10,
+        "ctr": 8
+      },
+      {
+        "nm_id": 274810981,
+        "name": "Защитное стекло на iPhone 11 на iPhone XR с автоустановкой",
+        "vendor_code": "smk_iPhone11/XR",
+        "view_count": 107,
+        "open_card_count": 5,
+        "ctr": 5
+      },
+      {
+        "nm_id": 274812255,
+        "name": "Защитное стекло на iPhone 16 Plus/15 Plus с автоустановкой",
+        "vendor_code": "smk_iPhone16Plus/15Plus",
+        "view_count": 99,
+        "open_card_count": 8,
+        "ctr": 8
+      },
+      {
+        "nm_id": 259474327,
+        "name": "Защитное стекло на iPhone 12 и iPhone 12 Pro автоустановка",
+        "vendor_code": "smk_iPhone12_12Pro",
+        "view_count": 98,
+        "open_card_count": 5,
+        "ctr": 5
+      },
+      {
+        "nm_id": 274811657,
+        "name": "Защитное стекло на iPhone 12 Pro Max с автоустановкой",
+        "vendor_code": "smk_iPhone12ProMax",
+        "view_count": 97,
+        "open_card_count": 11,
+        "ctr": 11
+      },
+      {
+        "nm_id": 428857112,
+        "name": "Защитное стекло матовое на iPhone 13 Pro Max / 14 Plus",
+        "vendor_code": "(Matte) iPhone 13 Pro Max / 14 Plus",
+        "view_count": 35,
+        "open_card_count": 2,
+        "ctr": 6
+      },
+      {
+        "nm_id": 428850861,
+        "name": "Защитное стекло антишпион на iPhone 11 Pro",
+        "vendor_code": "(Anti-Spy) iPhone 11 Pro",
+        "view_count": 31,
+        "open_card_count": 3,
+        "ctr": 10
+      },
+      {
+        "nm_id": 428856851,
+        "name": "Защитное стекло матовое на iPhone 11 Pro",
+        "vendor_code": "(Matte) iPhone 11 Pro",
+        "view_count": 28,
+        "open_card_count": 2,
+        "ctr": 7
+      },
+      {
+        "nm_id": 428862749,
+        "name": "Защитное стекло матовое на iPhone 16 Plus / 15 Plus",
+        "vendor_code": "(Matte) iPhone 16 Plus / 15 Plus",
+        "view_count": 27,
+        "open_card_count": 5,
+        "ctr": 19
+      },
+      {
+        "nm_id": 428857476,
+        "name": "Защитное стекло матовое на iPhone 11 Pro Max",
+        "vendor_code": "(Matte) iPhone 11 Pro Max",
+        "view_count": 25,
+        "open_card_count": 2,
+        "ctr": 8
+      },
+      {
+        "nm_id": 428850322,
+        "name": "Защитное стекло антишпион на iPhone 12 / 12 Pro",
+        "vendor_code": "(Anti-Spy) iPhone 12 / 12 Pro",
+        "view_count": 24,
+        "open_card_count": 1,
+        "ctr": 4
+      },
+      {
+        "nm_id": 428851074,
+        "name": "Защитное стекло антишпион на iPhone 13 Pro Max / 14 Plus",
+        "vendor_code": "(Anti-Spy) iPhone 13 Pro Max / 14 Plus",
+        "view_count": 24,
+        "open_card_count": 0,
+        "ctr": 0
+      },
+      {
+        "nm_id": 428856665,
+        "name": "Защитное стекло матовое на iPhone 11 / XR",
+        "vendor_code": "(Matte) iPhone 11 / XR",
+        "view_count": 23,
+        "open_card_count": 2,
+        "ctr": 9
+      },
+      {
+        "nm_id": 428850660,
+        "name": "Защитное стекло антишпион на iPhone 11 / XR",
+        "vendor_code": "(Anti-Spy) iPhone 11 / XR",
+        "view_count": 22,
+        "open_card_count": 1,
+        "ctr": 5
+      },
+      {
+        "nm_id": 428851675,
+        "name": "Защитное стекло антишпион на iPhone 11 Pro Max",
+        "vendor_code": "(Anti-Spy) iPhone 11 Pro Max",
+        "view_count": 21,
+        "open_card_count": 4,
+        "ctr": 19
+      },
+      {
+        "nm_id": 428852463,
+        "name": "Защитное стекло антишпион на iPhone 12 Pro Max",
+        "vendor_code": "(Anti-Spy) iPhone 12 Pro Max",
+        "view_count": 19,
+        "open_card_count": 3,
+        "ctr": 16
+      },
+      {
+        "nm_id": 428856194,
+        "name": "Защитное стекло матовое на iPhone 12 / 12 Pro",
+        "vendor_code": "(Matte) iPhone 12 / 12 Pro",
+        "view_count": 18,
+        "open_card_count": 1,
+        "ctr": 6
+      },
+      {
+        "nm_id": 301475360,
+        "name": "Защитное стекло на iPhone 15 pro max автоустановка",
+        "vendor_code": "easy_iPhone15promax",
+        "view_count": 17,
+        "open_card_count": 1,
+        "ctr": 6
+      },
+      {
+        "nm_id": 428852875,
+        "name": "Защитное стекло антишпион на iPhone 16 Plus / 15 Plus",
+        "vendor_code": "(Anti-Spy) iPhone 16 Plus / 15 Plus",
+        "view_count": 17,
+        "open_card_count": 2,
+        "ctr": 12
+      },
+      {
+        "nm_id": 428857728,
+        "name": "Защитное стекло матовое на iPhone 12 Pro Max",
+        "vendor_code": "(Matte) iPhone 12 Pro Max",
+        "view_count": 16,
+        "open_card_count": 5,
+        "ctr": 31
+      },
+      {
+        "nm_id": 301472513,
+        "name": "Защитное стекло на iPhone 13 айфон 14 и 13про автоустановка",
+        "vendor_code": "easy_iPhone13_13pro_14",
+        "view_count": 13,
+        "open_card_count": 0,
+        "ctr": 0
+      },
+      {
+        "nm_id": 301472730,
+        "name": "Защитное стекло на iPhone 15 и iPhone 16 c автоустановкой",
+        "vendor_code": "easy_iPhone15_16",
+        "view_count": 12,
+        "open_card_count": 1,
+        "ctr": 8
+      },
+      {
+        "nm_id": 301474639,
+        "name": "Защитное стекло на iPhone 11 iPhone XR автоустановка",
+        "vendor_code": "easy_iPhone11/XR",
+        "view_count": 12,
+        "open_card_count": 1,
+        "ctr": 8
+      },
+      {
+        "nm_id": 301476228,
+        "name": "Защитное стекло на iPhone 12 iPhone 12 pro автоустановка",
+        "vendor_code": "easy_iPhone12_12pro",
+        "view_count": 10,
+        "open_card_count": 0,
+        "ctr": 0
+      },
+      {
+        "nm_id": 260492476,
+        "name": "Защитное стекло Remax на iPhone 15/16 - 2 штуки - GL-81",
+        "vendor_code": "remax_smk_iPhone15_16",
+        "view_count": 5,
+        "open_card_count": 0,
+        "ctr": 0
+      },
+      {
+        "nm_id": 180330785,
+        "name": "Пижама с кимоно и штанами",
+        "vendor_code": "кимоно1",
+        "view_count": 2,
+        "open_card_count": 0,
+        "ctr": 0
+      },
+      {
+        "nm_id": 260493197,
+        "name": "Защитное стекло Remax на iPhone 16 Pro Max - 2 штуки - GL-81",
+        "vendor_code": "remax_smk_iPhone16ProMax",
+        "view_count": 2,
+        "open_card_count": 0,
+        "ctr": 0
+      }
+    ]
+  }
+}
