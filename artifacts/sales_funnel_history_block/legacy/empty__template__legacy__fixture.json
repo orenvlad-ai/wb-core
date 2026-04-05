@@ -1,0 +1,1 @@
+{"date_from":"2026-03-30","date_to":"2026-04-05","requested_nm_ids":[999000001],"source":{"endpoint":"POST /api/analytics/v3/sales-funnel/products/history","mode":"official_api_empty_history"},"data":{"rows":[]}}
