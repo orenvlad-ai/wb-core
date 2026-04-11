@@ -1,0 +1,102 @@
+---
+title: "Модуль: seller_funnel_snapshot_block"
+doc_id: "WB-CORE-MODULE-02-SELLER-FUNNEL-SNAPSHOT-BLOCK"
+doc_type: "module"
+status: "active"
+purpose: "Зафиксировать канонический модульный reference по уже перенесённому блоку `seller_funnel_snapshot_block`."
+scope: "Legacy consumer-facing daily contract, target snapshot semantics, артефакты, кодовые части и текущие smoke-path этого web-source модуля."
+source_basis:
+  - "migration/20_seller_funnel_snapshot_block_contract.md"
+  - "migration/23_seller_funnel_snapshot_block_legacy_sample_source.md"
+  - "artifacts/seller_funnel_snapshot_block/evidence/initial__seller-funnel-snapshot__evidence.md"
+  - "apps/seller_funnel_snapshot_block_smoke.py"
+  - "apps/seller_funnel_snapshot_block_http_smoke.py"
+related_modules:
+  - "packages/contracts/seller_funnel_snapshot_block.py"
+  - "packages/adapters/seller_funnel_snapshot_block.py"
+  - "packages/application/seller_funnel_snapshot_block.py"
+related_tables: []
+related_endpoints:
+  - "GET /v1/sales-funnel/daily"
+related_runners:
+  - "apps/seller_funnel_snapshot_block_smoke.py"
+  - "apps/seller_funnel_snapshot_block_http_smoke.py"
+related_docs:
+  - "00_INDEX__MODULES.md"
+  - "migration/20_seller_funnel_snapshot_block_contract.md"
+  - "migration/21_seller_funnel_snapshot_block_parity_matrix.md"
+  - "migration/22_seller_funnel_snapshot_block_evidence_checklist.md"
+  - "migration/23_seller_funnel_snapshot_block_legacy_sample_source.md"
+  - "artifacts/seller_funnel_snapshot_block/evidence/initial__seller-funnel-snapshot__evidence.md"
+source_of_truth_level: "module_canonical"
+update_note: "Добавлен как канонический модульный документ по текущему состоянию `main`; фиксирует seller funnel daily snapshot checkpoint."
+---
+
+# 1. Идентификатор и статус
+
+- `module_id`: `seller_funnel_snapshot_block`
+- `family`: `web-source`
+- `status_transfer`: модуль перенесён в `wb-core`
+- `status_verification`: модуль проверен
+- `status_checkpoint`: рабочий checkpoint подтверждён
+- `status_main`: модуль смёржен в `main`
+
+# 2. Legacy-source и legacy semantics
+
+- Legacy-source фиксируется как consumer-facing daily contract `GET /v1/sales-funnel/daily`.
+- Ключевая semantics задаётся на уровне daily snapshot `date` и item identity `nm_id`.
+- В checkpoint сохранены:
+  - поля `name`, `vendor_code`, `view_count`, `open_card_count`, `ctr`
+  - `count` и состав `items`
+  - отдельный режим `not_found`
+
+# 3. Target contract и смысл результата
+
+- Success shape:
+  - `kind = "success"`
+  - `date`
+  - `count`
+  - `items[]`
+- Not-found shape:
+  - `kind = "not_found"`
+  - `detail`
+- Целевой смысл блока: server-side daily snapshot boundary для downstream-потребителей без переноса producer-side runtime.
+
+# 4. Артефакты по модулю
+
+- legacy samples:
+  - `artifacts/seller_funnel_snapshot_block/legacy/normal__template__legacy__fixture.json`
+  - `artifacts/seller_funnel_snapshot_block/legacy/not-found__template__legacy__fixture.json`
+- target samples:
+  - `artifacts/seller_funnel_snapshot_block/target/normal__template__target__fixture.json`
+  - `artifacts/seller_funnel_snapshot_block/target/not-found__template__target__fixture.json`
+- parity:
+  - `artifacts/seller_funnel_snapshot_block/parity/normal__template__legacy-vs-target__comparison.md`
+  - `artifacts/seller_funnel_snapshot_block/parity/not-found__template__legacy-vs-target__comparison.md`
+- evidence:
+  - `artifacts/seller_funnel_snapshot_block/evidence/initial__seller-funnel-snapshot__evidence.md`
+
+# 5. Кодовые части
+
+- contracts: `packages/contracts/seller_funnel_snapshot_block.py`
+- adapters: `packages/adapters/seller_funnel_snapshot_block.py`
+- application: `packages/application/seller_funnel_snapshot_block.py`
+- artifact-backed smoke: `apps/seller_funnel_snapshot_block_smoke.py`
+- live read-side/API smoke path: `apps/seller_funnel_snapshot_block_http_smoke.py`
+
+# 6. Какой smoke подтверждён
+
+- Artifact-backed smoke подтверждён через `apps/seller_funnel_snapshot_block_smoke.py`.
+- Текущий live read-side/API smoke path поддерживается в `main` через `apps/seller_funnel_snapshot_block_http_smoke.py`.
+
+# 7. Что уже доказано по модулю
+
+- Contract-level parity подтверждена для `normal-case` и `not_found`.
+- Daily snapshot semantics и item-level fields сохранены без изменения downstream boundary.
+- Модуль зафиксирован в `main` как канонический seller funnel snapshot checkpoint.
+
+# 8. Что пока не является частью финальной production-сборки
+
+- producer/runtime внутренний path;
+- jobs/API/deploy вокруг producer-side контура;
+- более широкий production pipeline beyond bounded daily snapshot contract.
