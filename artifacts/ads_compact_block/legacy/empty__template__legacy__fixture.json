@@ -1,0 +1,1 @@
+{"snapshot_date":"2026-04-05","requested_nm_ids":[999000001],"source":{"endpoint":"GET /adv/v1/promotion/count + GET /adv/v3/fullstats","mode":"official_api_bootstrap_sample"},"data":{"rows":[]}}
