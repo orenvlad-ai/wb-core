@@ -1,0 +1,16 @@
+{
+  "registry_id": "formulas_v2",
+  "version": "pilot_v1",
+  "items": [
+    {
+      "formula_id": "proxy_profit_rub",
+      "expression": "(fin_buyout_rub - fin_commission)",
+      "description": "Минимальная прокси-прибыль без логистики и штрафов"
+    },
+    {
+      "formula_id": "proxy_stock_value_rub",
+      "expression": "(stock_total * price_seller_discounted)",
+      "description": "Прокси-оценка денежной стоимости текущего остатка"
+    }
+  ]
+}

@@ -1,0 +1,272 @@
+{
+  "bundle_id": "registry_pilot_bundle_v1",
+  "as_of_date": "2026-04-12",
+  "pilot_scope": {
+    "sku_count": 5,
+    "metric_count": 12,
+    "formula_count": 2,
+    "metric_kinds": [
+      "direct",
+      "formula",
+      "ratio"
+    ]
+  },
+  "source_basis": {
+    "tabular_bridge": {
+      "config_rows": [
+        {
+          "row_number": 1,
+          "sku(nmId)": 210183919,
+          "active": "TRUE",
+          "comment": "Худи basic",
+          "group": "hoodie"
+        },
+        {
+          "row_number": 2,
+          "sku(nmId)": 210184534,
+          "active": "TRUE",
+          "comment": "Футболка base",
+          "group": "tshirt"
+        },
+        {
+          "row_number": 3,
+          "sku(nmId)": 245720334,
+          "active": "TRUE",
+          "comment": "Лонгслив light",
+          "group": "longsleeve"
+        },
+        {
+          "row_number": 4,
+          "sku(nmId)": 259460529,
+          "active": "TRUE",
+          "comment": "Свитшот urban",
+          "group": "sweatshirt"
+        },
+        {
+          "row_number": 5,
+          "sku(nmId)": 210185771,
+          "active": "FALSE",
+          "comment": "Кепка archive",
+          "group": "cap"
+        }
+      ],
+      "metrics_rows": [
+        {
+          "display_order": 10,
+          "metric": "stock_total",
+          "enabled": "TRUE",
+          "scope": "SKU",
+          "label_ru": "Остаток, шт",
+          "show_in_data": "TRUE",
+          "ui_format": "integer",
+          "section": "Запасы",
+          "bridge_calc_type": "metric",
+          "bridge_calc_ref": "stock_total"
+        },
+        {
+          "display_order": 20,
+          "metric": "price_seller_discounted",
+          "enabled": "TRUE",
+          "scope": "SKU",
+          "label_ru": "Цена со скидкой",
+          "show_in_data": "TRUE",
+          "ui_format": "rub",
+          "section": "Цены",
+          "bridge_calc_type": "metric",
+          "bridge_calc_ref": "price_seller_discounted"
+        },
+        {
+          "display_order": 30,
+          "metric": "spp",
+          "enabled": "TRUE",
+          "scope": "SKU",
+          "label_ru": "СПП",
+          "show_in_data": "TRUE",
+          "ui_format": "percent",
+          "section": "Цены",
+          "bridge_calc_type": "metric",
+          "bridge_calc_ref": "spp"
+        },
+        {
+          "display_order": 40,
+          "metric": "ads_views",
+          "enabled": "TRUE",
+          "scope": "SKU",
+          "label_ru": "Показы рекламы",
+          "show_in_data": "TRUE",
+          "ui_format": "integer",
+          "section": "Реклама",
+          "bridge_calc_type": "metric",
+          "bridge_calc_ref": "ads_views"
+        },
+        {
+          "display_order": 50,
+          "metric": "ads_clicks",
+          "enabled": "TRUE",
+          "scope": "SKU",
+          "label_ru": "Клики рекламы",
+          "show_in_data": "TRUE",
+          "ui_format": "integer",
+          "section": "Реклама",
+          "bridge_calc_type": "metric",
+          "bridge_calc_ref": "ads_clicks"
+        },
+        {
+          "display_order": 60,
+          "metric": "ads_orders",
+          "enabled": "TRUE",
+          "scope": "SKU",
+          "label_ru": "Заказы из рекламы",
+          "show_in_data": "TRUE",
+          "ui_format": "integer",
+          "section": "Реклама",
+          "bridge_calc_type": "metric",
+          "bridge_calc_ref": "ads_orders"
+        },
+        {
+          "display_order": 70,
+          "metric": "ads_sum_price",
+          "enabled": "TRUE",
+          "scope": "SKU",
+          "label_ru": "Выручка из рекламы",
+          "show_in_data": "TRUE",
+          "ui_format": "rub",
+          "section": "Реклама",
+          "bridge_calc_type": "metric",
+          "bridge_calc_ref": "ads_sum_price"
+        },
+        {
+          "display_order": 80,
+          "metric": "fin_buyout_rub",
+          "enabled": "TRUE",
+          "scope": "SKU",
+          "label_ru": "Выкуп, руб",
+          "show_in_data": "TRUE",
+          "ui_format": "rub",
+          "section": "Финансы",
+          "bridge_calc_type": "metric",
+          "bridge_calc_ref": "fin_buyout_rub"
+        },
+        {
+          "display_order": 90,
+          "metric": "fin_commission",
+          "enabled": "TRUE",
+          "scope": "SKU",
+          "label_ru": "Комиссия, руб",
+          "show_in_data": "TRUE",
+          "ui_format": "rub",
+          "section": "Финансы",
+          "bridge_calc_type": "metric",
+          "bridge_calc_ref": "fin_commission"
+        },
+        {
+          "display_order": 100,
+          "metric": "ads_ctr",
+          "enabled": "TRUE",
+          "scope": "SKU",
+          "label_ru": "CTR рекламы",
+          "show_in_data": "TRUE",
+          "ui_format": "percent",
+          "section": "Реклама",
+          "bridge_calc_type": "ratio",
+          "bridge_calc_ref": "ads_ctr"
+        },
+        {
+          "display_order": 110,
+          "metric": "proxy_profit_rub",
+          "enabled": "TRUE",
+          "scope": "SKU",
+          "label_ru": "Прокси-прибыль, руб",
+          "show_in_data": "TRUE",
+          "ui_format": "rub",
+          "section": "Расчётные",
+          "bridge_calc_type": "formula",
+          "bridge_calc_ref": "proxy_profit_rub"
+        },
+        {
+          "display_order": 120,
+          "metric": "proxy_stock_value_rub",
+          "enabled": "TRUE",
+          "scope": "SKU",
+          "label_ru": "Прокси-стоимость остатка, руб",
+          "show_in_data": "TRUE",
+          "ui_format": "rub",
+          "section": "Расчётные",
+          "bridge_calc_type": "formula",
+          "bridge_calc_ref": "proxy_stock_value_rub"
+        }
+      ],
+      "formulas_rows": [
+        {
+          "formula_id": "proxy_profit_rub",
+          "expression": "(fin_buyout_rub - fin_commission)",
+          "description": "Минимальная прокси-прибыль без логистики и штрафов"
+        },
+        {
+          "formula_id": "proxy_stock_value_rub",
+          "expression": "(stock_total * price_seller_discounted)",
+          "description": "Прокси-оценка денежной стоимости текущего остатка"
+        }
+      ]
+    },
+    "server_runtime_seed": {
+      "path": "registry/pilot_bundle/metric_runtime_registry.json",
+      "note": "Runtime semantics ведутся отдельно от таблицы и не выводятся автоматически из display-реестра."
+    }
+  },
+  "normalization": {
+    "config_v2": {
+      "path": "registry/pilot_bundle/config_v2.json",
+      "field_map": {
+        "nm_id": "sku(nmId)",
+        "enabled": "active",
+        "display_name": "comment",
+        "group": "group",
+        "display_order": "row_number"
+      },
+      "transforms": {
+        "active": "TRUE/FALSE -> boolean",
+        "row_number": "int -> display_order"
+      }
+    },
+    "metrics_v2": {
+      "path": "registry/pilot_bundle/metrics_v2.json",
+      "field_map": {
+        "metric_key": "metric",
+        "enabled": "enabled",
+        "scope": "scope",
+        "label_ru": "label_ru",
+        "calc_type": "bridge_calc_type",
+        "calc_ref": "bridge_calc_ref",
+        "show_in_data": "show_in_data",
+        "format": "ui_format",
+        "display_order": "display_order",
+        "section": "section"
+      },
+      "transforms": {
+        "enabled": "TRUE/FALSE -> boolean",
+        "show_in_data": "TRUE/FALSE -> boolean"
+      }
+    },
+    "formulas_v2": {
+      "path": "registry/pilot_bundle/formulas_v2.json",
+      "field_map": {
+        "formula_id": "formula_id",
+        "expression": "expression",
+        "description": "description"
+      }
+    },
+    "metric_runtime_registry": {
+      "path": "registry/pilot_bundle/metric_runtime_registry.json",
+      "source": "server_runtime_seed",
+      "note": "Runtime registry остаётся отдельным server-side truth и не выводится из tabular bridge."
+    }
+  },
+  "output_files": {
+    "config_v2": "registry/pilot_bundle/config_v2.json",
+    "metrics_v2": "registry/pilot_bundle/metrics_v2.json",
+    "formulas_v2": "registry/pilot_bundle/formulas_v2.json",
+    "metric_runtime_registry": "registry/pilot_bundle/metric_runtime_registry.json",
+    "bridge_export_bundle": "registry/pilot_bundle/bridge_export_bundle.json"
+  }
+}
