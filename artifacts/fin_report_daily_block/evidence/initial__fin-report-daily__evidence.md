@@ -9,8 +9,9 @@
 - Parity по смыслу подтверждена для storage-total.
 - Artifact-backed transformation может быть проверена локальным smoke-check.
 - Локальный artifact-backed smoke пройден: `normal -> success`, `storage_total -> success`.
-- Authoritative server-side smoke был запущен без deploy и без изменений в `/opt/...`, но упёрся в auth blocker statistics API.
-- Попытка с `WB_AUTH_TOKEN` из `/opt/wb-ai/.env` вернула `401 Unauthorized` с сообщением про invalid signature.
-- Попытка с `wb-eu-portal.seller-token` из `/opt/wb-web-bot/storage_state.json` вернула `401 Unauthorized` с сообщением про missing or empty kid.
+- После замены server-side secret layer повторно выполнен authoritative server-side smoke на `root@178.72.152.177` во временной директории `/tmp/wb-core-fin-report-daily-smoke-20260411` без deploy и без изменений в `/opt/...`.
+- Во временную server-side среду копировались только `apps/fin_report_daily_block_http_smoke.py`, `packages/adapters/fin_report_daily_block.py`, `packages/adapters/official_api_runtime.py`, `packages/application/fin_report_daily_block.py`, `packages/contracts/fin_report_daily_block.py`.
+- Server-side live smoke запущен через `python3` с `PYTHONPATH=/tmp/wb-core-fin-report-daily-smoke-20260411`, при этом актуальный `WB_TOKEN` брался только из `/opt/wb-ai/.env` в runtime запуска и не сохранялся в repo-файлах.
+- Server-side smoke дал authoritative результат: `normal: ok -> success`, `normal: count -> 2`, `storage_total: ok -> 0.0`, `http-smoke-check passed`.
 
-Вывод: code-skeleton и bounded transformation готовы; до реально рабочего checkpoint не хватает валидного live token для authoritative statistics smoke.
+Вывод: `fin_report_daily_block` подтверждён как реально рабочий live-source checkpoint на bootstrap sample set; прежний paused auth-blocker снят заменой server-side `WB_TOKEN`.
