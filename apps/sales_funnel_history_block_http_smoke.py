@@ -1,6 +1,7 @@
 """Минимальный smoke-check для HTTP-backed sales funnel history adapter."""
 
 from dataclasses import asdict
+from datetime import date, timedelta
 from pathlib import Path
 import sys
 
@@ -13,15 +14,22 @@ from packages.application.sales_funnel_history_block import SalesFunnelHistoryBl
 from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryRequest
 
 
+def _resolve_recent_window() -> tuple[str, str]:
+    date_to = date.today() - timedelta(days=1)
+    date_from = date_to - timedelta(days=1)
+    return date_from.isoformat(), date_to.isoformat()
+
+
 def main() -> None:
+    date_from, date_to = _resolve_recent_window()
     source = HttpBackedSalesFunnelHistorySource()
     block = SalesFunnelHistoryBlock(source)
     result = asdict(
         block.execute(
             SalesFunnelHistoryRequest(
                 snapshot_type="sales_funnel_history",
-                date_from="2026-03-30",
-                date_to="2026-04-05",
+                date_from=date_from,
+                date_to=date_to,
                 nm_ids=[210183919, 210184534],
             )
         )
