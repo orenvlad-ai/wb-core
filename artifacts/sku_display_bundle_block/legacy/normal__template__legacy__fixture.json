@@ -1,0 +1,1 @@
+{"source":{"sheet":"CONFIG","mode":"bootstrap_config_fixture","fields":["sku(nmId)","active","comment","group"]},"data":{"rows":[{"sku":210183919,"active":true,"comment":"Худи basic","group":"hoodie"},{"sku":210184534,"active":true,"comment":"Футболка base","group":"tshirt"},{"sku":210185771,"active":false,"comment":"Кепка archive","group":"cap"}]}}

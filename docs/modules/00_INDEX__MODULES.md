@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–12`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–13`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -18,6 +18,7 @@ source_basis:
   - "docs/modules/10_MODULE__FIN_REPORT_DAILY_BLOCK.md"
   - "docs/modules/11_MODULE__PROMO_BY_PRICE_BLOCK.md"
   - "docs/modules/12_MODULE__COGS_BY_GROUP_BLOCK.md"
+  - "docs/modules/13_MODULE__SKU_DISPLAY_BUNDLE_BLOCK.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -35,8 +36,9 @@ related_docs:
   - "10_MODULE__FIN_REPORT_DAILY_BLOCK.md"
   - "11_MODULE__PROMO_BY_PRICE_BLOCK.md"
   - "12_MODULE__COGS_BY_GROUP_BLOCK.md"
+  - "13_MODULE__SKU_DISPLAY_BUNDLE_BLOCK.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён после docs-backfill `01–10`; теперь индекс отражает полный комплект канонических модульных документов `01–12` и остаётся единым source of truth для `docs/modules/`."
+update_note: "Обновлён после добавления `sku_display_bundle_block`; теперь индекс отражает полный комплект канонических модульных документов `01–13` и остаётся единым source of truth для `docs/modules/`."
 ---
 
 # 1. Назначение индекса
@@ -106,6 +108,7 @@ update_note: "Обновлён после docs-backfill `01–10`; теперь 
 | `10_MODULE__FIN_REPORT_DAILY_BLOCK.md` | `fin_report_daily_block` | `official-api` | перенесён, подтверждён server-side, смёржен в `main` |
 | `11_MODULE__PROMO_BY_PRICE_BLOCK.md` | `promo_by_price_block` | `rule-based` | перенесён, проверен, смёржен в `main` |
 | `12_MODULE__COGS_BY_GROUP_BLOCK.md` | `cogs_by_group_block` | `rule-based` | перенесён, проверен, смёржен в `main` |
+| `13_MODULE__SKU_DISPLAY_BUNDLE_BLOCK.md` | `sku_display_bundle_block` | `table-facing` | перенесён, проверен, checkpoint PR |
 
 # 5. Как эта папка используется дальше
 
