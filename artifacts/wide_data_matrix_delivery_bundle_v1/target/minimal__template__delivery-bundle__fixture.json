@@ -1,0 +1,45 @@
+{
+  "delivery_contract_version": "wide_matrix_delivery_v1",
+  "snapshot_id": "2026-04-05__wide_matrix_delivery_v1__minimal",
+  "as_of_date": "2026-04-05",
+  "data_vitrina": {
+    "sheet_name": "DATA_VITRINA",
+    "header": [
+      "label",
+      "key",
+      "2026-04-05"
+    ],
+    "rows": []
+  },
+  "status": {
+    "sheet_name": "STATUS",
+    "header": [
+      "source_key",
+      "kind",
+      "freshness",
+      "snapshot_date",
+      "date",
+      "date_from",
+      "date_to",
+      "requested_count",
+      "covered_count",
+      "missing_nm_ids",
+      "note"
+    ],
+    "rows": [
+      [
+        "sku_display_bundle",
+        "empty",
+        "",
+        "",
+        "",
+        "",
+        "",
+        0,
+        0,
+        "",
+        ""
+      ]
+    ]
+  }
+}
