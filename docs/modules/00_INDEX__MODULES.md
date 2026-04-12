@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–16`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–17`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -22,6 +22,7 @@ source_basis:
   - "docs/modules/14_MODULE__TABLE_PROJECTION_BUNDLE_BLOCK.md"
   - "docs/modules/15_MODULE__WIDE_DATA_MATRIX_V1_FIXTURE_BLOCK.md"
   - "docs/modules/16_MODULE__WIDE_DATA_MATRIX_DELIVERY_BUNDLE_V1_BLOCK.md"
+  - "docs/modules/17_MODULE__SHEET_VITRINA_V1_SCAFFOLD_BLOCK.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -43,8 +44,9 @@ related_docs:
   - "14_MODULE__TABLE_PROJECTION_BUNDLE_BLOCK.md"
   - "15_MODULE__WIDE_DATA_MATRIX_V1_FIXTURE_BLOCK.md"
   - "16_MODULE__WIDE_DATA_MATRIX_DELIVERY_BUNDLE_V1_BLOCK.md"
+  - "17_MODULE__SHEET_VITRINA_V1_SCAFFOLD_BLOCK.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён после добавления `wide_data_matrix_delivery_bundle_v1_block`; теперь индекс отражает полный комплект канонических модульных документов `01–16` и остаётся единым source of truth для `docs/modules/`."
+update_note: "Обновлён после добавления `sheet_vitrina_v1_scaffold_block`; теперь индекс отражает полный комплект канонических модульных документов `01–17` и остаётся единым source of truth для `docs/modules/`."
 ---
 
 # 1. Назначение индекса
@@ -118,6 +120,7 @@ update_note: "Обновлён после добавления `wide_data_matrix
 | `14_MODULE__TABLE_PROJECTION_BUNDLE_BLOCK.md` | `table_projection_bundle_block` | `projection` | перенесён, проверен, checkpoint PR |
 | `15_MODULE__WIDE_DATA_MATRIX_V1_FIXTURE_BLOCK.md` | `wide_data_matrix_v1_fixture_block` | `wide-matrix` | перенесён, проверен, checkpoint PR |
 | `16_MODULE__WIDE_DATA_MATRIX_DELIVERY_BUNDLE_V1_BLOCK.md` | `wide_data_matrix_delivery_bundle_v1_block` | `delivery` | перенесён, проверен, checkpoint PR |
+| `17_MODULE__SHEET_VITRINA_V1_SCAFFOLD_BLOCK.md` | `sheet_vitrina_v1_scaffold_block` | `sheet-side` | перенесён, проверен, checkpoint PR |
 
 # 5. Как эта папка используется дальше
 
