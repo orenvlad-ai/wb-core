@@ -1,0 +1,23 @@
+# Parity Для Wide Data Matrix V1: normal-case
+
+- Input bundle использует только уже существующие слои:
+  - `sku_display_bundle_block`
+  - `table_projection_bundle_block`
+  - `registry/pilot_bundle`
+- На входе выбраны `3` SKU, но target материализует только `2` enabled SKU; `210185771` остаётся в scope input, но не попадает в строки витрины.
+- Row layout в target соблюдает wide-by-date форму:
+  - `A = label`
+  - `B = key`
+  - `C..E = dates`
+- Key-patterns подтверждены:
+  - `TOTAL|<metric_key>`
+  - `GROUP:<group>|<metric_key>`
+  - `SKU:<nm_id>|<metric_key>`
+- Block counts:
+  - `TOTAL = 2`
+  - `GROUP = 4`
+  - `SKU = 12`
+- Порядок `SKU`-строк подтверждён по `CONFIG_V2.display_order` и `METRICS_V2.display_order`.
+- `TOTAL` и `GROUP` intentionally limited to safe subset:
+  - `stock_total`
+  - `ads_views`

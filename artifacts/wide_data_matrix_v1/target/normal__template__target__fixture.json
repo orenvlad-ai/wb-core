@@ -1,0 +1,251 @@
+{
+  "result": {
+    "kind": "success",
+    "columns": [
+      {
+        "column": "A",
+        "field": "label",
+        "label": "label"
+      },
+      {
+        "column": "B",
+        "field": "key",
+        "label": "key"
+      },
+      {
+        "column": "C",
+        "field": "2026-04-03",
+        "label": "2026-04-03"
+      },
+      {
+        "column": "D",
+        "field": "2026-04-04",
+        "label": "2026-04-04"
+      },
+      {
+        "column": "E",
+        "field": "2026-04-05",
+        "label": "2026-04-05"
+      }
+    ],
+    "dates": [
+      "2026-04-03",
+      "2026-04-04",
+      "2026-04-05"
+    ],
+    "blocks": [
+      {
+        "block": "TOTAL",
+        "row_count": 2
+      },
+      {
+        "block": "GROUP",
+        "row_count": 4
+      },
+      {
+        "block": "SKU",
+        "row_count": 12
+      }
+    ],
+    "rows": [
+      {
+        "block": "TOTAL",
+        "label": "Итого: Остаток, шт",
+        "key": "TOTAL|stock_total",
+        "metric_key": "stock_total",
+        "values": {
+          "2026-04-03": 14630.0,
+          "2026-04-04": 14660.0,
+          "2026-04-05": 14692.0
+        }
+      },
+      {
+        "block": "TOTAL",
+        "label": "Итого: Показы рекламы",
+        "key": "TOTAL|ads_views",
+        "metric_key": "ads_views",
+        "values": {
+          "2026-04-03": 2160.0,
+          "2026-04-04": 2230.0,
+          "2026-04-05": 2300.0
+        }
+      },
+      {
+        "block": "GROUP",
+        "label": "Группа hoodie: Остаток, шт",
+        "key": "GROUP:hoodie|stock_total",
+        "metric_key": "stock_total",
+        "values": {
+          "2026-04-03": 9050.0,
+          "2026-04-04": 9140.0,
+          "2026-04-05": 9230.0
+        }
+      },
+      {
+        "block": "GROUP",
+        "label": "Группа hoodie: Показы рекламы",
+        "key": "GROUP:hoodie|ads_views",
+        "metric_key": "ads_views",
+        "values": {
+          "2026-04-03": 1400.0,
+          "2026-04-04": 1450.0,
+          "2026-04-05": 1500.0
+        }
+      },
+      {
+        "block": "GROUP",
+        "label": "Группа tshirt: Остаток, шт",
+        "key": "GROUP:tshirt|stock_total",
+        "metric_key": "stock_total",
+        "values": {
+          "2026-04-03": 5580.0,
+          "2026-04-04": 5520.0,
+          "2026-04-05": 5462.0
+        }
+      },
+      {
+        "block": "GROUP",
+        "label": "Группа tshirt: Показы рекламы",
+        "key": "GROUP:tshirt|ads_views",
+        "metric_key": "ads_views",
+        "values": {
+          "2026-04-03": 760.0,
+          "2026-04-04": 780.0,
+          "2026-04-05": 800.0
+        }
+      },
+      {
+        "block": "SKU",
+        "label": "Худи basic: Остаток, шт",
+        "key": "SKU:210183919|stock_total",
+        "metric_key": "stock_total",
+        "values": {
+          "2026-04-03": 9050.0,
+          "2026-04-04": 9140.0,
+          "2026-04-05": 9230.0
+        }
+      },
+      {
+        "block": "SKU",
+        "label": "Худи basic: Цена со скидкой",
+        "key": "SKU:210183919|price_seller_discounted",
+        "metric_key": "price_seller_discounted",
+        "values": {
+          "2026-04-03": 1019.0,
+          "2026-04-04": 1009.0,
+          "2026-04-05": 999.0
+        }
+      },
+      {
+        "block": "SKU",
+        "label": "Худи basic: СПП",
+        "key": "SKU:210183919|spp",
+        "metric_key": "spp",
+        "values": {
+          "2026-04-03": 0.248,
+          "2026-04-04": 0.247,
+          "2026-04-05": 0.24621052631578932
+        }
+      },
+      {
+        "block": "SKU",
+        "label": "Худи basic: Показы рекламы",
+        "key": "SKU:210183919|ads_views",
+        "metric_key": "ads_views",
+        "values": {
+          "2026-04-03": 1400.0,
+          "2026-04-04": 1450.0,
+          "2026-04-05": 1500.0
+        }
+      },
+      {
+        "block": "SKU",
+        "label": "Худи basic: CTR рекламы",
+        "key": "SKU:210183919|ads_ctr",
+        "metric_key": "ads_ctr",
+        "values": {
+          "2026-04-03": 0.04857142857142857,
+          "2026-04-04": 0.0496551724137931,
+          "2026-04-05": 0.05
+        }
+      },
+      {
+        "block": "SKU",
+        "label": "Худи basic: Прокси-прибыль, руб",
+        "key": "SKU:210183919|proxy_profit_rub",
+        "metric_key": "proxy_profit_rub",
+        "values": {
+          "2026-04-03": 790.0,
+          "2026-04-04": 812.0,
+          "2026-04-05": 835.0
+        }
+      },
+      {
+        "block": "SKU",
+        "label": "Футболка base: Остаток, шт",
+        "key": "SKU:210184534|stock_total",
+        "metric_key": "stock_total",
+        "values": {
+          "2026-04-03": 5580.0,
+          "2026-04-04": 5520.0,
+          "2026-04-05": 5462.0
+        }
+      },
+      {
+        "block": "SKU",
+        "label": "Футболка base: Цена со скидкой",
+        "key": "SKU:210184534|price_seller_discounted",
+        "metric_key": "price_seller_discounted",
+        "values": {
+          "2026-04-03": 1410.0,
+          "2026-04-04": 1400.0,
+          "2026-04-05": 1390.0
+        }
+      },
+      {
+        "block": "SKU",
+        "label": "Футболка base: СПП",
+        "key": "SKU:210184534|spp",
+        "metric_key": "spp",
+        "values": {
+          "2026-04-03": 0.2445,
+          "2026-04-04": 0.243,
+          "2026-04-05": 0.24250000000000005
+        }
+      },
+      {
+        "block": "SKU",
+        "label": "Футболка base: Показы рекламы",
+        "key": "SKU:210184534|ads_views",
+        "metric_key": "ads_views",
+        "values": {
+          "2026-04-03": 760.0,
+          "2026-04-04": 780.0,
+          "2026-04-05": 800.0
+        }
+      },
+      {
+        "block": "SKU",
+        "label": "Футболка base: CTR рекламы",
+        "key": "SKU:210184534|ads_ctr",
+        "metric_key": "ads_ctr",
+        "values": {
+          "2026-04-03": 0.038157894736842106,
+          "2026-04-04": 0.03974358974358974,
+          "2026-04-05": 0.04
+        }
+      },
+      {
+        "block": "SKU",
+        "label": "Футболка base: Прокси-прибыль, руб",
+        "key": "SKU:210184534|proxy_profit_rub",
+        "metric_key": "proxy_profit_rub",
+        "values": {
+          "2026-04-03": 469.0,
+          "2026-04-04": 488.0,
+          "2026-04-05": 507.0
+        }
+      }
+    ]
+  }
+}
