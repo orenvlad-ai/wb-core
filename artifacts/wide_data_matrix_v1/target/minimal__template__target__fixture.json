@@ -1,0 +1,41 @@
+{
+  "result": {
+    "kind": "empty",
+    "columns": [
+      {
+        "column": "A",
+        "field": "label",
+        "label": "label"
+      },
+      {
+        "column": "B",
+        "field": "key",
+        "label": "key"
+      },
+      {
+        "column": "C",
+        "field": "2026-04-05",
+        "label": "2026-04-05"
+      }
+    ],
+    "dates": [
+      "2026-04-05"
+    ],
+    "blocks": [
+      {
+        "block": "TOTAL",
+        "row_count": 0
+      },
+      {
+        "block": "GROUP",
+        "row_count": 0
+      },
+      {
+        "block": "SKU",
+        "row_count": 0
+      }
+    ],
+    "rows": [],
+    "detail": "no enabled sku rows available for wide matrix"
+  }
+}

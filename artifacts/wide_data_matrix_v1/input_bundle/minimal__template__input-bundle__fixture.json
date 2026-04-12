@@ -1,0 +1,31 @@
+{
+  "bundle_type": "wide_data_matrix_v1",
+  "scenario": "minimal",
+  "dates": [
+    "2026-04-05"
+  ],
+  "source_basis": {
+    "sku_display_bundle_path": "artifacts/sku_display_bundle_block/target/normal__template__target__fixture.json",
+    "table_projection_bundle_path": "artifacts/table_projection_bundle_block/target/normal__template__target__fixture.json",
+    "registry_paths": {
+      "config_v2": "registry/pilot_bundle/config_v2.json",
+      "metrics_v2": "registry/pilot_bundle/metrics_v2.json",
+      "formulas_v2": "registry/pilot_bundle/formulas_v2.json",
+      "metric_runtime_registry": "registry/pilot_bundle/metric_runtime_registry.json"
+    }
+  },
+  "display_scope": {
+    "nm_ids": [
+      210185771
+    ],
+    "display_metric_keys": [
+      "stock_total",
+      "ads_views"
+    ],
+    "safe_aggregate_metric_keys": [
+      "stock_total",
+      "ads_views"
+    ]
+  },
+  "series_seed": {}
+}

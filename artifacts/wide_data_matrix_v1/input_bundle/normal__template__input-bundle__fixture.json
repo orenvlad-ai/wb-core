@@ -1,0 +1,114 @@
+{
+  "bundle_type": "wide_data_matrix_v1",
+  "scenario": "normal",
+  "dates": [
+    "2026-04-03",
+    "2026-04-04",
+    "2026-04-05"
+  ],
+  "source_basis": {
+    "sku_display_bundle_path": "artifacts/sku_display_bundle_block/target/normal__template__target__fixture.json",
+    "table_projection_bundle_path": "artifacts/table_projection_bundle_block/target/normal__template__target__fixture.json",
+    "registry_paths": {
+      "config_v2": "registry/pilot_bundle/config_v2.json",
+      "metrics_v2": "registry/pilot_bundle/metrics_v2.json",
+      "formulas_v2": "registry/pilot_bundle/formulas_v2.json",
+      "metric_runtime_registry": "registry/pilot_bundle/metric_runtime_registry.json"
+    }
+  },
+  "display_scope": {
+    "nm_ids": [
+      210183919,
+      210184534,
+      210185771
+    ],
+    "display_metric_keys": [
+      "stock_total",
+      "price_seller_discounted",
+      "spp",
+      "ads_views",
+      "ads_ctr",
+      "proxy_profit_rub"
+    ],
+    "safe_aggregate_metric_keys": [
+      "stock_total",
+      "ads_views"
+    ]
+  },
+  "series_seed": {
+    "210183919": {
+      "stock_total": {
+        "2026-04-03": 9050.0,
+        "2026-04-04": 9140.0,
+        "2026-04-05": 9230.0
+      },
+      "price_seller_discounted": {
+        "2026-04-03": 1019.0,
+        "2026-04-04": 1009.0,
+        "2026-04-05": 999.0
+      },
+      "spp": {
+        "2026-04-03": 0.248,
+        "2026-04-04": 0.247,
+        "2026-04-05": 0.24621052631578932
+      },
+      "ads_views": {
+        "2026-04-03": 1400.0,
+        "2026-04-04": 1450.0,
+        "2026-04-05": 1500.0
+      },
+      "ads_clicks": {
+        "2026-04-03": 68.0,
+        "2026-04-04": 72.0,
+        "2026-04-05": 75.0
+      },
+      "fin_buyout_rub": {
+        "2026-04-03": 840.0,
+        "2026-04-04": 865.0,
+        "2026-04-05": 890.0
+      },
+      "fin_commission": {
+        "2026-04-03": 50.0,
+        "2026-04-04": 53.0,
+        "2026-04-05": 55.0
+      }
+    },
+    "210184534": {
+      "stock_total": {
+        "2026-04-03": 5580.0,
+        "2026-04-04": 5520.0,
+        "2026-04-05": 5462.0
+      },
+      "price_seller_discounted": {
+        "2026-04-03": 1410.0,
+        "2026-04-04": 1400.0,
+        "2026-04-05": 1390.0
+      },
+      "spp": {
+        "2026-04-03": 0.2445,
+        "2026-04-04": 0.243,
+        "2026-04-05": 0.24250000000000005
+      },
+      "ads_views": {
+        "2026-04-03": 760.0,
+        "2026-04-04": 780.0,
+        "2026-04-05": 800.0
+      },
+      "ads_clicks": {
+        "2026-04-03": 29.0,
+        "2026-04-04": 31.0,
+        "2026-04-05": 32.0
+      },
+      "fin_buyout_rub": {
+        "2026-04-03": 500.0,
+        "2026-04-04": 520.0,
+        "2026-04-05": 540.0
+      },
+      "fin_commission": {
+        "2026-04-03": 31.0,
+        "2026-04-04": 32.0,
+        "2026-04-05": 33.0
+      }
+    }
+  }
+}
