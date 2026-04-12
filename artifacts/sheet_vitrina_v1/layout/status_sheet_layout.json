@@ -1,0 +1,20 @@
+{
+  "sheet_name": "STATUS",
+  "write_start_cell": "A1",
+  "clear_range": "A:K",
+  "write_mode": "full_overwrite",
+  "partial_update_allowed": false,
+  "expected_header": [
+    "source_key",
+    "kind",
+    "freshness",
+    "snapshot_date",
+    "date",
+    "date_from",
+    "date_to",
+    "requested_count",
+    "covered_count",
+    "missing_nm_ids",
+    "note"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "sheet_name": "DATA_VITRINA",
+  "write_start_cell": "A1",
+  "clear_range": "A:ZZ",
+  "write_mode": "full_overwrite",
+  "partial_update_allowed": false,
+  "expected_header": [
+    "label",
+    "key",
+    "2026-04-03",
+    "2026-04-04",
+    "2026-04-05"
+  ]
+}
