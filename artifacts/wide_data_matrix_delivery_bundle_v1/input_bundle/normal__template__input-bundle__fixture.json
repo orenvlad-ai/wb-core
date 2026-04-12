@@ -1,0 +1,21 @@
+{
+  "bundle_type": "wide_data_matrix_delivery_bundle_v1",
+  "scenario": "normal",
+  "source_basis": {
+    "wide_data_matrix_path": "artifacts/wide_data_matrix_v1/target/normal__template__target__fixture.json",
+    "table_projection_bundle_path": "artifacts/table_projection_bundle_block/target/normal__template__target__fixture.json",
+    "sku_display_bundle_path": "artifacts/sku_display_bundle_block/target/normal__template__target__fixture.json",
+    "registry_paths": {
+      "config_v2": "registry/pilot_bundle/config_v2.json",
+      "metrics_v2": "registry/pilot_bundle/metrics_v2.json",
+      "metric_runtime_registry": "registry/pilot_bundle/metric_runtime_registry.json"
+    }
+  },
+  "delivery_meta": {
+    "delivery_contract_version": "wide_matrix_delivery_v1",
+    "sheet_names": {
+      "data_vitrina": "DATA_VITRINA",
+      "status": "STATUS"
+    }
+  }
+}
