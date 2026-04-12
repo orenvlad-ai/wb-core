@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–18`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–19`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -24,6 +24,7 @@ source_basis:
   - "docs/modules/16_MODULE__WIDE_DATA_MATRIX_DELIVERY_BUNDLE_V1_BLOCK.md"
   - "docs/modules/17_MODULE__SHEET_VITRINA_V1_SCAFFOLD_BLOCK.md"
   - "docs/modules/18_MODULE__SHEET_VITRINA_V1_WRITE_BRIDGE_BLOCK.md"
+  - "docs/modules/19_MODULE__SHEET_VITRINA_V1_PRESENTATION_BLOCK.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -47,8 +48,9 @@ related_docs:
   - "16_MODULE__WIDE_DATA_MATRIX_DELIVERY_BUNDLE_V1_BLOCK.md"
   - "17_MODULE__SHEET_VITRINA_V1_SCAFFOLD_BLOCK.md"
   - "18_MODULE__SHEET_VITRINA_V1_WRITE_BRIDGE_BLOCK.md"
+  - "19_MODULE__SHEET_VITRINA_V1_PRESENTATION_BLOCK.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён после добавления `sheet_vitrina_v1_write_bridge_block`; теперь индекс отражает полный комплект канонических модульных документов `01–18` и остаётся единым source of truth для `docs/modules/`."
+update_note: "Обновлён после добавления `sheet_vitrina_v1_presentation_block`; теперь индекс отражает полный комплект канонических модульных документов `01–19` и остаётся единым source of truth для `docs/modules/`."
 ---
 
 # 1. Назначение индекса
@@ -124,6 +126,7 @@ update_note: "Обновлён после добавления `sheet_vitrina_v1
 | `16_MODULE__WIDE_DATA_MATRIX_DELIVERY_BUNDLE_V1_BLOCK.md` | `wide_data_matrix_delivery_bundle_v1_block` | `delivery` | перенесён, проверен, checkpoint PR |
 | `17_MODULE__SHEET_VITRINA_V1_SCAFFOLD_BLOCK.md` | `sheet_vitrina_v1_scaffold_block` | `sheet-side` | перенесён, проверен, checkpoint PR |
 | `18_MODULE__SHEET_VITRINA_V1_WRITE_BRIDGE_BLOCK.md` | `sheet_vitrina_v1_write_bridge_block` | `sheet-side` | live bridge подтверждён, смёржен в `main` |
+| `19_MODULE__SHEET_VITRINA_V1_PRESENTATION_BLOCK.md` | `sheet_vitrina_v1_presentation_block` | `sheet-side` | live formatting подтверждён, checkpoint PR |
 
 # 5. Как эта папка используется дальше
 
