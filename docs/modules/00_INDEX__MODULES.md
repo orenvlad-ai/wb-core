@@ -52,7 +52,7 @@ related_docs:
   - "19_MODULE__SHEET_VITRINA_V1_PRESENTATION_BLOCK.md"
   - "20_MODULE__REGISTRY_UPLOAD_BUNDLE_V1_BLOCK.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён после добавления `registry_upload_bundle_v1_block`; теперь индекс отражает полный комплект канонических модульных документов `01–20` и остаётся единым source of truth для `docs/modules/`."
+update_note: "Обновлён под фактическое состояние `origin/main` после merge `registry_upload_bundle_v1_block`: индекс отражает полный комплект смёрженных модулей `01–20`, current main-confirmed contour и не смешивает уже смёрженный upload bundle с ещё не собранным server-side ingest runtime."
 ---
 
 # 1. Назначение индекса
@@ -66,6 +66,27 @@ update_note: "Обновлён после добавления `registry_upload_
 - короткие указатели.
 
 Но канонический свод по модулю должен отражаться в `docs/modules/`.
+
+# 1.1 Текущий Checkpoint Main
+
+На текущем `origin/main` смёржены канонические модульные блоки `01–20`.
+
+Подтверждённый main-confirmed contour:
+- `sku_display_bundle_block`
+- `table_projection_bundle_block`
+- `registry_pilot_bundle`
+- `wide_data_matrix_v1_fixture_block`
+- `wide_data_matrix_delivery_bundle_v1_block`
+- `sheet_vitrina_v1_scaffold_block`
+
+Дополнительно в `main` уже есть:
+- `sheet_vitrina_v1_write_bridge_block`;
+- `sheet_vitrina_v1_presentation_block`;
+- `registry_upload_bundle_v1_block` как первый artifact-backed upload bundle и local validator для V2-реестров.
+
+Главный незакрытый gap текущего `main`:
+- artifact-backed upload bundle уже находится в `main`;
+- server-side ingest, version storage и activation runtime для registry upload ещё не входят в текущий `main`.
 
 # 2. Naming rules комплекта
 
@@ -122,17 +143,18 @@ update_note: "Обновлён после добавления `registry_upload_
 | `10_MODULE__FIN_REPORT_DAILY_BLOCK.md` | `fin_report_daily_block` | `official-api` | перенесён, подтверждён server-side, смёржен в `main` |
 | `11_MODULE__PROMO_BY_PRICE_BLOCK.md` | `promo_by_price_block` | `rule-based` | перенесён, проверен, смёржен в `main` |
 | `12_MODULE__COGS_BY_GROUP_BLOCK.md` | `cogs_by_group_block` | `rule-based` | перенесён, проверен, смёржен в `main` |
-| `13_MODULE__SKU_DISPLAY_BUNDLE_BLOCK.md` | `sku_display_bundle_block` | `table-facing` | перенесён, проверен, checkpoint PR |
-| `14_MODULE__TABLE_PROJECTION_BUNDLE_BLOCK.md` | `table_projection_bundle_block` | `projection` | перенесён, проверен, checkpoint PR |
-| `15_MODULE__WIDE_DATA_MATRIX_V1_FIXTURE_BLOCK.md` | `wide_data_matrix_v1_fixture_block` | `wide-matrix` | перенесён, проверен, checkpoint PR |
-| `16_MODULE__WIDE_DATA_MATRIX_DELIVERY_BUNDLE_V1_BLOCK.md` | `wide_data_matrix_delivery_bundle_v1_block` | `delivery` | перенесён, проверен, checkpoint PR |
-| `17_MODULE__SHEET_VITRINA_V1_SCAFFOLD_BLOCK.md` | `sheet_vitrina_v1_scaffold_block` | `sheet-side` | перенесён, проверен, checkpoint PR |
+| `13_MODULE__SKU_DISPLAY_BUNDLE_BLOCK.md` | `sku_display_bundle_block` | `table-facing` | перенесён, проверен, смёржен в `main` |
+| `14_MODULE__TABLE_PROJECTION_BUNDLE_BLOCK.md` | `table_projection_bundle_block` | `projection` | перенесён, проверен, смёржен в `main` |
+| `15_MODULE__WIDE_DATA_MATRIX_V1_FIXTURE_BLOCK.md` | `wide_data_matrix_v1_fixture_block` | `wide-matrix` | перенесён, проверен, смёржен в `main` |
+| `16_MODULE__WIDE_DATA_MATRIX_DELIVERY_BUNDLE_V1_BLOCK.md` | `wide_data_matrix_delivery_bundle_v1_block` | `delivery` | перенесён, проверен, смёржен в `main` |
+| `17_MODULE__SHEET_VITRINA_V1_SCAFFOLD_BLOCK.md` | `sheet_vitrina_v1_scaffold_block` | `sheet-side` | перенесён, проверен, смёржен в `main` |
 | `18_MODULE__SHEET_VITRINA_V1_WRITE_BRIDGE_BLOCK.md` | `sheet_vitrina_v1_write_bridge_block` | `sheet-side` | live bridge подтверждён, смёржен в `main` |
-| `19_MODULE__SHEET_VITRINA_V1_PRESENTATION_BLOCK.md` | `sheet_vitrina_v1_presentation_block` | `sheet-side` | live formatting подтверждён, checkpoint PR |
-| `20_MODULE__REGISTRY_UPLOAD_BUNDLE_V1_BLOCK.md` | `registry_upload_bundle_v1_block` | `registry` | artifact-backed bundle и validator подтверждены, checkpoint PR |
+| `19_MODULE__SHEET_VITRINA_V1_PRESENTATION_BLOCK.md` | `sheet_vitrina_v1_presentation_block` | `sheet-side` | live formatting подтверждён, смёржен в `main` |
+| `20_MODULE__REGISTRY_UPLOAD_BUNDLE_V1_BLOCK.md` | `registry_upload_bundle_v1_block` | `registry` | artifact-backed bundle и validator подтверждены, смёржены в `main` |
 
 # 5. Как эта папка используется дальше
 
 - при добавлении нового модульного документа обновлять этот файл вместе с соответствующим `NN_MODULE__*.md`;
 - считать этот файл navigation entrypoint для пакета `docs/modules/`;
+- не документировать здесь как часть `main` блоки, которые существуют только на незамёрженных ветках или ещё не дошли до merge;
 - не дублировать полный канонический модульный текст в других местах репозитория.

@@ -35,7 +35,7 @@ update_note: "Создан как канонический модульный д
 - `status_transfer`: presentation pass перенесён в `wb-core`
 - `status_verification`: live smoke для визуального шага подтверждён
 - `status_checkpoint`: рабочий checkpoint подтверждён
-- `status_main`: ожидает merge в `main`
+- `status_main`: модуль смёржен в `main`
 
 # 2. Upstream/source basis и semantics
 
