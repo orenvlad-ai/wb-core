@@ -26,12 +26,12 @@ Legacy-репозитории остаются рабочими, но счита
 - live write bridge новой витрины в bound Google Sheet;
 - presentation pass для `DATA_VITRINA` и `STATUS`;
 - compact v3 bootstrap для `CONFIG / METRICS / FORMULAS`, который поднимает уже заполненные operator sheets и сохраняет service/status block;
-- первый bounded end-to-end MVP `prepare -> upload -> load`, где expanded MVP-safe seed `33 / 7 / 7`, upload path и controlled reverse-load в `DATA_VITRINA` уже материализованы в коде и артефактах;
+- первый bounded end-to-end MVP `prepare -> upload -> load`, где operator seed `33 / 19 / 2`, full current `metrics_v2` dictionary для upload path и controlled reverse-load в `DATA_VITRINA` уже материализованы в коде и артефактах;
 - evidence и module docs по этим шагам.
 
 Главные незакрытые gaps на текущем `main`:
 - full legacy parity по всем историческим registry rows и metric sections;
-- расширение beyond MVP-safe metrics/sections без поломки текущего contour;
+- расширение beyond current `19`-row upload metrics dictionary и beyond current `7` live readback metrics без поломки текущего contour;
 - repo-owned stable hosted runtime URL, deploy/auth-hardening и production storage binding вокруг уже materialized upload/load линии;
 - окончательное решение по судьбе `AI_EXPORT` как compatibility contract или прямой замене server-side contract.
 

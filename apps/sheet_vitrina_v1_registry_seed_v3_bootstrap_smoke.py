@@ -29,6 +29,8 @@ UPLOADED_AT = "2026-04-13T12:10:00Z"
 
 
 def main() -> None:
+    expected_metrics_seed = _load_json(ARTIFACTS_DIR / "input" / "metrics_v3_seed__fixture.json")
+    expected_formulas_seed = _load_json(ARTIFACTS_DIR / "input" / "formulas_v3_seed__fixture.json")
     expected_prepare = _load_json(TARGET_DIR / "prepare_result__fixture.json")
     expected_preserved = _load_json(TARGET_DIR / "preserved_control_block__fixture.json")
     expected_bundle = _load_json(TARGET_DIR / "bundle_from_seed_v3__fixture.json")
@@ -98,6 +100,14 @@ def main() -> None:
 
             if harness_result["prepare_result_after_reprepare"] != expected_prepare:
                 raise AssertionError("prepare result after reprepare differs from target fixture")
+            if harness_result["prepare_result_after_reprepare"]["seeded_counts"]["metrics_v2"] != len(
+                expected_metrics_seed["items"]
+            ):
+                raise AssertionError("prepare must materialize full authoritative metrics set")
+            if harness_result["prepare_result_after_reprepare"]["seeded_counts"]["formulas_v2"] != len(
+                expected_formulas_seed["items"]
+            ):
+                raise AssertionError("prepare must materialize formula set required by authoritative metrics")
             preserved_control_block = harness_result["preserved_control_block"]
             if preserved_control_block["endpoint_url"] != base_url:
                 raise AssertionError("preserved control block endpoint_url mismatch")
@@ -112,6 +122,14 @@ def main() -> None:
                 raise AssertionError("preserved control block differs from target fixture")
             if harness_result["built_bundle"] != expected_bundle:
                 raise AssertionError("bundle from seeded sheets differs from target fixture")
+            built_metric_keys = [item["metric_key"] for item in harness_result["built_bundle"]["metrics_v2"]]
+            expected_metric_keys = [item["metric_key"] for item in expected_metrics_seed["items"]]
+            if built_metric_keys != expected_metric_keys:
+                raise AssertionError("bundle must contain full authoritative metrics_v2 set in canonical order")
+            built_formula_ids = [item["formula_id"] for item in harness_result["built_bundle"]["formulas_v2"]]
+            expected_formula_ids = [item["formula_id"] for item in expected_formulas_seed["items"]]
+            if built_formula_ids != expected_formula_ids:
+                raise AssertionError("bundle formulas_v2 must stay aligned with authoritative upload metrics")
 
             accepted_response = harness_result["accepted_response"]
             accepted_subset = {
@@ -120,6 +138,8 @@ def main() -> None:
             }
             if accepted_subset != expected_accepted:
                 raise AssertionError("accepted response differs from target fixture")
+            if accepted_response["upload_result"]["accepted_counts"]["metrics_v2"] != len(expected_metric_keys):
+                raise AssertionError("accepted upload must persist every authoritative metrics_v2 row")
             if accepted_response["endpoint_url"] != base_url:
                 raise AssertionError("accepted response endpoint_url mismatch")
             status_block = harness_result["status_block"]

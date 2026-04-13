@@ -86,16 +86,17 @@ update_note: "Создан как канонический модульный д
   - `GET /v1/sheet-vitrina-v1/plan`
   - response body = existing `SheetVitrinaV1Envelope`-совместимый write plan для `DATA_VITRINA` и `STATUS`
 
-## 3.1 Expanded MVP-safe seed bounded шага
+## 3.1 Expanded operator seed bounded шага
 
 - `config_v2 = 33`
-- `metrics_v2 = 7`
-- `formulas_v2 = 7`
+- `metrics_v2 = 19`
+- `formulas_v2 = 2`
 
 Bounded допущение:
 - seed deliberately не равен full legacy dump;
-- materialize-ится только тот объём, который existing validator/runtime/readback contour реально поддерживает без server-side redesign;
-- unsupported tail остаётся вне этого шага и фиксируется в `STATUS.note`/docs, а не ломает весь MVP.
+- `METRICS` materialize-ит полный current main-confirmed dictionary для sheet/upload/runtime;
+- `DATA_VITRINA` при этом остаётся bounded to current `7` supported live metrics и не расширяется в этом шаге шире, чем нужно для upload;
+- unsupported future tail остаётся вне этого шага и фиксируется в `STATUS.note`/docs, а не ломает весь MVP.
 
 ## 3.2 Service block bounded шага
 
@@ -141,8 +142,8 @@ Bounded допущение:
 
 - Подтверждён локальный end-to-end smoke через `apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py`.
 - Smoke проверяет:
-  - что `prepare` поднимает expanded MVP-safe seed `33 / 7 / 7`;
-  - что upload из sheet-side trigger сохраняет current truth в existing runtime;
+  - что `prepare` поднимает expanded operator seed `33 / 19 / 2`;
+  - что upload из sheet-side trigger сохраняет current truth в existing runtime без усечения `metrics_v2`;
   - что `load` ходит в живой HTTP plan endpoint, а не в локальный stub;
   - что `DATA_VITRINA` и `STATUS` получают реальные live rows;
   - что service/status block `CONFIG!H:I` сохраняется и не перезаписывается при load.
@@ -150,6 +151,7 @@ Bounded допущение:
 # 7. Что уже доказано по модулю
 
 - В `wb-core` появился первый bounded end-to-end MVP для `VB-Core Витрина V1`.
+- Sheet-side upload registry больше не обрезает `METRICS` до `7` rows: current truth хранит полный current main-confirmed `metrics_v2` dictionary.
 - Таблица больше не заканчивается на upload-only flow: из уже существующего server-side contour появился controlled reverse-load обратно в `DATA_VITRINA`.
 - Readback строится на текущем registry current truth и уже materialized live public source blocks, а не на фейковом локальном fixture.
 - Existing upload contour не ломается: bundle/result contracts и control block сохраняются.
@@ -157,6 +159,7 @@ Bounded допущение:
 # 8. Что пока не является частью финальной production-сборки
 
 - full legacy parity 1:1 по всем metric sections и registry rows;
+- widening `DATA_VITRINA` beyond current `7` supported live metrics;
 - official-api-backed coverage всех historical metrics;
 - stable hosted runtime URL и production-bound operator runtime;
 - deploy/auth-hardening;
