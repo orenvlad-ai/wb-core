@@ -1,0 +1,45 @@
+{
+  "registry_id": "config_v2",
+  "source_sheet": "CONFIG_V2",
+  "bundle_meta": {
+    "bundle_version": "registry_upload_bundle_v1__2026-04-13T12:00:00Z",
+    "uploaded_at": "2026-04-13T12:00:00Z"
+  },
+  "items": [
+    {
+      "nm_id": 210183919,
+      "enabled": true,
+      "display_name": "Худи basic",
+      "group": "hoodie",
+      "display_order": 1
+    },
+    {
+      "nm_id": 210184534,
+      "enabled": true,
+      "display_name": "Футболка base",
+      "group": "tshirt",
+      "display_order": 2
+    },
+    {
+      "nm_id": 245720334,
+      "enabled": true,
+      "display_name": "Лонгслив light",
+      "group": "longsleeve",
+      "display_order": 3
+    },
+    {
+      "nm_id": 259460529,
+      "enabled": true,
+      "display_name": "Свитшот urban",
+      "group": "sweatshirt",
+      "display_order": 4
+    },
+    {
+      "nm_id": 210185771,
+      "enabled": false,
+      "display_name": "Кепка archive",
+      "group": "cap",
+      "display_order": 5
+    }
+  ]
+}
