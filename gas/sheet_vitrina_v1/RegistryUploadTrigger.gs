@@ -559,13 +559,17 @@ function _resolveRegistryUploadEndpointUrl_(spreadsheet, endpointUrlOverride) {
 }
 
 function _deriveSheetVitrinaPlanUrl_(uploadUrl, asOfDate) {
-  const parsed = new URL(_validateRegistryUploadEndpointUrl_(uploadUrl));
-  parsed.pathname = SHEET_VITRINA_PLAN_PATH;
-  parsed.search = '';
+  const normalizedUploadUrl = _validateRegistryUploadEndpointUrl_(uploadUrl);
+  const hashlessUrl = String(normalizedUploadUrl).split('#')[0];
+  const pathlessUrl = hashlessUrl.split('?')[0];
+  const schemeMarkerIndex = pathlessUrl.indexOf('://');
+  const pathStartIndex = pathlessUrl.indexOf('/', schemeMarkerIndex + 3);
+  const origin = pathStartIndex === -1 ? pathlessUrl : pathlessUrl.slice(0, pathStartIndex);
+  let planUrl = `${origin}${SHEET_VITRINA_PLAN_PATH}`;
   if (asOfDate) {
-    parsed.searchParams.set('as_of_date', asOfDate);
+    planUrl += `?as_of_date=${encodeURIComponent(asOfDate)}`;
   }
-  return parsed.toString();
+  return planUrl;
 }
 
 function _setRegistryUploadEndpointUrl_(configSheet, endpointUrl) {
