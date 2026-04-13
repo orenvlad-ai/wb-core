@@ -8,7 +8,7 @@ Foundation-этап уже пройден. Текущее состояние `ma
 - в `main` уже есть смёрженные bounded modules для `web-source`, `official-api`, `rule-based`, `table-facing`, `registry`, `wide-matrix` и `sheet-side` линии;
 - подтверждён working contour `sku_display -> table_projection -> registry_pilot -> wide_matrix -> delivery -> sheet_scaffold`;
 - live write и presentation новой витрины уже присутствуют в `main` как code + evidence;
-- registry upload path уже дошёл до artifact-backed bundle, local validator и file-backed upload service: `migration/86`, `migration/87`, `migration/88` вместе с модулями `registry_upload_bundle_v1_block` и `registry_upload_file_backed_service_block` уже находятся в `main`.
+- registry upload path уже дошёл до artifact-backed bundle, local validator, file-backed service и DB-backed runtime: `migration/86`, `migration/87`, `migration/88`, `migration/89` вместе с модулями `registry_upload_bundle_v1_block`, `registry_upload_file_backed_service_block` и `registry_upload_db_backed_runtime_block` уже находятся в `main`.
 
 ## Цель
 
@@ -65,7 +65,7 @@ Foundation-этап уже пройден. Текущее состояние `ma
 - live write bridge и presentation pass для новой Google Sheets-витрины.
 
 На текущем `main` ещё не собраны:
-- live server-side ingest endpoint, DB-backed storage и production runtime вокруг registry upload.
+- live server-side ingest endpoint, production storage binding и operator-facing runtime вокруг registry upload.
 - live operator-side trigger вокруг registry upload.
 
 ## Почему Выбран Greenfield Sidecar Migration
