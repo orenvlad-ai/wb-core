@@ -28,8 +28,8 @@ Legacy-репозитории остаются рабочими, но счита
 - evidence и module docs по этим шагам.
 
 Главный незакрытый gap на текущем `main`:
-- upload line уже дошла до artifact-backed bundle, local validator, file-backed service и локального DB-backed runtime слоя;
-- live server-side ingest endpoint, production storage binding и operator-facing runtime entrypoint для registry upload в `main` ещё не собраны.
+- upload line уже дошла до artifact-backed bundle, local validator, file-backed service, локального DB-backed runtime и тонкого live HTTP entrypoint;
+- operator-facing trigger, deploy/auth-hardening и production storage binding для registry upload в `main` ещё не собраны.
 
 ## Что repo уже содержит
 
@@ -40,6 +40,7 @@ Legacy-репозитории остаются рабочими, но счита
 - `artifacts/registry_upload_bundle_v1/` как первый artifact-backed upload path для V2-реестров;
 - `artifacts/registry_upload_file_backed_service/` как локальный file-backed receiver для registry upload path;
 - `artifacts/registry_upload_db_backed_runtime/` как локальный DB-backed runtime layer для registry upload path;
+- `artifacts/registry_upload_http_entrypoint/` как первый live HTTP entrypoint для registry upload path;
 - `gas/sheet_vitrina_v1/` и `.clasp.json` для bound sheet-side wiring;
 - `docs/modules/` как канонический модульный reference;
 - `migration/` как канонический слой migration contracts и implementation notes.
@@ -54,14 +55,15 @@ Legacy-репозитории остаются рабочими, но счита
 6. Первый artifact-backed upload bundle и local validator для V2-реестров.
 7. Первый file-backed upload service, current-marker и structured upload result для V2-реестров.
 8. Первый DB-backed runtime ingest и current server-side truth для V2-реестров.
-9. Текущий незакрытый шаг: live server-side entrypoint для registry upload path.
+9. Первый тонкий live HTTP entrypoint для registry upload path.
+10. Текущий незакрытый шаг: operator-facing trigger и production/runtime hardening вокруг уже materialized entrypoint.
 
 ## Что не следует считать частью текущего `main`
 
-- server-side ingest endpoint для registry upload;
-- production storage binding и operator-facing runtime entrypoint для registry upload;
+- operator-facing runtime trigger для registry upload;
+- production storage binding, deploy и auth-hardening для registry upload;
 - Apps Script upload button;
-- live API/jobs/operator runtime для registry upload;
+- deployed/auth-hardened API, jobs и operator runtime для registry upload;
 - материализованные слои `packages/domain`, `infra/`, `tests/`, `api/`, `jobs/`, `db/`.
 
 ## Где смотреть детали
@@ -77,3 +79,4 @@ Legacy-репозитории остаются рабочими, но счита
 - [migration/87_registry_upload_bundle_v1.md](migration/87_registry_upload_bundle_v1.md)
 - [migration/88_registry_upload_file_backed_service.md](migration/88_registry_upload_file_backed_service.md)
 - [migration/89_registry_upload_db_backed_runtime.md](migration/89_registry_upload_db_backed_runtime.md)
+- [migration/90_registry_upload_http_entrypoint.md](migration/90_registry_upload_http_entrypoint.md)

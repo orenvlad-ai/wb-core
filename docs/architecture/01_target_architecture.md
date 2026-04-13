@@ -19,10 +19,11 @@
 - `registry_upload_bundle_v1_block` как первый artifact-backed upload bundle и local validator для V2-реестров;
 - `registry_upload_file_backed_service_block` как первый file-backed accept/store/activate слой для V2-реестров;
 - `registry_upload_db_backed_runtime_block` как первый DB-backed runtime ingest и current-truth слой для V2-реестров.
+- `registry_upload_http_entrypoint_block` как первый live HTTP/API entrypoint для V2-реестров.
 
 Главный незакрытый gap текущего `main`:
-- upload-side artifact-backed, file-backed и DB-backed runtime path уже в `main`;
-- этот документ не должен трактоваться как подтверждение наличия live server-side ingest endpoint, operator-facing API entrypoint или production storage binding для registry upload.
+- upload-side artifact-backed, file-backed, DB-backed runtime и тонкий live HTTP entrypoint уже в `main`;
+- этот документ не должен трактоваться как подтверждение наличия operator-facing Apps Script trigger, deploy/auth-hardening или production storage binding для registry upload.
 
 ## Server-First Architecture
 
@@ -45,7 +46,7 @@ Target-state — server-first:
 Текущее состояние `main`:
 - bounded sheet-side витрина уже есть как `DATA_VITRINA` и `STATUS`;
 - live write и visual presentation подтверждены для этого bounded sheet-side contour;
-- full replacement operator-table и live server ingest path для registry upload пока не являются частью `main`.
+- full replacement operator-table и operator-facing upload trigger пока не являются частью `main`.
 
 ## Current Main-Confirmed Layers
 
@@ -87,7 +88,7 @@ Target-state — server-first:
 
 Текущий `main` уже реализует bounded read-side/sheet-side форму этого правила:
 - таблица и витрина получают controlled bundles;
-- registry upload bundle, file-backed service и DB-backed runtime уже материализованы, но live server ingest path обратно в server truth пока не реализован и поэтому не должен трактоваться как working dual-write path.
+- registry upload bundle, file-backed service, DB-backed runtime и live HTTP entrypoint уже материализованы, но operator-side wiring до таблицы пока не реализован и поэтому не должен трактоваться как working dual-write path.
 
 ### Граница Сервера
 
@@ -99,8 +100,8 @@ Target-state — server-first:
 - auditability и runtime observability.
 
 Текущее ограничение `main`:
-- contracts, artifact-backed bundle, file-backed service и DB-backed runtime уже есть;
-- production ingest/jobs/API/runtime binding вокруг registry upload пока не смёржены.
+- contracts, artifact-backed bundle, file-backed service, DB-backed runtime и live HTTP entrypoint уже есть;
+- deploy/auth/operator binding вокруг registry upload пока не смёржены.
 
 ### Граница Web-Source
 
