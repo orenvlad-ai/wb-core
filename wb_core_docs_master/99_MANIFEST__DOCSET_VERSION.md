@@ -20,9 +20,9 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "фактическая внешняя project upload"
-built_from_commit: "33be18836bb46f029b48fd19f28d45300171602a"
+built_from_commit: "5121d0f2ceac9ec99c776a9b572a6ed12981237a"
 docset_version: "wb_core_docs_master_v1"
-built_at: "2026-04-13T17:54:32Z"
+built_at: "2026-04-13T18:11:45Z"
 core_docs_changed:
   - "README.md"
   - "docs/architecture/00_migration_charter.md"
@@ -33,26 +33,28 @@ core_docs_changed:
   - "docs/architecture/08_open_questions_and_decision_log.md"
   - "docs/modules/00_INDEX__MODULES.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
-project_upload_required: true
-last_project_upload_at: "unknown_not_uploaded_yet"
+project_upload_required: false
+last_project_upload_at: "2026-04-13T18:11:45Z"
+project_upload_note: "подтверждён первый initial upload curated-pack в новый ChatGPT Project WebCore"
 ---
 
 # Summary
 
-Этот manifest отвечает на два вопроса:
+Этот manifest отвечает на три вопроса:
 - из какого repo commit собран текущий curated-pack;
 - нужно ли заново загружать его в внешний ChatGPT Project.
+- подтверждён ли уже первый initial upload в новый ChatGPT Project WebCore.
 
 # Current norm
 
 - `docset_version` меняется только при осмысленной пересборке pack.
 - `built_from_commit` указывает на repo commit, от которого отталкивался pack.
-- `project_upload_required = true` означает, что внешний Project pack ещё не синхронизирован с текущей repo-версией.
+- `project_upload_required = false` означает, что текущий curated-pack уже подтверждён как загруженный во внешний Project.
 - `last_project_upload_at` обновляется только после реальной внешней загрузки, а не после локального commit.
+- `project_upload_note` можно использовать для короткой фиксации особого upload-события, если это помогает audit trail.
 
 # Known gaps
 
-- External upload time пока неизвестен.
 - Автоматическая синхронизация pack -> Project не materialized.
 
 # Not in scope
