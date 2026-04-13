@@ -38,7 +38,7 @@ update_note: "Создан как канонический модульный д
 - `status_transfer`: pilot upload bundle перенесён в `wb-core`
 - `status_verification`: artifact-backed smoke подтверждён
 - `status_checkpoint`: рабочий checkpoint подтверждён
-- `status_main`: ожидает merge в `main`
+- `status_main`: модуль смёржен в `main`
 
 # 2. Upstream/source basis и semantics
 

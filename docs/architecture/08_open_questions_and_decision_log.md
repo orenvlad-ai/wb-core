@@ -4,13 +4,14 @@
 
 | ID | Тема | Статус | Примечание |
 | --- | --- | --- | --- |
-| Q-01 | Какой именно будет первый функциональный перенос после foundation? | Открыт | Предварительный кандидат: web-source snapshot block. |
+| Q-01 | Какой именно будет первый функциональный перенос после foundation? | Закрыт | Исторически первым functional migration шагом стал `web_source_snapshot_block`; текущий `main` уже находится существенно дальше этой точки. |
 | Q-02 | Какова каноническая target storage model для facts, registries и snapshots? | Открыт | Reference-репозитории указывают на Postgres, но `wb-core` это ещё не зафиксировал. |
-| Q-03 | Какова полная authoritative schema `METRICS` и живой словарь metric keys? | Открыт | Reference-code показывает только часть схемы. |
+| Q-03 | Какова полная authoritative schema `METRICS` и живой словарь metric keys? | Открыт | В `main` уже есть `migration/75`, `migration/76`, `migration/78`, `migration/86` и `migration/87`, но окончательный authoritative registry path и server-side upload runtime ещё не собраны. |
 | Q-04 | Какие operator inputs останутся table-native в target-state? | Открыт | `CONFIG` и часть manual rules, вероятно, останутся, но final boundary ещё не зафиксирован. |
 | Q-05 | Должен ли `AI_EXPORT` остаться compatibility contract или его заменит прямой server contract? | Открыт | Текущий ingest всё ещё зависит от него. |
 | Q-06 | Кто является authoritative current producer для `GET /v1/search-analytics/snapshot`? | Открыт | Reference-репозитории показывают consumers и adjacent capture code, но не один окончательный producer path. |
 | Q-07 | Какие operator-visible outputs обязательны для первых cutover кроме raw parity? | Открыт | Сейчас существуют `DATA`, отчёты и machine-readable export. |
+| Q-08 | Каким будет первый server-side ingest/runtime step для registry upload path после `registry_upload_bundle_v1_block`? | Открыт | Artifact-backed bundle и local validator уже смёржены в `main`, но live ingest/storage/activation слой ещё не собран. |
 
 ## Незакрытые Решения
 
@@ -20,7 +21,7 @@
 | D-02 | Target-state — server-first modular monolith | Принято | Зафиксировано текущей архитектурой. |
 | D-03 | Таблица становится thin operator shell | Принято | Новая таблица отложена, но принцип зафиксирован. |
 | D-04 | Legacy остаётся maintenance-only | Принято | Никакой in-place cleanup campaign в legacy не планируется. |
-| D-05 | Первый кандидат на cutover — web-source snapshot block | Предварительно | Сильный кандидат, но не финальное обязательство. |
+| D-05 | `web_source_snapshot_block` был первым functional migration шагом | Реализовано | Исторический вопрос закрыт: `main` уже содержит и более поздние migration-линии. |
 
 ## Provisional Assumptions
 

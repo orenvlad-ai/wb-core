@@ -38,7 +38,7 @@ update_note: "Создан как канонический модульный д
 - `status_transfer`: модуль перенесён в `wb-core`
 - `status_verification`: модуль проверен
 - `status_checkpoint`: рабочий checkpoint подтверждён
-- `status_main`: ожидает merge в `main`
+- `status_main`: модуль смёржен в `main`
 
 # 2. Legacy-source и legacy semantics
 

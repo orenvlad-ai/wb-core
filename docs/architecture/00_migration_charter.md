@@ -1,5 +1,15 @@
 # Migration Charter
 
+## Статус Документа
+
+Этот документ фиксирует исходный charter запуска `wb-core`.
+
+Foundation-этап уже пройден. Текущее состояние `main` шире стартового charter:
+- в `main` уже есть смёрженные bounded modules для `web-source`, `official-api`, `rule-based`, `table-facing`, `registry`, `wide-matrix` и `sheet-side` линии;
+- подтверждён working contour `sku_display -> table_projection -> registry_pilot -> wide_matrix -> delivery -> sheet_scaffold`;
+- live write и presentation новой витрины уже присутствуют в `main` как code + evidence;
+- registry upload path уже дошёл до artifact-backed bundle и local validator: `migration/86` и `migration/87` вместе с `registry_upload_bundle_v1_block` уже находятся в `main`.
+
 ## Цель
 
 Создать новый target-core рядом с legacy и затем переносить возможности по одной, под явным контролем.
@@ -14,26 +24,28 @@
 
 В legacy допускаются только maintenance, bugfix и reconcile-изменения.
 
-## Scope Текущего Этапа
+## Исторический Scope Стартового Этапа
 
-В scope Phase 0/1 входит:
+В стартовый scope Phase 0/1 входило:
 - зафиксировать migration model и ограничения;
 - зафиксировать target architecture и границы репозитория;
 - зафиксировать source-of-truth policy и anti-drift rules;
 - зафиксировать backlog foundation-этапа, cutover rules и правила работы Codex;
 - собрать inventory legacy-контрактов, которые нельзя потерять при последующих переносах.
 
-## Что Считается Success
+## Что Считалось Success Для Стартового Этапа
 
-Этап успешен, если:
+Стартовый этап считался успешным, если:
 - в `wb-core` есть reviewable foundation package;
 - target-boundaries описаны достаточно жёстко, чтобы не повторить drift между table/server/web;
 - следующий модульный перенос можно начинать без повторного спора о migration model;
 - ни один business-модуль не перенесён преждевременно.
 
-## Что Не Входит В Этап
+Эти критерии уже закрыты и не описывают текущий checkpoint `main`.
 
-Сейчас не входит в scope:
+## Что Не Входило В Стартовый Этап
+
+В стартовый scope не входило:
 - перенос business-модулей;
 - создание новой таблицы;
 - production API, ingestion, jobs или web-source код;
@@ -41,6 +53,20 @@
 - CI/CD и deploy automation;
 - cutover любых live-workflow;
 - замена legacy-репозиториев.
+
+## Текущий Checkpoint Main
+
+На текущем `main` уже собраны:
+- bounded source blocks и official-api blocks;
+- rule-based модули;
+- table-facing и projection слой для новой витрины;
+- registry pilot line;
+- wide matrix, delivery bundle и sheet scaffold;
+- live write bridge и presentation pass для новой Google Sheets-витрины.
+
+На текущем `main` ещё не собраны:
+- server-side ingest/API/runtime вокруг registry upload.
+- live operator-side trigger вокруг registry upload.
 
 ## Почему Выбран Greenfield Sidecar Migration
 

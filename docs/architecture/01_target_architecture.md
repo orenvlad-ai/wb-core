@@ -1,5 +1,27 @@
 # Target Architecture
 
+## Current Main-Confirmed Checkpoint
+
+`origin/main` уже реализует bounded read-side и sheet-side контур, а не только foundation-документы.
+
+Подтверждённый working contour на `main`:
+- `sku_display_bundle_block`
+- `table_projection_bundle_block`
+- `registry_pilot_bundle`
+- `wide_data_matrix_v1_fixture_block`
+- `wide_data_matrix_delivery_bundle_v1_block`
+- `sheet_vitrina_v1_scaffold_block`
+
+Дополнительно в `main` уже присутствуют:
+- `sheet_vitrina_v1_write_bridge_block`;
+- `sheet_vitrina_v1_presentation_block`;
+- `migration/86_registry_upload_contract.md` как канонический контракт upload path для V2-реестров;
+- `registry_upload_bundle_v1_block` как первый artifact-backed upload bundle и local validator для V2-реестров.
+
+Главный незакрытый gap текущего `main`:
+- upload-side artifact-backed path уже в `main`;
+- этот документ не должен трактоваться как подтверждение наличия server-side ingest, API, version storage или activation runtime для registry upload.
+
 ## Server-First Architecture
 
 Target-state — server-first:
@@ -18,24 +40,34 @@ Target-state — server-first:
 - без скрытого server-only поведения внутри Apps Script;
 - без table-exclusive truth для production-логики.
 
-Новая таблица не создаётся на Phase 0/1.
+Текущее состояние `main`:
+- bounded sheet-side витрина уже есть как `DATA_VITRINA` и `STATUS`;
+- live write и visual presentation подтверждены для этого bounded sheet-side contour;
+- full replacement operator-table и live server ingest path для registry upload пока не являются частью `main`.
 
-Жёсткое правило:
-- новая таблица не создаётся, пока core сам не умеет отдавать нужные server-side read-models и projections.
+## Current Main-Confirmed Layers
 
-## Слои Core
+Материализованные слои и каталоги в `main`:
+- `apps/`: smoke runners, local live-write runners и sheet-side utilities;
+- `packages/contracts`: typed DTO, schemas и contract validation;
+- `packages/application`: bundle assembly, orchestration и use-cases;
+- `packages/adapters`: WB API, Sheets и другие I/O adapters в тех блоках, которые уже смёржены;
+- `artifacts/`: fixture, parity и evidence для bounded implementation blocks;
+- `registry/pilot_bundle/`: pilot registry artifacts для новой витрины;
+- `gas/sheet_vitrina_v1/`: bound Apps Script wiring для новой витрины;
+- `docs/` и `migration/`: канонические policy/module/migration документы.
 
-Целевые слои:
-- `apps/`: ограниченные entrypoint-ы, например будущий operator shell, internal APIs или admin tools;
-- `packages/domain`: чистые business/domain rules;
-- `packages/application`: orchestration и use-cases;
-- `packages/contracts`: typed DTO, schemas и interface contracts;
-- `packages/adapters`: WB API, Sheets, DB, browser/web-source и другие I/O adapters;
-- `infra/`: environment bootstrapping, local/dev ops и позже deployment descriptors.
+## Target/Future Layers
 
-Inference:
-- точные имена пакетов могут измениться;
-- жёсткое разделение между domain, application, contracts и adapters меняться не должно.
+Целевые, но пока не материализованные в `main` слои:
+- `packages/domain`
+- `infra/`
+- `tests/`
+- `api/`
+- `jobs/`
+- `db/`
+
+Эти каталоги и слои нельзя описывать как текущую реализацию `main`. На текущем checkpoint они остаются target/future направлением.
 
 ## Границы
 
@@ -51,6 +83,10 @@ Inference:
 - владеть тяжёлыми transform-ами или long-running fetch-логикой;
 - скрывать server behavior, которое нельзя review-ить в Git.
 
+Текущий `main` уже реализует bounded read-side/sheet-side форму этого правила:
+- таблица и витрина получают controlled bundles;
+- registry upload bundle уже материализован, но live server ingest path обратно в server truth пока не реализован и поэтому не должен трактоваться как working dual-write path.
+
 ### Граница Сервера
 
 Сервер владеет:
@@ -59,6 +95,10 @@ Inference:
 - materialization of snapshots;
 - contract validation;
 - auditability и runtime observability.
+
+Текущее ограничение `main`:
+- contracts и artifact-backed implementation шаги уже есть;
+- production ingest/jobs/API/runtime вокруг registry upload пока не смёржены.
 
 ### Граница Web-Source
 
