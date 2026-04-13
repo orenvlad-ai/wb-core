@@ -28,8 +28,8 @@ Legacy-репозитории остаются рабочими, но счита
 - evidence и module docs по этим шагам.
 
 Главный незакрытый gap на текущем `main`:
-- upload line уже дошла до artifact-backed bundle и local validator;
-- server-side ingest, version storage и activation runtime для registry upload в `main` ещё не собраны.
+- upload line уже дошла до artifact-backed bundle, local validator и file-backed accept/store/activate service;
+- live server-side ingest endpoint, DB-backed version storage и production activation runtime для registry upload в `main` ещё не собраны.
 
 ## Что repo уже содержит
 
@@ -38,6 +38,7 @@ Legacy-репозитории остаются рабочими, но счита
 - `artifacts/` с fixture/parity/evidence по смёрженным блокам;
 - `registry/pilot_bundle/` как pilot registry line для новой витрины;
 - `artifacts/registry_upload_bundle_v1/` как первый artifact-backed upload path для V2-реестров;
+- `artifacts/registry_upload_file_backed_service/` как локальный file-backed receiver для registry upload path;
 - `gas/sheet_vitrina_v1/` и `.clasp.json` для bound sheet-side wiring;
 - `docs/modules/` как канонический модульный reference;
 - `migration/` как канонический слой migration contracts и implementation notes.
@@ -50,12 +51,13 @@ Legacy-репозитории остаются рабочими, но счита
 4. Table/registry/wide/sheet line: `sku_display`, `table_projection`, `registry_pilot`, `wide_matrix`, `delivery`, `sheet_scaffold`, `live write`, `presentation`.
 5. Upload contract для V2-реестров.
 6. Первый artifact-backed upload bundle и local validator для V2-реестров.
-7. Текущий незакрытый шаг: server-side ingest/runtime слой для registry upload path.
+7. Первый file-backed upload service, current-marker и structured upload result для V2-реестров.
+8. Текущий незакрытый шаг: live server-side ingest/runtime слой для registry upload path.
 
 ## Что не следует считать частью текущего `main`
 
 - server-side ingest endpoint для registry upload;
-- server-side version storage и activation runtime для registry upload;
+- live DB-backed version storage и production activation runtime для registry upload;
 - Apps Script upload button;
 - DB/API/jobs runtime для registry upload;
 - материализованные слои `packages/domain`, `infra/`, `tests/`, `api/`, `jobs/`, `db/`.
@@ -71,3 +73,4 @@ Legacy-репозитории остаются рабочими, но счита
 - [migration/78_pilot_registry_bundle.md](migration/78_pilot_registry_bundle.md)
 - [migration/86_registry_upload_contract.md](migration/86_registry_upload_contract.md)
 - [migration/87_registry_upload_bundle_v1.md](migration/87_registry_upload_bundle_v1.md)
+- [migration/88_registry_upload_file_backed_service.md](migration/88_registry_upload_file_backed_service.md)

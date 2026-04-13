@@ -16,11 +16,12 @@
 - `sheet_vitrina_v1_write_bridge_block`;
 - `sheet_vitrina_v1_presentation_block`;
 - `migration/86_registry_upload_contract.md` как канонический контракт upload path для V2-реестров;
-- `registry_upload_bundle_v1_block` как первый artifact-backed upload bundle и local validator для V2-реестров.
+- `registry_upload_bundle_v1_block` как первый artifact-backed upload bundle и local validator для V2-реестров;
+- `registry_upload_file_backed_service_block` как первый file-backed accept/store/activate слой для V2-реестров.
 
 Главный незакрытый gap текущего `main`:
-- upload-side artifact-backed path уже в `main`;
-- этот документ не должен трактоваться как подтверждение наличия server-side ingest, API, version storage или activation runtime для registry upload.
+- upload-side artifact-backed и file-backed path уже в `main`;
+- этот документ не должен трактоваться как подтверждение наличия live server-side ingest, API, DB-backed version storage или production activation runtime для registry upload.
 
 ## Server-First Architecture
 
@@ -85,7 +86,7 @@ Target-state — server-first:
 
 Текущий `main` уже реализует bounded read-side/sheet-side форму этого правила:
 - таблица и витрина получают controlled bundles;
-- registry upload bundle уже материализован, но live server ingest path обратно в server truth пока не реализован и поэтому не должен трактоваться как working dual-write path.
+- registry upload bundle и file-backed upload service уже материализованы, но live server ingest path обратно в server truth пока не реализован и поэтому не должен трактоваться как working dual-write path.
 
 ### Граница Сервера
 
@@ -97,8 +98,8 @@ Target-state — server-first:
 - auditability и runtime observability.
 
 Текущее ограничение `main`:
-- contracts и artifact-backed implementation шаги уже есть;
-- production ingest/jobs/API/runtime вокруг registry upload пока не смёржены.
+- contracts, artifact-backed bundle и file-backed upload service уже есть;
+- production ingest/jobs/API/DB runtime вокруг registry upload пока не смёржены.
 
 ### Граница Web-Source
 
