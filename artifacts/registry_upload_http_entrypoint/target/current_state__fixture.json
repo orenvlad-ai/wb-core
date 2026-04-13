@@ -1,0 +1,199 @@
+{
+  "bundle_version": "registry_upload_bundle_v1__2026-04-13T12:00:00Z",
+  "activated_at": "2026-04-13T12:00:03Z",
+  "config_v2": [
+    {
+      "nm_id": 210183919,
+      "enabled": true,
+      "display_name": "Худи basic",
+      "group": "hoodie",
+      "display_order": 1
+    },
+    {
+      "nm_id": 210184534,
+      "enabled": true,
+      "display_name": "Футболка base",
+      "group": "tshirt",
+      "display_order": 2
+    },
+    {
+      "nm_id": 245720334,
+      "enabled": true,
+      "display_name": "Лонгслив light",
+      "group": "longsleeve",
+      "display_order": 3
+    },
+    {
+      "nm_id": 259460529,
+      "enabled": true,
+      "display_name": "Свитшот urban",
+      "group": "sweatshirt",
+      "display_order": 4
+    },
+    {
+      "nm_id": 210185771,
+      "enabled": false,
+      "display_name": "Кепка archive",
+      "group": "cap",
+      "display_order": 5
+    }
+  ],
+  "metrics_v2": [
+    {
+      "metric_key": "stock_total",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Остаток, шт",
+      "calc_type": "metric",
+      "calc_ref": "stock_total",
+      "show_in_data": true,
+      "format": "integer",
+      "display_order": 10,
+      "section": "Запасы"
+    },
+    {
+      "metric_key": "price_seller_discounted",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Цена со скидкой",
+      "calc_type": "metric",
+      "calc_ref": "price_seller_discounted",
+      "show_in_data": true,
+      "format": "rub",
+      "display_order": 20,
+      "section": "Цены"
+    },
+    {
+      "metric_key": "spp",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "СПП",
+      "calc_type": "metric",
+      "calc_ref": "spp",
+      "show_in_data": true,
+      "format": "percent",
+      "display_order": 30,
+      "section": "Цены"
+    },
+    {
+      "metric_key": "ads_views",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Показы рекламы",
+      "calc_type": "metric",
+      "calc_ref": "ads_views",
+      "show_in_data": true,
+      "format": "integer",
+      "display_order": 40,
+      "section": "Реклама"
+    },
+    {
+      "metric_key": "ads_clicks",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Клики рекламы",
+      "calc_type": "metric",
+      "calc_ref": "ads_clicks",
+      "show_in_data": true,
+      "format": "integer",
+      "display_order": 50,
+      "section": "Реклама"
+    },
+    {
+      "metric_key": "ads_orders",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Заказы из рекламы",
+      "calc_type": "metric",
+      "calc_ref": "ads_orders",
+      "show_in_data": true,
+      "format": "integer",
+      "display_order": 60,
+      "section": "Реклама"
+    },
+    {
+      "metric_key": "ads_sum_price",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Выручка из рекламы",
+      "calc_type": "metric",
+      "calc_ref": "ads_sum_price",
+      "show_in_data": true,
+      "format": "rub",
+      "display_order": 70,
+      "section": "Реклама"
+    },
+    {
+      "metric_key": "fin_buyout_rub",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Выкуп, руб",
+      "calc_type": "metric",
+      "calc_ref": "fin_buyout_rub",
+      "show_in_data": true,
+      "format": "rub",
+      "display_order": 80,
+      "section": "Финансы"
+    },
+    {
+      "metric_key": "fin_commission",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Комиссия, руб",
+      "calc_type": "metric",
+      "calc_ref": "fin_commission",
+      "show_in_data": true,
+      "format": "rub",
+      "display_order": 90,
+      "section": "Финансы"
+    },
+    {
+      "metric_key": "ads_ctr",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "CTR рекламы",
+      "calc_type": "ratio",
+      "calc_ref": "ads_ctr",
+      "show_in_data": true,
+      "format": "percent",
+      "display_order": 100,
+      "section": "Реклама"
+    },
+    {
+      "metric_key": "proxy_profit_rub",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Прокси-прибыль, руб",
+      "calc_type": "formula",
+      "calc_ref": "proxy_profit_rub",
+      "show_in_data": true,
+      "format": "rub",
+      "display_order": 110,
+      "section": "Расчётные"
+    },
+    {
+      "metric_key": "proxy_stock_value_rub",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Прокси-стоимость остатка, руб",
+      "calc_type": "formula",
+      "calc_ref": "proxy_stock_value_rub",
+      "show_in_data": true,
+      "format": "rub",
+      "display_order": 120,
+      "section": "Расчётные"
+    }
+  ],
+  "formulas_v2": [
+    {
+      "formula_id": "proxy_profit_rub",
+      "expression": "(fin_buyout_rub - fin_commission)",
+      "description": "Минимальная прокси-прибыль без логистики и штрафов"
+    },
+    {
+      "formula_id": "proxy_stock_value_rub",
+      "expression": "(stock_total * price_seller_discounted)",
+      "description": "Прокси-оценка денежной стоимости текущего остатка"
+    }
+  ]
+}

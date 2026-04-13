@@ -1,0 +1,160 @@
+"""Минимальный inbound HTTP entrypoint для registry upload."""
+
+from __future__ import annotations
+
+from dataclasses import asdict
+import json
+import os
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+import socketserver
+from typing import Any, Mapping
+
+from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.contracts.registry_upload_file_backed_service import RegistryUploadResult
+from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
+
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8765
+DEFAULT_UPLOAD_PATH = "/v1/registry-upload/bundle"
+DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
+
+
+def load_registry_upload_http_entrypoint_config() -> RegistryUploadHttpEntrypointConfig:
+    host = os.environ.get("REGISTRY_UPLOAD_HTTP_HOST", DEFAULT_HOST).strip() or DEFAULT_HOST
+
+    raw_port = os.environ.get("REGISTRY_UPLOAD_HTTP_PORT", str(DEFAULT_PORT)).strip()
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise ValueError(f"REGISTRY_UPLOAD_HTTP_PORT must be an integer, got {raw_port!r}") from exc
+    if port < 0 or port > 65535:
+        raise ValueError(f"REGISTRY_UPLOAD_HTTP_PORT must be between 0 and 65535, got {port}")
+
+    upload_path = os.environ.get("REGISTRY_UPLOAD_HTTP_PATH", DEFAULT_UPLOAD_PATH).strip() or DEFAULT_UPLOAD_PATH
+    if not upload_path.startswith("/"):
+        raise ValueError("REGISTRY_UPLOAD_HTTP_PATH must start with /")
+
+    raw_runtime_dir = os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR", str(DEFAULT_RUNTIME_DIR)).strip()
+    runtime_dir = Path(raw_runtime_dir).expanduser()
+
+    return RegistryUploadHttpEntrypointConfig(
+        host=host,
+        port=port,
+        upload_path=upload_path,
+        runtime_dir=runtime_dir,
+    )
+
+
+def build_registry_upload_http_server(
+    config: RegistryUploadHttpEntrypointConfig,
+    entrypoint: RegistryUploadHttpEntrypoint | None = None,
+) -> HTTPServer:
+    runtime_entrypoint = entrypoint or RegistryUploadHttpEntrypoint(runtime_dir=config.runtime_dir)
+    handler_cls = _build_handler(runtime_entrypoint, upload_path=config.upload_path)
+    return RegistryUploadHttpServer((config.host, config.port), handler_cls)
+
+
+def _build_handler(
+    entrypoint: RegistryUploadHttpEntrypoint,
+    *,
+    upload_path: str,
+) -> type[BaseHTTPRequestHandler]:
+    class RegistryUploadHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            if self.path != upload_path:
+                _write_json_response(
+                    self,
+                    HTTPStatus.NOT_FOUND,
+                    {"error": f"unsupported path: {self.path}"},
+                )
+                return
+
+            try:
+                payload = _load_request_payload(self)
+            except ValueError as exc:
+                _write_json_response(
+                    self,
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": str(exc)},
+                )
+                return
+
+            try:
+                result = entrypoint.handle_bundle_payload(payload)
+            except Exception as exc:  # pragma: no cover - bounded fallback
+                _write_json_response(
+                    self,
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"error": f"registry upload runtime failed: {exc}"},
+                )
+                return
+
+            _write_json_response(
+                self,
+                _http_status_for_result(result),
+                asdict(result),
+            )
+
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
+            return
+
+    return RegistryUploadHandler
+
+
+class RegistryUploadHttpServer(HTTPServer):
+    """Минимальный HTTP server без reverse-DNS lookup на bind."""
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
+def _load_request_payload(handler: BaseHTTPRequestHandler) -> Mapping[str, Any]:
+    raw_length = handler.headers.get("Content-Length", "").strip()
+    if not raw_length:
+        raise ValueError("request body is required")
+
+    try:
+        content_length = int(raw_length)
+    except ValueError as exc:
+        raise ValueError(f"Content-Length must be integer, got {raw_length!r}") from exc
+    if content_length <= 0:
+        raise ValueError("request body must not be empty")
+
+    raw_body = handler.rfile.read(content_length)
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("request body must be valid UTF-8 JSON") from exc
+
+    if not isinstance(payload, Mapping):
+        raise ValueError("request body must be a JSON object")
+    return payload
+
+
+def _http_status_for_result(result: RegistryUploadResult) -> HTTPStatus:
+    if result.status == "accepted":
+        return HTTPStatus.OK
+
+    if any("bundle_version already accepted" in error for error in result.validation_errors):
+        return HTTPStatus.CONFLICT
+
+    return HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+def _write_json_response(
+    handler: BaseHTTPRequestHandler,
+    status: HTTPStatus,
+    payload: Any,
+) -> None:
+    body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+    handler.send_response(status.value)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
