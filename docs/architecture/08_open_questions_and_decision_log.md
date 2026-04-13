@@ -5,13 +5,13 @@
 | ID | Тема | Статус | Примечание |
 | --- | --- | --- | --- |
 | Q-01 | Какой именно будет первый функциональный перенос после foundation? | Закрыт | Исторически первым functional migration шагом стал `web_source_snapshot_block`; текущий `main` уже находится существенно дальше этой точки. |
-| Q-02 | Какова каноническая target storage model для facts, registries и snapshots? | Открыт | Reference-репозитории указывают на Postgres, но `wb-core` это ещё не зафиксировал. |
-| Q-03 | Какова полная authoritative schema `METRICS` и живой словарь metric keys? | Открыт | В `main` уже есть `migration/75`, `migration/76`, `migration/78`, `migration/86`, `migration/87` и `migration/88`, но окончательный authoritative registry path и live server-side upload runtime ещё не собраны. |
+| Q-02 | Какова каноническая target storage model для facts, registries и snapshots? | Открыт | В `main` уже есть локальный SQLite-backed runtime шаг для registry upload, но это не фиксирует окончательное production storage решение. |
+| Q-03 | Какова полная authoritative schema `METRICS` и живой словарь metric keys? | Открыт | В `main` уже есть `migration/75`, `migration/76`, `migration/78`, `migration/86`, `migration/87`, `migration/88` и `migration/89`, но окончательный authoritative registry path и live operator-facing upload runtime ещё не собраны. |
 | Q-04 | Какие operator inputs останутся table-native в target-state? | Открыт | `CONFIG` и часть manual rules, вероятно, останутся, но final boundary ещё не зафиксирован. |
 | Q-05 | Должен ли `AI_EXPORT` остаться compatibility contract или его заменит прямой server contract? | Открыт | Текущий ingest всё ещё зависит от него. |
 | Q-06 | Кто является authoritative current producer для `GET /v1/search-analytics/snapshot`? | Открыт | Reference-репозитории показывают consumers и adjacent capture code, но не один окончательный producer path. |
 | Q-07 | Какие operator-visible outputs обязательны для первых cutover кроме raw parity? | Открыт | Сейчас существуют `DATA`, отчёты и machine-readable export. |
-| Q-08 | Каким будет первый server-side ingest/runtime step для registry upload path после `registry_upload_bundle_v1_block`? | Закрыт | Первым bounded шагом стал `registry_upload_file_backed_service_block`: в `main` уже есть local file-backed accept/store/activate/result слой; незакрытым остаётся live server-side ingest/API/DB runtime. |
+| Q-08 | Каким будет первый server-side ingest/runtime step для registry upload path после `registry_upload_bundle_v1_block`? | Закрыт | Bounded chain уже дошёл до `registry_upload_file_backed_service_block` и `registry_upload_db_backed_runtime_block`; незакрытым остаётся только live entrypoint поверх этого runtime слоя. |
 
 ## Незакрытые Решения
 
