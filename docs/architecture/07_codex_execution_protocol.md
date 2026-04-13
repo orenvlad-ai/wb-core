@@ -31,6 +31,7 @@ Codex должна остановиться и вынести задачу на 
 | Boundaries | В foundation work не добавлена business-логика |
 | Diff hygiene | Нет случайных правок в reference-репозиториях |
 | Documentation sync | При значимом техническом изменении обновлена каноническая документация в той же задаче |
+| Project-pack sync | Если изменение влияет на project-oriented pack, обновлены затронутые файлы `wb_core_docs_master/` и manifest |
 | Git capture | Канонический source-of-truth артефакт не остаётся только в рабочем дереве и доведён до commit/push/PR или paused-ветки |
 | Local validation | Базовые структурные проверки проходят |
 | Reviewability | Результат понятен ручному reviewer без runtime-археологии |
@@ -81,6 +82,17 @@ Codex должна остановиться и вынести задачу на 
   - commit hash;
   - push;
   - PR / paused-ветка.
+
+Для `wb_core_docs_master` действует дополнительное частное правило:
+- primary canonical docs всегда первичны по отношению к project-pack;
+- `wb_core_docs_master/` обновляется только как compact curated-pack, а не как dump-копия `docs/`;
+- если изменение влияет на contract/status/smoke/checkpoint/module status/glossary/common runbook/migration boundary, Codex обязана:
+  - обновить primary repo docs;
+  - обновить затронутые файлы в `wb_core_docs_master/`;
+  - обновить `wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`;
+  - поставить `project_upload_required = true`, пока pack не будет загружен в внешний ChatGPT Project;
+- legacy knowledge в `wb_core_docs_master` разрешён только в register-слое (`LEGACY_TO_WEBCORE_MAP`, `DO_NOT_LOSE_CONSTRAINTS`), а не как перенос полного legacy-корпуса;
+- создание или изменение `wb_core_docs_master` без Git-фиксации так же считается незавершённой задачей.
 
 ## Когда Codex Может Действовать Самостоятельно
 
