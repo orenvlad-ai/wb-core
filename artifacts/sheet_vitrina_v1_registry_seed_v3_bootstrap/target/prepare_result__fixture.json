@@ -2,16 +2,16 @@
   "ok": "success",
   "spreadsheet_id": "1ltgE8GltN3Rk8qP1UiaT2NPEwQyPKZ-1tuIqV7EC1NE",
   "spreadsheet_name": "WB Core Vitrina V1",
-  "seed_version": "compact_v3_runtime_compatible",
+  "seed_version": "compact_v3_mvp_safe",
   "sheet_names": [
     "CONFIG",
     "METRICS",
     "FORMULAS"
   ],
   "seeded_counts": {
-    "config_v2": 9,
-    "metrics_v2": 10,
-    "formulas_v2": 2
+    "config_v2": 33,
+    "metrics_v2": 7,
+    "formulas_v2": 7
   },
   "sheets": [
     {
@@ -24,8 +24,8 @@
         "group",
         "display_order"
       ],
-      "data_row_count": 9,
-      "last_row": 10,
+      "data_row_count": 33,
+      "last_row": 34,
       "last_column": 9,
       "control_header": [
         "key",
@@ -55,8 +55,8 @@
         "display_order",
         "section"
       ],
-      "data_row_count": 10,
-      "last_row": 11,
+      "data_row_count": 7,
+      "last_row": 8,
       "last_column": 10
     },
     {
@@ -67,8 +67,8 @@
         "expression",
         "description"
       ],
-      "data_row_count": 2,
-      "last_row": 3,
+      "data_row_count": 7,
+      "last_row": 8,
       "last_column": 3
     }
   ]

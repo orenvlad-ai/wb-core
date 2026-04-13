@@ -151,7 +151,7 @@ function applyDataBodyNumberFormats_(sheet, lastRow, lastColumn) {
 }
 
 function resolveDataPattern_(key, rowValues) {
-  if (/\|(spp|ads_ctr)$/.test(key)) {
+  if (/\|(spp|ads_ctr|ctr|ctr_current)$/.test(key)) {
     return PRESENTATION_PERCENT_PATTERN;
   }
   if (/(price_seller_discounted|_rub)$/.test(key)) {
@@ -206,9 +206,12 @@ function describeHeaderStyle_(sheet, lastColumn) {
 
 function describeDataSamples_(sheet) {
   return {
-    percent: describeDataSampleByPredicate_(sheet, (key) => /\|(spp|ads_ctr)$/.test(key)),
+    percent: describeDataSampleByPredicate_(sheet, (key) => /\|(spp|ads_ctr|ctr|ctr_current)$/.test(key)),
     ruble: describeDataSampleByPredicate_(sheet, (key) => /(price_seller_discounted|_rub)$/.test(key)),
-    integer: describeDataSampleByPredicate_(sheet, (key) => !/\|(spp|ads_ctr)$/.test(key) && !/(price_seller_discounted|_rub)$/.test(key)),
+    integer: describeDataSampleByPredicate_(
+      sheet,
+      (key) => !/\|(spp|ads_ctr|ctr|ctr_current)$/.test(key) && !/(price_seller_discounted|_rub)$/.test(key)
+    ),
   };
 }
 

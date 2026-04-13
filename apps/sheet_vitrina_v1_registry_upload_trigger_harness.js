@@ -27,6 +27,8 @@ function main() {
   const result =
     options.mode === 'seed_bootstrap'
       ? runSeedBootstrapMode({ context, spreadsheet, options })
+      : options.mode === 'mvp_end_to_end'
+        ? runMvpEndToEndMode({ context, spreadsheet, options })
       : runBundleUploadMode({ context, spreadsheet, options });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
@@ -45,6 +47,9 @@ function parseArgs(argv) {
   const requiredKeys = ['scriptPath', 'endpointUrl', 'bundleVersion', 'uploadedAt'];
   if (options.mode === 'bundle_upload') {
     requiredKeys.push('fixturePath');
+  }
+  if (options.mode === 'mvp_end_to_end') {
+    requiredKeys.push('asOfDate');
   }
   for (const required of requiredKeys) {
     if (!options[required]) {
@@ -115,6 +120,35 @@ function runSeedBootstrapMode({ context, spreadsheet, options }) {
   };
 }
 
+function runMvpEndToEndMode({ context, spreadsheet, options }) {
+  const prepareResult = parseJsonString(context.prepareRegistryUploadOperatorSheets());
+  const builtBundle = parseJsonString(
+    context.debugBuildRegistryUploadBundleFromSheets(options.bundleVersion, options.uploadedAt)
+  );
+  const acceptedResponse = parseJsonString(
+    context.debugUploadRegistryUploadBundleFromSheets(options.endpointUrl, options.bundleVersion, options.uploadedAt)
+  );
+  const loadResult = parseJsonString(
+    context.debugLoadSheetVitrinaTable(options.endpointUrl, options.asOfDate)
+  );
+  const configSheet = spreadsheet.getSheetByName('CONFIG');
+  const statusBlock = readStatusBlock(configSheet);
+  return {
+    prepare_result: prepareResult,
+    built_bundle: builtBundle,
+    accepted_response: acceptedResponse,
+    load_result: loadResult,
+    status_block: statusBlock,
+    sheets: {
+      CONFIG: snapshotSheet(spreadsheet.getSheetByName('CONFIG')),
+      METRICS: snapshotSheet(spreadsheet.getSheetByName('METRICS')),
+      FORMULAS: snapshotSheet(spreadsheet.getSheetByName('FORMULAS')),
+      DATA_VITRINA: snapshotSheet(spreadsheet.getSheetByName('DATA_VITRINA')),
+      STATUS: snapshotSheet(spreadsheet.getSheetByName('STATUS')),
+    },
+  };
+}
+
 function parseJsonString(value) {
   return typeof value === 'string' ? JSON.parse(value) : value;
 }
@@ -164,6 +198,7 @@ function buildContext({ spreadsheet }) {
     Number,
     Boolean,
     Date,
+    URL,
     Math,
     RegExp,
     Array,
@@ -244,6 +279,10 @@ class MockSpreadsheet {
     return this.sheets.get(name) || null;
   }
 
+  getSheets() {
+    return Array.from(this.sheets.values());
+  }
+
   insertSheet(name) {
     const sheet = new MockSheet(name);
     this.sheets.set(name, sheet);
@@ -261,7 +300,7 @@ class MockSheet {
     this.values = new Map();
     this.notes = new Map();
     this.maxRows = 200;
-    this.maxColumns = 26;
+    this.maxColumns = 702;
     this.frozenRows = 0;
     this.columnWidths = new Map();
   }
@@ -271,6 +310,10 @@ class MockSheet {
   }
 
   getRange(row, column, numRows = 1, numColumns = 1) {
+    if (typeof row === 'string') {
+      const range = parseA1Range(row, this.maxRows, this.maxColumns);
+      return new MockRange(this, range.row, range.column, range.numRows, range.numColumns);
+    }
     return new MockRange(this, row, column, numRows, numColumns);
   }
 
@@ -377,6 +420,95 @@ class MockRange {
     this.sheet.notes.set(`${this.row}:${this.column}`, note);
     return this;
   }
+
+  offset(rowOffset, columnOffset, numRows = this.numRows, numColumns = this.numColumns) {
+    return new MockRange(
+      this.sheet,
+      this.row + rowOffset,
+      this.column + columnOffset,
+      numRows,
+      numColumns
+    );
+  }
+
+  getA1Notation() {
+    const start = `${columnName(this.column)}${this.row}`;
+    const end = `${columnName(this.column + this.numColumns - 1)}${this.row + this.numRows - 1}`;
+    return start === end ? start : `${start}:${end}`;
+  }
+}
+
+function snapshotSheet(sheet) {
+  if (!sheet) {
+    return null;
+  }
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+  return {
+    name: sheet.getName(),
+    last_row: lastRow,
+    last_column: lastColumn,
+    values: lastRow > 0 && lastColumn > 0 ? sheet.getRange(1, 1, lastRow, lastColumn).getValues() : [],
+  };
+}
+
+function parseA1Range(value, maxRows, maxColumns) {
+  const normalized = String(value).trim().toUpperCase();
+  const parts = normalized.split(':');
+  if (parts.length === 1) {
+    const single = parseA1Cell(parts[0]);
+    return { row: single.row, column: single.column, numRows: 1, numColumns: 1 };
+  }
+  if (parts.length !== 2) {
+    throw new Error(`unsupported A1 notation: ${value}`);
+  }
+  const left = parts[0];
+  const right = parts[1];
+  if (/^[A-Z]+$/.test(left) && /^[A-Z]+$/.test(right)) {
+    const startColumn = columnNumber(left);
+    const endColumn = columnNumber(right);
+    return {
+      row: 1,
+      column: startColumn,
+      numRows: maxRows,
+      numColumns: Math.min(maxColumns, endColumn) - startColumn + 1,
+    };
+  }
+  const start = parseA1Cell(left);
+  const end = parseA1Cell(right);
+  return {
+    row: start.row,
+    column: start.column,
+    numRows: end.row - start.row + 1,
+    numColumns: end.column - start.column + 1,
+  };
+}
+
+function parseA1Cell(value) {
+  const match = /^([A-Z]+)(\d+)$/.exec(String(value).trim().toUpperCase());
+  if (!match) {
+    throw new Error(`unsupported A1 cell: ${value}`);
+  }
+  return { column: columnNumber(match[1]), row: Number(match[2]) };
+}
+
+function columnNumber(label) {
+  let current = 0;
+  for (const ch of String(label)) {
+    current = current * 26 + (ch.charCodeAt(0) - 64);
+  }
+  return current;
+}
+
+function columnName(index) {
+  let out = '';
+  let current = index;
+  while (current > 0) {
+    const remainder = (current - 1) % 26;
+    out = String.fromCharCode(65 + remainder) + out;
+    current = Math.floor((current - 1) / 26);
+  }
+  return out;
 }
 
 main();

@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 import socketserver
 from typing import Any, Mapping
+from urllib import parse as urllib_parse
 
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.contracts.registry_upload_file_backed_service import RegistryUploadResult
@@ -19,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_UPLOAD_PATH = "/v1/registry-upload/bundle"
+DEFAULT_SHEET_PLAN_PATH = "/v1/sheet-vitrina-v1/plan"
 DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
 
 
@@ -37,6 +39,10 @@ def load_registry_upload_http_entrypoint_config() -> RegistryUploadHttpEntrypoin
     if not upload_path.startswith("/"):
         raise ValueError("REGISTRY_UPLOAD_HTTP_PATH must start with /")
 
+    sheet_plan_path = os.environ.get("SHEET_VITRINA_HTTP_PATH", DEFAULT_SHEET_PLAN_PATH).strip() or DEFAULT_SHEET_PLAN_PATH
+    if not sheet_plan_path.startswith("/"):
+        raise ValueError("SHEET_VITRINA_HTTP_PATH must start with /")
+
     raw_runtime_dir = os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR", str(DEFAULT_RUNTIME_DIR)).strip()
     runtime_dir = Path(raw_runtime_dir).expanduser()
 
@@ -44,6 +50,7 @@ def load_registry_upload_http_entrypoint_config() -> RegistryUploadHttpEntrypoin
         host=host,
         port=port,
         upload_path=upload_path,
+        sheet_plan_path=sheet_plan_path,
         runtime_dir=runtime_dir,
     )
 
@@ -53,7 +60,11 @@ def build_registry_upload_http_server(
     entrypoint: RegistryUploadHttpEntrypoint | None = None,
 ) -> HTTPServer:
     runtime_entrypoint = entrypoint or RegistryUploadHttpEntrypoint(runtime_dir=config.runtime_dir)
-    handler_cls = _build_handler(runtime_entrypoint, upload_path=config.upload_path)
+    handler_cls = _build_handler(
+        runtime_entrypoint,
+        upload_path=config.upload_path,
+        sheet_plan_path=config.sheet_plan_path,
+    )
     return RegistryUploadHttpServer((config.host, config.port), handler_cls)
 
 
@@ -61,14 +72,16 @@ def _build_handler(
     entrypoint: RegistryUploadHttpEntrypoint,
     *,
     upload_path: str,
+    sheet_plan_path: str,
 ) -> type[BaseHTTPRequestHandler]:
     class RegistryUploadHandler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802
-            if self.path != upload_path:
+            parsed = urllib_parse.urlparse(self.path)
+            if parsed.path != upload_path:
                 _write_json_response(
                     self,
                     HTTPStatus.NOT_FOUND,
-                    {"error": f"unsupported path: {self.path}"},
+                    {"error": f"unsupported path: {parsed.path}"},
                 )
                 return
 
@@ -96,6 +109,44 @@ def _build_handler(
                 self,
                 _http_status_for_result(result),
                 asdict(result),
+            )
+
+        def do_GET(self) -> None:  # noqa: N802
+            parsed = urllib_parse.urlparse(self.path)
+            if parsed.path != sheet_plan_path:
+                _write_json_response(
+                    self,
+                    HTTPStatus.NOT_FOUND,
+                    {"error": f"unsupported path: {parsed.path}"},
+                )
+                return
+
+            query = urllib_parse.parse_qs(parsed.query)
+            as_of_date = ""
+            if query.get("as_of_date"):
+                as_of_date = str(query["as_of_date"][0]).strip()
+
+            try:
+                payload = entrypoint.handle_sheet_plan_request(as_of_date=as_of_date or None)
+            except ValueError as exc:
+                _write_json_response(
+                    self,
+                    HTTPStatus.UNPROCESSABLE_ENTITY,
+                    {"error": str(exc)},
+                )
+                return
+            except Exception as exc:  # pragma: no cover - bounded fallback
+                _write_json_response(
+                    self,
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"error": f"sheet vitrina plan runtime failed: {exc}"},
+                )
+                return
+
+            _write_json_response(
+                self,
+                HTTPStatus.OK,
+                payload,
             )
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A003

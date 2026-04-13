@@ -25,11 +25,16 @@ Legacy-репозитории остаются рабочими, но счита
 В `main` также уже есть:
 - live write bridge новой витрины в bound Google Sheet;
 - presentation pass для `DATA_VITRINA` и `STATUS`;
+- compact v3 bootstrap для `CONFIG / METRICS / FORMULAS`, который поднимает уже заполненные operator sheets и сохраняет service/status block;
 - evidence и module docs по этим шагам.
 
 Главный незакрытый gap на текущем `main`:
 - upload line уже дошла до artifact-backed bundle, local validator, file-backed service, локального DB-backed runtime, тонкого live HTTP entrypoint и первого sheet-side operator trigger;
-- загрузка server-side current truth обратно в таблицу, deploy/auth-hardening и production storage binding для registry upload в `main` ещё не собраны.
+- compact v3 bootstrap уже в `main`, но controlled reverse-load server-side current truth обратно в `DATA_VITRINA` ещё не входит в текущий `main`.
+
+На текущей PR-ветке дополнительно materialize-ится:
+- `sheet_vitrina_v1_mvp_end_to_end_block` как первый bounded end-to-end MVP: expanded MVP-safe seed `33 / 7 / 7`, сохранённый upload flow и controlled load живых server-side данных обратно в `DATA_VITRINA` через lightweight plan endpoint.
+- После этого блока незакрытым хвостом остаются full legacy parity, расширение beyond MVP-safe metrics/sections, stable hosted runtime URL, deploy/auth-hardening и production storage binding.
 
 ## Что repo уже содержит
 
@@ -42,6 +47,7 @@ Legacy-репозитории остаются рабочими, но счита
 - `artifacts/registry_upload_db_backed_runtime/` как локальный DB-backed runtime layer для registry upload path;
 - `artifacts/registry_upload_http_entrypoint/` как первый live HTTP entrypoint для registry upload path;
 - `artifacts/sheet_vitrina_v1_registry_upload_trigger/` как первый operator-facing sheet-side trigger для registry upload path;
+- `artifacts/sheet_vitrina_v1_registry_seed_v3_bootstrap/` как compact v3 bootstrap для operator registry sheets;
 - `gas/sheet_vitrina_v1/` и `.clasp.json` для bound sheet-side wiring;
 - `docs/modules/` как канонический модульный reference;
 - `migration/` как канонический слой migration contracts и implementation notes.
@@ -58,12 +64,14 @@ Legacy-репозитории остаются рабочими, но счита
 8. Первый DB-backed runtime ingest и current server-side truth для V2-реестров.
 9. Первый тонкий live HTTP entrypoint для registry upload path.
 10. Первый operator-facing sheet-side trigger для отправки `CONFIG / METRICS / FORMULAS` в уже materialized entrypoint.
-11. Текущий незакрытый шаг: загрузка server-side truth обратно в таблицу и production/runtime hardening вокруг уже materialized upload contour.
+11. Compact v3 bootstrap для `CONFIG / METRICS / FORMULAS` с сохранением service/status block.
+12. На текущей PR-ветке: первый bounded end-to-end MVP, где expanded MVP-safe registry seed, upload и load `DATA_VITRINA` уже работают в одном контуре.
+13. После этого остаются full parity, stable hosted runtime URL, deploy/auth-hardening и production/runtime hardening вокруг уже materialized contour.
 
 ## Что не следует считать частью текущего `main`
 
-- загрузка server-side truth обратно в таблицу;
-- production storage binding, deploy и auth-hardening для registry upload;
+- full legacy parity по всем историческим registry rows и metric sections;
+- stable hosted runtime URL, production storage binding, deploy и auth-hardening для registry upload;
 - deployed/auth-hardened API, jobs и operator runtime для registry upload;
 - материализованные слои `packages/domain`, `infra/`, `tests/`, `api/`, `jobs/`, `db/`.
 
@@ -82,3 +90,5 @@ Legacy-репозитории остаются рабочими, но счита
 - [migration/89_registry_upload_db_backed_runtime.md](migration/89_registry_upload_db_backed_runtime.md)
 - [migration/90_registry_upload_http_entrypoint.md](migration/90_registry_upload_http_entrypoint.md)
 - [migration/91_sheet_vitrina_v1_registry_upload_trigger.md](migration/91_sheet_vitrina_v1_registry_upload_trigger.md)
+- [migration/92_sheet_vitrina_v1_registry_seed_v3_bootstrap.md](migration/92_sheet_vitrina_v1_registry_seed_v3_bootstrap.md)
+- [migration/93_sheet_vitrina_v1_mvp_end_to_end.md](migration/93_sheet_vitrina_v1_mvp_end_to_end.md)
