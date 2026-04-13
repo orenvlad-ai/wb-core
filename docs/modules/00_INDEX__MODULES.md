@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–20`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–21`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -26,6 +26,7 @@ source_basis:
   - "docs/modules/18_MODULE__SHEET_VITRINA_V1_WRITE_BRIDGE_BLOCK.md"
   - "docs/modules/19_MODULE__SHEET_VITRINA_V1_PRESENTATION_BLOCK.md"
   - "docs/modules/20_MODULE__REGISTRY_UPLOAD_BUNDLE_V1_BLOCK.md"
+  - "docs/modules/21_MODULE__REGISTRY_UPLOAD_FILE_BACKED_SERVICE_BLOCK.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -51,8 +52,9 @@ related_docs:
   - "18_MODULE__SHEET_VITRINA_V1_WRITE_BRIDGE_BLOCK.md"
   - "19_MODULE__SHEET_VITRINA_V1_PRESENTATION_BLOCK.md"
   - "20_MODULE__REGISTRY_UPLOAD_BUNDLE_V1_BLOCK.md"
+  - "21_MODULE__REGISTRY_UPLOAD_FILE_BACKED_SERVICE_BLOCK.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён под фактическое состояние `origin/main` после merge `registry_upload_bundle_v1_block`: индекс отражает полный комплект смёрженных модулей `01–20`, current main-confirmed contour и не смешивает уже смёрженный upload bundle с ещё не собранным server-side ingest runtime."
+update_note: "Обновлён под фактическое состояние `origin/main` после merge `registry_upload_file_backed_service_block`: индекс отражает полный комплект смёрженных модулей `01–21`, current main-confirmed contour и не смешивает local file-backed upload service с ещё не собранным live server-side ingest runtime."
 ---
 
 # 1. Назначение индекса
@@ -69,7 +71,7 @@ update_note: "Обновлён под фактическое состояние 
 
 # 1.1 Текущий Checkpoint Main
 
-На текущем `origin/main` смёржены канонические модульные блоки `01–20`.
+На текущем `origin/main` смёржены канонические модульные блоки `01–21`.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`
@@ -83,10 +85,11 @@ update_note: "Обновлён под фактическое состояние 
 - `sheet_vitrina_v1_write_bridge_block`;
 - `sheet_vitrina_v1_presentation_block`;
 - `registry_upload_bundle_v1_block` как первый artifact-backed upload bundle и local validator для V2-реестров.
+- `registry_upload_file_backed_service_block` как первый file-backed accept/store/activate слой для V2-реестров.
 
 Главный незакрытый gap текущего `main`:
-- artifact-backed upload bundle уже находится в `main`;
-- server-side ingest, version storage и activation runtime для registry upload ещё не входят в текущий `main`.
+- artifact-backed upload bundle и file-backed upload service уже находятся в `main`;
+- live server-side ingest endpoint, DB-backed version storage и production activation runtime для registry upload ещё не входят в текущий `main`.
 
 # 2. Naming rules комплекта
 
@@ -151,6 +154,7 @@ update_note: "Обновлён под фактическое состояние 
 | `18_MODULE__SHEET_VITRINA_V1_WRITE_BRIDGE_BLOCK.md` | `sheet_vitrina_v1_write_bridge_block` | `sheet-side` | live bridge подтверждён, смёржен в `main` |
 | `19_MODULE__SHEET_VITRINA_V1_PRESENTATION_BLOCK.md` | `sheet_vitrina_v1_presentation_block` | `sheet-side` | live formatting подтверждён, смёржен в `main` |
 | `20_MODULE__REGISTRY_UPLOAD_BUNDLE_V1_BLOCK.md` | `registry_upload_bundle_v1_block` | `registry` | artifact-backed bundle и validator подтверждены, смёржены в `main` |
+| `21_MODULE__REGISTRY_UPLOAD_FILE_BACKED_SERVICE_BLOCK.md` | `registry_upload_file_backed_service_block` | `registry` | file-backed accept/store/activate/result подтверждены, смёржены в `main` |
 
 # 5. Как эта папка используется дальше
 

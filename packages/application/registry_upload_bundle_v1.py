@@ -70,9 +70,11 @@ class RegistryUploadBundleV1Block:
         self,
         bundle: RegistryUploadBundleV1,
         bundle_path: Path = TARGET_FIXTURE,
+        enforce_fixture_uniqueness: bool = True,
     ) -> RegistryUploadBundleV1ValidationReport:
         _validate_uploaded_at(bundle.uploaded_at)
-        _require_unique_bundle_version(bundle.bundle_version, bundle_path, self.target_dir)
+        if enforce_fixture_uniqueness:
+            _require_unique_bundle_version(bundle.bundle_version, bundle_path, self.target_dir)
 
         if not 5 <= len(bundle.config_v2) <= 10:
             raise ValueError("pilot bundle must contain 5-10 config_v2 entries")
@@ -164,6 +166,21 @@ class RegistryUploadBundleV1Block:
             calc_types=calc_types,
             runtime_metric_keys_checked=len(checked_runtime_keys),
         )
+
+
+def load_registry_upload_bundle_v1_from_path(path: Path) -> RegistryUploadBundleV1:
+    return parse_registry_upload_bundle_v1_payload(_load_json(path))
+
+
+def parse_registry_upload_bundle_v1_payload(payload: Any) -> RegistryUploadBundleV1:
+    mapping = _require_mapping_value(payload, "registry upload bundle payload")
+    return RegistryUploadBundleV1(
+        bundle_version=_require_str(mapping, "bundle_version"),
+        uploaded_at=_require_str(mapping, "uploaded_at"),
+        config_v2=[_parse_config_item(item) for item in _require_list(mapping, "config_v2")],
+        metrics_v2=[_parse_metric_item(item) for item in _require_list(mapping, "metrics_v2")],
+        formulas_v2=[_parse_formula_item(item) for item in _require_list(mapping, "formulas_v2")],
+    )
 
 
 def _read_bundle_meta(document: Mapping[str, Any]) -> dict[str, str]:
