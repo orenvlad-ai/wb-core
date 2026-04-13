@@ -26,15 +26,14 @@ Legacy-репозитории остаются рабочими, но счита
 - live write bridge новой витрины в bound Google Sheet;
 - presentation pass для `DATA_VITRINA` и `STATUS`;
 - compact v3 bootstrap для `CONFIG / METRICS / FORMULAS`, который поднимает уже заполненные operator sheets и сохраняет service/status block;
+- первый bounded end-to-end MVP `prepare -> upload -> load`, где expanded MVP-safe seed `33 / 7 / 7`, upload path и controlled reverse-load в `DATA_VITRINA` уже материализованы в коде и артефактах;
 - evidence и module docs по этим шагам.
 
-Главный незакрытый gap на текущем `main`:
-- upload line уже дошла до artifact-backed bundle, local validator, file-backed service, локального DB-backed runtime, тонкого live HTTP entrypoint и первого sheet-side operator trigger;
-- compact v3 bootstrap уже в `main`, но controlled reverse-load server-side current truth обратно в `DATA_VITRINA` ещё не входит в текущий `main`.
-
-На текущей PR-ветке дополнительно materialize-ится:
-- `sheet_vitrina_v1_mvp_end_to_end_block` как первый bounded end-to-end MVP: expanded MVP-safe seed `33 / 7 / 7`, сохранённый upload flow и controlled load живых server-side данных обратно в `DATA_VITRINA` через lightweight plan endpoint.
-- После этого блока незакрытым хвостом остаются full legacy parity, расширение beyond MVP-safe metrics/sections, stable hosted runtime URL, deploy/auth-hardening и production storage binding.
+Главные незакрытые gaps на текущем `main`:
+- full legacy parity по всем историческим registry rows и metric sections;
+- расширение beyond MVP-safe metrics/sections без поломки текущего contour;
+- repo-owned stable hosted runtime URL, deploy/auth-hardening и production storage binding вокруг уже materialized upload/load линии;
+- окончательное решение по судьбе `AI_EXPORT` как compatibility contract или прямой замене server-side contract.
 
 ## Что repo уже содержит
 
@@ -48,7 +47,9 @@ Legacy-репозитории остаются рабочими, но счита
 - `artifacts/registry_upload_http_entrypoint/` как первый live HTTP entrypoint для registry upload path;
 - `artifacts/sheet_vitrina_v1_registry_upload_trigger/` как первый operator-facing sheet-side trigger для registry upload path;
 - `artifacts/sheet_vitrina_v1_registry_seed_v3_bootstrap/` как compact v3 bootstrap для operator registry sheets;
+- `artifacts/sheet_vitrina_v1_mvp_end_to_end/` как первый bounded end-to-end MVP для `VB-Core Витрина V1`;
 - `gas/sheet_vitrina_v1/` и `.clasp.json` для bound sheet-side wiring;
+- `wb_core_docs_master/` как compact curated-pack для project-oriented retrieval вне primary repo docs;
 - `docs/modules/` как канонический модульный reference;
 - `migration/` как канонический слой migration contracts и implementation notes.
 
@@ -65,8 +66,9 @@ Legacy-репозитории остаются рабочими, но счита
 9. Первый тонкий live HTTP entrypoint для registry upload path.
 10. Первый operator-facing sheet-side trigger для отправки `CONFIG / METRICS / FORMULAS` в уже materialized entrypoint.
 11. Compact v3 bootstrap для `CONFIG / METRICS / FORMULAS` с сохранением service/status block.
-12. На текущей PR-ветке: первый bounded end-to-end MVP, где expanded MVP-safe registry seed, upload и load `DATA_VITRINA` уже работают в одном контуре.
-13. После этого остаются full parity, stable hosted runtime URL, deploy/auth-hardening и production/runtime hardening вокруг уже materialized contour.
+12. Первый bounded end-to-end MVP, где expanded MVP-safe registry seed, upload и load `DATA_VITRINA` уже работают в одном контуре.
+13. Появление `wb_core_docs_master` как secondary compact project-pack поверх primary canonical repo docs.
+14. После этого остаются full parity, stable hosted runtime URL, deploy/auth-hardening и production/runtime hardening вокруг уже materialized contour.
 
 ## Что не следует считать частью текущего `main`
 
@@ -75,9 +77,21 @@ Legacy-репозитории остаются рабочими, но счита
 - deployed/auth-hardened API, jobs и operator runtime для registry upload;
 - материализованные слои `packages/domain`, `infra/`, `tests/`, `api/`, `jobs/`, `db/`.
 
+## Двухслойная Схема Docs
+
+В `wb-core` действует двухслойная схема документации:
+- primary canonical docs живут в `README.md`, `docs/architecture/*`, `docs/modules/*` и `migration/*`;
+- secondary project-oriented pack живёт в `wb_core_docs_master/` и предназначен для retrieval/upload в отдельный ChatGPT Project.
+
+`wb_core_docs_master` не является копией всего `docs/`. Это компактный curated-pack, который:
+- пересобирается из primary source of truth;
+- хранит только project-facing summary, registers, glossary и runbook;
+- не должен становиться местом, где появляются новые нормы раньше primary repo docs.
+
 ## Где смотреть детали
 
 - [docs/modules/00_INDEX__MODULES.md](docs/modules/00_INDEX__MODULES.md)
+- [wb_core_docs_master/00_INDEX__WEBCORE_PROJECT_DOCS.md](wb_core_docs_master/00_INDEX__WEBCORE_PROJECT_DOCS.md)
 - [docs/architecture/00_migration_charter.md](docs/architecture/00_migration_charter.md)
 - [docs/architecture/01_target_architecture.md](docs/architecture/01_target_architecture.md)
 - [migration/75_registry_v2_minimal_schema.md](migration/75_registry_v2_minimal_schema.md)

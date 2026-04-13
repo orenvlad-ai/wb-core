@@ -64,7 +64,7 @@ related_docs:
   - "25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
   - "26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён под bounded checkpoint `sheet_vitrina_v1_mvp_end_to_end_block`: индекс отражает комплект модулей `01–26`, фиксирует смёрженный compact v3 bootstrap и добавляет первый end-to-end MVP-модуль на PR-ветке."
+update_note: "Обновлён под current `main`: индекс отражает комплект модулей `01–26`, включая смёрженный bounded end-to-end MVP `sheet_vitrina_v1_mvp_end_to_end_block`."
 ---
 
 # 1. Назначение индекса
@@ -81,7 +81,7 @@ update_note: "Обновлён под bounded checkpoint `sheet_vitrina_v1_mvp_e
 
 # 1.1 Текущий Checkpoint Main
 
-На текущем `main` main-confirmed модульные блоки доходят до `01–25`.
+На текущем `main` main-confirmed модульные блоки доходят до `01–26`.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`
@@ -101,12 +101,9 @@ update_note: "Обновлён под bounded checkpoint `sheet_vitrina_v1_mvp_e
 - `sheet_vitrina_v1_registry_upload_trigger_block` как первый operator-facing trigger отправки `CONFIG / METRICS / FORMULAS` в уже materialized HTTP entrypoint.
 - `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` как compact v3 bootstrap для `CONFIG / METRICS / FORMULAS`, сохраняющий service/status block и не ломающий existing upload trigger.
 
-На текущей PR-ветке дополнительно materialize-ится:
-- `sheet_vitrina_v1_mvp_end_to_end_block` как первый bounded end-to-end MVP: expanded MVP-safe seed, сохранённый upload flow и controlled reverse-load живых server-side данных обратно в `DATA_VITRINA`.
-
 Главный незакрытый gap текущей линии:
-- текущий `main` уже содержит upload line, live sheet-side trigger и compact v3 bootstrap, но ещё не содержит reverse-load server-side truth обратно в `DATA_VITRINA`;
-- на текущей PR-ветке этот gap закрывается bounded MVP-слоем, после чего незакрытым остаются full legacy parity, расширение beyond MVP-safe metrics/sections, stable hosted runtime URL, deploy/auth-hardening и production storage binding.
+- текущий `main` уже содержит upload line, compact v3 bootstrap и bounded reverse-load обратно в `DATA_VITRINA`;
+- незакрытым остаются full legacy parity, расширение beyond MVP-safe metrics/sections, stable hosted runtime URL, deploy/auth-hardening и production storage binding.
 
 # 2. Naming rules комплекта
 
@@ -176,7 +173,7 @@ update_note: "Обновлён под bounded checkpoint `sheet_vitrina_v1_mvp_e
 | `23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md` | `registry_upload_http_entrypoint_block` | `registry` | live HTTP entrypoint и thin runtime wiring подтверждены, смёржены в `main` |
 | `24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md` | `sheet_vitrina_v1_registry_upload_trigger_block` | `sheet-side` | operator-facing bundle upload trigger подтверждён, смёржен в `main` |
 | `25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` | `sheet-side` | compact v3 bootstrap подтверждён, смёржен в `main` |
-| `26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md` | `sheet_vitrina_v1_mvp_end_to_end_block` | `sheet-side` | первый bounded end-to-end MVP подтверждён на PR-ветке, готов к review |
+| `26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md` | `sheet_vitrina_v1_mvp_end_to_end_block` | `sheet-side` | первый bounded end-to-end MVP подтверждён и смёржен в `main` |
 
 # 5. Как эта папка используется дальше
 

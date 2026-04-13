@@ -16,6 +16,7 @@
 - `packages/application/`
 - `packages/contracts/`
 - `registry/`
+- `wb_core_docs_master/`
 
 Дополнительно в корне присутствует `.clasp.json` для bound Apps Script wiring новой витрины.
 
@@ -79,6 +80,16 @@ Domain-логика отсюда начинаться не должна.
 ### `docs/`
 
 Здесь живут устойчивые architecture docs, ADR и operating policies.
+
+### `wb_core_docs_master/`
+
+Здесь живёт secondary compact project-pack для внешнего retrieval/use в отдельном ChatGPT Project.
+
+Правила слоя:
+- это не замена `README.md`, `docs/architecture/*`, `docs/modules/*` и `migration/*`;
+- это не dump-копия всего repo docs;
+- здесь разрешены только compact summary, glossary, registers, runbook и manifest;
+- source of truth для норм и контрактов всё равно остаётся в primary repo docs.
 
 ### `migration/`
 
