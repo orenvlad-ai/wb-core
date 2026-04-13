@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–24`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–25`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -30,6 +30,7 @@ source_basis:
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
+  - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -59,8 +60,9 @@ related_docs:
   - "22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
   - "23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
+  - "25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён под bounded checkpoint `sheet_vitrina_v1_registry_upload_trigger_block`: индекс отражает комплект модулей `01–24`, наличие operator-facing upload trigger на PR-ветке и не смешивает этот шаг с ещё не собранной загрузкой server-side truth обратно в таблицу."
+update_note: "Обновлён под bounded checkpoint `sheet_vitrina_v1_registry_seed_v3_bootstrap_block`: индекс отражает комплект модулей `01–25`, фиксирует смёрженный operator-facing upload trigger и добавляет compact v3 bootstrap модуль на PR-ветке."
 ---
 
 # 1. Назначение индекса
@@ -77,7 +79,7 @@ update_note: "Обновлён под bounded checkpoint `sheet_vitrina_v1_regis
 
 # 1.1 Текущий Checkpoint Main
 
-На текущей линии после merge этого bounded шага канонические модульные блоки доходят до `01–24`.
+На текущем `main` main-confirmed модульные блоки доходят до `01–24`.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`
@@ -95,6 +97,9 @@ update_note: "Обновлён под bounded checkpoint `sheet_vitrina_v1_regis
 - `registry_upload_db_backed_runtime_block` как первый DB-backed runtime ingest и current-truth слой для V2-реестров.
 - `registry_upload_http_entrypoint_block` как первый live HTTP entrypoint для V2-реестров.
 - `sheet_vitrina_v1_registry_upload_trigger_block` как первый operator-facing trigger отправки `CONFIG / METRICS / FORMULAS` в уже materialized HTTP entrypoint.
+
+На текущей PR-ветке дополнительно materialize-ится:
+- `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` как compact v3 bootstrap для `CONFIG / METRICS / FORMULAS`, сохраняющий service/status block и не ломающий existing upload trigger.
 
 Главный незакрытый gap текущей линии:
 - artifact-backed upload bundle, file-backed service, DB-backed runtime, live HTTP entrypoint и первый sheet-side upload trigger уже материализованы;
@@ -166,7 +171,8 @@ update_note: "Обновлён под bounded checkpoint `sheet_vitrina_v1_regis
 | `21_MODULE__REGISTRY_UPLOAD_FILE_BACKED_SERVICE_BLOCK.md` | `registry_upload_file_backed_service_block` | `registry` | file-backed accept/store/activate/result подтверждены, смёржены в `main` |
 | `22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md` | `registry_upload_db_backed_runtime_block` | `registry` | DB-backed runtime ingest и current truth подтверждены, смёржены в `main` |
 | `23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md` | `registry_upload_http_entrypoint_block` | `registry` | live HTTP entrypoint и thin runtime wiring подтверждены, смёржены в `main` |
-| `24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md` | `sheet_vitrina_v1_registry_upload_trigger_block` | `sheet-side` | operator-facing bundle upload trigger подтверждён на PR-ветке, готов к merge |
+| `24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md` | `sheet_vitrina_v1_registry_upload_trigger_block` | `sheet-side` | operator-facing bundle upload trigger подтверждён, смёржен в `main` |
+| `25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` | `sheet-side` | compact v3 bootstrap подтверждён на PR-ветке, готов к merge |
 
 # 5. Как эта папка используется дальше
 
