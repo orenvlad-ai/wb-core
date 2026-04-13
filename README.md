@@ -28,8 +28,8 @@ Legacy-репозитории остаются рабочими, но счита
 - evidence и module docs по этим шагам.
 
 Главный незакрытый gap на текущем `main`:
-- upload line уже дошла до artifact-backed bundle, local validator, file-backed service, локального DB-backed runtime и тонкого live HTTP entrypoint;
-- operator-facing trigger, deploy/auth-hardening и production storage binding для registry upload в `main` ещё не собраны.
+- upload line уже дошла до artifact-backed bundle, local validator, file-backed service, локального DB-backed runtime, тонкого live HTTP entrypoint и первого sheet-side operator trigger;
+- загрузка server-side current truth обратно в таблицу, deploy/auth-hardening и production storage binding для registry upload в `main` ещё не собраны.
 
 ## Что repo уже содержит
 
@@ -41,6 +41,7 @@ Legacy-репозитории остаются рабочими, но счита
 - `artifacts/registry_upload_file_backed_service/` как локальный file-backed receiver для registry upload path;
 - `artifacts/registry_upload_db_backed_runtime/` как локальный DB-backed runtime layer для registry upload path;
 - `artifacts/registry_upload_http_entrypoint/` как первый live HTTP entrypoint для registry upload path;
+- `artifacts/sheet_vitrina_v1_registry_upload_trigger/` как первый operator-facing sheet-side trigger для registry upload path;
 - `gas/sheet_vitrina_v1/` и `.clasp.json` для bound sheet-side wiring;
 - `docs/modules/` как канонический модульный reference;
 - `migration/` как канонический слой migration contracts и implementation notes.
@@ -56,13 +57,13 @@ Legacy-репозитории остаются рабочими, но счита
 7. Первый file-backed upload service, current-marker и structured upload result для V2-реестров.
 8. Первый DB-backed runtime ingest и current server-side truth для V2-реестров.
 9. Первый тонкий live HTTP entrypoint для registry upload path.
-10. Текущий незакрытый шаг: operator-facing trigger и production/runtime hardening вокруг уже materialized entrypoint.
+10. Первый operator-facing sheet-side trigger для отправки `CONFIG / METRICS / FORMULAS` в уже materialized entrypoint.
+11. Текущий незакрытый шаг: загрузка server-side truth обратно в таблицу и production/runtime hardening вокруг уже materialized upload contour.
 
 ## Что не следует считать частью текущего `main`
 
-- operator-facing runtime trigger для registry upload;
+- загрузка server-side truth обратно в таблицу;
 - production storage binding, deploy и auth-hardening для registry upload;
-- Apps Script upload button;
 - deployed/auth-hardened API, jobs и operator runtime для registry upload;
 - материализованные слои `packages/domain`, `infra/`, `tests/`, `api/`, `jobs/`, `db/`.
 
@@ -80,3 +81,4 @@ Legacy-репозитории остаются рабочими, но счита
 - [migration/88_registry_upload_file_backed_service.md](migration/88_registry_upload_file_backed_service.md)
 - [migration/89_registry_upload_db_backed_runtime.md](migration/89_registry_upload_db_backed_runtime.md)
 - [migration/90_registry_upload_http_entrypoint.md](migration/90_registry_upload_http_entrypoint.md)
+- [migration/91_sheet_vitrina_v1_registry_upload_trigger.md](migration/91_sheet_vitrina_v1_registry_upload_trigger.md)

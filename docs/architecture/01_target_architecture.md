@@ -20,10 +20,11 @@
 - `registry_upload_file_backed_service_block` как первый file-backed accept/store/activate слой для V2-реестров;
 - `registry_upload_db_backed_runtime_block` как первый DB-backed runtime ingest и current-truth слой для V2-реестров.
 - `registry_upload_http_entrypoint_block` как первый live HTTP/API entrypoint для V2-реестров.
+- `sheet_vitrina_v1_registry_upload_trigger_block` как первый operator-facing Apps Script trigger для отправки `CONFIG / METRICS / FORMULAS` в уже существующий HTTP entrypoint.
 
 Главный незакрытый gap текущего `main`:
-- upload-side artifact-backed, file-backed, DB-backed runtime и тонкий live HTTP entrypoint уже в `main`;
-- этот документ не должен трактоваться как подтверждение наличия operator-facing Apps Script trigger, deploy/auth-hardening или production storage binding для registry upload.
+- upload-side artifact-backed, file-backed, DB-backed runtime, тонкий live HTTP entrypoint и первый operator-facing Apps Script trigger уже в текущей линии;
+- этот документ не должен трактоваться как подтверждение наличия server-side readback в таблицу, deploy/auth-hardening или production storage binding для registry upload.
 
 ## Server-First Architecture
 
@@ -46,7 +47,8 @@ Target-state — server-first:
 Текущее состояние `main`:
 - bounded sheet-side витрина уже есть как `DATA_VITRINA` и `STATUS`;
 - live write и visual presentation подтверждены для этого bounded sheet-side contour;
-- full replacement operator-table и operator-facing upload trigger пока не являются частью `main`.
+- operator-facing upload trigger для `CONFIG / METRICS / FORMULAS` уже materialize-ится в текущей линии;
+- full replacement operator-table и обратная загрузка server-side truth в таблицу пока не являются частью `main`.
 
 ## Current Main-Confirmed Layers
 
@@ -100,8 +102,8 @@ Target-state — server-first:
 - auditability и runtime observability.
 
 Текущее ограничение `main`:
-- contracts, artifact-backed bundle, file-backed service, DB-backed runtime и live HTTP entrypoint уже есть;
-- deploy/auth/operator binding вокруг registry upload пока не смёржены.
+- contracts, artifact-backed bundle, file-backed service, DB-backed runtime, live HTTP entrypoint и operator-facing sheet trigger уже есть;
+- deploy/auth hardening и reverse load из server-side truth обратно в таблицу пока не смёржены.
 
 ### Граница Web-Source
 
