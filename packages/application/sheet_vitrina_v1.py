@@ -59,7 +59,7 @@ def _build_write_target(section: Mapping[str, Any], layout: Mapping[str, Any]) -
 
     header = _require_string_list(section, "header")
     expected_header = _require_string_list(layout, "expected_header")
-    if header != expected_header:
+    if not _is_supported_header(sheet_name, header, expected_header):
         raise ValueError(f"header mismatch for sheet {sheet_name}")
 
     rows = _require_rows(section, "rows", expected_width=len(header), sheet_name=sheet_name)
@@ -79,6 +79,29 @@ def _build_write_target(section: Mapping[str, Any], layout: Mapping[str, Any]) -
         row_count=row_count,
         column_count=column_count,
     )
+
+
+def _is_supported_header(sheet_name: str, header: list[str], expected_header: list[str]) -> bool:
+    if header == expected_header:
+        return True
+    if sheet_name != "DATA_VITRINA":
+        return False
+    if len(header) < 3:
+        return False
+    if header[:2] != ["label", "key"]:
+        return False
+    for item in header[2:]:
+        if not _is_iso_date(item):
+            return False
+    return True
+
+
+def _is_iso_date(value: str) -> bool:
+    parts = value.split("-")
+    if len(parts) != 3:
+        return False
+    year, month, day = parts
+    return len(year) == 4 and len(month) == 2 and len(day) == 2 and value.replace("-", "").isdigit()
 
 
 def _column_name(index: int) -> str:

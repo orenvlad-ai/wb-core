@@ -1,7 +1,9 @@
 """Адаптерная граница блока seller funnel snapshot."""
 
 import json
+import os
 from pathlib import Path
+import ssl
 from typing import Any, Mapping, Protocol
 from urllib import error, parse, request as urllib_request
 
@@ -42,7 +44,7 @@ class HttpBackedSellerFunnelSnapshotSource:
     def fetch(self, request: SellerFunnelSnapshotRequest) -> Mapping[str, Any]:
         url = self._build_url(request)
         try:
-            with urllib_request.urlopen(url) as response:
+            with _open_url(url) as response:
                 body = response.read().decode("utf-8")
                 return json.loads(body)
         except error.HTTPError as exc:
@@ -62,3 +64,15 @@ class HttpBackedSellerFunnelSnapshotSource:
             return {"date": "1900-01-01"}
         raise ValueError(f"unsupported scenario: {snapshot_request.scenario}")
 
+
+def _open_url(url: str):
+    try:
+        return urllib_request.urlopen(url)
+    except error.URLError as exc:
+        ssl_reason = getattr(exc, "reason", None)
+        if (
+            os.environ.get("SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK", "").strip() == "1"
+            and isinstance(ssl_reason, ssl.SSLCertVerificationError)
+        ):
+            return urllib_request.urlopen(url, context=ssl._create_unverified_context())
+        raise

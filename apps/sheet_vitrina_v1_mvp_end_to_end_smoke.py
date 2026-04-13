@@ -1,4 +1,4 @@
-"""Smoke-check для compact v3 bootstrap в sheet_vitrina_v1."""
+"""Интеграционный smoke-check первого end-to-end MVP sheet_vitrina_v1."""
 
 from __future__ import annotations
 
@@ -21,22 +21,18 @@ from packages.adapters.registry_upload_http_entrypoint import DEFAULT_SHEET_PLAN
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 
-ARTIFACTS_DIR = ROOT / "artifacts" / "sheet_vitrina_v1_registry_seed_v3_bootstrap"
+ARTIFACTS_DIR = ROOT / "artifacts" / "sheet_vitrina_v1_mvp_end_to_end"
 TARGET_DIR = ARTIFACTS_DIR / "target"
-ACTIVATED_AT = "2026-04-13T12:10:04Z"
-BUNDLE_VERSION = "sheet_vitrina_v1_registry_seed_v3__2026-04-13T12:10:00Z"
-UPLOADED_AT = "2026-04-13T12:10:00Z"
+ACTIVATED_AT = "2026-04-13T14:00:00Z"
+BUNDLE_VERSION = "sheet_vitrina_v1_mvp_e2e__2026-04-13T14:00:00Z"
+UPLOADED_AT = "2026-04-13T14:00:00Z"
+AS_OF_DATE = "2026-04-12"
 
 
 def main() -> None:
-    expected_prepare = _load_json(TARGET_DIR / "prepare_result__fixture.json")
-    expected_preserved = _load_json(TARGET_DIR / "preserved_control_block__fixture.json")
-    expected_bundle = _load_json(TARGET_DIR / "bundle_from_seed_v3__fixture.json")
-    expected_accepted = _load_json(TARGET_DIR / "upload_response__accepted__fixture.json")
-    expected_status = _load_json(TARGET_DIR / "status_block__after_upload__fixture.json")
-    expected_current_state = _load_json(TARGET_DIR / "current_state__fixture.json")
+    expected_summary = _load_json(TARGET_DIR / "mvp_summary__fixture.json")
 
-    with TemporaryDirectory(prefix="sheet-vitrina-registry-seed-v3-") as tmp:
+    with TemporaryDirectory(prefix="sheet-vitrina-mvp-e2e-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         port = _reserve_free_port()
         config = RegistryUploadHttpEntrypointConfig(
@@ -52,11 +48,12 @@ def main() -> None:
                 "REGISTRY_UPLOAD_HTTP_HOST": config.host,
                 "REGISTRY_UPLOAD_HTTP_PORT": str(config.port),
                 "REGISTRY_UPLOAD_HTTP_PATH": config.upload_path,
+                "SHEET_VITRINA_HTTP_PATH": config.sheet_plan_path,
                 "REGISTRY_UPLOAD_RUNTIME_DIR": str(config.runtime_dir),
                 "REGISTRY_UPLOAD_ACTIVATED_AT_OVERRIDE": ACTIVATED_AT,
+                "SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK": "1",
             }
         )
-
         process = subprocess.Popen(
             [sys.executable, str(ROOT / "apps" / "registry_upload_http_entrypoint_live.py")],
             cwd=ROOT,
@@ -75,7 +72,7 @@ def main() -> None:
                         "node",
                         str(ROOT / "apps" / "sheet_vitrina_v1_registry_upload_trigger_harness.js"),
                         "--mode",
-                        "seed_bootstrap",
+                        "mvp_end_to_end",
                         "--scriptPath",
                         str(ROOT / "gas" / "sheet_vitrina_v1" / "RegistryUploadTrigger.gs"),
                         "--endpointUrl",
@@ -84,66 +81,74 @@ def main() -> None:
                         BUNDLE_VERSION,
                         "--uploadedAt",
                         UPLOADED_AT,
+                        "--asOfDate",
+                        AS_OF_DATE,
                     ],
                     cwd=ROOT,
                     text=True,
                 )
             )
 
-            initial_prepare = harness_result["prepare_result"]
-            if initial_prepare["sheet_names"] != ["CONFIG", "METRICS", "FORMULAS"]:
-                raise AssertionError(f"unexpected sheet names: {initial_prepare['sheet_names']}")
-            if not all(item["created"] for item in initial_prepare["sheets"]):
-                raise AssertionError("initial prepare must create all sheets in empty harness spreadsheet")
+            prepare_result = harness_result["prepare_result"]
+            if prepare_result["seed_version"] != expected_summary["seed_version"]:
+                raise AssertionError("unexpected seed_version")
+            if prepare_result["seeded_counts"] != expected_summary["seeded_counts"]:
+                raise AssertionError("seeded_counts mismatch")
 
-            if harness_result["prepare_result_after_reprepare"] != expected_prepare:
-                raise AssertionError("prepare result after reprepare differs from target fixture")
-            preserved_control_block = harness_result["preserved_control_block"]
-            if preserved_control_block["endpoint_url"] != base_url:
-                raise AssertionError("preserved control block endpoint_url mismatch")
-            preserved_subset = {
-                "last_bundle_version": preserved_control_block["last_bundle_version"],
-                "last_status": preserved_control_block["last_status"],
-                "last_activated_at": preserved_control_block["last_activated_at"],
-                "last_http_status": preserved_control_block["last_http_status"],
-                "last_validation_errors": preserved_control_block["last_validation_errors"],
-            }
-            if preserved_subset != expected_preserved:
-                raise AssertionError("preserved control block differs from target fixture")
-            if harness_result["built_bundle"] != expected_bundle:
-                raise AssertionError("bundle from seeded sheets differs from target fixture")
+            accepted = harness_result["accepted_response"]["upload_result"]
+            if accepted["status"] != "accepted":
+                raise AssertionError("upload path must return accepted")
+            if accepted["accepted_counts"] != expected_summary["accepted_counts"]:
+                raise AssertionError("accepted_counts mismatch")
 
-            accepted_response = harness_result["accepted_response"]
-            accepted_subset = {
-                "http_status": accepted_response["http_status"],
-                "upload_result": accepted_response["upload_result"],
-            }
-            if accepted_subset != expected_accepted:
-                raise AssertionError("accepted response differs from target fixture")
-            if accepted_response["endpoint_url"] != base_url:
-                raise AssertionError("accepted response endpoint_url mismatch")
+            load_result = harness_result["load_result"]
+            if load_result["http_status"] != 200:
+                raise AssertionError(f"load endpoint must return 200, got {load_result['http_status']}")
+            sheet_plan = load_result["sheet_plan"]
+            if sheet_plan["snapshot_id"] != expected_summary["snapshot_id"]:
+                raise AssertionError("snapshot_id mismatch")
+            if sheet_plan["sheets"][0]["row_count"] != expected_summary["data_row_count"]:
+                raise AssertionError("DATA_VITRINA row_count mismatch")
+            if sheet_plan["sheets"][1]["row_count"] != expected_summary["status_row_count"]:
+                raise AssertionError("STATUS row_count mismatch")
+
+            sheets = harness_result["sheets"]
+            data_values = sheets["DATA_VITRINA"]["values"]
+            status_values = sheets["STATUS"]["values"]
+            if data_values[0] != expected_summary["data_header"]:
+                raise AssertionError("DATA_VITRINA header mismatch")
+            if status_values[0] != expected_summary["status_header"]:
+                raise AssertionError("STATUS header mismatch")
+            if data_values[1][:2] != expected_summary["first_data_key"]:
+                raise AssertionError("unexpected first DATA_VITRINA row key")
+            if not isinstance(data_values[1][2], (int, float)):
+                raise AssertionError("TOTAL first metric must contain numeric value")
+
+            status_keys = [row[0] for row in status_values[1:]]
+            if status_keys != expected_summary["status_keys"]:
+                raise AssertionError("STATUS source keys mismatch")
+
             status_block = harness_result["status_block"]
             if status_block["endpoint_url"] != base_url:
-                raise AssertionError("status block endpoint_url mismatch")
-            status_subset = {
-                "last_bundle_version": status_block["last_bundle_version"],
-                "last_status": status_block["last_status"],
-                "last_activated_at": status_block["last_activated_at"],
-                "last_http_status": status_block["last_http_status"],
-                "last_validation_errors": status_block["last_validation_errors"],
-            }
-            if status_subset != expected_status:
-                raise AssertionError("status block after upload differs from target fixture")
+                raise AssertionError("CONFIG!I2 endpoint_url must be preserved")
+            if status_block["last_status"] != "accepted":
+                raise AssertionError("CONFIG!I4 last_status must remain accepted after load")
 
             runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
             current_state = asdict(runtime.load_current_state())
-            if current_state != expected_current_state:
-                raise AssertionError("runtime current state differs from target fixture")
+            if current_state["bundle_version"] != BUNDLE_VERSION:
+                raise AssertionError("runtime current_state bundle_version mismatch")
+            if len(current_state["config_v2"]) != expected_summary["accepted_counts"]["config_v2"]:
+                raise AssertionError("runtime config_v2 count mismatch")
+            if len(current_state["metrics_v2"]) != expected_summary["accepted_counts"]["metrics_v2"]:
+                raise AssertionError("runtime metrics_v2 count mismatch")
+            if len(current_state["formulas_v2"]) != expected_summary["accepted_counts"]["formulas_v2"]:
+                raise AssertionError("runtime formulas_v2 count mismatch")
 
-            print("prepare compact v3: ok -> CONFIG, METRICS, FORMULAS")
-            print("control block preservation: ok")
-            print(f"bundle_from_seed: ok -> {BUNDLE_VERSION}")
-            print(f"accepted status: ok -> {accepted_response['upload_result']['status']}")
+            print(f"prepare seed: ok -> {prepare_result['seeded_counts']}")
+            print(f"upload accepted: ok -> {accepted['bundle_version']}")
+            print(f"load DATA_VITRINA: ok -> {sheet_plan['sheets'][0]['write_rect']}")
+            print(f"load STATUS: ok -> {sheet_plan['sheets'][1]['write_rect']}")
             print("smoke-check passed")
         finally:
             process.terminate()

@@ -1,0 +1,44 @@
+{
+  "seed_version": "compact_v3_mvp_safe",
+  "seeded_counts": {
+    "config_v2": 33,
+    "metrics_v2": 7,
+    "formulas_v2": 7
+  },
+  "accepted_counts": {
+    "config_v2": 33,
+    "metrics_v2": 7,
+    "formulas_v2": 7
+  },
+  "snapshot_id": "2026-04-12__sheet_vitrina_v1_mvp_live_v1__current",
+  "data_row_count": 259,
+  "status_row_count": 4,
+  "data_header": [
+    "label",
+    "key",
+    "2026-04-12"
+  ],
+  "status_header": [
+    "source_key",
+    "kind",
+    "freshness",
+    "snapshot_date",
+    "date",
+    "date_from",
+    "date_to",
+    "requested_count",
+    "covered_count",
+    "missing_nm_ids",
+    "note"
+  ],
+  "first_data_key": [
+    "Итого: Показы в воронке",
+    "TOTAL|view_count"
+  ],
+  "status_keys": [
+    "registry_upload_current_state",
+    "seller_funnel_snapshot",
+    "web_source_snapshot",
+    "sheet_vitrina_v1_mvp"
+  ]
+}

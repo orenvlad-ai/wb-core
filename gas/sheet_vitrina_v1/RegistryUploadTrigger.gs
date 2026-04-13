@@ -4,6 +4,8 @@ const REGISTRY_UPLOAD_TARGET_SPREADSHEET_NAME = 'WB Core Vitrina V1';
 const REGISTRY_UPLOAD_MENU_ROOT = 'WB Core';
 const REGISTRY_UPLOAD_MENU_PREPARE_LABEL = 'Подготовить листы CONFIG / METRICS / FORMULAS';
 const REGISTRY_UPLOAD_MENU_UPLOAD_LABEL = 'Отправить реестры на сервер';
+const REGISTRY_UPLOAD_MENU_LOAD_LABEL = 'Загрузить таблицу';
+const SHEET_VITRINA_PLAN_PATH = '/v1/sheet-vitrina-v1/plan';
 
 const REGISTRY_UPLOAD_SHEET_LAYOUTS = {
   CONFIG: {
@@ -54,6 +56,7 @@ function onOpen() {
     .createMenu(REGISTRY_UPLOAD_MENU_ROOT)
     .addItem(REGISTRY_UPLOAD_MENU_PREPARE_LABEL, 'prepareRegistryUploadOperatorSheets')
     .addItem(REGISTRY_UPLOAD_MENU_UPLOAD_LABEL, 'uploadRegistryUploadBundle')
+    .addItem(REGISTRY_UPLOAD_MENU_LOAD_LABEL, 'loadSheetVitrinaTable')
     .addToUi();
 }
 
@@ -66,7 +69,7 @@ function prepareRegistryUploadOperatorSheets() {
     ok: 'success',
     spreadsheet_id: spreadsheet.getId(),
     spreadsheet_name: spreadsheet.getName(),
-    seed_version: 'compact_v3_runtime_compatible',
+    seed_version: 'compact_v3_mvp_safe',
     sheet_names: summaries.map((item) => item.sheet_name),
     seeded_counts: seededCounts,
     sheets: summaries,
@@ -74,6 +77,26 @@ function prepareRegistryUploadOperatorSheets() {
   const message = `Подготовлены листы: ${summary.sheet_names.join(', ')} · seed ${seededCounts.config_v2}/${seededCounts.metrics_v2}/${seededCounts.formulas_v2}`;
   _notifyRegistryUploadOperator_(message, 'success');
   return JSON.stringify(summary);
+}
+
+function loadSheetVitrinaTable() {
+  const spreadsheet = getRegistryUploadSpreadsheet_();
+  spreadsheet.toast('Загружаю витрину из server-side current truth...', REGISTRY_UPLOAD_MENU_ROOT, 5);
+  try {
+    const response = _loadSheetVitrinaTableFromServer_({});
+    const plan = response.sheet_plan;
+    const lines = [
+      'Витрина обновлена',
+      `Дата: ${plan.as_of_date}`,
+      `Snapshot: ${plan.snapshot_id}`,
+      `DATA_VITRINA: ${plan.sheets[0].row_count} строк`,
+    ];
+    _notifyRegistryUploadOperator_(lines.join('\n'), 'success');
+    return JSON.stringify(response);
+  } catch (error) {
+    _notifyRegistryUploadOperator_(String(error), 'error');
+    throw error;
+  }
 }
 
 function uploadRegistryUploadBundle() {
@@ -166,6 +189,15 @@ function debugUploadRegistryUploadBundleFromSheets(endpointUrl, bundleVersion, u
       endpointUrl: String(endpointUrl || '').trim(),
       bundleVersion: String(bundleVersion || '').trim(),
       uploadedAt: String(uploadedAt || '').trim(),
+    })
+  );
+}
+
+function debugLoadSheetVitrinaTable(endpointUrl, asOfDate) {
+  return JSON.stringify(
+    _loadSheetVitrinaTableFromServer_({
+      endpointUrl: String(endpointUrl || '').trim(),
+      asOfDate: String(asOfDate || '').trim(),
     })
   );
 }
@@ -302,6 +334,15 @@ function _applyRegistryUploadCompactV3Seed_(spreadsheet) {
   };
 }
 
+function _loadSheetVitrinaTableFromServer_(options) {
+  const spreadsheet = getRegistryUploadSpreadsheet_();
+  const uploadUrl = _resolveRegistryUploadEndpointUrl_(spreadsheet, String(options.endpointUrl || '').trim());
+  const planUrl = _deriveSheetVitrinaPlanUrl_(uploadUrl, String(options.asOfDate || '').trim());
+  const response = _fetchSheetVitrinaPlan_(planUrl);
+  writeSheetVitrinaV1Plan(JSON.stringify(response.sheet_plan));
+  return response;
+}
+
 function _clearRegistryUploadSheetData_(sheet, sheetName) {
   const headers = REGISTRY_UPLOAD_SHEET_LAYOUTS[sheetName].headers;
   const startRow = 2;
@@ -349,6 +390,31 @@ function _postRegistryUploadBundle_(bundle, endpointUrl) {
   };
 }
 
+function _fetchSheetVitrinaPlan_(planUrl) {
+  const response = UrlFetchApp.fetch(planUrl, {
+    method: 'get',
+    muteHttpExceptions: true,
+  });
+  const httpStatus = response.getResponseCode();
+  const bodyText = response.getContentText();
+  let bodyPayload = null;
+  try {
+    bodyPayload = JSON.parse(bodyText);
+  } catch (error) {
+    throw new Error(`sheet vitrina endpoint returned non-JSON response: ${bodyText}`);
+  }
+  if (httpStatus >= 400) {
+    throw new Error(`sheet vitrina endpoint HTTP ${httpStatus}: ${String(bodyPayload.error || 'unexpected runtime error')}`);
+  }
+  _validateSheetVitrinaPlanPayload_(bodyPayload);
+  return {
+    ok: 'success',
+    plan_url: planUrl,
+    http_status: httpStatus,
+    sheet_plan: bodyPayload,
+  };
+}
+
 function _isCanonicalRegistryUploadResult_(payload) {
   return (
     payload &&
@@ -359,6 +425,18 @@ function _isCanonicalRegistryUploadResult_(payload) {
     typeof payload.accepted_counts === 'object' &&
     Array.isArray(payload.validation_errors)
   );
+}
+
+function _validateSheetVitrinaPlanPayload_(payload) {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('sheet vitrina plan payload must be a JSON object');
+  }
+  if (typeof payload.plan_version !== 'string' || !payload.plan_version) {
+    throw new Error('sheet vitrina plan payload must contain plan_version');
+  }
+  if (!Array.isArray(payload.sheets) || payload.sheets.length !== 2) {
+    throw new Error('sheet vitrina plan payload must contain two sheet targets');
+  }
 }
 
 function _ensureRegistryUploadSheet_(spreadsheet, sheetName) {
@@ -478,6 +556,16 @@ function _resolveRegistryUploadEndpointUrl_(spreadsheet, endpointUrlOverride) {
     throw new Error('CONFIG!I2 должен содержать URL registry upload endpoint');
   }
   return _validateRegistryUploadEndpointUrl_(endpointUrl);
+}
+
+function _deriveSheetVitrinaPlanUrl_(uploadUrl, asOfDate) {
+  const parsed = new URL(_validateRegistryUploadEndpointUrl_(uploadUrl));
+  parsed.pathname = SHEET_VITRINA_PLAN_PATH;
+  parsed.search = '';
+  if (asOfDate) {
+    parsed.searchParams.set('as_of_date', asOfDate);
+  }
+  return parsed.toString();
 }
 
 function _setRegistryUploadEndpointUrl_(configSheet, endpointUrl) {

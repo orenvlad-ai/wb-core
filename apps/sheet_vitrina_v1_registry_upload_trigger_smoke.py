@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from packages.adapters.registry_upload_http_entrypoint import DEFAULT_UPLOAD_PATH
+from packages.adapters.registry_upload_http_entrypoint import DEFAULT_SHEET_PLAN_PATH, DEFAULT_UPLOAD_PATH
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 
@@ -41,6 +41,7 @@ def main() -> None:
             host="127.0.0.1",
             port=port,
             upload_path=DEFAULT_UPLOAD_PATH,
+            sheet_plan_path=DEFAULT_SHEET_PLAN_PATH,
             runtime_dir=runtime_dir,
         )
         env = os.environ.copy()

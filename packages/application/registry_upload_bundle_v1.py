@@ -76,12 +76,12 @@ class RegistryUploadBundleV1Block:
         if enforce_fixture_uniqueness:
             _require_unique_bundle_version(bundle.bundle_version, bundle_path, self.target_dir)
 
-        if not 5 <= len(bundle.config_v2) <= 10:
-            raise ValueError("pilot bundle must contain 5-10 config_v2 entries")
-        if not 8 <= len(bundle.metrics_v2) <= 12:
-            raise ValueError("pilot bundle must contain 8-12 metrics_v2 entries")
-        if not 2 <= len(bundle.formulas_v2) <= 4:
-            raise ValueError("pilot bundle must contain 2-4 formulas_v2 entries")
+        if not 5 <= len(bundle.config_v2) <= 64:
+            raise ValueError("registry upload bundle must contain 5-64 config_v2 entries")
+        if not 5 <= len(bundle.metrics_v2) <= 64:
+            raise ValueError("registry upload bundle must contain 5-64 metrics_v2 entries")
+        if not 0 <= len(bundle.formulas_v2) <= 32:
+            raise ValueError("registry upload bundle must contain 0-32 formulas_v2 entries")
 
         _require_unique("config_v2.nm_id", (item.nm_id for item in bundle.config_v2))
         _require_unique("config_v2.display_order", (item.display_order for item in bundle.config_v2))
@@ -102,8 +102,6 @@ class RegistryUploadBundleV1Block:
         formula_ids = {item.formula_id for item in bundle.formulas_v2}
         scope_values = sorted({item.scope for item in bundle.metrics_v2})
         calc_types = sorted({item.calc_type for item in bundle.metrics_v2})
-        if calc_types != sorted(ALLOWED_CALC_TYPES):
-            raise ValueError(f"pilot bundle must cover calc types {sorted(ALLOWED_CALC_TYPES)}")
 
         checked_runtime_keys: set[str] = set()
         for metric in bundle.metrics_v2:

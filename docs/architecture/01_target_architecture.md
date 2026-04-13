@@ -21,10 +21,20 @@
 - `registry_upload_db_backed_runtime_block` как первый DB-backed runtime ingest и current-truth слой для V2-реестров.
 - `registry_upload_http_entrypoint_block` как первый live HTTP/API entrypoint для V2-реестров.
 - `sheet_vitrina_v1_registry_upload_trigger_block` как первый operator-facing Apps Script trigger для отправки `CONFIG / METRICS / FORMULAS` в уже существующий HTTP entrypoint.
+- `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` как compact v3 bootstrap для operator sheets `CONFIG / METRICS / FORMULAS`.
 
 Главный незакрытый gap текущего `main`:
 - upload-side artifact-backed, file-backed, DB-backed runtime, тонкий live HTTP entrypoint и первый operator-facing Apps Script trigger уже в текущей линии;
-- этот документ не должен трактоваться как подтверждение наличия server-side readback в таблицу, deploy/auth-hardening или production storage binding для registry upload.
+- compact v3 bootstrap уже тоже в текущей линии;
+- этот документ пока не должен трактоваться как подтверждение наличия server-side readback в таблицу, deploy/auth-hardening или production storage binding для registry upload.
+
+На текущей PR-ветке дополнительно materialize-ится:
+- `sheet_vitrina_v1_mvp_end_to_end_block` как первый bounded end-to-end MVP: expanded MVP-safe seed, сохранённый upload flow и live public-source-backed readback в `DATA_VITRINA`.
+
+После этого незакрытым хвостом остаются:
+- full legacy parity по всем metric sections;
+- stable hosted runtime URL и production-bound operator runtime;
+- deploy/auth-hardening и production storage binding.
 
 ## Server-First Architecture
 
@@ -48,7 +58,8 @@ Target-state — server-first:
 - bounded sheet-side витрина уже есть как `DATA_VITRINA` и `STATUS`;
 - live write и visual presentation подтверждены для этого bounded sheet-side contour;
 - operator-facing upload trigger для `CONFIG / METRICS / FORMULAS` уже materialize-ится в текущей линии;
-- full replacement operator-table и обратная загрузка server-side truth в таблицу пока не являются частью `main`.
+- compact v3 bootstrap operator sheets уже тоже материализован в текущей линии;
+- full replacement operator-table и обратная загрузка server-side truth в таблицу пока ещё не являются частью `main`, но на текущей PR-ветке появляется первый bounded readback path в `DATA_VITRINA`.
 
 ## Current Main-Confirmed Layers
 
@@ -90,7 +101,8 @@ Target-state — server-first:
 
 Текущий `main` уже реализует bounded read-side/sheet-side форму этого правила:
 - таблица и витрина получают controlled bundles;
-- registry upload bundle, file-backed service, DB-backed runtime и live HTTP entrypoint уже материализованы, но operator-side wiring до таблицы пока не реализован и поэтому не должен трактоваться как working dual-write path.
+- registry upload bundle, file-backed service, DB-backed runtime, live HTTP entrypoint, sheet-side upload trigger и compact v3 bootstrap уже материализованы;
+- bounded reverse-load обратно в `DATA_VITRINA` пока ещё не часть `main`, но на текущей PR-ветке появляется первый controlled load path без daily orchestration и без deploy.
 
 ### Граница Сервера
 
@@ -102,8 +114,8 @@ Target-state — server-first:
 - auditability и runtime observability.
 
 Текущее ограничение `main`:
-- contracts, artifact-backed bundle, file-backed service, DB-backed runtime, live HTTP entrypoint и operator-facing sheet trigger уже есть;
-- deploy/auth hardening и reverse load из server-side truth обратно в таблицу пока не смёржены.
+- contracts, artifact-backed bundle, file-backed service, DB-backed runtime, live HTTP entrypoint, operator-facing sheet trigger и compact v3 bootstrap уже есть;
+- deploy/auth hardening и reverse load из server-side truth обратно в таблицу пока не смёржены в текущий `main`; на текущей PR-ветке reverse-load materialize-ится как bounded MVP-layer без full parity и без deploy.
 
 ### Граница Web-Source
 

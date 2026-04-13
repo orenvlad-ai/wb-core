@@ -9,4 +9,5 @@ class RegistryUploadHttpEntrypointConfig:
     host: str
     port: int
     upload_path: str
+    sheet_plan_path: str
     runtime_dir: Path
