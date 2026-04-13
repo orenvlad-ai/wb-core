@@ -1,0 +1,75 @@
+{
+  "ok": "success",
+  "spreadsheet_id": "1ltgE8GltN3Rk8qP1UiaT2NPEwQyPKZ-1tuIqV7EC1NE",
+  "spreadsheet_name": "WB Core Vitrina V1",
+  "seed_version": "compact_v3_runtime_compatible",
+  "sheet_names": [
+    "CONFIG",
+    "METRICS",
+    "FORMULAS"
+  ],
+  "seeded_counts": {
+    "config_v2": 9,
+    "metrics_v2": 10,
+    "formulas_v2": 2
+  },
+  "sheets": [
+    {
+      "sheet_name": "CONFIG",
+      "created": false,
+      "header": [
+        "nm_id",
+        "enabled",
+        "display_name",
+        "group",
+        "display_order"
+      ],
+      "data_row_count": 9,
+      "last_row": 10,
+      "last_column": 9,
+      "control_header": [
+        "key",
+        "value"
+      ],
+      "control_rows": [
+        "endpoint_url",
+        "last_bundle_version",
+        "last_status",
+        "last_activated_at",
+        "last_http_status",
+        "last_validation_errors"
+      ]
+    },
+    {
+      "sheet_name": "METRICS",
+      "created": false,
+      "header": [
+        "metric_key",
+        "enabled",
+        "scope",
+        "label_ru",
+        "calc_type",
+        "calc_ref",
+        "show_in_data",
+        "format",
+        "display_order",
+        "section"
+      ],
+      "data_row_count": 10,
+      "last_row": 11,
+      "last_column": 10
+    },
+    {
+      "sheet_name": "FORMULAS",
+      "created": false,
+      "header": [
+        "formula_id",
+        "expression",
+        "description"
+      ],
+      "data_row_count": 2,
+      "last_row": 3,
+      "last_column": 3
+    }
+  ]
+}

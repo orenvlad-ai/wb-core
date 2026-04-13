@@ -1,0 +1,203 @@
+{
+  "bundle_version": "sheet_vitrina_v1_registry_seed_v3__2026-04-13T12:10:00Z",
+  "uploaded_at": "2026-04-13T12:10:00Z",
+  "config_v2": [
+    {
+      "nm_id": 210183919,
+      "enabled": true,
+      "display_name": "clean iPhone 14",
+      "group": "Clean",
+      "display_order": 1
+    },
+    {
+      "nm_id": 210184534,
+      "enabled": true,
+      "display_name": "clean iPhone 14 Pro",
+      "group": "Clean",
+      "display_order": 2
+    },
+    {
+      "nm_id": 210183142,
+      "enabled": true,
+      "display_name": "clean iPhone 14 Pro Max",
+      "group": "Clean",
+      "display_order": 3
+    },
+    {
+      "nm_id": 391659990,
+      "enabled": true,
+      "display_name": "anti-spy iPhone 15 Pro",
+      "group": "Anti-Spy",
+      "display_order": 4
+    },
+    {
+      "nm_id": 391663632,
+      "enabled": true,
+      "display_name": "anti-spy iPhone 15 Pro Max",
+      "group": "Anti-Spy",
+      "display_order": 5
+    },
+    {
+      "nm_id": 391661710,
+      "enabled": true,
+      "display_name": "anti-spy iPhone 16 ProMax",
+      "group": "Anti-Spy",
+      "display_order": 6
+    },
+    {
+      "nm_id": 428854299,
+      "enabled": true,
+      "display_name": "matte iPhone 16 ProMax",
+      "group": "Matte",
+      "display_order": 7
+    },
+    {
+      "nm_id": 428854140,
+      "enabled": true,
+      "display_name": "matte iPhone 16 Pro",
+      "group": "Matte",
+      "display_order": 8
+    },
+    {
+      "nm_id": 428855560,
+      "enabled": true,
+      "display_name": "matte iPhone 15 Pro Max",
+      "group": "Matte",
+      "display_order": 9
+    }
+  ],
+  "metrics_v2": [
+    {
+      "metric_key": "price_seller_discounted",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Цена со скидкой (₽)",
+      "calc_type": "metric",
+      "calc_ref": "price_seller_discounted",
+      "show_in_data": true,
+      "format": "rub",
+      "display_order": 10,
+      "section": "Цены"
+    },
+    {
+      "metric_key": "spp",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "СПП",
+      "calc_type": "metric",
+      "calc_ref": "spp",
+      "show_in_data": true,
+      "format": "percent",
+      "display_order": 20,
+      "section": "Цены"
+    },
+    {
+      "metric_key": "ads_views",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Реклама: показы",
+      "calc_type": "metric",
+      "calc_ref": "ads_views",
+      "show_in_data": true,
+      "format": "integer",
+      "display_order": 30,
+      "section": "Реклама"
+    },
+    {
+      "metric_key": "ads_ctr",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Реклама: CTR",
+      "calc_type": "ratio",
+      "calc_ref": "ads_ctr",
+      "show_in_data": true,
+      "format": "percent",
+      "display_order": 40,
+      "section": "Реклама"
+    },
+    {
+      "metric_key": "ads_clicks",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Реклама: клики",
+      "calc_type": "metric",
+      "calc_ref": "ads_clicks",
+      "show_in_data": true,
+      "format": "integer",
+      "display_order": 50,
+      "section": "Реклама"
+    },
+    {
+      "metric_key": "ads_orders",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Реклама: заказы",
+      "calc_type": "metric",
+      "calc_ref": "ads_orders",
+      "show_in_data": true,
+      "format": "integer",
+      "display_order": 60,
+      "section": "Реклама"
+    },
+    {
+      "metric_key": "ads_sum_price",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Реклама: выручка",
+      "calc_type": "metric",
+      "calc_ref": "ads_sum_price",
+      "show_in_data": true,
+      "format": "rub",
+      "display_order": 70,
+      "section": "Реклама"
+    },
+    {
+      "metric_key": "stock_total",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Остаток всего",
+      "calc_type": "metric",
+      "calc_ref": "stock_total",
+      "show_in_data": true,
+      "format": "integer",
+      "display_order": 80,
+      "section": "Запасы"
+    },
+    {
+      "metric_key": "fin_buyout_rub",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Выкупы, ₽",
+      "calc_type": "metric",
+      "calc_ref": "fin_buyout_rub",
+      "show_in_data": true,
+      "format": "rub",
+      "display_order": 90,
+      "section": "Финансы"
+    },
+    {
+      "metric_key": "proxy_profit_rub",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "Прибыль прокси, ₽",
+      "calc_type": "formula",
+      "calc_ref": "proxy_profit_rub",
+      "show_in_data": true,
+      "format": "rub",
+      "display_order": 100,
+      "section": "Экономика"
+    }
+  ],
+  "formulas_v2": [
+    {
+      "formula_id": "proxy_profit_rub",
+      "expression": "{orderSum}*0,5096-{orderCount}*0,91*{cost_price_rub}-{ads_sum}",
+      "description": "Прокси-прибыль: 91% от суммы заказов минус 38% расходов WB от выкупной выручки, минус 6% налога от выкупной выручки, минус себестоимость выкупленных товаров, минус рекламные расходы."
+    },
+    {
+      "formula_id": "F_PROXY_MARGIN_PCT",
+      "expression": "IF({orderSum}=0;0;{proxy_profit_rub}/{orderSum})",
+      "description": "Прокси маржинальность, %"
+    }
+  ]
+}

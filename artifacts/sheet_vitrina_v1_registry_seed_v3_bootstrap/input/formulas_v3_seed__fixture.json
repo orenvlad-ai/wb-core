@@ -1,0 +1,12 @@
+[
+  {
+    "formula_id": "proxy_profit_rub",
+    "expression": "{orderSum}*0,5096-{orderCount}*0,91*{cost_price_rub}-{ads_sum}",
+    "description": "Прокси-прибыль: 91% от суммы заказов минус 38% расходов WB от выкупной выручки, минус 6% налога от выкупной выручки, минус себестоимость выкупленных товаров, минус рекламные расходы."
+  },
+  {
+    "formula_id": "F_PROXY_MARGIN_PCT",
+    "expression": "IF({orderSum}=0;0;{proxy_profit_rub}/{orderSum})",
+    "description": "Прокси маржинальность, %"
+  }
+]

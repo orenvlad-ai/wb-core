@@ -13,57 +13,21 @@ function main() {
   );
   const context = buildContext({ spreadsheet });
   const scriptPath = path.resolve(options.scriptPath);
-  const source = fs.readFileSync(scriptPath, 'utf8');
-  vm.runInNewContext(source, context, { filename: scriptPath });
+  const scriptDir = path.dirname(scriptPath);
+  const scriptFiles = fs
+    .readdirSync(scriptDir)
+    .filter((name) => name.endsWith('.gs'))
+    .sort();
+  for (const fileName of scriptFiles) {
+    const filePath = path.join(scriptDir, fileName);
+    const source = fs.readFileSync(filePath, 'utf8');
+    vm.runInNewContext(source, context, { filename: filePath });
+  }
 
-  const ensureResult = parseJsonString(context.ensureRegistryUploadOperatorSheets());
-  const bundleFixture = JSON.parse(fs.readFileSync(path.resolve(options.fixturePath), 'utf8'));
-  parseJsonString(
-    context.debugWriteRegistryUploadBundleToSheets(
-      JSON.stringify(bundleFixture),
-      ''
-    )
-  );
-  const builtBundle = parseJsonString(
-    context.debugBuildRegistryUploadBundleFromSheets(
-      options.bundleVersion,
-      options.uploadedAt
-    )
-  );
-  const acceptedResponse = parseJsonString(
-    context.debugUploadRegistryUploadBundleFromSheets(
-      options.endpointUrl,
-      options.bundleVersion,
-      options.uploadedAt
-    )
-  );
-  const duplicateResponse = parseJsonString(
-    context.debugUploadRegistryUploadBundleFromSheets(
-      options.endpointUrl,
-      options.bundleVersion,
-      options.uploadedAt
-    )
-  );
-
-  const configSheet = spreadsheet.getSheetByName('CONFIG');
-  const statusBlock = {
-    endpoint_url: String(configSheet.getCellValue(2, 9) || ''),
-    last_bundle_version: String(configSheet.getCellValue(3, 9) || ''),
-    last_status: String(configSheet.getCellValue(4, 9) || ''),
-    last_activated_at: String(configSheet.getCellValue(5, 9) || ''),
-    last_http_status: String(configSheet.getCellValue(6, 9) || ''),
-    last_validation_errors: String(configSheet.getCellValue(7, 9) || ''),
-  };
-
-  parseJsonString(context.debugResetRegistryUploadOperatorSheets());
-
-  const result = {
-    ensure_result: ensureResult,
-    built_bundle: builtBundle,
-    accepted_response: acceptedResponse,
-    duplicate_response: duplicateResponse,
-    status_block: statusBlock,
-  };
+  const result =
+    options.mode === 'seed_bootstrap'
+      ? runSeedBootstrapMode({ context, spreadsheet, options })
+      : runBundleUploadMode({ context, spreadsheet, options });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
@@ -77,7 +41,12 @@ function parseArgs(argv) {
     }
     options[key.slice(2)] = value;
   }
-  for (const required of ['scriptPath', 'fixturePath', 'endpointUrl', 'bundleVersion', 'uploadedAt']) {
+  options.mode = options.mode || 'bundle_upload';
+  const requiredKeys = ['scriptPath', 'endpointUrl', 'bundleVersion', 'uploadedAt'];
+  if (options.mode === 'bundle_upload') {
+    requiredKeys.push('fixturePath');
+  }
+  for (const required of requiredKeys) {
     if (!options[required]) {
       throw new Error(`missing required argument --${required}`);
     }
@@ -85,8 +54,89 @@ function parseArgs(argv) {
   return options;
 }
 
+function runBundleUploadMode({ context, spreadsheet, options }) {
+  const ensureResult = parseJsonString(context.ensureRegistryUploadOperatorSheets());
+  const bundleFixture = JSON.parse(fs.readFileSync(path.resolve(options.fixturePath), 'utf8'));
+  parseJsonString(context.debugWriteRegistryUploadBundleToSheets(JSON.stringify(bundleFixture), ''));
+  const builtBundle = parseJsonString(
+    context.debugBuildRegistryUploadBundleFromSheets(options.bundleVersion, options.uploadedAt)
+  );
+  const acceptedResponse = parseJsonString(
+    context.debugUploadRegistryUploadBundleFromSheets(options.endpointUrl, options.bundleVersion, options.uploadedAt)
+  );
+  const duplicateResponse = parseJsonString(
+    context.debugUploadRegistryUploadBundleFromSheets(options.endpointUrl, options.bundleVersion, options.uploadedAt)
+  );
+
+  const configSheet = spreadsheet.getSheetByName('CONFIG');
+  const statusBlock = readStatusBlock(configSheet);
+
+  parseJsonString(context.debugResetRegistryUploadOperatorSheets());
+
+  return {
+    ensure_result: ensureResult,
+    built_bundle: builtBundle,
+    accepted_response: acceptedResponse,
+    duplicate_response: duplicateResponse,
+    status_block: statusBlock,
+  };
+}
+
+function runSeedBootstrapMode({ context, spreadsheet, options }) {
+  const prepareResult = parseJsonString(context.prepareRegistryUploadOperatorSheets());
+  const configSheet = spreadsheet.getSheetByName('CONFIG');
+  writeStatusBlock(configSheet, {
+    endpoint_url: options.endpointUrl,
+    last_bundle_version: 'preserved_bundle_version',
+    last_status: 'accepted',
+    last_activated_at: '2026-04-13T12:09:59Z',
+    last_http_status: '200',
+    last_validation_errors: '',
+  });
+  const prepareResultAfterReprepare = parseJsonString(context.prepareRegistryUploadOperatorSheets());
+  const preservedControlBlock = readStatusBlock(configSheet);
+  const builtBundle = parseJsonString(
+    context.debugBuildRegistryUploadBundleFromSheets(options.bundleVersion, options.uploadedAt)
+  );
+  const acceptedResponse = parseJsonString(
+    context.debugUploadRegistryUploadBundleFromSheets('', options.bundleVersion, options.uploadedAt)
+  );
+  const statusBlock = readStatusBlock(configSheet);
+
+  parseJsonString(context.debugResetRegistryUploadOperatorSheets());
+
+  return {
+    prepare_result: prepareResult,
+    prepare_result_after_reprepare: prepareResultAfterReprepare,
+    preserved_control_block: preservedControlBlock,
+    built_bundle: builtBundle,
+    accepted_response: acceptedResponse,
+    status_block: statusBlock,
+  };
+}
+
 function parseJsonString(value) {
   return typeof value === 'string' ? JSON.parse(value) : value;
+}
+
+function readStatusBlock(configSheet) {
+  return {
+    endpoint_url: String(configSheet.getCellValue(2, 9) || ''),
+    last_bundle_version: String(configSheet.getCellValue(3, 9) || ''),
+    last_status: String(configSheet.getCellValue(4, 9) || ''),
+    last_activated_at: String(configSheet.getCellValue(5, 9) || ''),
+    last_http_status: String(configSheet.getCellValue(6, 9) || ''),
+    last_validation_errors: String(configSheet.getCellValue(7, 9) || ''),
+  };
+}
+
+function writeStatusBlock(configSheet, values) {
+  configSheet.getRange(2, 9).setValue(values.endpoint_url || '');
+  configSheet.getRange(3, 9).setValue(values.last_bundle_version || '');
+  configSheet.getRange(4, 9).setValue(values.last_status || '');
+  configSheet.getRange(5, 9).setValue(values.last_activated_at || '');
+  configSheet.getRange(6, 9).setValue(values.last_http_status || '');
+  configSheet.getRange(7, 9).setValue(values.last_validation_errors || '');
 }
 
 function buildContext({ spreadsheet }) {

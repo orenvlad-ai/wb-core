@@ -58,8 +58,20 @@ function onOpen() {
 }
 
 function prepareRegistryUploadOperatorSheets() {
-  const summary = JSON.parse(ensureRegistryUploadOperatorSheets());
-  const message = `Подготовлены листы: ${summary.sheet_names.join(', ')}`;
+  const spreadsheet = getRegistryUploadSpreadsheet_();
+  const createdMap = _ensureRegistryUploadSheets_(spreadsheet);
+  const seededCounts = _applyRegistryUploadCompactV3Seed_(spreadsheet);
+  const summaries = _summarizeRegistryUploadSheets_(spreadsheet, createdMap);
+  const summary = {
+    ok: 'success',
+    spreadsheet_id: spreadsheet.getId(),
+    spreadsheet_name: spreadsheet.getName(),
+    seed_version: 'compact_v3_runtime_compatible',
+    sheet_names: summaries.map((item) => item.sheet_name),
+    seeded_counts: seededCounts,
+    sheets: summaries,
+  };
+  const message = `Подготовлены листы: ${summary.sheet_names.join(', ')} · seed ${seededCounts.config_v2}/${seededCounts.metrics_v2}/${seededCounts.formulas_v2}`;
   _notifyRegistryUploadOperator_(message, 'success');
   return JSON.stringify(summary);
 }
@@ -99,9 +111,8 @@ function uploadRegistryUploadBundle() {
 
 function ensureRegistryUploadOperatorSheets() {
   const spreadsheet = getRegistryUploadSpreadsheet_();
-  const summaries = Object.keys(REGISTRY_UPLOAD_SHEET_LAYOUTS).map((sheetName) =>
-    _ensureRegistryUploadSheet_(spreadsheet, sheetName)
-  );
+  const createdMap = _ensureRegistryUploadSheets_(spreadsheet);
+  const summaries = _summarizeRegistryUploadSheets_(spreadsheet, createdMap);
 
   return JSON.stringify({
     ok: 'success',
@@ -110,6 +121,20 @@ function ensureRegistryUploadOperatorSheets() {
     sheet_names: summaries.map((summary) => summary.sheet_name),
     sheets: summaries,
   });
+}
+
+function _ensureRegistryUploadSheets_(spreadsheet) {
+  const createdMap = {};
+  Object.keys(REGISTRY_UPLOAD_SHEET_LAYOUTS).forEach((sheetName) => {
+    createdMap[sheetName] = _ensureRegistryUploadSheet_(spreadsheet, sheetName);
+  });
+  return createdMap;
+}
+
+function _summarizeRegistryUploadSheets_(spreadsheet, createdMap) {
+  return Object.keys(REGISTRY_UPLOAD_SHEET_LAYOUTS).map((sheetName) =>
+    _summarizeRegistryUploadSheet_(spreadsheet, sheetName, Boolean(createdMap[sheetName]))
+  );
 }
 
 function debugWriteRegistryUploadBundleToSheets(bundleJson, endpointUrl) {
@@ -265,6 +290,18 @@ function _writeRegistrySheetRows_(spreadsheet, sheetName, rows) {
   sheet.getRange(2, 1, values.length, headers.length).setValues(values);
 }
 
+function _applyRegistryUploadCompactV3Seed_(spreadsheet) {
+  const seed = getRegistryUploadCompactV3Seed();
+  _writeRegistrySheetRows_(spreadsheet, 'CONFIG', seed.config_v2 || []);
+  _writeRegistrySheetRows_(spreadsheet, 'METRICS', seed.metrics_v2 || []);
+  _writeRegistrySheetRows_(spreadsheet, 'FORMULAS', seed.formulas_v2 || []);
+  return {
+    config_v2: Array.isArray(seed.config_v2) ? seed.config_v2.length : 0,
+    metrics_v2: Array.isArray(seed.metrics_v2) ? seed.metrics_v2.length : 0,
+    formulas_v2: Array.isArray(seed.formulas_v2) ? seed.formulas_v2.length : 0,
+  };
+}
+
 function _clearRegistryUploadSheetData_(sheet, sheetName) {
   const headers = REGISTRY_UPLOAD_SHEET_LAYOUTS[sheetName].headers;
   const startRow = 2;
@@ -341,19 +378,38 @@ function _ensureRegistryUploadSheet_(spreadsheet, sheetName) {
     _ensureRegistryUploadControlBlock_(sheet);
   }
 
-  return {
+  return created;
+}
+
+function _summarizeRegistryUploadSheet_(spreadsheet, sheetName, created) {
+  const layout = REGISTRY_UPLOAD_SHEET_LAYOUTS[sheetName];
+  const sheet = requireRegistryUploadSheet_(spreadsheet, sheetName);
+  const summary = {
     sheet_name: sheetName,
     created: created,
     header: layout.headers,
+    data_row_count: _readRegistryUploadRows_(sheet, layout.headers).length,
     last_row: sheet.getLastRow(),
     last_column: sheet.getLastColumn(),
+  };
+  if (sheetName === 'CONFIG') {
+    summary.control_header = REGISTRY_UPLOAD_CONTROL_HEADERS;
+    summary.control_rows = REGISTRY_UPLOAD_CONTROL_ROWS;
+  }
+  return {
+    sheet_name: summary.sheet_name,
+    created: summary.created,
+    header: summary.header,
+    data_row_count: summary.data_row_count,
+    last_row: summary.last_row,
+    last_column: summary.last_column,
+    control_header: summary.control_header,
+    control_rows: summary.control_rows,
   };
 }
 
 function _ensureRegistryUploadControlBlock_(sheet) {
-  const existingEndpoint = String(
-    sheet.getRange(REGISTRY_UPLOAD_ENDPOINT_ROW, REGISTRY_UPLOAD_CONTROL_VALUE_COLUMN).getValue() || ''
-  ).trim();
+  const existingValues = _readRegistryUploadControlValues_(sheet);
   sheet
     .getRange(1, REGISTRY_UPLOAD_CONTROL_START_COLUMN, 1, REGISTRY_UPLOAD_CONTROL_HEADERS.length)
     .setValues([REGISTRY_UPLOAD_CONTROL_HEADERS])
@@ -366,8 +422,21 @@ function _ensureRegistryUploadControlBlock_(sheet) {
     .clearContent();
   sheet.setColumnWidth(REGISTRY_UPLOAD_CONTROL_START_COLUMN, 180);
   sheet.setColumnWidth(REGISTRY_UPLOAD_CONTROL_VALUE_COLUMN, 320);
-  sheet.getRange(REGISTRY_UPLOAD_ENDPOINT_ROW, REGISTRY_UPLOAD_CONTROL_VALUE_COLUMN).setValue(existingEndpoint);
+  sheet
+    .getRange(2, REGISTRY_UPLOAD_CONTROL_VALUE_COLUMN, REGISTRY_UPLOAD_CONTROL_ROWS.length, 1)
+    .setValues(REGISTRY_UPLOAD_CONTROL_ROWS.map((key) => [existingValues[key]]));
   sheet.getRange(REGISTRY_UPLOAD_ENDPOINT_ROW, REGISTRY_UPLOAD_CONTROL_VALUE_COLUMN).setNote(REGISTRY_UPLOAD_CONTROL_NOTE);
+}
+
+function _readRegistryUploadControlValues_(sheet) {
+  const values = sheet
+    .getRange(2, REGISTRY_UPLOAD_CONTROL_VALUE_COLUMN, REGISTRY_UPLOAD_CONTROL_ROWS.length, 1)
+    .getValues();
+  const out = {};
+  REGISTRY_UPLOAD_CONTROL_ROWS.forEach((key, index) => {
+    out[key] = values[index][0];
+  });
+  return out;
 }
 
 function _writeRegistryUploadStatus_(configSheet, endpointUrl, response) {

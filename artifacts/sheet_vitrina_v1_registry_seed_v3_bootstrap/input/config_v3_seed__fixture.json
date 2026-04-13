@@ -1,0 +1,65 @@
+[
+  {
+    "nm_id": 210183919,
+    "enabled": true,
+    "display_name": "clean iPhone 14",
+    "group": "Clean",
+    "display_order": 1
+  },
+  {
+    "nm_id": 210184534,
+    "enabled": true,
+    "display_name": "clean iPhone 14 Pro",
+    "group": "Clean",
+    "display_order": 2
+  },
+  {
+    "nm_id": 210183142,
+    "enabled": true,
+    "display_name": "clean iPhone 14 Pro Max",
+    "group": "Clean",
+    "display_order": 3
+  },
+  {
+    "nm_id": 391659990,
+    "enabled": true,
+    "display_name": "anti-spy iPhone 15 Pro",
+    "group": "Anti-Spy",
+    "display_order": 4
+  },
+  {
+    "nm_id": 391663632,
+    "enabled": true,
+    "display_name": "anti-spy iPhone 15 Pro Max",
+    "group": "Anti-Spy",
+    "display_order": 5
+  },
+  {
+    "nm_id": 391661710,
+    "enabled": true,
+    "display_name": "anti-spy iPhone 16 ProMax",
+    "group": "Anti-Spy",
+    "display_order": 6
+  },
+  {
+    "nm_id": 428854299,
+    "enabled": true,
+    "display_name": "matte iPhone 16 ProMax",
+    "group": "Matte",
+    "display_order": 7
+  },
+  {
+    "nm_id": 428854140,
+    "enabled": true,
+    "display_name": "matte iPhone 16 Pro",
+    "group": "Matte",
+    "display_order": 8
+  },
+  {
+    "nm_id": 428855560,
+    "enabled": true,
+    "display_name": "matte iPhone 15 Pro Max",
+    "group": "Matte",
+    "display_order": 9
+  }
+]

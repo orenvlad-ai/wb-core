@@ -43,7 +43,7 @@ update_note: "Создан как канонический модульный д
 - `status_transfer`: operator-facing sheet trigger перенесён в `wb-core`
 - `status_verification`: bundle-to-runtime smoke подтверждён
 - `status_checkpoint`: рабочий checkpoint подтверждён
-- `status_main`: модуль находится в PR и предназначен для merge в `main`
+- `status_main`: модуль смёржен в `main`
 
 # 2. Upstream/source basis и semantics
 
