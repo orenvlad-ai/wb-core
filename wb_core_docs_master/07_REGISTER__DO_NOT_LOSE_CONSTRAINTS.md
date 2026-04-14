@@ -3,8 +3,8 @@ title: "Register: do-not-lose constraints"
 doc_id: "WB-CORE-PROJECT-07-CONSTRAINTS"
 doc_type: "register"
 status: "active"
-purpose: "Зафиксировать минимальный набор ограничений, которые нельзя потерять при дальнейших реализациях и docs updates."
-scope: "Source-of-truth rules, migration boundaries, sheet/runtime invariants, docs governance invariants и anti-drift constraints."
+purpose: "Зафиксировать минимальный набор ограничений, которые нельзя потерять при дальнейших реализациях, docs updates и chat execution handoff."
+scope: "Source-of-truth rules, migration boundaries, sheet/runtime invariants, docs governance invariants, chat execution invariants и anti-drift constraints."
 source_basis:
   - "docs/architecture/03_source_of_truth_policy.md"
   - "docs/architecture/07_codex_execution_protocol.md"
@@ -45,6 +45,9 @@ built_from_commit: "138d97eb4eb4f95b1911b3a7fbee54ac5f074dbc"
 | `C-08` | При изменении contract/status/checkpoint/smoke/glossary/runbook нужно обновлять и primary docs, и затронутый project-pack, и manifest. |
 | `C-09` | `project_upload_required = true` нельзя сбрасывать до фактической внешней загрузки project-pack. |
 | `C-10` | Bounded steps не должны тихо превращаться в deploy/platform redesign, full parity campaign или новый parallel contour. |
+| `C-11` | Для новых WebCore chat prompts prompt к Codex обязан заканчиваться блоками `=== ДЛЯ КУРАТОРА ===` и `=== СЖАТАЯ ПРОВЕРКА ===`; без них execution handoff считается неполным. |
+| `C-12` | Bounded и безопасная техническая работа должна сначала идти через Codex; пользователю можно отдавать только human-only step: логин, права, ручной merge, ручная UI-проверка или решение по риску. |
+| `C-13` | Если manual handoff неизбежен, действует `one step = one action`: один ответ содержит один минимальный практический следующий шаг и не смешивает несколько независимых рискованных действий. |
 
 # Known gaps
 

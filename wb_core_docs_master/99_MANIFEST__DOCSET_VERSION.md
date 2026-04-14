@@ -22,16 +22,17 @@ update_triggers:
   - "фактическая внешняя project upload"
 built_from_commit: "138d97eb4eb4f95b1911b3a7fbee54ac5f074dbc"
 docset_version: "wb_core_docs_master_v1"
-built_at: "2026-04-13T18:48:37Z"
+built_at: "2026-04-14T08:33:18Z"
 core_docs_changed:
   - "README.md"
   - "docs/architecture/08_open_questions_and_decision_log.md"
   - "migration/93_sheet_vitrina_v1_mvp_end_to_end.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
+  - "docs/architecture/07_codex_execution_protocol.md"
 project_upload_required: true
 last_project_upload_at: "2026-04-13T18:11:45Z"
-project_upload_note: "после initial upload curated-pack обновлён: current sheet/upload metrics dictionary materialized как 19 rows; требуется повторный project upload"
+project_upload_note: "после initial upload curated-pack обновлён: current sheet/upload metrics dictionary materialized как 19 rows; после hardening execution protocol из PR #45 нужен повторный upload curated-pack в ChatGPT Project WebCore"
 ---
 
 # Summary
