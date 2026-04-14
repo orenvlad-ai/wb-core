@@ -2,34 +2,6 @@ const TARGET_SPREADSHEET_ID = '1ltgE8GltN3Rk8qP1UiaT2NPEwQyPKZ-1tuIqV7EC1NE';
 const TARGET_SPREADSHEET_NAME = 'WB Core Vitrina V1';
 const EXPECTED_SHEET_NAMES = ['DATA_VITRINA', 'STATUS'];
 const DATA_VITRINA_MATRIX_HEADER = ['дата', 'key'];
-const DATA_VITRINA_MATRIX_METRICS = [
-  { key: 'view_count', title: 'Показы в воронке' },
-  { key: 'ctr', title: 'CTR открытия карточки' },
-  { key: 'open_card_count', title: 'Открытия карточки' },
-  { key: 'views_current', title: 'Показы в поиске' },
-  { key: 'ctr_current', title: 'CTR в поиске' },
-  { key: 'orders_current', title: 'Заказы в поиске' },
-  { key: 'position_avg', title: 'Средняя позиция в поиске' },
-];
-const DATA_VITRINA_METRIC_TITLE_BY_KEY = DATA_VITRINA_MATRIX_METRICS.reduce((out, item) => {
-  out[item.key] = item.title;
-  return out;
-}, {});
-const DATA_VITRINA_TOTAL_SOURCE_KEYS = {
-  view_count: 'total_view_count',
-  ctr: 'ctr',
-  open_card_count: 'total_open_card_count',
-  views_current: 'total_views_current',
-  ctr_current: 'avg_ctr_current',
-  orders_current: 'total_orders_current',
-  position_avg: 'avg_position_avg',
-};
-const DATA_VITRINA_TOTAL_RATIO_FALLBACKS = {
-  ctr: {
-    numerator: 'total_open_card_count',
-    denominator: 'total_view_count',
-  },
-};
 
 function getSheetVitrinaBridgeTargetInfo() {
   const spreadsheet = getTargetSpreadsheet_();
@@ -413,11 +385,10 @@ function getTargetSpreadsheet_() {
 function writeSheetTarget_(spreadsheet, target) {
   validateTarget_(target);
   const sheet = spreadsheet.getSheetByName(target.sheet_name) || spreadsheet.insertSheet(target.sheet_name);
-  const summary = writeFullOverwriteTarget_(sheet, target);
   if (target.sheet_name === 'DATA_VITRINA') {
-    return enrichDataVitrinaWriteSummary_(summary, target);
+    return writeDataVitrinaMatrixTarget_(sheet, target);
   }
-  return summary;
+  return writeFullOverwriteTarget_(sheet, target);
 }
 
 function writeFullOverwriteTarget_(sheet, target) {
@@ -441,16 +412,20 @@ function writeFullOverwriteTarget_(sheet, target) {
 function enrichDataVitrinaWriteSummary_(summary, target) {
   const header = Array.isArray(target.header) ? target.header : [];
   const metricKeys = collectDataVitrinaMetricKeys_(target.rows || []);
+  summary.source_row_count = Array.isArray(target.rows) ? target.rows.length : 0;
+  summary.source_metric_key_count = metricKeys.length;
   summary.displayed_metric_count = metricKeys.length;
   summary.metric_keys = metricKeys;
   if (isDataVitrinaMatrixHeader_(header)) {
     summary.layout_mode = 'date_matrix';
     summary.date_columns = header.slice(2);
+    summary.rendered_data_row_count = summary.row_count;
     return summary;
   }
   if (isDataVitrinaFlatHeader_(header)) {
     summary.layout_mode = 'flat_rows';
     summary.date_columns = header.slice(2);
+    summary.rendered_data_row_count = summary.row_count;
   }
   return summary;
 }
@@ -482,7 +457,7 @@ function writeDataVitrinaMatrixTarget_(sheet, target) {
   const existingState = readExistingDataVitrinaMatrixState_(sheet);
   const incomingState = buildIncomingDataVitrinaMatrixState_(target.header, target.rows || []);
   if (!incomingState.block_order.length || !incomingState.dates.length) {
-    return writeFullOverwriteTarget_(sheet, target);
+    return enrichDataVitrinaWriteSummary_(writeFullOverwriteTarget_(sheet, target), target);
   }
 
   const mergedState = mergeDataVitrinaMatrixStates_(existingState, incomingState);
@@ -498,7 +473,15 @@ function writeDataVitrinaMatrixTarget_(sheet, target) {
     layout_mode: 'date_matrix',
     date_columns: mergedState.dates.slice(),
     block_key_count: mergedState.block_order.length,
-    displayed_metric_count: DATA_VITRINA_MATRIX_METRICS.length,
+    block_keys: mergedState.block_order.slice(),
+    displayed_metric_count: incomingState.metric_keys.length,
+    metric_keys: incomingState.metric_keys.slice(),
+    source_row_count: incomingState.source_row_count,
+    source_metric_key_count: incomingState.metric_keys.length,
+    rendered_block_count: mergedState.block_order.length,
+    rendered_date_column_count: mergedState.dates.length,
+    rendered_metric_row_count: countDataVitrinaMatrixMetricRows_(mergedState),
+    rendered_data_row_count: matrix.length - 1,
   };
 }
 
@@ -554,6 +537,10 @@ function createEmptyDataVitrinaMatrixState_() {
       SKU: [],
       OTHER: [],
     },
+    block_metric_order: {},
+    metric_titles: {},
+    metric_keys: [],
+    source_row_count: 0,
     values: {},
   };
 }
@@ -579,8 +566,7 @@ function buildIncomingDataVitrinaMatrixState_(header, rows) {
   const dates = normalizeDataVitrinaDateHeaders_(header);
   const state = createEmptyDataVitrinaMatrixState_();
   state.dates = dates.slice();
-  const rawBlocks = {};
-  rows.forEach((row) => {
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
     const key = String(row[1] || '').trim();
     if (!key) {
       return;
@@ -589,47 +575,28 @@ function buildIncomingDataVitrinaMatrixState_(header, rows) {
     if (!parsed) {
       return;
     }
-    if (!rawBlocks[parsed.block_key]) {
-      rawBlocks[parsed.block_key] = {
-        raw_metrics: {},
-        title: '',
-      };
-    }
-    const derivedTitle = deriveFlatBlockTitle_(parsed.block_key, String(row[0] || ''), parsed.metric_key);
+    const scope = scopeFromBlockKey_(parsed.block_key);
+    const logicalKey = `${parsed.block_key}|${parsed.metric_key}`;
+    const derivedTitles = deriveFlatRowTitles_(parsed.block_key, String(row[0] || ''), parsed.metric_key);
     const defaultTitle = buildDefaultBlockTitle_(parsed.block_key);
+    const currentTitle = state.block_titles[parsed.block_key] || '';
     if (
-      !rawBlocks[parsed.block_key].title ||
-      (rawBlocks[parsed.block_key].title === defaultTitle && derivedTitle !== defaultTitle)
+      !currentTitle ||
+      (currentTitle === defaultTitle && derivedTitles.block_title !== defaultTitle)
     ) {
-      rawBlocks[parsed.block_key].title = derivedTitle;
+      state.block_titles[parsed.block_key] = derivedTitles.block_title;
     }
-    rawBlocks[parsed.block_key].raw_metrics[parsed.metric_key] = mapRowValuesToDates_(dates, row.slice(2));
-  });
-
-  const blockScopeOrder = {
-    TOTAL: [],
-    GROUP: [],
-    SKU: [],
-    OTHER: [],
-  };
-  Object.keys(rawBlocks).forEach((blockKey) => {
-    if (!blockHasSupportedMetricRows_(blockKey, rawBlocks[blockKey].raw_metrics)) {
-      return;
+    if (!state.block_metric_order[parsed.block_key]) {
+      state.block_metric_order[parsed.block_key] = [];
     }
-    pushUnique_(blockScopeOrder[scopeFromBlockKey_(blockKey)] || blockScopeOrder.OTHER, blockKey);
-    state.block_titles[blockKey] = rawBlocks[blockKey].title || buildDefaultBlockTitle_(blockKey);
-    DATA_VITRINA_MATRIX_METRICS.forEach((metric) => {
-      state.values[`${blockKey}|${metric.key}`] = resolveDisplayedMetricValues_(
-        blockKey,
-        metric.key,
-        rawBlocks[blockKey].raw_metrics,
-        dates
-      );
-    });
+    pushUnique_(state.block_scope_order[scope] || state.block_scope_order.OTHER, parsed.block_key);
+    pushUnique_(state.block_metric_order[parsed.block_key], parsed.metric_key);
+    pushUnique_(state.metric_keys, parsed.metric_key);
+    state.metric_titles[logicalKey] = derivedTitles.metric_title;
+    state.values[logicalKey] = mapRowValuesToDates_(dates, row.slice(2));
+    state.source_row_count += 1;
   });
-
-  state.block_scope_order = blockScopeOrder;
-  state.block_order = composeDataVitrinaBlockOrder_(blockScopeOrder);
+  state.block_order = composeDataVitrinaBlockOrder_(state.block_scope_order);
   return state;
 }
 
@@ -648,12 +615,20 @@ function parseMatrixDataVitrinaState_(values) {
       currentBlockKey = key;
       pushUnique_(state.block_scope_order[scopeFromBlockKey_(key)] || state.block_scope_order.OTHER, key);
       state.block_titles[key] = label || buildDefaultBlockTitle_(key);
+      if (!state.block_metric_order[key]) {
+        state.block_metric_order[key] = [];
+      }
       return;
     }
-    if (!currentBlockKey || !DATA_VITRINA_METRIC_TITLE_BY_KEY[key]) {
+    if (!currentBlockKey || !key) {
       return;
     }
-    state.values[`${currentBlockKey}|${key}`] = mapRowValuesToDates_(state.dates, row.slice(2));
+    const logicalKey = `${currentBlockKey}|${key}`;
+    pushUnique_(state.block_metric_order[currentBlockKey], key);
+    pushUnique_(state.metric_keys, key);
+    state.metric_titles[logicalKey] = label || key;
+    state.values[logicalKey] = mapRowValuesToDates_(state.dates, row.slice(2));
+    state.source_row_count += 1;
   });
   state.block_order = composeDataVitrinaBlockOrder_(state.block_scope_order);
   return state;
@@ -667,51 +642,42 @@ function mergeDataVitrinaMatrixStates_(existingState, incomingState) {
       merged.dates.push(date);
     }
   });
-
   merged.block_scope_order = {
-    TOTAL: mergeScopeOrder_(
-      incomingState.block_scope_order.TOTAL || [],
-      existingState.block_scope_order.TOTAL || []
-    ),
-    GROUP: mergeScopeOrder_(
-      incomingState.block_scope_order.GROUP || [],
-      existingState.block_scope_order.GROUP || []
-    ),
-    SKU: mergeScopeOrder_(
-      incomingState.block_scope_order.SKU || [],
-      existingState.block_scope_order.SKU || []
-    ),
-    OTHER: mergeScopeOrder_(
-      incomingState.block_scope_order.OTHER || [],
-      existingState.block_scope_order.OTHER || []
-    ),
+    TOTAL: (incomingState.block_scope_order.TOTAL || []).slice(),
+    GROUP: (incomingState.block_scope_order.GROUP || []).slice(),
+    SKU: (incomingState.block_scope_order.SKU || []).slice(),
+    OTHER: (incomingState.block_scope_order.OTHER || []).slice(),
   };
   merged.block_order = composeDataVitrinaBlockOrder_(merged.block_scope_order);
+  merged.metric_keys = incomingState.metric_keys.slice();
+  merged.source_row_count = incomingState.source_row_count;
   merged.block_order.forEach((blockKey) => {
     merged.block_titles[blockKey] =
       incomingState.block_titles[blockKey] ||
       existingState.block_titles[blockKey] ||
       buildDefaultBlockTitle_(blockKey);
-  });
-
-  Object.keys(existingState.values).forEach((logicalKey) => {
-    merged.values[logicalKey] = cloneDateValueMap_(existingState.values[logicalKey]);
-  });
-  incomingState.dates.forEach((date) => {
-    Object.keys(merged.values).forEach((logicalKey) => {
-      delete merged.values[logicalKey][date];
-    });
+    merged.block_metric_order[blockKey] = (incomingState.block_metric_order[blockKey] || []).slice();
   });
   incomingState.block_order.forEach((blockKey) => {
-    DATA_VITRINA_MATRIX_METRICS.forEach((metric) => {
-      const logicalKey = `${blockKey}|${metric.key}`;
-      if (!merged.values[logicalKey]) {
-        merged.values[logicalKey] = {};
-      }
+    (incomingState.block_metric_order[blockKey] || []).forEach((metricKey) => {
+      const logicalKey = `${blockKey}|${metricKey}`;
+      const existingValues = existingState.values[logicalKey] || {};
       const incomingValues = incomingState.values[logicalKey] || {};
-      incomingState.dates.forEach((date) => {
+      merged.metric_titles[logicalKey] =
+        incomingState.metric_titles[logicalKey] ||
+        existingState.metric_titles[logicalKey] ||
+        metricKey;
+      merged.values[logicalKey] = {};
+      merged.dates.forEach((date) => {
         if (Object.prototype.hasOwnProperty.call(incomingValues, date)) {
           const value = incomingValues[date];
+          if (value !== '' && value !== null) {
+            merged.values[logicalKey][date] = value;
+          }
+          return;
+        }
+        if (Object.prototype.hasOwnProperty.call(existingValues, date)) {
+          const value = existingValues[date];
           if (value !== '' && value !== null) {
             merged.values[logicalKey][date] = value;
           }
@@ -727,11 +693,11 @@ function buildDataVitrinaMatrixSheet_(state) {
   const rows = [];
   state.block_order.forEach((blockKey, index) => {
     rows.push([state.block_titles[blockKey] || buildDefaultBlockTitle_(blockKey), blockKey].concat(buildBlankCells_(state.dates.length)));
-    DATA_VITRINA_MATRIX_METRICS.forEach((metric) => {
-      const logicalKey = `${blockKey}|${metric.key}`;
+    (state.block_metric_order[blockKey] || []).forEach((metricKey) => {
+      const logicalKey = `${blockKey}|${metricKey}`;
       const dateValues = state.values[logicalKey] || {};
       rows.push(
-        [metric.title, metric.key].concat(
+        [(state.metric_titles[logicalKey] || metricKey), metricKey].concat(
           state.dates.map((date) => (Object.prototype.hasOwnProperty.call(dateValues, date) ? dateValues[date] : ''))
         )
       );
@@ -741,6 +707,10 @@ function buildDataVitrinaMatrixSheet_(state) {
     }
   });
   return [header].concat(rows);
+}
+
+function countDataVitrinaMatrixMetricRows_(state) {
+  return state.block_order.reduce((total, blockKey) => total + ((state.block_metric_order[blockKey] || []).length), 0);
 }
 
 function normalizeDataVitrinaDateHeaders_(header) {
@@ -768,68 +738,41 @@ function parseFlatDataVitrinaKey_(key) {
   };
 }
 
-function blockHasSupportedMetricRows_(blockKey, rawMetrics) {
-  return DATA_VITRINA_MATRIX_METRICS.some((metric) => {
-    if (blockKey === 'TOTAL') {
-      const directKey = DATA_VITRINA_TOTAL_SOURCE_KEYS[metric.key];
-      const ratio = DATA_VITRINA_TOTAL_RATIO_FALLBACKS[metric.key];
-      return Boolean(
-        rawMetrics[directKey] ||
-        (ratio && rawMetrics[ratio.numerator] && rawMetrics[ratio.denominator]) ||
-        rawMetrics[metric.key]
-      );
-    }
-    return Boolean(rawMetrics[metric.key]);
-  });
-}
-
-function resolveDisplayedMetricValues_(blockKey, metricKey, rawMetrics, dates) {
+function deriveFlatRowTitles_(blockKey, label, metricKey) {
+  const defaultBlockTitle = buildDefaultBlockTitle_(blockKey);
+  const defaultMetricTitle = metricKey;
+  const normalizedLabel = String(label || '').trim();
   if (blockKey === 'TOTAL') {
-    return resolveTotalDisplayedMetricValues_(metricKey, rawMetrics, dates);
-  }
-  return cloneDateValueMap_(rawMetrics[metricKey] || {});
-}
-
-function resolveTotalDisplayedMetricValues_(metricKey, rawMetrics, dates) {
-  const directKey = DATA_VITRINA_TOTAL_SOURCE_KEYS[metricKey];
-  if (directKey && rawMetrics[directKey]) {
-    return cloneDateValueMap_(rawMetrics[directKey]);
-  }
-  if (rawMetrics[metricKey]) {
-    return cloneDateValueMap_(rawMetrics[metricKey]);
-  }
-  const ratio = DATA_VITRINA_TOTAL_RATIO_FALLBACKS[metricKey];
-  if (!ratio || !rawMetrics[ratio.numerator] || !rawMetrics[ratio.denominator]) {
-    return {};
-  }
-  const result = {};
-  dates.forEach((date) => {
-    const numerator = rawMetrics[ratio.numerator][date];
-    const denominator = rawMetrics[ratio.denominator][date];
-    if (typeof numerator === 'number' && typeof denominator === 'number' && denominator !== 0) {
-      result[date] = numerator / denominator;
+    if (normalizedLabel.startsWith('Итого: ')) {
+      return {
+        block_title: 'ИТОГО',
+        metric_title: normalizedLabel.slice('Итого: '.length).trim() || defaultMetricTitle,
+      };
     }
-  });
-  return result;
-}
-
-function deriveFlatBlockTitle_(blockKey, label, metricKey) {
-  if (blockKey === 'TOTAL') {
-    return 'ИТОГО';
+    return {
+      block_title: 'ИТОГО',
+      metric_title: normalizedLabel || defaultMetricTitle,
+    };
   }
-  const metricTitle = DATA_VITRINA_METRIC_TITLE_BY_KEY[metricKey];
-  if (!metricTitle) {
-    return buildDefaultBlockTitle_(blockKey);
-  }
-  const suffix = `: ${metricTitle}`;
-  if (label.endsWith(suffix)) {
-    const entityTitle = label.slice(0, label.length - suffix.length).trim();
+  const separatorIndex = normalizedLabel.lastIndexOf(': ');
+  if (separatorIndex >= 0) {
+    const entityTitle = normalizedLabel.slice(0, separatorIndex).trim();
+    const metricTitle = normalizedLabel.slice(separatorIndex + 2).trim() || defaultMetricTitle;
     if (blockKey.startsWith('GROUP:') && entityTitle.startsWith('Группа ')) {
-      return `ГРУППА: ${entityTitle.slice('Группа '.length).trim()}`;
+      return {
+        block_title: `ГРУППА: ${entityTitle.slice('Группа '.length).trim()}`,
+        metric_title: metricTitle,
+      };
     }
-    return entityTitle || buildDefaultBlockTitle_(blockKey);
+    return {
+      block_title: entityTitle || defaultBlockTitle,
+      metric_title: metricTitle,
+    };
   }
-  return buildDefaultBlockTitle_(blockKey);
+  return {
+    block_title: defaultBlockTitle,
+    metric_title: normalizedLabel || defaultMetricTitle,
+  };
 }
 
 function buildDefaultBlockTitle_(blockKey) {
@@ -848,13 +791,6 @@ function composeDataVitrinaBlockOrder_(blockScopeOrder) {
     .concat(blockScopeOrder.GROUP || [])
     .concat(blockScopeOrder.SKU || [])
     .concat(blockScopeOrder.OTHER || []);
-}
-
-function mergeScopeOrder_(primary, secondary) {
-  const merged = [];
-  (primary || []).forEach((item) => pushUnique_(merged, item));
-  (secondary || []).forEach((item) => pushUnique_(merged, item));
-  return merged;
 }
 
 function mapRowValuesToDates_(dates, rowValues) {
@@ -968,20 +904,22 @@ function describeSheetState_(spreadsheet, sheetName) {
           scopeBlockCounts[scopeFromBlockKey_(key)] = (scopeBlockCounts[scopeFromBlockKey_(key)] || 0) + 1;
           return;
         }
-        if (DATA_VITRINA_METRIC_TITLE_BY_KEY[key]) {
-          metricKeys.push(key);
-          metricRowCount += 1;
-          if (row.slice(2).some((cell) => cell !== '' && cell !== null)) {
-            nonEmptyMetricRowCount += 1;
-          }
+        if (!key) {
+          return;
+        }
+        metricKeys.push(key);
+        metricRowCount += 1;
+        if (row.slice(2).some((cell) => cell !== '' && cell !== null)) {
+          nonEmptyMetricRowCount += 1;
         }
       });
+      const uniqueMetricKeys = Array.from(new Set(metricKeys));
       state.layout_mode = 'date_matrix';
       state.data_row_count = dataRows.length;
       state.date_column_count = Math.max(header.length - 2, 0);
       state.date_headers = header.slice(2);
-      state.metric_key_count = Array.from(new Set(metricKeys)).length;
-      state.metric_keys = Array.from(new Set(metricKeys));
+      state.metric_key_count = uniqueMetricKeys.length;
+      state.metric_keys = uniqueMetricKeys;
       state.block_key_count = blockKeys.length;
       state.block_keys = blockKeys;
       state.scope_block_counts = scopeBlockCounts;
@@ -989,6 +927,10 @@ function describeSheetState_(spreadsheet, sheetName) {
       state.metric_row_count = metricRowCount;
       state.separator_row_count = separatorRowCount;
       state.non_empty_metric_row_count = nonEmptyMetricRowCount;
+      state.rendered_block_count = blockKeys.length;
+      state.rendered_date_column_count = Math.max(header.length - 2, 0);
+      state.rendered_data_row_count = dataRows.length;
+      state.rendered_metric_row_count = metricRowCount;
     } else {
       const dataRows = values.slice(1);
       const metricKeys = [];

@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-19-SHEET-VITRINA-V1-PRESENTATION-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `sheet_vitrina_v1_presentation_block`."
-scope: "Bounded presentation/layout pass для `DATA_VITRINA` и `STATUS`: server-driven flat readback view без локального reshape/subset logic, semantic number formats и жёсткие границы thin sheet-side presentation шага."
+scope: "Bounded presentation/layout pass для `DATA_VITRINA` и `STATUS`: server-driven `date_matrix` view поверх incoming current-truth rows без локального subset/fallback logic, semantic number formats и жёсткие границы thin sheet-side presentation шага."
 source_basis:
   - "migration/85_sheet_vitrina_v1_presentation.md"
   - "artifacts/sheet_vitrina_v1/evidence/initial__sheet-vitrina-v1__evidence.md"
@@ -26,7 +26,7 @@ related_docs:
   - "docs/modules/18_MODULE__SHEET_VITRINA_V1_WRITE_BRIDGE_BLOCK.md"
   - "artifacts/sheet_vitrina_v1/evidence/initial__sheet-vitrina-v1__evidence.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под server-driven flat readback: `DATA_VITRINA` снова materialize-ит полный incoming plan из current truth без локального 7-metric reshape; presentation pass только форматирует composite keys и не меняет row set."
+update_note: "Обновлён под server-driven date-matrix presentation: `DATA_VITRINA` visual-но снова близка к legacy sheet, но row set, block set и metric rows полностью зависят от incoming current truth; локальный 7-metric reshape не возвращён."
 ---
 
 # 1. Идентификатор и статус
@@ -45,7 +45,7 @@ update_note: "Обновлён под server-driven flat readback: `DATA_VITRINA
   - `migration/85_sheet_vitrina_v1_presentation.md`
   - `apps/sheet_vitrina_v1_presentation_live.py`
   - `gas/sheet_vitrina_v1/PresentationPass.gs`
-- Семантика блока: не менять upload/runtime/server contracts, не invent-ить локальный truth path и не резать incoming rows, а наложить на server-driven readback минимальный читаемый visual scaffold.
+- Семантика блока: не менять upload/runtime/server contracts, не invent-ить локальный truth path и не резать incoming rows, а наложить на server-driven readback минимальный legacy-like visual scaffold.
 
 # 3. Target contract и смысл результата
 
@@ -64,13 +64,16 @@ update_note: "Обновлён под server-driven flat readback: `DATA_VITRINA
   - `DATA_VITRINA`
   - `STATUS`
 
-## 3.1 DATA_VITRINA flat contract
+## 3.1 DATA_VITRINA date-matrix contract
 
-- `A1 = label`
+- `A1 = дата`
 - `B1 = key`
-- `C1..` = incoming date columns from server-side plan; на текущем contour это один `as_of_date`
-- `DATA_VITRINA` сохраняет полный incoming row set из `GET /v1/sheet-vitrina-v1/plan`
-- composite keys вида `TOTAL|...` / `SKU:...|...` не переписываются локально и не сужаются до subset
+- `C1..` = date columns; первый load materialize-ит текущий `as_of_date`, следующий день добавляется справа
+- incoming flat row set из `GET /v1/sheet-vitrina-v1/plan` reshaped only for presentation:
+  - block header row = human title + canonical block key;
+  - metric rows = display label + canonical metric key;
+  - history по датам живёт только в `C:...`
+- блоки идут как `TOTAL`, затем `GROUP:*`, затем `SKU:*`; metric rows внутри блока сохраняют incoming current-truth ordering
 - row grouping / outline / hidden rows intentionally не используются
 
 # 4. Артефакты и wiring по модулю
@@ -96,16 +99,16 @@ update_note: "Обновлён под server-driven flat readback: `DATA_VITRINA
 
 - Подтверждён targeted smoke через `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`.
 - Smoke проверяет:
-  - что `DATA_VITRINA` сохраняет flat server-driven header `label | key | <date>`;
-  - что incoming plan больше не режется до `7` metric keys;
-  - что repeated load переписывает текущий server-driven snapshot вместо локального history/subset path;
-  - что freeze `A:B`, plain header и semantic formats для `integer / percent / decimal` сохраняются и для composite keys.
+  - что `DATA_VITRINA` materialize-ит `date_matrix` header `дата | key | <date...>`;
+  - что incoming plan больше не режется до `7` metric keys и не требует hardcoded metric list;
+  - что same-day load переписывает текущую date-column, а новый день добавляется вправо;
+  - что freeze `A:B`, plain header, section rows и semantic formats для `integer / percent / decimal` сохраняются.
 
 # 7. Что уже доказано по модулю
 
 - Новая витрина больше не только рабочая, но и базово читаемая.
 - `DATA_VITRINA` остаётся thin presentation layer над server-driven current truth и больше не теряет rows с `show_in_data = true`.
-- Presentation pass форматирует flat composite-key rows без изменения incoming load semantics.
+- Presentation pass превращает incoming flat composite-key rows в data-driven `date_matrix` без изменения incoming load semantics.
 - `STATUS` визуально отделяет status/date/coverage поля.
 - Это bounded presentation/layout step новой витрины поверх уже живого write bridge.
 

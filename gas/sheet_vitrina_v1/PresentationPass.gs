@@ -189,21 +189,33 @@ function normalizeDataMetricKey_(key) {
 }
 
 function isPercentMetricKey_(metricKey) {
+  const normalized = String(metricKey || '').trim();
   return (
-    metricKey === 'ctr' ||
-    metricKey === 'ctr_current' ||
-    metricKey === 'localizationPercent' ||
-    metricKey === 'localization_percent' ||
-    /(?:_pct|_percent)$/.test(metricKey)
+    normalized === 'ctr' ||
+    normalized === 'ctr_current' ||
+    normalized === 'localizationPercent' ||
+    normalized === 'localization_percent' ||
+    /(?:^|_)(ctr|spp|drr)(?:_|$)/i.test(normalized) ||
+    /(pct|percent|conversion|share)/i.test(normalized)
   );
 }
 
 function isDecimalMetricKey_(metricKey) {
-  return metricKey === 'position_avg';
+  const normalized = String(metricKey || '').trim();
+  return normalized === 'position_avg' || normalized === 'avg_position_avg';
 }
 
 function isCurrencyMetricKey_(metricKey) {
-  return /_rub$/.test(metricKey);
+  const normalized = String(metricKey || '').trim();
+  return (
+    /(?:^|_)(rub)(?:_|$)/i.test(normalized) ||
+    /(price|profit|revenue|sum|fee|bid|cpc|cost)/i.test(normalized) ||
+    normalized === 'orderSum'
+  );
+}
+
+function isIntegerMetricKey_(metricKey) {
+  return !isPercentMetricKey_(metricKey) && !isDecimalMetricKey_(metricKey) && !isCurrencyMetricKey_(metricKey);
 }
 
 function buildPresentationSnapshot_(spreadsheet, sheetName) {
@@ -249,7 +261,7 @@ function describeDataSamples_(sheet) {
     section: describeDataSampleByPredicate_(sheet, (key) => isDataVitrinaBlockKey_(key)),
     percent: describeDataSampleByPredicate_(sheet, (metricKey) => isPercentMetricKey_(metricKey)),
     decimal: describeDataSampleByPredicate_(sheet, (metricKey) => isDecimalMetricKey_(metricKey)),
-    integer: describeDataSampleByPredicate_(sheet, (metricKey) => metricKey === 'view_count' || metricKey === 'orders_current'),
+    integer: describeDataSampleByPredicate_(sheet, (metricKey, rawKey) => !isDataVitrinaBlockKey_(rawKey) && isIntegerMetricKey_(metricKey)),
   };
 }
 

@@ -1,4 +1,4 @@
-"""Targeted smoke-check для server-driven materialization в DATA_VITRINA."""
+"""Targeted smoke-check для data-driven date-matrix presentation в DATA_VITRINA."""
 
 from __future__ import annotations
 
@@ -30,27 +30,45 @@ def main() -> None:
     first_state = harness_result["states"]["first_load"]["sheets"][0]
     first_presentation = harness_result["presentations"]["first_load"]["sheets"][0]
 
-    if first_sheet[0] != ["label", "key", "2026-04-12"]:
-        raise AssertionError("DATA_VITRINA must keep flat server-driven header")
+    if first_sheet[0] != ["дата", "key", "2026-04-12"]:
+        raise AssertionError("DATA_VITRINA must expose date-matrix header")
     expected_prefix = [
-        ["Итого: Маржинальность прокси, %", "TOTAL|proxy_margin_pct_total", 0.2],
-        ["Итого: Прокси-прибыль, ₽", "TOTAL|total_proxy_profit_rub", 10000],
-        ["Итого: Показы в воронке", "TOTAL|total_view_count", 1000],
-        ["Итого: Открытия карточки", "TOTAL|total_open_card_count", 250],
+        ["ИТОГО", "TOTAL", ""],
+        ["Маржинальность прокси, %", "proxy_margin_pct_total", 0.2],
+        ["Прокси-прибыль, ₽", "total_proxy_profit_rub", 10000],
+        ["Показы в воронке", "total_view_count", 1000],
     ]
     if first_sheet[1:5] != expected_prefix:
-        raise AssertionError("unexpected server-driven prefix after first load")
+        raise AssertionError("unexpected matrix prefix after first load")
+    if first_sheet[12][:2] != ["ГРУППА: Clean", "GROUP:Clean"]:
+        raise AssertionError("matrix layout lost the first group block header")
+    first_sku_index = next(
+        (index for index, row in enumerate(first_sheet) if len(row) > 1 and row[1] == "SKU:210183919"),
+        -1,
+    )
+    if first_sku_index <= 0 or first_sheet[first_sku_index][:2] != ["clean iPhone 14", "SKU:210183919"]:
+        raise AssertionError("matrix layout lost the first SKU block header")
+    if first_sheet[first_sku_index + 1][:2] != ["Показы в воронке", "view_count"]:
+        raise AssertionError("matrix layout lost the first SKU metric row")
 
-    if first_state["layout_mode"] != "flat_rows":
-        raise AssertionError("DATA_VITRINA must stay in flat_rows mode")
-    if first_state["metric_key_count"] <= 7:
-        raise AssertionError("server-driven materialization must keep more than 7 metric keys")
+    if first_state["layout_mode"] != "date_matrix":
+        raise AssertionError("DATA_VITRINA must materialize date_matrix layout")
+    if first_state["metric_key_count"] != 20:
+        raise AssertionError("synthetic matrix must keep every incoming metric key")
+    if first_state["block_key_count"] != 5:
+        raise AssertionError("synthetic matrix must keep TOTAL + groups + SKUs as blocks")
+    if first_state["date_column_count"] != 1:
+        raise AssertionError("first load must keep a single date column")
+    if first_state["metric_row_count"] != 51 or first_state["separator_row_count"] != 4:
+        raise AssertionError("matrix layout row accounting mismatch")
     if "proxy_profit_rub" not in first_state["metric_keys"]:
-        raise AssertionError("server-driven materialization lost proxy_profit_rub")
+        raise AssertionError("matrix layout lost proxy_profit_rub")
+    if "localization_percent" not in first_state["metric_keys"]:
+        raise AssertionError("matrix layout lost localization_percent")
     if first_state["data_row_count"] != len(first_sheet) - 1:
         raise AssertionError("DATA_VITRINA data_row_count mismatch")
-    if first_state["scope_row_counts"] != {"TOTAL": 9, "GROUP": 20, "SKU": 22, "OTHER": 0}:
-        raise AssertionError("DATA_VITRINA scope_row_counts mismatch")
+    if first_state["scope_block_counts"] != {"TOTAL": 1, "GROUP": 2, "SKU": 2, "OTHER": 0}:
+        raise AssertionError("DATA_VITRINA scope_block_counts mismatch")
 
     if first_presentation["frozen_columns"] != 2:
         raise AssertionError("DATA_VITRINA must keep frozen A:B columns")
@@ -60,8 +78,8 @@ def main() -> None:
         raise AssertionError("date header format mismatch")
     if first_presentation["column_widths"]["A"] != 280 or first_presentation["column_widths"]["B"] != 220:
         raise AssertionError("base DATA_VITRINA widths mismatch")
-    if first_presentation["samples"]["section"] is not None:
-        raise AssertionError("flat server-driven view must not invent section rows")
+    if first_presentation["samples"]["section"] is None or first_presentation["samples"]["section"]["key"] != "TOTAL":
+        raise AssertionError("matrix view must expose bold section rows")
     if first_presentation["samples"]["percent"]["number_format"] != "0.0%":
         raise AssertionError("CTR rows must keep percent format")
     if first_presentation["samples"]["decimal"]["number_format"] != "#,##0.00":
@@ -71,27 +89,29 @@ def main() -> None:
 
     overwrite_sheet = harness_result["snapshots"]["after_same_day_overwrite"]["values"]
     overwrite_state = harness_result["states"]["same_day_overwrite"]["sheets"][0]
-    if overwrite_sheet[0] != ["label", "key", "2026-04-12"]:
-        raise AssertionError("same-day overwrite must keep flat header")
-    if overwrite_sheet[1][2] != 0.25 or overwrite_sheet[2][2] != 10500:
+    if overwrite_sheet[0] != ["дата", "key", "2026-04-12"]:
+        raise AssertionError("same-day overwrite must keep matrix header")
+    if overwrite_sheet[2][2] != 0.25 or overwrite_sheet[3][2] != 10500:
         raise AssertionError("same-day overwrite must refresh current server-driven values")
-    if overwrite_state["layout_mode"] != "flat_rows" or overwrite_state["data_row_count"] != len(overwrite_sheet) - 1:
-        raise AssertionError("same-day overwrite must preserve flat_rows shape")
+    if overwrite_state["layout_mode"] != "date_matrix" or overwrite_state["data_row_count"] != len(overwrite_sheet) - 1:
+        raise AssertionError("same-day overwrite must preserve date_matrix shape")
 
     next_day_sheet = harness_result["snapshots"]["after_next_day_overwrite"]["values"]
     next_day_state = harness_result["states"]["next_day_overwrite"]["sheets"][0]
-    if next_day_sheet[0] != ["label", "key", "2026-04-13"]:
-        raise AssertionError("next day load must overwrite header date from server plan")
-    if len(next_day_sheet[0]) != 3:
-        raise AssertionError("next day load must not invent presentation-side history columns")
-    if next_day_sheet[1][2] != 0.3 or next_day_sheet[2][2] != 11000:
-        raise AssertionError("next day overwrite must refresh server-driven values")
-    if next_day_state["layout_mode"] != "flat_rows" or next_day_state["metric_key_count"] != first_state["metric_key_count"]:
-        raise AssertionError("next day overwrite must preserve full metric set")
+    if next_day_sheet[0] != ["дата", "key", "2026-04-12", "2026-04-13"]:
+        raise AssertionError("next day load must append a new date column to the right")
+    if next_day_sheet[2][2] != 0.25 or next_day_sheet[2][3] != 0.3:
+        raise AssertionError("next day load must preserve history and append new values")
+    if next_day_sheet[3][2] != 10500 or next_day_sheet[3][3] != 11000:
+        raise AssertionError("next day overwrite must append refreshed money-like values")
+    if next_day_state["layout_mode"] != "date_matrix" or next_day_state["metric_key_count"] != first_state["metric_key_count"]:
+        raise AssertionError("next day overwrite must preserve the full metric set")
+    if next_day_state["date_column_count"] != 2:
+        raise AssertionError("next day overwrite must keep two date columns in matrix mode")
 
-    print(f"first_load: ok -> metric_keys={first_state['metric_key_count']}")
+    print(f"first_load: ok -> blocks={first_state['block_key_count']} metric_keys={first_state['metric_key_count']}")
     print("same_day_overwrite: ok -> 2026-04-12")
-    print("next_day_overwrite: ok -> 2026-04-13")
+    print("next_day_overwrite: ok -> 2026-04-12 + 2026-04-13")
     print("presentation_formats: ok -> integer/percent/decimal")
     print("smoke-check passed")
 
