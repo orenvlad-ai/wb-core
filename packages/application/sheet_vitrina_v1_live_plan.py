@@ -1,4 +1,4 @@
-"""Live readback plan для sheet_vitrina_v1 по uploaded compact registry package."""
+"""Heavy refresh-builder для ready snapshot sheet_vitrina_v1 по uploaded compact registry package."""
 
 from __future__ import annotations
 

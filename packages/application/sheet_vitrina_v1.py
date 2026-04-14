@@ -52,6 +52,26 @@ def build_sheet_write_plan(
     )
 
 
+def parse_sheet_write_plan_payload(payload: Mapping[str, Any]) -> SheetVitrinaV1Envelope:
+    plan_version = _require_str(payload, "plan_version")
+    snapshot_id = _require_str(payload, "snapshot_id")
+    as_of_date = _require_str(payload, "as_of_date")
+    sheets_raw = payload.get("sheets")
+    if not isinstance(sheets_raw, list) or len(sheets_raw) != 2:
+        raise ValueError("sheet write plan payload must contain two sheet targets")
+
+    sheets = [_parse_write_target(item) for item in sheets_raw]
+    if len({item.sheet_name for item in sheets}) != 2:
+        raise ValueError("sheet write plan payload must contain exactly two distinct sheets")
+
+    return SheetVitrinaV1Envelope(
+        plan_version=plan_version,
+        snapshot_id=snapshot_id,
+        as_of_date=as_of_date,
+        sheets=sheets,
+    )
+
+
 def _build_write_target(section: Mapping[str, Any], layout: Mapping[str, Any]) -> SheetVitrinaWriteTarget:
     sheet_name = _require_str(section, "sheet_name")
     if sheet_name != _require_str(layout, "sheet_name"):
@@ -74,6 +94,33 @@ def _build_write_target(section: Mapping[str, Any], layout: Mapping[str, Any]) -
         clear_range=_require_str(layout, "clear_range"),
         write_mode=_require_str(layout, "write_mode"),
         partial_update_allowed=_require_bool(layout, "partial_update_allowed"),
+        header=header,
+        rows=rows,
+        row_count=row_count,
+        column_count=column_count,
+    )
+
+
+def _parse_write_target(value: Any) -> SheetVitrinaWriteTarget:
+    if not isinstance(value, Mapping):
+        raise ValueError("sheet write target must be an object")
+
+    header = _require_string_list(value, "header")
+    rows = _require_rows(value, "rows", expected_width=len(header), sheet_name=_require_str(value, "sheet_name"))
+    row_count = _require_int(value, "row_count")
+    column_count = _require_int(value, "column_count")
+    if row_count != len(rows):
+        raise ValueError("row_count must match rows length")
+    if column_count != len(header):
+        raise ValueError("column_count must match header length")
+
+    return SheetVitrinaWriteTarget(
+        sheet_name=_require_str(value, "sheet_name"),
+        write_start_cell=_require_str(value, "write_start_cell"),
+        write_rect=_require_str(value, "write_rect"),
+        clear_range=_require_str(value, "clear_range"),
+        write_mode=_require_str(value, "write_mode"),
+        partial_update_allowed=_require_bool(value, "partial_update_allowed"),
         header=header,
         rows=rows,
         row_count=row_count,
@@ -163,4 +210,11 @@ def _require_bool(mapping: Mapping[str, Any], key: str) -> bool:
     value = mapping.get(key)
     if not isinstance(value, bool):
         raise ValueError(f"{key} must be a boolean")
+    return value
+
+
+def _require_int(mapping: Mapping[str, Any], key: str) -> int:
+    value = mapping.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{key} must be an integer")
     return value

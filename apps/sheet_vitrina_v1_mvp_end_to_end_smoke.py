@@ -17,7 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from packages.adapters.registry_upload_http_entrypoint import DEFAULT_SHEET_PLAN_PATH, DEFAULT_UPLOAD_PATH
+from packages.adapters.registry_upload_http_entrypoint import (
+    DEFAULT_SHEET_PLAN_PATH,
+    DEFAULT_SHEET_REFRESH_PATH,
+    DEFAULT_UPLOAD_PATH,
+)
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 
@@ -40,6 +44,7 @@ def main() -> None:
             port=port,
             upload_path=DEFAULT_UPLOAD_PATH,
             sheet_plan_path=DEFAULT_SHEET_PLAN_PATH,
+            sheet_refresh_path=DEFAULT_SHEET_REFRESH_PATH,
             runtime_dir=runtime_dir,
         )
         env = os.environ.copy()
@@ -49,6 +54,7 @@ def main() -> None:
                 "REGISTRY_UPLOAD_HTTP_PORT": str(config.port),
                 "REGISTRY_UPLOAD_HTTP_PATH": config.upload_path,
                 "SHEET_VITRINA_HTTP_PATH": config.sheet_plan_path,
+                "SHEET_VITRINA_REFRESH_HTTP_PATH": config.sheet_refresh_path,
                 "REGISTRY_UPLOAD_RUNTIME_DIR": str(config.runtime_dir),
                 "REGISTRY_UPLOAD_ACTIVATED_AT_OVERRIDE": ACTIVATED_AT,
                 "SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK": "1",
@@ -77,6 +83,8 @@ def main() -> None:
                         str(ROOT / "gas" / "sheet_vitrina_v1" / "RegistryUploadTrigger.gs"),
                         "--endpointUrl",
                         base_url,
+                        "--refreshUrl",
+                        f"http://127.0.0.1:{config.port}{config.sheet_refresh_path}",
                         "--bundleVersion",
                         BUNDLE_VERSION,
                         "--uploadedAt",
@@ -109,6 +117,12 @@ def main() -> None:
                 raise AssertionError("upload path must accept every metrics_v2 row built from sheets")
             if accepted["accepted_counts"]["formulas_v2"] != len(built_bundle["formulas_v2"]):
                 raise AssertionError("upload path must accept every formulas_v2 row built from sheets")
+
+            refresh_payload = harness_result["refresh_response"]
+            if refresh_payload["status"] != "success":
+                raise AssertionError("refresh endpoint must return success")
+            if refresh_payload["as_of_date"] != AS_OF_DATE:
+                raise AssertionError("refresh endpoint as_of_date mismatch")
 
             load_result = harness_result["load_result"]
             if load_result["http_status"] != 200:
@@ -227,6 +241,7 @@ def main() -> None:
 
             print(f"prepare seed: ok -> {prepare_result['seeded_counts']}")
             print(f"upload accepted: ok -> {accepted['bundle_version']}")
+            print(f"refresh snapshot: ok -> {refresh_payload['snapshot_id']}")
             print(f"load DATA_VITRINA: ok -> {write_result['sheets'][0]['write_rect']}")
             print(f"load STATUS: ok -> {sheet_plan['sheets'][1]['write_rect']}")
             print("smoke-check passed")

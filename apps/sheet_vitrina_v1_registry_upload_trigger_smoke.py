@@ -17,7 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from packages.adapters.registry_upload_http_entrypoint import DEFAULT_SHEET_PLAN_PATH, DEFAULT_UPLOAD_PATH
+from packages.adapters.registry_upload_http_entrypoint import (
+    DEFAULT_SHEET_PLAN_PATH,
+    DEFAULT_SHEET_REFRESH_PATH,
+    DEFAULT_UPLOAD_PATH,
+)
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 
@@ -42,6 +46,7 @@ def main() -> None:
             port=port,
             upload_path=DEFAULT_UPLOAD_PATH,
             sheet_plan_path=DEFAULT_SHEET_PLAN_PATH,
+            sheet_refresh_path=DEFAULT_SHEET_REFRESH_PATH,
             runtime_dir=runtime_dir,
         )
         env = os.environ.copy()
@@ -50,6 +55,8 @@ def main() -> None:
                 "REGISTRY_UPLOAD_HTTP_HOST": config.host,
                 "REGISTRY_UPLOAD_HTTP_PORT": str(config.port),
                 "REGISTRY_UPLOAD_HTTP_PATH": config.upload_path,
+                "SHEET_VITRINA_HTTP_PATH": config.sheet_plan_path,
+                "SHEET_VITRINA_REFRESH_HTTP_PATH": config.sheet_refresh_path,
                 "REGISTRY_UPLOAD_RUNTIME_DIR": str(config.runtime_dir),
                 "REGISTRY_UPLOAD_ACTIVATED_AT_OVERRIDE": ACTIVATED_AT,
             }

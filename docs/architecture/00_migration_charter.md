@@ -9,7 +9,7 @@ Foundation-этап уже пройден. Текущее состояние `ma
 - подтверждён working contour `sku_display -> table_projection -> registry_pilot -> wide_matrix -> delivery -> sheet_scaffold`;
 - live write и presentation новой витрины уже присутствуют в `main` как code + evidence;
 - registry upload path уже дошёл до artifact-backed bundle, local validator, file-backed service, DB-backed runtime, live HTTP entrypoint, sheet-side operator trigger и compact v3 bootstrap: `migration/86`, `migration/87`, `migration/88`, `migration/89`, `migration/90`, `migration/91`, `migration/92` вместе с соответствующими модулями уже materialize-ятся в текущей линии;
-- `migration/93` уже materialize-ится в текущем `main` как первый bounded end-to-end MVP `prepare -> upload -> load DATA_VITRINA`.
+- `migration/93` уже materialize-ится в текущем `main` как первый bounded end-to-end MVP `prepare -> upload -> refresh -> load DATA_VITRINA`.
 
 ## Цель
 
@@ -65,7 +65,7 @@ Foundation-этап уже пройден. Текущее состояние `ma
 - wide matrix, delivery bundle и sheet scaffold;
 - live write bridge и presentation pass для новой Google Sheets-витрины;
 - compact v3 bootstrap для `CONFIG / METRICS / FORMULAS`;
-- первый bounded reverse-load server-side current truth обратно в `DATA_VITRINA`.
+- первый bounded refresh/read split с repo-owned ready snapshot для reverse-load обратно в `DATA_VITRINA`.
 
 На текущем `main` ещё не собраны:
 - deploy/auth-hardening и production storage binding вокруг registry upload.
