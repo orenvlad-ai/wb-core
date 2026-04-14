@@ -25,12 +25,14 @@ Current main-confirmed operator seed этого шага фиксируется 
 - `metrics_v2 = 102`
 - `formulas_v2 = 7`
 - `enabled + show_in_data = 95`
+- operator-facing `DATA_VITRINA` = `34` blocks, `7` metric keys на блок, `305` data rows при одном дне
 
 Bounded допущение шага:
 - в seed materialize-ится не full legacy dump;
 - sheet-side `METRICS` поднимает полный uploaded compact dictionary для upload/runtime;
-- `DATA_VITRINA` materialize-ит полный current displayed set, а не subset `7` или `19`;
-- metrics без live HTTP adapters остаются rows с пустыми values и явным blocker-status, а не отрезаются.
+- server-side current truth и lightweight plan остаются шире operator-facing sheet и держат все `95` enabled+show_in_data metrics;
+- `DATA_VITRINA` сознательно reshaped в legacy-aligned date-matrix view по bounded 7-metric subset вместо full row dump;
+- metrics без live HTTP adapters остаются явным server-side/status surface, а не превращаются в local sheet fallback.
 
 ## 4. Readback Семантика
 
@@ -50,7 +52,13 @@ Bounded допущение шага:
   - `stocks_block`
   - `ads_compact_block`
   - `fin_report_daily_block`
-- итоговый план пишется через existing sheet write bridge в `DATA_VITRINA` и `STATUS`.
+- итоговый плоский plan пишется через existing sheet write bridge в `DATA_VITRINA` и `STATUS`;
+- sheet-side bridge затем reshaped-ит `DATA_VITRINA` в matrix layout:
+  - `дата | key | <day1> | <day2> | ...`
+  - section row + `7` metric rows + blank separator;
+  - same-day overwrite обновляет текущую date-column;
+  - новый день добавляет новую колонку справа;
+  - row grouping / outline intentionally не возвращаются.
 
 Явные решения этого шага:
 - `openCount` и `open_card_count` не объединяются;
@@ -75,6 +83,7 @@ Bounded допущение шага:
 - uploaded compact seed;
 - второй operator-facing trigger `Загрузить таблицу`;
 - первый живой обратный контур из server-side truth в `DATA_VITRINA`;
+- bounded legacy-aligned matrix presentation поверх existing server contour;
 - end-to-end smoke `prepare -> upload -> load`.
 
 ## 6. Что Остаётся После Этого Блока

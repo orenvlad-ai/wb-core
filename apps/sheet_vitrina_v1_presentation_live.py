@@ -35,13 +35,13 @@ STATUS_WIDTHS = {
     "K": 260,
 }
 
-HEADER_BACKGROUND = "#1f2937"
-HEADER_FONT_COLOR = "#ffffff"
+HEADER_BACKGROUND = "#ffffff"
+HEADER_FONT_COLOR = "#000000"
 DATE_PATTERN = "dd.mm.yyyy"
 PERCENT_PATTERN = "0.0%"
-RUBLE_PATTERN = '#,##0" ₽"'
 INTEGER_PATTERN = "#,##0"
 DECIMAL_PATTERN = "#,##0.00"
+TEXT_PATTERN = "@"
 
 
 def _load_clasp_config() -> dict[str, Any]:
@@ -281,6 +281,22 @@ def _build_presentation_requests(sheet_props: dict[str, Any], values: dict[str, 
         },
         {
             "repeatCell": {
+                "range": _sheet_range(data_sheet_id, start_row=1, end_row=data_last_row, start_column=0, end_column=data_last_col),
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": _rgb_from_hex("#ffffff"),
+                        "textFormat": {
+                            "foregroundColor": _rgb_from_hex("#000000"),
+                            "bold": False,
+                        },
+                        "verticalAlignment": "MIDDLE",
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor,textFormat,verticalAlignment)",
+            }
+        },
+        {
+            "repeatCell": {
                 "range": _sheet_range(data_sheet_id, start_row=0, end_row=1, start_column=0, end_column=data_last_col),
                 "cell": {"userEnteredFormat": header_format},
                 "fields": "userEnteredFormat(backgroundColor,textFormat,verticalAlignment,horizontalAlignment)",
@@ -410,7 +426,53 @@ def _build_presentation_requests(sheet_props: dict[str, Any], values: dict[str, 
 
     for row_index, row in enumerate(data_values[1:], start=1):
         key = str(row[1]) if len(row) > 1 else ""
-        pattern = _resolve_data_pattern(key, row[2:])
+        label = str(row[0]) if row else ""
+        if not label and not key:
+            requests.append(
+                {
+                    "repeatCell": {
+                        "range": _sheet_range(data_sheet_id, start_row=row_index, end_row=row_index + 1, start_column=2, end_column=data_last_col),
+                        "cell": {
+                            "userEnteredFormat": {
+                                "horizontalAlignment": "LEFT",
+                                "numberFormat": _number_format(TEXT_PATTERN, "TEXT"),
+                            }
+                        },
+                        "fields": "userEnteredFormat(horizontalAlignment,numberFormat)",
+                    }
+                }
+            )
+            continue
+        if _is_block_key(key):
+            requests.append(
+                {
+                    "repeatCell": {
+                        "range": _sheet_range(data_sheet_id, start_row=row_index, end_row=row_index + 1, start_column=0, end_column=data_last_col),
+                        "cell": {
+                            "userEnteredFormat": {
+                                "textFormat": {"bold": True},
+                            }
+                        },
+                        "fields": "userEnteredFormat.textFormat.bold",
+                    }
+                }
+            )
+            requests.append(
+                {
+                    "repeatCell": {
+                        "range": _sheet_range(data_sheet_id, start_row=row_index, end_row=row_index + 1, start_column=2, end_column=data_last_col),
+                        "cell": {
+                            "userEnteredFormat": {
+                                "horizontalAlignment": "LEFT",
+                                "numberFormat": _number_format(TEXT_PATTERN, "TEXT"),
+                            }
+                        },
+                        "fields": "userEnteredFormat(horizontalAlignment,numberFormat)",
+                    }
+                }
+            )
+            continue
+        pattern = _resolve_data_pattern(key)
         requests.append(
             {
                 "repeatCell": {
@@ -428,15 +490,16 @@ def _build_presentation_requests(sheet_props: dict[str, Any], values: dict[str, 
     return requests
 
 
-def _resolve_data_pattern(key: str, values: list[Any]) -> dict[str, str]:
-    if re.search(r"\|(spp|ads_ctr)$", key):
+def _resolve_data_pattern(key: str) -> dict[str, str]:
+    if key in {"ctr", "ctr_current"}:
         return _number_format(PERCENT_PATTERN, "PERCENT")
-    if re.search(r"(price_seller_discounted|_rub)$", key):
-        return _number_format(RUBLE_PATTERN, "NUMBER")
-    for value in values:
-        if isinstance(value, float) and not value.is_integer():
-            return _number_format(DECIMAL_PATTERN, "NUMBER")
+    if key == "position_avg":
+        return _number_format(DECIMAL_PATTERN, "NUMBER")
     return _number_format(INTEGER_PATTERN, "NUMBER")
+
+
+def _is_block_key(key: str) -> bool:
+    return bool(re.match(r"^(TOTAL|GROUP:[^|]+|SKU:[^|]+)$", key))
 
 
 def _apply_batch_update(token: str, requests: list[dict[str, Any]]) -> dict[str, Any]:
@@ -526,18 +589,24 @@ def _assert_data_vitrina(snapshot: dict[str, Any], values: list[list[Any]]) -> N
     if _get_number_format(header_date) != DATE_PATTERN:
         raise AssertionError(f"DATA_VITRINA date header pattern mismatch: {header_date}")
 
-    percent_row = _find_row_index(values, r"\|(spp|ads_ctr)$")
-    ruble_row = _find_row_index(values, r"(price_seller_discounted|_rub)$")
-    integer_row = _find_row_index(values, r"TOTAL\|stock_total$")
+    section_row = _find_row_index(values, r"^TOTAL$")
+    percent_row = _find_row_index(values, r"^(ctr|ctr_current)$")
+    decimal_row = _find_row_index(values, r"^position_avg$")
+    integer_row = _find_row_index(values, r"^view_count$")
 
+    section_cell = _get_cell(sheet, section_row, 2)
     percent_cell = _get_cell(sheet, percent_row, 2)
-    ruble_cell = _get_cell(sheet, ruble_row, 2)
+    decimal_cell = _get_cell(sheet, decimal_row, 2)
     integer_cell = _get_cell(sheet, integer_row, 2)
 
+    if _get_number_format(section_cell) != TEXT_PATTERN:
+        raise AssertionError(f"DATA_VITRINA section format mismatch: {section_cell}")
+    if _get_alignment(section_cell) != "left":
+        raise AssertionError(f"DATA_VITRINA section alignment mismatch: {section_cell}")
     if _get_number_format(percent_cell) != PERCENT_PATTERN:
         raise AssertionError(f"DATA_VITRINA percent format mismatch: {percent_cell}")
-    if _get_number_format(ruble_cell) != RUBLE_PATTERN:
-        raise AssertionError(f"DATA_VITRINA ruble format mismatch: {ruble_cell}")
+    if _get_number_format(decimal_cell) != DECIMAL_PATTERN:
+        raise AssertionError(f"DATA_VITRINA decimal format mismatch: {decimal_cell}")
     if _get_number_format(integer_cell) != INTEGER_PATTERN:
         raise AssertionError(f"DATA_VITRINA integer format mismatch: {integer_cell}")
 

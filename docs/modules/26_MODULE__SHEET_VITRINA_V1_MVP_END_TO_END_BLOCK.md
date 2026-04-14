@@ -33,6 +33,7 @@ related_endpoints:
   - "POST /v1/registry-upload/bundle"
   - "GET /v1/sheet-vitrina-v1/plan"
 related_runners:
+  - "apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py"
   - "apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py"
   - "apps/registry_upload_http_entrypoint_live.py"
 related_docs:
@@ -44,7 +45,7 @@ related_docs:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под uploaded compact package: `prepare -> upload -> load` теперь работает на `33 / 102 / 7`, materialize-ит `95` displayed metrics и явно фиксирует blocked live sources для promo/cogs."
+update_note: "Обновлён под legacy-aligned matrix layout: `prepare -> upload -> load` по-прежнему работает на `33 / 102 / 7` и current truth `95`, но operator-facing `DATA_VITRINA` теперь reshaped в bounded 7-metric date-matrix view с историей по колонкам."
 ---
 
 # 1. Идентификатор и статус
@@ -92,15 +93,28 @@ update_note: "Обновлён под uploaded compact package: `prepare -> uplo
 - `metrics_v2 = 102`
 - `formulas_v2 = 7`
 - `enabled + show_in_data = 95`
-- `DATA_VITRINA` materialize-ит:
-  - `95` displayed metric keys
-  - `1631` data rows (`47 TOTAL` + `48 * 33 SKU`)
+- server-side plan materialize-ит:
+  - `95` enabled+show_in_data metric rows
+  - `1631` flat data rows (`47 TOTAL` + `48 * 33 SKU`)
+- operator-facing `DATA_VITRINA` materialize-ит:
+  - `34` logical blocks (`1 TOTAL + 33 SKU`)
+  - `7` metric keys на блок
+  - `305` data rows (`34` section rows + `238` metric rows + `33` separator rows)
+  - date history по колонкам вправо c header `дата | key | <day1> | <day2> | ...`
 
 Bounded допущение:
 - seed deliberately не равен full legacy dump;
 - `METRICS` materialize-ит полный uploaded compact dictionary для sheet/upload/runtime;
-- `DATA_VITRINA` больше не режется до `7` или `19` metric subset;
-- unsupported live-source tail фиксируется в `STATUS`, а rows остаются materialized с пустыми значениями, а не отбрасываются.
+- server-side current truth и `STATUS` не режутся до legacy subset;
+- `DATA_VITRINA` сознательно остаётся bounded operator-facing matrix-view только по `7` legacy-aligned metrics:
+  - `view_count`
+  - `ctr`
+  - `open_card_count`
+  - `views_current`
+  - `ctr_current`
+  - `orders_current`
+  - `position_avg`
+- unsupported live-source tail продолжает фиксироваться в `STATUS`, а не переносится в Apps Script как local truth path.
 
 ## 3.2 Явно принятые решения bounded шага
 
@@ -114,8 +128,8 @@ Bounded допущение:
 ## 3.3 Явный live blocker
 
 - `promo_by_price` и `cogs_by_group` не имеют live HTTP adapters в текущем contour.
-- Поэтому promo/cogs-backed rows materialize-ятся в `DATA_VITRINA`, но numeric values для них остаются пустыми.
-- Это сознательно лучше, чем тихо срезать строки или подменять live contour локальным fixture/rule path.
+- Поэтому full current truth / `STATUS` остаются шире operator-facing matrix-view.
+- Это сознательно лучше, чем тихо подменять server contour локальным fixture/rule path или возвращать heavy aggregation logic в Apps Script.
 
 ## 3.4 Service block bounded шага
 
@@ -155,16 +169,20 @@ Bounded допущение:
 - local harness:
   - `apps/sheet_vitrina_v1_registry_upload_trigger_harness.js`
 - smoke:
+  - `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`
   - `apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py`
 
 # 6. Какой smoke подтверждён
 
 - Подтверждён локальный end-to-end smoke через `apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py`.
+- Подтверждён targeted matrix smoke через `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`.
 - Smoke проверяет:
   - что `prepare` поднимает operator seed `33 / 102 / 7`;
   - что upload из sheet-side trigger сохраняет current truth в existing runtime без усечения `metrics_v2`;
   - что `load` ходит в живой HTTP plan endpoint, а не в локальный stub;
-  - что `DATA_VITRINA` materialize-ит `95` displayed metric keys и full row set из current truth;
+  - что `DATA_VITRINA` мигрирует из flat one-day layout в date-matrix without row grouping;
+  - что `same-day` load перезаписывает существующую date-column, а новый день добавляет колонку вправо;
+  - что `DATA_VITRINA` materialize-ит bounded 7-metric matrix view по текущему current truth без локального fixture-source;
   - что `STATUS` фиксирует live sources и blocked sources `promo_by_price` / `cogs_by_group`;
   - что service/status block `CONFIG!H:I` сохраняется и не перезаписывается при load.
 
@@ -174,13 +192,14 @@ Bounded допущение:
 - Sheet-side upload registry больше не обрезает `METRICS` до subset: current truth хранит полный uploaded compact dictionary `102` rows.
 - Таблица больше не заканчивается на upload-only flow: из уже существующего server-side contour появился controlled reverse-load обратно в `DATA_VITRINA`.
 - Readback строится на текущем registry current truth и уже materialized live public source blocks, а не на фейковом локальном fixture.
-- `DATA_VITRINA` теперь показывает полный current authoritative displayed set `95` metric keys вместо прежнего live cap.
+- `DATA_VITRINA` теперь показывает legacy-aligned date-matrix view c `7` stable metric rows на блок и с историей по датам вправо, не меняя server-side truth semantics.
 - Existing upload contour не ломается: bundle/result contracts и control block сохраняются.
 
 # 8. Что пока не является частью финальной production-сборки
 
 - full legacy parity 1:1 по всем metric sections и registry rows;
 - numeric live fill для promo/cogs-backed metrics до появления `promo_by_price` и `cogs_by_group` HTTP adapters;
+- full operator-facing legacy parity beyond bounded 7-metric matrix subset;
 - official-api-backed coverage всех historical metrics beyond current uploaded package;
 - stable hosted runtime URL и production-bound operator runtime;
 - deploy/auth-hardening;

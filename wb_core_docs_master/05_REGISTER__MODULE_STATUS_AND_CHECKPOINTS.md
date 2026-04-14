@@ -69,7 +69,8 @@ Current main-confirmed operator flow:
 
 Current main-confirmed counts для этого flow:
 - prepare/upload package = `33 / 102 / 7`
-- `DATA_VITRINA` displayed metric keys = `95`
+- current truth / server-side plan displayed metrics = `95`
+- operator-facing `DATA_VITRINA` = `34` blocks, `7` metric keys на блок, `305` data rows, date history grows to the right
 
 This is the first bounded MVP checkpoint, not final production parity.
 
