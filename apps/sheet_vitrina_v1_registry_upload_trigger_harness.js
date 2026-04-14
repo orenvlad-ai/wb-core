@@ -29,8 +29,8 @@ function main() {
       ? runSeedBootstrapMode({ context, spreadsheet, options })
       : options.mode === 'mvp_end_to_end'
         ? runMvpEndToEndMode({ context, spreadsheet, options })
-      : options.mode === 'matrix_layout'
-        ? runMatrixLayoutMode({ context, spreadsheet })
+      : options.mode === 'server_driven_materialization'
+        ? runServerDrivenMaterializationMode({ context, spreadsheet })
       : runBundleUploadMode({ context, spreadsheet, options });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
@@ -47,7 +47,7 @@ function parseArgs(argv) {
   }
   options.mode = options.mode || 'bundle_upload';
   const requiredKeys = ['scriptPath'];
-  if (options.mode !== 'matrix_layout') {
+  if (options.mode !== 'server_driven_materialization') {
     requiredKeys.push('endpointUrl', 'bundleVersion', 'uploadedAt');
   }
   if (options.mode === 'bundle_upload') {
@@ -157,49 +157,44 @@ function runMvpEndToEndMode({ context, spreadsheet, options }) {
   };
 }
 
-function runMatrixLayoutMode({ context, spreadsheet }) {
+function runServerDrivenMaterializationMode({ context, spreadsheet }) {
   const dayOnePlan = buildSyntheticSheetVitrinaPlan('2026-04-12', 0);
   const dayOneOverwritePlan = buildSyntheticSheetVitrinaPlan('2026-04-12', 500);
   const dayTwoPlan = buildSyntheticSheetVitrinaPlan('2026-04-13', 1000);
 
-  writePlanDirectlyToSheet(spreadsheet, dayOnePlan.sheets[0]);
-  writePlanDirectlyToSheet(spreadsheet, dayOnePlan.sheets[1]);
-  const flatSeedSnapshot = snapshotSheet(spreadsheet.getSheetByName('DATA_VITRINA'));
-
-  const migrated = parseJsonString(context.writeSheetVitrinaV1Plan(JSON.stringify(dayOnePlan)));
-  const migratedState = parseJsonString(context.getSheetVitrinaV1State());
-  const migratedPresentation = parseJsonString(context.getSheetVitrinaV1PresentationSnapshot());
-  const migratedSnapshot = snapshotSheet(spreadsheet.getSheetByName('DATA_VITRINA'));
+  const firstLoad = parseJsonString(context.writeSheetVitrinaV1Plan(JSON.stringify(dayOnePlan)));
+  const firstState = parseJsonString(context.getSheetVitrinaV1State());
+  const firstPresentation = parseJsonString(context.getSheetVitrinaV1PresentationSnapshot());
+  const firstSnapshot = snapshotSheet(spreadsheet.getSheetByName('DATA_VITRINA'));
 
   const sameDayOverwrite = parseJsonString(context.writeSheetVitrinaV1Plan(JSON.stringify(dayOneOverwritePlan)));
   const sameDayState = parseJsonString(context.getSheetVitrinaV1State());
   const sameDayPresentation = parseJsonString(context.getSheetVitrinaV1PresentationSnapshot());
   const sameDaySnapshot = snapshotSheet(spreadsheet.getSheetByName('DATA_VITRINA'));
 
-  const nextDayAppend = parseJsonString(context.writeSheetVitrinaV1Plan(JSON.stringify(dayTwoPlan)));
+  const nextDayOverwrite = parseJsonString(context.writeSheetVitrinaV1Plan(JSON.stringify(dayTwoPlan)));
   const nextDayState = parseJsonString(context.getSheetVitrinaV1State());
   const nextDayPresentation = parseJsonString(context.getSheetVitrinaV1PresentationSnapshot());
   const nextDaySnapshot = snapshotSheet(spreadsheet.getSheetByName('DATA_VITRINA'));
 
   return {
-    migrated,
+    first_load: firstLoad,
     same_day_overwrite: sameDayOverwrite,
-    next_day_append: nextDayAppend,
+    next_day_overwrite: nextDayOverwrite,
     snapshots: {
-      after_flat_seed: flatSeedSnapshot,
-      after_migration: migratedSnapshot,
+      after_first_load: firstSnapshot,
       after_same_day_overwrite: sameDaySnapshot,
-      after_next_day_append: nextDaySnapshot,
+      after_next_day_overwrite: nextDaySnapshot,
     },
     states: {
-      migrated: migratedState,
+      first_load: firstState,
       same_day_overwrite: sameDayState,
-      next_day_append: nextDayState,
+      next_day_overwrite: nextDayState,
     },
     presentations: {
-      migrated: migratedPresentation,
+      first_load: firstPresentation,
       same_day_overwrite: sameDayPresentation,
-      next_day_append: nextDayPresentation,
+      next_day_overwrite: nextDayPresentation,
     },
   };
 }
@@ -244,15 +239,20 @@ function buildSyntheticSheetVitrinaPlan(asOfDate, offset) {
     ['ctr_current', 'CTR в поиске'],
     ['orders_current', 'Заказы в поиске'],
     ['position_avg', 'Средняя позиция в поиске'],
+    ['proxy_profit_rub', 'Прокси-прибыль, ₽'],
+    ['inventory_value_retail_rub', 'Розничная стоимость остатков, ₽'],
+    ['localization_percent', 'Локализация, %'],
   ];
   const totalRows = [
+    ['Итого: Маржинальность прокси, %', 'TOTAL|proxy_margin_pct_total', Number((0.2 + offset / 10000).toFixed(4))],
+    ['Итого: Прокси-прибыль, ₽', 'TOTAL|total_proxy_profit_rub', 10000 + offset],
     ['Итого: Показы в воронке', 'TOTAL|total_view_count', 1000 + offset],
     ['Итого: Открытия карточки', 'TOTAL|total_open_card_count', 250 + offset],
     ['Итого: Показы в поиске всего', 'TOTAL|total_views_current', 850 + offset],
     ['Итого: CTR в поиске средний', 'TOTAL|avg_ctr_current', 0.23 + offset / 10000],
     ['Итого: Заказы в поиске всего', 'TOTAL|total_orders_current', 75 + offset],
     ['Итого: Средняя позиция в поиске средняя', 'TOTAL|avg_position_avg', 4.25 + offset / 1000],
-    ['Итого: Заказы всего', 'TOTAL|total_orderCount', 90 + offset],
+    ['Итого: Розничная стоимость остатков, ₽', 'TOTAL|inventory_value_retail_rub_total', 15000 + offset],
   ];
   const groups = [
     { key: 'GROUP:Clean', label: 'Clean', base: 200 + offset },
@@ -266,11 +266,11 @@ function buildSyntheticSheetVitrinaPlan(asOfDate, offset) {
   const rows = totalRows.slice();
   groups.forEach((group) => {
     supportedMetrics.forEach(([metricKey, title], index) => {
-      rows.push([
-        `Группа ${group.label}: ${title}`,
-        `${group.key}|${metricKey}`,
-        syntheticMetricValue(metricKey, group.base + index),
-      ]);
+        rows.push([
+          `Группа ${group.label}: ${title}`,
+          `${group.key}|${metricKey}`,
+          syntheticMetricValue(metricKey, group.base + index),
+        ]);
     });
   });
   skus.forEach((sku) => {
@@ -323,7 +323,7 @@ function buildSyntheticSheetVitrinaPlan(asOfDate, offset) {
         ],
         rows: [
           ['registry_upload_current_state', 'success', asOfDate, asOfDate, '', '', '', 2, 2, '', 'synthetic'],
-          ['sheet_vitrina_v1_compact_live_v2', 'success', asOfDate, asOfDate, '', '', '', 7, 7, '', 'synthetic'],
+          ['sheet_vitrina_v1_compact_live_v2', 'success', asOfDate, asOfDate, '', '', '', supportedMetrics.length + 2, supportedMetrics.length + 2, '', 'synthetic'],
         ],
         row_count: 2,
         column_count: 11,
@@ -333,11 +333,14 @@ function buildSyntheticSheetVitrinaPlan(asOfDate, offset) {
 }
 
 function syntheticMetricValue(metricKey, base) {
-  if (metricKey === 'ctr' || metricKey === 'ctr_current') {
+  if (metricKey === 'ctr' || metricKey === 'ctr_current' || metricKey === 'localization_percent') {
     return Number((0.1 + base / 1000).toFixed(4));
   }
   if (metricKey === 'position_avg') {
     return Number((2 + base / 100).toFixed(2));
+  }
+  if (metricKey.endsWith('_rub')) {
+    return Number((100 + base / 10).toFixed(2));
   }
   return Math.round(base);
 }
