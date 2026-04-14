@@ -22,7 +22,7 @@ update_triggers:
   - "изменение migration boundary"
   - "изменение operator/runtime invariant"
   - "изменение docs governance"
-built_from_commit: "e4c08c83e0f19e8f270ac8ee93812a751f57a021"
+built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
 ---
 
 # Summary
@@ -49,10 +49,11 @@ built_from_commit: "e4c08c83e0f19e8f270ac8ee93812a751f57a021"
 | `C-12` | Bounded и безопасная техническая работа должна сначала идти через Codex; пользователю можно отдавать только human-only step: логин, права, ручной merge, ручная UI-проверка или решение по риску. |
 | `C-13` | Если manual handoff неизбежен, действует `one step = one action`: один ответ содержит один минимальный практический следующий шаг и не смешивает несколько независимых рискованных действий. |
 | `C-14` | Матрица `L1/L2/L3` задаёт минимальный execution burden: `L1` = локальный малорисковый шаг без отдельного read-only review и без `README` / architecture sync по умолчанию, только targeted smoke; `L2` = bounded block с обязательными `module doc + index`, targeted smoke и `1` integration smoke; `L3` = boundary/risk/governance task с усиленным bounded execution, docs sync по смыслу текущего checkpoint и при необходимости отдельной merge-readiness проверкой. |
+| `C-15` | Если uploaded metric присутствует в current truth и `show_in_data = true`, его row не должен silently исчезать из `DATA_VITRINA`; при отсутствии live adapter допустимы только blank value + явный blocker в `STATUS`. |
 
 # Known gaps
 
-- Некоторые constraints всё ещё различают current `19`-row sheet/upload dictionary и current `7` supported live readback metrics, а не full parity.
+- Некоторые constraints всё ещё различают full row materialization и full numeric live coverage: promo/cogs-backed metrics уже обязаны оставаться в `DATA_VITRINA`, но их values могут быть пустыми до появления live adapters.
 - Hosted runtime/deploy hardening пока operational, а не repo-owned contract layer.
 
 # Not in scope

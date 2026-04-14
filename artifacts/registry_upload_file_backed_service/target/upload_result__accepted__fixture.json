@@ -2,9 +2,9 @@
   "status": "accepted",
   "bundle_version": "registry_upload_bundle_v1__2026-04-13T12:00:00Z",
   "accepted_counts": {
-    "config_v2": 5,
-    "metrics_v2": 12,
-    "formulas_v2": 2
+    "config_v2": 33,
+    "metrics_v2": 102,
+    "formulas_v2": 7
   },
   "validation_errors": [],
   "activated_at": "2026-04-13T12:00:02Z"

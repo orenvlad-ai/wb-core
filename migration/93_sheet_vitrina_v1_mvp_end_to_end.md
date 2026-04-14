@@ -4,15 +4,15 @@
 
 `sheet_vitrina_v1_mvp_end_to_end_block` — следующий bounded implementation step поверх уже смёрженного `sheet_vitrina_v1_registry_seed_v3_bootstrap_block`.
 
-Этот шаг не строит новый server-side контур, а впервые замыкает уже существующую линию в один операторский MVP-flow:
-- `prepare` поднимает не пилотный мини-набор, а expanded MVP-safe seed;
+Этот шаг не строит новый server-side контур, а замыкает уже существующую линию в один операторский MVP-flow:
+- `prepare` поднимает uploaded compact seed;
 - `upload` продолжает писать в уже существующий HTTP entrypoint;
 - `load` возвращает живые server-side данные обратно в `DATA_VITRINA`.
 
 ## 2. Что Именно Покрывает Блок
 
 Блок покрывает один bounded end-to-end MVP:
-- materialize-ить `CONFIG / METRICS / FORMULAS` уже заполненным MVP-safe compact seed;
+- materialize-ить `CONFIG / METRICS / FORMULAS` уже заполненным uploaded compact seed;
 - сохранить service/status block и не сломать existing upload trigger;
 - использовать уже существующий `POST /v1/registry-upload/bundle`;
 - добавить второй operator-facing trigger `Загрузить таблицу`;
@@ -22,13 +22,15 @@
 
 Current main-confirmed operator seed этого шага фиксируется так:
 - `config_v2 = 33`
-- `metrics_v2 = 19`
-- `formulas_v2 = 2`
+- `metrics_v2 = 102`
+- `formulas_v2 = 7`
+- `enabled + show_in_data = 95`
 
 Bounded допущение шага:
 - в seed materialize-ится не full legacy dump;
-- sheet-side `METRICS` больше не режется до `7` MVP-safe rows и поднимает полный current main-confirmed metrics dictionary для upload/runtime;
-- `DATA_VITRINA` при этом остаётся bounded to current `7` supported live readback metrics и не расширяется в этом шаге шире, чем нужно для upload.
+- sheet-side `METRICS` поднимает полный uploaded compact dictionary для upload/runtime;
+- `DATA_VITRINA` materialize-ит полный current displayed set, а не subset `7` или `19`;
+- metrics без live HTTP adapters остаются rows с пустыми values и явным blocker-status, а не отрезаются.
 
 ## 4. Readback Семантика
 
@@ -40,7 +42,22 @@ Bounded допущение шага:
 - live data подтягиваются из уже materialized public source blocks:
   - `web_source_snapshot_block`
   - `seller_funnel_snapshot_block`
+  - `sales_funnel_history_block`
+  - `prices_snapshot_block`
+  - `sf_period_block`
+  - `spp_block`
+  - `ads_bids_block`
+  - `stocks_block`
+  - `ads_compact_block`
+  - `fin_report_daily_block`
 - итоговый план пишется через existing sheet write bridge в `DATA_VITRINA` и `STATUS`.
+
+Явные решения этого шага:
+- `openCount` и `open_card_count` не объединяются;
+- uploaded `total_*` / `avg_*` rows сохраняются;
+- uploaded `section` dictionary остаётся authoritative;
+- `CONFIG!H:I` service block сохраняется;
+- `promo_by_price` и `cogs_by_group` пока дают blocked status и blank values, потому что live HTTP adapters ещё не materialized.
 
 Этот шаг не утверждает:
 - full legacy parity 1:1;
@@ -55,7 +72,7 @@ Bounded допущение шага:
 - совместимость с existing upload path.
 
 `sheet_vitrina_v1_mvp_end_to_end_block` добавляет:
-- expanded MVP-safe seed;
+- uploaded compact seed;
 - второй operator-facing trigger `Загрузить таблицу`;
 - первый живой обратный контур из server-side truth в `DATA_VITRINA`;
 - end-to-end smoke `prepare -> upload -> load`.
@@ -64,6 +81,7 @@ Bounded допущение шага:
 
 После bounded MVP всё ещё остаются вне scope:
 - full legacy parity по всем metric sections и registry rows;
+- numeric live fill для promo/cogs-backed metrics до появления HTTP adapters;
 - stable hosted runtime URL вместо временного/локального live routing;
 - deploy/auth-hardening;
 - daily orchestration;

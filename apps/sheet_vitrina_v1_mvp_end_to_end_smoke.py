@@ -121,12 +121,29 @@ def main() -> None:
                 raise AssertionError("STATUS header mismatch")
             if data_values[1][:2] != expected_summary["first_data_key"]:
                 raise AssertionError("unexpected first DATA_VITRINA row key")
-            if not isinstance(data_values[1][2], (int, float)):
-                raise AssertionError("TOTAL first metric must contain numeric value")
+            if not any(
+                row[1].startswith("TOTAL|") and isinstance(row[2], (int, float))
+                for row in data_values[1:]
+            ):
+                raise AssertionError("DATA_VITRINA must contain numeric TOTAL rows")
+
+            sheet_state = harness_result["sheet_state"]
+            data_state = next(item for item in sheet_state["sheets"] if item["sheet_name"] == "DATA_VITRINA")
+            status_state = next(item for item in sheet_state["sheets"] if item["sheet_name"] == "STATUS")
+            if data_state["metric_key_count"] != expected_summary["metric_key_count"]:
+                raise AssertionError("DATA_VITRINA metric_key_count mismatch")
+            if data_state["non_empty_value_row_count"] != expected_summary["non_empty_value_row_count"]:
+                raise AssertionError("DATA_VITRINA non_empty_value_row_count mismatch")
+            if data_state["scope_row_counts"] != expected_summary["scope_row_counts"]:
+                raise AssertionError("DATA_VITRINA scope_row_counts mismatch")
+            if status_state["status_row_count"] != expected_summary["status_row_count"]:
+                raise AssertionError("STATUS status_row_count mismatch")
 
             status_keys = [row[0] for row in status_values[1:]]
             if status_keys != expected_summary["status_keys"]:
                 raise AssertionError("STATUS source keys mismatch")
+            if status_state["source_keys"] != expected_summary["status_keys"]:
+                raise AssertionError("STATUS state summary source keys mismatch")
 
             status_block = harness_result["status_block"]
             if status_block["endpoint_url"] != base_url:

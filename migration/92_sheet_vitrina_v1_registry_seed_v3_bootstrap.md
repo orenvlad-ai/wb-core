@@ -7,7 +7,7 @@
 Этот шаг меняет семантику подготовки листов `CONFIG / METRICS / FORMULAS`:
 - вместо пустых операторских листов;
 - и вместо legacy-формата;
-- таблица получает сразу materialized compact v3 seed, совместимый с текущей upload/runtime линией.
+- таблица получает сразу materialized compact v3 seed из uploaded package, совместимый с текущей upload/runtime линией.
 
 ## 2. Что Именно Покрывает Блок
 
@@ -52,19 +52,19 @@ Service/control block остаётся отдельно:
 
 ## 4. Bounded Допущение По Seed-Pack
 
-Внешний seed-pack v3 не встраивается в repo как полный raw dump.
+Внешний seed-pack v3 materialize-ится в repo как repo-owned uploaded package и как canonical sheet bootstrap.
 
-Для bounded checkpoint в repo materialize-ится runtime-compatible compact subset, потому что текущий upload/runtime контур всё ещё живёт в pilot-bound semantics:
-- `config_v2 = 9`
-- `metrics_v2 = 10`
-- `formulas_v2 = 2`
+Для текущего bounded checkpoint в repo materialize-ится current authoritative package:
+- `config_v2 = 33`
+- `metrics_v2 = 102`
+- `formulas_v2 = 7`
 
 Минимальные нормализации bounded шага:
-- `display_order` переуплотняется в компактный согласованный порядок;
-- `ads_ctr.calc_ref` нормализуется в runtime-compatible `ads_ctr`;
-- `F_proxy_profit_rub` нормализуется в `proxy_profit_rub`.
+- raw uploaded files сохраняются отдельно как source artifact;
+- sheet headers и bundle contract остаются каноническими `config_v2 / metrics_v2 / formulas_v2`;
+- `CONFIG!H:I` service block сохраняется и не смешивается с uploaded rows.
 
-Это не трактуется как финальная authoritative schema всех legacy-метрик и не заменяет будущий более широкий registry expansion.
+Это не трактуется как финальная authoritative schema всего legacy-миррора, но закрывает repo drift относительно uploaded package пользователя.
 
 ## 5. Где Это Materialize-ится В Repo
 

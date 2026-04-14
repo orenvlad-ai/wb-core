@@ -20,7 +20,7 @@ ARTIFACTS_DIR = ROOT / "artifacts" / "registry_upload_bundle_v1"
 INPUT_DIR = ARTIFACTS_DIR / "input"
 TARGET_DIR = ARTIFACTS_DIR / "target"
 TARGET_FIXTURE = TARGET_DIR / "registry_upload_bundle__fixture.json"
-RUNTIME_REGISTRY_PATH = ROOT / "registry" / "pilot_bundle" / "metric_runtime_registry.json"
+RUNTIME_REGISTRY_PATH = ARTIFACTS_DIR / "input" / "metric_runtime_registry__fixture.json"
 ALLOWED_SCOPES = {"SKU", "GROUP", "TOTAL"}
 ALLOWED_CALC_TYPES = {"metric", "formula", "ratio"}
 
@@ -76,12 +76,12 @@ class RegistryUploadBundleV1Block:
         if enforce_fixture_uniqueness:
             _require_unique_bundle_version(bundle.bundle_version, bundle_path, self.target_dir)
 
-        if not 5 <= len(bundle.config_v2) <= 64:
-            raise ValueError("registry upload bundle must contain 5-64 config_v2 entries")
-        if not 5 <= len(bundle.metrics_v2) <= 64:
-            raise ValueError("registry upload bundle must contain 5-64 metrics_v2 entries")
-        if not 0 <= len(bundle.formulas_v2) <= 32:
-            raise ValueError("registry upload bundle must contain 0-32 formulas_v2 entries")
+        if not 1 <= len(bundle.config_v2) <= 256:
+            raise ValueError("registry upload bundle must contain 1-256 config_v2 entries")
+        if not 1 <= len(bundle.metrics_v2) <= 256:
+            raise ValueError("registry upload bundle must contain 1-256 metrics_v2 entries")
+        if not 0 <= len(bundle.formulas_v2) <= 128:
+            raise ValueError("registry upload bundle must contain 0-128 formulas_v2 entries")
 
         _require_unique("config_v2.nm_id", (item.nm_id for item in bundle.config_v2))
         _require_unique("config_v2.display_order", (item.display_order for item in bundle.config_v2))
@@ -115,12 +115,12 @@ class RegistryUploadBundleV1Block:
                 raise ValueError(f"runtime registry missing metric_key: {metric.metric_key}")
             if not _require_bool(runtime_for_metric, "is_runtime_enabled"):
                 raise ValueError(f"runtime metric is disabled: {metric.metric_key}")
-            expected_runtime_kind = {
-                "metric": "direct",
-                "formula": "formula",
-                "ratio": "ratio",
-            }[metric.calc_type]
-            if _require_str(runtime_for_metric, "metric_kind") != expected_runtime_kind:
+            runtime_kind = _require_str(runtime_for_metric, "metric_kind")
+            if metric.calc_type == "formula" and runtime_kind != "formula":
+                raise ValueError(f"formula metric must map to formula runtime kind: {metric.metric_key}")
+            if metric.calc_type == "ratio" and runtime_kind != "ratio":
+                raise ValueError(f"ratio metric must map to ratio runtime kind: {metric.metric_key}")
+            if metric.calc_type == "metric" and runtime_kind not in {"direct", "formula", "ratio"}:
                 raise ValueError(f"metric_key/runtime kind mismatch for {metric.metric_key}")
             checked_runtime_keys.add(metric.metric_key)
 
@@ -128,20 +128,27 @@ class RegistryUploadBundleV1Block:
                 runtime_target = runtime_by_key.get(metric.calc_ref)
                 if runtime_target is None:
                     raise ValueError(f"metric calc_ref missing in runtime registry: {metric.calc_ref}")
-                if _require_str(runtime_target, "metric_kind") != "direct":
-                    raise ValueError(f"metric calc_ref must point to direct runtime metric: {metric.metric_key}")
+                target_kind = _require_str(runtime_target, "metric_kind")
+                if target_kind not in {"direct", "formula", "ratio"}:
+                    raise ValueError(f"metric calc_ref must point to runtime metric: {metric.metric_key}")
                 checked_runtime_keys.add(metric.calc_ref)
             elif metric.calc_type == "ratio":
-                runtime_target = runtime_by_key.get(metric.calc_ref)
-                if runtime_target is None:
-                    raise ValueError(f"ratio calc_ref missing in runtime registry: {metric.calc_ref}")
-                if _require_str(runtime_target, "metric_kind") != "ratio":
-                    raise ValueError(f"ratio calc_ref must point to ratio runtime metric: {metric.metric_key}")
-                if not _require_nullable_str(runtime_target, "ratio_num_key"):
-                    raise ValueError(f"ratio runtime metric missing ratio_num_key: {metric.calc_ref}")
-                if not _require_nullable_str(runtime_target, "ratio_den_key"):
-                    raise ValueError(f"ratio runtime metric missing ratio_den_key: {metric.calc_ref}")
-                checked_runtime_keys.add(metric.calc_ref)
+                ratio_num_key = _require_nullable_str(runtime_for_metric, "ratio_num_key")
+                ratio_den_key = _require_nullable_str(runtime_for_metric, "ratio_den_key")
+                if not ratio_num_key or not ratio_den_key:
+                    raise ValueError(f"ratio runtime metric missing numerator/denominator: {metric.metric_key}")
+                if "/" in metric.calc_ref:
+                    calc_num_key, calc_den_key = [part.strip() for part in metric.calc_ref.split("/", 1)]
+                    if ratio_num_key != calc_num_key or ratio_den_key != calc_den_key:
+                        raise ValueError(f"ratio calc_ref mismatch for {metric.metric_key}")
+                else:
+                    runtime_target = runtime_by_key.get(metric.calc_ref)
+                    if runtime_target is None:
+                        raise ValueError(f"ratio calc_ref missing in runtime registry: {metric.calc_ref}")
+                    if _require_str(runtime_target, "metric_kind") != "ratio":
+                        raise ValueError(f"ratio calc_ref must point to ratio runtime metric: {metric.metric_key}")
+                checked_runtime_keys.add(ratio_num_key)
+                checked_runtime_keys.add(ratio_den_key)
             elif metric.calc_type == "formula":
                 if metric.calc_ref not in formula_ids:
                     raise ValueError(f"formula calc_ref missing in formulas_v2: {metric.calc_ref}")

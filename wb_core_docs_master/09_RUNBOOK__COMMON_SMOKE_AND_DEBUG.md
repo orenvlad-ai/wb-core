@@ -23,7 +23,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "138d97eb4eb4f95b1911b3a7fbee54ac5f074dbc"
+built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
 ---
 
 # Summary
@@ -72,11 +72,12 @@ clasp run getSheetVitrinaV1State
 ## What to verify in sheet
 
 - `CONFIG / METRICS / FORMULAS` have expected headers and non-empty rows;
-- `prepareRegistryUploadOperatorSheets` currently materializes `33 / 19 / 2`;
-- `uploadRegistryUploadBundle` currently accepts and persists all `19` `metrics_v2` rows;
+- `prepareRegistryUploadOperatorSheets` currently materializes `33 / 102 / 7`;
+- `uploadRegistryUploadBundle` currently accepts and persists all `102` `metrics_v2` rows;
 - `CONFIG!H:I` preserves `endpoint_url`, `last_bundle_version`, `last_status`, `last_http_status`;
-- `DATA_VITRINA` gets non-empty real rows;
-- `STATUS` names live sources such as `registry_upload_current_state`, `seller_funnel_snapshot`, `web_source_snapshot`.
+- `DATA_VITRINA` gets `95` displayed metric keys and `1631` data rows;
+- `STATUS` names live sources such as `registry_upload_current_state`, `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `prices_snapshot`, `sf_period`, `spp`, `ads_bids`, `stocks`, `ads_compact`, `fin_report_daily`, plus blocked `promo_by_price` / `cogs_by_group`;
+- blank values для promo/cogs-backed metrics трактуются как известный live-adapter gap, а не как повод срезать rows.
 
 ## Common failure signatures
 

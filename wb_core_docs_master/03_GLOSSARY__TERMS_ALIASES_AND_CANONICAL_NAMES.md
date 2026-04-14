@@ -21,7 +21,7 @@ update_triggers:
   - "изменение canonical naming"
   - "появление нового публичного термина"
   - "изменение operator-visible labels"
-built_from_commit: "138d97eb4eb4f95b1911b3a7fbee54ac5f074dbc"
+built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
 ---
 
 # Summary
@@ -41,6 +41,7 @@ built_from_commit: "138d97eb4eb4f95b1911b3a7fbee54ac5f074dbc"
 | `sheet_vitrina_v1` | `sheet_vitrina`, `Vitrina V1` | code/gas module family |
 | `CONFIG / METRICS / FORMULAS` | `operator sheets`, `registry sheets` | sheet-side input реестры |
 | `config_v2 / metrics_v2 / formulas_v2` | `CONFIG_V2 / METRICS_V2 / FORMULAS_V2` | canonical bundle/runtime arrays |
+| `uploaded compact package` | `current authoritative registry package`, `uploaded package` | canonical repo-owned input для текущего набора `33 / 102 / 7` |
 | `RegistryUploadResult` | `upload result` | canonical response shape upload path |
 | `current truth` | `current state`, `active registry state` | current server-side accepted registry version |
 | `DATA_VITRINA` | `vitrina data sheet` | operator-facing data readback sheet |
@@ -53,11 +54,12 @@ built_from_commit: "138d97eb4eb4f95b1911b3a7fbee54ac5f074dbc"
 - Для файлов и ids используется ASCII и machine-friendly style.
 - Для пользовательских sheet/menu labels допустим русский UI-text.
 - Для module ids canonical форма всегда snake_case + `_block`.
+- `openCount` и `open_card_count` — разные canonical metric keys; auto-merge между ними запрещён.
 
 # Known gaps
 
 - Final production naming для будущих hosted/runtime/deploy слоёв ещё не зафиксирован.
-- Текущий main-confirmed dictionary уже фиксируется как `19` sheet/upload metrics rows и `7` supported live readback metrics, но future expansion beyond этого набора остаётся открытым.
+- Текущий main-confirmed uploaded package уже фиксируется как `102` metrics rows / `95` displayed metric keys; открытым остаётся live numeric fill для promo/cogs-backed metrics.
 
 # Not in scope
 

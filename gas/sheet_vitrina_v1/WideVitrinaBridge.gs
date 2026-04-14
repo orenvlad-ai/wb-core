@@ -434,11 +434,62 @@ function describeSheetState_(spreadsheet, sheetName) {
   const lastRow = sheet.getLastRow();
   const lastColumn = sheet.getLastColumn();
   const header = lastRow > 0 && lastColumn > 0 ? sheet.getRange(1, 1, 1, lastColumn).getValues()[0] : [];
-  return {
+  const state = {
     sheet_name: sheetName,
     present: true,
     last_row: lastRow,
     last_column: lastColumn,
     header: header,
   };
+  if (lastRow <= 1 || lastColumn <= 0) {
+    return state;
+  }
+
+  const values = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
+  if (sheetName === 'DATA_VITRINA') {
+    const dataRows = values.slice(1);
+    const metricKeys = [];
+    const scopeRowCounts = {
+      TOTAL: 0,
+      GROUP: 0,
+      SKU: 0,
+      OTHER: 0,
+    };
+    let nonEmptyValueRowCount = 0;
+    dataRows.forEach((row) => {
+      const key = String(row[1] || '').trim();
+      if (!key) {
+        return;
+      }
+      const pipeIndex = key.lastIndexOf('|');
+      metricKeys.push(pipeIndex >= 0 ? key.slice(pipeIndex + 1) : key);
+      if (key.startsWith('TOTAL|')) {
+        scopeRowCounts.TOTAL += 1;
+      } else if (key.startsWith('GROUP:')) {
+        scopeRowCounts.GROUP += 1;
+      } else if (key.startsWith('SKU:')) {
+        scopeRowCounts.SKU += 1;
+      } else {
+        scopeRowCounts.OTHER += 1;
+      }
+      if (row.slice(2).some((cell) => cell !== '' && cell !== null)) {
+        nonEmptyValueRowCount += 1;
+      }
+    });
+    const uniqueMetricKeys = Array.from(new Set(metricKeys)).sort();
+    state.data_row_count = dataRows.length;
+    state.metric_key_count = uniqueMetricKeys.length;
+    state.metric_keys = uniqueMetricKeys;
+    state.scope_row_counts = scopeRowCounts;
+    state.non_empty_value_row_count = nonEmptyValueRowCount;
+  }
+
+  if (sheetName === 'STATUS') {
+    state.status_row_count = Math.max(lastRow - 1, 0);
+    state.source_keys = values
+      .slice(1)
+      .map((row) => String(row[0] || '').trim())
+      .filter((value) => value);
+  }
+  return state;
 }

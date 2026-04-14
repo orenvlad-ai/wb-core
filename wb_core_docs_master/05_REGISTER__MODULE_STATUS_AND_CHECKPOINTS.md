@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "138d97eb4eb4f95b1911b3a7fbee54ac5f074dbc"
+built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
 ---
 
 # Summary
@@ -67,12 +67,16 @@ Current main-confirmed operator flow:
 - `Отправить реестры на сервер`
 - `Загрузить таблицу`
 
+Current main-confirmed counts для этого flow:
+- prepare/upload package = `33 / 102 / 7`
+- `DATA_VITRINA` displayed metric keys = `95`
+
 This is the first bounded MVP checkpoint, not final production parity.
 
 # Known gaps
 
 - full legacy parity beyond current main-confirmed sheet/upload dictionary;
-- widening `DATA_VITRINA` beyond current `7` supported live metrics;
+- live numeric fill для promo/cogs-backed metrics до появления live HTTP adapters;
 - production hardening around runtime/deploy/auth;
 - unresolved long-tail compatibility around `AI_EXPORT`.
 

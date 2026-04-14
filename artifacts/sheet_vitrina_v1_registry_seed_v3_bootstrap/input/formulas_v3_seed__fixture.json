@@ -1,14 +1,39 @@
 {
   "items": [
     {
-      "formula_id": "proxy_profit_rub",
-      "expression": "(fin_buyout_rub - fin_commission)",
-      "description": "Минимальная прокси-прибыль без логистики и штрафов"
+      "formula_id": "F_ADS_ROAS",
+      "expression": "IF({orderSum}=0;0;{ads_sum}/{orderSum})",
+      "description": "DRR"
     },
     {
-      "formula_id": "proxy_stock_value_rub",
-      "expression": "(stock_total * price_seller_discounted)",
-      "description": "Прокси-оценка денежной стоимости текущего остатка"
+      "formula_id": "F_ADS_ROAS_TOTAL",
+      "expression": "IF({total_orderSum}=0;0;{total_ads_sum}/{total_orderSum})",
+      "description": "total DRR"
+    },
+    {
+      "formula_id": "F_proxy_profit_rub",
+      "expression": "{orderSum}*0,5096-{orderCount}*0,91*{cost_price_rub}-{ads_sum}",
+      "description": "Прокси-прибыль: 91% от суммы заказов минус 38% расходов WB от выкупной выручки, минус 6% налога от выкупной выручки, минус себестоимость выкупленных товаров, минус рекламные расходы."
+    },
+    {
+      "formula_id": "F_ADS_DRR_ATTRIBUTED",
+      "expression": "IF({ads_sum_price}=0;0;{ads_sum}/{ads_sum_price})",
+      "description": "ДРР по рекламной выручке"
+    },
+    {
+      "formula_id": "F_ADS_DRR_ATTRIBUTED_TOTAL",
+      "expression": "IF({total_ads_sum_price}=0;0;{total_ads_sum}/{total_ads_sum_price})",
+      "description": "total ДРР по рекламной выручке"
+    },
+    {
+      "formula_id": "F_PROXY_MARGIN_PCT",
+      "expression": "IF({orderSum}=0;0;{proxy_profit_rub}/{orderSum})",
+      "description": "Прокси маржинальность, %"
+    },
+    {
+      "formula_id": "F_PROXY_MARGIN_PCT_TOTAL",
+      "expression": "IF({total_orderSum}=0;0;{total_proxy_profit_rub}/{total_orderSum})",
+      "description": "Прокси маржинальность всего, %"
     }
   ]
 }

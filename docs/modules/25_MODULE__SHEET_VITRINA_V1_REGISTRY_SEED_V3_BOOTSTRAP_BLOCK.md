@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-25-SHEET-VITRINA-V1-REGISTRY-SEED-V3-BOOTSTRAP-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `sheet_vitrina_v1_registry_seed_v3_bootstrap_block`."
-scope: "Compact v3 bootstrap для `CONFIG / METRICS / FORMULAS`: materialized operator seed, full current sheet/upload metrics dictionary, канонический formulas subset и сохранение service/status блока без поломки upload trigger."
+scope: "Compact v3 bootstrap для `CONFIG / METRICS / FORMULAS`: materialized operator seed из uploaded compact package, полный current sheet/upload dictionary и сохранение service/status блока без поломки upload trigger."
 source_basis:
   - "migration/91_sheet_vitrina_v1_registry_upload_trigger.md"
   - "migration/92_sheet_vitrina_v1_registry_seed_v3_bootstrap.md"
@@ -34,7 +34,7 @@ related_docs:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Создан как канонический модульный документ для compact v3 bootstrap operator sheets в `sheet_vitrina_v1`."
+update_note: "Обновлён под uploaded compact package: prepare-step теперь materialize-ит `33 / 102 / 7`, а не промежуточный repo-subset."
 ---
 
 # 1. Идентификатор и статус
@@ -53,7 +53,7 @@ update_note: "Создан как канонический модульный д
   - `registry_upload_http_entrypoint_block`
   - `migration/91_sheet_vitrina_v1_registry_upload_trigger.md`
   - `migration/92_sheet_vitrina_v1_registry_seed_v3_bootstrap.md`
-- Семантика блока: не менять upload/runtime contract и не строить новый UI, а поднять в таблице уже заполненные operator registries, совместимые с существующим upload path и current live readback contour.
+- Семантика блока: не менять upload/runtime contract и не строить новый UI, а поднять в таблице уже заполненные operator registries, совместимые с существующим upload path и current live readback contour по uploaded compact package.
 
 # 3. Target contract и смысл результата
 
@@ -82,14 +82,13 @@ update_note: "Создан как канонический модульный д
 
 - В текущем `main` materialize-ятся:
   - `config_v2 = 33`
-  - `metrics_v2 = 19`
-  - `formulas_v2 = 2`
+  - `metrics_v2 = 102`
+  - `formulas_v2 = 7`
 - `CONFIG` остаётся compact v3 operator seed.
-- `METRICS` больше не режется до MVP-safe `7` rows и собирает current main-confirmed dictionary:
-  - `12` current upload-authoritative rows;
-  - `7` live readback rows, уже используемых `sheet_vitrina_v1_live_plan`.
-- `FORMULAS` синхронизируются до канонического subset, который требуется current formula metrics в `metrics_v2`.
-- Это осознанный bounded checkpoint: full legacy dump не переносится, но sheet-side upload уже не теряет существующие `metrics_v2` rows.
+- `METRICS` materialize-ит полный uploaded compact dictionary без тихого возврата к repo-subset.
+- `FORMULAS` синхронизируются с uploaded formula set, который требуется current authoritative `metrics_v2`.
+- `CONFIG!H:I` сохраняется при prepare/reprepare и не смешивается с registry rows.
+- Это осознанный bounded checkpoint: repo выровнен под uploaded package пользователя, но не объявляет full legacy 1:1 mirror вне этого пакета.
 
 # 4. Артефакты и wiring по модулю
 
@@ -126,7 +125,7 @@ update_note: "Создан как канонический модульный д
 
 - Подтверждён локальный prepare-to-upload smoke через `apps/sheet_vitrina_v1_registry_seed_v3_bootstrap_smoke.py`.
 - Smoke проверяет:
-  - что prepare materialize-ит `CONFIG / METRICS / FORMULAS` с compact v3 headers и current seed rows `33 / 19 / 2`;
+  - что prepare materialize-ит `CONFIG / METRICS / FORMULAS` с compact v3 headers и current seed rows `33 / 102 / 7`;
   - что повторный prepare не теряет service/status block;
   - что bundle, собранный из seeded sheets, содержит полный expected `metrics_v2` set и уходит в существующий HTTP entrypoint;
   - что accepted response возвращается в канонической форме;
@@ -135,7 +134,7 @@ update_note: "Создан как канонический модульный д
 # 7. Что уже доказано по модулю
 
 - В `sheet_vitrina_v1` больше не поднимаются пустые operator sheets для registry upload.
-- Оператор после `Подготовить листы CONFIG / METRICS / FORMULAS` получает уже заполненный seed, где `METRICS` содержит полный current main-confirmed dictionary, а не урезанный subset.
+- Оператор после `Подготовить листы CONFIG / METRICS / FORMULAS` получает уже заполненный seed, где `METRICS` содержит полный uploaded compact dictionary, а не урезанный subset.
 - Служебная зона `CONFIG!H:I` сохраняется и не ломает live endpoint wiring.
 - Новый bootstrap не дублирует server-side validation/runtime и не меняет bundle/result contract.
 
@@ -144,5 +143,5 @@ update_note: "Создан как канонический модульный д
 - reverse-load server-side truth обратно в таблицу;
 - кнопка `обновить витрину`;
 - deploy/auth-hardening;
-- полный legacy dump и future expansion beyond current `19` metric rows;
+- future expansion beyond current uploaded compact package;
 - большой UI/UX redesign операторской таблицы.
