@@ -51,7 +51,7 @@ built_from_commit: "138d97eb4eb4f95b1911b3a7fbee54ac5f074dbc"
 
 # Known gaps
 
-- Некоторые constraints всё ещё различают current `19`-row sheet/upload dictionary и current `7` supported live readback metrics, а не full parity.
+- Некоторые constraints всё ещё различают полный displayed `19`-key set в `DATA_VITRINA` и current numeric live fill only для `7` public readback metrics, а не full parity.
 - Hosted runtime/deploy hardening пока operational, а не repo-owned contract layer.
 
 # Not in scope

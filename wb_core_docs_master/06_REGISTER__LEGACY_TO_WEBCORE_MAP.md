@@ -38,7 +38,7 @@ built_from_commit: "138d97eb4eb4f95b1911b3a7fbee54ac5f074dbc"
 | --- | --- | --- | --- |
 | `wb-table-audit` Apps Script operator shell | `gas/sheet_vitrina_v1/*` | частично перенесён | новый sheet-side contour materialized, но не весь legacy UI |
 | legacy `CONFIG` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `registry_upload_bundle_v1_block` | перенесён в compact V2/V3 form | не равен full legacy `CONFIG` 1:1 |
-| legacy `METRICS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `sheet_vitrina_v1_mvp_end_to_end_block` | current bounded set перенесён | sheet/upload dictionary теперь materialize-ит `19` current rows; live `DATA_VITRINA` всё ещё ограничена `7` supported metrics |
+| legacy `METRICS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `sheet_vitrina_v1_mvp_end_to_end_block` | current bounded set перенесён | sheet/upload dictionary materialize-ит `19` current rows; `DATA_VITRINA` теперь показывает полный `19`-key set, но numeric live fill beyond current `7` public metrics остаётся открытым |
 | legacy `FORMULAS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `registry_upload_bundle_v1_block` | current upload subset перенесён | в sheet-side seed остаются только formula refs, нужные для current `metrics_v2` |
 | legacy `DATA`/vitrina readback | `sheet_vitrina_v1_mvp_end_to_end_block` | первый bounded replacement есть | не full legacy parity |
 | legacy `AI_EXPORT` | отдельного полного replacement пока нет | open gap | compatibility boundary ещё не закрыт |

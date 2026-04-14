@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -23,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SHEET_LAYOUT_DIR = ROOT / "artifacts" / "sheet_vitrina_v1" / "layout"
 DATA_LAYOUT_PATH = SHEET_LAYOUT_DIR / "data_vitrina_sheet_layout.json"
 STATUS_LAYOUT_PATH = SHEET_LAYOUT_DIR / "status_sheet_layout.json"
-SUPPORTED_METRIC_KEYS = (
+LIVE_VALUE_SUPPORTED_METRIC_KEYS = (
     "view_count",
     "ctr",
     "open_card_count",
@@ -72,10 +71,15 @@ class SheetVitrinaV1LivePlanBlock:
             [item for item in current_state.metrics_v2 if item.enabled and item.show_in_data],
             key=lambda item: item.display_order,
         )
-        supported_metrics = [item for item in configured_metrics if item.metric_key in SUPPORTED_METRIC_KEYS]
-        unsupported_metrics = [item.metric_key for item in configured_metrics if item.metric_key not in SUPPORTED_METRIC_KEYS]
-        if not supported_metrics:
-            raise ValueError("current registry metrics_v2 does not contain supported live MVP metrics")
+        displayed_metrics = configured_metrics
+        live_value_supported_metrics = [
+            item for item in configured_metrics if item.metric_key in LIVE_VALUE_SUPPORTED_METRIC_KEYS
+        ]
+        live_value_unmapped_metrics = [
+            item.metric_key for item in configured_metrics if item.metric_key not in LIVE_VALUE_SUPPORTED_METRIC_KEYS
+        ]
+        if not displayed_metrics:
+            raise ValueError("current registry metrics_v2 does not contain enabled show_in_data metrics")
 
         web_result = self.web_source_block.execute(
             WebSourceSnapshotRequest(
@@ -100,12 +104,12 @@ class SheetVitrinaV1LivePlanBlock:
         data_header = ["label", "key", effective_date]
         data_rows: list[list[Any]] = []
 
-        for metric in supported_metrics:
+        for metric in displayed_metrics:
             total_value = _aggregate_metric(enabled_config, metric.metric_key, web_lookup, funnel_lookup)
             data_rows.append([f"Итого: {metric.label_ru}", f"TOTAL|{metric.metric_key}", _to_sheet_value(total_value)])
 
         for group_name, group_items in _group_config(enabled_config):
-            for metric in supported_metrics:
+            for metric in displayed_metrics:
                 group_value = _aggregate_metric(group_items, metric.metric_key, web_lookup, funnel_lookup)
                 data_rows.append(
                     [
@@ -116,7 +120,7 @@ class SheetVitrinaV1LivePlanBlock:
                 )
 
         for config_item in enabled_config:
-            for metric in supported_metrics:
+            for metric in displayed_metrics:
                 sku_value = _resolve_metric_value(config_item.nm_id, metric.metric_key, web_lookup, funnel_lookup)
                 data_rows.append(
                     [
@@ -147,7 +151,9 @@ class SheetVitrinaV1LivePlanBlock:
                         "config_count": len(current_state.config_v2),
                         "metrics_count": len(current_state.metrics_v2),
                         "formulas_count": len(current_state.formulas_v2),
-                        "unsupported_metrics": ",".join(unsupported_metrics),
+                        "displayed_metrics": len(displayed_metrics),
+                        "live_value_supported_metrics": len(live_value_supported_metrics),
+                        "live_value_unmapped_metrics": ",".join(live_value_unmapped_metrics),
                     }
                 ),
             ],
@@ -185,13 +191,16 @@ class SheetVitrinaV1LivePlanBlock:
                 "",
                 "",
                 "",
-                len(configured_metrics),
-                len(supported_metrics),
+                len(displayed_metrics),
+                len(displayed_metrics),
                 "",
                 _format_note(
                     {
-                        "supported_metrics": ",".join(item.metric_key for item in supported_metrics),
-                        "unsupported_metrics": ",".join(unsupported_metrics),
+                        "displayed_metrics": ",".join(item.metric_key for item in displayed_metrics),
+                        "live_value_supported_metrics": ",".join(
+                            item.metric_key for item in live_value_supported_metrics
+                        ),
+                        "live_value_unmapped_metrics": ",".join(live_value_unmapped_metrics),
                     }
                 ),
             ],
@@ -243,6 +252,8 @@ def _aggregate_metric(
     funnel_lookup: Mapping[int, Any],
 ) -> float | None:
     items = list(config_items)
+    if metric_key not in LIVE_VALUE_SUPPORTED_METRIC_KEYS:
+        return None
     if metric_key in {"view_count", "open_card_count", "views_current", "orders_current"}:
         values = [_resolve_metric_value(item.nm_id, metric_key, web_lookup, funnel_lookup) for item in items]
         numeric = [value for value in values if value is not None]
@@ -265,7 +276,7 @@ def _aggregate_metric(
             return None
         weight_total = sum(weight for _, weight in pairs)
         return sum(value * weight for value, weight in pairs) / weight_total
-    raise ValueError(f"unsupported aggregate metric: {metric_key}")
+    return None
 
 
 def _resolve_metric_value(
@@ -274,6 +285,8 @@ def _resolve_metric_value(
     web_lookup: Mapping[int, Any],
     funnel_lookup: Mapping[int, Any],
 ) -> float | None:
+    if metric_key not in LIVE_VALUE_SUPPORTED_METRIC_KEYS:
+        return None
     funnel_item = funnel_lookup.get(nm_id)
     web_item = web_lookup.get(nm_id)
     if metric_key == "view_count":
@@ -290,7 +303,7 @@ def _resolve_metric_value(
         return float(web_item.orders_current) if web_item else None
     if metric_key == "position_avg":
         return float(web_item.position_avg) if web_item else None
-    raise ValueError(f"unsupported live metric: {metric_key}")
+    return None
 
 
 def _to_sheet_value(value: float | None) -> Any:

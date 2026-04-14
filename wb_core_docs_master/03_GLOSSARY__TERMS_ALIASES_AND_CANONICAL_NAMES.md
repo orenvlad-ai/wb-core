@@ -57,7 +57,7 @@ built_from_commit: "138d97eb4eb4f95b1911b3a7fbee54ac5f074dbc"
 # Known gaps
 
 - Final production naming для будущих hosted/runtime/deploy слоёв ещё не зафиксирован.
-- Текущий main-confirmed dictionary уже фиксируется как `19` sheet/upload metrics rows и `7` supported live readback metrics, но future expansion beyond этого набора остаётся открытым.
+- Текущий main-confirmed dictionary уже фиксируется как `19` sheet/upload metrics rows и как полный `19`-key displayed set в `DATA_VITRINA`; открытым остаётся numeric live fill beyond current `7` public readback metrics.
 
 # Not in scope
 

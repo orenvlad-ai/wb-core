@@ -11,7 +11,7 @@
     "formulas_v2": 2
   },
   "snapshot_id": "2026-04-12__sheet_vitrina_v1_mvp_live_v1__current",
-  "data_row_count": 259,
+  "data_row_count": 703,
   "status_row_count": 4,
   "data_header": [
     "label",
@@ -32,8 +32,8 @@
     "note"
   ],
   "first_data_key": [
-    "Итого: Показы в воронке",
-    "TOTAL|view_count"
+    "Итого: Остаток, шт",
+    "TOTAL|stock_total"
   ],
   "status_keys": [
     "registry_upload_current_state",

@@ -87,7 +87,7 @@ update_note: "Создан как канонический модульный д
 - `CONFIG` остаётся compact v3 operator seed.
 - `METRICS` больше не режется до MVP-safe `7` rows и собирает current main-confirmed dictionary:
   - `12` current upload-authoritative rows;
-  - `7` live readback rows, уже используемых `sheet_vitrina_v1_live_plan`.
+  - `7` current public live-value-backed rows, уже используемых `sheet_vitrina_v1_live_plan` для numeric fill без обрезания full displayed set.
 - `FORMULAS` синхронизируются до канонического subset, который требуется current formula metrics в `metrics_v2`.
 - Это осознанный bounded checkpoint: full legacy dump не переносится, но sheet-side upload уже не теряет существующие `metrics_v2` rows.
 

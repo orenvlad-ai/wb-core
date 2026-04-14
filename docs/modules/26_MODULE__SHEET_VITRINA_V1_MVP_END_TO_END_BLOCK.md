@@ -95,7 +95,7 @@ update_note: "Создан как канонический модульный д
 Bounded допущение:
 - seed deliberately не равен full legacy dump;
 - `METRICS` materialize-ит полный current main-confirmed dictionary для sheet/upload/runtime;
-- `DATA_VITRINA` при этом остаётся bounded to current `7` supported live metrics и не расширяется в этом шаге шире, чем нужно для upload;
+- `DATA_VITRINA` теперь materialize-ит полный current authoritative `19`-row metric set из registry current truth, но numeric live fill за пределами текущих `7` public readback metrics остаётся blank и не маскируется как full parity;
 - unsupported future tail остаётся вне этого шага и фиксируется в `STATUS.note`/docs, а не ломает весь MVP.
 
 ## 3.2 Service block bounded шага
@@ -145,6 +145,7 @@ Bounded допущение:
   - что `prepare` поднимает expanded operator seed `33 / 19 / 2`;
   - что upload из sheet-side trigger сохраняет current truth в existing runtime без усечения `metrics_v2`;
   - что `load` ходит в живой HTTP plan endpoint, а не в локальный stub;
+  - что `DATA_VITRINA` больше не режет authoritative metric keys до `7` и `getSheetVitrinaV1State` показывает полный displayed set;
   - что `DATA_VITRINA` и `STATUS` получают реальные live rows;
   - что service/status block `CONFIG!H:I` сохраняется и не перезаписывается при load.
 
@@ -154,13 +155,14 @@ Bounded допущение:
 - Sheet-side upload registry больше не обрезает `METRICS` до `7` rows: current truth хранит полный current main-confirmed `metrics_v2` dictionary.
 - Таблица больше не заканчивается на upload-only flow: из уже существующего server-side contour появился controlled reverse-load обратно в `DATA_VITRINA`.
 - Readback строится на текущем registry current truth и уже materialized live public source blocks, а не на фейковом локальном fixture.
+- `DATA_VITRINA` больше не режет displayed metric rows до current `7` public live metrics: sheet показывает весь current authoritative `19`-key set, а unmapped rows остаются blank вместо выпадения из плана.
 - Existing upload contour не ломается: bundle/result contracts и control block сохраняются.
 
 # 8. Что пока не является частью финальной production-сборки
 
 - full legacy parity 1:1 по всем metric sections и registry rows;
-- widening `DATA_VITRINA` beyond current `7` supported live metrics;
-- official-api-backed coverage всех historical metrics;
+- numeric live fill для authoritative rows beyond current `7` public readback metrics;
+- official-api-backed coverage remaining authoritative rows и historical metrics;
 - stable hosted runtime URL и production-bound operator runtime;
 - deploy/auth-hardening;
 - daily orchestration;

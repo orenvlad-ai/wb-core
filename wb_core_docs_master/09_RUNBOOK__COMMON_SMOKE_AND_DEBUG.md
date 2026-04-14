@@ -75,7 +75,8 @@ clasp run getSheetVitrinaV1State
 - `prepareRegistryUploadOperatorSheets` currently materializes `33 / 19 / 2`;
 - `uploadRegistryUploadBundle` currently accepts and persists all `19` `metrics_v2` rows;
 - `CONFIG!H:I` preserves `endpoint_url`, `last_bundle_version`, `last_status`, `last_http_status`;
-- `DATA_VITRINA` gets non-empty real rows;
+- `DATA_VITRINA` shows the full current `19`-key metric set and `getSheetVitrinaV1State` reports `metric_key_count = 19`;
+- `DATA_VITRINA` keeps non-empty real values for current public live readback metrics instead of falling back to local fixture rows;
 - `STATUS` names live sources such as `registry_upload_current_state`, `seller_funnel_snapshot`, `web_source_snapshot`.
 
 ## Common failure signatures

@@ -131,6 +131,7 @@ function runMvpEndToEndMode({ context, spreadsheet, options }) {
   const loadResult = parseJsonString(
     context.debugLoadSheetVitrinaTable(options.endpointUrl, options.asOfDate)
   );
+  const sheetState = parseJsonString(context.getSheetVitrinaV1State());
   const configSheet = spreadsheet.getSheetByName('CONFIG');
   const statusBlock = readStatusBlock(configSheet);
   return {
@@ -138,6 +139,7 @@ function runMvpEndToEndMode({ context, spreadsheet, options }) {
     built_bundle: builtBundle,
     accepted_response: acceptedResponse,
     load_result: loadResult,
+    sheet_state: sheetState,
     status_block: statusBlock,
     sheets: {
       CONFIG: snapshotSheet(spreadsheet.getSheetByName('CONFIG')),

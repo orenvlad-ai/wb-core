@@ -28,7 +28,7 @@ Current main-confirmed operator seed этого шага фиксируется 
 Bounded допущение шага:
 - в seed materialize-ится не full legacy dump;
 - sheet-side `METRICS` больше не режется до `7` MVP-safe rows и поднимает полный current main-confirmed metrics dictionary для upload/runtime;
-- `DATA_VITRINA` при этом остаётся bounded to current `7` supported live readback metrics и не расширяется в этом шаге шире, чем нужно для upload.
+- `DATA_VITRINA` теперь materialize-ит полный current authoritative `19`-row metric set из registry current truth; numeric live fill за пределами текущих `7` public readback metrics остаётся blank и не выдаётся за full parity.
 
 ## 4. Readback Семантика
 
@@ -64,6 +64,7 @@ Bounded допущение шага:
 
 После bounded MVP всё ещё остаются вне scope:
 - full legacy parity по всем metric sections и registry rows;
+- numeric live fill для authoritative rows beyond current `7` public readback metrics;
 - stable hosted runtime URL вместо временного/локального live routing;
 - deploy/auth-hardening;
 - daily orchestration;

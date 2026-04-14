@@ -72,7 +72,7 @@ This is the first bounded MVP checkpoint, not final production parity.
 # Known gaps
 
 - full legacy parity beyond current main-confirmed sheet/upload dictionary;
-- widening `DATA_VITRINA` beyond current `7` supported live metrics;
+- numeric live fill beyond current `7` public readback metrics;
 - production hardening around runtime/deploy/auth;
 - unresolved long-tail compatibility around `AI_EXPORT`.
 

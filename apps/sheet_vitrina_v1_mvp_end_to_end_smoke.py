@@ -107,22 +107,17 @@ def main() -> None:
             sheet_plan = load_result["sheet_plan"]
             if sheet_plan["snapshot_id"] != expected_summary["snapshot_id"]:
                 raise AssertionError("snapshot_id mismatch")
-            if sheet_plan["sheets"][0]["row_count"] != expected_summary["data_row_count"]:
-                raise AssertionError("DATA_VITRINA row_count mismatch")
             if sheet_plan["sheets"][1]["row_count"] != expected_summary["status_row_count"]:
                 raise AssertionError("STATUS row_count mismatch")
 
             sheets = harness_result["sheets"]
+            sheet_state = harness_result["sheet_state"]
             data_values = sheets["DATA_VITRINA"]["values"]
             status_values = sheets["STATUS"]["values"]
             if data_values[0] != expected_summary["data_header"]:
                 raise AssertionError("DATA_VITRINA header mismatch")
             if status_values[0] != expected_summary["status_header"]:
                 raise AssertionError("STATUS header mismatch")
-            if data_values[1][:2] != expected_summary["first_data_key"]:
-                raise AssertionError("unexpected first DATA_VITRINA row key")
-            if not isinstance(data_values[1][2], (int, float)):
-                raise AssertionError("TOTAL first metric must contain numeric value")
 
             status_keys = [row[0] for row in status_values[1:]]
             if status_keys != expected_summary["status_keys"]:
@@ -145,8 +140,54 @@ def main() -> None:
             if len(current_state["formulas_v2"]) != expected_summary["accepted_counts"]["formulas_v2"]:
                 raise AssertionError("runtime formulas_v2 count mismatch")
 
+            enabled_config = [item for item in current_state["config_v2"] if item["enabled"]]
+            expected_metric_keys = [
+                item["metric_key"]
+                for item in sorted(
+                    [item for item in current_state["metrics_v2"] if item["enabled"] and item["show_in_data"]],
+                    key=lambda row: row["display_order"],
+                )
+            ]
+            expected_group_count = len({item["group"] for item in enabled_config})
+            expected_data_row_count = len(expected_metric_keys) * (1 + expected_group_count + len(enabled_config))
+            if sheet_plan["sheets"][0]["row_count"] != expected_data_row_count:
+                raise AssertionError("DATA_VITRINA row_count mismatch")
+
+            displayed_metric_keys = _extract_displayed_metric_keys(data_values)
+            if displayed_metric_keys != expected_metric_keys:
+                raise AssertionError("DATA_VITRINA must materialize the full authoritative metric key set")
+
+            data_state = next(sheet for sheet in sheet_state["sheets"] if sheet["sheet_name"] == "DATA_VITRINA")
+            if data_state["metric_key_count"] != len(expected_metric_keys):
+                raise AssertionError("getSheetVitrinaV1State metric_key_count mismatch")
+            if data_state["metric_keys"] != expected_metric_keys:
+                raise AssertionError("getSheetVitrinaV1State metric_keys mismatch")
+            if data_state["section_row_counts"] != {
+                "TOTAL": len(expected_metric_keys),
+                "GROUP": len(expected_metric_keys) * expected_group_count,
+                "SKU": len(expected_metric_keys) * len(enabled_config),
+                "OTHER": 0,
+            }:
+                raise AssertionError("getSheetVitrinaV1State section_row_counts mismatch")
+
+            total_view_count_row = _find_row_by_key(data_values, "TOTAL|view_count")
+            if not isinstance(total_view_count_row[2], (int, float)):
+                raise AssertionError("supported live metric rows must keep numeric values")
+
+            total_stock_row = _find_row_by_key(data_values, "TOTAL|stock_total")
+            if total_stock_row[:2] != ["Итого: Остаток, шт", "TOTAL|stock_total"]:
+                raise AssertionError("authoritative metric rows must include newly unlocked stock_total")
+
+            live_summary_row = _find_status_row(status_values, "sheet_vitrina_v1_mvp")
+            live_summary_note = str(live_summary_row[10] or "")
+            if f"displayed_metrics={','.join(expected_metric_keys)}" not in live_summary_note:
+                raise AssertionError("STATUS live summary must expose the full displayed metric key set")
+            if "live_value_supported_metrics=view_count,ctr,open_card_count,views_current,ctr_current,orders_current,position_avg" not in live_summary_note:
+                raise AssertionError("STATUS live summary must expose current live numeric coverage")
+
             print(f"prepare seed: ok -> {prepare_result['seeded_counts']}")
             print(f"upload accepted: ok -> {accepted['bundle_version']}")
+            print(f"displayed metrics: ok -> {len(expected_metric_keys)}")
             print(f"load DATA_VITRINA: ok -> {sheet_plan['sheets'][0]['write_rect']}")
             print(f"load STATUS: ok -> {sheet_plan['sheets'][1]['write_rect']}")
             print("smoke-check passed")
@@ -195,6 +236,36 @@ def _reserve_free_port() -> int:
 
 def _load_json(path: Path) -> object:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _extract_displayed_metric_keys(values: list[list[object]]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for row in values[1:]:
+        if len(row) < 2:
+            continue
+        key = str(row[1] or "")
+        if "|" not in key:
+            continue
+        metric_key = key.split("|")[-1]
+        if metric_key not in seen:
+            seen.add(metric_key)
+            out.append(metric_key)
+    return out
+
+
+def _find_row_by_key(values: list[list[object]], key: str) -> list[object]:
+    for row in values[1:]:
+        if len(row) >= 2 and str(row[1] or "") == key:
+            return row
+    raise AssertionError(f"unable to find DATA_VITRINA row by key: {key}")
+
+
+def _find_status_row(values: list[list[object]], source_key: str) -> list[object]:
+    for row in values[1:]:
+        if row and str(row[0] or "") == source_key:
+            return row
+    raise AssertionError(f"unable to find STATUS row by source_key: {source_key}")
 
 
 if __name__ == "__main__":

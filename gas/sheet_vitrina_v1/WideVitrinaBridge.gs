@@ -434,11 +434,52 @@ function describeSheetState_(spreadsheet, sheetName) {
   const lastRow = sheet.getLastRow();
   const lastColumn = sheet.getLastColumn();
   const header = lastRow > 0 && lastColumn > 0 ? sheet.getRange(1, 1, 1, lastColumn).getValues()[0] : [];
-  return {
+  const summary = {
     sheet_name: sheetName,
     present: true,
     last_row: lastRow,
     last_column: lastColumn,
     header: header,
   };
+
+  if (sheetName === 'DATA_VITRINA' && lastRow > 1 && lastColumn >= 2) {
+    const keys = sheet.getRange(2, 2, lastRow - 1, 1).getValues().map((row) => String(row[0] || ''));
+    const distinctMetricKeys = [];
+    const seenMetricKeys = {};
+    const sectionRowCounts = {
+      TOTAL: 0,
+      GROUP: 0,
+      SKU: 0,
+      OTHER: 0,
+    };
+    keys.forEach((key) => {
+      const metricKey = key.indexOf('|') >= 0 ? key.split('|').pop() : '';
+      if (metricKey && !seenMetricKeys[metricKey]) {
+        seenMetricKeys[metricKey] = true;
+        distinctMetricKeys.push(metricKey);
+      }
+      if (key.indexOf('TOTAL|') === 0) {
+        sectionRowCounts.TOTAL += 1;
+      } else if (key.indexOf('GROUP:') === 0) {
+        sectionRowCounts.GROUP += 1;
+      } else if (key.indexOf('SKU:') === 0) {
+        sectionRowCounts.SKU += 1;
+      } else {
+        sectionRowCounts.OTHER += 1;
+      }
+    });
+    summary.data_row_count = lastRow - 1;
+    summary.metric_key_count = distinctMetricKeys.length;
+    summary.metric_keys = distinctMetricKeys;
+    summary.section_row_counts = sectionRowCounts;
+  }
+
+  if (sheetName === 'STATUS' && lastRow > 1) {
+    const sourceKeys = sheet.getRange(2, 1, lastRow - 1, 1).getValues().map((row) => String(row[0] || ''));
+    summary.data_row_count = lastRow - 1;
+    summary.source_key_count = sourceKeys.filter((value) => value).length;
+    summary.source_keys = sourceKeys.filter((value) => value);
+  }
+
+  return summary;
 }
