@@ -10,6 +10,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.registry_upload_smoke_support import (
+    LEGACY_CONFIG_CAP,
+    LEGACY_FORMULAS_CAP,
+    LEGACY_METRICS_CAP,
+    build_synthetic_oversized_bundle,
+    write_runtime_registry_fixture,
+)
+from packages.application.registry_upload_bundle_v1 import RegistryUploadBundleV1Block
 from packages.application.registry_upload_db_backed_runtime import (
     INPUT_BUNDLE_FIXTURE,
     RegistryUploadDbBackedRuntime,
@@ -56,7 +64,45 @@ def main() -> None:
         print(f"db file: ok -> {runtime.db_path.name}")
         print(f"current bundle_version: ok -> {current_state.bundle_version}")
         print(f"duplicate status: ok -> {duplicate_result.status}")
-        print("smoke-check passed")
+
+    synthetic_bundle = build_synthetic_oversized_bundle()
+    if len(synthetic_bundle.config_v2) <= LEGACY_CONFIG_CAP:
+        raise AssertionError("synthetic config_v2 count must exceed legacy hardcoded cap")
+    if len(synthetic_bundle.metrics_v2) <= LEGACY_METRICS_CAP:
+        raise AssertionError("synthetic metrics_v2 count must exceed legacy hardcoded cap")
+    if len(synthetic_bundle.formulas_v2) <= LEGACY_FORMULAS_CAP:
+        raise AssertionError("synthetic formulas_v2 count must exceed legacy hardcoded cap")
+
+    with TemporaryDirectory(prefix="registry-upload-db-backed-runtime-uncapped-") as tmp:
+        runtime_registry_path = Path(tmp) / "runtime_registry.json"
+        write_runtime_registry_fixture(runtime_registry_path, synthetic_bundle)
+        runtime = RegistryUploadDbBackedRuntime(
+            runtime_dir=Path(tmp) / "runtime",
+            bundle_block=RegistryUploadBundleV1Block(runtime_registry_path=runtime_registry_path),
+        )
+        accepted_result = runtime.ingest_bundle(synthetic_bundle, activated_at=ACTIVATED_AT)
+        if accepted_result.status != "accepted":
+            raise AssertionError("synthetic oversized bundle must be accepted by DB-backed runtime")
+        if accepted_result.accepted_counts.config_v2 != len(synthetic_bundle.config_v2):
+            raise AssertionError("runtime must persist all synthetic config_v2 rows")
+        if accepted_result.accepted_counts.metrics_v2 != len(synthetic_bundle.metrics_v2):
+            raise AssertionError("runtime must persist all synthetic metrics_v2 rows")
+        if accepted_result.accepted_counts.formulas_v2 != len(synthetic_bundle.formulas_v2):
+            raise AssertionError("runtime must persist all synthetic formulas_v2 rows")
+
+        current_state = runtime.load_current_state()
+        if len(current_state.config_v2) != len(synthetic_bundle.config_v2):
+            raise AssertionError("runtime current_state must keep all synthetic config_v2 rows")
+        if len(current_state.metrics_v2) != len(synthetic_bundle.metrics_v2):
+            raise AssertionError("runtime current_state must keep all synthetic metrics_v2 rows")
+        if len(current_state.formulas_v2) != len(synthetic_bundle.formulas_v2):
+            raise AssertionError("runtime current_state must keep all synthetic formulas_v2 rows")
+
+    print(
+        "uncapped runtime bundle: ok -> "
+        f"{len(synthetic_bundle.config_v2)}/{len(synthetic_bundle.metrics_v2)}/{len(synthetic_bundle.formulas_v2)}"
+    )
+    print("smoke-check passed")
 
 
 def _load_json(path: Path) -> object:

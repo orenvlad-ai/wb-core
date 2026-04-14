@@ -19,10 +19,10 @@ Bundle V1 покрывает:
   - `metrics_v2`
   - `formulas_v2`
 
-В pilot scope bundle входят:
-- `5` SKU;
-- `12` метрик;
-- `2` формулы;
+В current authoritative scope bundle входят:
+- `33` SKU/config rows;
+- `102` metrics rows;
+- `7` formulas rows;
 - все три `calc_type`: `metric`, `formula`, `ratio`.
 
 ## 3. Чем Это Отличается От Чистой Схемы
@@ -31,6 +31,7 @@ Bundle V1 покрывает:
 
 `registry_upload_bundle_v1` добавляет:
 - реальные artifact-backed input fixtures;
+- repo-owned raw uploaded package под `artifacts/registry_upload_bundle_v1/input/uploaded_compact_package/`;
 - реальный target bundle fixture;
 - локальный validator;
 - smoke, который подтверждает, что bundle можно собрать и провалидировать без API, БД и server ingest.
@@ -40,7 +41,7 @@ Bundle V1 покрывает:
 Это implementation artifact, потому что:
 - bundle материализован в `artifacts/registry_upload_bundle_v1/target/registry_upload_bundle__fixture.json`;
 - кодовый слой в `packages/contracts/` и `packages/application/` реально читает input artifacts и строит target bundle;
-- validator реально проверяет contract rules из `migration/86` и `calc_ref` resolution через server runtime seed.
+- validator реально проверяет contract rules из `migration/86` и `calc_ref` resolution через repo-owned runtime registry fixture.
 
 ## 5. Что Остаётся Следующим Шагом
 

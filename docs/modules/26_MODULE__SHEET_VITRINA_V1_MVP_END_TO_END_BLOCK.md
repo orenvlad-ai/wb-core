@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-26-SHEET-VITRINA-V1-MVP-END-TO-END-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `sheet_vitrina_v1_mvp_end_to_end_block`."
-scope: "Первый bounded end-to-end MVP для `sheet_vitrina_v1`: expanded MVP-safe bootstrap `CONFIG / METRICS / FORMULAS`, сохранённый upload trigger, второй Apps Script trigger `Загрузить таблицу` и controlled reverse-load живых server-side данных в `DATA_VITRINA`."
+scope: "Первый bounded end-to-end alignment для `sheet_vitrina_v1`: uploaded compact bootstrap `CONFIG / METRICS / FORMULAS`, сохранённый upload trigger, `Загрузить таблицу` и controlled reverse-load живых server-side данных в `DATA_VITRINA` по current truth."
 source_basis:
   - "migration/90_registry_upload_http_entrypoint.md"
   - "migration/91_sheet_vitrina_v1_registry_upload_trigger.md"
@@ -44,7 +44,7 @@ related_docs:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Создан как канонический модульный документ для первого bounded end-to-end MVP `prepare -> upload -> load DATA_VITRINA`."
+update_note: "Обновлён под uploaded compact package: `prepare -> upload -> load` теперь работает на `33 / 102 / 7`, materialize-ит `95` displayed metrics и явно фиксирует blocked live sources для promo/cogs."
 ---
 
 # 1. Идентификатор и статус
@@ -66,7 +66,7 @@ update_note: "Создан как канонический модульный д
   - `migration/91_sheet_vitrina_v1_registry_upload_trigger.md`
   - `migration/92_sheet_vitrina_v1_registry_seed_v3_bootstrap.md`
   - `migration/93_sheet_vitrina_v1_mvp_end_to_end.md`
-- Семантика блока: не строить новый parallel server contour и не возвращать full legacy 1:1, а впервые замкнуть практический `prepare -> upload -> load` сценарий на уже существующих bounded server-side модулях.
+- Семантика блока: не строить новый parallel server contour и не возвращать full legacy 1:1, а замкнуть практический `prepare -> upload -> load` сценарий на uploaded compact package и уже существующих bounded server-side модулях.
 
 # 3. Target contract и смысл результата
 
@@ -75,9 +75,9 @@ update_note: "Создан как канонический модульный д
   - `Отправить реестры на сервер`
   - `Загрузить таблицу`
 - Канонический prepare output:
-  - `CONFIG` с expanded MVP-safe compact rows
-  - `METRICS` с expanded MVP-safe compact rows
-  - `FORMULAS` с expanded MVP-safe compact rows
+  - `CONFIG` с uploaded compact rows
+  - `METRICS` с uploaded compact rows
+  - `FORMULAS` с uploaded compact rows
 - Канонический upload path:
   - `POST /v1/registry-upload/bundle`
   - request body = existing upload bundle V1
@@ -89,16 +89,35 @@ update_note: "Создан как канонический модульный д
 ## 3.1 Expanded operator seed bounded шага
 
 - `config_v2 = 33`
-- `metrics_v2 = 19`
-- `formulas_v2 = 2`
+- `metrics_v2 = 102`
+- `formulas_v2 = 7`
+- `enabled + show_in_data = 95`
+- `DATA_VITRINA` materialize-ит:
+  - `95` displayed metric keys
+  - `1631` data rows (`47 TOTAL` + `48 * 33 SKU`)
 
 Bounded допущение:
 - seed deliberately не равен full legacy dump;
-- `METRICS` materialize-ит полный current main-confirmed dictionary для sheet/upload/runtime;
-- `DATA_VITRINA` при этом остаётся bounded to current `7` supported live metrics и не расширяется в этом шаге шире, чем нужно для upload;
-- unsupported future tail остаётся вне этого шага и фиксируется в `STATUS.note`/docs, а не ломает весь MVP.
+- `METRICS` materialize-ит полный uploaded compact dictionary для sheet/upload/runtime;
+- `DATA_VITRINA` больше не режется до `7` или `19` metric subset;
+- unsupported live-source tail фиксируется в `STATUS`, а rows остаются materialized с пустыми значениями, а не отбрасываются.
 
-## 3.2 Service block bounded шага
+## 3.2 Явно принятые решения bounded шага
+
+- `openCount` и `open_card_count` сохраняются как разные метрики из разных live sources.
+- Все uploaded `total_*` и `avg_*` rows сохраняются:
+  - `total_*` = сумма по enabled SKU rows;
+  - `avg_*` = arithmetic mean по доступным enabled SKU values.
+- Uploaded `section` dictionary считается authoritative и не remap-ится локально.
+- `CONFIG!H:I` service/status block сохраняется при `prepare`, `upload`, `load`.
+
+## 3.3 Явный live blocker
+
+- `promo_by_price` и `cogs_by_group` не имеют live HTTP adapters в текущем contour.
+- Поэтому promo/cogs-backed rows materialize-ятся в `DATA_VITRINA`, но numeric values для них остаются пустыми.
+- Это сознательно лучше, чем тихо срезать строки или подменять live contour локальным fixture/rule path.
+
+## 3.4 Service block bounded шага
 
 - `CONFIG!H:I` остаётся служебной зоной.
 - `CONFIG!I2:I7` сохраняет:
@@ -142,25 +161,27 @@ Bounded допущение:
 
 - Подтверждён локальный end-to-end smoke через `apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py`.
 - Smoke проверяет:
-  - что `prepare` поднимает expanded operator seed `33 / 19 / 2`;
+  - что `prepare` поднимает operator seed `33 / 102 / 7`;
   - что upload из sheet-side trigger сохраняет current truth в existing runtime без усечения `metrics_v2`;
   - что `load` ходит в живой HTTP plan endpoint, а не в локальный stub;
-  - что `DATA_VITRINA` и `STATUS` получают реальные live rows;
+  - что `DATA_VITRINA` materialize-ит `95` displayed metric keys и full row set из current truth;
+  - что `STATUS` фиксирует live sources и blocked sources `promo_by_price` / `cogs_by_group`;
   - что service/status block `CONFIG!H:I` сохраняется и не перезаписывается при load.
 
 # 7. Что уже доказано по модулю
 
 - В `wb-core` появился первый bounded end-to-end MVP для `VB-Core Витрина V1`.
-- Sheet-side upload registry больше не обрезает `METRICS` до `7` rows: current truth хранит полный current main-confirmed `metrics_v2` dictionary.
+- Sheet-side upload registry больше не обрезает `METRICS` до subset: current truth хранит полный uploaded compact dictionary `102` rows.
 - Таблица больше не заканчивается на upload-only flow: из уже существующего server-side contour появился controlled reverse-load обратно в `DATA_VITRINA`.
 - Readback строится на текущем registry current truth и уже materialized live public source blocks, а не на фейковом локальном fixture.
+- `DATA_VITRINA` теперь показывает полный current authoritative displayed set `95` metric keys вместо прежнего live cap.
 - Existing upload contour не ломается: bundle/result contracts и control block сохраняются.
 
 # 8. Что пока не является частью финальной production-сборки
 
 - full legacy parity 1:1 по всем metric sections и registry rows;
-- widening `DATA_VITRINA` beyond current `7` supported live metrics;
-- official-api-backed coverage всех historical metrics;
+- numeric live fill для promo/cogs-backed metrics до появления `promo_by_price` и `cogs_by_group` HTTP adapters;
+- official-api-backed coverage всех historical metrics beyond current uploaded package;
 - stable hosted runtime URL и production-bound operator runtime;
 - deploy/auth-hardening;
 - daily orchestration;

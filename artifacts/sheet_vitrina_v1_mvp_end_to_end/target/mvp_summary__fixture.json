@@ -2,17 +2,25 @@
   "seed_version": "compact_v3_authoritative_upload_v1",
   "seeded_counts": {
     "config_v2": 33,
-    "metrics_v2": 19,
-    "formulas_v2": 2
+    "metrics_v2": 102,
+    "formulas_v2": 7
   },
   "accepted_counts": {
     "config_v2": 33,
-    "metrics_v2": 19,
-    "formulas_v2": 2
+    "metrics_v2": 102,
+    "formulas_v2": 7
   },
-  "snapshot_id": "2026-04-12__sheet_vitrina_v1_mvp_live_v1__current",
-  "data_row_count": 259,
-  "status_row_count": 4,
+  "snapshot_id": "2026-04-12__sheet_vitrina_v1_compact_live_v2__current",
+  "data_row_count": 1631,
+  "status_row_count": 14,
+  "metric_key_count": 95,
+  "non_empty_value_row_count": 237,
+  "scope_row_counts": {
+    "TOTAL": 47,
+    "GROUP": 0,
+    "SKU": 1584,
+    "OTHER": 0
+  },
   "data_header": [
     "label",
     "key",
@@ -32,13 +40,23 @@
     "note"
   ],
   "first_data_key": [
-    "Итого: Показы в воронке",
-    "TOTAL|view_count"
+    "Итого: Прокси маржинальность всего, %",
+    "TOTAL|proxy_margin_pct_total"
   ],
   "status_keys": [
     "registry_upload_current_state",
     "seller_funnel_snapshot",
+    "sales_funnel_history",
     "web_source_snapshot",
-    "sheet_vitrina_v1_mvp"
+    "prices_snapshot",
+    "sf_period",
+    "spp",
+    "ads_bids",
+    "stocks",
+    "ads_compact",
+    "fin_report_daily",
+    "promo_by_price",
+    "cogs_by_group",
+    "sheet_vitrina_v1_compact_live_v2"
   ]
 }

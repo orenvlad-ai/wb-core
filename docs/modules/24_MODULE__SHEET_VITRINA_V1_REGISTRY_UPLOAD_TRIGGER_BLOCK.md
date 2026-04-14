@@ -52,7 +52,7 @@ update_note: "Создан как канонический модульный д
   - `registry_upload_bundle_v1_block`
   - `registry_upload_http_entrypoint_block`
   - `migration/91_sheet_vitrina_v1_registry_upload_trigger.md`
-- Семантика блока: не менять server-side runtime и не строить второй UI, а дать bound таблице первый operator-visible trigger, который собирает bundle из `CONFIG / METRICS / FORMULAS` и шлёт его в уже существующий HTTP entrypoint.
+- Семантика блока: не менять server-side runtime и не строить второй UI, а дать bound таблице первый operator-visible trigger, который собирает bundle из `CONFIG / METRICS / FORMULAS` и шлёт в уже существующий HTTP entrypoint полный uploaded compact registry package без sheet-side усечения.
 
 # 3. Target contract и смысл результата
 
@@ -90,6 +90,15 @@ update_note: "Создан как канонический модульный д
 - Этот шаг не утверждает, что cloud Apps Script уже может ходить в недеплоенный локальный `localhost`.
 - Как только в `CONFIG!I2` указывается внешне достижимый URL materialized entrypoint и Apps Script pushed в bound spreadsheet, тот же trigger становится live operator path без изменения bundle/result contracts.
 
+## 3.3 Current authoritative operator package
+
+- Текущий trigger не режет sheet-side bundle до MVP-subset.
+- При current uploaded compact package из листов уходит полный набор:
+  - `config_v2 = 33`
+  - `metrics_v2 = 102`
+  - `formulas_v2 = 7`
+- Duplicate rejection не должен сдвигать current truth и только обновляет status block как rejected attempt.
+
 # 4. Артефакты и wiring по модулю
 
 - input artifact:
@@ -125,7 +134,8 @@ update_note: "Создан как канонический модульный д
   - что именно Apps Script upload function делает thin POST в существующий HTTP entrypoint;
   - что accepted response возвращается в канонической форме;
   - что duplicate `bundle_version` отвергается и фиксируется в operator status block;
-  - что current truth обновляется через уже существующий runtime DB.
+  - что current truth обновляется через уже существующий runtime DB;
+  - что sheet-built bundle сохраняет все rows uploaded compact package, а не только pilot/MVP-subset.
 
 # 7. Что уже доказано по модулю
 
@@ -133,6 +143,7 @@ update_note: "Создан как канонический модульный д
 - Trigger не дублирует server-side validation/runtime логику, а пишет в уже materialized HTTP entrypoint.
 - В таблице появились отдельные service-листы `CONFIG`, `METRICS`, `FORMULAS`.
 - Оператор получает минимальный persisted feedback по последней загрузке в control block `CONFIG!I2:I7`.
+- Sheet-side upload теперь отправляет current authoritative registry lists, уже согласованные с uploaded compact package.
 
 # 8. Что пока не является частью финальной production-сборки
 

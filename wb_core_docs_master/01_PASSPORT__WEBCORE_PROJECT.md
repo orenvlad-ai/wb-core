@@ -33,7 +33,7 @@ update_triggers:
   - "изменение current main-confirmed contour"
   - "merge нового bounded модуля"
   - "смена главного project gap"
-built_from_commit: "33be18836bb46f029b48fd19f28d45300171602a"
+built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
 ---
 
 # Summary
@@ -69,6 +69,7 @@ Confirmed contour на текущем `main`:
 - live HTTP entrypoint;
 - Apps Script trigger `Отправить реестры на сервер`;
 - compact seed bootstrap для `CONFIG / METRICS / FORMULAS`;
+- выравнивание sheet/upload/runtime под uploaded compact package `33 / 102 / 7`;
 - bounded reverse-load в `DATA_VITRINA` и `STATUS`.
 
 ## Primary source of truth
@@ -84,7 +85,7 @@ Confirmed contour на текущем `main`:
 # Known gaps
 
 - full legacy parity по всем historical metric sections и registry rows;
-- расширение beyond MVP-safe metric coverage;
+- live numeric fill для promo/cogs-backed metrics до появления `promo_by_price` и `cogs_by_group` HTTP adapters;
 - repo-owned production hardening вокруг upload/load runtime;
 - окончательная судьба `AI_EXPORT` как compatibility contract;
 - materialized `packages/domain`, `infra/`, `tests/`, `api/`, `jobs/`, `db/`.

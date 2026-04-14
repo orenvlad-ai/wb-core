@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+import threading
 import time
 from urllib import error, request as urllib_request
 
@@ -16,11 +17,21 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.registry_upload_smoke_support import (
+    LEGACY_CONFIG_CAP,
+    LEGACY_FORMULAS_CAP,
+    LEGACY_METRICS_CAP,
+    build_synthetic_oversized_bundle,
+    write_runtime_registry_fixture,
+)
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_UPLOAD_PATH,
+    build_registry_upload_http_server,
 )
+from packages.application.registry_upload_bundle_v1 import RegistryUploadBundleV1Block
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 
 ARTIFACTS_DIR = ROOT / "artifacts" / "registry_upload_http_entrypoint"
@@ -30,6 +41,7 @@ ACTIVATED_AT = "2026-04-13T12:00:03Z"
 
 
 def main() -> None:
+    input_bundle = _load_json(INPUT_BUNDLE_FIXTURE)
     with TemporaryDirectory(prefix="registry-upload-http-entrypoint-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         port = _reserve_free_port()
@@ -69,6 +81,12 @@ def main() -> None:
             accepted_expected = _load_json(TARGET_DIR / "http_result__accepted__fixture.json")
             if accepted_payload != accepted_expected:
                 raise AssertionError("accepted HTTP result differs from target fixture")
+            if accepted_payload["accepted_counts"]["config_v2"] != len(input_bundle["config_v2"]):
+                raise AssertionError("HTTP entrypoint must persist all config_v2 rows from request body")
+            if accepted_payload["accepted_counts"]["metrics_v2"] != len(input_bundle["metrics_v2"]):
+                raise AssertionError("HTTP entrypoint must persist all metrics_v2 rows from request body")
+            if accepted_payload["accepted_counts"]["formulas_v2"] != len(input_bundle["formulas_v2"]):
+                raise AssertionError("HTTP entrypoint must persist all formulas_v2 rows from request body")
 
             runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
             current_state = asdict(runtime.load_current_state())
@@ -90,7 +108,6 @@ def main() -> None:
             print(f"http path: ok -> {config.upload_path}")
             print(f"current bundle_version: ok -> {current_state['bundle_version']}")
             print(f"duplicate status: ok -> {duplicate_payload['status']}")
-            print("smoke-check passed")
         finally:
             process.terminate()
             try:
@@ -98,6 +115,61 @@ def main() -> None:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+
+    synthetic_bundle = build_synthetic_oversized_bundle()
+    if len(synthetic_bundle.config_v2) <= LEGACY_CONFIG_CAP:
+        raise AssertionError("synthetic config_v2 count must exceed legacy hardcoded cap")
+    if len(synthetic_bundle.metrics_v2) <= LEGACY_METRICS_CAP:
+        raise AssertionError("synthetic metrics_v2 count must exceed legacy hardcoded cap")
+    if len(synthetic_bundle.formulas_v2) <= LEGACY_FORMULAS_CAP:
+        raise AssertionError("synthetic formulas_v2 count must exceed legacy hardcoded cap")
+
+    with TemporaryDirectory(prefix="registry-upload-http-entrypoint-uncapped-") as tmp:
+        runtime_dir = Path(tmp) / "runtime"
+        runtime_registry_path = Path(tmp) / "runtime_registry.json"
+        write_runtime_registry_fixture(runtime_registry_path, synthetic_bundle)
+        port = _reserve_free_port()
+        config = RegistryUploadHttpEntrypointConfig(
+            host="127.0.0.1",
+            port=port,
+            upload_path=DEFAULT_UPLOAD_PATH,
+            sheet_plan_path=DEFAULT_SHEET_PLAN_PATH,
+            runtime_dir=runtime_dir,
+        )
+        entrypoint = RegistryUploadHttpEntrypoint(
+            runtime_dir=runtime_dir,
+            runtime=RegistryUploadDbBackedRuntime(
+                runtime_dir=runtime_dir,
+                bundle_block=RegistryUploadBundleV1Block(runtime_registry_path=runtime_registry_path),
+            ),
+            activated_at_factory=lambda: ACTIVATED_AT,
+        )
+        server = build_registry_upload_http_server(config, entrypoint=entrypoint)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            status, payload = _post_json(
+                f"http://127.0.0.1:{config.port}{config.upload_path}",
+                asdict(synthetic_bundle),
+            )
+            if status != 200:
+                raise AssertionError(f"synthetic oversized HTTP request must return 200, got {status}")
+            if payload["accepted_counts"]["config_v2"] != len(synthetic_bundle.config_v2):
+                raise AssertionError("synthetic HTTP request must persist all config_v2 rows")
+            if payload["accepted_counts"]["metrics_v2"] != len(synthetic_bundle.metrics_v2):
+                raise AssertionError("synthetic HTTP request must persist all metrics_v2 rows")
+            if payload["accepted_counts"]["formulas_v2"] != len(synthetic_bundle.formulas_v2):
+                raise AssertionError("synthetic HTTP request must persist all formulas_v2 rows")
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
+    print(
+        "uncapped HTTP bundle: ok -> "
+        f"{len(synthetic_bundle.config_v2)}/{len(synthetic_bundle.metrics_v2)}/{len(synthetic_bundle.formulas_v2)}"
+    )
+    print("smoke-check passed")
 
 
 def _post_json(url: str, payload: object) -> tuple[int, object]:

@@ -11,13 +11,11 @@
 ## Source Basis
 
 - `migration/86_registry_upload_contract.md`
-- `registry/pilot_bundle/config_v2.json`
-- `registry/pilot_bundle/metrics_v2.json`
-- `registry/pilot_bundle/formulas_v2.json`
-- `registry/pilot_bundle/metric_runtime_registry.json`
 - `artifacts/registry_upload_bundle_v1/input/config_v2__fixture.json`
 - `artifacts/registry_upload_bundle_v1/input/metrics_v2__fixture.json`
 - `artifacts/registry_upload_bundle_v1/input/formulas_v2__fixture.json`
+- `artifacts/registry_upload_bundle_v1/input/metric_runtime_registry__fixture.json`
+- `artifacts/registry_upload_bundle_v1/input/uploaded_compact_package/*`
 
 ## What Is Proven
 
@@ -27,9 +25,9 @@
 - bundle остаётся table-facing и не тащит внутрь server runtime semantics
 - runtime registry используется только как внешний validation seed для `calc_ref` resolution
 - bounded scope покрывает:
-  - `5` SKU
-  - `12` метрик
-  - `2` формулы
+  - `33` SKU/config rows
+  - `102` metrics rows
+  - `7` formulas rows
   - `metric`, `formula`, `ratio`
 
 ## Checks

@@ -10,8 +10,8 @@
   ],
   "seeded_counts": {
     "config_v2": 33,
-    "metrics_v2": 19,
-    "formulas_v2": 2
+    "metrics_v2": 102,
+    "formulas_v2": 7
   },
   "sheets": [
     {
@@ -55,8 +55,8 @@
         "display_order",
         "section"
       ],
-      "data_row_count": 19,
-      "last_row": 20,
+      "data_row_count": 102,
+      "last_row": 103,
       "last_column": 10
     },
     {
@@ -67,8 +67,8 @@
         "expression",
         "description"
       ],
-      "data_row_count": 2,
-      "last_row": 3,
+      "data_row_count": 7,
+      "last_row": 8,
       "last_column": 3
     }
   ]
