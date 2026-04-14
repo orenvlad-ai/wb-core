@@ -29,6 +29,8 @@ function main() {
       ? runSeedBootstrapMode({ context, spreadsheet, options })
       : options.mode === 'mvp_end_to_end'
         ? runMvpEndToEndMode({ context, spreadsheet, options })
+      : options.mode === 'matrix_layout'
+        ? runMatrixLayoutMode({ context, spreadsheet })
       : runBundleUploadMode({ context, spreadsheet, options });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
@@ -44,7 +46,10 @@ function parseArgs(argv) {
     options[key.slice(2)] = value;
   }
   options.mode = options.mode || 'bundle_upload';
-  const requiredKeys = ['scriptPath', 'endpointUrl', 'bundleVersion', 'uploadedAt'];
+  const requiredKeys = ['scriptPath'];
+  if (options.mode !== 'matrix_layout') {
+    requiredKeys.push('endpointUrl', 'bundleVersion', 'uploadedAt');
+  }
   if (options.mode === 'bundle_upload') {
     requiredKeys.push('fixturePath');
   }
@@ -140,6 +145,7 @@ function runMvpEndToEndMode({ context, spreadsheet, options }) {
     accepted_response: acceptedResponse,
     load_result: loadResult,
     sheet_state: sheetState,
+    presentation_snapshot: parseJsonString(context.getSheetVitrinaV1PresentationSnapshot()),
     status_block: statusBlock,
     sheets: {
       CONFIG: snapshotSheet(spreadsheet.getSheetByName('CONFIG')),
@@ -147,6 +153,53 @@ function runMvpEndToEndMode({ context, spreadsheet, options }) {
       FORMULAS: snapshotSheet(spreadsheet.getSheetByName('FORMULAS')),
       DATA_VITRINA: snapshotSheet(spreadsheet.getSheetByName('DATA_VITRINA')),
       STATUS: snapshotSheet(spreadsheet.getSheetByName('STATUS')),
+    },
+  };
+}
+
+function runMatrixLayoutMode({ context, spreadsheet }) {
+  const dayOnePlan = buildSyntheticSheetVitrinaPlan('2026-04-12', 0);
+  const dayOneOverwritePlan = buildSyntheticSheetVitrinaPlan('2026-04-12', 500);
+  const dayTwoPlan = buildSyntheticSheetVitrinaPlan('2026-04-13', 1000);
+
+  writePlanDirectlyToSheet(spreadsheet, dayOnePlan.sheets[0]);
+  writePlanDirectlyToSheet(spreadsheet, dayOnePlan.sheets[1]);
+  const flatSeedSnapshot = snapshotSheet(spreadsheet.getSheetByName('DATA_VITRINA'));
+
+  const migrated = parseJsonString(context.writeSheetVitrinaV1Plan(JSON.stringify(dayOnePlan)));
+  const migratedState = parseJsonString(context.getSheetVitrinaV1State());
+  const migratedPresentation = parseJsonString(context.getSheetVitrinaV1PresentationSnapshot());
+  const migratedSnapshot = snapshotSheet(spreadsheet.getSheetByName('DATA_VITRINA'));
+
+  const sameDayOverwrite = parseJsonString(context.writeSheetVitrinaV1Plan(JSON.stringify(dayOneOverwritePlan)));
+  const sameDayState = parseJsonString(context.getSheetVitrinaV1State());
+  const sameDayPresentation = parseJsonString(context.getSheetVitrinaV1PresentationSnapshot());
+  const sameDaySnapshot = snapshotSheet(spreadsheet.getSheetByName('DATA_VITRINA'));
+
+  const nextDayAppend = parseJsonString(context.writeSheetVitrinaV1Plan(JSON.stringify(dayTwoPlan)));
+  const nextDayState = parseJsonString(context.getSheetVitrinaV1State());
+  const nextDayPresentation = parseJsonString(context.getSheetVitrinaV1PresentationSnapshot());
+  const nextDaySnapshot = snapshotSheet(spreadsheet.getSheetByName('DATA_VITRINA'));
+
+  return {
+    migrated,
+    same_day_overwrite: sameDayOverwrite,
+    next_day_append: nextDayAppend,
+    snapshots: {
+      after_flat_seed: flatSeedSnapshot,
+      after_migration: migratedSnapshot,
+      after_same_day_overwrite: sameDaySnapshot,
+      after_next_day_append: nextDaySnapshot,
+    },
+    states: {
+      migrated: migratedState,
+      same_day_overwrite: sameDayState,
+      next_day_append: nextDayState,
+    },
+    presentations: {
+      migrated: migratedPresentation,
+      same_day_overwrite: sameDayPresentation,
+      next_day_append: nextDayPresentation,
     },
   };
 }
@@ -173,6 +226,120 @@ function writeStatusBlock(configSheet, values) {
   configSheet.getRange(5, 9).setValue(values.last_activated_at || '');
   configSheet.getRange(6, 9).setValue(values.last_http_status || '');
   configSheet.getRange(7, 9).setValue(values.last_validation_errors || '');
+}
+
+function writePlanDirectlyToSheet(spreadsheet, target) {
+  const sheet = spreadsheet.getSheetByName(target.sheet_name) || spreadsheet.insertSheet(target.sheet_name);
+  const matrix = [target.header].concat(target.rows || []);
+  sheet.getRange(target.clear_range).clearContent();
+  sheet.getRange(target.write_start_cell).offset(0, 0, matrix.length, matrix[0].length).setValues(matrix);
+}
+
+function buildSyntheticSheetVitrinaPlan(asOfDate, offset) {
+  const supportedMetrics = [
+    ['view_count', 'Показы в воронке'],
+    ['ctr', 'CTR открытия карточки'],
+    ['open_card_count', 'Открытия карточки'],
+    ['views_current', 'Показы в поиске'],
+    ['ctr_current', 'CTR в поиске'],
+    ['orders_current', 'Заказы в поиске'],
+    ['position_avg', 'Средняя позиция в поиске'],
+  ];
+  const totalRows = [
+    ['Итого: Показы в воронке', 'TOTAL|total_view_count', 1000 + offset],
+    ['Итого: Открытия карточки', 'TOTAL|total_open_card_count', 250 + offset],
+    ['Итого: Показы в поиске всего', 'TOTAL|total_views_current', 850 + offset],
+    ['Итого: CTR в поиске средний', 'TOTAL|avg_ctr_current', 0.23 + offset / 10000],
+    ['Итого: Заказы в поиске всего', 'TOTAL|total_orders_current', 75 + offset],
+    ['Итого: Средняя позиция в поиске средняя', 'TOTAL|avg_position_avg', 4.25 + offset / 1000],
+    ['Итого: Заказы всего', 'TOTAL|total_orderCount', 90 + offset],
+  ];
+  const groups = [
+    { key: 'GROUP:Clean', label: 'Clean', base: 200 + offset },
+    { key: 'GROUP:Anti-Spy', label: 'Anti-Spy', base: 120 + offset },
+  ];
+  const skus = [
+    { key: 'SKU:210183919', label: 'clean iPhone 14', base: 110 + offset },
+    { key: 'SKU:210183920', label: 'clean iPhone 15', base: 80 + offset },
+  ];
+
+  const rows = totalRows.slice();
+  groups.forEach((group) => {
+    supportedMetrics.forEach(([metricKey, title], index) => {
+      rows.push([
+        `Группа ${group.label}: ${title}`,
+        `${group.key}|${metricKey}`,
+        syntheticMetricValue(metricKey, group.base + index),
+      ]);
+    });
+  });
+  skus.forEach((sku) => {
+    supportedMetrics.forEach(([metricKey, title], index) => {
+      rows.push([
+        `${sku.label}: ${title}`,
+        `${sku.key}|${metricKey}`,
+        syntheticMetricValue(metricKey, sku.base + index),
+      ]);
+    });
+    rows.push([`${sku.label}: Остаток`, `${sku.key}|stock_total`, 500 + sku.base]);
+  });
+
+  return {
+    plan_version: 'sheet_vitrina_v1_compact_live_v2__sheet_scaffold_v1',
+    snapshot_id: `${asOfDate}__sheet_vitrina_v1_compact_live_v2__synthetic`,
+    as_of_date: asOfDate,
+    sheets: [
+      {
+        sheet_name: 'DATA_VITRINA',
+        write_start_cell: 'A1',
+        write_rect: `A1:C${rows.length + 1}`,
+        clear_range: 'A:ZZ',
+        write_mode: 'full_overwrite',
+        partial_update_allowed: false,
+        header: ['label', 'key', asOfDate],
+        rows: rows,
+        row_count: rows.length,
+        column_count: 3,
+      },
+      {
+        sheet_name: 'STATUS',
+        write_start_cell: 'A1',
+        write_rect: 'A1:K3',
+        clear_range: 'A:K',
+        write_mode: 'full_overwrite',
+        partial_update_allowed: false,
+        header: [
+          'source_key',
+          'kind',
+          'freshness',
+          'snapshot_date',
+          'date',
+          'date_from',
+          'date_to',
+          'requested_count',
+          'covered_count',
+          'missing_nm_ids',
+          'note',
+        ],
+        rows: [
+          ['registry_upload_current_state', 'success', asOfDate, asOfDate, '', '', '', 2, 2, '', 'synthetic'],
+          ['sheet_vitrina_v1_compact_live_v2', 'success', asOfDate, asOfDate, '', '', '', 7, 7, '', 'synthetic'],
+        ],
+        row_count: 2,
+        column_count: 11,
+      },
+    ],
+  };
+}
+
+function syntheticMetricValue(metricKey, base) {
+  if (metricKey === 'ctr' || metricKey === 'ctr_current') {
+    return Number((0.1 + base / 1000).toFixed(4));
+  }
+  if (metricKey === 'position_avg') {
+    return Number((2 + base / 100).toFixed(2));
+  }
+  return Math.round(base);
 }
 
 function buildContext({ spreadsheet }) {
@@ -216,6 +383,9 @@ function buildContext({ spreadsheet }) {
           throw new Error(`unexpected spreadsheet id: ${id}`);
         }
         return spreadsheet;
+      },
+      flush() {
+        return null;
       },
       getUi() {
         return ui;
@@ -301,9 +471,16 @@ class MockSheet {
     this.name = name;
     this.values = new Map();
     this.notes = new Map();
-    this.maxRows = 200;
+    this.backgrounds = new Map();
+    this.fontColors = new Map();
+    this.fontWeights = new Map();
+    this.horizontalAlignments = new Map();
+    this.verticalAlignments = new Map();
+    this.numberFormats = new Map();
+    this.maxRows = 5000;
     this.maxColumns = 702;
     this.frozenRows = 0;
+    this.frozenColumns = 0;
     this.columnWidths = new Map();
   }
 
@@ -349,10 +526,40 @@ class MockSheet {
 
   setFrozenRows(count) {
     this.frozenRows = count;
+    return this;
+  }
+
+  getFrozenRows() {
+    return this.frozenRows;
+  }
+
+  setFrozenColumns(count) {
+    this.frozenColumns = count;
+    return this;
+  }
+
+  getFrozenColumns() {
+    return this.frozenColumns;
   }
 
   setColumnWidth(column, width) {
     this.columnWidths.set(column, width);
+    return this;
+  }
+
+  setColumnWidths(startColumn, numColumns, width) {
+    for (let offset = 0; offset < numColumns; offset += 1) {
+      this.columnWidths.set(startColumn + offset, width);
+    }
+    return this;
+  }
+
+  getColumnWidth(column) {
+    return this.columnWidths.get(column) || 100;
+  }
+
+  showRows() {
+    return this;
   }
 
   getCellValue(row, column) {
@@ -406,16 +613,92 @@ class MockRange {
   }
 
   clearContent() {
-    for (let rowOffset = 0; rowOffset < this.numRows; rowOffset += 1) {
-      for (let columnOffset = 0; columnOffset < this.numColumns; columnOffset += 1) {
-        this.sheet.values.set(`${this.row + rowOffset}:${this.column + columnOffset}`, '');
+    for (const key of Array.from(this.sheet.values.keys())) {
+      const [row, column] = key.split(':').map(Number);
+      if (
+        row >= this.row &&
+        row < this.row + this.numRows &&
+        column >= this.column &&
+        column < this.column + this.numColumns
+      ) {
+        this.sheet.values.set(key, '');
       }
     }
     return this;
   }
 
-  setFontWeight() {
+  setFontWeight(value) {
+    return this._setStyle(this.sheet.fontWeights, value);
+  }
+
+  setBackground(value) {
+    return this._setStyle(this.sheet.backgrounds, value);
+  }
+
+  setFontColor(value) {
+    return this._setStyle(this.sheet.fontColors, value);
+  }
+
+  setHorizontalAlignment(value) {
+    return this._setStyle(this.sheet.horizontalAlignments, value);
+  }
+
+  setVerticalAlignment(value) {
+    return this._setStyle(this.sheet.verticalAlignments, value);
+  }
+
+  setNumberFormat(value) {
+    return this._setStyle(this.sheet.numberFormats, value);
+  }
+
+  getDisplayValues() {
+    return this.getValues().map((row) =>
+      row.map((value) =>
+        value === null || value === undefined ? '' : typeof value === 'string' ? value : String(value)
+      )
+    );
+  }
+
+  getBackground() {
+    return this._getStyle(this.sheet.backgrounds, '#ffffff');
+  }
+
+  getFontColor() {
+    return this._getStyle(this.sheet.fontColors, '#000000');
+  }
+
+  getFontWeight() {
+    return this._getStyle(this.sheet.fontWeights, 'normal');
+  }
+
+  getHorizontalAlignment() {
+    return this._getStyle(this.sheet.horizontalAlignments, '');
+  }
+
+  getVerticalAlignment() {
+    return this._getStyle(this.sheet.verticalAlignments, '');
+  }
+
+  getNumberFormat() {
+    return this._getStyle(this.sheet.numberFormats, '');
+  }
+
+  getNote() {
+    return this.sheet.notes.get(`${this.row}:${this.column}`) || '';
+  }
+
+  _setStyle(store, value) {
+    for (let rowOffset = 0; rowOffset < this.numRows; rowOffset += 1) {
+      for (let columnOffset = 0; columnOffset < this.numColumns; columnOffset += 1) {
+        store.set(`${this.row + rowOffset}:${this.column + columnOffset}`, value);
+      }
+    }
     return this;
+  }
+
+  _getStyle(store, fallback) {
+    const key = `${this.row}:${this.column}`;
+    return store.has(key) ? store.get(key) : fallback;
   }
 
   setNote(note) {

@@ -6,13 +6,13 @@ const DATA_VITRINA_WIDTHS = {
 
 const STATUS_WIDTHS = [190, 110, 110, 110, 110, 110, 110, 120, 120, 150, 260];
 
-const PRESENTATION_HEADER_BACKGROUND = '#1f2937';
-const PRESENTATION_HEADER_FONT_COLOR = '#ffffff';
+const PRESENTATION_HEADER_BACKGROUND = '#ffffff';
+const PRESENTATION_HEADER_FONT_COLOR = '#000000';
 const PRESENTATION_DATE_PATTERN = 'dd.mm.yyyy';
 const PRESENTATION_PERCENT_PATTERN = '0.0%';
-const PRESENTATION_RUBLE_PATTERN = '#,##0" ₽"';
 const PRESENTATION_INTEGER_PATTERN = '#,##0';
 const PRESENTATION_DECIMAL_PATTERN = '#,##0.00';
+const PRESENTATION_TEXT_PATTERN = '@';
 
 function applySheetVitrinaV1PresentationPass() {
   const spreadsheet = getPresentationSpreadsheet_();
@@ -67,6 +67,9 @@ function applyDataVitrinaPresentation_(sheet) {
   }
 
   styleHeaderRow_(sheet, lastColumn);
+  if (typeof sheet.showRows === 'function') {
+    sheet.showRows(1, sheet.getMaxRows());
+  }
   sheet.setFrozenColumns(2);
   sheet.setColumnWidth(1, DATA_VITRINA_WIDTHS.label);
   sheet.setColumnWidth(2, DATA_VITRINA_WIDTHS.key);
@@ -78,13 +81,12 @@ function applyDataVitrinaPresentation_(sheet) {
   }
 
   if (lastRow > 1) {
-    sheet.getRange(2, 1, lastRow - 1, 1).setHorizontalAlignment('left');
-    sheet.getRange(2, 2, lastRow - 1, 1).setHorizontalAlignment('left');
-    if (lastColumn > 2) {
-      const bodyRange = sheet.getRange(2, 3, lastRow - 1, lastColumn - 2);
-      bodyRange.setHorizontalAlignment('right');
-      applyDataBodyNumberFormats_(sheet, lastRow, lastColumn);
-    }
+    sheet.getRange(2, 1, lastRow - 1, lastColumn)
+      .setBackground('#ffffff')
+      .setFontColor('#000000')
+      .setFontWeight('normal')
+      .setVerticalAlignment('middle');
+    applyDataBodyPresentation_(sheet, lastRow, lastColumn);
   }
 
   return {
@@ -140,28 +142,37 @@ function styleHeaderRow_(sheet, lastColumn) {
   sheet.getRange(1, 1, 1, Math.min(lastColumn, 2)).setHorizontalAlignment('left');
 }
 
-function applyDataBodyNumberFormats_(sheet, lastRow, lastColumn) {
+function applyDataBodyPresentation_(sheet, lastRow, lastColumn) {
   const keys = sheet.getRange(2, 2, lastRow - 1, 1).getDisplayValues();
+  const labels = sheet.getRange(2, 1, lastRow - 1, 1).getDisplayValues();
   const values = sheet.getRange(2, 3, lastRow - 1, lastColumn - 2).getValues();
   for (let index = 0; index < keys.length; index += 1) {
     const key = String(keys[index][0] || '');
-    const pattern = resolveDataPattern_(key, values[index]);
-    sheet.getRange(index + 2, 3, 1, lastColumn - 2).setNumberFormat(pattern);
+    const label = String(labels[index][0] || '');
+    const rowNumber = index + 2;
+    const valueRange = sheet.getRange(rowNumber, 3, 1, lastColumn - 2);
+    sheet.getRange(rowNumber, 1, 1, 2).setHorizontalAlignment('left');
+    if (!label && !key) {
+      valueRange.setHorizontalAlignment('left').setNumberFormat(PRESENTATION_TEXT_PATTERN);
+      continue;
+    }
+    if (isDataVitrinaBlockKey_(key)) {
+      sheet.getRange(rowNumber, 1, 1, lastColumn).setFontWeight('bold');
+      valueRange.setHorizontalAlignment('left').setNumberFormat(PRESENTATION_TEXT_PATTERN);
+      continue;
+    }
+    valueRange
+      .setHorizontalAlignment('right')
+      .setNumberFormat(resolveDataPattern_(key, values[index]));
   }
 }
 
 function resolveDataPattern_(key, rowValues) {
-  if (/\|(spp|ads_ctr|ctr|ctr_current)$/.test(key)) {
+  if (key === 'ctr' || key === 'ctr_current') {
     return PRESENTATION_PERCENT_PATTERN;
   }
-  if (/(price_seller_discounted|_rub)$/.test(key)) {
-    return PRESENTATION_RUBLE_PATTERN;
-  }
-  for (let index = 0; index < rowValues.length; index += 1) {
-    const value = rowValues[index];
-    if (typeof value === 'number' && Math.floor(value) !== value) {
-      return PRESENTATION_DECIMAL_PATTERN;
-    }
+  if (key === 'position_avg') {
+    return PRESENTATION_DECIMAL_PATTERN;
   }
   return PRESENTATION_INTEGER_PATTERN;
 }
@@ -206,12 +217,10 @@ function describeHeaderStyle_(sheet, lastColumn) {
 
 function describeDataSamples_(sheet) {
   return {
-    percent: describeDataSampleByPredicate_(sheet, (key) => /\|(spp|ads_ctr|ctr|ctr_current)$/.test(key)),
-    ruble: describeDataSampleByPredicate_(sheet, (key) => /(price_seller_discounted|_rub)$/.test(key)),
-    integer: describeDataSampleByPredicate_(
-      sheet,
-      (key) => !/\|(spp|ads_ctr|ctr|ctr_current)$/.test(key) && !/(price_seller_discounted|_rub)$/.test(key)
-    ),
+    section: describeDataSampleByPredicate_(sheet, (key) => isDataVitrinaBlockKey_(key)),
+    percent: describeDataSampleByPredicate_(sheet, (key) => key === 'ctr' || key === 'ctr_current'),
+    decimal: describeDataSampleByPredicate_(sheet, (key) => key === 'position_avg'),
+    integer: describeDataSampleByPredicate_(sheet, (key) => key === 'view_count' || key === 'orders_current'),
   };
 }
 

@@ -45,6 +45,7 @@ python3 apps/registry_upload_db_backed_runtime_smoke.py
 python3 apps/registry_upload_http_entrypoint_smoke.py
 python3 apps/sheet_vitrina_v1_registry_upload_trigger_smoke.py
 python3 apps/sheet_vitrina_v1_registry_seed_v3_bootstrap_smoke.py
+python3 apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py
 python3 apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py
 git diff --check
 ```
@@ -75,9 +76,10 @@ clasp run getSheetVitrinaV1State
 - `prepareRegistryUploadOperatorSheets` currently materializes `33 / 102 / 7`;
 - `uploadRegistryUploadBundle` accepts and persists factual registry sheet lengths; на текущем contour это `33 / 102 / 7`, но проверка не должна зависеть от hardcoded row caps;
 - `CONFIG!H:I` preserves `endpoint_url`, `last_bundle_version`, `last_status`, `last_http_status`;
-- `DATA_VITRINA` gets `95` displayed metric keys and `1631` data rows;
+- current truth / server-side plan keep `95` enabled+show_in_data metrics;
+- `DATA_VITRINA` gets legacy-aligned matrix layout: `34` blocks, `7` metric keys на блок, `305` data rows при одном дне и рост истории по датам вправо;
 - `STATUS` names live sources such as `registry_upload_current_state`, `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `prices_snapshot`, `sf_period`, `spp`, `ads_bids`, `stocks`, `ads_compact`, `fin_report_daily`, plus blocked `promo_by_price` / `cogs_by_group`;
-- blank values для promo/cogs-backed metrics трактуются как известный live-adapter gap, а не как повод срезать rows.
+- blank values для promo/cogs-backed metrics трактуются как известный live-adapter gap на стороне current truth / `STATUS`, а не как повод переносить heavy fallback logic в Apps Script.
 
 ## Common failure signatures
 

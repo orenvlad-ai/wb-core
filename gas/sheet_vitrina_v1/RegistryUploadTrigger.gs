@@ -85,11 +85,13 @@ function loadSheetVitrinaTable() {
   try {
     const response = _loadSheetVitrinaTableFromServer_({});
     const plan = response.sheet_plan;
+    const writeResult = response.write_result || { sheets: [] };
+    const dataSheet = writeResult.sheets && writeResult.sheets.length ? writeResult.sheets[0] : null;
     const lines = [
       'Витрина обновлена',
       `Дата: ${plan.as_of_date}`,
       `Snapshot: ${plan.snapshot_id}`,
-      `DATA_VITRINA: ${plan.sheets[0].row_count} строк`,
+      `DATA_VITRINA: ${dataSheet ? dataSheet.row_count : plan.sheets[0].row_count} строк`,
     ];
     _notifyRegistryUploadOperator_(lines.join('\n'), 'success');
     return JSON.stringify(response);
@@ -339,7 +341,7 @@ function _loadSheetVitrinaTableFromServer_(options) {
   const uploadUrl = _resolveRegistryUploadEndpointUrl_(spreadsheet, String(options.endpointUrl || '').trim());
   const planUrl = _deriveSheetVitrinaPlanUrl_(uploadUrl, String(options.asOfDate || '').trim());
   const response = _fetchSheetVitrinaPlan_(planUrl);
-  writeSheetVitrinaV1Plan(JSON.stringify(response.sheet_plan));
+  response.write_result = JSON.parse(writeSheetVitrinaV1Plan(JSON.stringify(response.sheet_plan)));
   return response;
 }
 

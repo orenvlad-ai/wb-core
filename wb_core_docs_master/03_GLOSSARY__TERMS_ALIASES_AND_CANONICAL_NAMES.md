@@ -59,7 +59,7 @@ built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
 # Known gaps
 
 - Final production naming для будущих hosted/runtime/deploy слоёв ещё не зафиксирован.
-- Текущий main-confirmed uploaded package уже фиксируется как `102` metrics rows / `95` displayed metric keys; открытым остаётся live numeric fill для promo/cogs-backed metrics.
+- Текущий main-confirmed uploaded package уже фиксируется как `102` metrics rows / `95` enabled+show_in_data metric keys в current truth; operator-facing `DATA_VITRINA` при этом сознательно остаётся bounded 7-metric date-matrix view.
 
 # Not in scope
 

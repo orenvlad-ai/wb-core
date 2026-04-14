@@ -11,18 +11,23 @@
     "formulas_v2": 7
   },
   "snapshot_id": "2026-04-12__sheet_vitrina_v1_compact_live_v2__current",
-  "data_row_count": 1631,
+  "data_row_count": 305,
   "status_row_count": 14,
-  "metric_key_count": 95,
-  "non_empty_value_row_count": 237,
-  "scope_row_counts": {
-    "TOTAL": 47,
+  "block_key_count": 34,
+  "metric_key_count": 7,
+  "date_column_count": 1,
+  "section_row_count": 34,
+  "metric_row_count": 238,
+  "separator_row_count": 33,
+  "non_empty_metric_row_count": 238,
+  "scope_block_counts": {
+    "TOTAL": 1,
     "GROUP": 0,
-    "SKU": 1584,
+    "SKU": 33,
     "OTHER": 0
   },
   "data_header": [
-    "label",
+    "дата",
     "key",
     "2026-04-12"
   ],
@@ -39,9 +44,18 @@
     "missing_nm_ids",
     "note"
   ],
-  "first_data_key": [
-    "Итого: Прокси маржинальность всего, %",
-    "TOTAL|proxy_margin_pct_total"
+  "first_section": [
+    "ИТОГО",
+    "TOTAL"
+  ],
+  "first_metric_row": [
+    "Показы в воронке",
+    "view_count",
+    185241
+  ],
+  "first_sku_section": [
+    "clean iPhone 14",
+    "SKU:210183919"
   ],
   "status_keys": [
     "registry_upload_current_state",
