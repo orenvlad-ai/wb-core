@@ -20,16 +20,16 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "фактическая внешняя project upload"
-built_from_commit: "e4c08c83e0f19e8f270ac8ee93812a751f57a021"
+built_from_commit: "189b00fadda06f3be7ef92391ddf597357492f80"
 docset_version: "wb_core_docs_master_v1"
-built_at: "2026-04-14T10:07:40Z"
+built_at: "2026-04-14T10:23:55Z"
 core_docs_changed:
   - "docs/architecture/07_codex_execution_protocol.md"
   - "wb_core_docs_master/02_POLICY__DOCS_SYNC_AND_CODEX_PROTOCOL.md"
   - "wb_core_docs_master/07_REGISTER__DO_NOT_LOSE_CONSTRAINTS.md"
-project_upload_required: true
-last_project_upload_at: "2026-04-14T09:19:08Z"
-project_upload_note: "после фиксации L1/L2/L3 execution matrix, Codex-first rule и mandatory prompt footer нужен повторный upload curated-pack в ChatGPT Project WebCore"
+project_upload_required: false
+last_project_upload_at: "2026-04-14T10:23:55Z"
+project_upload_note: "повторный upload curated-pack после фиксации L1/L2/L3 execution matrix, Codex-first rule и mandatory prompt footer уже выполнен в ChatGPT Project WebCore"
 ---
 
 # Summary
@@ -43,7 +43,7 @@ project_upload_note: "после фиксации L1/L2/L3 execution matrix, Cod
 
 - `docset_version` меняется только при осмысленной пересборке pack.
 - `built_from_commit` указывает на repo commit, от которого отталкивался pack.
-- `project_upload_required = true` означает, что curated-pack изменился после последней подтверждённой внешней загрузки и требует повторного upload.
+- `project_upload_required = false` означает, что текущий curated-pack уже подтверждён как загруженный во внешний Project.
 - `last_project_upload_at` обновляется только после реальной внешней загрузки, а не после локального commit.
 - `project_upload_note` можно использовать для короткой фиксации особого upload-события, если это помогает audit trail.
 
