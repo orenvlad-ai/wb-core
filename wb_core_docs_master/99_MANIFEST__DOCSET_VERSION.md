@@ -20,22 +20,14 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "фактическая внешняя project upload"
-built_from_commit: "5121d0f2ceac9ec99c776a9b572a6ed12981237a"
+built_from_commit: "138d97eb4eb4f95b1911b3a7fbee54ac5f074dbc"
 docset_version: "wb_core_docs_master_v1"
-built_at: "2026-04-13T18:11:45Z"
+built_at: "2026-04-14T08:33:18Z"
 core_docs_changed:
-  - "README.md"
-  - "docs/architecture/00_migration_charter.md"
-  - "docs/architecture/01_target_architecture.md"
-  - "docs/architecture/02_repo_workspace_blueprint.md"
-  - "docs/architecture/03_source_of_truth_policy.md"
   - "docs/architecture/07_codex_execution_protocol.md"
-  - "docs/architecture/08_open_questions_and_decision_log.md"
-  - "docs/modules/00_INDEX__MODULES.md"
-  - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
-project_upload_required: false
+project_upload_required: true
 last_project_upload_at: "2026-04-13T18:11:45Z"
-project_upload_note: "подтверждён первый initial upload curated-pack в новый ChatGPT Project WebCore"
+project_upload_note: "после hardening execution protocol для новых чатов нужен повторный upload curated-pack в ChatGPT Project WebCore"
 ---
 
 # Summary
@@ -49,7 +41,7 @@ project_upload_note: "подтверждён первый initial upload curated
 
 - `docset_version` меняется только при осмысленной пересборке pack.
 - `built_from_commit` указывает на repo commit, от которого отталкивался pack.
-- `project_upload_required = false` означает, что текущий curated-pack уже подтверждён как загруженный во внешний Project.
+- `project_upload_required = true` означает, что текущий curated-pack уже изменён локально и требует повторной внешней загрузки во внешний Project.
 - `last_project_upload_at` обновляется только после реальной внешней загрузки, а не после локального commit.
 - `project_upload_note` можно использовать для короткой фиксации особого upload-события, если это помогает audit trail.
 
