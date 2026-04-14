@@ -38,7 +38,7 @@ built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
 | `C-01` | Git-tracked repo docs и code остаются единственным canonical source of truth. Runtime-only fixes без Git недействительны. |
 | `C-02` | Таблица остаётся thin operator shell; production truth и heavy logic не должны возвращаться в Apps Script. |
 | `C-03` | `CONFIG!H:I` является service/status block и не должен теряться при `prepare`, `upload`, `load`. |
-| `C-04` | Upload flow обязан использовать канонический bundle/result contract и existing HTTP entrypoint, а не локальные sheet-side копии validation logic. |
+| `C-04` | Upload flow обязан использовать канонический bundle/result contract и existing HTTP entrypoint, а не локальные sheet-side копии validation logic; server-side acceptance должна опираться на structure/schema correctness и фактические длины registry lists, а не на hardcoded row-count caps. |
 | `C-05` | Reverse-load в `DATA_VITRINA` должен идти из живого server-side contour, а не из fake local sheet fixture. |
 | `C-06` | `wb_core_docs_master` не может становиться dump-копией repo docs или полным legacy mirror. |
 | `C-07` | Legacy knowledge разрешён только как thin register/map/constraint layer. |

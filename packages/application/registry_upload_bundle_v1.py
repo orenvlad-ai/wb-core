@@ -76,13 +76,6 @@ class RegistryUploadBundleV1Block:
         if enforce_fixture_uniqueness:
             _require_unique_bundle_version(bundle.bundle_version, bundle_path, self.target_dir)
 
-        if not 1 <= len(bundle.config_v2) <= 256:
-            raise ValueError("registry upload bundle must contain 1-256 config_v2 entries")
-        if not 1 <= len(bundle.metrics_v2) <= 256:
-            raise ValueError("registry upload bundle must contain 1-256 metrics_v2 entries")
-        if not 0 <= len(bundle.formulas_v2) <= 128:
-            raise ValueError("registry upload bundle must contain 0-128 formulas_v2 entries")
-
         _require_unique("config_v2.nm_id", (item.nm_id for item in bundle.config_v2))
         _require_unique("config_v2.display_order", (item.display_order for item in bundle.config_v2))
         _require_unique("metrics_v2.metric_key", (item.metric_key for item in bundle.metrics_v2))

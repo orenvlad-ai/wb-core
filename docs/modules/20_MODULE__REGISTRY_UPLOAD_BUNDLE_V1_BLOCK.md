@@ -28,7 +28,7 @@ related_docs:
   - "migration/86_registry_upload_contract.md"
   - "migration/87_registry_upload_bundle_v1.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под uploaded compact package: bundle и validator теперь работают с полным current authoritative registry set `33 / 102 / 7`, а не с pilot-subset."
+update_note: "Обновлён под uploaded compact package: bundle и validator работают с полным current authoritative registry set `33 / 102 / 7` и валидируют structure/runtime correctness без hardcoded row-count caps."
 ---
 
 # 1. Идентификатор и статус
@@ -66,6 +66,10 @@ update_note: "Обновлён под uploaded compact package: bundle и valida
   - `config_v2 = 33`
   - `metrics_v2 = 102`
   - `formulas_v2 = 7`
+- Validator не должен отклонять bundle по заранее зашитым min/max caps вроде `1-256`, `0-128` или `5-64`.
+- Acceptance semantics строится по фактическим спискам из registry sheets:
+  - валидируются shape, required fields, uniqueness, runtime mapping и `calc_ref`;
+  - `accepted_counts` обязаны отражать реальные длины `config_v2 / metrics_v2 / formulas_v2`, а не заранее ожидаемый preset.
 - Validator использует repo-owned runtime registry fixture:
   - `artifacts/registry_upload_bundle_v1/input/metric_runtime_registry__fixture.json`
 - Bundle допускает все три `calc_type`:
@@ -105,7 +109,8 @@ update_note: "Обновлён под uploaded compact package: bundle и valida
   - что проходят проверки уникальности `bundle_version`, `nm_id`, `display_order`, `metric_key`, `formula_id`;
   - что `scope` и `calc_type` лежат в допустимых множествах;
   - что `calc_ref` резолвится через `formulas_v2` и repo-owned runtime registry fixture;
-  - что current authoritative package реально покрывает `metric`, `formula`, `ratio` без pilot-usability cap.
+  - что current authoritative package реально покрывает `metric`, `formula`, `ratio` без pilot-usability cap;
+  - что synthetic oversized bundle проходит validator поверх фактических длин списков и не режется hardcoded row-count caps.
 
 # 7. Что уже доказано по модулю
 
@@ -113,6 +118,7 @@ update_note: "Обновлён под uploaded compact package: bundle и valida
 - Первый bounded validator уже выражает contract rules из `migration/86` без раннего server ingest.
 - Bundle остаётся table-facing и не смешивает display-слой с runtime registry в одном payload.
 - Full uploaded compact package уже проходит локальную сборку и validation без тихого возврата к `5 / 12 / 2` pilot-subset.
+- Row-count coupling к фиксированным caps удалён: bounded validator принимает фактические registry list lengths, если сохраняется schema/runtime correctness.
 
 # 8. Что пока не является частью финальной production-сборки
 

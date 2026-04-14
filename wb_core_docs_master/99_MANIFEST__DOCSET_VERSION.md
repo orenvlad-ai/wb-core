@@ -20,12 +20,13 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "фактическая внешняя project upload"
-built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
+built_from_commit: "20be78495c35cb34da4cb899821d2e800d1c8fc5"
 docset_version: "wb_core_docs_master_v1"
-built_at: "2026-04-14T11:25:48Z"
+built_at: "2026-04-14T11:52:56Z"
 core_docs_changed:
   - "docs/architecture/08_open_questions_and_decision_log.md"
   - "docs/modules/20_MODULE__REGISTRY_UPLOAD_BUNDLE_V1_BLOCK.md"
+  - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
@@ -37,7 +38,7 @@ core_docs_changed:
   - "wb_core_docs_master/09_RUNBOOK__COMMON_SMOKE_AND_DEBUG.md"
 project_upload_required: true
 last_project_upload_at: "2026-04-14T10:23:55Z"
-project_upload_note: "pack изменён после выравнивания live contour `prepare -> upload -> load` под uploaded compact package и decision-log по alias/total_avg/section/service-values; требуется повторный внешний upload в ChatGPT Project WebCore"
+project_upload_note: "pack изменён после снятия hardcoded row-count caps в registry upload boundary и обновления smoke/debug guidance; требуется повторный внешний upload в ChatGPT Project WebCore"
 ---
 
 # Summary
@@ -54,6 +55,7 @@ project_upload_note: "pack изменён после выравнивания li
 - `project_upload_required = true` означает, что pack уже изменён в repo, но ещё не подтверждён как заново загруженный во внешний Project.
 - `last_project_upload_at` обновляется только после реальной внешней загрузки, а не после локального commit.
 - `project_upload_note` можно использовать для короткой фиксации особого upload-события, если это помогает audit trail.
+- При изменении canonical upload/runtime semantics manifest должен явно отражать необходимость повторной внешней project upload.
 
 # Known gaps
 

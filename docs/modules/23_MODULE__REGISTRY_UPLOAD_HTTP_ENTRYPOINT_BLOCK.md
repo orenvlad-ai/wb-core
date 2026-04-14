@@ -35,7 +35,7 @@ related_docs:
   - "migration/90_registry_upload_http_entrypoint.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Создан как канонический модульный документ для первого live HTTP entrypoint слоя registry upload."
+update_note: "Обновлён под uncapped registry upload boundary: HTTP entrypoint принимает фактические registry list lengths и не вводит fixed row-count caps поверх canonical bundle/runtime validation."
 ---
 
 # 1. Идентификатор и статус
@@ -69,6 +69,8 @@ update_note: "Создан как канонический модульный д
   - `accepted_counts`
   - `validation_errors`
   - `activated_at`
+- HTTP boundary не должен навязывать fixed row-count presets для `config_v2 / metrics_v2 / formulas_v2`.
+- `accepted_counts` обязаны отражать фактические длины списков из request body после successful ingest.
 - HTTP семантика bounded шага:
   - `200` для `accepted`
   - `409` для duplicate `bundle_version`
@@ -116,13 +118,16 @@ update_note: "Создан как канонический модульный д
   - что request body попадает в существующий DB-backed runtime, а не в дублирующую ingest-логику;
   - что accepted response возвращается в канонической форме;
   - что current server-side truth обновляется через runtime DB;
-  - что duplicate `bundle_version` возвращает rejected result и HTTP `409`.
+  - что duplicate `bundle_version` возвращает rejected result и HTTP `409`;
+  - что accepted HTTP response сохраняет фактические request counts;
+  - что synthetic oversized bundle проходит тот же HTTP boundary без hardcoded row-count caps.
 
 # 7. Что уже доказано по модулю
 
 - upload line больше не заканчивается на локальном runtime: в repo появился первый внешний вызываемый boundary.
 - В будущем кнопке из `VB-Core Витрина V1` уже есть куда писать на уровне thin HTTP entrypoint.
 - Новая HTTP прослойка остаётся тонкой и не тянет за собой deploy, auth и Apps Script UI.
+- HTTP boundary выровнен с current upload semantics: валидируется содержимое registry rows, а не их заранее зашитое количество.
 
 # 8. Что пока не является частью финальной production-сборки
 

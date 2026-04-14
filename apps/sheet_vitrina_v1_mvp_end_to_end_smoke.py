@@ -100,6 +100,15 @@ def main() -> None:
                 raise AssertionError("upload path must return accepted")
             if accepted["accepted_counts"] != expected_summary["accepted_counts"]:
                 raise AssertionError("accepted_counts mismatch")
+            built_bundle = harness_result["built_bundle"]
+            if len(built_bundle["metrics_v2"]) <= 64:
+                raise AssertionError("integration smoke must stay above legacy 64-row metrics cap")
+            if accepted["accepted_counts"]["config_v2"] != len(built_bundle["config_v2"]):
+                raise AssertionError("upload path must accept every config_v2 row built from sheets")
+            if accepted["accepted_counts"]["metrics_v2"] != len(built_bundle["metrics_v2"]):
+                raise AssertionError("upload path must accept every metrics_v2 row built from sheets")
+            if accepted["accepted_counts"]["formulas_v2"] != len(built_bundle["formulas_v2"]):
+                raise AssertionError("upload path must accept every formulas_v2 row built from sheets")
 
             load_result = harness_result["load_result"]
             if load_result["http_status"] != 200:
@@ -132,6 +141,8 @@ def main() -> None:
             status_state = next(item for item in sheet_state["sheets"] if item["sheet_name"] == "STATUS")
             if data_state["metric_key_count"] != expected_summary["metric_key_count"]:
                 raise AssertionError("DATA_VITRINA metric_key_count mismatch")
+            if data_state["metric_key_count"] <= 7:
+                raise AssertionError("DATA_VITRINA must materialize more than the legacy 7-metric subset")
             if data_state["non_empty_value_row_count"] != expected_summary["non_empty_value_row_count"]:
                 raise AssertionError("DATA_VITRINA non_empty_value_row_count mismatch")
             if data_state["scope_row_counts"] != expected_summary["scope_row_counts"]:

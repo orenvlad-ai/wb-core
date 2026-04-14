@@ -73,7 +73,7 @@ clasp run getSheetVitrinaV1State
 
 - `CONFIG / METRICS / FORMULAS` have expected headers and non-empty rows;
 - `prepareRegistryUploadOperatorSheets` currently materializes `33 / 102 / 7`;
-- `uploadRegistryUploadBundle` currently accepts and persists all `102` `metrics_v2` rows;
+- `uploadRegistryUploadBundle` accepts and persists factual registry sheet lengths; на текущем contour это `33 / 102 / 7`, но проверка не должна зависеть от hardcoded row caps;
 - `CONFIG!H:I` preserves `endpoint_url`, `last_bundle_version`, `last_status`, `last_http_status`;
 - `DATA_VITRINA` gets `95` displayed metric keys and `1631` data rows;
 - `STATUS` names live sources such as `registry_upload_current_state`, `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `prices_snapshot`, `sf_period`, `spp`, `ads_bids`, `stocks`, `ads_compact`, `fin_report_daily`, plus blocked `promo_by_price` / `cogs_by_group`;
@@ -86,6 +86,7 @@ clasp run getSheetVitrinaV1State
 | `CONFIG!I2 должен содержать URL registry upload endpoint` | sheet-side endpoint URL is missing |
 | `sheet vitrina endpoint returned non-JSON response` | stale/invalid external URL or upstream HTML error |
 | `ReferenceError: URL is not defined` | Apps Script runtime bug in sheet-side URL derivation |
+| `registry upload bundle must contain 5-64 metrics_v2 entries` | live endpoint still runs stale validator/deploy and is not aligned with current repo semantics |
 | `ACCESS_TOKEN_SCOPE_INSUFFICIENT` for `clasp` | local GAS OAuth scopes are insufficient for content read/write |
 
 # Known gaps
