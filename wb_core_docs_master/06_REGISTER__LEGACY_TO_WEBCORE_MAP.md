@@ -38,7 +38,7 @@ built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
 | --- | --- | --- | --- |
 | `wb-table-audit` Apps Script operator shell | `gas/sheet_vitrina_v1/*` | частично перенесён | новый sheet-side contour materialized, но не весь legacy UI |
 | legacy `CONFIG` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `registry_upload_bundle_v1_block` | перенесён в compact V2/V3 form | не равен full legacy `CONFIG` 1:1 |
-| legacy `METRICS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `sheet_vitrina_v1_mvp_end_to_end_block` | uploaded compact package перенесён | sheet/upload dictionary materialize-ит `102` rows; current truth / server plan держат `95` enabled+show_in_data metrics, а operator-facing `DATA_VITRINA` materialize-ит тот же server-driven flat row set |
+| legacy `METRICS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `sheet_vitrina_v1_mvp_end_to_end_block` | uploaded compact package перенесён | sheet/upload dictionary materialize-ит `102` rows; current truth / server plan держат `95` enabled+show_in_data metrics, а operator-facing `DATA_VITRINA` materialize-ит тот же server-driven set как thin `date_matrix` |
 | legacy `FORMULAS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `registry_upload_bundle_v1_block` | current uploaded set перенесён | sheet-side seed и upload bundle держат `7` formulas rows, нужных authoritative `metrics_v2` |
 | legacy `DATA`/vitrina readback | `sheet_vitrina_v1_mvp_end_to_end_block` | bounded replacement есть | rows materialize-ятся по uploaded package; promo/cogs numeric fill ещё blocked live-source gap'ом |
 | legacy `AI_EXPORT` | отдельного полного replacement пока нет | open gap | compatibility boundary ещё не закрыт |

@@ -45,7 +45,7 @@ related_docs:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён после снятия sheet-side 7-metric reshape: `prepare -> upload -> load` по-прежнему работает на `33 / 102 / 7`, а `DATA_VITRINA` снова materialize-ит полный server-driven current-truth row set `95` metric keys / `1631` rows."
+update_note: "Обновлён после возврата operator-facing date-matrix presentation: `prepare -> upload -> load` по-прежнему работает на `33 / 102 / 7`, server-side plan остаётся flat `95` metric keys / `1631` source rows, а `DATA_VITRINA` renders тот же current-truth set как `34` block date-matrix / `1698` rendered rows при одном дне."
 ---
 
 # 1. Идентификатор и статус
@@ -97,16 +97,18 @@ update_note: "Обновлён после снятия sheet-side 7-metric resha
   - `95` enabled+show_in_data metric rows
   - `1631` flat data rows (`47 TOTAL` + `48 * 33 SKU`)
 - operator-facing `DATA_VITRINA` materialize-ит:
-  - тот же incoming flat row set из current truth
+  - тот же incoming current-truth row set как thin presentation-only `date_matrix`
   - `95` unique metric keys
-  - `1631` data rows
-  - header `label | key | <as_of_date>`
+  - `34` block headers (`1 TOTAL` + `33 SKU`)
+  - `33` separator rows
+  - `1698` rendered data rows при одном дне
+  - header `дата | key | <as_of_date>`
 
 Bounded допущение:
 - seed deliberately не равен full legacy dump;
 - `METRICS` materialize-ит полный uploaded compact dictionary для sheet/upload/runtime;
 - server-side current truth и `STATUS` не режутся до legacy subset;
-- `DATA_VITRINA` больше не делает локальный subset/reshape поверх incoming server plan;
+- `DATA_VITRINA` не режет incoming server plan и делает только presentation-side reshape в data-driven `date_matrix`;
 - unsupported live-source tail продолжает фиксироваться в `STATUS`, а не переносится в Apps Script как local truth path.
 
 ## 3.2 Явно принятые решения bounded шага
@@ -173,8 +175,8 @@ Bounded допущение:
   - что `prepare` поднимает operator seed `33 / 102 / 7`;
   - что upload из sheet-side trigger сохраняет current truth в existing runtime без усечения `metrics_v2`;
   - что `load` ходит в живой HTTP plan endpoint, а не в локальный stub;
-  - что `DATA_VITRINA` сохраняет flat server-driven row set и не режется до `7` metric keys;
-  - что repeated load переписывает incoming snapshot без локального history/subset path;
+  - что `DATA_VITRINA` materialize-ит полный server-driven metric set как `date_matrix` и не режется до `7` metric keys;
+  - что repeated load обновляет текущую date-column и добавляет новый день вправо без локального history/truth path;
   - что `STATUS` фиксирует live sources и blocked sources `promo_by_price` / `cogs_by_group`;
   - что service/status block `CONFIG!H:I` сохраняется и не перезаписывается при load.
 
@@ -184,14 +186,14 @@ Bounded допущение:
 - Sheet-side upload registry больше не обрезает `METRICS` до subset: current truth хранит полный uploaded compact dictionary `102` rows.
 - Таблица больше не заканчивается на upload-only flow: из уже существующего server-side contour появился controlled reverse-load обратно в `DATA_VITRINA`.
 - Readback строится на текущем registry current truth и уже materialized live public source blocks, а не на фейковом локальном fixture.
-- `DATA_VITRINA` теперь снова materialize-ит полный incoming current-truth row set `95` metric keys / `1631` rows и не теряет `show_in_data` metrics на sheet-side bridge.
+- `DATA_VITRINA` теперь materialize-ит полный incoming current-truth row set `95` metric keys / `1631` source rows как operator-facing `date_matrix` (`34` blocks / `1698` rendered rows при одном дне) и не теряет `show_in_data` metrics на sheet-side bridge.
 - Existing upload contour не ломается: bundle/result contracts и control block сохраняются.
 
 # 8. Что пока не является частью финальной production-сборки
 
 - full legacy parity 1:1 по всем metric sections и registry rows;
 - numeric live fill для promo/cogs-backed metrics до появления `promo_by_price` и `cogs_by_group` HTTP adapters;
-- full operator-facing legacy parity beyond current server-driven flat row set;
+- full operator-facing legacy parity beyond current server-driven date-matrix scaffold;
 - official-api-backed coverage всех historical metrics beyond current uploaded package;
 - stable hosted runtime URL и production-bound operator runtime;
 - deploy/auth-hardening;

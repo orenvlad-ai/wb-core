@@ -123,6 +123,16 @@ def main() -> None:
                 raise AssertionError("DATA_VITRINA row_count mismatch")
             if write_result["sheets"][0]["displayed_metric_count"] != expected_summary["metric_key_count"]:
                 raise AssertionError("DATA_VITRINA displayed_metric_count mismatch")
+            if write_result["sheets"][0]["source_row_count"] != expected_summary["source_row_count"]:
+                raise AssertionError("DATA_VITRINA source_row_count mismatch")
+            if write_result["sheets"][0]["source_metric_key_count"] != expected_summary["source_metric_key_count"]:
+                raise AssertionError("DATA_VITRINA source_metric_key_count mismatch")
+            if write_result["sheets"][0]["rendered_block_count"] != expected_summary["block_key_count"]:
+                raise AssertionError("DATA_VITRINA rendered_block_count mismatch")
+            if write_result["sheets"][0]["rendered_metric_row_count"] != expected_summary["metric_row_count"]:
+                raise AssertionError("DATA_VITRINA rendered_metric_row_count mismatch")
+            if write_result["sheets"][0]["rendered_data_row_count"] != expected_summary["data_row_count"]:
+                raise AssertionError("DATA_VITRINA rendered_data_row_count mismatch")
 
             sheets = harness_result["sheets"]
             data_values = sheets["DATA_VITRINA"]["values"]
@@ -131,28 +141,48 @@ def main() -> None:
                 raise AssertionError("DATA_VITRINA header mismatch")
             if status_values[0] != expected_summary["status_header"]:
                 raise AssertionError("STATUS header mismatch")
-            if data_values[1][:3] != expected_summary["first_row"]:
-                raise AssertionError("unexpected first DATA_VITRINA row")
-            if data_values[2][:3] != expected_summary["second_row"]:
-                raise AssertionError("unexpected second DATA_VITRINA row")
-            if data_values[expected_summary["first_sku_row_index"]][:2] != expected_summary["first_sku_row"]:
-                raise AssertionError("unexpected first SKU DATA_VITRINA row")
+            if data_values[1][:3] != expected_summary["first_block_row"]:
+                raise AssertionError("unexpected TOTAL block header row")
+            if data_values[2][:3] != expected_summary["first_metric_row"]:
+                raise AssertionError("unexpected first DATA_VITRINA metric row")
+            if data_values[3][:3] != expected_summary["second_metric_row"]:
+                raise AssertionError("unexpected second DATA_VITRINA metric row")
+            if data_values[expected_summary["first_sku_header_index"]][:2] != expected_summary["first_sku_header"]:
+                raise AssertionError("unexpected first SKU DATA_VITRINA block header")
+            if data_values[expected_summary["first_sku_header_index"] + 1][:2] != expected_summary["first_sku_metric_row"]:
+                raise AssertionError("unexpected first SKU DATA_VITRINA metric row")
 
             sheet_state = harness_result["sheet_state"]
             data_state = next(item for item in sheet_state["sheets"] if item["sheet_name"] == "DATA_VITRINA")
             status_state = next(item for item in sheet_state["sheets"] if item["sheet_name"] == "STATUS")
-            if data_state["layout_mode"] != "flat_rows":
-                raise AssertionError("DATA_VITRINA must materialize flat_rows layout")
+            if data_state["layout_mode"] != "date_matrix":
+                raise AssertionError("DATA_VITRINA must materialize date_matrix layout")
             if data_state["metric_key_count"] != expected_summary["metric_key_count"]:
                 raise AssertionError("DATA_VITRINA metric_key_count mismatch")
             if data_state["metric_key_count"] <= 7:
                 raise AssertionError("DATA_VITRINA must keep the full current-truth metric set")
             if data_state["data_row_count"] != expected_summary["data_row_count"]:
                 raise AssertionError("DATA_VITRINA data_row_count mismatch")
-            if data_state["scope_row_counts"] != expected_summary["scope_row_counts"]:
-                raise AssertionError("DATA_VITRINA scope_row_counts mismatch")
-            if data_state["non_empty_value_row_count"] != expected_summary["non_empty_value_row_count"]:
-                raise AssertionError("DATA_VITRINA non_empty_value_row_count mismatch")
+            if data_state["block_key_count"] != expected_summary["block_key_count"]:
+                raise AssertionError("DATA_VITRINA block_key_count mismatch")
+            if data_state["date_column_count"] != expected_summary["date_column_count"]:
+                raise AssertionError("DATA_VITRINA date_column_count mismatch")
+            if data_state["scope_block_counts"] != expected_summary["scope_block_counts"]:
+                raise AssertionError("DATA_VITRINA scope_block_counts mismatch")
+            if data_state["section_row_count"] != expected_summary["section_row_count"]:
+                raise AssertionError("DATA_VITRINA section_row_count mismatch")
+            if data_state["separator_row_count"] != expected_summary["separator_row_count"]:
+                raise AssertionError("DATA_VITRINA separator_row_count mismatch")
+            if data_state["metric_row_count"] != expected_summary["metric_row_count"]:
+                raise AssertionError("DATA_VITRINA metric_row_count mismatch")
+            if data_state["non_empty_metric_row_count"] != expected_summary["non_empty_metric_row_count"]:
+                raise AssertionError("DATA_VITRINA non_empty_metric_row_count mismatch")
+            if data_state["rendered_block_count"] != expected_summary["block_key_count"]:
+                raise AssertionError("DATA_VITRINA rendered_block_count mismatch")
+            if data_state["rendered_date_column_count"] != expected_summary["date_column_count"]:
+                raise AssertionError("DATA_VITRINA rendered_date_column_count mismatch")
+            if data_state["rendered_data_row_count"] != expected_summary["data_row_count"]:
+                raise AssertionError("DATA_VITRINA rendered_data_row_count mismatch")
             if status_state["status_row_count"] != expected_summary["status_row_count"]:
                 raise AssertionError("STATUS status_row_count mismatch")
 
@@ -169,8 +199,8 @@ def main() -> None:
                 raise AssertionError("DATA_VITRINA frozen_columns mismatch")
             if data_presentation["header_style"]["background"] != "#ffffff":
                 raise AssertionError("DATA_VITRINA header must not keep dark fill")
-            if data_presentation["samples"]["section"] is not None:
-                raise AssertionError("DATA_VITRINA flat_rows view must not invent section rows")
+            if data_presentation["samples"]["section"] is None:
+                raise AssertionError("DATA_VITRINA matrix view must keep section rows")
             if data_presentation["samples"]["percent"]["number_format"] != "0.0%":
                 raise AssertionError("DATA_VITRINA percent format mismatch")
             if data_presentation["samples"]["decimal"]["number_format"] != "#,##0.00":

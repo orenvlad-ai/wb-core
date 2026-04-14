@@ -77,7 +77,7 @@ clasp run getSheetVitrinaV1State
 - `uploadRegistryUploadBundle` accepts and persists factual registry sheet lengths; на текущем contour это `33 / 102 / 7`, но проверка не должна зависеть от hardcoded row caps;
 - `CONFIG!H:I` preserves `endpoint_url`, `last_bundle_version`, `last_status`, `last_http_status`;
 - current truth / server-side plan keep `95` enabled+show_in_data metrics;
-- `DATA_VITRINA` keeps the same server-driven flat readback set: `1631` data rows и `95` unique metric keys при одном дне;
+- `DATA_VITRINA` keeps the same server-driven truth as operator-facing `date_matrix`: `1631` source rows, `34` blocks, `33` separators, `1698` rendered rows и `95` unique metric keys при одном дне;
 - `STATUS` names live sources such as `registry_upload_current_state`, `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `prices_snapshot`, `sf_period`, `spp`, `ads_bids`, `stocks`, `ads_compact`, `fin_report_daily`, plus blocked `promo_by_price` / `cogs_by_group`;
 - blank values для promo/cogs-backed metrics трактуются как известный live-adapter gap на стороне current truth / `STATUS`, а не как повод переносить heavy fallback logic в Apps Script.
 

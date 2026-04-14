@@ -511,17 +511,25 @@ def _normalize_metric_key(key: str) -> str:
 
 
 def _is_percent_metric(metric_key: str) -> bool:
-    return metric_key in {"ctr", "ctr_current", "localizationPercent", "localization_percent"} or bool(
-        re.search(r"(_pct|_percent)$", metric_key)
+    normalized = metric_key.strip()
+    return normalized in {"ctr", "ctr_current", "localizationPercent", "localization_percent"} or bool(
+        re.search(r"(^|_)(ctr|spp|drr)(_|$)", normalized, flags=re.IGNORECASE)
+        or re.search(r"(pct|percent|conversion|share)", normalized, flags=re.IGNORECASE)
     )
 
 
 def _is_decimal_metric(metric_key: str) -> bool:
-    return metric_key == "position_avg"
+    normalized = metric_key.strip()
+    return normalized in {"position_avg", "avg_position_avg"}
 
 
 def _is_currency_metric(metric_key: str) -> bool:
-    return metric_key.endswith("_rub")
+    normalized = metric_key.strip()
+    return bool(
+        re.search(r"(^|_)(rub)(_|$)", normalized, flags=re.IGNORECASE)
+        or re.search(r"(price|profit|revenue|sum|fee|bid|cpc|cost)", normalized, flags=re.IGNORECASE)
+        or normalized == "orderSum"
+    )
 
 
 def _apply_batch_update(token: str, requests: list[dict[str, Any]]) -> dict[str, Any]:

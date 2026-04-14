@@ -20,9 +20,9 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "фактическая внешняя project upload"
-built_from_commit: "159cf9ba03dca709bdf63a3d75ccc6468b2e5fae"
+built_from_commit: "e9e52ae991f60da956b51ba60d371c891b8ec069"
 docset_version: "wb_core_docs_master_v1"
-built_at: "2026-04-14T14:01:30Z"
+built_at: "2026-04-14T14:45:14Z"
 core_docs_changed:
   - "docs/modules/00_INDEX__MODULES.md"
   - "docs/modules/19_MODULE__SHEET_VITRINA_V1_PRESENTATION_BLOCK.md"
@@ -35,7 +35,7 @@ core_docs_changed:
   - "wb_core_docs_master/09_RUNBOOK__COMMON_SMOKE_AND_DEBUG.md"
 project_upload_required: true
 last_project_upload_at: "2026-04-14T10:23:55Z"
-project_upload_note: "pack изменён после снятия sheet-side 7-metric reshape и возврата server-driven materialization `DATA_VITRINA` по current truth; требуется повторный внешний upload в ChatGPT Project WebCore"
+project_upload_note: "pack изменён после возврата operator-facing server-driven date-matrix presentation `DATA_VITRINA`; требуется повторный внешний upload в ChatGPT Project WebCore"
 ---
 
 # Summary
