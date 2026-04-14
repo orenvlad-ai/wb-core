@@ -11,23 +11,18 @@
     "formulas_v2": 7
   },
   "snapshot_id": "2026-04-12__sheet_vitrina_v1_compact_live_v2__current",
-  "data_row_count": 305,
+  "data_row_count": 1631,
   "status_row_count": 14,
-  "block_key_count": 34,
-  "metric_key_count": 7,
-  "date_column_count": 1,
-  "section_row_count": 34,
-  "metric_row_count": 238,
-  "separator_row_count": 33,
-  "non_empty_metric_row_count": 238,
-  "scope_block_counts": {
-    "TOTAL": 1,
+  "metric_key_count": 95,
+  "scope_row_counts": {
+    "TOTAL": 47,
     "GROUP": 0,
-    "SKU": 33,
+    "SKU": 1584,
     "OTHER": 0
   },
+  "non_empty_value_row_count": 237,
   "data_header": [
-    "дата",
+    "label",
     "key",
     "2026-04-12"
   ],
@@ -44,18 +39,20 @@
     "missing_nm_ids",
     "note"
   ],
-  "first_section": [
-    "ИТОГО",
-    "TOTAL"
+  "first_row": [
+    "Итого: Прокси маржинальность всего, %",
+    "TOTAL|proxy_margin_pct_total",
+    ""
   ],
-  "first_metric_row": [
-    "Показы в воронке",
-    "view_count",
-    185241
+  "second_row": [
+    "Итого: Прибыль прокси всего, ₽",
+    "TOTAL|total_proxy_profit_rub",
+    ""
   ],
-  "first_sku_section": [
-    "clean iPhone 14",
-    "SKU:210183919"
+  "first_sku_row_index": 48,
+  "first_sku_row": [
+    "clean iPhone 14: Прокси маржинальность, %",
+    "SKU:210183919|proxy_margin_pct"
   ],
   "status_keys": [
     "registry_upload_current_state",

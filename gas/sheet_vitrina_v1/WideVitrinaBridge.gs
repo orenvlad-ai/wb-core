@@ -413,10 +413,11 @@ function getTargetSpreadsheet_() {
 function writeSheetTarget_(spreadsheet, target) {
   validateTarget_(target);
   const sheet = spreadsheet.getSheetByName(target.sheet_name) || spreadsheet.insertSheet(target.sheet_name);
+  const summary = writeFullOverwriteTarget_(sheet, target);
   if (target.sheet_name === 'DATA_VITRINA') {
-    return writeDataVitrinaMatrixTarget_(sheet, target);
+    return enrichDataVitrinaWriteSummary_(summary, target);
   }
-  return writeFullOverwriteTarget_(sheet, target);
+  return summary;
 }
 
 function writeFullOverwriteTarget_(sheet, target) {
@@ -435,6 +436,46 @@ function writeFullOverwriteTarget_(sheet, target) {
     row_count: rows.length,
     column_count: header.length,
   };
+}
+
+function enrichDataVitrinaWriteSummary_(summary, target) {
+  const header = Array.isArray(target.header) ? target.header : [];
+  const metricKeys = collectDataVitrinaMetricKeys_(target.rows || []);
+  summary.displayed_metric_count = metricKeys.length;
+  summary.metric_keys = metricKeys;
+  if (isDataVitrinaMatrixHeader_(header)) {
+    summary.layout_mode = 'date_matrix';
+    summary.date_columns = header.slice(2);
+    return summary;
+  }
+  if (isDataVitrinaFlatHeader_(header)) {
+    summary.layout_mode = 'flat_rows';
+    summary.date_columns = header.slice(2);
+  }
+  return summary;
+}
+
+function collectDataVitrinaMetricKeys_(rows) {
+  const metricKeys = [];
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const key = normalizeDataVitrinaMetricKey_(row[1]);
+    if (!key || isDataVitrinaBlockKey_(row[1])) {
+      return;
+    }
+    pushUnique_(metricKeys, key);
+  });
+  return metricKeys;
+}
+
+function normalizeDataVitrinaMetricKey_(key) {
+  const normalized = String(key || '').trim();
+  if (!normalized) {
+    return '';
+  }
+  if (normalized.indexOf('|') >= 0) {
+    return normalized.slice(normalized.lastIndexOf('|') + 1).trim();
+  }
+  return normalized;
 }
 
 function writeDataVitrinaMatrixTarget_(sheet, target) {

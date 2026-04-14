@@ -145,9 +145,9 @@ function styleHeaderRow_(sheet, lastColumn) {
 function applyDataBodyPresentation_(sheet, lastRow, lastColumn) {
   const keys = sheet.getRange(2, 2, lastRow - 1, 1).getDisplayValues();
   const labels = sheet.getRange(2, 1, lastRow - 1, 1).getDisplayValues();
-  const values = sheet.getRange(2, 3, lastRow - 1, lastColumn - 2).getValues();
   for (let index = 0; index < keys.length; index += 1) {
     const key = String(keys[index][0] || '');
+    const metricKey = normalizeDataMetricKey_(key);
     const label = String(labels[index][0] || '');
     const rowNumber = index + 2;
     const valueRange = sheet.getRange(rowNumber, 3, 1, lastColumn - 2);
@@ -163,18 +163,47 @@ function applyDataBodyPresentation_(sheet, lastRow, lastColumn) {
     }
     valueRange
       .setHorizontalAlignment('right')
-      .setNumberFormat(resolveDataPattern_(key, values[index]));
+      .setNumberFormat(resolveDataPattern_(metricKey));
   }
 }
 
-function resolveDataPattern_(key, rowValues) {
-  if (key === 'ctr' || key === 'ctr_current') {
+function resolveDataPattern_(metricKey) {
+  if (isPercentMetricKey_(metricKey)) {
     return PRESENTATION_PERCENT_PATTERN;
   }
-  if (key === 'position_avg') {
+  if (isDecimalMetricKey_(metricKey) || isCurrencyMetricKey_(metricKey)) {
     return PRESENTATION_DECIMAL_PATTERN;
   }
   return PRESENTATION_INTEGER_PATTERN;
+}
+
+function normalizeDataMetricKey_(key) {
+  const normalized = String(key || '').trim();
+  if (!normalized) {
+    return '';
+  }
+  if (normalized.indexOf('|') >= 0) {
+    return normalized.slice(normalized.lastIndexOf('|') + 1).trim();
+  }
+  return normalized;
+}
+
+function isPercentMetricKey_(metricKey) {
+  return (
+    metricKey === 'ctr' ||
+    metricKey === 'ctr_current' ||
+    metricKey === 'localizationPercent' ||
+    metricKey === 'localization_percent' ||
+    /(?:_pct|_percent)$/.test(metricKey)
+  );
+}
+
+function isDecimalMetricKey_(metricKey) {
+  return metricKey === 'position_avg';
+}
+
+function isCurrencyMetricKey_(metricKey) {
+  return /_rub$/.test(metricKey);
 }
 
 function buildPresentationSnapshot_(spreadsheet, sheetName) {
@@ -218,9 +247,9 @@ function describeHeaderStyle_(sheet, lastColumn) {
 function describeDataSamples_(sheet) {
   return {
     section: describeDataSampleByPredicate_(sheet, (key) => isDataVitrinaBlockKey_(key)),
-    percent: describeDataSampleByPredicate_(sheet, (key) => key === 'ctr' || key === 'ctr_current'),
-    decimal: describeDataSampleByPredicate_(sheet, (key) => key === 'position_avg'),
-    integer: describeDataSampleByPredicate_(sheet, (key) => key === 'view_count' || key === 'orders_current'),
+    percent: describeDataSampleByPredicate_(sheet, (metricKey) => isPercentMetricKey_(metricKey)),
+    decimal: describeDataSampleByPredicate_(sheet, (metricKey) => isDecimalMetricKey_(metricKey)),
+    integer: describeDataSampleByPredicate_(sheet, (metricKey) => metricKey === 'view_count' || metricKey === 'orders_current'),
   };
 }
 
@@ -229,7 +258,7 @@ function describeDataSampleByPredicate_(sheet, predicate) {
   const keys = lastRow > 1 ? sheet.getRange(2, 2, lastRow - 1, 1).getDisplayValues() : [];
   for (let index = 0; index < keys.length; index += 1) {
     const key = String(keys[index][0] || '');
-    if (predicate(key)) {
+    if (predicate(normalizeDataMetricKey_(key), key)) {
       const rowNumber = index + 2;
       return {
         key: key,

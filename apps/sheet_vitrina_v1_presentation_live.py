@@ -491,15 +491,37 @@ def _build_presentation_requests(sheet_props: dict[str, Any], values: dict[str, 
 
 
 def _resolve_data_pattern(key: str) -> dict[str, str]:
-    if key in {"ctr", "ctr_current"}:
+    metric_key = _normalize_metric_key(key)
+    if _is_percent_metric(metric_key):
         return _number_format(PERCENT_PATTERN, "PERCENT")
-    if key == "position_avg":
+    if _is_decimal_metric(metric_key) or _is_currency_metric(metric_key):
         return _number_format(DECIMAL_PATTERN, "NUMBER")
     return _number_format(INTEGER_PATTERN, "NUMBER")
 
 
 def _is_block_key(key: str) -> bool:
     return bool(re.match(r"^(TOTAL|GROUP:[^|]+|SKU:[^|]+)$", key))
+
+
+def _normalize_metric_key(key: str) -> str:
+    normalized = key.strip()
+    if "|" in normalized:
+        return normalized.rsplit("|", 1)[-1].strip()
+    return normalized
+
+
+def _is_percent_metric(metric_key: str) -> bool:
+    return metric_key in {"ctr", "ctr_current", "localizationPercent", "localization_percent"} or bool(
+        re.search(r"(_pct|_percent)$", metric_key)
+    )
+
+
+def _is_decimal_metric(metric_key: str) -> bool:
+    return metric_key == "position_avg"
+
+
+def _is_currency_metric(metric_key: str) -> bool:
+    return metric_key.endswith("_rub")
 
 
 def _apply_batch_update(token: str, requests: list[dict[str, Any]]) -> dict[str, Any]:
@@ -589,20 +611,22 @@ def _assert_data_vitrina(snapshot: dict[str, Any], values: list[list[Any]]) -> N
     if _get_number_format(header_date) != DATE_PATTERN:
         raise AssertionError(f"DATA_VITRINA date header pattern mismatch: {header_date}")
 
-    section_row = _find_row_index(values, r"^TOTAL$")
-    percent_row = _find_row_index(values, r"^(ctr|ctr_current)$")
-    decimal_row = _find_row_index(values, r"^position_avg$")
-    integer_row = _find_row_index(values, r"^view_count$")
+    header_mode = "matrix" if values and values[0][:2] == ["дата", "key"] else "flat"
+    percent_row = _find_row_index(values, r"^(ctr|ctr_current)$", normalized=True)
+    decimal_row = _find_row_index(values, r"^position_avg$", normalized=True)
+    integer_row = _find_row_index(values, r"^view_count$", normalized=True)
 
-    section_cell = _get_cell(sheet, section_row, 2)
     percent_cell = _get_cell(sheet, percent_row, 2)
     decimal_cell = _get_cell(sheet, decimal_row, 2)
     integer_cell = _get_cell(sheet, integer_row, 2)
 
-    if _get_number_format(section_cell) != TEXT_PATTERN:
-        raise AssertionError(f"DATA_VITRINA section format mismatch: {section_cell}")
-    if _get_alignment(section_cell) != "left":
-        raise AssertionError(f"DATA_VITRINA section alignment mismatch: {section_cell}")
+    if header_mode == "matrix":
+        section_row = _find_row_index(values, r"^TOTAL$")
+        section_cell = _get_cell(sheet, section_row, 2)
+        if _get_number_format(section_cell) != TEXT_PATTERN:
+            raise AssertionError(f"DATA_VITRINA section format mismatch: {section_cell}")
+        if _get_alignment(section_cell) != "left":
+            raise AssertionError(f"DATA_VITRINA section alignment mismatch: {section_cell}")
     if _get_number_format(percent_cell) != PERCENT_PATTERN:
         raise AssertionError(f"DATA_VITRINA percent format mismatch: {percent_cell}")
     if _get_number_format(decimal_cell) != DECIMAL_PATTERN:
@@ -650,9 +674,11 @@ def _assert_status(snapshot: dict[str, Any]) -> None:
         raise AssertionError(f"STATUS covered_count format mismatch: {covered}")
 
 
-def _find_row_index(values: list[list[Any]], pattern: str) -> int:
+def _find_row_index(values: list[list[Any]], pattern: str, *, normalized: bool = False) -> int:
     for index, row in enumerate(values[1:], start=1):
         key = str(row[1]) if len(row) > 1 else ""
+        if normalized:
+            key = _normalize_metric_key(key)
         if re.search(pattern, key):
             return index
     raise AssertionError(f"unable to find DATA_VITRINA row for pattern: {pattern}")
