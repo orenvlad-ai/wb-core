@@ -21,7 +21,7 @@ update_triggers:
   - "изменение canonical naming"
   - "появление нового публичного термина"
   - "изменение operator-visible labels"
-built_from_commit: "33be18836bb46f029b48fd19f28d45300171602a"
+built_from_commit: "138d97eb4eb4f95b1911b3a7fbee54ac5f074dbc"
 ---
 
 # Summary
@@ -57,7 +57,7 @@ built_from_commit: "33be18836bb46f029b48fd19f28d45300171602a"
 # Known gaps
 
 - Final production naming для будущих hosted/runtime/deploy слоёв ещё не зафиксирован.
-- Полный authoritative dictionary metric keys beyond MVP-safe subset ещё открыт.
+- Текущий main-confirmed dictionary уже фиксируется как `19` sheet/upload metrics rows и `7` supported live readback metrics, но future expansion beyond этого набора остаётся открытым.
 
 # Not in scope
 

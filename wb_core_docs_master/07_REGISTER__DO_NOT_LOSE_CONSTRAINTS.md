@@ -22,7 +22,7 @@ update_triggers:
   - "изменение migration boundary"
   - "изменение operator/runtime invariant"
   - "изменение docs governance"
-built_from_commit: "33be18836bb46f029b48fd19f28d45300171602a"
+built_from_commit: "138d97eb4eb4f95b1911b3a7fbee54ac5f074dbc"
 ---
 
 # Summary
@@ -48,7 +48,7 @@ built_from_commit: "33be18836bb46f029b48fd19f28d45300171602a"
 
 # Known gaps
 
-- Некоторые constraints ещё опираются на MVP-safe subset, а не на full parity.
+- Некоторые constraints всё ещё различают current `19`-row sheet/upload dictionary и current `7` supported live readback metrics, а не full parity.
 - Hosted runtime/deploy hardening пока operational, а не repo-owned contract layer.
 
 # Not in scope

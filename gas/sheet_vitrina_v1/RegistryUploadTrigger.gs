@@ -69,7 +69,7 @@ function prepareRegistryUploadOperatorSheets() {
     ok: 'success',
     spreadsheet_id: spreadsheet.getId(),
     spreadsheet_name: spreadsheet.getName(),
-    seed_version: 'compact_v3_mvp_safe',
+    seed_version: 'compact_v3_authoritative_upload_v1',
     sheet_names: summaries.map((item) => item.sheet_name),
     seeded_counts: seededCounts,
     sheets: summaries,
