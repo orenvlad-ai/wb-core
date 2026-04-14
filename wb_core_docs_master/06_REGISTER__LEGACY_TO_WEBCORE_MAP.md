@@ -24,7 +24,7 @@ update_triggers:
   - "перенос новой legacy capability"
   - "изменение migration boundary"
   - "закрытие крупного compatibility gap"
-built_from_commit: "33be18836bb46f029b48fd19f28d45300171602a"
+built_from_commit: "138d97eb4eb4f95b1911b3a7fbee54ac5f074dbc"
 ---
 
 # Summary
@@ -38,8 +38,8 @@ built_from_commit: "33be18836bb46f029b48fd19f28d45300171602a"
 | --- | --- | --- | --- |
 | `wb-table-audit` Apps Script operator shell | `gas/sheet_vitrina_v1/*` | частично перенесён | новый sheet-side contour materialized, но не весь legacy UI |
 | legacy `CONFIG` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `registry_upload_bundle_v1_block` | перенесён в compact V2/V3 form | не равен full legacy `CONFIG` 1:1 |
-| legacy `METRICS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `sheet_vitrina_v1_mvp_end_to_end_block` | частично перенесён | current MVP-safe subset only |
-| legacy `FORMULAS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `registry_upload_bundle_v1_block` | частично перенесён | bounded formula subset only |
+| legacy `METRICS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `sheet_vitrina_v1_mvp_end_to_end_block` | current bounded set перенесён | sheet/upload dictionary теперь materialize-ит `19` current rows; live `DATA_VITRINA` всё ещё ограничена `7` supported metrics |
+| legacy `FORMULAS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `registry_upload_bundle_v1_block` | current upload subset перенесён | в sheet-side seed остаются только formula refs, нужные для current `metrics_v2` |
 | legacy `DATA`/vitrina readback | `sheet_vitrina_v1_mvp_end_to_end_block` | первый bounded replacement есть | не full legacy parity |
 | legacy `AI_EXPORT` | отдельного полного replacement пока нет | open gap | compatibility boundary ещё не закрыт |
 | `wb-ai-research` ingest/runtime вокруг registry | `registry_upload_file_backed_service_block`, `registry_upload_db_backed_runtime_block`, `registry_upload_http_entrypoint_block` | перенесено bounded chain-ом | production hardening остаётся отдельно |
@@ -54,7 +54,7 @@ built_from_commit: "33be18836bb46f029b48fd19f28d45300171602a"
 
 # Known gaps
 
-- full parity `METRICS` и long-tail registry rows;
+- full parity beyond current `19` metrics rows и long-tail registry rows;
 - окончательная судьба `AI_EXPORT`;
 - production-grade hosted runtime/deploy surface вокруг уже materialized upload/load contour.
 

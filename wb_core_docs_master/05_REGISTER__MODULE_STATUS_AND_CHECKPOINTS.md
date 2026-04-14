@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "33be18836bb46f029b48fd19f28d45300171602a"
+built_from_commit: "138d97eb4eb4f95b1911b3a7fbee54ac5f074dbc"
 ---
 
 # Summary
@@ -71,8 +71,8 @@ This is the first bounded MVP checkpoint, not final production parity.
 
 # Known gaps
 
-- full legacy parity beyond current MVP-safe subset;
-- расширение metric dictionary beyond current `7` supported metrics in `DATA_VITRINA`;
+- full legacy parity beyond current main-confirmed sheet/upload dictionary;
+- widening `DATA_VITRINA` beyond current `7` supported live metrics;
 - production hardening around runtime/deploy/auth;
 - unresolved long-tail compatibility around `AI_EXPORT`.
 

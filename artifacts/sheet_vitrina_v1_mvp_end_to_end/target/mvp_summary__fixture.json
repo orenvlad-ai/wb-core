@@ -1,14 +1,14 @@
 {
-  "seed_version": "compact_v3_mvp_safe",
+  "seed_version": "compact_v3_authoritative_upload_v1",
   "seeded_counts": {
     "config_v2": 33,
-    "metrics_v2": 7,
-    "formulas_v2": 7
+    "metrics_v2": 19,
+    "formulas_v2": 2
   },
   "accepted_counts": {
     "config_v2": 33,
-    "metrics_v2": 7,
-    "formulas_v2": 7
+    "metrics_v2": 19,
+    "formulas_v2": 2
   },
   "snapshot_id": "2026-04-12__sheet_vitrina_v1_mvp_live_v1__current",
   "data_row_count": 259,

@@ -18,17 +18,17 @@
 - добавить второй operator-facing trigger `Загрузить таблицу`;
 - materialize-ить `DATA_VITRINA` и `STATUS` из живого server-side contour через новый lightweight plan endpoint.
 
-## 3. MVP-Safe Расширение Seed
+## 3. Expanded Operator Seed
 
-Expanded compact v3 seed этого шага фиксируется так:
+Current main-confirmed operator seed этого шага фиксируется так:
 - `config_v2 = 33`
-- `metrics_v2 = 7`
-- `formulas_v2 = 7`
+- `metrics_v2 = 19`
+- `formulas_v2 = 2`
 
 Bounded допущение шага:
-- в MVP materialize-ится не full legacy dump;
-- в seed остаётся только тот объём registry rows и metric keys, который current upload/runtime/readback contour реально переваривает без server-side redesign;
-- проблемный хвост legacy-модели не блокирует весь MVP и остаётся явно вне scope.
+- в seed materialize-ится не full legacy dump;
+- sheet-side `METRICS` больше не режется до `7` MVP-safe rows и поднимает полный current main-confirmed metrics dictionary для upload/runtime;
+- `DATA_VITRINA` при этом остаётся bounded to current `7` supported live readback metrics и не расширяется в этом шаге шире, чем нужно для upload.
 
 ## 4. Readback Семантика
 

@@ -51,7 +51,7 @@ built_from_commit: "138d97eb4eb4f95b1911b3a7fbee54ac5f074dbc"
 
 # Known gaps
 
-- Некоторые constraints ещё опираются на MVP-safe subset, а не на full parity.
+- Некоторые constraints всё ещё различают current `19`-row sheet/upload dictionary и current `7` supported live readback metrics, а не full parity.
 - Hosted runtime/deploy hardening пока operational, а не repo-owned contract layer.
 
 # Not in scope

@@ -94,6 +94,8 @@ def main() -> None:
 
             if harness_result["built_bundle"] != expected_bundle:
                 raise AssertionError("sheet-built bundle differs from target fixture")
+            if len(harness_result["built_bundle"]["metrics_v2"]) != len(bundle_fixture["metrics_v2"]):
+                raise AssertionError("sheet-built bundle must preserve all metrics_v2 rows from the input fixture")
             accepted_response = harness_result["accepted_response"]
             if accepted_response.get("ok") != "success":
                 raise AssertionError("accepted trigger response must be marked as success")
@@ -103,6 +105,8 @@ def main() -> None:
             }
             if accepted_subset != expected_accepted:
                 raise AssertionError("accepted trigger response differs from target fixture")
+            if accepted_response["upload_result"]["accepted_counts"]["metrics_v2"] != len(bundle_fixture["metrics_v2"]):
+                raise AssertionError("accepted upload must persist all metrics_v2 rows from the sheet bundle")
             duplicate_response = harness_result["duplicate_response"]
             if duplicate_response.get("ok") != "success":
                 raise AssertionError("duplicate trigger response must be marked as success")
