@@ -20,19 +20,16 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "фактическая внешняя project upload"
-built_from_commit: "402b7a8ad9aafaffdf61af31fcdd6d3d00923f34"
+built_from_commit: "e4c08c83e0f19e8f270ac8ee93812a751f57a021"
 docset_version: "wb_core_docs_master_v1"
-built_at: "2026-04-14T09:19:08Z"
+built_at: "2026-04-14T10:07:40Z"
 core_docs_changed:
-  - "README.md"
-  - "docs/architecture/08_open_questions_and_decision_log.md"
-  - "migration/93_sheet_vitrina_v1_mvp_end_to_end.md"
-  - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
-  - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
   - "docs/architecture/07_codex_execution_protocol.md"
-project_upload_required: false
+  - "wb_core_docs_master/02_POLICY__DOCS_SYNC_AND_CODEX_PROTOCOL.md"
+  - "wb_core_docs_master/07_REGISTER__DO_NOT_LOSE_CONSTRAINTS.md"
+project_upload_required: true
 last_project_upload_at: "2026-04-14T09:19:08Z"
-project_upload_note: "повторный upload curated-pack после hardening из PR #45 уже выполнен в ChatGPT Project WebCore"
+project_upload_note: "после фиксации L1/L2/L3 execution matrix, Codex-first rule и mandatory prompt footer нужен повторный upload curated-pack в ChatGPT Project WebCore"
 ---
 
 # Summary
@@ -46,7 +43,7 @@ project_upload_note: "повторный upload curated-pack после hardenin
 
 - `docset_version` меняется только при осмысленной пересборке pack.
 - `built_from_commit` указывает на repo commit, от которого отталкивался pack.
-- `project_upload_required = false` означает, что текущий curated-pack уже подтверждён как загруженный во внешний Project.
+- `project_upload_required = true` означает, что curated-pack изменился после последней подтверждённой внешней загрузки и требует повторного upload.
 - `last_project_upload_at` обновляется только после реальной внешней загрузки, а не после локального commit.
 - `project_upload_note` можно использовать для короткой фиксации особого upload-события, если это помогает audit trail.
 

@@ -22,7 +22,7 @@ update_triggers:
   - "изменение migration boundary"
   - "изменение operator/runtime invariant"
   - "изменение docs governance"
-built_from_commit: "138d97eb4eb4f95b1911b3a7fbee54ac5f074dbc"
+built_from_commit: "e4c08c83e0f19e8f270ac8ee93812a751f57a021"
 ---
 
 # Summary
@@ -45,9 +45,10 @@ built_from_commit: "138d97eb4eb4f95b1911b3a7fbee54ac5f074dbc"
 | `C-08` | При изменении contract/status/checkpoint/smoke/glossary/runbook нужно обновлять и primary docs, и затронутый project-pack, и manifest. |
 | `C-09` | `project_upload_required = true` нельзя сбрасывать до фактической внешней загрузки project-pack. |
 | `C-10` | Bounded steps не должны тихо превращаться в deploy/platform redesign, full parity campaign или новый parallel contour. |
-| `C-11` | Для новых WebCore chat prompts prompt к Codex обязан заканчиваться блоками `=== ДЛЯ КУРАТОРА ===` и `=== СЖАТАЯ ПРОВЕРКА ===`; без них execution handoff считается неполным. |
+| `C-11` | Для новых WebCore chat prompts prompt к Codex обязан явно содержать `Класс задачи`, `Причина классификации`, `Режим выполнения` и заканчиваться блоками `=== ДЛЯ КУРАТОРА ===` и `=== СЖАТАЯ ПРОВЕРКА ===`; без этого execution handoff считается неполным. |
 | `C-12` | Bounded и безопасная техническая работа должна сначала идти через Codex; пользователю можно отдавать только human-only step: логин, права, ручной merge, ручная UI-проверка или решение по риску. |
 | `C-13` | Если manual handoff неизбежен, действует `one step = one action`: один ответ содержит один минимальный практический следующий шаг и не смешивает несколько независимых рискованных действий. |
+| `C-14` | Матрица `L1/L2/L3` задаёт минимальный execution burden: `L1` = локальный малорисковый шаг без отдельного read-only review и без `README` / architecture sync по умолчанию, только targeted smoke; `L2` = bounded block с обязательными `module doc + index`, targeted smoke и `1` integration smoke; `L3` = boundary/risk/governance task с усиленным bounded execution, docs sync по смыслу текущего checkpoint и при необходимости отдельной merge-readiness проверкой. |
 
 # Known gaps
 
