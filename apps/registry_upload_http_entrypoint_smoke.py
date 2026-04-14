@@ -26,6 +26,7 @@ from apps.registry_upload_smoke_support import (
 )
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_PLAN_PATH,
+    DEFAULT_SHEET_REFRESH_PATH,
     DEFAULT_UPLOAD_PATH,
     build_registry_upload_http_server,
 )
@@ -50,6 +51,7 @@ def main() -> None:
             port=port,
             upload_path=DEFAULT_UPLOAD_PATH,
             sheet_plan_path=DEFAULT_SHEET_PLAN_PATH,
+            sheet_refresh_path=DEFAULT_SHEET_REFRESH_PATH,
             runtime_dir=runtime_dir,
         )
         env = os.environ.copy()
@@ -58,6 +60,8 @@ def main() -> None:
                 "REGISTRY_UPLOAD_HTTP_HOST": config.host,
                 "REGISTRY_UPLOAD_HTTP_PORT": str(config.port),
                 "REGISTRY_UPLOAD_HTTP_PATH": config.upload_path,
+                "SHEET_VITRINA_HTTP_PATH": config.sheet_plan_path,
+                "SHEET_VITRINA_REFRESH_HTTP_PATH": config.sheet_refresh_path,
                 "REGISTRY_UPLOAD_RUNTIME_DIR": str(config.runtime_dir),
             }
         )
@@ -71,6 +75,7 @@ def main() -> None:
         )
         try:
             base_url = f"http://127.0.0.1:{config.port}{config.upload_path}"
+            plan_url = f"http://127.0.0.1:{config.port}{config.sheet_plan_path}"
 
             accepted_status, accepted_payload = _post_json_when_ready(
                 base_url,
@@ -94,6 +99,12 @@ def main() -> None:
             if current_state != current_expected:
                 raise AssertionError("runtime current state differs from HTTP target fixture")
 
+            missing_plan_status, missing_plan_payload = _get_json(plan_url)
+            if missing_plan_status != 422:
+                raise AssertionError(f"plan read before refresh must return 422, got {missing_plan_status}")
+            if "ready snapshot missing" not in str(missing_plan_payload.get("error", "")):
+                raise AssertionError("plan read before refresh must surface ready snapshot miss")
+
             duplicate_status, duplicate_payload = _post_json(base_url, _load_json(INPUT_BUNDLE_FIXTURE))
             if duplicate_status != 409:
                 raise AssertionError(f"duplicate request must return 409, got {duplicate_status}")
@@ -107,6 +118,7 @@ def main() -> None:
             print(f"accepted status: ok -> {accepted_payload['status']}")
             print(f"http path: ok -> {config.upload_path}")
             print(f"current bundle_version: ok -> {current_state['bundle_version']}")
+            print(f"plan_before_refresh: ok -> {missing_plan_payload['error']}")
             print(f"duplicate status: ok -> {duplicate_payload['status']}")
         finally:
             process.terminate()
@@ -134,6 +146,7 @@ def main() -> None:
             port=port,
             upload_path=DEFAULT_UPLOAD_PATH,
             sheet_plan_path=DEFAULT_SHEET_PLAN_PATH,
+            sheet_refresh_path=DEFAULT_SHEET_REFRESH_PATH,
             runtime_dir=runtime_dir,
         )
         entrypoint = RegistryUploadHttpEntrypoint(
@@ -196,6 +209,15 @@ def _post_json_when_ready(url: str, payload: object) -> tuple[int, object]:
             if time.time() >= deadline:
                 raise AssertionError(f"HTTP entrypoint did not become reachable: {exc}") from exc
             time.sleep(0.1)
+
+
+def _get_json(url: str) -> tuple[int, object]:
+    req = urllib_request.Request(url, method="GET")
+    try:
+        with urllib_request.urlopen(req) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
 def _reserve_free_port() -> int:

@@ -13,6 +13,7 @@ from packages.application.registry_upload_bundle_v1 import (
     load_registry_upload_bundle_v1_from_path,
     parse_registry_upload_bundle_v1_payload,
 )
+from packages.application.sheet_vitrina_v1 import parse_sheet_write_plan_payload
 from packages.contracts.registry_upload_bundle_v1 import (
     ConfigV2Item,
     FormulaV2Item,
@@ -24,6 +25,7 @@ from packages.contracts.registry_upload_file_backed_service import (
     RegistryUploadAcceptedCounts,
     RegistryUploadResult,
 )
+from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope, SheetVitrinaV1RefreshResult
 
 ROOT = Path(__file__).resolve().parents[2]
 ARTIFACTS_DIR = ROOT / "artifacts" / "registry_upload_db_backed_runtime"
@@ -96,6 +98,92 @@ class RegistryUploadDbBackedRuntime:
                 metrics_v2=_load_metric_items(conn, bundle_version),
                 formulas_v2=_load_formula_items(conn, bundle_version),
             )
+
+    def save_sheet_vitrina_ready_snapshot(
+        self,
+        *,
+        current_state: RegistryUploadDbBackedCurrentState,
+        refreshed_at: str,
+        plan: SheetVitrinaV1Envelope,
+    ) -> SheetVitrinaV1RefreshResult:
+        _validate_timestamp(refreshed_at, field_name="refreshed_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_ready_snapshots(
+                    bundle_version,
+                    activated_at,
+                    as_of_date,
+                    snapshot_id,
+                    plan_version,
+                    refreshed_at,
+                    plan_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(bundle_version, as_of_date) DO UPDATE SET
+                    activated_at = excluded.activated_at,
+                    snapshot_id = excluded.snapshot_id,
+                    plan_version = excluded.plan_version,
+                    refreshed_at = excluded.refreshed_at,
+                    plan_json = excluded.plan_json
+                """,
+                (
+                    current_state.bundle_version,
+                    current_state.activated_at,
+                    plan.as_of_date,
+                    plan.snapshot_id,
+                    plan.plan_version,
+                    refreshed_at,
+                    _serialize_sheet_vitrina_plan(plan),
+                ),
+            )
+            conn.commit()
+
+        return SheetVitrinaV1RefreshResult(
+            status="success",
+            bundle_version=current_state.bundle_version,
+            activated_at=current_state.activated_at,
+            refreshed_at=refreshed_at,
+            as_of_date=plan.as_of_date,
+            snapshot_id=plan.snapshot_id,
+            plan_version=plan.plan_version,
+            sheet_row_counts={item.sheet_name: item.row_count for item in plan.sheets},
+        )
+
+    def load_sheet_vitrina_ready_snapshot(self, as_of_date: str | None = None) -> SheetVitrinaV1Envelope:
+        current_state = self.load_current_state()
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            if as_of_date:
+                row = conn.execute(
+                    """
+                    SELECT plan_json
+                    FROM sheet_vitrina_v1_ready_snapshots
+                    WHERE bundle_version = ? AND as_of_date = ?
+                    """,
+                    (current_state.bundle_version, as_of_date),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT plan_json
+                    FROM sheet_vitrina_v1_ready_snapshots
+                    WHERE bundle_version = ?
+                    ORDER BY refreshed_at DESC, as_of_date DESC
+                    LIMIT 1
+                    """,
+                    (current_state.bundle_version,),
+                ).fetchone()
+            if row is None:
+                detail = (
+                    f"bundle_version={current_state.bundle_version} as_of_date={as_of_date}"
+                    if as_of_date
+                    else f"bundle_version={current_state.bundle_version}"
+                )
+                raise ValueError(f"sheet_vitrina_v1 ready snapshot missing: {detail}")
+            return _deserialize_sheet_vitrina_plan(row["plan_json"])
 
     def load_persisted_upload_result(self, bundle_version: str) -> RegistryUploadResult:
         with _connect(self.db_path) as conn:
@@ -378,6 +466,40 @@ def _validate_timestamp(value: str, field_name: str) -> None:
         raise ValueError(f"{field_name} must be a valid ISO 8601 timestamp") from exc
 
 
+def _serialize_sheet_vitrina_plan(plan: SheetVitrinaV1Envelope) -> str:
+    payload = {
+        "plan_version": plan.plan_version,
+        "snapshot_id": plan.snapshot_id,
+        "as_of_date": plan.as_of_date,
+        "sheets": [
+            {
+                "sheet_name": item.sheet_name,
+                "write_start_cell": item.write_start_cell,
+                "write_rect": item.write_rect,
+                "clear_range": item.clear_range,
+                "write_mode": item.write_mode,
+                "partial_update_allowed": item.partial_update_allowed,
+                "header": item.header,
+                "rows": item.rows,
+                "row_count": item.row_count,
+                "column_count": item.column_count,
+            }
+            for item in plan.sheets
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _deserialize_sheet_vitrina_plan(raw_value: str) -> SheetVitrinaV1Envelope:
+    try:
+        payload = json.loads(raw_value)
+    except json.JSONDecodeError as exc:  # pragma: no cover - persisted data corruption guard
+        raise ValueError("sheet_vitrina_v1 ready snapshot contains invalid JSON") from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError("sheet_vitrina_v1 ready snapshot must contain a JSON object")
+    return parse_sheet_write_plan_payload(payload)
+
+
 def _connect(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -456,5 +578,19 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (bundle_version, formula_id),
             UNIQUE (bundle_version, row_order)
         );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_ready_snapshots (
+            bundle_version TEXT NOT NULL REFERENCES registry_upload_versions(bundle_version) ON DELETE CASCADE,
+            activated_at TEXT NOT NULL,
+            as_of_date TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            plan_version TEXT NOT NULL,
+            refreshed_at TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            PRIMARY KEY (bundle_version, as_of_date)
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_ready_snapshots_by_bundle_refresh
+        ON sheet_vitrina_v1_ready_snapshots(bundle_version, refreshed_at DESC, as_of_date DESC);
         """
     )

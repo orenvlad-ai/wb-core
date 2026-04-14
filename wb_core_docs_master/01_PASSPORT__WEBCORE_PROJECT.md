@@ -44,7 +44,7 @@ built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
 - source/data blocks `01–12` уже смёржены;
 - table/projection/wide/sheet read-side `13–19` уже смёржены;
 - registry upload line `20–23` уже смёржена;
-- sheet-side operator line `24–26` уже смёржена, включая первый bounded MVP `prepare -> upload -> load`.
+- sheet-side operator line `24–26` уже смёржена, включая первый bounded MVP `prepare -> upload -> refresh -> load`.
 
 # Current norm
 
@@ -59,7 +59,7 @@ built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
 
 Confirmed contour на текущем `main`:
 - `sku_display -> table_projection -> registry_pilot -> wide_matrix -> delivery -> sheet_scaffold`
-- `live write -> presentation -> registry upload -> sheet trigger -> compact seed -> bounded reverse-load`
+- `live write -> presentation -> registry upload -> sheet trigger -> compact seed -> bounded refresh/read reverse-load`
 
 ## Что уже materialized
 
@@ -70,7 +70,7 @@ Confirmed contour на текущем `main`:
 - Apps Script trigger `Отправить реестры на сервер`;
 - compact seed bootstrap для `CONFIG / METRICS / FORMULAS`;
 - выравнивание sheet/upload/runtime под uploaded compact package `33 / 102 / 7`;
-- bounded reverse-load в `DATA_VITRINA` и `STATUS`.
+- bounded refresh/read reverse-load в `DATA_VITRINA` и `STATUS`, где ready snapshot хранится в repo-owned SQLite runtime contour.
 
 ## Primary source of truth
 

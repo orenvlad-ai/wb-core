@@ -22,7 +22,7 @@
 - `registry_upload_http_entrypoint_block` как первый live HTTP/API entrypoint для V2-реестров.
 - `sheet_vitrina_v1_registry_upload_trigger_block` как первый operator-facing Apps Script trigger для отправки `CONFIG / METRICS / FORMULAS` в уже существующий HTTP entrypoint.
 - `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` как compact v3 bootstrap для operator sheets `CONFIG / METRICS / FORMULAS`.
-- `sheet_vitrina_v1_mvp_end_to_end_block` как первый bounded end-to-end MVP `prepare -> upload -> load DATA_VITRINA`.
+- `sheet_vitrina_v1_mvp_end_to_end_block` как первый bounded end-to-end MVP `prepare -> upload -> refresh -> load DATA_VITRINA`.
 
 Главный незакрытый gap текущего `main`:
 - registry upload и bounded reverse-load уже присутствуют в текущей линии;
@@ -56,7 +56,7 @@ Target-state — server-first:
 - live write и visual presentation подтверждены для этого bounded sheet-side contour;
 - operator-facing upload trigger для `CONFIG / METRICS / FORMULAS` уже materialize-ится в текущей линии;
 - compact v3 bootstrap operator sheets уже тоже материализован в текущей линии;
-- первый bounded readback path server-side truth обратно в `DATA_VITRINA` уже является частью текущего `main`;
+- первый bounded readback path server-side truth обратно в `DATA_VITRINA` уже является частью текущего `main` как explicit refresh + cheap read split;
 - full replacement operator-table по-прежнему не является частью текущей линии.
 
 ## Current Main-Confirmed Layers
@@ -100,7 +100,7 @@ Target-state — server-first:
 Текущий `main` уже реализует bounded read-side/sheet-side форму этого правила:
 - таблица и витрина получают controlled bundles;
 - registry upload bundle, file-backed service, DB-backed runtime, live HTTP entrypoint, sheet-side upload trigger и compact v3 bootstrap уже материализованы;
-- bounded reverse-load обратно в `DATA_VITRINA` уже является частью `main` как первый controlled load path без daily orchestration и без deploy.
+- bounded reverse-load обратно в `DATA_VITRINA` уже является частью `main` как первый controlled refresh/read path без daily orchestration и без deploy.
 
 ### Граница Сервера
 
@@ -113,7 +113,7 @@ Target-state — server-first:
 
 Текущее ограничение `main`:
 - contracts, artifact-backed bundle, file-backed service, DB-backed runtime, live HTTP entrypoint, operator-facing sheet trigger и compact v3 bootstrap уже есть;
-- bounded reverse load из server-side truth обратно в таблицу уже смёржен в текущий `main`;
+- bounded reverse load из server-side truth обратно в таблицу уже смёржен в текущий `main` как persisted ready snapshot в repo-owned runtime SQLite contour;
 - deploy/auth hardening и production storage binding остаются отдельным незакрытым хвостом.
 
 ### Граница Web-Source

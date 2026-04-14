@@ -81,7 +81,7 @@ function prepareRegistryUploadOperatorSheets() {
 
 function loadSheetVitrinaTable() {
   const spreadsheet = getRegistryUploadSpreadsheet_();
-  spreadsheet.toast('Загружаю витрину из server-side current truth...', REGISTRY_UPLOAD_MENU_ROOT, 5);
+  spreadsheet.toast('Загружаю витрину из готового server-side snapshot...', REGISTRY_UPLOAD_MENU_ROOT, 5);
   try {
     const response = _loadSheetVitrinaTableFromServer_({});
     const plan = response.sheet_plan;

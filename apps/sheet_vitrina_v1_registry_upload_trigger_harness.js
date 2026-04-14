@@ -29,6 +29,8 @@ function main() {
       ? runSeedBootstrapMode({ context, spreadsheet, options })
       : options.mode === 'mvp_end_to_end'
         ? runMvpEndToEndMode({ context, spreadsheet, options })
+      : options.mode === 'load_only'
+        ? runLoadOnlyMode({ context, spreadsheet, options })
       : options.mode === 'server_driven_materialization'
         ? runServerDrivenMaterializationMode({ context, spreadsheet })
       : runBundleUploadMode({ context, spreadsheet, options });
@@ -47,14 +49,17 @@ function parseArgs(argv) {
   }
   options.mode = options.mode || 'bundle_upload';
   const requiredKeys = ['scriptPath'];
-  if (options.mode !== 'server_driven_materialization') {
+  if (!['server_driven_materialization', 'load_only'].includes(options.mode)) {
     requiredKeys.push('endpointUrl', 'bundleVersion', 'uploadedAt');
   }
   if (options.mode === 'bundle_upload') {
     requiredKeys.push('fixturePath');
   }
   if (options.mode === 'mvp_end_to_end') {
-    requiredKeys.push('asOfDate');
+    requiredKeys.push('asOfDate', 'refreshUrl');
+  }
+  if (options.mode === 'load_only') {
+    requiredKeys.push('endpointUrl');
   }
   for (const required of requiredKeys) {
     if (!options[required]) {
@@ -133,6 +138,10 @@ function runMvpEndToEndMode({ context, spreadsheet, options }) {
   const acceptedResponse = parseJsonString(
     context.debugUploadRegistryUploadBundleFromSheets(options.endpointUrl, options.bundleVersion, options.uploadedAt)
   );
+  const refreshResponse = fetchJson(options.refreshUrl, {
+    method: 'POST',
+    payload: JSON.stringify({ as_of_date: options.asOfDate }),
+  });
   const loadResult = parseJsonString(
     context.debugLoadSheetVitrinaTable(options.endpointUrl, options.asOfDate)
   );
@@ -143,6 +152,7 @@ function runMvpEndToEndMode({ context, spreadsheet, options }) {
     prepare_result: prepareResult,
     built_bundle: builtBundle,
     accepted_response: acceptedResponse,
+    refresh_response: refreshResponse,
     load_result: loadResult,
     sheet_state: sheetState,
     presentation_snapshot: parseJsonString(context.getSheetVitrinaV1PresentationSnapshot()),
@@ -151,6 +161,38 @@ function runMvpEndToEndMode({ context, spreadsheet, options }) {
       CONFIG: snapshotSheet(spreadsheet.getSheetByName('CONFIG')),
       METRICS: snapshotSheet(spreadsheet.getSheetByName('METRICS')),
       FORMULAS: snapshotSheet(spreadsheet.getSheetByName('FORMULAS')),
+      DATA_VITRINA: snapshotSheet(spreadsheet.getSheetByName('DATA_VITRINA')),
+      STATUS: snapshotSheet(spreadsheet.getSheetByName('STATUS')),
+    },
+  };
+}
+
+function runLoadOnlyMode({ context, spreadsheet, options }) {
+  const ensureResult = parseJsonString(context.ensureRegistryUploadOperatorSheets());
+  const configSheet = spreadsheet.getSheetByName('CONFIG');
+  writeStatusBlock(configSheet, {
+    endpoint_url: options.endpointUrl,
+    last_bundle_version: '',
+    last_status: '',
+    last_activated_at: '',
+    last_http_status: '',
+    last_validation_errors: '',
+  });
+
+  let loadResult = null;
+  let loadError = '';
+  try {
+    loadResult = parseJsonString(context.debugLoadSheetVitrinaTable('', options.asOfDate || ''));
+  } catch (error) {
+    loadError = String(error);
+  }
+
+  return {
+    ensure_result: ensureResult,
+    load_result: loadResult,
+    load_error: loadError,
+    status_block: readStatusBlock(configSheet),
+    sheets: {
       DATA_VITRINA: snapshotSheet(spreadsheet.getSheetByName('DATA_VITRINA')),
       STATUS: snapshotSheet(spreadsheet.getSheetByName('STATUS')),
     },
@@ -432,6 +474,21 @@ function curlFetch(url, options) {
       return body;
     },
   };
+}
+
+function fetchJson(url, options) {
+  const response = curlFetch(url, options || {});
+  const bodyText = response.getContentText();
+  let payload;
+  try {
+    payload = JSON.parse(bodyText);
+  } catch (error) {
+    throw new Error(`endpoint returned non-JSON response: ${bodyText}`);
+  }
+  if (response.getResponseCode() >= 400) {
+    throw new Error(payload.error || `endpoint failed with HTTP ${response.getResponseCode()}`);
+  }
+  return payload;
 }
 
 class MockSpreadsheet {

@@ -46,7 +46,8 @@ built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
 | `current truth` | `current state`, `active registry state` | current server-side accepted registry version |
 | `DATA_VITRINA` | `vitrina data sheet` | operator-facing data readback sheet |
 | `STATUS` | `status sheet` | operator-facing freshness/source sheet |
-| `prepare -> upload -> load` | `MVP flow`, `end-to-end flow` | canonical operator scenario |
+| `prepare -> upload -> refresh -> load` | `MVP flow`, `end-to-end flow` | canonical current bounded operator/server scenario |
+| `ready snapshot` | `materialized snapshot`, `persisted sheet plan` | persisted server-side read-model for `DATA_VITRINA` / `STATUS` |
 | `AI_EXPORT` | `legacy export` | compatibility/open-gap term, не новый canonical target |
 
 ## Naming notes

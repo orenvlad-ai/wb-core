@@ -30,7 +30,7 @@ built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
 Практически это значит:
 - source/data foundation уже materialized;
 - registry upload line уже замкнута до HTTP entrypoint;
-- sheet-side line уже дошла до bounded MVP `prepare -> upload -> load`.
+- sheet-side line уже дошла до bounded MVP `prepare -> upload -> refresh -> load`.
 
 # Current norm
 
@@ -65,11 +65,12 @@ built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
 Current main-confirmed operator flow:
 - `Подготовить листы CONFIG / METRICS / FORMULAS`
 - `Отправить реестры на сервер`
+- `POST /v1/sheet-vitrina-v1/refresh`
 - `Загрузить таблицу`
 
 Current main-confirmed counts для этого flow:
 - prepare/upload package = `33 / 102 / 7`
-- current truth / server-side plan displayed metrics = `95`
+- current truth / ready snapshot displayed metrics = `95`
 - operator-facing `DATA_VITRINA` = server-driven `date_matrix` `1698` rendered rows / `95` metric keys (`1631` source rows, `34` blocks)
 
 This is the first bounded MVP checkpoint, not final production parity.

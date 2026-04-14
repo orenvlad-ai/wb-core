@@ -69,7 +69,7 @@ update_note: "Обновлён под server-driven date-matrix presentation: `D
 - `A1 = дата`
 - `B1 = key`
 - `C1..` = date columns; первый load materialize-ит текущий `as_of_date`, следующий день добавляется справа
-- incoming flat row set из `GET /v1/sheet-vitrina-v1/plan` reshaped only for presentation:
+- incoming flat row set из ready snapshot `GET /v1/sheet-vitrina-v1/plan` reshaped only for presentation:
   - block header row = human title + canonical block key;
   - metric rows = display label + canonical metric key;
   - history по датам живёт только в `C:...`

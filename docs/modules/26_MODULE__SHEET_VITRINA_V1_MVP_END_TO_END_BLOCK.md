@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-26-SHEET-VITRINA-V1-MVP-END-TO-END-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `sheet_vitrina_v1_mvp_end_to_end_block`."
-scope: "Первый bounded end-to-end alignment для `sheet_vitrina_v1`: uploaded compact bootstrap `CONFIG / METRICS / FORMULAS`, сохранённый upload trigger, `Загрузить таблицу` и controlled reverse-load живых server-side данных в `DATA_VITRINA` по current truth."
+scope: "Первый bounded end-to-end alignment для `sheet_vitrina_v1`: uploaded compact bootstrap `CONFIG / METRICS / FORMULAS`, сохранённый upload trigger, explicit refresh в repo-owned ready snapshot и cheap read этого snapshot в `DATA_VITRINA`."
 source_basis:
   - "migration/90_registry_upload_http_entrypoint.md"
   - "migration/91_sheet_vitrina_v1_registry_upload_trigger.md"
@@ -31,8 +31,11 @@ related_tables:
   - "STATUS"
 related_endpoints:
   - "POST /v1/registry-upload/bundle"
+  - "POST /v1/sheet-vitrina-v1/refresh"
   - "GET /v1/sheet-vitrina-v1/plan"
 related_runners:
+  - "apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py"
+  - "apps/sheet_vitrina_v1_refresh_read_split_smoke.py"
   - "apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py"
   - "apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py"
   - "apps/registry_upload_http_entrypoint_live.py"
@@ -45,7 +48,7 @@ related_docs:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён после возврата operator-facing date-matrix presentation: `prepare -> upload -> load` по-прежнему работает на `33 / 102 / 7`, server-side plan остаётся flat `95` metric keys / `1631` source rows, а `DATA_VITRINA` renders тот же current-truth set как `34` block date-matrix / `1698` rendered rows при одном дне."
+update_note: "Обновлён после split `refresh/read`: heavy build вынесен в `POST /v1/sheet-vitrina-v1/refresh`, ready snapshot хранится в repo-owned SQLite runtime table `sheet_vitrina_v1_ready_snapshots`, а `GET /v1/sheet-vitrina-v1/plan` и `loadSheetVitrinaTable` читают только этот persisted plan."
 ---
 
 # 1. Идентификатор и статус
@@ -53,7 +56,7 @@ update_note: "Обновлён после возврата operator-facing date-
 - `module_id`: `sheet_vitrina_v1_mvp_end_to_end_block`
 - `family`: `sheet-side`
 - `status_transfer`: первый bounded end-to-end MVP перенесён в `wb-core`
-- `status_verification`: prepare-to-upload-to-load smoke подтверждён
+- `status_verification`: prepare-to-upload-to-refresh-to-load smoke подтверждён
 - `status_checkpoint`: рабочий checkpoint подтверждён
 - `status_main`: модуль смёржен в `main`
 
@@ -67,13 +70,14 @@ update_note: "Обновлён после возврата operator-facing date-
   - `migration/91_sheet_vitrina_v1_registry_upload_trigger.md`
   - `migration/92_sheet_vitrina_v1_registry_seed_v3_bootstrap.md`
   - `migration/93_sheet_vitrina_v1_mvp_end_to_end.md`
-- Семантика блока: не строить новый parallel server contour и не возвращать full legacy 1:1, а замкнуть практический `prepare -> upload -> load` сценарий на uploaded compact package и уже существующих bounded server-side модулях.
+- Семантика блока: не строить новый parallel server contour и не возвращать full legacy 1:1, а замкнуть практический `prepare -> upload -> refresh -> load` сценарий на uploaded compact package, repo-owned ready snapshot и уже существующих bounded server-side модулях.
 
 # 3. Target contract и смысл результата
 
 - Канонический operator flow:
   - `Подготовить листы CONFIG / METRICS / FORMULAS`
   - `Отправить реестры на сервер`
+  - `POST /v1/sheet-vitrina-v1/refresh`
   - `Загрузить таблицу`
 - Канонический prepare output:
   - `CONFIG` с uploaded compact rows
@@ -85,7 +89,10 @@ update_note: "Обновлён после возврата operator-facing date-
   - response body = canonical `RegistryUploadResult`
 - Канонический load path:
   - `GET /v1/sheet-vitrina-v1/plan`
-  - response body = existing `SheetVitrinaV1Envelope`-совместимый write plan для `DATA_VITRINA` и `STATUS`
+  - response body = existing `SheetVitrinaV1Envelope`-совместимый ready snapshot для `DATA_VITRINA` и `STATUS`
+- Канонический refresh path:
+  - `POST /v1/sheet-vitrina-v1/refresh`
+  - response body = `SheetVitrinaV1RefreshResult` со snapshot metadata и row counts
 
 ## 3.1 Expanded operator seed bounded шага
 
@@ -93,7 +100,7 @@ update_note: "Обновлён после возврата operator-facing date-
 - `metrics_v2 = 102`
 - `formulas_v2 = 7`
 - `enabled + show_in_data = 95`
-- server-side plan materialize-ит:
+- server-side ready snapshot materialize-ит:
   - `95` enabled+show_in_data metric rows
   - `1631` flat data rows (`47 TOTAL` + `48 * 33 SKU`)
 - operator-facing `DATA_VITRINA` materialize-ит:
@@ -107,7 +114,7 @@ update_note: "Обновлён после возврата operator-facing date-
 Bounded допущение:
 - seed deliberately не равен full legacy dump;
 - `METRICS` materialize-ит полный uploaded compact dictionary для sheet/upload/runtime;
-- server-side current truth и `STATUS` не режутся до legacy subset;
+- server-side current truth, ready snapshot и `STATUS` не режутся до legacy subset;
 - `DATA_VITRINA` не режет incoming server plan и делает только presentation-side reshape в data-driven `date_matrix`;
 - unsupported live-source tail продолжает фиксироваться в `STATUS`, а не переносится в Apps Script как local truth path.
 
@@ -157,6 +164,7 @@ Bounded допущение:
   - `packages/application/sheet_vitrina_v1_live_plan.py`
   - `packages/application/sheet_vitrina_v1.py`
   - `packages/application/registry_upload_http_entrypoint.py`
+  - `packages/application/registry_upload_db_backed_runtime.py`
 - adapters:
   - `packages/adapters/registry_upload_http_entrypoint.py`
   - `packages/adapters/web_source_snapshot_block.py`
@@ -164,17 +172,23 @@ Bounded допущение:
 - local harness:
   - `apps/sheet_vitrina_v1_registry_upload_trigger_harness.js`
 - smoke:
+  - `apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py`
+  - `apps/sheet_vitrina_v1_refresh_read_split_smoke.py`
   - `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`
   - `apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py`
 
 # 6. Какой smoke подтверждён
 
 - Подтверждён локальный end-to-end smoke через `apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py`.
+- Подтверждён targeted runtime smoke через `apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py`.
+- Подтверждён split refresh/read smoke через `apps/sheet_vitrina_v1_refresh_read_split_smoke.py`.
 - Подтверждён targeted server-driven smoke через `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`.
 - Smoke проверяет:
   - что `prepare` поднимает operator seed `33 / 102 / 7`;
   - что upload из sheet-side trigger сохраняет current truth в existing runtime без усечения `metrics_v2`;
-  - что `load` ходит в живой HTTP plan endpoint, а не в локальный stub;
+  - что `POST /v1/sheet-vitrina-v1/refresh` вызывает heavy source blocks и обновляет persisted ready snapshot;
+  - что `GET /v1/sheet-vitrina-v1/plan` и sheet-side `load` читают только ready snapshot и не делают live fetch;
+  - что при отсутствии ready snapshot load path возвращает явную ошибку `ready snapshot missing`;
   - что `DATA_VITRINA` materialize-ит полный server-driven metric set как `date_matrix` и не режется до `7` metric keys;
   - что repeated load обновляет текущую date-column и добавляет новый день вправо без локального history/truth path;
   - что `STATUS` фиксирует live sources и blocked sources `promo_by_price` / `cogs_by_group`;
@@ -184,8 +198,8 @@ Bounded допущение:
 
 - В `wb-core` появился первый bounded end-to-end MVP для `VB-Core Витрина V1`.
 - Sheet-side upload registry больше не обрезает `METRICS` до subset: current truth хранит полный uploaded compact dictionary `102` rows.
-- Таблица больше не заканчивается на upload-only flow: из уже существующего server-side contour появился controlled reverse-load обратно в `DATA_VITRINA`.
-- Readback строится на текущем registry current truth и уже materialized live public source blocks, а не на фейковом локальном fixture.
+- Таблица больше не заканчивается на upload-only flow: появился explicit refresh/build action и cheap read path из repo-owned ready snapshot обратно в `DATA_VITRINA`.
+- Read path больше не строит live plan on-demand: heavy fetch живёт только в explicit refresh action, а `load` читает persisted snapshot из current runtime contour.
 - `DATA_VITRINA` теперь materialize-ит полный incoming current-truth row set `95` metric keys / `1631` source rows как operator-facing `date_matrix` (`34` blocks / `1698` rendered rows при одном дне) и не теряет `show_in_data` metrics на sheet-side bridge.
 - Existing upload contour не ломается: bundle/result contracts и control block сохраняются.
 

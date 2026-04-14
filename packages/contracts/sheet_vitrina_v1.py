@@ -30,3 +30,15 @@ class SheetVitrinaV1Envelope:
     snapshot_id: str
     as_of_date: str
     sheets: list[SheetVitrinaWriteTarget]
+
+
+@dataclass(frozen=True)
+class SheetVitrinaV1RefreshResult:
+    status: str
+    bundle_version: str
+    activated_at: str
+    refreshed_at: str
+    as_of_date: str
+    snapshot_id: str
+    plan_version: str
+    sheet_row_counts: dict[str, int]
