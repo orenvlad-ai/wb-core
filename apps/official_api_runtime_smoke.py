@@ -9,6 +9,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.official_api_runtime import (
+    DEFAULT_WB_API_TOKEN_ENV,
     OfficialApiRuntimeError,
     assert_upstream_reachable,
     load_runtime_config,
@@ -17,7 +18,7 @@ from packages.adapters.official_api_runtime import (
 
 def main() -> None:
     runtime = load_runtime_config(
-        token_env_var="WB_TOKEN",
+        token_env_var=DEFAULT_WB_API_TOKEN_ENV,
         default_base_url="https://discounts-prices-api.wildberries.ru",
         base_url_env_var="WB_OFFICIAL_API_BASE_URL",
     )

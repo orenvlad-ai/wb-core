@@ -7,6 +7,7 @@ from typing import Optional, Tuple
 
 
 DEFAULT_TIMEOUT_SECONDS = 10.0
+DEFAULT_WB_API_TOKEN_ENV = "WB_API_TOKEN"
 
 
 class OfficialApiRuntimeError(RuntimeError):

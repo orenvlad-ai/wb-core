@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, List, Mapping, Optional, Protocol, Tuple
 from urllib import error, parse, request as urllib_request
 
-from packages.adapters.official_api_runtime import load_runtime_config
+from packages.adapters.official_api_runtime import DEFAULT_WB_API_TOKEN_ENV, load_runtime_config
 from packages.contracts.fin_report_daily_block import FinReportDailyRequest
 
 
@@ -39,7 +39,7 @@ class HttpBackedFinReportDailySource:
     def __init__(
         self,
         base_url: str = "https://statistics-api.wildberries.ru",
-        token_env_var: str = "WB_TOKEN",
+        token_env_var: str = DEFAULT_WB_API_TOKEN_ENV,
         base_url_env_var: str = "WB_STATISTICS_API_BASE_URL",
         timeout_seconds: float = 30.0,
         page_sleep_seconds: float = 0.2,

@@ -47,6 +47,7 @@ update_note: "Обновлён под batched `wb-warehouses` checkpoint: `stock
 
 - Исторический repo-checkpoint до этого fix использовал `POST /api/v2/stocks-report/products/sizes` per `nmId`; на bundle с десятками enabled SKU такой fan-out мог приходить в `429`.
 - Current main-confirmed official path: `POST /api/analytics/v1/stocks-report/wb-warehouses` c batched `nmIds`, `limit/offset` pagination и analytics-capable token.
+- Current canonical runtime secret path для official stocks adapter: `WB_API_TOKEN`.
 - Результат остаётся на уровне `nmId`, но `snapshot_date` в success теперь отражает фактический день получения current WB warehouses inventory; он может отличаться от requested sheet `as_of_date`, и именно это считается честным freshness signal.
 - Ключевая semantics:
   - latest fetched `snapshot_ts` per `nmId` считается authoritative;
@@ -88,6 +89,7 @@ update_note: "Обновлён под batched `wb-warehouses` checkpoint: `stock
 - contracts: `packages/contracts/stocks_block.py`
 - adapters: `packages/adapters/stocks_block.py`
 - application: `packages/application/stocks_block.py`
+- official token boundary: `packages/adapters/official_api_runtime.py` with canonical env key `WB_API_TOKEN`
 - artifact-backed smoke: `apps/stocks_block_smoke.py`
 - targeted batching/rate-limit smoke: `apps/stocks_block_batching_smoke.py`
 - authoritative server-side smoke: `apps/stocks_block_http_smoke.py`
