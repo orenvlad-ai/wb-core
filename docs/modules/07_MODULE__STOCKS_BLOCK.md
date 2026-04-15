@@ -20,6 +20,7 @@ related_endpoints:
   - "POST /api/analytics/v1/stocks-report/wb-warehouses"
 related_runners:
   - "apps/stocks_block_smoke.py"
+  - "apps/stocks_block_region_mapping_smoke.py"
   - "apps/stocks_block_batching_smoke.py"
   - "apps/stocks_block_http_smoke.py"
   - "apps/sheet_vitrina_v1_stocks_refresh_smoke.py"
@@ -55,7 +56,8 @@ update_note: "Обновлён под batched `wb-warehouses` checkpoint и date
 - Ключевая semantics:
   - latest fetched `snapshot_ts` per `nmId` считается authoritative;
   - `stock_total` суммирует `quantity` по всем WB warehouses / chart variants, которые вернул endpoint;
-  - региональные `stock_*` строятся по текущему RU region mapping;
+  - региональные `stock_*` строятся по текущему RU region mapping с нормализацией legacy/current alias-ов `Южный +/и Северо-Кавказский` и `Дальневосточный +/и Сибирский`;
+  - quantity из raw regions вне configured district map не invent-ится в district rows: она остаётся внутри `stock_total` и surface-ится в `StocksSuccess.detail` / `STATUS.stocks[today_current].note`;
   - publish guard не допускает success при неполном coverage requested `nmId`;
   - `429` уважает `X-Ratelimit-Retry` / `X-Ratelimit-Reset`, использует per-seller limiter и после bounded retry budget не превращается в fake-success внутри source.
 
@@ -66,6 +68,7 @@ update_note: "Обновлён под batched `wb-warehouses` checkpoint и date
   - `snapshot_date`
   - `count`
   - `items[]` с `stock_total` и региональными `stock_*`
+  - `detail` для honest note по unmapped raw regions, если часть quantity не попала ни в один configured district bucket
 - Incomplete shape:
   - `kind = "incomplete"`
   - `requested_count`
@@ -95,6 +98,7 @@ update_note: "Обновлён под batched `wb-warehouses` checkpoint и date
 - application: `packages/application/stocks_block.py`
 - official token boundary: `packages/adapters/official_api_runtime.py` with canonical env key `WB_API_TOKEN`
 - artifact-backed smoke: `apps/stocks_block_smoke.py`
+- region normalization smoke: `apps/stocks_block_region_mapping_smoke.py`
 - targeted batching/rate-limit smoke: `apps/stocks_block_batching_smoke.py`
 - authoritative server-side smoke: `apps/stocks_block_http_smoke.py`
 - refresh integration smoke: `apps/sheet_vitrina_v1_stocks_refresh_smoke.py`
@@ -102,6 +106,7 @@ update_note: "Обновлён под batched `wb-warehouses` checkpoint и date
 # 6. Какой smoke подтверждён
 
 - Artifact-backed smoke подтверждён через `apps/stocks_block_smoke.py`.
+- Alias normalization + unmapped-note semantics подтверждены через `apps/stocks_block_region_mapping_smoke.py`.
 - Batching + cache + `429` retry/exhaustion подтверждены через `apps/stocks_block_batching_smoke.py`.
 - Refresh/runtime path c real `stocks` adapter подтверждён через `apps/sheet_vitrina_v1_stocks_refresh_smoke.py`.
 - Authoritative server-side smoke подтверждён через `apps/stocks_block_http_smoke.py`.
@@ -112,6 +117,8 @@ update_note: "Обновлён под batched `wb-warehouses` checkpoint и date
 - Server-side checkpoint подтверждён как реально рабочий: `normal -> success`, `normal: count -> 2`.
 - Refresh path с live-like bundle больше не делает `stocks` fan-out per `nmId`: current bundle `33` enabled SKU обслуживаются одним batched stocks request в normal bounded scenario.
 - В date-aware refresh `stocks[yesterday_closed]` честно materialize-ится как `not_available`, а `stocks[today_current]` заполняет только current-day column.
+- Live-shaped region aliases `Южный и Северо-Кавказский` и `Дальневосточный и Сибирский` больше не теряются на application normalization stage: district rows materialize-ятся в `stock_ru_south_caucasus` / `stock_ru_far_siberia`.
+- Если raw payload содержит quantity вне configured district map, эта разница больше не теряется молча: она остаётся внутри `stock_total` и явно попадает в success detail / operator-facing `STATUS` note.
 - Forced/external `429` больше не маскируется под заполненные stock values: source-level `STATUS.stocks[today_current]=error`, freshness остаётся пустым, stock cells materialize как blank.
 - Coverage guard сохранён в bounded форме через `incomplete` result.
 
@@ -120,5 +127,4 @@ update_note: "Обновлён под batched `wb-warehouses` checkpoint и date
 - буквальный перенос Apps Script cursor/staging;
 - `CONFIG/METRICS` migration;
 - jobs/API bundle/deploy;
-- отдельный bounded fix по распределению `stocks` в Южный / Северо-Кавказский ФО, если проблема сохранится после date-aware model;
 - более широкий runtime-pipeline beyond bounded checkpoint.

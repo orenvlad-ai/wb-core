@@ -25,7 +25,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "23491a0b8313e45403ac6b4afdb8f7bd0a178134"
+built_from_commit: "211593619fb2719d0f836e70a59e24e9dc834d0a"
 ---
 
 # Summary
@@ -47,6 +47,7 @@ python3 apps/registry_upload_db_backed_runtime_smoke.py
 python3 apps/registry_upload_http_entrypoint_smoke.py
 python3 apps/official_api_token_path_smoke.py
 python3 apps/stocks_block_smoke.py
+python3 apps/stocks_block_region_mapping_smoke.py
 python3 apps/stocks_block_batching_smoke.py
 python3 apps/sheet_vitrina_v1_registry_upload_trigger_smoke.py
 python3 apps/sheet_vitrina_v1_registry_seed_v3_bootstrap_smoke.py
@@ -159,6 +160,7 @@ clasp run getSheetVitrinaV1PresentationSnapshot
 | `official stocks request failed with status 429` in `STATUS.stocks[today_current].note` | live runtime still hits WB inventory limiter; confirm batched `stocks` path is deployed, no stale runtime remains, and upstream wait headers are being honored |
 | `STATUS.stocks[today_current] = error` with blank stock rows after refresh | bounded refresh stayed honest about stocks failure; investigate upstream inventory rate-limit / token scope instead of treating blanks as fresh stock values |
 | `STATUS.stocks[yesterday_closed] = not_available` | expected bounded semantics: current-only stocks are not backfilled into yesterday EOD without dedicated historical path |
+| `STATUS.stocks[today_current].note` starts with `unmapped stocks quantity outside configured district map=` | raw payload contains quantity outside the current RU district mapping; `stock_total` keeps it, district rows stay source-backed, and the residual is surfaced explicitly instead of being dropped |
 | `ReferenceError: URL is not defined` | Apps Script runtime bug in sheet-side URL derivation |
 | `registry upload bundle must contain 5-64 metrics_v2 entries` | live runtime still serves stale validator / stale deploy and is not aligned with current repo semantics |
 | `ACCESS_TOKEN_SCOPE_INSUFFICIENT` for `clasp` | local GAS OAuth scopes are insufficient for content read/write |

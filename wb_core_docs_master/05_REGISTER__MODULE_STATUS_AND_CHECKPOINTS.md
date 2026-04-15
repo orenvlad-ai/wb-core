@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "23491a0b8313e45403ac6b4afdb8f7bd0a178134"
+built_from_commit: "211593619fb2719d0f836e70a59e24e9dc834d0a"
 ---
 
 # Summary
@@ -86,7 +86,7 @@ This is the first bounded MVP checkpoint, not final production parity.
 
 - full legacy parity beyond current main-confirmed sheet/upload dictionary;
 - live numeric fill для promo/cogs-backed metrics до появления live HTTP adapters;
-- отдельный bounded fix по распределению `stocks` в Южный / Северо-Кавказский ФО, если проблема сохранится после date-aware model;
+- отдельный bounded fix по любому remaining non-district / foreign stocks residual, если одной truthful `STATUS` note окажется недостаточно для operator flow;
 - production hardening around runtime/deploy/auth;
 - unresolved long-tail compatibility around `AI_EXPORT`.
 

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import socket
 import sys
+import subprocess
 from tempfile import TemporaryDirectory
 import threading
 from types import SimpleNamespace
@@ -57,11 +58,12 @@ def main() -> None:
 def _check_refresh_uses_batched_stocks_request(bundle: dict[str, Any]) -> None:
     with _StocksApiStub(mode="success") as stocks_api, TemporaryDirectory(prefix="sheet-vitrina-stocks-ok-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
-        refresh_payload, plan_payload, _status_payload = _run_refresh_scenario(
+        refresh_payload, plan_payload, _status_payload, _endpoint_url, load_harness_result = _run_refresh_scenario(
             bundle=bundle,
             runtime_dir=runtime_dir,
             stocks_base_url=stocks_api.base_url,
             as_of_date=NORMAL_AS_OF_DATE,
+            run_load_harness=True,
         )
         if refresh_payload["status"] != "success":
             raise AssertionError("refresh must persist the ready snapshot in normal scenario")
@@ -96,13 +98,45 @@ def _check_refresh_uses_batched_stocks_request(bundle: dict[str, Any]) -> None:
             raise AssertionError("stocks[yesterday_closed] must stay blank instead of using current snapshot")
         if any(row[3] in ("", None) for row in stock_rows[:5]):
             raise AssertionError("normal stocks refresh must materialize current-day stock_total values")
+        south_rows = _find_data_rows(plan_payload, "stock_ru_south_caucasus")
+        if not any(_row_today_value(row) == 5.0 for row in south_rows):
+            raise AssertionError("SKU south/caucasus stock rows must materialize live-shaped regional values")
+        total_south_rows = _find_data_rows(plan_payload, "total_stock_ru_south_caucasus")
+        if not any(_row_today_value(row) == 165.0 for row in total_south_rows):
+            raise AssertionError("TOTAL south/caucasus stock row must aggregate all SKU regional values")
+        far_rows = _find_data_rows(plan_payload, "stock_ru_far_siberia")
+        if not any(_row_today_value(row) == 2.0 for row in far_rows):
+            raise AssertionError("SKU far/siberia stock rows must materialize live-shaped regional values")
+        total_far_rows = _find_data_rows(plan_payload, "total_stock_ru_far_siberia")
+        if not any(_row_today_value(row) == 66.0 for row in total_far_rows):
+            raise AssertionError("TOTAL far/siberia stock row must aggregate all SKU regional values")
+        stock_total_rows = _find_data_rows(plan_payload, "stock_total")
+        if not any(_row_today_value(row) == 18.0 for row in stock_total_rows):
+            raise AssertionError("stock_total must keep unmapped quantity inside total for affected SKU rows")
+        total_stock_rows = _find_data_rows(plan_payload, "total_stock_total")
+        if not any(_row_today_value(row) == 562.0 for row in total_stock_rows):
+            raise AssertionError("TOTAL stock_total must aggregate mapped + unmapped quantities honestly")
+        if "Армения=1" not in str(stocks_status["note"]):
+            raise AssertionError(f"stocks status must surface unmapped non-district quantity, got {stocks_status['note']!r}")
+
+        if not load_harness_result or load_harness_result["load_result"]["http_status"] != 200:
+            raise AssertionError(f"sheet load must return 200 after refresh, got {load_harness_result['load_result']}")
+        loaded_rows = load_harness_result["sheets"]["DATA_VITRINA"]["values"]
+        if not any(_row_today_value(row) == 5.0 for row in _find_loaded_rows(loaded_rows, "stock_ru_south_caucasus")):
+            raise AssertionError("loaded DATA_VITRINA must keep south/caucasus district values")
+        if not any(_row_today_value(row) == 165.0 for row in _find_loaded_rows(loaded_rows, "total_stock_ru_south_caucasus")):
+            raise AssertionError("loaded DATA_VITRINA must keep TOTAL south/caucasus aggregate")
+        if not any(_row_today_value(row) == 2.0 for row in _find_loaded_rows(loaded_rows, "stock_ru_far_siberia")):
+            raise AssertionError("loaded DATA_VITRINA must keep far/siberia district values")
+        if not any(_row_today_value(row) == 562.0 for row in _find_loaded_rows(loaded_rows, "total_stock_total")):
+            raise AssertionError("loaded DATA_VITRINA must keep honest stock total including unmapped residual")
         print("refresh-batched: ok -> one stocks request serves the whole refresh path")
 
 
 def _check_refresh_surfaces_stocks_429_honestly(bundle: dict[str, Any]) -> None:
     with _StocksApiStub(mode="always_429") as stocks_api, TemporaryDirectory(prefix="sheet-vitrina-stocks-429-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
-        refresh_payload, plan_payload, _status_payload = _run_refresh_scenario(
+        refresh_payload, plan_payload, _status_payload, _endpoint_url, _load_harness_result = _run_refresh_scenario(
             bundle=bundle,
             runtime_dir=runtime_dir,
             stocks_base_url=stocks_api.base_url,
@@ -140,7 +174,8 @@ def _run_refresh_scenario(
     runtime_dir: Path,
     stocks_base_url: str,
     as_of_date: str,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    run_load_harness: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str, dict[str, Any] | None]:
     previous_token = os.environ.get(TOKEN_ENV)
     os.environ[TOKEN_ENV] = "stocks-refresh-smoke-token"
     try:
@@ -186,7 +221,12 @@ def _run_refresh_scenario(
             status_code, status_payload = _get_json(status_url)
             if status_code != 200:
                 raise AssertionError(f"status endpoint must return 200 after refresh, got {status_code}")
-            return refresh_payload, plan_payload, status_payload
+            load_harness_result = (
+                _run_load_only_harness(endpoint_url=upload_url, as_of_date=as_of_date)
+                if run_load_harness
+                else None
+            )
+            return refresh_payload, plan_payload, status_payload, upload_url, load_harness_result
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -309,14 +349,36 @@ class _StocksApiStub:
 
     def _response_for(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self.mode == "success":
-            items = [
-                {
-                    "nmId": int(nm_id),
-                    "regionName": "Центральный",
-                    "quantity": 10,
-                }
-                for nm_id in payload.get("nmIds", [])
-            ]
+            nm_ids = [int(nm_id) for nm_id in payload.get("nmIds", [])]
+            items = []
+            for nm_id in nm_ids:
+                items.extend(
+                    [
+                        {
+                            "nmId": nm_id,
+                            "regionName": "Центральный",
+                            "quantity": 10,
+                        },
+                        {
+                            "nmId": nm_id,
+                            "regionName": "Южный и Северо-Кавказский",
+                            "quantity": 5,
+                        },
+                        {
+                            "nmId": nm_id,
+                            "regionName": "Дальневосточный и Сибирский",
+                            "quantity": 2,
+                        },
+                    ]
+                )
+            if nm_ids:
+                items.append(
+                    {
+                        "nmId": nm_ids[0],
+                        "regionName": "Армения",
+                        "quantity": 1,
+                    }
+                )
             return _json_response(200, {"data": {"items": items}})
         if self.mode == "always_429":
             return _json_response(
@@ -368,6 +430,27 @@ def _get_json(url: str) -> tuple[int, dict[str, Any]]:
         return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
+def _run_load_only_harness(*, endpoint_url: str, as_of_date: str) -> dict[str, Any]:
+    return json.loads(
+        subprocess.check_output(
+            [
+                "node",
+                str(ROOT / "apps" / "sheet_vitrina_v1_registry_upload_trigger_harness.js"),
+                "--mode",
+                "load_only",
+                "--scriptPath",
+                str(ROOT / "gas" / "sheet_vitrina_v1" / "RegistryUploadTrigger.gs"),
+                "--endpointUrl",
+                endpoint_url,
+                "--asOfDate",
+                as_of_date,
+            ],
+            cwd=ROOT,
+            text=True,
+        )
+    )
+
+
 def _find_status_row(plan_payload: dict[str, Any], source_key: str) -> dict[str, Any]:
     status_sheet = _find_sheet(plan_payload, "STATUS")
     for row in status_sheet["rows"]:
@@ -379,6 +462,16 @@ def _find_status_row(plan_payload: dict[str, Any], source_key: str) -> dict[str,
 def _find_data_rows(plan_payload: dict[str, Any], metric_key: str) -> list[list[Any]]:
     data_sheet = _find_sheet(plan_payload, "DATA_VITRINA")
     return [row for row in data_sheet["rows"] if len(row) >= 3 and str(row[1]).endswith(f"|{metric_key}")]
+
+
+def _find_loaded_rows(rows: list[list[Any]], metric_key: str) -> list[list[Any]]:
+    return [row for row in rows if len(row) >= 4 and str(row[1]) == metric_key]
+
+
+def _row_today_value(row: list[Any]) -> float | None:
+    if len(row) < 4 or row[3] in ("", None):
+        return None
+    return float(row[3])
 
 
 def _find_sheet(plan_payload: dict[str, Any], sheet_name: str) -> dict[str, Any]:
