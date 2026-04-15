@@ -87,9 +87,11 @@ function loadSheetVitrinaTable() {
     const plan = response.sheet_plan;
     const writeResult = response.write_result || { sheets: [] };
     const dataSheet = writeResult.sheets && writeResult.sheets.length ? writeResult.sheets[0] : null;
+    const dateColumns = _resolveSheetVitrinaPlanDateColumns_(plan);
     const lines = [
       'Витрина обновлена',
-      `Дата: ${plan.as_of_date}`,
+      `Даты: ${dateColumns.length ? dateColumns.join(' + ') : plan.as_of_date}`,
+      `Base as_of_date: ${plan.as_of_date}`,
       `Snapshot: ${plan.snapshot_id}`,
       `DATA_VITRINA: ${dataSheet ? dataSheet.row_count : plan.sheets[0].row_count} строк`,
     ];
@@ -439,6 +441,20 @@ function _validateSheetVitrinaPlanPayload_(payload) {
   if (!Array.isArray(payload.sheets) || payload.sheets.length !== 2) {
     throw new Error('sheet vitrina plan payload must contain two sheet targets');
   }
+}
+
+function _resolveSheetVitrinaPlanDateColumns_(plan) {
+  if (Array.isArray(plan && plan.date_columns) && plan.date_columns.length) {
+    return plan.date_columns
+      .map((value) => String(value || '').trim())
+      .filter((value) => value);
+  }
+  const sheets = Array.isArray(plan && plan.sheets) ? plan.sheets : [];
+  const dataSheet = sheets.find((sheet) => sheet && sheet.sheet_name === 'DATA_VITRINA');
+  if (!dataSheet || !Array.isArray(dataSheet.header)) {
+    return [];
+  }
+  return dataSheet.header.slice(2).map((value) => String(value || '').trim()).filter((value) => value);
 }
 
 function _ensureRegistryUploadSheet_(spreadsheet, sheetName) {

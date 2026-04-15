@@ -36,6 +36,7 @@ class StocksSuccess:
     snapshot_date: str
     count: int
     items: list[StocksItem]
+    detail: str = ""
 
 
 @dataclass(frozen=True)

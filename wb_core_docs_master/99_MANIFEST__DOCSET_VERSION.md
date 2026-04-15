@@ -20,18 +20,17 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "фактическая внешняя project upload"
-built_from_commit: "a164014035c98d158bce6867bfc4fcd6885c0f8f"
+built_from_commit: "211593619fb2719d0f836e70a59e24e9dc834d0a"
 docset_version: "wb_core_docs_master_v1"
-built_at: "2026-04-15T20:51:37Z"
+built_at: "2026-04-16T09:35:00Z"
 core_docs_changed:
-  - "docs/architecture/09_official_api_secret_boundary.md"
   - "docs/modules/07_MODULE__STOCKS_BLOCK.md"
-  - "docs/modules/09_MODULE__ADS_COMPACT_BLOCK.md"
-  - "docs/modules/10_MODULE__FIN_REPORT_DAILY_BLOCK.md"
+  - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
+  - "wb_core_docs_master/05_REGISTER__MODULE_STATUS_AND_CHECKPOINTS.md"
   - "wb_core_docs_master/09_RUNBOOK__COMMON_SMOKE_AND_DEBUG.md"
 project_upload_required: true
 last_project_upload_at: "2026-04-14T10:23:55Z"
-project_upload_note: "pack changed after canonical WB auth normalization: repo-owned official adapters now default to `WB_API_TOKEN`, runbook reflects the canonical token path, and confirmed external upload of this updated pack is still pending"
+project_upload_note: "pack changed after stocks regional decomposition fix: live/current WB aliases for South/North-Caucasus and Far/Siberia are normalized server-side, unmapped residual quantity is surfaced in STATUS note, and confirmed external upload of this updated pack is still pending"
 ---
 
 # Summary
