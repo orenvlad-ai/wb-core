@@ -554,7 +554,7 @@ function readExistingDataVitrinaMatrixState_(sheet) {
   const values = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
   const header = values[0];
   if (isDataVitrinaMatrixHeader_(header)) {
-    return parseMatrixDataVitrinaState_(values);
+    return parseMatrixDataVitrinaState_(values, resolveSpreadsheetTimeZone_(sheet.getParent()));
   }
   if (isDataVitrinaFlatHeader_(header)) {
     return buildIncomingDataVitrinaMatrixState_(header, values.slice(1));
@@ -563,7 +563,8 @@ function readExistingDataVitrinaMatrixState_(sheet) {
 }
 
 function buildIncomingDataVitrinaMatrixState_(header, rows) {
-  const dates = normalizeDataVitrinaDateHeaders_(header);
+  const dateColumns = normalizeDataVitrinaDateColumns_(header);
+  const dates = uniqueDataVitrinaDates_(dateColumns);
   const state = createEmptyDataVitrinaMatrixState_();
   state.dates = dates.slice();
   (Array.isArray(rows) ? rows : []).forEach((row) => {
@@ -593,16 +594,17 @@ function buildIncomingDataVitrinaMatrixState_(header, rows) {
     pushUnique_(state.block_metric_order[parsed.block_key], parsed.metric_key);
     pushUnique_(state.metric_keys, parsed.metric_key);
     state.metric_titles[logicalKey] = derivedTitles.metric_title;
-    state.values[logicalKey] = mapRowValuesToDates_(dates, row.slice(2));
+    state.values[logicalKey] = mapRowValuesToDates_(dateColumns, row.slice(2));
     state.source_row_count += 1;
   });
   state.block_order = composeDataVitrinaBlockOrder_(state.block_scope_order);
   return state;
 }
 
-function parseMatrixDataVitrinaState_(values) {
+function parseMatrixDataVitrinaState_(values, timeZone) {
   const state = createEmptyDataVitrinaMatrixState_();
-  state.dates = normalizeDataVitrinaDateHeaders_(values[0]);
+  const dateColumns = normalizeDataVitrinaDateColumns_(values[0], timeZone);
+  state.dates = uniqueDataVitrinaDates_(dateColumns);
   let currentBlockKey = '';
   values.slice(1).forEach((row) => {
     const label = String(row[0] || '').trim();
@@ -627,7 +629,7 @@ function parseMatrixDataVitrinaState_(values) {
     pushUnique_(state.block_metric_order[currentBlockKey], key);
     pushUnique_(state.metric_keys, key);
     state.metric_titles[logicalKey] = label || key;
-    state.values[logicalKey] = mapRowValuesToDates_(state.dates, row.slice(2));
+    state.values[logicalKey] = mapRowValuesToDates_(dateColumns, row.slice(2));
     state.source_row_count += 1;
   });
   state.block_order = composeDataVitrinaBlockOrder_(state.block_scope_order);
@@ -713,10 +715,59 @@ function countDataVitrinaMatrixMetricRows_(state) {
   return state.block_order.reduce((total, blockKey) => total + ((state.block_metric_order[blockKey] || []).length), 0);
 }
 
-function normalizeDataVitrinaDateHeaders_(header) {
+function normalizeDataVitrinaDateHeaders_(header, timeZone) {
+  return uniqueDataVitrinaDates_(normalizeDataVitrinaDateColumns_(header, timeZone));
+}
+
+function normalizeDataVitrinaDateColumns_(header, timeZone) {
   return (Array.isArray(header) ? header.slice(2) : [])
-    .map((item) => String(item || '').trim())
+    .map((item) => normalizeDataVitrinaDateHeader_(item, timeZone))
     .filter((item) => item);
+}
+
+function uniqueDataVitrinaDates_(dates) {
+  const out = [];
+  (Array.isArray(dates) ? dates : []).forEach((item) => {
+    if (out.indexOf(item) === -1) {
+      out.push(item);
+    }
+  });
+  return out;
+}
+
+function normalizeDataVitrinaDateHeader_(value, timeZone) {
+  const targetTimeZone = String(timeZone || 'UTC');
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return Utilities.formatDate(value, targetTimeZone, 'yyyy-MM-dd');
+  }
+  const normalized = String(value || '').trim();
+  if (!normalized) {
+    return '';
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    return normalized;
+  }
+  const parsed = new Date(normalized);
+  if (!Number.isNaN(parsed.getTime())) {
+    return Utilities.formatDate(parsed, targetTimeZone, 'yyyy-MM-dd');
+  }
+  return normalized;
+}
+
+function resolveSpreadsheetTimeZone_(spreadsheet) {
+  if (spreadsheet && typeof spreadsheet.getSpreadsheetTimeZone === 'function') {
+    const value = String(spreadsheet.getSpreadsheetTimeZone() || '').trim();
+    if (value) {
+      return value;
+    }
+  }
+  if (typeof Session !== 'undefined' && Session && typeof Session.getScriptTimeZone === 'function') {
+    const value = String(Session.getScriptTimeZone() || '').trim();
+    if (value) {
+      return value;
+    }
+  }
+  return 'UTC';
 }
 
 function parseFlatDataVitrinaKey_(key) {
@@ -879,6 +930,8 @@ function describeSheetState_(spreadsheet, sheetName) {
   const values = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
   if (sheetName === 'DATA_VITRINA') {
     if (isDataVitrinaMatrixHeader_(header)) {
+      const normalizedDateHeaders = normalizeDataVitrinaDateHeaders_(header, resolveSpreadsheetTimeZone_(spreadsheet));
+      state.header = DATA_VITRINA_MATRIX_HEADER.concat(normalizedDateHeaders);
       const dataRows = values.slice(1);
       const metricKeys = [];
       const blockKeys = [];
@@ -916,8 +969,8 @@ function describeSheetState_(spreadsheet, sheetName) {
       const uniqueMetricKeys = Array.from(new Set(metricKeys));
       state.layout_mode = 'date_matrix';
       state.data_row_count = dataRows.length;
-      state.date_column_count = Math.max(header.length - 2, 0);
-      state.date_headers = header.slice(2);
+      state.date_column_count = normalizedDateHeaders.length;
+      state.date_headers = normalizedDateHeaders;
       state.metric_key_count = uniqueMetricKeys.length;
       state.metric_keys = uniqueMetricKeys;
       state.block_key_count = blockKeys.length;
@@ -928,7 +981,7 @@ function describeSheetState_(spreadsheet, sheetName) {
       state.separator_row_count = separatorRowCount;
       state.non_empty_metric_row_count = nonEmptyMetricRowCount;
       state.rendered_block_count = blockKeys.length;
-      state.rendered_date_column_count = Math.max(header.length - 2, 0);
+      state.rendered_date_column_count = normalizedDateHeaders.length;
       state.rendered_data_row_count = dataRows.length;
       state.rendered_metric_row_count = metricRowCount;
     } else {
