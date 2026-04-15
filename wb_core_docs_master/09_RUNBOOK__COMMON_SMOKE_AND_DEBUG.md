@@ -25,7 +25,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "f2ecd83242baef9f7d022d898a7162d30ba48efc"
+built_from_commit: "33f87338d5d6a8bc1776ab413eafb4b2317f3c94"
 ---
 
 # Summary
@@ -45,10 +45,13 @@ python3 apps/registry_upload_bundle_v1_smoke.py
 python3 apps/registry_upload_file_backed_service_smoke.py
 python3 apps/registry_upload_db_backed_runtime_smoke.py
 python3 apps/registry_upload_http_entrypoint_smoke.py
+python3 apps/stocks_block_smoke.py
+python3 apps/stocks_block_batching_smoke.py
 python3 apps/sheet_vitrina_v1_registry_upload_trigger_smoke.py
 python3 apps/sheet_vitrina_v1_registry_seed_v3_bootstrap_smoke.py
 python3 apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py
 python3 apps/sheet_vitrina_v1_refresh_read_split_smoke.py
+python3 apps/sheet_vitrina_v1_stocks_refresh_smoke.py
 python3 apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py
 python3 apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py
 git diff --check
@@ -144,6 +147,8 @@ clasp run getSheetVitrinaV1State
 | `sheet_vitrina_v1 ready snapshot missing` после upload | load path is cheap-read only; explicit refresh has not materialized snapshot for the current bundle / date yet |
 | `Ready snapshot пока не materialized.` на `/sheet-vitrina-v1/operator` | operator page честно сообщает, что explicit refresh ещё не запускался для current bundle / date |
 | `sheet vitrina endpoint returned non-JSON response` | wrong publish/upstream route or HTML error surface instead of expected JSON |
+| `official stocks request failed with status 429` in `STATUS.stocks.note` | live runtime still hits WB inventory limiter; confirm batched `stocks` path is deployed, no stale runtime remains, and upstream wait headers are being honored |
+| `STATUS.stocks = error` with blank stock rows after refresh | bounded refresh stayed honest about stocks failure; investigate upstream inventory rate-limit / token scope instead of treating blanks as fresh stock values |
 | `ReferenceError: URL is not defined` | Apps Script runtime bug in sheet-side URL derivation |
 | `registry upload bundle must contain 5-64 metrics_v2 entries` | live runtime still serves stale validator / stale deploy and is not aligned with current repo semantics |
 | `ACCESS_TOKEN_SCOPE_INSUFFICIENT` for `clasp` | local GAS OAuth scopes are insufficient for content read/write |
