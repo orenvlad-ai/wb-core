@@ -15,6 +15,7 @@ from packages.adapters.sales_funnel_history_block import (
     HttpBackedSalesFunnelHistorySource,
     _SalesFunnelHistoryHttpStatusError,
 )
+from packages.adapters.official_api_runtime import DEFAULT_WB_API_TOKEN_ENV
 from packages.application.sales_funnel_history_block import SalesFunnelHistoryBlock
 from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryRequest
 
@@ -33,7 +34,7 @@ class RecordingSalesFunnelHistorySource(HttpBackedSalesFunnelHistorySource):
     def __init__(self, *, responses: list[object], clock: FakeClock, **kwargs: object) -> None:
         super().__init__(
             base_url="https://example.invalid",
-            token_env_var="WB_TOKEN",
+            token_env_var=DEFAULT_WB_API_TOKEN_ENV,
             **kwargs,
         )
         self._responses = list(responses)
@@ -223,7 +224,7 @@ def _check_retry_exhaustion() -> None:
 
 
 def main() -> None:
-    os.environ.setdefault("WB_TOKEN", "stub-token")
+    os.environ.setdefault(DEFAULT_WB_API_TOKEN_ENV, "stub-token")
     _check_chunking_and_merge()
     _check_rate_limit_pacing()
     _check_retry_after_429()

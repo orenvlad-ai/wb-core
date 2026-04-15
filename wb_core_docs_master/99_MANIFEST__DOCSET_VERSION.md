@@ -20,21 +20,18 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "фактическая внешняя project upload"
-built_from_commit: "f2ecd83242baef9f7d022d898a7162d30ba48efc"
+built_from_commit: "a164014035c98d158bce6867bfc4fcd6885c0f8f"
 docset_version: "wb_core_docs_master_v1"
-built_at: "2026-04-15T19:32:55Z"
+built_at: "2026-04-15T20:51:37Z"
 core_docs_changed:
-  - "wb_core_docs_master/00_INDEX__WEBCORE_PROJECT_DOCS.md"
-  - "wb_core_docs_master/01_PASSPORT__WEBCORE_PROJECT.md"
-  - "wb_core_docs_master/02_POLICY__DOCS_SYNC_AND_CODEX_PROTOCOL.md"
-  - "wb_core_docs_master/03_GLOSSARY__TERMS_ALIASES_AND_CANONICAL_NAMES.md"
-  - "wb_core_docs_master/05_REGISTER__MODULE_STATUS_AND_CHECKPOINTS.md"
-  - "wb_core_docs_master/06_REGISTER__LEGACY_TO_WEBCORE_MAP.md"
-  - "wb_core_docs_master/07_REGISTER__DO_NOT_LOSE_CONSTRAINTS.md"
+  - "docs/architecture/09_official_api_secret_boundary.md"
+  - "docs/modules/07_MODULE__STOCKS_BLOCK.md"
+  - "docs/modules/09_MODULE__ADS_COMPACT_BLOCK.md"
+  - "docs/modules/10_MODULE__FIN_REPORT_DAILY_BLOCK.md"
   - "wb_core_docs_master/09_RUNBOOK__COMMON_SMOKE_AND_DEBUG.md"
 project_upload_required: true
 last_project_upload_at: "2026-04-14T10:23:55Z"
-project_upload_note: "metadata drift synced to merged `main` after PR #57, but repo does not contain a factual confirmed timestamp for external upload of this metadata-synced pack; `project_upload_required = true` remains until the next confirmed external upload in ChatGPT Project WebCore"
+project_upload_note: "pack changed after canonical WB auth normalization: repo-owned official adapters now default to `WB_API_TOKEN`, runbook reflects the canonical token path, and confirmed external upload of this updated pack is still pending"
 ---
 
 # Summary

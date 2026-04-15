@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 from urllib import error, request as urllib_request
 
-from packages.adapters.official_api_runtime import load_runtime_config
+from packages.adapters.official_api_runtime import DEFAULT_WB_API_TOKEN_ENV, load_runtime_config
 from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryRequest
 
 
@@ -35,7 +35,7 @@ class HttpBackedSalesFunnelHistorySource:
     def __init__(
         self,
         base_url: str = "https://seller-analytics-api.wildberries.ru",
-        token_env_var: str = "WB_TOKEN",
+        token_env_var: str = DEFAULT_WB_API_TOKEN_ENV,
         base_url_env_var: str = "WB_SELLER_ANALYTICS_API_BASE_URL",
         timeout_seconds: float = 30.0,
         max_nm_ids_per_request: int = 20,

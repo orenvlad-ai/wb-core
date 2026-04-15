@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 from urllib import error, parse, request as urllib_request
 
-from packages.adapters.official_api_runtime import load_runtime_config
+from packages.adapters.official_api_runtime import DEFAULT_WB_API_TOKEN_ENV, load_runtime_config
 from packages.contracts.spp_block import SppRequest
 
 
@@ -41,7 +41,7 @@ class HttpBackedSppSource:
     def __init__(
         self,
         base_url: str = "https://statistics-api.wildberries.ru",
-        token_env_var: str = "WB_TOKEN",
+        token_env_var: str = DEFAULT_WB_API_TOKEN_ENV,
         base_url_env_var: str = "WB_STATISTICS_API_BASE_URL",
         timeout_seconds: float = 30.0,
     ) -> None:

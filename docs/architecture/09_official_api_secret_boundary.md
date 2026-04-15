@@ -6,7 +6,18 @@
 - API tokens;
 - при необходимости отдельные upstream-specific base URLs или host overrides, если они считаются environment-specific runtime config.
 
-В текущем evidence для `prices_snapshot_block` required secret — `WB_TOKEN`.
+В текущем repo norm для official-API family required secret — `WB_API_TOKEN`.
+Он является canonical runtime path для current WB adapters в `sheet_vitrina_v1` refresh contour:
+- `prices_snapshot_block`
+- `sf_period_block`
+- `spp_block`
+- `ads_bids_block`
+- `stocks_block`
+- `sales_funnel_history_block`
+- `ads_compact_block`
+- `fin_report_daily_block`
+
+`web_source_snapshot_block` и `seller_funnel_snapshot_block` не используют direct WB token path: они ходят в repo-owned `api.selleros.pro` contour.
 
 ## Что Хранится Только Вне Git
 
@@ -38,6 +49,11 @@
 - какие секреты ему нужны по имени runtime contract;
 - какие runtime параметры обязательны для запроса;
 - какие ошибки вернуть, если runtime boundary не собран.
+
+Для current official-API contour это значит:
+- default token env key в repo code должен быть один: `WB_API_TOKEN`;
+- legacy names вроде `WB_TOKEN` / `WB_AUTH_TOKEN` / `WB_SUPPLIES_API_TOKEN` не должны оставаться hidden runtime fallback inside adapters;
+- если какой-то endpoint реально требует другой token type/category и не работает от canonical token, это должно быть отдельным documented exception, а не silent branch в runtime loading.
 
 Модуль не должен знать:
 - из `.env`, shell env, secret manager или process supervisor пришёл секрет;
