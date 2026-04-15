@@ -36,6 +36,9 @@ class RegistryUploadHttpEntrypoint:
     def handle_sheet_plan_request(self, as_of_date: str | None = None) -> dict[str, Any]:
         return asdict(self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=as_of_date))
 
+    def handle_sheet_status_request(self, as_of_date: str | None = None) -> dict[str, Any]:
+        return asdict(self.runtime.load_sheet_vitrina_refresh_status(as_of_date=as_of_date))
+
     def handle_sheet_refresh_request(self, as_of_date: str | None = None) -> dict[str, Any]:
         current_state = self.runtime.load_current_state()
         plan = self.sheet_plan_block.build_plan(as_of_date=as_of_date)

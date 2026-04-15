@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -19,6 +20,8 @@ if str(ROOT) not in sys.path:
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_REFRESH_PATH,
+    DEFAULT_SHEET_STATUS_PATH,
+    DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_UPLOAD_PATH,
     build_registry_upload_http_server,
 )
@@ -77,6 +80,8 @@ def main() -> None:
             upload_path=DEFAULT_UPLOAD_PATH,
             sheet_plan_path=DEFAULT_SHEET_PLAN_PATH,
             sheet_refresh_path=DEFAULT_SHEET_REFRESH_PATH,
+            sheet_status_path=DEFAULT_SHEET_STATUS_PATH,
+            sheet_operator_ui_path=DEFAULT_SHEET_OPERATOR_UI_PATH,
             runtime_dir=runtime_dir,
         )
         server = build_registry_upload_http_server(config, entrypoint=entrypoint)
@@ -84,8 +89,24 @@ def main() -> None:
         thread.start()
         try:
             upload_url = f"http://127.0.0.1:{config.port}{config.upload_path}"
-            refresh_url = f"http://127.0.0.1:{config.port}{config.sheet_refresh_path}"
             plan_url = f"http://127.0.0.1:{config.port}{config.sheet_plan_path}"
+            operator_ui_url = f"http://127.0.0.1:{config.port}{config.sheet_operator_ui_path}"
+
+            operator_ui_status, operator_ui_html = _get_text(operator_ui_url)
+            if operator_ui_status != 200:
+                raise AssertionError(f"operator UI must return 200, got {operator_ui_status}")
+            if "Обновление данных витрины" not in operator_ui_html or "Загрузить данные" not in operator_ui_html:
+                raise AssertionError("operator UI must expose the expected operator controls")
+            operator_ui_config = _extract_operator_ui_config(operator_ui_html)
+            if operator_ui_config["refresh_path"] != config.sheet_refresh_path:
+                raise AssertionError("operator UI must point to the existing refresh endpoint")
+            if operator_ui_config["status_path"] != config.sheet_status_path:
+                raise AssertionError("operator UI must point to the cheap status endpoint")
+            refresh_url = f"http://127.0.0.1:{config.port}{operator_ui_config['refresh_path']}"
+            status_url = (
+                f"http://127.0.0.1:{config.port}{operator_ui_config['status_path']}"
+                f"?{urllib_parse.urlencode({'as_of_date': AS_OF_DATE})}"
+            )
 
             upload_status, upload_payload = _post_json(upload_url, bundle)
             if upload_status != 200 or upload_payload["status"] != "accepted":
@@ -101,6 +122,10 @@ def main() -> None:
             if missing_status != 422 or "ready snapshot missing" not in str(missing_payload.get("error", "")):
                 raise AssertionError("cheap read endpoint must report missing ready snapshot before refresh")
 
+            pre_refresh_status, pre_refresh_payload = _get_json(status_url)
+            if pre_refresh_status != 422 or "ready snapshot missing" not in str(pre_refresh_payload.get("error", "")):
+                raise AssertionError("cheap status endpoint must report missing ready snapshot before refresh")
+
             refresh_status, refresh_payload = _post_json(refresh_url, {"as_of_date": AS_OF_DATE})
             if refresh_status != 200:
                 raise AssertionError(f"refresh endpoint must return 200, got {refresh_status}")
@@ -112,6 +137,16 @@ def main() -> None:
                 raise AssertionError("refresh_result as_of_date mismatch")
             if not all(block.calls == 1 for block in counters.values()):
                 raise AssertionError("refresh endpoint must call each heavy source block exactly once")
+
+            status_after_refresh, status_payload = _get_json(status_url)
+            if status_after_refresh != 200:
+                raise AssertionError(f"status endpoint must return 200 after refresh, got {status_after_refresh}")
+            if status_payload["snapshot_id"] != refresh_payload["snapshot_id"]:
+                raise AssertionError("status endpoint must return persisted refresh metadata")
+            if status_payload["refreshed_at"] != REFRESHED_AT:
+                raise AssertionError("status endpoint refreshed_at mismatch")
+            if status_payload["sheet_row_counts"] != refresh_payload["sheet_row_counts"]:
+                raise AssertionError("status endpoint row counts must match refresh result")
 
             plan_status, plan_payload = _get_json(f"{plan_url}?{urllib_parse.urlencode({'as_of_date': AS_OF_DATE})}")
             if plan_status != 200:
@@ -134,7 +169,9 @@ def main() -> None:
                 raise AssertionError("sheet-side load must not trigger heavy source blocks after refresh")
 
             print(f"missing_snapshot: ok -> {missing_load['load_error']}")
+            print(f"operator_page: ok -> {config.sheet_operator_ui_path}")
             print(f"refresh_endpoint: ok -> {refresh_payload['snapshot_id']}")
+            print(f"status_endpoint: ok -> {status_payload['snapshot_id']}")
             print(f"cheap_read_endpoint: ok -> {plan_payload['snapshot_id']}")
             print("sheet_load: ok -> ready snapshot only")
             print("smoke-check passed")
@@ -202,6 +239,26 @@ def _get_json(url: str) -> tuple[int, object]:
             return response.status, json.loads(response.read().decode("utf-8"))
     except error.HTTPError as exc:
         return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _get_text(url: str) -> tuple[int, str]:
+    req = urllib_request.Request(url, method="GET")
+    try:
+        with urllib_request.urlopen(req) as response:
+            return response.status, response.read().decode("utf-8")
+    except error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8")
+
+
+def _extract_operator_ui_config(html: str) -> dict[str, object]:
+    match = re.search(
+        r'<script id="sheet-vitrina-v1-operator-config" type="application/json">(.*?)</script>',
+        html,
+        re.DOTALL,
+    )
+    if match is None:
+        raise AssertionError("operator UI config script is missing")
+    return json.loads(match.group(1))
 
 
 def _reserve_free_port() -> int:

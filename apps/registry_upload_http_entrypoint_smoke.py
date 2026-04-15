@@ -4,6 +4,7 @@ from dataclasses import asdict
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -27,6 +28,8 @@ from apps.registry_upload_smoke_support import (
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_REFRESH_PATH,
+    DEFAULT_SHEET_STATUS_PATH,
+    DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_UPLOAD_PATH,
     build_registry_upload_http_server,
 )
@@ -52,6 +55,8 @@ def main() -> None:
             upload_path=DEFAULT_UPLOAD_PATH,
             sheet_plan_path=DEFAULT_SHEET_PLAN_PATH,
             sheet_refresh_path=DEFAULT_SHEET_REFRESH_PATH,
+            sheet_status_path=DEFAULT_SHEET_STATUS_PATH,
+            sheet_operator_ui_path=DEFAULT_SHEET_OPERATOR_UI_PATH,
             runtime_dir=runtime_dir,
         )
         env = os.environ.copy()
@@ -62,6 +67,8 @@ def main() -> None:
                 "REGISTRY_UPLOAD_HTTP_PATH": config.upload_path,
                 "SHEET_VITRINA_HTTP_PATH": config.sheet_plan_path,
                 "SHEET_VITRINA_REFRESH_HTTP_PATH": config.sheet_refresh_path,
+                "SHEET_VITRINA_STATUS_HTTP_PATH": config.sheet_status_path,
+                "SHEET_VITRINA_OPERATOR_UI_PATH": config.sheet_operator_ui_path,
                 "REGISTRY_UPLOAD_RUNTIME_DIR": str(config.runtime_dir),
             }
         )
@@ -76,6 +83,8 @@ def main() -> None:
         try:
             base_url = f"http://127.0.0.1:{config.port}{config.upload_path}"
             plan_url = f"http://127.0.0.1:{config.port}{config.sheet_plan_path}"
+            status_url = f"http://127.0.0.1:{config.port}{config.sheet_status_path}"
+            operator_ui_url = f"http://127.0.0.1:{config.port}{config.sheet_operator_ui_path}"
 
             accepted_status, accepted_payload = _post_json_when_ready(
                 base_url,
@@ -99,11 +108,30 @@ def main() -> None:
             if current_state != current_expected:
                 raise AssertionError("runtime current state differs from HTTP target fixture")
 
+            operator_ui_status, operator_ui_html = _get_text(operator_ui_url)
+            if operator_ui_status != 200:
+                raise AssertionError(f"operator UI must return 200, got {operator_ui_status}")
+            if "Обновление данных витрины" not in operator_ui_html or "Загрузить данные" not in operator_ui_html:
+                raise AssertionError("operator UI must expose the expected minimal page")
+            operator_ui_config = _extract_operator_ui_config(operator_ui_html)
+            if operator_ui_config != {
+                "page_title": "Обновление данных витрины",
+                "refresh_path": config.sheet_refresh_path,
+                "status_path": config.sheet_status_path,
+            }:
+                raise AssertionError("operator UI config must expose existing refresh/status paths")
+
             missing_plan_status, missing_plan_payload = _get_json(plan_url)
             if missing_plan_status != 422:
                 raise AssertionError(f"plan read before refresh must return 422, got {missing_plan_status}")
             if "ready snapshot missing" not in str(missing_plan_payload.get("error", "")):
                 raise AssertionError("plan read before refresh must surface ready snapshot miss")
+
+            missing_status_status, missing_status_payload = _get_json(status_url)
+            if missing_status_status != 422:
+                raise AssertionError(f"status read before refresh must return 422, got {missing_status_status}")
+            if "ready snapshot missing" not in str(missing_status_payload.get("error", "")):
+                raise AssertionError("status read before refresh must surface ready snapshot miss")
 
             duplicate_status, duplicate_payload = _post_json(base_url, _load_json(INPUT_BUNDLE_FIXTURE))
             if duplicate_status != 409:
@@ -118,7 +146,9 @@ def main() -> None:
             print(f"accepted status: ok -> {accepted_payload['status']}")
             print(f"http path: ok -> {config.upload_path}")
             print(f"current bundle_version: ok -> {current_state['bundle_version']}")
+            print(f"operator_page: ok -> {config.sheet_operator_ui_path}")
             print(f"plan_before_refresh: ok -> {missing_plan_payload['error']}")
+            print(f"status_before_refresh: ok -> {missing_status_payload['error']}")
             print(f"duplicate status: ok -> {duplicate_payload['status']}")
         finally:
             process.terminate()
@@ -147,6 +177,8 @@ def main() -> None:
             upload_path=DEFAULT_UPLOAD_PATH,
             sheet_plan_path=DEFAULT_SHEET_PLAN_PATH,
             sheet_refresh_path=DEFAULT_SHEET_REFRESH_PATH,
+            sheet_status_path=DEFAULT_SHEET_STATUS_PATH,
+            sheet_operator_ui_path=DEFAULT_SHEET_OPERATOR_UI_PATH,
             runtime_dir=runtime_dir,
         )
         entrypoint = RegistryUploadHttpEntrypoint(
@@ -218,6 +250,26 @@ def _get_json(url: str) -> tuple[int, object]:
             return response.status, json.loads(response.read().decode("utf-8"))
     except error.HTTPError as exc:
         return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _get_text(url: str) -> tuple[int, str]:
+    req = urllib_request.Request(url, method="GET")
+    try:
+        with urllib_request.urlopen(req) as response:
+            return response.status, response.read().decode("utf-8")
+    except error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8")
+
+
+def _extract_operator_ui_config(html: str) -> dict[str, object]:
+    match = re.search(
+        r'<script id="sheet-vitrina-v1-operator-config" type="application/json">(.*?)</script>',
+        html,
+        re.DOTALL,
+    )
+    if match is None:
+        raise AssertionError("operator UI config script is missing")
+    return json.loads(match.group(1))
 
 
 def _reserve_free_port() -> int:

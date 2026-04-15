@@ -22,7 +22,10 @@ DEFAULT_PORT = 8765
 DEFAULT_UPLOAD_PATH = "/v1/registry-upload/bundle"
 DEFAULT_SHEET_PLAN_PATH = "/v1/sheet-vitrina-v1/plan"
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
+DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
+DEFAULT_SHEET_OPERATOR_UI_PATH = "/sheet-vitrina-v1/operator"
 DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
+OPERATOR_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_operator.html"
 
 
 def load_registry_upload_http_entrypoint_config() -> RegistryUploadHttpEntrypointConfig:
@@ -51,6 +54,20 @@ def load_registry_upload_http_entrypoint_config() -> RegistryUploadHttpEntrypoin
     if not sheet_refresh_path.startswith("/"):
         raise ValueError("SHEET_VITRINA_REFRESH_HTTP_PATH must start with /")
 
+    sheet_status_path = (
+        os.environ.get("SHEET_VITRINA_STATUS_HTTP_PATH", DEFAULT_SHEET_STATUS_PATH).strip()
+        or DEFAULT_SHEET_STATUS_PATH
+    )
+    if not sheet_status_path.startswith("/"):
+        raise ValueError("SHEET_VITRINA_STATUS_HTTP_PATH must start with /")
+
+    sheet_operator_ui_path = (
+        os.environ.get("SHEET_VITRINA_OPERATOR_UI_PATH", DEFAULT_SHEET_OPERATOR_UI_PATH).strip()
+        or DEFAULT_SHEET_OPERATOR_UI_PATH
+    )
+    if not sheet_operator_ui_path.startswith("/"):
+        raise ValueError("SHEET_VITRINA_OPERATOR_UI_PATH must start with /")
+
     raw_runtime_dir = os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR", str(DEFAULT_RUNTIME_DIR)).strip()
     runtime_dir = Path(raw_runtime_dir).expanduser()
 
@@ -60,6 +77,8 @@ def load_registry_upload_http_entrypoint_config() -> RegistryUploadHttpEntrypoin
         upload_path=upload_path,
         sheet_plan_path=sheet_plan_path,
         sheet_refresh_path=sheet_refresh_path,
+        sheet_status_path=sheet_status_path,
+        sheet_operator_ui_path=sheet_operator_ui_path,
         runtime_dir=runtime_dir,
     )
 
@@ -74,6 +93,8 @@ def build_registry_upload_http_server(
         upload_path=config.upload_path,
         sheet_plan_path=config.sheet_plan_path,
         sheet_refresh_path=config.sheet_refresh_path,
+        sheet_status_path=config.sheet_status_path,
+        sheet_operator_ui_path=config.sheet_operator_ui_path,
     )
     return RegistryUploadHttpServer((config.host, config.port), handler_cls)
 
@@ -84,6 +105,8 @@ def _build_handler(
     upload_path: str,
     sheet_plan_path: str,
     sheet_refresh_path: str,
+    sheet_status_path: str,
+    sheet_operator_ui_path: str,
 ) -> type[BaseHTTPRequestHandler]:
     class RegistryUploadHandler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802
@@ -161,6 +184,44 @@ def _build_handler(
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urllib_parse.urlparse(self.path)
+            if parsed.path == sheet_operator_ui_path:
+                _write_html_response(
+                    self,
+                    HTTPStatus.OK,
+                    _render_sheet_vitrina_operator_ui(
+                        refresh_path=sheet_refresh_path,
+                        status_path=sheet_status_path,
+                    ),
+                )
+                return
+
+            if parsed.path == sheet_status_path:
+                try:
+                    payload = entrypoint.handle_sheet_status_request(
+                        as_of_date=_resolve_as_of_date_from_query(parsed.query) or None
+                    )
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina status runtime failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(
+                    self,
+                    HTTPStatus.OK,
+                    payload,
+                )
+                return
+
             if parsed.path != sheet_plan_path:
                 _write_json_response(
                     self,
@@ -169,13 +230,10 @@ def _build_handler(
                 )
                 return
 
-            query = urllib_parse.parse_qs(parsed.query)
-            as_of_date = ""
-            if query.get("as_of_date"):
-                as_of_date = str(query["as_of_date"][0]).strip()
-
             try:
-                payload = entrypoint.handle_sheet_plan_request(as_of_date=as_of_date or None)
+                payload = entrypoint.handle_sheet_plan_request(
+                    as_of_date=_resolve_as_of_date_from_query(parsed.query) or None
+                )
             except ValueError as exc:
                 _write_json_response(
                     self,
@@ -261,12 +319,16 @@ def _load_optional_request_payload(handler: BaseHTTPRequestHandler) -> Mapping[s
 
 
 def _resolve_as_of_date(query_string: str, payload: Mapping[str, Any]) -> str:
-    query = urllib_parse.parse_qs(query_string)
-    query_value = str(query.get("as_of_date", [""])[0]).strip()
+    query_value = _resolve_as_of_date_from_query(query_string)
     body_value = str(payload.get("as_of_date", "") or "").strip()
     if query_value and body_value and query_value != body_value:
         raise ValueError("as_of_date mismatch between query string and request body")
     return query_value or body_value
+
+
+def _resolve_as_of_date_from_query(query_string: str) -> str:
+    query = urllib_parse.parse_qs(query_string)
+    return str(query.get("as_of_date", [""])[0]).strip()
 
 
 def _http_status_for_result(result: RegistryUploadResult) -> HTTPStatus:
@@ -290,3 +352,29 @@ def _write_json_response(
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def _write_html_response(
+    handler: BaseHTTPRequestHandler,
+    status: HTTPStatus,
+    body_text: str,
+) -> None:
+    body = body_text.encode("utf-8")
+    handler.send_response(status.value)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def _render_sheet_vitrina_operator_ui(*, refresh_path: str, status_path: str) -> str:
+    config_payload = {
+        "page_title": "Обновление данных витрины",
+        "refresh_path": refresh_path,
+        "status_path": status_path,
+    }
+    template = OPERATOR_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return (
+        template.replace("__SHEET_VITRINA_V1_OPERATOR_PAGE_TITLE__", config_payload["page_title"])
+        .replace("__SHEET_VITRINA_V1_OPERATOR_CONFIG_JSON__", json.dumps(config_payload, ensure_ascii=False))
+    )
