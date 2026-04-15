@@ -11,4 +11,6 @@ class RegistryUploadHttpEntrypointConfig:
     upload_path: str
     sheet_plan_path: str
     sheet_refresh_path: str
+    sheet_status_path: str
+    sheet_operator_ui_path: str
     runtime_dir: Path

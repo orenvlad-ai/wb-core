@@ -20,6 +20,8 @@ if str(ROOT) not in sys.path:
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_REFRESH_PATH,
+    DEFAULT_SHEET_STATUS_PATH,
+    DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_UPLOAD_PATH,
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
@@ -45,6 +47,8 @@ def main() -> None:
             upload_path=DEFAULT_UPLOAD_PATH,
             sheet_plan_path=DEFAULT_SHEET_PLAN_PATH,
             sheet_refresh_path=DEFAULT_SHEET_REFRESH_PATH,
+            sheet_status_path=DEFAULT_SHEET_STATUS_PATH,
+            sheet_operator_ui_path=DEFAULT_SHEET_OPERATOR_UI_PATH,
             runtime_dir=runtime_dir,
         )
         env = os.environ.copy()
@@ -55,6 +59,8 @@ def main() -> None:
                 "REGISTRY_UPLOAD_HTTP_PATH": config.upload_path,
                 "SHEET_VITRINA_HTTP_PATH": config.sheet_plan_path,
                 "SHEET_VITRINA_REFRESH_HTTP_PATH": config.sheet_refresh_path,
+                "SHEET_VITRINA_STATUS_HTTP_PATH": config.sheet_status_path,
+                "SHEET_VITRINA_OPERATOR_UI_PATH": config.sheet_operator_ui_path,
                 "REGISTRY_UPLOAD_RUNTIME_DIR": str(config.runtime_dir),
                 "REGISTRY_UPLOAD_ACTIVATED_AT_OVERRIDE": ACTIVATED_AT,
                 "SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK": "1",

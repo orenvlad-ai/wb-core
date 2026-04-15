@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-23-REGISTRY-UPLOAD-HTTP-ENTRYPOINT-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `registry_upload_http_entrypoint_block`."
-scope: "Первый live inbound HTTP entrypoint для V2-реестров: canonical bundle request, thin request -> runtime -> response wiring, server-side `activated_at`, integration smoke без Apps Script UI и deploy."
+scope: "Первый live inbound HTTP entrypoint для V2-реестров и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, thin request -> runtime -> response wiring, server-side `activated_at`, existing refresh/read split, cheap status read и simple repo-owned HTML page без SPA/build pipeline."
 source_basis:
   - "migration/86_registry_upload_contract.md"
   - "migration/89_registry_upload_db_backed_runtime.md"
@@ -25,6 +25,10 @@ related_tables:
   - "FORMULAS_V2"
 related_endpoints:
   - "POST /v1/registry-upload/bundle"
+  - "POST /v1/sheet-vitrina-v1/refresh"
+  - "GET /v1/sheet-vitrina-v1/plan"
+  - "GET /v1/sheet-vitrina-v1/status"
+  - "GET /sheet-vitrina-v1/operator"
 related_runners:
   - "apps/registry_upload_http_entrypoint_live.py"
   - "apps/registry_upload_http_entrypoint_smoke.py"
@@ -35,7 +39,7 @@ related_docs:
   - "migration/90_registry_upload_http_entrypoint.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под uncapped registry upload boundary: HTTP entrypoint принимает фактические registry list lengths и не вводит fixed row-count caps поверх canonical bundle/runtime validation."
+update_note: "Обновлён под uncapped registry upload boundary и narrow operator UI surface: HTTP entrypoint принимает фактические registry list lengths, не вводит fixed row-count caps и обслуживает simple page/status routes для explicit refresh `sheet_vitrina_v1`."
 ---
 
 # 1. Идентификатор и статус
@@ -55,7 +59,7 @@ update_note: "Обновлён под uncapped registry upload boundary: HTTP en
   - `registry_upload_db_backed_runtime_block`
   - `migration/86_registry_upload_contract.md`
   - `migration/90_registry_upload_http_entrypoint.md`
-- Семантика блока: принять bundle по HTTP, делегировать ingest в существующий DB-backed runtime и вернуть наружу канонический result без Apps Script UI и deploy.
+- Семантика блока: принять bundle по HTTP, делегировать ingest/refresh/status-read в существующий DB-backed runtime и отдать наружу канонические JSON/results плюс один narrow operator HTML page на том же server contour.
 
 # 3. Target contract и смысл результата
 
@@ -75,6 +79,12 @@ update_note: "Обновлён под uncapped registry upload boundary: HTTP en
   - `200` для `accepted`
   - `409` для duplicate `bundle_version`
   - `422` для contract-level rejection после parse
+- Для `sheet_vitrina_v1` тот же entrypoint обслуживает ещё четыре узких surface:
+  - `POST /v1/sheet-vitrina-v1/refresh` = existing heavy server-side action
+  - `GET /v1/sheet-vitrina-v1/plan` = existing cheap ready-snapshot read
+  - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result
+  - `GET /sheet-vitrina-v1/operator` = simple repo-owned page с одной primary action `Загрузить данные`
+- Operator page не invent-ит новый heavy route: UI вызывает существующий `POST /v1/sheet-vitrina-v1/refresh` и читает только cheap status surface.
 
 ## 3.1 Допущение bounded шага
 
@@ -118,6 +128,8 @@ update_note: "Обновлён под uncapped registry upload boundary: HTTP en
   - что request body попадает в существующий DB-backed runtime, а не в дублирующую ingest-логику;
   - что accepted response возвращается в канонической форме;
   - что current server-side truth обновляется через runtime DB;
+  - что operator page `GET /sheet-vitrina-v1/operator` отдается тем же contour и публикует правильные refresh/status paths;
+  - что `GET /v1/sheet-vitrina-v1/status` до refresh честно возвращает `ready snapshot missing`;
   - что duplicate `bundle_version` возвращает rejected result и HTTP `409`;
   - что accepted HTTP response сохраняет фактические request counts;
   - что synthetic oversized bundle проходит тот же HTTP boundary без hardcoded row-count caps.
@@ -125,15 +137,16 @@ update_note: "Обновлён под uncapped registry upload boundary: HTTP en
 # 7. Что уже доказано по модулю
 
 - upload line больше не заканчивается на локальном runtime: в repo появился первый внешний вызываемый boundary.
-- В будущем кнопке из `VB-Core Витрина V1` уже есть куда писать на уровне thin HTTP entrypoint.
-- Новая HTTP прослойка остаётся тонкой и не тянет за собой deploy, auth и Apps Script UI.
+- Repo-owned operator page для explicit refresh теперь живёт на том же thin HTTP entrypoint и убирает ручной `curl` из нормального operator path.
+- Новая HTTP прослойка остаётся тонкой и не тянет за собой deploy, auth, scheduler и большой Apps Script UI.
 - HTTP boundary выровнен с current upload semantics: валидируется содержимое registry rows, а не их заранее зашитое количество.
 
 # 8. Что пока не является частью финальной production-сборки
 
-- Apps Script upload button;
-- Google Sheets UI;
+- Apps Script upload button redesign;
+- Google Sheets UI redesign;
 - operator workflow в таблице;
 - deploy и внешняя доступность entrypoint;
 - auth/hardening;
+- background jobs / scheduler;
 - production Postgres redesign и внешняя инфраструктура.

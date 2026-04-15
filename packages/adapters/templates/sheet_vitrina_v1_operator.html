@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>__SHEET_VITRINA_V1_OPERATOR_PAGE_TITLE__</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --page-bg: #f3f5f7;
+      --panel-bg: #ffffff;
+      --border: #d7dee7;
+      --text: #18212b;
+      --muted: #637182;
+      --accent: #0b63f6;
+      --accent-hover: #084dc7;
+      --idle-bg: #eef2f6;
+      --idle-text: #415364;
+      --loading-bg: #fff2d9;
+      --loading-text: #8b5a00;
+      --success-bg: #e7f6ed;
+      --success-text: #157347;
+      --error-bg: #fdeaea;
+      --error-text: #b42318;
+      --shadow: 0 18px 48px rgba(17, 24, 39, 0.08);
+      --radius: 18px;
+      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at top left, rgba(11, 99, 246, 0.06), transparent 34%),
+        linear-gradient(180deg, #f8fafc 0%, var(--page-bg) 100%);
+      color: var(--text);
+    }
+
+    .page {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 72px 24px;
+    }
+
+    .panel {
+      background: var(--panel-bg);
+      border: 1px solid rgba(215, 222, 231, 0.9);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 40px;
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 4vw, 36px);
+      line-height: 1.15;
+      font-weight: 650;
+    }
+
+    .subtitle {
+      margin: 14px 0 0;
+      max-width: 520px;
+      font-size: 15px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+
+    .actions {
+      margin-top: 28px;
+    }
+
+    .primary-button {
+      appearance: none;
+      border: 0;
+      border-radius: 12px;
+      background: var(--accent);
+      color: #ffffff;
+      font: inherit;
+      font-size: 15px;
+      font-weight: 600;
+      padding: 14px 22px;
+      cursor: pointer;
+      transition: background-color 120ms ease, transform 120ms ease;
+    }
+
+    .primary-button:hover:not(:disabled) {
+      background: var(--accent-hover);
+      transform: translateY(-1px);
+    }
+
+    .primary-button:disabled {
+      cursor: wait;
+      opacity: 0.72;
+      transform: none;
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+      margin-top: 28px;
+    }
+
+    .block {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: #fbfcfd;
+      padding: 20px;
+    }
+
+    .block-title {
+      margin: 0 0 16px;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
+    .status-label {
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 88px;
+      padding: 7px 12px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: lowercase;
+    }
+
+    .badge.is-idle {
+      background: var(--idle-bg);
+      color: var(--idle-text);
+    }
+
+    .badge.is-loading {
+      background: var(--loading-bg);
+      color: var(--loading-text);
+    }
+
+    .badge.is-success {
+      background: var(--success-bg);
+      color: var(--success-text);
+    }
+
+    .badge.is-error {
+      background: var(--error-bg);
+      color: var(--error-text);
+    }
+
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin: 0;
+    }
+
+    .meta-grid div {
+      min-width: 0;
+    }
+
+    .meta-grid dt {
+      margin: 0;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+    }
+
+    .meta-grid dd {
+      margin: 8px 0 0;
+      font-size: 15px;
+      font-weight: 600;
+      word-break: break-word;
+    }
+
+    .log-block {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: 13px/1.7 "SFMono-Regular", Menlo, Consolas, monospace;
+      color: var(--text);
+    }
+
+    @media (max-width: 640px) {
+      .page {
+        padding: 28px 16px;
+      }
+
+      .panel {
+        padding: 24px;
+      }
+
+      .meta-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .primary-button {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="panel">
+      <p class="eyebrow">sheet_vitrina_v1</p>
+      <h1>__SHEET_VITRINA_V1_OPERATOR_PAGE_TITLE__</h1>
+      <p class="subtitle">
+        Страница запускает существующий server-side refresh. Если дата не передана явно,
+        используется server default `UTC yesterday`.
+      </p>
+      <div class="actions">
+        <button id="refreshButton" class="primary-button" type="button">Загрузить данные</button>
+      </div>
+
+      <div class="grid">
+        <section class="block" aria-labelledby="status-title">
+          <h2 id="status-title" class="block-title">Status</h2>
+          <div class="status-row">
+            <span class="status-label">Состояние запроса</span>
+            <span id="stateBadge" class="badge is-idle">idle</span>
+          </div>
+          <dl class="meta-grid">
+            <div>
+              <dt>as_of_date</dt>
+              <dd id="asOfDate">-</dd>
+            </div>
+            <div>
+              <dt>refreshed_at</dt>
+              <dd id="refreshedAt">-</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="block" aria-labelledby="log-title">
+          <h2 id="log-title" class="block-title">Result</h2>
+          <pre id="logBlock" class="log-block">Инициализация...</pre>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <script id="sheet-vitrina-v1-operator-config" type="application/json">__SHEET_VITRINA_V1_OPERATOR_CONFIG_JSON__</script>
+  <script>
+    (() => {
+      const config = JSON.parse(document.getElementById("sheet-vitrina-v1-operator-config").textContent);
+      const refreshButton = document.getElementById("refreshButton");
+      const stateBadge = document.getElementById("stateBadge");
+      const asOfDate = document.getElementById("asOfDate");
+      const refreshedAt = document.getElementById("refreshedAt");
+      const logBlock = document.getElementById("logBlock");
+
+      function setState(nextState) {
+        stateBadge.textContent = nextState;
+        stateBadge.className = "badge is-" + nextState;
+      }
+
+      function valueOrDash(value) {
+        return value ? String(value) : "-";
+      }
+
+      function sheetCount(counts, key) {
+        if (!counts || typeof counts[key] !== "number") {
+          return "-";
+        }
+        return String(counts[key]);
+      }
+
+      function renderSnapshot(payload, intro) {
+        const counts = payload.sheet_row_counts || {};
+        asOfDate.textContent = valueOrDash(payload.as_of_date);
+        refreshedAt.textContent = valueOrDash(payload.refreshed_at);
+        logBlock.textContent = [
+          intro,
+          "as_of_date: " + valueOrDash(payload.as_of_date),
+          "refreshed_at: " + valueOrDash(payload.refreshed_at),
+          "DATA_VITRINA rows: " + sheetCount(counts, "DATA_VITRINA"),
+          "STATUS rows: " + sheetCount(counts, "STATUS"),
+          "snapshot_id: " + valueOrDash(payload.snapshot_id),
+          "bundle_version: " + valueOrDash(payload.bundle_version)
+        ].join("\n");
+      }
+
+      function renderEmpty(message) {
+        asOfDate.textContent = "-";
+        refreshedAt.textContent = "-";
+        logBlock.textContent = message;
+      }
+
+      function renderError(message, detail) {
+        setState("error");
+        logBlock.textContent = [message, detail].filter(Boolean).join("\n\n");
+      }
+
+      async function readJson(response) {
+        const raw = await response.text();
+        if (!raw) {
+          return {};
+        }
+        try {
+          return JSON.parse(raw);
+        } catch (error) {
+          throw new Error("endpoint returned non-JSON response");
+        }
+      }
+
+      async function loadStatus() {
+        try {
+          const response = await fetch(config.status_path, {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            if (response.status === 422) {
+              setState("idle");
+              renderEmpty("Ready snapshot пока не materialized.\n\n" + valueOrDash(payload.error));
+              return;
+            }
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          setState("idle");
+          renderSnapshot(payload, "Последний ready snapshot в runtime contour.");
+        } catch (error) {
+          renderError("Не удалось прочитать status.", error instanceof Error ? error.message : String(error));
+        }
+      }
+
+      async function runRefresh() {
+        setState("loading");
+        refreshButton.disabled = true;
+        refreshButton.textContent = "Загружаем...";
+        logBlock.textContent = "Запускаем server-side refresh...";
+        try {
+          const response = await fetch(config.refresh_path, {
+            method: "POST",
+            headers: {
+              "Accept": "application/json",
+              "Content-Type": "application/json; charset=utf-8"
+            },
+            body: JSON.stringify({})
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          setState("success");
+          renderSnapshot(payload, "Refresh завершён.");
+        } catch (error) {
+          renderError("Refresh завершился с ошибкой.", error instanceof Error ? error.message : String(error));
+        } finally {
+          refreshButton.disabled = false;
+          refreshButton.textContent = "Загрузить данные";
+        }
+      }
+
+      refreshButton.addEventListener("click", runRefresh);
+      loadStatus();
+    })();
+  </script>
+</body>
+</html>

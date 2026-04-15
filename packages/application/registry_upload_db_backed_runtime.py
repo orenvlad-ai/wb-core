@@ -149,7 +149,7 @@ class RegistryUploadDbBackedRuntime:
             as_of_date=plan.as_of_date,
             snapshot_id=plan.snapshot_id,
             plan_version=plan.plan_version,
-            sheet_row_counts={item.sheet_name: item.row_count for item in plan.sheets},
+            sheet_row_counts=_sheet_row_counts_from_plan(plan),
         )
 
     def load_sheet_vitrina_ready_snapshot(self, as_of_date: str | None = None) -> SheetVitrinaV1Envelope:
@@ -184,6 +184,50 @@ class RegistryUploadDbBackedRuntime:
                 )
                 raise ValueError(f"sheet_vitrina_v1 ready snapshot missing: {detail}")
             return _deserialize_sheet_vitrina_plan(row["plan_json"])
+
+    def load_sheet_vitrina_refresh_status(self, as_of_date: str | None = None) -> SheetVitrinaV1RefreshResult:
+        current_state = self.load_current_state()
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            if as_of_date:
+                row = conn.execute(
+                    """
+                    SELECT activated_at, as_of_date, snapshot_id, plan_version, refreshed_at, plan_json
+                    FROM sheet_vitrina_v1_ready_snapshots
+                    WHERE bundle_version = ? AND as_of_date = ?
+                    """,
+                    (current_state.bundle_version, as_of_date),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT activated_at, as_of_date, snapshot_id, plan_version, refreshed_at, plan_json
+                    FROM sheet_vitrina_v1_ready_snapshots
+                    WHERE bundle_version = ?
+                    ORDER BY refreshed_at DESC, as_of_date DESC
+                    LIMIT 1
+                    """,
+                    (current_state.bundle_version,),
+                ).fetchone()
+            if row is None:
+                detail = (
+                    f"bundle_version={current_state.bundle_version} as_of_date={as_of_date}"
+                    if as_of_date
+                    else f"bundle_version={current_state.bundle_version}"
+                )
+                raise ValueError(f"sheet_vitrina_v1 ready snapshot missing: {detail}")
+
+            plan = _deserialize_sheet_vitrina_plan(row["plan_json"])
+            return SheetVitrinaV1RefreshResult(
+                status="success",
+                bundle_version=current_state.bundle_version,
+                activated_at=row["activated_at"],
+                refreshed_at=row["refreshed_at"],
+                as_of_date=row["as_of_date"],
+                snapshot_id=row["snapshot_id"],
+                plan_version=row["plan_version"],
+                sheet_row_counts=_sheet_row_counts_from_plan(plan),
+            )
 
     def load_persisted_upload_result(self, bundle_version: str) -> RegistryUploadResult:
         with _connect(self.db_path) as conn:
@@ -464,6 +508,10 @@ def _validate_timestamp(value: str, field_name: str) -> None:
         datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(f"{field_name} must be a valid ISO 8601 timestamp") from exc
+
+
+def _sheet_row_counts_from_plan(plan: SheetVitrinaV1Envelope) -> dict[str, int]:
+    return {item.sheet_name: item.row_count for item in plan.sheets}
 
 
 def _serialize_sheet_vitrina_plan(plan: SheetVitrinaV1Envelope) -> str:

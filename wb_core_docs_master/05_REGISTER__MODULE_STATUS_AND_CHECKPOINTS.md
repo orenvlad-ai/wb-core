@@ -68,6 +68,11 @@ Current main-confirmed operator flow:
 - `POST /v1/sheet-vitrina-v1/refresh`
 - `Загрузить таблицу`
 
+Current repo-owned operator refresh surface:
+- `GET /sheet-vitrina-v1/operator`
+- page uses `POST /v1/sheet-vitrina-v1/refresh` and `GET /v1/sheet-vitrina-v1/status`
+- page stays intentionally narrow: one button `Загрузить данные`, compact status, minimal result/log
+
 Current main-confirmed counts для этого flow:
 - prepare/upload package = `33 / 102 / 7`
 - current truth / ready snapshot displayed metrics = `95`

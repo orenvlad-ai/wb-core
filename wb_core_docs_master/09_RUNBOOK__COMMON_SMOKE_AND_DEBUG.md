@@ -64,6 +64,8 @@ Expected routes:
 - `POST /v1/registry-upload/bundle`
 - `POST /v1/sheet-vitrina-v1/refresh`
 - `GET /v1/sheet-vitrina-v1/plan`
+- `GET /v1/sheet-vitrina-v1/status`
+- `GET /sheet-vitrina-v1/operator`
 
 ## Live GAS checks
 
@@ -71,7 +73,9 @@ Expected routes:
 clasp push
 clasp run prepareRegistryUploadOperatorSheets
 clasp run uploadRegistryUploadBundle
-# explicit refresh is server-side only for now; use curl or another HTTP client
+# open the narrow repo-owned operator page for explicit refresh
+python3 -m webbrowser http://127.0.0.1:8765/sheet-vitrina-v1/operator
+# curl remains a fallback if browser/UI surface is unavailable
 curl -X POST http://127.0.0.1:8765/v1/sheet-vitrina-v1/refresh \
   -H 'Content-Type: application/json' \
   -d '{"as_of_date":"2026-04-12"}'
@@ -84,7 +88,10 @@ clasp run getSheetVitrinaV1State
 - `CONFIG / METRICS / FORMULAS` have expected headers and non-empty rows;
 - `prepareRegistryUploadOperatorSheets` currently materializes `33 / 102 / 7`;
 - `uploadRegistryUploadBundle` accepts and persists factual registry sheet lengths; на текущем contour это `33 / 102 / 7`, но проверка не должна зависеть от hardcoded row caps;
+- `GET /sheet-vitrina-v1/operator` поднимает simple operator page без SPA/build pipeline;
+- operator page показывает только narrow status/log surface: `idle / loading / success / error`, `as_of_date`, `refreshed_at`, `DATA_VITRINA` / `STATUS` row counts и текст ошибки;
 - `POST /v1/sheet-vitrina-v1/refresh` обновляет ready snapshot в repo-owned SQLite runtime contour;
+- `GET /v1/sheet-vitrina-v1/status` читает последний persisted refresh result и не триггерит heavy source fetch;
 - `CONFIG!H:I` preserves `endpoint_url`, `last_bundle_version`, `last_status`, `last_http_status`;
 - current truth / ready snapshot keep `95` enabled+show_in_data metrics;
 - `DATA_VITRINA` keeps the same server-driven truth as operator-facing `date_matrix`: `1631` source rows, `34` blocks, `33` separators, `1698` rendered rows и `95` unique metric keys при одном дне;
@@ -97,6 +104,7 @@ clasp run getSheetVitrinaV1State
 | --- | --- |
 | `CONFIG!I2 должен содержать URL registry upload endpoint` | sheet-side endpoint URL is missing |
 | `sheet_vitrina_v1 ready snapshot missing` | load path is now cheap-read only; explicit refresh has not materialized snapshot for the current bundle / date yet |
+| `Ready snapshot пока не materialized.` на `/sheet-vitrina-v1/operator` | operator page честно сообщает, что explicit refresh ещё не запускался для current bundle / date |
 | `sheet vitrina endpoint returned non-JSON response` | stale/invalid external URL or upstream HTML error |
 | `ReferenceError: URL is not defined` | Apps Script runtime bug in sheet-side URL derivation |
 | `registry upload bundle must contain 5-64 metrics_v2 entries` | live endpoint still runs stale validator/deploy and is not aligned with current repo semantics |
