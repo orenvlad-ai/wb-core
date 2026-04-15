@@ -90,6 +90,19 @@ Manifest обязан хранить:
 - В `=== ДЛЯ КУРАТОРА ===` обязательны поля `Статус`, `Что сделано`, `Изменённые/созданные файлы`, `Ключевой результат`, `Что НЕ тронуто / что осталось вне scope`, `Следующий шаг`, `Если есть блокер — точная причина`; при наличии Git-изменений дополнительно обязательны `Commit hash`, `Push`, `PR`, `Ссылка на PR`.
 - В `=== СЖАТАЯ ПРОВЕРКА ===` обязательны `3-5 коротких пунктов по сути` и `одна строка с главным выводом`.
 
+## Completion states
+
+- `repo-complete` = repo update + local validation + canonical result не остаётся только в рабочем дереве.
+- `live-complete` = live runtime/service/publish contour обновлён и public probe подтверждён.
+- `sheet-complete` = bound Apps Script/sheet publish step выполнен и минимальный live sheet verify подтверждён.
+- `pack-complete` = primary docs, `wb_core_docs_master` и manifest синхронизированы; `project_upload_required = true` сохраняется, пока внешний Project не обновлён.
+
+Правило completion такое:
+- если задача меняет public route, runtime/service/nginx publish, bound Apps Script, operator UI или live sheet behavior, `repo-complete` недостаточно;
+- Codex по умолчанию должна пытаться закрыть repo + deploy + `clasp` + verify в одном bounded execution, если это безопасно и доступно;
+- human-only step остаётся только для логина, прав, ручного merge, ручной UI-проверки или решения по риску;
+- для live/public/GAS задачи в финальном отчёте отдельно фиксируются `repo state`, `live deploy state`, `public verify result`, `sheet verify result`.
+
 ## Legacy rule
 
 Legacy knowledge допускается только в тонком register-слое:

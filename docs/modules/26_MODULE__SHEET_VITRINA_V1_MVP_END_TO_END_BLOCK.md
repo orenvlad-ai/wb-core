@@ -155,6 +155,18 @@ Bounded допущение:
   - `last_validation_errors`
 - Ни `prepare`, ни `load` не должны очищать этот блок.
 
+## 3.5 Completion semantics для execution handoff
+
+- Канонический product flow по-прежнему остаётся `prepare -> upload -> refresh -> load`.
+- Для задач, которые меняют bound Apps Script, sheet-side live behavior, operator UI или другой live operator surface вокруг `sheet_vitrina_v1`, `repo-complete` и local smokes недостаточны.
+- Default completion для таких задач включает:
+  - `clasp push` для bound GAS/sheet changes или equivalent publish step для другого live contour, если это безопасно и доступно;
+  - минимальный live verify по затронутому surface;
+  - явную фиксацию, достигнуты ли `live-complete` и `sheet-complete`.
+- Если изменение затрагивает registry/upload/current bundle/readiness semantics, done criteria должны проверять не только local smokes, но и связку `refresh -> load` для текущего bundle/date.
+- Если изменение затрагивает public operator route или runtime publish, done criteria должны включать и public route probe, а не только router code в repo.
+- Если `clasp` credentials, spreadsheet access, live runtime access или publish rights недоступны, final handoff обязан явно назвать blocker и не маркировать задачу как fully complete.
+
 # 4. Артефакты и wiring по модулю
 
 - target artifacts:

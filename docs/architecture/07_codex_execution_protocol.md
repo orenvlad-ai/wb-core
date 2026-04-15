@@ -56,11 +56,40 @@ Codex должна остановиться и вынести задачу на 
 | Documentation sync | При значимом техническом изменении обновлена каноническая документация в той же задаче |
 | Project-pack sync | Если изменение влияет на project-oriented pack, обновлены затронутые файлы `wb_core_docs_master/` и manifest |
 | Git capture | Канонический source-of-truth артефакт не остаётся только в рабочем дереве и доведён до commit/push/PR или paused-ветки |
+| Completion state | Для live/public/GAS задач явно зафиксировано, достигнуты ли `repo-complete`, `live-complete`, `sheet-complete`, `pack-complete`, либо где именно блокер |
 | Local validation | Базовые структурные проверки проходят |
 | Reviewability | Результат понятен ручному reviewer без runtime-археологии |
 | Step discipline | Если нужен manual step, один ответ содержит один практический следующий шаг; несколько независимых рискованных действий не смешиваются |
 | Codex-first path | Bounded и безопасная техническая работа сначала выполняется через Codex; user handoff допустим только для human-only step |
 | Prompt footer | Prompt для Codex заканчивается блоками `=== ДЛЯ КУРАТОРА ===` и `=== СЖАТАЯ ПРОВЕРКА ===` с обязательными полями |
+
+## Completion State Model
+
+Execution handoff должен явно различать четыре состояния завершения:
+
+- `repo-complete`:
+  - intended repo files обновлены;
+  - локальные проверки/targeted smoke пройдены или blocker явно назван;
+  - canonical результат не остался только в рабочем дереве.
+- `live-complete`:
+  - если задача меняет public HTTP route, runtime/service wiring, process restart contract, nginx/proxy publish или другой live runtime behavior, соответствующий live contour обновлён;
+  - route/process/service existence проверены в живом contour;
+  - public probe или equivalent live verify выполнен.
+- `sheet-complete`:
+  - если задача меняет bound Apps Script, live sheet behavior, operator UI path для таблицы или sheet-side flow, выполнен `clasp push` или equivalent publish step;
+  - минимальный live verify по затронутому sheet-flow выполнен.
+- `pack-complete`:
+  - если задача меняет policy/contract/checkpoint/runbook/status wording, обновлены и primary canonical docs, и затронутый `wb_core_docs_master`;
+  - manifest обновлён;
+  - если внешний ChatGPT Project ещё не обновлён, `project_upload_required = true` сохраняется.
+
+Важно:
+- `repo-complete` не означает, что задача полностью завершена.
+- Если задача меняет public HTTP route, runtime/service/nginx publish, bound Apps Script, operator UI или live sheet behavior, execution handoff не считается complete на этапе "код готов в repo".
+- Для таких задач Codex по умолчанию должна пытаться закрыть `repo-complete + live-complete + sheet-complete + verify` в одном bounded execution, если это безопасно и требуемые доступы уже доступны.
+- Human-only step допускается только там, где действительно нужны логин, права, ручной merge, ручная UI-проверка или решение по риску.
+- Если `live-complete` или `sheet-complete` не достигнуты, финальный отчёт обязан явно назвать это состояние и точный blocker, а не маскировать задачу как "готово".
+- `pack-complete` не равен внешнему upload в ChatGPT Project: внешний upload остаётся отдельным operational step, но repo-owned pack sync должен быть доведён в той же задаче.
 
 ## Execution Step Discipline
 
@@ -78,6 +107,7 @@ Assistant ведёт bounded работу по шагам.
 - Пользователя подключают только там, где действительно нужен human-only step: логин, права, ручной merge, ручная UI-проверка, решение по риску.
 - Техническую рутину, которую Codex может безопасно выполнить сама, просить у пользователя нельзя.
 - Если manual step неизбежен, он формулируется как один минимальный следующий шаг.
+- Если задача по смыслу требует live/runtime/GAS closure и безопасные доступы уже есть, Codex не должна по умолчанию останавливаться на `repo-complete`; она должна пытаться дотянуть deploy / `clasp push` / public verify до полного bounded completion.
 
 ## Mandatory Codex Prompt Footer
 
@@ -106,6 +136,12 @@ Assistant ведёт bounded работу по шагам.
 - `Push`
 - `PR`
 - `Ссылка на PR`
+
+Если задача меняет live/public/GAS behavior, в блоке `=== ДЛЯ КУРАТОРА ===` дополнительно обязательно отдельно фиксируются:
+- `Repo state`
+- `Live deploy state`
+- `Public verify result`
+- `Sheet verify result`
 
 В блоке `=== СЖАТАЯ ПРОВЕРКА ===` обязательны:
 - `3-5 коротких пунктов по сути`
