@@ -20,26 +20,21 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "фактическая внешняя project upload"
-built_from_commit: "d932ec8477469f5a4bb2f812db3c7333f4946670"
+built_from_commit: "f2ecd83242baef9f7d022d898a7162d30ba48efc"
 docset_version: "wb_core_docs_master_v1"
-built_at: "2026-04-15T19:14:21Z"
+built_at: "2026-04-15T19:32:55Z"
 core_docs_changed:
-  - "docs/architecture/00_migration_charter.md"
-  - "docs/architecture/01_target_architecture.md"
-  - "docs/architecture/07_codex_execution_protocol.md"
-  - "docs/modules/00_INDEX__MODULES.md"
-  - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
-  - "docs/modules/19_MODULE__SHEET_VITRINA_V1_PRESENTATION_BLOCK.md"
-  - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
-  - "migration/93_sheet_vitrina_v1_mvp_end_to_end.md"
+  - "wb_core_docs_master/00_INDEX__WEBCORE_PROJECT_DOCS.md"
   - "wb_core_docs_master/01_PASSPORT__WEBCORE_PROJECT.md"
   - "wb_core_docs_master/02_POLICY__DOCS_SYNC_AND_CODEX_PROTOCOL.md"
   - "wb_core_docs_master/03_GLOSSARY__TERMS_ALIASES_AND_CANONICAL_NAMES.md"
+  - "wb_core_docs_master/05_REGISTER__MODULE_STATUS_AND_CHECKPOINTS.md"
+  - "wb_core_docs_master/06_REGISTER__LEGACY_TO_WEBCORE_MAP.md"
   - "wb_core_docs_master/07_REGISTER__DO_NOT_LOSE_CONSTRAINTS.md"
   - "wb_core_docs_master/09_RUNBOOK__COMMON_SMOKE_AND_DEBUG.md"
 project_upload_required: true
 last_project_upload_at: "2026-04-14T10:23:55Z"
-project_upload_note: "pack изменён после hardening execution protocol: для live/public/GAS задач `repo-complete` больше не считается достаточным closure без live deploy / public probe / sheet verify; требуется повторный внешний upload в ChatGPT Project WebCore"
+project_upload_note: "metadata drift synced to merged `main` after PR #57, but repo does not contain a factual confirmed timestamp for external upload of this metadata-synced pack; `project_upload_required = true` remains until the next confirmed external upload in ChatGPT Project WebCore"
 ---
 
 # Summary
