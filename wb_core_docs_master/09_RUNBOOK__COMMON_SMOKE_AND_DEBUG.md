@@ -83,6 +83,43 @@ clasp run loadSheetVitrinaTable
 clasp run getSheetVitrinaV1State
 ```
 
+## Post-change closure
+
+### Repo-only closure
+
+- проверить scope diff и `git diff --check`;
+- прогнать targeted local smoke / integration smoke по затронутому bounded path;
+- не объявлять задачу complete, если для неё по смыслу нужен live/public/GAS closure.
+
+### Live route/runtime closure
+
+- если change затрагивает public HTTP route, runtime/service wiring или nginx/proxy publish, после repo update нужно закрыть и live contour;
+- минимальная норма:
+  - обновить existing live runtime;
+  - перезапустить/reload нужный process/service;
+  - проверить route на loopback/runtime contour;
+  - проверить route снаружи через public URL;
+- route change не считается complete, пока public probe не подтвердил expected content type / response shape.
+
+### GAS/sheet closure
+
+- если change затрагивает bound Apps Script, sheet-side flow или live sheet behavior, default closure включает `clasp push`, если он безопасен и доступен;
+- после `clasp push` нужно сделать хотя бы минимальный live verify по затронутому flow:
+  - `prepare`
+  - `upload`
+  - `refresh`
+  - `load`
+  - или более узкий subset, если именно он соответствует change scope;
+- если upload меняет current bundle/readiness semantics, после upload недостаточно local smoke: нужно подтвердить `refresh/load` path для current bundle/date.
+
+### Docs-pack closure
+
+- если change меняет contract/status/checkpoint/runbook/policy wording, нужно:
+  - обновить primary docs;
+  - обновить затронутый `wb_core_docs_master`;
+  - обновить manifest;
+  - сохранить `project_upload_required = true`, пока внешний Project не обновлён.
+
 ## What to verify in sheet
 
 - `CONFIG / METRICS / FORMULAS` have expected headers and non-empty rows;
@@ -103,11 +140,12 @@ clasp run getSheetVitrinaV1State
 | Signal | Meaning |
 | --- | --- |
 | `CONFIG!I2 должен содержать URL registry upload endpoint` | sheet-side endpoint URL is missing |
-| `sheet_vitrina_v1 ready snapshot missing` | load path is now cheap-read only; explicit refresh has not materialized snapshot for the current bundle / date yet |
+| public `404` JSON / `{"detail":"Not Found"}` на ожидаемом public route | route есть в repo intent, но live deploy или publish wiring stale/incomplete |
+| `sheet_vitrina_v1 ready snapshot missing` после upload | load path is cheap-read only; explicit refresh has not materialized snapshot for the current bundle / date yet |
 | `Ready snapshot пока не materialized.` на `/sheet-vitrina-v1/operator` | operator page честно сообщает, что explicit refresh ещё не запускался для current bundle / date |
-| `sheet vitrina endpoint returned non-JSON response` | stale/invalid external URL or upstream HTML error |
+| `sheet vitrina endpoint returned non-JSON response` | wrong publish/upstream route or HTML error surface instead of expected JSON |
 | `ReferenceError: URL is not defined` | Apps Script runtime bug in sheet-side URL derivation |
-| `registry upload bundle must contain 5-64 metrics_v2 entries` | live endpoint still runs stale validator/deploy and is not aligned with current repo semantics |
+| `registry upload bundle must contain 5-64 metrics_v2 entries` | live runtime still serves stale validator / stale deploy and is not aligned with current repo semantics |
 | `ACCESS_TOKEN_SCOPE_INSUFFICIENT` for `clasp` | local GAS OAuth scopes are insufficient for content read/write |
 
 # Known gaps

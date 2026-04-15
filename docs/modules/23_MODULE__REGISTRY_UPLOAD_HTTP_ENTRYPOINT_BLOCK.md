@@ -90,7 +90,20 @@ update_note: "Обновлён под uncapped registry upload boundary и narro
 
 - Для первого live inbound boundary используется стандартный `http.server`.
 - Это не является решением, что production target обязан жить на этом же framework-path.
-- Deploy, auth и operator-facing trigger остаются отдельными шагами вне scope этого модуля.
+- Deploy/auth-hardening остаются отдельными шагами вне исходного module proof, но task-level execution handoff для public route change всё равно требует live publish verification.
+
+## 3.2 Completion semantics для public route changes
+
+- Repo router code и local smoke дают только `repo-complete`, но не закрывают execution handoff для public/live task.
+- Если задача добавляет или меняет public route этого entrypoint, completion считается достигнутым только после live publish verification:
+  - нужный runtime/process реально обновлён;
+  - expected route существует в live app;
+  - expected route опубликован снаружи через nginx/proxy или equivalent contour;
+  - public probe подтверждает expected response shape.
+- Для этого блока есть два отдельных operational failure mode, которые нельзя путать с отсутствием repo code:
+  - stale runtime deploy: live process обслуживает старую версию entrypoint;
+  - incomplete nginx publish: live app route уже есть, но public contour не публикует его наружу.
+- Поэтому для нового public route недостаточно проверить только file-level router code в repo: нужен explicit probe live/public route existence.
 
 # 4. Артефакты и wiring по модулю
 
