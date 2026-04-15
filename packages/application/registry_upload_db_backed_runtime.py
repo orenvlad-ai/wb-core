@@ -147,6 +147,9 @@ class RegistryUploadDbBackedRuntime:
             activated_at=current_state.activated_at,
             refreshed_at=refreshed_at,
             as_of_date=plan.as_of_date,
+            date_columns=plan.date_columns,
+            temporal_slots=plan.temporal_slots,
+            source_temporal_policies=plan.source_temporal_policies,
             snapshot_id=plan.snapshot_id,
             plan_version=plan.plan_version,
             sheet_row_counts=_sheet_row_counts_from_plan(plan),
@@ -224,6 +227,9 @@ class RegistryUploadDbBackedRuntime:
                 activated_at=row["activated_at"],
                 refreshed_at=row["refreshed_at"],
                 as_of_date=row["as_of_date"],
+                date_columns=plan.date_columns,
+                temporal_slots=plan.temporal_slots,
+                source_temporal_policies=plan.source_temporal_policies,
                 snapshot_id=row["snapshot_id"],
                 plan_version=row["plan_version"],
                 sheet_row_counts=_sheet_row_counts_from_plan(plan),
@@ -519,6 +525,16 @@ def _serialize_sheet_vitrina_plan(plan: SheetVitrinaV1Envelope) -> str:
         "plan_version": plan.plan_version,
         "snapshot_id": plan.snapshot_id,
         "as_of_date": plan.as_of_date,
+        "date_columns": plan.date_columns,
+        "temporal_slots": [
+            {
+                "slot_key": item.slot_key,
+                "slot_label": item.slot_label,
+                "column_date": item.column_date,
+            }
+            for item in plan.temporal_slots
+        ],
+        "source_temporal_policies": plan.source_temporal_policies,
         "sheets": [
             {
                 "sheet_name": item.sheet_name,

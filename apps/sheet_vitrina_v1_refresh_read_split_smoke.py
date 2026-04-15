@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
@@ -36,24 +37,26 @@ INPUT_BUNDLE_FIXTURE = (
 ACTIVATED_AT = "2026-04-13T12:00:03Z"
 REFRESHED_AT = "2026-04-13T12:05:00Z"
 AS_OF_DATE = "2026-04-12"
+TODAY_CURRENT_DATE = "2026-04-13"
+CURRENT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "stocks"}
 
 
 class CountingBlock:
-    def __init__(self, source_key: str, as_of_date: str) -> None:
+    def __init__(self, source_key: str) -> None:
         self.source_key = source_key
-        self.as_of_date = as_of_date
-        self.calls = 0
+        self.request_dates: list[str] = []
 
     def execute(self, request: object) -> SimpleNamespace:
-        self.calls += 1
+        request_date = _request_date(request)
+        self.request_dates.append(request_date)
         payload = SimpleNamespace(
             kind="success",
             items=[],
-            snapshot_date=self.as_of_date,
-            date=self.as_of_date,
-            date_from=self.as_of_date,
-            date_to=self.as_of_date,
-            detail=f"{self.source_key} synthetic success",
+            snapshot_date=request_date,
+            date=request_date,
+            date_from=request_date,
+            date_to=request_date,
+            detail=f"{self.source_key} synthetic success for {request_date}",
             storage_total=None,
         )
         return SimpleNamespace(result=payload)
@@ -70,8 +73,12 @@ def main() -> None:
             activated_at_factory=lambda: ACTIVATED_AT,
             refreshed_at_factory=lambda: REFRESHED_AT,
         )
-        counters = _build_counting_blocks(AS_OF_DATE)
-        entrypoint.sheet_plan_block = SheetVitrinaV1LivePlanBlock(runtime=runtime, **counters)
+        counters = _build_counting_blocks()
+        entrypoint.sheet_plan_block = SheetVitrinaV1LivePlanBlock(
+            runtime=runtime,
+            now_factory=lambda: datetime(2026, 4, 13, 8, 0, tzinfo=timezone.utc),
+            **counters,
+        )
 
         port = _reserve_free_port()
         config = RegistryUploadHttpEntrypointConfig(
@@ -115,7 +122,7 @@ def main() -> None:
             missing_load = _run_load_harness(upload_url, as_of_date=AS_OF_DATE)
             if "ready snapshot missing" not in missing_load["load_error"]:
                 raise AssertionError(f"load must surface ready-snapshot miss, got {missing_load['load_error']!r}")
-            if any(block.calls for block in counters.values()):
+            if any(block.request_dates for block in counters.values()):
                 raise AssertionError("missing snapshot read path must not trigger heavy source blocks")
 
             missing_status, missing_payload = _get_json(f"{plan_url}?{urllib_parse.urlencode({'as_of_date': AS_OF_DATE})}")
@@ -135,8 +142,14 @@ def main() -> None:
                 raise AssertionError("refresh_result refreshed_at mismatch")
             if refresh_payload["as_of_date"] != AS_OF_DATE:
                 raise AssertionError("refresh_result as_of_date mismatch")
-            if not all(block.calls == 1 for block in counters.values()):
-                raise AssertionError("refresh endpoint must call each heavy source block exactly once")
+            if refresh_payload["date_columns"] != [AS_OF_DATE, TODAY_CURRENT_DATE]:
+                raise AssertionError("refresh_result date_columns mismatch")
+            if [slot["slot_key"] for slot in refresh_payload["temporal_slots"]] != [
+                "yesterday_closed",
+                "today_current",
+            ]:
+                raise AssertionError("refresh_result temporal_slots mismatch")
+            _assert_counting_calls(counters)
 
             status_after_refresh, status_payload = _get_json(status_url)
             if status_after_refresh != 200:
@@ -147,25 +160,52 @@ def main() -> None:
                 raise AssertionError("status endpoint refreshed_at mismatch")
             if status_payload["sheet_row_counts"] != refresh_payload["sheet_row_counts"]:
                 raise AssertionError("status endpoint row counts must match refresh result")
+            if status_payload["date_columns"] != [AS_OF_DATE, TODAY_CURRENT_DATE]:
+                raise AssertionError("status endpoint must expose both materialized dates")
 
             plan_status, plan_payload = _get_json(f"{plan_url}?{urllib_parse.urlencode({'as_of_date': AS_OF_DATE})}")
             if plan_status != 200:
                 raise AssertionError(f"plan read endpoint must return 200 after refresh, got {plan_status}")
             if plan_payload["snapshot_id"] != refresh_payload["snapshot_id"]:
                 raise AssertionError("read endpoint must return the persisted ready snapshot")
-            if not all(block.calls == 1 for block in counters.values()):
+            if plan_payload["date_columns"] != [AS_OF_DATE, TODAY_CURRENT_DATE]:
+                raise AssertionError("plan endpoint must expose both materialized dates")
+            if any(
+                block.request_dates != ([TODAY_CURRENT_DATE] if block.source_key in CURRENT_ONLY_SOURCE_KEYS else [AS_OF_DATE, TODAY_CURRENT_DATE])
+                for block in counters.values()
+            ):
                 raise AssertionError("cheap read endpoint must not trigger heavy source blocks after refresh")
+            status_sheet = next(sheet for sheet in plan_payload["sheets"] if sheet["sheet_name"] == "STATUS")
+            status_rows = {row[0]: row for row in status_sheet["rows"]}
+            if status_rows["stocks[yesterday_closed]"][1] != "not_available":
+                raise AssertionError("stocks yesterday_closed must stay explicitly unavailable")
+            if status_rows["stocks[today_current]"][1] != "success":
+                raise AssertionError("stocks today_current must materialize current data")
+            if status_rows["prices_snapshot[yesterday_closed]"][1] != "not_available":
+                raise AssertionError("prices yesterday_closed must stay explicitly unavailable")
+            if status_rows["prices_snapshot[today_current]"][1] != "success":
+                raise AssertionError("prices today_current must materialize current data")
+            if status_rows["seller_funnel_snapshot[yesterday_closed]"][1] != "success":
+                raise AssertionError("dual-day source must materialize yesterday_closed")
+            if status_rows["seller_funnel_snapshot[today_current]"][1] != "success":
+                raise AssertionError("dual-day source must materialize today_current")
+            data_sheet = next(sheet for sheet in plan_payload["sheets"] if sheet["sheet_name"] == "DATA_VITRINA")
+            if data_sheet["header"] != ["label", "key", AS_OF_DATE, TODAY_CURRENT_DATE]:
+                raise AssertionError("DATA_VITRINA plan header must contain yesterday + today")
 
             ready_load = _run_load_harness(upload_url, as_of_date=AS_OF_DATE)
             if ready_load["load_error"]:
                 raise AssertionError(f"sheet-side load must succeed after refresh, got {ready_load['load_error']!r}")
             if ready_load["load_result"]["http_status"] != 200:
                 raise AssertionError("sheet-side load must receive 200 from cheap read endpoint")
-            if ready_load["sheets"]["DATA_VITRINA"]["values"][0] != ["дата", "key", AS_OF_DATE]:
-                raise AssertionError("sheet-side load must materialize ready snapshot date header")
+            if ready_load["sheets"]["DATA_VITRINA"]["values"][0] != ["дата", "key", AS_OF_DATE, TODAY_CURRENT_DATE]:
+                raise AssertionError("sheet-side load must materialize yesterday + today")
             if ready_load["sheets"]["STATUS"]["values"][1][0] != "registry_upload_current_state":
                 raise AssertionError("STATUS sheet must be materialized from ready snapshot")
-            if not all(block.calls == 1 for block in counters.values()):
+            if any(
+                block.request_dates != ([TODAY_CURRENT_DATE] if block.source_key in CURRENT_ONLY_SOURCE_KEYS else [AS_OF_DATE, TODAY_CURRENT_DATE])
+                for block in counters.values()
+            ):
                 raise AssertionError("sheet-side load must not trigger heavy source blocks after refresh")
 
             print(f"missing_snapshot: ok -> {missing_load['load_error']}")
@@ -181,19 +221,48 @@ def main() -> None:
             server.server_close()
 
 
-def _build_counting_blocks(as_of_date: str) -> dict[str, CountingBlock]:
+def _build_counting_blocks() -> dict[str, CountingBlock]:
     return {
-        "web_source_block": CountingBlock("web_source_snapshot", as_of_date),
-        "seller_funnel_block": CountingBlock("seller_funnel_snapshot", as_of_date),
-        "sales_funnel_history_block": CountingBlock("sales_funnel_history", as_of_date),
-        "prices_snapshot_block": CountingBlock("prices_snapshot", as_of_date),
-        "sf_period_block": CountingBlock("sf_period", as_of_date),
-        "spp_block": CountingBlock("spp", as_of_date),
-        "ads_bids_block": CountingBlock("ads_bids", as_of_date),
-        "stocks_block": CountingBlock("stocks", as_of_date),
-        "ads_compact_block": CountingBlock("ads_compact", as_of_date),
-        "fin_report_daily_block": CountingBlock("fin_report_daily", as_of_date),
+        "web_source_block": CountingBlock("web_source_snapshot"),
+        "seller_funnel_block": CountingBlock("seller_funnel_snapshot"),
+        "sales_funnel_history_block": CountingBlock("sales_funnel_history"),
+        "prices_snapshot_block": CountingBlock("prices_snapshot"),
+        "sf_period_block": CountingBlock("sf_period"),
+        "spp_block": CountingBlock("spp"),
+        "ads_bids_block": CountingBlock("ads_bids"),
+        "stocks_block": CountingBlock("stocks"),
+        "ads_compact_block": CountingBlock("ads_compact"),
+        "fin_report_daily_block": CountingBlock("fin_report_daily"),
     }
+
+
+def _request_date(request: object) -> str:
+    for field in ("snapshot_date", "date", "date_to"):
+        value = getattr(request, field, None)
+        if isinstance(value, str) and value:
+            return value
+    raise AssertionError("synthetic source request must carry a date field")
+
+
+def _assert_counting_calls(counters: dict[str, CountingBlock]) -> None:
+    expected_by_source = {
+        "web_source_snapshot": [AS_OF_DATE, TODAY_CURRENT_DATE],
+        "seller_funnel_snapshot": [AS_OF_DATE, TODAY_CURRENT_DATE],
+        "sales_funnel_history": [AS_OF_DATE, TODAY_CURRENT_DATE],
+        "prices_snapshot": [TODAY_CURRENT_DATE],
+        "sf_period": [AS_OF_DATE, TODAY_CURRENT_DATE],
+        "spp": [AS_OF_DATE, TODAY_CURRENT_DATE],
+        "ads_bids": [TODAY_CURRENT_DATE],
+        "stocks": [TODAY_CURRENT_DATE],
+        "ads_compact": [AS_OF_DATE, TODAY_CURRENT_DATE],
+        "fin_report_daily": [AS_OF_DATE, TODAY_CURRENT_DATE],
+    }
+    for block in counters.values():
+        expected = expected_by_source[block.source_key]
+        if block.request_dates != expected:
+            raise AssertionError(
+                f"{block.source_key} request_dates mismatch: expected {expected}, got {block.request_dates}"
+            )
 
 
 def _run_load_harness(endpoint_url: str, as_of_date: str) -> dict[str, object]:

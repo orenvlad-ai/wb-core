@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "f2ecd83242baef9f7d022d898a7162d30ba48efc"
+built_from_commit: "23491a0b8313e45403ac6b4afdb8f7bd0a178134"
 ---
 
 # Summary
@@ -76,7 +76,9 @@ Current repo-owned operator refresh surface:
 Current main-confirmed counts для этого flow:
 - prepare/upload package = `33 / 102 / 7`
 - current truth / ready snapshot displayed metrics = `95`
-- operator-facing `DATA_VITRINA` = server-driven `date_matrix` `1698` rendered rows / `95` metric keys (`1631` source rows, `34` blocks)
+- refresh materialize-ит date-aware ready snapshot `yesterday_closed + today_current`
+- operator-facing `DATA_VITRINA` = server-driven two-day `date_matrix` `1698` rendered rows / `95` metric keys (`1631` source rows, `34` blocks)
+- operator-facing `STATUS` = per-source/per-slot freshness surface; current-only sources (`stocks`, `prices_snapshot`, `ads_bids`) показывают `not_available` для `yesterday_closed`, а не backfill
 
 This is the first bounded MVP checkpoint, not final production parity.
 
@@ -84,6 +86,7 @@ This is the first bounded MVP checkpoint, not final production parity.
 
 - full legacy parity beyond current main-confirmed sheet/upload dictionary;
 - live numeric fill для promo/cogs-backed metrics до появления live HTTP adapters;
+- отдельный bounded fix по распределению `stocks` в Южный / Северо-Кавказский ФО, если проблема сохранится после date-aware model;
 - production hardening around runtime/deploy/auth;
 - unresolved long-tail compatibility around `AI_EXPORT`.
 

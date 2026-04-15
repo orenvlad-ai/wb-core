@@ -21,7 +21,7 @@ update_triggers:
   - "изменение canonical naming"
   - "появление нового публичного термина"
   - "изменение operator-visible labels"
-built_from_commit: "f2ecd83242baef9f7d022d898a7162d30ba48efc"
+built_from_commit: "23491a0b8313e45403ac6b4afdb8f7bd0a178134"
 ---
 
 # Summary
@@ -48,6 +48,7 @@ built_from_commit: "f2ecd83242baef9f7d022d898a7162d30ba48efc"
 | `STATUS` | `status sheet` | operator-facing freshness/source sheet |
 | `prepare -> upload -> refresh -> load` | `MVP flow`, `end-to-end flow` | canonical current bounded operator/server scenario |
 | `ready snapshot` | `materialized snapshot`, `persisted sheet plan` | persisted server-side read-model for `DATA_VITRINA` / `STATUS` |
+| `yesterday_closed / today_current` | `temporal slots`, `date columns` | server-owned bounded two-day temporal slots inside current `sheet_vitrina_v1` ready snapshot |
 | `AI_EXPORT` | `legacy export` | compatibility/open-gap term, не новый canonical target |
 
 ## Naming notes
@@ -60,7 +61,7 @@ built_from_commit: "f2ecd83242baef9f7d022d898a7162d30ba48efc"
 # Known gaps
 
 - Final production naming для будущих hosted/runtime/deploy слоёв ещё не зафиксирован.
-- Текущий main-confirmed uploaded package уже фиксируется как `102` metrics rows / `95` enabled+show_in_data metric keys в current truth; operator-facing `DATA_VITRINA` при этом materialize-ит тот же server-driven row set как thin `date_matrix` (`1631` source rows -> `1698` rendered rows при одном дне) без локального subset path.
+- Текущий main-confirmed uploaded package уже фиксируется как `102` metrics rows / `95` enabled+show_in_data metric keys в current truth; operator-facing `DATA_VITRINA` при этом materialize-ит тот же server-driven row set как thin two-day `date_matrix` (`1631` source rows -> `1698` rendered rows на `yesterday_closed + today_current`) без локального subset path.
 
 # Not in scope
 

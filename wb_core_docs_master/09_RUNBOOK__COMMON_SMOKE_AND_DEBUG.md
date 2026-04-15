@@ -25,7 +25,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "a164014035c98d158bce6867bfc4fcd6885c0f8f"
+built_from_commit: "23491a0b8313e45403ac6b4afdb8f7bd0a178134"
 ---
 
 # Summary
@@ -89,6 +89,7 @@ curl -X POST http://127.0.0.1:8765/v1/sheet-vitrina-v1/refresh \
   -d '{"as_of_date":"2026-04-12"}'
 clasp run loadSheetVitrinaTable
 clasp run getSheetVitrinaV1State
+clasp run getSheetVitrinaV1PresentationSnapshot
 ```
 
 ## Post-change closure
@@ -134,13 +135,14 @@ clasp run getSheetVitrinaV1State
 - `prepareRegistryUploadOperatorSheets` currently materializes `33 / 102 / 7`;
 - `uploadRegistryUploadBundle` accepts and persists factual registry sheet lengths; на текущем contour это `33 / 102 / 7`, но проверка не должна зависеть от hardcoded row caps;
 - `GET /sheet-vitrina-v1/operator` поднимает simple operator page без SPA/build pipeline;
-- operator page показывает только narrow status/log surface: `idle / loading / success / error`, `as_of_date`, `refreshed_at`, `DATA_VITRINA` / `STATUS` row counts и текст ошибки;
-- `POST /v1/sheet-vitrina-v1/refresh` обновляет ready snapshot в repo-owned SQLite runtime contour;
-- `GET /v1/sheet-vitrina-v1/status` читает последний persisted refresh result и не триггерит heavy source fetch;
+- operator page показывает только narrow status/log surface: `idle / loading / success / error`, `as_of_date`, `date_columns`, `refreshed_at`, `DATA_VITRINA` / `STATUS` row counts и текст ошибки;
+- `POST /v1/sheet-vitrina-v1/refresh` обновляет date-aware ready snapshot в repo-owned SQLite runtime contour;
+- `GET /v1/sheet-vitrina-v1/status` читает последний persisted refresh result, не триггерит heavy source fetch и показывает `date_columns` / `temporal_slots`;
 - `CONFIG!H:I` preserves `endpoint_url`, `last_bundle_version`, `last_status`, `last_http_status`;
 - current truth / ready snapshot keep `95` enabled+show_in_data metrics;
-- `DATA_VITRINA` keeps the same server-driven truth as operator-facing `date_matrix`: `1631` source rows, `34` blocks, `33` separators, `1698` rendered rows и `95` unique metric keys при одном дне;
-- `STATUS` names live sources such as `registry_upload_current_state`, `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `prices_snapshot`, `sf_period`, `spp`, `ads_bids`, `stocks`, `ads_compact`, `fin_report_daily`, plus blocked `promo_by_price` / `cogs_by_group`;
+- `DATA_VITRINA` keeps the same server-driven truth as operator-facing two-day `date_matrix`: `1631` source rows, `34` blocks, `33` separators, `1698` rendered rows и `95` unique metric keys при `yesterday_closed + today_current`;
+- `STATUS` names live sources per temporal slot, such as `seller_funnel_snapshot[yesterday_closed]`, `seller_funnel_snapshot[today_current]`, `stocks[today_current]`, plus blocked `promo_by_price` / `cogs_by_group`;
+- current-only sources (`stocks`, `prices_snapshot`, `ads_bids`) are expected to show `not_available` for `yesterday_closed` instead of copying `today_current` into a closed-day column;
 - blank values для promo/cogs-backed metrics трактуются как известный live-adapter gap на стороне current truth / `STATUS`, а не как повод переносить heavy fallback logic в Apps Script.
 
 ## Common failure signatures
@@ -152,9 +154,11 @@ clasp run getSheetVitrinaV1State
 | `sheet_vitrina_v1 ready snapshot missing` после upload | load path is cheap-read only; explicit refresh has not materialized snapshot for the current bundle / date yet |
 | `Ready snapshot пока не materialized.` на `/sheet-vitrina-v1/operator` | operator page честно сообщает, что explicit refresh ещё не запускался для current bundle / date |
 | `sheet vitrina endpoint returned non-JSON response` | wrong publish/upstream route or HTML error surface instead of expected JSON |
+| `today_current` values оказались под yesterday date column | live runtime или GAS publish stale; current contour всё ещё использует single-date surrogate вместо two-slot ready snapshot |
 | `required env WB_API_TOKEN is not set` | live/runtime secret boundary is not aligned with the canonical WB token path |
-| `official stocks request failed with status 429` in `STATUS.stocks.note` | live runtime still hits WB inventory limiter; confirm batched `stocks` path is deployed, no stale runtime remains, and upstream wait headers are being honored |
-| `STATUS.stocks = error` with blank stock rows after refresh | bounded refresh stayed honest about stocks failure; investigate upstream inventory rate-limit / token scope instead of treating blanks as fresh stock values |
+| `official stocks request failed with status 429` in `STATUS.stocks[today_current].note` | live runtime still hits WB inventory limiter; confirm batched `stocks` path is deployed, no stale runtime remains, and upstream wait headers are being honored |
+| `STATUS.stocks[today_current] = error` with blank stock rows after refresh | bounded refresh stayed honest about stocks failure; investigate upstream inventory rate-limit / token scope instead of treating blanks as fresh stock values |
+| `STATUS.stocks[yesterday_closed] = not_available` | expected bounded semantics: current-only stocks are not backfilled into yesterday EOD without dedicated historical path |
 | `ReferenceError: URL is not defined` | Apps Script runtime bug in sheet-side URL derivation |
 | `registry upload bundle must contain 5-64 metrics_v2 entries` | live runtime still serves stale validator / stale deploy and is not aligned with current repo semantics |
 | `ACCESS_TOKEN_SCOPE_INSUFFICIENT` for `clasp` | local GAS OAuth scopes are insufficient for content read/write |

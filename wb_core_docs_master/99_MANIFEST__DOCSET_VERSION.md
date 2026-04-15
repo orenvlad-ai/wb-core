@@ -20,18 +20,20 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "фактическая внешняя project upload"
-built_from_commit: "a164014035c98d158bce6867bfc4fcd6885c0f8f"
+built_from_commit: "23491a0b8313e45403ac6b4afdb8f7bd0a178134"
 docset_version: "wb_core_docs_master_v1"
-built_at: "2026-04-15T20:51:37Z"
+built_at: "2026-04-15T22:17:43Z"
 core_docs_changed:
-  - "docs/architecture/09_official_api_secret_boundary.md"
   - "docs/modules/07_MODULE__STOCKS_BLOCK.md"
-  - "docs/modules/09_MODULE__ADS_COMPACT_BLOCK.md"
-  - "docs/modules/10_MODULE__FIN_REPORT_DAILY_BLOCK.md"
+  - "docs/modules/19_MODULE__SHEET_VITRINA_V1_PRESENTATION_BLOCK.md"
+  - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
+  - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
+  - "wb_core_docs_master/03_GLOSSARY__TERMS_ALIASES_AND_CANONICAL_NAMES.md"
+  - "wb_core_docs_master/05_REGISTER__MODULE_STATUS_AND_CHECKPOINTS.md"
   - "wb_core_docs_master/09_RUNBOOK__COMMON_SMOKE_AND_DEBUG.md"
 project_upload_required: true
 last_project_upload_at: "2026-04-14T10:23:55Z"
-project_upload_note: "pack changed after canonical WB auth normalization: repo-owned official adapters now default to `WB_API_TOKEN`, runbook reflects the canonical token path, and confirmed external upload of this updated pack is still pending"
+project_upload_note: "pack changed after date-aware `sheet_vitrina_v1` refresh/load model: current ready snapshot now materializes `yesterday_closed + today_current`, runbook/register/glossary were synced, and confirmed external upload of this updated pack is still pending"
 ---
 
 # Summary

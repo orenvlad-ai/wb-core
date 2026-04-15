@@ -253,6 +253,10 @@
               <dd id="asOfDate">-</dd>
             </div>
             <div>
+              <dt>date_columns</dt>
+              <dd id="dateColumns">-</dd>
+            </div>
+            <div>
               <dt>refreshed_at</dt>
               <dd id="refreshedAt">-</dd>
             </div>
@@ -274,6 +278,7 @@
       const refreshButton = document.getElementById("refreshButton");
       const stateBadge = document.getElementById("stateBadge");
       const asOfDate = document.getElementById("asOfDate");
+      const dateColumns = document.getElementById("dateColumns");
       const refreshedAt = document.getElementById("refreshedAt");
       const logBlock = document.getElementById("logBlock");
 
@@ -293,13 +298,35 @@
         return String(counts[key]);
       }
 
+      function formatDateColumns(payload) {
+        const values = Array.isArray(payload.date_columns) ? payload.date_columns.filter(Boolean) : [];
+        return values.length ? values.join(", ") : "-";
+      }
+
+      function formatTemporalSlots(payload) {
+        const slots = Array.isArray(payload.temporal_slots) ? payload.temporal_slots : [];
+        if (!slots.length) {
+          return "-";
+        }
+        return slots
+          .map((item) => {
+            const slotKey = valueOrDash(item && item.slot_key);
+            const columnDate = valueOrDash(item && item.column_date);
+            return slotKey + ": " + columnDate;
+          })
+          .join(", ");
+      }
+
       function renderSnapshot(payload, intro) {
         const counts = payload.sheet_row_counts || {};
         asOfDate.textContent = valueOrDash(payload.as_of_date);
+        dateColumns.textContent = formatDateColumns(payload);
         refreshedAt.textContent = valueOrDash(payload.refreshed_at);
         logBlock.textContent = [
           intro,
           "as_of_date: " + valueOrDash(payload.as_of_date),
+          "date_columns: " + formatDateColumns(payload),
+          "temporal_slots: " + formatTemporalSlots(payload),
           "refreshed_at: " + valueOrDash(payload.refreshed_at),
           "DATA_VITRINA rows: " + sheetCount(counts, "DATA_VITRINA"),
           "STATUS rows: " + sheetCount(counts, "STATUS"),
@@ -310,6 +337,7 @@
 
       function renderEmpty(message) {
         asOfDate.textContent = "-";
+        dateColumns.textContent = "-";
         refreshedAt.textContent = "-";
         logBlock.textContent = message;
       }

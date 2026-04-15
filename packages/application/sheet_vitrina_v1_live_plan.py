@@ -6,6 +6,7 @@ import ast
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any, Callable, Iterable, Mapping
@@ -40,7 +41,7 @@ from packages.contracts.registry_upload_bundle_v1 import ConfigV2Item, FormulaV2
 from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryRequest
 from packages.contracts.seller_funnel_snapshot_block import SellerFunnelSnapshotRequest
 from packages.contracts.sf_period_block import SfPeriodRequest
-from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope
+from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope, SheetVitrinaV1TemporalSlot
 from packages.contracts.spp_block import SppRequest
 from packages.contracts.stocks_block import StocksRequest
 from packages.contracts.web_source_snapshot_block import WebSourceSnapshotRequest
@@ -65,9 +66,26 @@ STATUS_HEADER = [
 FORMULA_TOKEN_RE = re.compile(r"\{([^}]+)\}")
 AGGREGATE_SUM_PREFIX = "total_"
 AGGREGATE_AVG_PREFIX = "avg_"
+DELIVERY_CONTRACT_VERSION = "sheet_vitrina_v1_temporal_live_v1"
+TEMPORAL_SLOT_YESTERDAY_CLOSED = "yesterday_closed"
+TEMPORAL_SLOT_TODAY_CURRENT = "today_current"
 BLOCKED_SOURCE_STATUSES = {
     "promo_by_price": "live HTTP adapter is not implemented; rows stay materialized with blank values",
     "cogs_by_group": "live HTTP adapter is not implemented; rows stay materialized with blank values",
+}
+SOURCE_TEMPORAL_POLICIES = {
+    "seller_funnel_snapshot": "dual_day_capable",
+    "sales_funnel_history": "dual_day_capable",
+    "web_source_snapshot": "dual_day_capable",
+    "prices_snapshot": "today_current",
+    "sf_period": "dual_day_capable",
+    "spp": "dual_day_capable",
+    "ads_bids": "today_current",
+    "stocks": "today_current",
+    "ads_compact": "dual_day_capable",
+    "fin_report_daily": "dual_day_capable",
+    "promo_by_price": "blocked",
+    "cogs_by_group": "blocked",
 }
 PERCENT_SOURCE_KEYS = {"ctr", "ctr_current", "localizationPercent"}
 DECISION_SUMMARY = {
@@ -81,6 +99,9 @@ DECISION_SUMMARY = {
 @dataclass(frozen=True)
 class LiveSourceStatus:
     source_key: str
+    temporal_slot: str
+    temporal_policy: str
+    column_date: str
     kind: str
     freshness: str
     snapshot_date: str
@@ -92,10 +113,8 @@ class LiveSourceStatus:
     missing_nm_ids: list[int]
     note: str
 
-
-@dataclass(frozen=True)
-class LiveSources:
-    statuses: list[LiveSourceStatus]
+@dataclass
+class SlotLookups:
     seller_funnel_lookup: dict[int, Any]
     history_lookup: dict[int, dict[str, float]]
     web_lookup: dict[int, Any]
@@ -107,6 +126,14 @@ class LiveSources:
     ads_compact_lookup: dict[int, Any]
     fin_lookup: dict[int, Any]
     fin_storage_fee_total: float | None
+
+
+@dataclass(frozen=True)
+class TemporalLiveSources:
+    temporal_slots: list[SheetVitrinaV1TemporalSlot]
+    statuses: list[LiveSourceStatus]
+    slot_lookups: dict[str, SlotLookups]
+    source_temporal_policies: dict[str, str]
 
 
 class SheetVitrinaV1LivePlanBlock:
@@ -123,6 +150,7 @@ class SheetVitrinaV1LivePlanBlock:
         stocks_block: StocksBlock | None = None,
         ads_compact_block: AdsCompactBlock | None = None,
         fin_report_daily_block: FinReportDailyBlock | None = None,
+        now_factory: Callable[[], datetime] | None = None,
     ) -> None:
         self.runtime = runtime
         self.web_source_block = web_source_block or WebSourceSnapshotBlock(HttpBackedWebSourceSnapshotSource())
@@ -135,10 +163,15 @@ class SheetVitrinaV1LivePlanBlock:
         self.stocks_block = stocks_block or StocksBlock(HttpBackedStocksSource())
         self.ads_compact_block = ads_compact_block or AdsCompactBlock(HttpBackedAdsCompactSource())
         self.fin_report_daily_block = fin_report_daily_block or FinReportDailyBlock(HttpBackedFinReportDailySource())
+        self.now_factory = now_factory or _default_now_factory
 
     def build_plan(self, as_of_date: str | None = None) -> SheetVitrinaV1Envelope:
         current_state = self.runtime.load_current_state()
         effective_date = _resolve_as_of_date(as_of_date)
+        temporal_slots = _build_temporal_slots(
+            as_of_date=effective_date,
+            current_date=self.now_factory().astimezone(timezone.utc).date().isoformat(),
+        )
         enabled_config = sorted(
             [item for item in current_state.config_v2 if item.enabled],
             key=lambda item: item.display_order,
@@ -155,7 +188,7 @@ class SheetVitrinaV1LivePlanBlock:
         if not displayed_metrics:
             raise ValueError("current registry metrics_v2 does not contain enabled show_in_data rows")
 
-        live_sources = self._load_live_sources(enabled_config, effective_date)
+        live_sources = self._load_live_sources(enabled_config, temporal_slots)
         evaluator = _MetricEvaluator(
             enabled_config=enabled_config,
             metrics_by_key=metrics_by_key,
@@ -167,24 +200,35 @@ class SheetVitrinaV1LivePlanBlock:
         scope_row_counts = {"TOTAL": 0, "GROUP": 0, "SKU": 0}
         section_row_counts: dict[str, int] = {}
         for metric in displayed_metrics:
-            rows = _build_metric_rows(metric, enabled_config, evaluator)
+            rows = _build_metric_rows(metric, enabled_config, evaluator, temporal_slots)
             data_rows.extend(rows)
             scope_row_counts[metric.scope] = scope_row_counts.get(metric.scope, 0) + len(rows)
             section_row_counts[metric.section] = section_row_counts.get(metric.section, 0) + len(rows)
 
-        data_header = ["label", "key", effective_date]
+        data_header = ["label", "key", *[slot.column_date for slot in temporal_slots]]
         status_rows = _build_status_rows(
             current_state=current_state,
             displayed_metrics=displayed_metrics,
             data_rows=data_rows,
             live_sources=live_sources,
+            temporal_slots=temporal_slots,
             scope_row_counts=scope_row_counts,
             section_row_counts=section_row_counts,
         )
         delivery_bundle = {
-            "delivery_contract_version": "sheet_vitrina_v1_compact_live_v2",
-            "snapshot_id": f"{effective_date}__sheet_vitrina_v1_compact_live_v2__current",
+            "delivery_contract_version": DELIVERY_CONTRACT_VERSION,
+            "snapshot_id": f"{effective_date}__{temporal_slots[-1].column_date}__{DELIVERY_CONTRACT_VERSION}__current",
             "as_of_date": effective_date,
+            "date_columns": [slot.column_date for slot in temporal_slots],
+            "temporal_slots": [
+                {
+                    "slot_key": slot.slot_key,
+                    "slot_label": slot.slot_label,
+                    "column_date": slot.column_date,
+                }
+                for slot in temporal_slots
+            ],
+            "source_temporal_policies": SOURCE_TEMPORAL_POLICIES,
             "data_vitrina": {
                 "sheet_name": "DATA_VITRINA",
                 "header": data_header,
@@ -202,91 +246,207 @@ class SheetVitrinaV1LivePlanBlock:
             status_layout=_load_json(STATUS_LAYOUT_PATH),
         )
 
-    def _load_live_sources(self, enabled_config: list[ConfigV2Item], effective_date: str) -> LiveSources:
+    def _load_live_sources(
+        self,
+        enabled_config: list[ConfigV2Item],
+        temporal_slots: list[SheetVitrinaV1TemporalSlot],
+    ) -> TemporalLiveSources:
         requested_nm_ids = [item.nm_id for item in enabled_config]
         statuses: list[LiveSourceStatus] = []
-        lookups: dict[str, dict[int, Any]] = {
-            "seller_funnel_lookup": {},
-            "history_lookup": {},
-            "web_lookup": {},
-            "prices_lookup": {},
-            "sf_period_lookup": {},
-            "spp_lookup": {},
-            "ads_bids_lookup": {},
-            "stocks_lookup": {},
-            "ads_compact_lookup": {},
-            "fin_lookup": {},
+        slot_lookups: dict[str, SlotLookups] = {
+            slot.slot_key: SlotLookups(
+                seller_funnel_lookup={},
+                history_lookup={},
+                web_lookup={},
+                prices_lookup={},
+                sf_period_lookup={},
+                spp_lookup={},
+                ads_bids_lookup={},
+                stocks_lookup={},
+                ads_compact_lookup={},
+                fin_lookup={},
+                fin_storage_fee_total=None,
+            )
+            for slot in temporal_slots
         }
-        fin_storage_fee_total: float | None = None
 
-        for source_key, loader in [
-            ("seller_funnel_snapshot", lambda: self.seller_funnel_block.execute(SellerFunnelSnapshotRequest(snapshot_type="seller_funnel_snapshot", date=effective_date)).result),
-            ("sales_funnel_history", lambda: self.sales_funnel_history_block.execute(SalesFunnelHistoryRequest(snapshot_type="sales_funnel_history", date_from=effective_date, date_to=effective_date, nm_ids=requested_nm_ids)).result),
-            ("web_source_snapshot", lambda: self.web_source_block.execute(WebSourceSnapshotRequest(snapshot_type="web_source_snapshot", date_from=effective_date, date_to=effective_date)).result),
-            ("prices_snapshot", lambda: self.prices_snapshot_block.execute(PricesSnapshotRequest(snapshot_type="prices_snapshot", snapshot_date=effective_date, nm_ids=requested_nm_ids)).result),
-            ("sf_period", lambda: self.sf_period_block.execute(SfPeriodRequest(snapshot_type="sf_period", snapshot_date=effective_date, nm_ids=requested_nm_ids)).result),
-            ("spp", lambda: self.spp_block.execute(SppRequest(snapshot_type="spp", snapshot_date=effective_date, nm_ids=requested_nm_ids)).result),
-            ("ads_bids", lambda: self.ads_bids_block.execute(AdsBidsRequest(snapshot_type="ads_bids", snapshot_date=effective_date, nm_ids=requested_nm_ids)).result),
-            ("stocks", lambda: self.stocks_block.execute(StocksRequest(snapshot_type="stocks", snapshot_date=effective_date, nm_ids=requested_nm_ids)).result),
-            ("ads_compact", lambda: self.ads_compact_block.execute(AdsCompactRequest(snapshot_type="ads_compact", snapshot_date=effective_date, nm_ids=requested_nm_ids)).result),
-            ("fin_report_daily", lambda: self.fin_report_daily_block.execute(FinReportDailyRequest(snapshot_type="fin_report_daily", snapshot_date=effective_date, nm_ids=requested_nm_ids)).result),
-        ]:
-            status, payload = _capture_live_source(source_key, requested_nm_ids, loader)
-            statuses.append(status)
-            if source_key == "seller_funnel_snapshot":
-                lookups["seller_funnel_lookup"] = _index_items_by_nm_id(payload)
-            elif source_key == "sales_funnel_history":
-                lookups["history_lookup"] = _index_history_items(payload)
-            elif source_key == "web_source_snapshot":
-                lookups["web_lookup"] = _index_items_by_nm_id(payload)
-            elif source_key == "prices_snapshot":
-                lookups["prices_lookup"] = _index_items_by_nm_id(payload)
-            elif source_key == "sf_period":
-                lookups["sf_period_lookup"] = _index_items_by_nm_id(payload)
-            elif source_key == "spp":
-                lookups["spp_lookup"] = _index_items_by_nm_id(payload)
-            elif source_key == "ads_bids":
-                lookups["ads_bids_lookup"] = _index_items_by_nm_id(payload)
-            elif source_key == "stocks":
-                lookups["stocks_lookup"] = _index_items_by_nm_id(payload)
-            elif source_key == "ads_compact":
-                lookups["ads_compact_lookup"] = _index_items_by_nm_id(payload)
-            elif source_key == "fin_report_daily":
-                lookups["fin_lookup"] = _index_items_by_nm_id(payload)
-                storage_total = getattr(payload, "storage_total", None)
-                if storage_total is not None:
-                    fin_storage_fee_total = float(getattr(storage_total, "fin_storage_fee_total", 0.0))
+        for slot in temporal_slots:
+            current_lookups = slot_lookups[slot.slot_key]
+            for source_key, loader in [
+                (
+                    "seller_funnel_snapshot",
+                    lambda slot=slot: self.seller_funnel_block.execute(
+                        SellerFunnelSnapshotRequest(
+                            snapshot_type="seller_funnel_snapshot",
+                            date=slot.column_date,
+                        )
+                    ).result,
+                ),
+                (
+                    "sales_funnel_history",
+                    lambda slot=slot: self.sales_funnel_history_block.execute(
+                        SalesFunnelHistoryRequest(
+                            snapshot_type="sales_funnel_history",
+                            date_from=slot.column_date,
+                            date_to=slot.column_date,
+                            nm_ids=requested_nm_ids,
+                        )
+                    ).result,
+                ),
+                (
+                    "web_source_snapshot",
+                    lambda slot=slot: self.web_source_block.execute(
+                        WebSourceSnapshotRequest(
+                            snapshot_type="web_source_snapshot",
+                            date_from=slot.column_date,
+                            date_to=slot.column_date,
+                        )
+                    ).result,
+                ),
+                (
+                    "prices_snapshot",
+                    lambda slot=slot: self.prices_snapshot_block.execute(
+                        PricesSnapshotRequest(
+                            snapshot_type="prices_snapshot",
+                            snapshot_date=slot.column_date,
+                            nm_ids=requested_nm_ids,
+                        )
+                    ).result,
+                ),
+                (
+                    "sf_period",
+                    lambda slot=slot: self.sf_period_block.execute(
+                        SfPeriodRequest(
+                            snapshot_type="sf_period",
+                            snapshot_date=slot.column_date,
+                            nm_ids=requested_nm_ids,
+                        )
+                    ).result,
+                ),
+                (
+                    "spp",
+                    lambda slot=slot: self.spp_block.execute(
+                        SppRequest(
+                            snapshot_type="spp",
+                            snapshot_date=slot.column_date,
+                            nm_ids=requested_nm_ids,
+                        )
+                    ).result,
+                ),
+                (
+                    "ads_bids",
+                    lambda slot=slot: self.ads_bids_block.execute(
+                        AdsBidsRequest(
+                            snapshot_type="ads_bids",
+                            snapshot_date=slot.column_date,
+                            nm_ids=requested_nm_ids,
+                        )
+                    ).result,
+                ),
+                (
+                    "stocks",
+                    lambda slot=slot: self.stocks_block.execute(
+                        StocksRequest(
+                            snapshot_type="stocks",
+                            snapshot_date=slot.column_date,
+                            nm_ids=requested_nm_ids,
+                        )
+                    ).result,
+                ),
+                (
+                    "ads_compact",
+                    lambda slot=slot: self.ads_compact_block.execute(
+                        AdsCompactRequest(
+                            snapshot_type="ads_compact",
+                            snapshot_date=slot.column_date,
+                            nm_ids=requested_nm_ids,
+                        )
+                    ).result,
+                ),
+                (
+                    "fin_report_daily",
+                    lambda slot=slot: self.fin_report_daily_block.execute(
+                        FinReportDailyRequest(
+                            snapshot_type="fin_report_daily",
+                            snapshot_date=slot.column_date,
+                            nm_ids=requested_nm_ids,
+                        )
+                    ).result,
+                ),
+            ]:
+                temporal_policy = SOURCE_TEMPORAL_POLICIES[source_key]
+                if not _source_policy_supports_slot(temporal_policy, slot.slot_key):
+                    statuses.append(
+                        _build_temporal_gap_status(
+                            source_key=source_key,
+                            temporal_slot=slot.slot_key,
+                            temporal_policy=temporal_policy,
+                            column_date=slot.column_date,
+                            requested_count=len(requested_nm_ids),
+                        )
+                    )
+                    continue
+                status, payload = _capture_live_source(
+                    source_key=source_key,
+                    temporal_slot=slot.slot_key,
+                    temporal_policy=temporal_policy,
+                    column_date=slot.column_date,
+                    requested_nm_ids=requested_nm_ids,
+                    loader=loader,
+                )
+                statuses.append(status)
+                if source_key == "seller_funnel_snapshot":
+                    current_lookups.seller_funnel_lookup = _index_items_by_nm_id(payload)
+                elif source_key == "sales_funnel_history":
+                    current_lookups.history_lookup = _index_history_items(payload)
+                elif source_key == "web_source_snapshot":
+                    current_lookups.web_lookup = _index_items_by_nm_id(payload)
+                elif source_key == "prices_snapshot":
+                    current_lookups.prices_lookup = _index_items_by_nm_id(payload)
+                elif source_key == "sf_period":
+                    current_lookups.sf_period_lookup = _index_items_by_nm_id(payload)
+                elif source_key == "spp":
+                    current_lookups.spp_lookup = _index_items_by_nm_id(payload)
+                elif source_key == "ads_bids":
+                    current_lookups.ads_bids_lookup = _index_items_by_nm_id(payload)
+                elif source_key == "stocks":
+                    current_lookups.stocks_lookup = _index_items_by_nm_id(payload)
+                elif source_key == "ads_compact":
+                    current_lookups.ads_compact_lookup = _index_items_by_nm_id(payload)
+                elif source_key == "fin_report_daily":
+                    current_lookups.fin_lookup = _index_items_by_nm_id(payload)
+                    storage_total = getattr(payload, "storage_total", None)
+                    if storage_total is not None:
+                        current_lookups.fin_storage_fee_total = float(
+                            getattr(storage_total, "fin_storage_fee_total", 0.0)
+                        )
 
         for source_key, note in BLOCKED_SOURCE_STATUSES.items():
-            statuses.append(
-                LiveSourceStatus(
-                    source_key=source_key,
-                    kind="blocked",
-                    freshness="",
-                    snapshot_date="",
-                    date="",
-                    date_from="",
-                    date_to="",
-                    requested_count=len(requested_nm_ids),
-                    covered_count=0,
-                    missing_nm_ids=[],
-                    note=note,
+            for slot in temporal_slots:
+                statuses.append(
+                    LiveSourceStatus(
+                        source_key=source_key,
+                        temporal_slot=slot.slot_key,
+                        temporal_policy="blocked",
+                        column_date=slot.column_date,
+                        kind="blocked",
+                        freshness="",
+                        snapshot_date="",
+                        date="",
+                        date_from="",
+                        date_to="",
+                        requested_count=len(requested_nm_ids),
+                        covered_count=0,
+                        missing_nm_ids=[],
+                        note=note,
+                    )
                 )
-            )
 
-        return LiveSources(
+        return TemporalLiveSources(
+            temporal_slots=temporal_slots,
             statuses=statuses,
-            seller_funnel_lookup=lookups["seller_funnel_lookup"],
-            history_lookup=lookups["history_lookup"],
-            web_lookup=lookups["web_lookup"],
-            prices_lookup=lookups["prices_lookup"],
-            sf_period_lookup=lookups["sf_period_lookup"],
-            spp_lookup=lookups["spp_lookup"],
-            ads_bids_lookup=lookups["ads_bids_lookup"],
-            stocks_lookup=lookups["stocks_lookup"],
-            ads_compact_lookup=lookups["ads_compact_lookup"],
-            fin_lookup=lookups["fin_lookup"],
-            fin_storage_fee_total=fin_storage_fee_total,
+            slot_lookups=slot_lookups,
+            source_temporal_policies=dict(SOURCE_TEMPORAL_POLICIES),
         )
 
 
@@ -297,19 +457,19 @@ class _MetricEvaluator:
         enabled_config: list[ConfigV2Item],
         metrics_by_key: Mapping[str, MetricV2Item],
         formulas_by_id: Mapping[str, FormulaV2Item],
-        live_sources: LiveSources,
+        live_sources: TemporalLiveSources,
     ) -> None:
         self.enabled_config = enabled_config
         self.metrics_by_key = metrics_by_key
         self.formulas_by_id = formulas_by_id
         self.live_sources = live_sources
         self.grouped_config = _group_config(enabled_config)
-        self.sku_cache: dict[tuple[int, str], float | None] = {}
-        self.total_cache: dict[str, float | None] = {}
-        self.group_cache: dict[tuple[str, str], float | None] = {}
+        self.sku_cache: dict[tuple[str, int, str], float | None] = {}
+        self.total_cache: dict[tuple[str, str], float | None] = {}
+        self.group_cache: dict[tuple[str, str, str], float | None] = {}
 
-    def resolve_sku(self, metric_key: str, nm_id: int) -> float | None:
-        cache_key = (nm_id, metric_key)
+    def resolve_sku(self, metric_key: str, nm_id: int, temporal_slot: str) -> float | None:
+        cache_key = (temporal_slot, nm_id, metric_key)
         if cache_key in self.sku_cache:
             return self.sku_cache[cache_key]
 
@@ -319,13 +479,13 @@ class _MetricEvaluator:
 
         if metric.calc_type == "metric":
             if metric.calc_ref != metric.metric_key:
-                value = self.resolve_sku(metric.calc_ref, nm_id)
+                value = self.resolve_sku(metric.calc_ref, nm_id, temporal_slot)
             else:
-                value = self._resolve_direct_sku(metric.metric_key, nm_id)
+                value = self._resolve_direct_sku(metric.metric_key, nm_id, temporal_slot)
         elif metric.calc_type == "ratio":
             numerator_key, denominator_key = _split_ratio(metric.calc_ref)
-            numerator = self.resolve_sku(numerator_key, nm_id)
-            denominator = self.resolve_sku(denominator_key, nm_id)
+            numerator = self.resolve_sku(numerator_key, nm_id, temporal_slot)
+            denominator = self.resolve_sku(denominator_key, nm_id, temporal_slot)
             value = None if numerator is None or denominator in (None, 0) else float(numerator) / float(denominator)
         elif metric.calc_type == "formula":
             formula = self.formulas_by_id.get(metric.calc_ref)
@@ -333,7 +493,7 @@ class _MetricEvaluator:
                 raise ValueError(f"formula missing for metric {metric_key}")
             value = _evaluate_formula(
                 formula.expression,
-                lambda dependency: self.resolve_sku(dependency, nm_id),
+                lambda dependency: self.resolve_sku(dependency, nm_id, temporal_slot),
             )
         else:
             raise ValueError(f"unsupported calc_type: {metric.calc_type}")
@@ -341,9 +501,10 @@ class _MetricEvaluator:
         self.sku_cache[cache_key] = value
         return value
 
-    def resolve_total(self, metric_key: str) -> float | None:
-        if metric_key in self.total_cache:
-            return self.total_cache[metric_key]
+    def resolve_total(self, metric_key: str, temporal_slot: str) -> float | None:
+        cache_key = (temporal_slot, metric_key)
+        if cache_key in self.total_cache:
+            return self.total_cache[cache_key]
 
         metric = self.metrics_by_key.get(metric_key)
         if metric is None:
@@ -351,33 +512,36 @@ class _MetricEvaluator:
 
         if metric.calc_type == "metric":
             if metric.metric_key == "fin_storage_fee_total":
-                value = self.live_sources.fin_storage_fee_total
+                value = self._slot_lookups(temporal_slot).fin_storage_fee_total
             elif metric.metric_key.startswith(AGGREGATE_SUM_PREFIX):
-                value = self._aggregate_sum(metric.calc_ref, self.enabled_config)
+                value = self._aggregate_sum(metric.calc_ref, self.enabled_config, temporal_slot)
             elif metric.metric_key.startswith(AGGREGATE_AVG_PREFIX):
-                value = self._aggregate_avg(metric.calc_ref, self.enabled_config)
+                value = self._aggregate_avg(metric.calc_ref, self.enabled_config, temporal_slot)
             elif metric.calc_ref != metric.metric_key:
-                value = self._aggregate_sum(metric.calc_ref, self.enabled_config)
+                value = self._aggregate_sum(metric.calc_ref, self.enabled_config, temporal_slot)
             else:
-                value = self._resolve_total_direct(metric.metric_key)
+                value = self._resolve_total_direct(metric.metric_key, temporal_slot)
         elif metric.calc_type == "ratio":
             numerator_key, denominator_key = _split_ratio(metric.calc_ref)
-            numerator = self.resolve_total(numerator_key)
-            denominator = self.resolve_total(denominator_key)
+            numerator = self.resolve_total(numerator_key, temporal_slot)
+            denominator = self.resolve_total(denominator_key, temporal_slot)
             value = None if numerator is None or denominator in (None, 0) else float(numerator) / float(denominator)
         elif metric.calc_type == "formula":
             formula = self.formulas_by_id.get(metric.calc_ref)
             if formula is None:
                 raise ValueError(f"formula missing for metric {metric_key}")
-            value = _evaluate_formula(formula.expression, self.resolve_total)
+            value = _evaluate_formula(
+                formula.expression,
+                lambda dependency: self.resolve_total(dependency, temporal_slot),
+            )
         else:
             raise ValueError(f"unsupported calc_type: {metric.calc_type}")
 
-        self.total_cache[metric_key] = value
+        self.total_cache[cache_key] = value
         return value
 
-    def resolve_group(self, metric_key: str, group_name: str) -> float | None:
-        cache_key = (group_name, metric_key)
+    def resolve_group(self, metric_key: str, group_name: str, temporal_slot: str) -> float | None:
+        cache_key = (temporal_slot, group_name, metric_key)
         if cache_key in self.group_cache:
             return self.group_cache[cache_key]
 
@@ -387,13 +551,13 @@ class _MetricEvaluator:
         group_items = self.grouped_config.get(group_name, [])
         if metric.calc_type == "metric":
             if metric.metric_key.startswith(AGGREGATE_AVG_PREFIX):
-                value = self._aggregate_avg(metric.calc_ref, group_items)
+                value = self._aggregate_avg(metric.calc_ref, group_items, temporal_slot)
             else:
-                value = self._aggregate_sum(metric.calc_ref, group_items)
+                value = self._aggregate_sum(metric.calc_ref, group_items, temporal_slot)
         elif metric.calc_type == "ratio":
             numerator_key, denominator_key = _split_ratio(metric.calc_ref)
-            numerator = self._aggregate_sum(numerator_key, group_items)
-            denominator = self._aggregate_sum(denominator_key, group_items)
+            numerator = self._aggregate_sum(numerator_key, group_items, temporal_slot)
+            denominator = self._aggregate_sum(denominator_key, group_items, temporal_slot)
             value = None if numerator is None or denominator in (None, 0) else float(numerator) / float(denominator)
         elif metric.calc_type == "formula":
             formula = self.formulas_by_id.get(metric.calc_ref)
@@ -401,7 +565,7 @@ class _MetricEvaluator:
                 raise ValueError(f"formula missing for metric {metric_key}")
             value = _evaluate_formula(
                 formula.expression,
-                lambda dependency: self._aggregate_sum(dependency, group_items),
+                lambda dependency: self._aggregate_sum(dependency, group_items, temporal_slot),
             )
         else:
             raise ValueError(f"unsupported calc_type: {metric.calc_type}")
@@ -409,40 +573,51 @@ class _MetricEvaluator:
         self.group_cache[cache_key] = value
         return value
 
-    def _resolve_total_direct(self, metric_key: str) -> float | None:
+    def _resolve_total_direct(self, metric_key: str, temporal_slot: str) -> float | None:
         if metric_key == "fin_storage_fee_total":
-            return self.live_sources.fin_storage_fee_total
-        return self._aggregate_sum(metric_key, self.enabled_config)
+            return self._slot_lookups(temporal_slot).fin_storage_fee_total
+        return self._aggregate_sum(metric_key, self.enabled_config, temporal_slot)
 
-    def _aggregate_sum(self, metric_key: str, config_items: Iterable[ConfigV2Item]) -> float | None:
-        values = [self.resolve_sku(metric_key, item.nm_id) for item in config_items]
+    def _aggregate_sum(
+        self,
+        metric_key: str,
+        config_items: Iterable[ConfigV2Item],
+        temporal_slot: str,
+    ) -> float | None:
+        values = [self.resolve_sku(metric_key, item.nm_id, temporal_slot) for item in config_items]
         numeric = [value for value in values if value is not None]
         return float(sum(numeric)) if numeric else None
 
-    def _aggregate_avg(self, metric_key: str, config_items: Iterable[ConfigV2Item]) -> float | None:
-        values = [self.resolve_sku(metric_key, item.nm_id) for item in config_items]
+    def _aggregate_avg(
+        self,
+        metric_key: str,
+        config_items: Iterable[ConfigV2Item],
+        temporal_slot: str,
+    ) -> float | None:
+        values = [self.resolve_sku(metric_key, item.nm_id, temporal_slot) for item in config_items]
         numeric = [value for value in values if value is not None]
         return float(sum(numeric)) / len(numeric) if numeric else None
 
-    def _resolve_direct_sku(self, metric_key: str, nm_id: int) -> float | None:
+    def _resolve_direct_sku(self, metric_key: str, nm_id: int, temporal_slot: str) -> float | None:
         if metric_key == "variable_costs_wb":
-            order_sum = self.resolve_sku("orderSum", nm_id)
+            order_sum = self.resolve_sku("orderSum", nm_id, temporal_slot)
             return None if order_sum is None else float(order_sum) * 0.4904
         if metric_key in {"profit_proxy_rub", "proxy_profit_rub"}:
-            order_sum = self.resolve_sku("orderSum", nm_id)
-            order_count = self.resolve_sku("orderCount", nm_id)
-            cost_price = self.resolve_sku("cost_price_rub", nm_id)
-            ads_sum = self.resolve_sku("ads_sum", nm_id)
+            order_sum = self.resolve_sku("orderSum", nm_id, temporal_slot)
+            order_count = self.resolve_sku("orderCount", nm_id, temporal_slot)
+            cost_price = self.resolve_sku("cost_price_rub", nm_id, temporal_slot)
+            ads_sum = self.resolve_sku("ads_sum", nm_id, temporal_slot)
             if None in {order_sum, order_count, cost_price, ads_sum}:
                 return None
             return float(order_sum) * 0.5096 - float(order_count) * 0.91 * float(cost_price) - float(ads_sum)
         if metric_key == "inventory_value_retail_rub":
-            stock_total = self.resolve_sku("stock_total", nm_id)
-            price_seller_discounted = self.resolve_sku("price_seller_discounted", nm_id)
+            stock_total = self.resolve_sku("stock_total", nm_id, temporal_slot)
+            price_seller_discounted = self.resolve_sku("price_seller_discounted", nm_id, temporal_slot)
             if stock_total is None or price_seller_discounted is None:
                 return None
             return float(stock_total) * float(price_seller_discounted)
 
+        slot_lookups = self._slot_lookups(temporal_slot)
         for lookup_name, attribute, scale in [
             ("seller_funnel_lookup", "view_count", 1.0),
             ("seller_funnel_lookup", "open_card_count", 1.0),
@@ -480,7 +655,7 @@ class _MetricEvaluator:
             ("fin_lookup", "fin_loyalty_rub", 1.0),
         ]:
             if metric_key == _metric_key_from_lookup(lookup_name, attribute):
-                return _lookup_attr(self.live_sources, lookup_name, nm_id, attribute, scale)
+                return _lookup_attr(slot_lookups, lookup_name, nm_id, attribute, scale)
 
         if metric_key in {
             "openCount",
@@ -494,14 +669,20 @@ class _MetricEvaluator:
             "cartToOrderConversion",
             "addToWishlistCount",
         }:
-            return self.live_sources.history_lookup.get(nm_id, {}).get(metric_key)
+            return slot_lookups.history_lookup.get(nm_id, {}).get(metric_key)
         if metric_key == "localizationPercent":
-            return _lookup_attr(self.live_sources, "sf_period_lookup", nm_id, "localization_percent", 0.01)
+            return _lookup_attr(slot_lookups, "sf_period_lookup", nm_id, "localization_percent", 0.01)
         if metric_key == "feedbackRating":
-            return _lookup_attr(self.live_sources, "sf_period_lookup", nm_id, "feedback_rating", 1.0)
+            return _lookup_attr(slot_lookups, "sf_period_lookup", nm_id, "feedback_rating", 1.0)
         if metric_key in BLOCKED_SOURCE_METRIC_KEYS:
             return None
         raise ValueError(f"unsupported direct metric_key: {metric_key}")
+
+    def _slot_lookups(self, temporal_slot: str) -> SlotLookups:
+        lookups = self.live_sources.slot_lookups.get(temporal_slot)
+        if lookups is None:
+            raise ValueError(f"missing live source lookups for temporal slot: {temporal_slot}")
+        return lookups
 
 
 BLOCKED_SOURCE_METRIC_KEYS = {
@@ -516,10 +697,20 @@ def _build_metric_rows(
     metric: MetricV2Item,
     enabled_config: list[ConfigV2Item],
     evaluator: _MetricEvaluator,
+    temporal_slots: list[SheetVitrinaV1TemporalSlot],
 ) -> list[list[Any]]:
     rows: list[list[Any]] = []
     if metric.scope == "TOTAL":
-        rows.append([f"Итого: {metric.label_ru}", f"TOTAL|{metric.metric_key}", _to_sheet_value(evaluator.resolve_total(metric.metric_key))])
+        rows.append(
+            [
+                f"Итого: {metric.label_ru}",
+                f"TOTAL|{metric.metric_key}",
+                *[
+                    _to_sheet_value(evaluator.resolve_total(metric.metric_key, slot.slot_key))
+                    for slot in temporal_slots
+                ],
+            ]
+        )
         return rows
     if metric.scope == "GROUP":
         for group_name, group_items in _group_config(enabled_config).items():
@@ -529,7 +720,12 @@ def _build_metric_rows(
                 [
                     f"Группа {group_name}: {metric.label_ru}",
                     f"GROUP:{group_name}|{metric.metric_key}",
-                    _to_sheet_value(evaluator.resolve_group(metric.metric_key, group_name)),
+                    *[
+                        _to_sheet_value(
+                            evaluator.resolve_group(metric.metric_key, group_name, slot.slot_key)
+                        )
+                        for slot in temporal_slots
+                    ],
                 ]
             )
         return rows
@@ -539,7 +735,12 @@ def _build_metric_rows(
                 [
                     f"{config_item.display_name}: {metric.label_ru}",
                     f"SKU:{config_item.nm_id}|{metric.metric_key}",
-                    _to_sheet_value(evaluator.resolve_sku(metric.metric_key, config_item.nm_id)),
+                    *[
+                        _to_sheet_value(
+                            evaluator.resolve_sku(metric.metric_key, config_item.nm_id, slot.slot_key)
+                        )
+                        for slot in temporal_slots
+                    ],
                 ]
             )
         return rows
@@ -551,11 +752,16 @@ def _build_status_rows(
     current_state: Any,
     displayed_metrics: list[MetricV2Item],
     data_rows: list[list[Any]],
-    live_sources: LiveSources,
+    live_sources: TemporalLiveSources,
+    temporal_slots: list[SheetVitrinaV1TemporalSlot],
     scope_row_counts: Mapping[str, int],
     section_row_counts: Mapping[str, int],
 ) -> list[list[Any]]:
-    non_empty_value_rows = sum(1 for row in data_rows if row[2] not in ("", None))
+    non_empty_value_rows = sum(
+        1
+        for row in data_rows
+        if any(cell not in ("", None) for cell in row[2:])
+    )
     status_rows = [
         [
             "registry_upload_current_state",
@@ -579,6 +785,7 @@ def _build_status_rows(
                     "total_avg_policy": "preserve_uploaded_total_avg",
                     "section_dictionary": "uploaded_authoritative",
                     "config_service_values": "preserve_CONFIG_HI",
+                    "date_columns": ",".join(slot.column_date for slot in temporal_slots),
                 }
             ),
         ]
@@ -586,7 +793,7 @@ def _build_status_rows(
     status_rows.extend(
         [
             [
-                status.source_key,
+                _format_temporal_source_key(status.source_key, status.temporal_slot),
                 status.kind,
                 status.freshness,
                 status.snapshot_date,
@@ -603,10 +810,10 @@ def _build_status_rows(
     )
     status_rows.append(
         [
-            "sheet_vitrina_v1_compact_live_v2",
+            DELIVERY_CONTRACT_VERSION,
             "success",
-            current_state.activated_at[:10],
-            current_state.activated_at[:10],
+            temporal_slots[-1].column_date,
+            temporal_slots[-1].column_date,
             "",
             "",
             "",
@@ -620,6 +827,10 @@ def _build_status_rows(
                     "non_empty_value_rows": non_empty_value_rows,
                     "scope_row_counts": _format_counter(scope_row_counts),
                     "section_row_counts": _format_counter(section_row_counts),
+                    "date_columns": ",".join(slot.column_date for slot in temporal_slots),
+                    "temporal_slots": ",".join(
+                        f"{slot.slot_key}:{slot.column_date}" for slot in temporal_slots
+                    ),
                     "blocked_sources": ",".join(sorted(BLOCKED_SOURCE_STATUSES)),
                 }
             ),
@@ -636,8 +847,8 @@ def _metric_key_from_lookup(lookup_name: str, attribute: str) -> str:
     return attribute
 
 
-def _lookup_attr(live_sources: LiveSources, lookup_name: str, nm_id: int, attribute: str, scale: float) -> float | None:
-    lookup = getattr(live_sources, lookup_name)
+def _lookup_attr(slot_lookups: SlotLookups, lookup_name: str, nm_id: int, attribute: str, scale: float) -> float | None:
+    lookup = getattr(slot_lookups, lookup_name)
     item = lookup.get(nm_id)
     if item is None:
         return None
@@ -648,7 +859,11 @@ def _lookup_attr(live_sources: LiveSources, lookup_name: str, nm_id: int, attrib
 
 
 def _capture_live_source(
+    *,
     source_key: str,
+    temporal_slot: str,
+    temporal_policy: str,
+    column_date: str,
     requested_nm_ids: list[int],
     loader: Callable[[], Any],
 ) -> tuple[LiveSourceStatus, Any | None]:
@@ -658,6 +873,9 @@ def _capture_live_source(
         return (
             LiveSourceStatus(
                 source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
                 kind="error",
                 freshness="",
                 snapshot_date="",
@@ -676,6 +894,9 @@ def _capture_live_source(
         return (
             LiveSourceStatus(
                 source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
                 kind="missing",
                 freshness="",
                 snapshot_date="",
@@ -698,6 +919,9 @@ def _capture_live_source(
         return (
             LiveSourceStatus(
                 source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
                 kind=kind,
                 freshness=_resolve_freshness(payload),
                 snapshot_date=str(getattr(payload, "snapshot_date", "") or ""),
@@ -718,6 +942,9 @@ def _capture_live_source(
     return (
         LiveSourceStatus(
             source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
             kind=kind,
             freshness=_resolve_freshness(payload),
             snapshot_date=str(getattr(payload, "snapshot_date", "") or ""),
@@ -730,6 +957,41 @@ def _capture_live_source(
             note=_status_note_from_payload(payload),
         ),
         payload,
+    )
+
+
+def _build_temporal_gap_status(
+    *,
+    source_key: str,
+    temporal_slot: str,
+    temporal_policy: str,
+    column_date: str,
+    requested_count: int,
+) -> LiveSourceStatus:
+    gap_note = (
+        "source is current-only in the bounded live contour; "
+        "yesterday_closed is left blank instead of backfilling current values into a closed-day column"
+    )
+    if temporal_policy == "not_available_for_today":
+        gap_note = (
+            "source is not available for today_current in the bounded live contour; "
+            "today column stays blank instead of inventing fresh values"
+        )
+    return LiveSourceStatus(
+        source_key=source_key,
+        temporal_slot=temporal_slot,
+        temporal_policy=temporal_policy,
+        column_date=column_date,
+        kind="not_available",
+        freshness="",
+        snapshot_date="",
+        date="",
+        date_from="",
+        date_to="",
+        requested_count=requested_count,
+        covered_count=0,
+        missing_nm_ids=[],
+        note=gap_note,
     )
 
 
@@ -752,6 +1014,22 @@ def _resolve_freshness(payload: Any) -> str:
         if isinstance(value, str) and value:
             return value
     return ""
+
+
+def _source_policy_supports_slot(temporal_policy: str, temporal_slot: str) -> bool:
+    if temporal_policy == "dual_day_capable":
+        return True
+    if temporal_policy == TEMPORAL_SLOT_YESTERDAY_CLOSED:
+        return temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED
+    if temporal_policy == TEMPORAL_SLOT_TODAY_CURRENT:
+        return temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT
+    if temporal_policy == "not_available_for_today":
+        return temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED
+    return False
+
+
+def _format_temporal_source_key(source_key: str, temporal_slot: str) -> str:
+    return f"{source_key}[{temporal_slot}]"
 
 
 def _index_items_by_nm_id(payload: Any | None) -> dict[int, Any]:
@@ -787,6 +1065,37 @@ def _index_history_items(payload: Any | None) -> dict[int, dict[str, float]]:
     for (nm_id, metric), (_, value) in latest.items():
         out.setdefault(nm_id, {})[metric] = value
     return out
+
+
+def _build_temporal_slots(
+    *,
+    as_of_date: str,
+    current_date: str,
+) -> list[SheetVitrinaV1TemporalSlot]:
+    return [
+        SheetVitrinaV1TemporalSlot(
+            slot_key=TEMPORAL_SLOT_YESTERDAY_CLOSED,
+            slot_label=TEMPORAL_SLOT_YESTERDAY_CLOSED,
+            column_date=as_of_date,
+        ),
+        SheetVitrinaV1TemporalSlot(
+            slot_key=TEMPORAL_SLOT_TODAY_CURRENT,
+            slot_label=TEMPORAL_SLOT_TODAY_CURRENT,
+            column_date=current_date,
+        ),
+    ]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _default_now_factory() -> datetime:
+    override = str(os.environ.get("SHEET_VITRINA_CURRENT_DATE_OVERRIDE", "") or "").strip()
+    if override:
+        datetime.strptime(override, "%Y-%m-%d")
+        return datetime.fromisoformat(f"{override}T12:00:00+00:00")
+    return _utc_now()
 
 
 def _resolve_as_of_date(value: str | None) -> str:

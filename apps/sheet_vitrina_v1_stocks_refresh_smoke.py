@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -42,6 +43,7 @@ ACTIVATED_AT = "2026-04-16T10:00:00Z"
 REFRESHED_AT = "2026-04-16T10:05:00Z"
 NORMAL_AS_OF_DATE = "2026-04-15"
 RATE_LIMIT_AS_OF_DATE = "2026-04-14"
+TODAY_CURRENT_DATE = "2026-04-16"
 TOKEN_ENV = "WB_STOCKS_REFRESH_SMOKE_TOKEN"
 
 
@@ -64,7 +66,12 @@ def _check_refresh_uses_batched_stocks_request(bundle: dict[str, Any]) -> None:
         if refresh_payload["status"] != "success":
             raise AssertionError("refresh must persist the ready snapshot in normal scenario")
 
-        stocks_status = _find_status_row(plan_payload, "stocks")
+        if refresh_payload["date_columns"] != [NORMAL_AS_OF_DATE, TODAY_CURRENT_DATE]:
+            raise AssertionError("refresh_result must expose yesterday + today date columns")
+        stocks_yesterday = _find_status_row(plan_payload, "stocks[yesterday_closed]")
+        stocks_status = _find_status_row(plan_payload, "stocks[today_current]")
+        if stocks_yesterday["kind"] != "not_available":
+            raise AssertionError(f"stocks[yesterday_closed] must stay explicitly unavailable, got {stocks_yesterday}")
         if stocks_status["kind"] != "success":
             raise AssertionError(f"stocks status must be success, got {stocks_status}")
         if stocks_status["requested_count"] != 33 or stocks_status["covered_count"] != 33:
@@ -85,8 +92,10 @@ def _check_refresh_uses_batched_stocks_request(bundle: dict[str, Any]) -> None:
         stock_rows = _find_data_rows(plan_payload, "stock_total")
         if not stock_rows:
             raise AssertionError("plan must contain stock_total rows in DATA_VITRINA")
-        if any(row[2] in ("", None) for row in stock_rows[:5]):
-            raise AssertionError("normal stocks refresh must materialize non-empty stock_total values")
+        if any(row[2] not in ("", None) for row in stock_rows):
+            raise AssertionError("stocks[yesterday_closed] must stay blank instead of using current snapshot")
+        if any(row[3] in ("", None) for row in stock_rows[:5]):
+            raise AssertionError("normal stocks refresh must materialize current-day stock_total values")
         print("refresh-batched: ok -> one stocks request serves the whole refresh path")
 
 
@@ -102,7 +111,12 @@ def _check_refresh_surfaces_stocks_429_honestly(bundle: dict[str, Any]) -> None:
         if refresh_payload["status"] != "success":
             raise AssertionError("refresh should persist the snapshot shell even when one source errors")
 
-        stocks_status = _find_status_row(plan_payload, "stocks")
+        if refresh_payload["date_columns"] != [RATE_LIMIT_AS_OF_DATE, TODAY_CURRENT_DATE]:
+            raise AssertionError("refresh_result must expose requested yesterday + current today")
+        stocks_yesterday = _find_status_row(plan_payload, "stocks[yesterday_closed]")
+        stocks_status = _find_status_row(plan_payload, "stocks[today_current]")
+        if stocks_yesterday["kind"] != "not_available":
+            raise AssertionError("stocks[yesterday_closed] must stay explicitly unavailable")
         if stocks_status["kind"] != "error":
             raise AssertionError(f"stocks 429 must surface as source-level error, got {stocks_status}")
         if "status 429" not in str(stocks_status["note"]):
@@ -115,8 +129,8 @@ def _check_refresh_surfaces_stocks_429_honestly(bundle: dict[str, Any]) -> None:
         stock_rows = _find_data_rows(plan_payload, "stock_total")
         if not stock_rows:
             raise AssertionError("plan must still contain stock_total rows for honest error scenario")
-        if any(row[2] not in ("", None) for row in stock_rows):
-            raise AssertionError("errored stocks source must keep stock_total rows blank instead of fake values")
+        if any(row[2] not in ("", None) or row[3] not in ("", None) for row in stock_rows):
+            raise AssertionError("errored stocks source must keep both yesterday and today stock_total cells blank")
         print("refresh-429-honest: ok -> stocks error is surfaced without fake stock values")
 
 
@@ -214,6 +228,7 @@ def _build_entrypoint(*, runtime_dir: Path, stocks_base_url: str) -> RegistryUpl
         ),
         ads_compact_block=_SyntheticSuccessBlock("ads_compact"),
         fin_report_daily_block=_SyntheticSuccessBlock("fin_report_daily"),
+        now_factory=lambda: datetime(2026, 4, 16, 9, 0, tzinfo=timezone.utc),
     )
     return entrypoint
 
@@ -231,7 +246,7 @@ class _SyntheticSuccessBlock:
             date=as_of_date,
             date_from=as_of_date,
             date_to=as_of_date,
-            detail=f"{self.source_key} synthetic success",
+            detail=f"{self.source_key} synthetic success for {as_of_date}",
             storage_total=None,
         )
         return SimpleNamespace(result=payload)

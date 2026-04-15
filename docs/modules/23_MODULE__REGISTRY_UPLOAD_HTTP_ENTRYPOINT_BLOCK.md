@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-23-REGISTRY-UPLOAD-HTTP-ENTRYPOINT-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `registry_upload_http_entrypoint_block`."
-scope: "Первый live inbound HTTP entrypoint для V2-реестров и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, thin request -> runtime -> response wiring, server-side `activated_at`, existing refresh/read split, cheap status read и simple repo-owned HTML page без SPA/build pipeline."
+scope: "Первый live inbound HTTP entrypoint для V2-реестров и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, thin request -> runtime -> response wiring, server-side `activated_at`, existing refresh/read split, date-aware plan/status read и simple repo-owned HTML page без SPA/build pipeline."
 source_basis:
   - "migration/86_registry_upload_contract.md"
   - "migration/89_registry_upload_db_backed_runtime.md"
@@ -39,7 +39,7 @@ related_docs:
   - "migration/90_registry_upload_http_entrypoint.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под uncapped registry upload boundary и narrow operator UI surface: HTTP entrypoint принимает фактические registry list lengths, не вводит fixed row-count caps и обслуживает simple page/status routes для explicit refresh `sheet_vitrina_v1`."
+update_note: "Обновлён под date-aware `sheet_vitrina_v1` read model: HTTP entrypoint принимает фактические registry list lengths, не вводит fixed row-count caps и обслуживает simple operator/status routes поверх persisted two-slot ready snapshot."
 ---
 
 # 1. Идентификатор и статус
@@ -81,10 +81,15 @@ update_note: "Обновлён под uncapped registry upload boundary и narro
   - `422` для contract-level rejection после parse
 - Для `sheet_vitrina_v1` тот же entrypoint обслуживает ещё четыре узких surface:
   - `POST /v1/sheet-vitrina-v1/refresh` = existing heavy server-side action
-  - `GET /v1/sheet-vitrina-v1/plan` = existing cheap ready-snapshot read
+  - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
   - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result
   - `GET /sheet-vitrina-v1/operator` = simple repo-owned page с одной primary action `Загрузить данные`
 - Operator page не invent-ит новый heavy route: UI вызывает существующий `POST /v1/sheet-vitrina-v1/refresh` и читает только cheap status surface.
+- Для current checkpoint `plan/status` обязаны surface-ить temporal metadata, достаточную для thin operators:
+  - `date_columns`
+  - `temporal_slots`
+  - `source_temporal_policies`
+- Это нужно, чтобы public/runtime/operator contour не маскировал `today_current` values под surrogate `as_of_date`.
 
 ## 3.1 Допущение bounded шага
 
