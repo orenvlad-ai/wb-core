@@ -25,7 +25,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "211593619fb2719d0f836e70a59e24e9dc834d0a"
+built_from_commit: "ba4dc99558cdb54f10a9799dee49ee7058173483"
 ---
 
 # Summary
@@ -45,11 +45,13 @@ python3 apps/registry_upload_bundle_v1_smoke.py
 python3 apps/registry_upload_file_backed_service_smoke.py
 python3 apps/registry_upload_db_backed_runtime_smoke.py
 python3 apps/registry_upload_http_entrypoint_smoke.py
+python3 apps/cost_price_upload_http_entrypoint_smoke.py
 python3 apps/official_api_token_path_smoke.py
 python3 apps/stocks_block_smoke.py
 python3 apps/stocks_block_region_mapping_smoke.py
 python3 apps/stocks_block_batching_smoke.py
 python3 apps/sheet_vitrina_v1_registry_upload_trigger_smoke.py
+python3 apps/sheet_vitrina_v1_cost_price_upload_smoke.py
 python3 apps/sheet_vitrina_v1_registry_seed_v3_bootstrap_smoke.py
 python3 apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py
 python3 apps/sheet_vitrina_v1_refresh_read_split_smoke.py
@@ -71,6 +73,7 @@ Current canonical WB secret path for official adapters:
 
 Expected routes:
 - `POST /v1/registry-upload/bundle`
+- `POST /v1/cost-price/upload`
 - `POST /v1/sheet-vitrina-v1/refresh`
 - `GET /v1/sheet-vitrina-v1/plan`
 - `GET /v1/sheet-vitrina-v1/status`
@@ -82,6 +85,8 @@ Expected routes:
 clasp push
 clasp run prepareRegistryUploadOperatorSheets
 clasp run uploadRegistryUploadBundle
+clasp run prepareCostPriceSheet
+clasp run uploadCostPriceSheet
 # open the narrow repo-owned operator page for explicit refresh
 python3 -m webbrowser http://127.0.0.1:8765/sheet-vitrina-v1/operator
 # curl remains a fallback if browser/UI surface is unavailable
@@ -135,6 +140,10 @@ clasp run getSheetVitrinaV1PresentationSnapshot
 - `CONFIG / METRICS / FORMULAS` have expected headers and non-empty rows;
 - `prepareRegistryUploadOperatorSheets` currently materializes `33 / 102 / 7`;
 - `uploadRegistryUploadBundle` accepts and persists factual registry sheet lengths; на текущем contour это `33 / 102 / 7`, но проверка не должна зависеть от hardcoded row caps;
+- `COST_PRICE` has exact headers `group / cost_price_rub / effective_from`;
+- `prepareCostPriceSheet` materializes only `COST_PRICE` and its local control block, не меняя existing registry/upload actions;
+- `uploadCostPriceSheet` sends `dataset_version + uploaded_at + cost_price_rows` в separate `POST /v1/cost-price/upload`, а не подмешивает rows в `config_v2 / metrics_v2 / formulas_v2`;
+- current COST_PRICE checkpoint проверяется по accepted/rejected upload result и separate runtime current state, потому что read-side integration в `DATA_VITRINA` / `STATUS` ещё вне scope;
 - `GET /sheet-vitrina-v1/operator` поднимает simple operator page без SPA/build pipeline;
 - operator page показывает только narrow status/log surface: `idle / loading / success / error`, `as_of_date`, `date_columns`, `refreshed_at`, `DATA_VITRINA` / `STATUS` row counts и текст ошибки;
 - `POST /v1/sheet-vitrina-v1/refresh` обновляет date-aware ready snapshot в repo-owned SQLite runtime contour;
@@ -151,6 +160,7 @@ clasp run getSheetVitrinaV1PresentationSnapshot
 | Signal | Meaning |
 | --- | --- |
 | `CONFIG!I2 должен содержать URL registry upload endpoint` | sheet-side endpoint URL is missing |
+| `COST_PRICE!F2 должен содержать URL cost price upload endpoint или должен быть заполнен CONFIG!I2` | COST_PRICE upload path has no explicit URL and cannot derive origin from registry upload control block |
 | public `404` JSON / `{"detail":"Not Found"}` на ожидаемом public route | route есть в repo intent, но live deploy или publish wiring stale/incomplete |
 | `sheet_vitrina_v1 ready snapshot missing` после upload | load path is cheap-read only; explicit refresh has not materialized snapshot for the current bundle / date yet |
 | `Ready snapshot пока не materialized.` на `/sheet-vitrina-v1/operator` | operator page честно сообщает, что explicit refresh ещё не запускался для current bundle / date |

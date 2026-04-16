@@ -26,6 +26,7 @@ Legacy-репозитории остаются рабочими, но счита
 - live write bridge новой витрины в bound Google Sheet;
 - presentation pass для `DATA_VITRINA` и `STATUS`;
 - compact v3 bootstrap для `CONFIG / METRICS / FORMULAS`, который поднимает уже заполненные operator sheets и сохраняет service/status block;
+- отдельный bounded `COST_PRICE` contour: лист `COST_PRICE`, separate menu actions, sibling HTTP upload path и server-side authoritative storage seam вне compact registry bundle;
 - первый bounded end-to-end MVP `prepare -> upload -> load`, где operator seed `33 / 19 / 2`, full current `metrics_v2` dictionary для upload path и controlled reverse-load в `DATA_VITRINA` уже материализованы в коде и артефактах;
 - evidence и module docs по этим шагам.
 
@@ -48,6 +49,7 @@ Legacy-репозитории остаются рабочими, но счита
 - `artifacts/sheet_vitrina_v1_registry_upload_trigger/` как первый operator-facing sheet-side trigger для registry upload path;
 - `artifacts/sheet_vitrina_v1_registry_seed_v3_bootstrap/` как compact v3 bootstrap для operator registry sheets;
 - `artifacts/sheet_vitrina_v1_mvp_end_to_end/` как первый bounded end-to-end MVP для `VB-Core Витрина V1`;
+- `packages/application/cost_price_upload.py` и `packages/contracts/cost_price_upload.py` как отдельный authoritative upload contract для `COST_PRICE`;
 - `gas/sheet_vitrina_v1/` и `.clasp.json` для bound sheet-side wiring;
 - `wb_core_docs_master/` как compact curated-pack для project-oriented retrieval вне primary repo docs;
 - `docs/modules/` как канонический модульный reference;
@@ -68,7 +70,8 @@ Legacy-репозитории остаются рабочими, но счита
 11. Compact v3 bootstrap для `CONFIG / METRICS / FORMULAS` с сохранением service/status block.
 12. Первый bounded end-to-end MVP, где expanded MVP-safe registry seed, upload и load `DATA_VITRINA` уже работают в одном контуре.
 13. Появление `wb_core_docs_master` как secondary compact project-pack поверх primary canonical repo docs.
-14. После этого остаются full parity, stable hosted runtime URL, deploy/auth-hardening и production/runtime hardening вокруг уже materialized contour.
+14. Отдельный bounded contour для `COST_PRICE`: `COST_PRICE` sheet-side prepare/upload, sibling `POST /v1/cost-price/upload` и separate authoritative dataset в том же runtime/app boundary.
+15. После этого остаются full parity, stable hosted runtime URL, deploy/auth-hardening и production/runtime hardening вокруг уже materialized contour.
 
 ## Что не следует считать частью текущего `main`
 

@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-24-SHEET-VITRINA-V1-REGISTRY-UPLOAD-TRIGGER-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `sheet_vitrina_v1_registry_upload_trigger_block`."
-scope: "Первый operator-facing sheet-side trigger для отправки V2-реестров: листы `CONFIG / METRICS / FORMULAS`, Apps Script menu, bundle assembly, thin HTTP POST в существующий entrypoint и минимальный feedback для оператора."
+scope: "Первый operator-facing sheet-side trigger для отправки V2-реестров и sibling `COST_PRICE` contour: листы `CONFIG / METRICS / FORMULAS`, отдельный лист `COST_PRICE`, Apps Script menu, bundle assembly, thin HTTP POST в существующий entrypoint и минимальный feedback для оператора."
 source_basis:
   - "migration/86_registry_upload_contract.md"
   - "migration/90_registry_upload_http_entrypoint.md"
@@ -12,9 +12,11 @@ source_basis:
   - "artifacts/sheet_vitrina_v1_registry_upload_trigger/input/registry_upload_bundle__fixture.json"
   - "artifacts/sheet_vitrina_v1_registry_upload_trigger/evidence/initial__sheet-vitrina-v1-registry-upload-trigger__evidence.md"
 related_modules:
+  - "packages/contracts/cost_price_upload.py"
   - "packages/contracts/registry_upload_bundle_v1.py"
   - "packages/contracts/registry_upload_file_backed_service.py"
   - "packages/contracts/registry_upload_http_entrypoint.py"
+  - "packages/application/cost_price_upload.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/adapters/registry_upload_http_entrypoint.py"
@@ -22,10 +24,13 @@ related_tables:
   - "CONFIG"
   - "METRICS"
   - "FORMULAS"
+  - "COST_PRICE"
 related_endpoints:
   - "POST /v1/registry-upload/bundle"
+  - "POST /v1/cost-price/upload"
 related_runners:
   - "apps/sheet_vitrina_v1_registry_upload_trigger_smoke.py"
+  - "apps/sheet_vitrina_v1_cost_price_upload_smoke.py"
   - "apps/registry_upload_http_entrypoint_live.py"
 related_docs:
   - "migration/90_registry_upload_http_entrypoint.md"
@@ -33,7 +38,7 @@ related_docs:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/18_MODULE__SHEET_VITRINA_V1_WRITE_BRIDGE_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Создан как канонический модульный документ для первого sheet-side operator trigger загрузки реестров."
+update_note: "Обновлён под sibling COST_PRICE contour: existing registry actions остаются неизменными, а bound Apps Script получает отдельный sheet/menu/upload path для себестоимостей без смешивания с compact registry bundle."
 ---
 
 # 1. Идентификатор и статус
@@ -52,7 +57,9 @@ update_note: "Создан как канонический модульный д
   - `registry_upload_bundle_v1_block`
   - `registry_upload_http_entrypoint_block`
   - `migration/91_sheet_vitrina_v1_registry_upload_trigger.md`
-- Семантика блока: не менять server-side runtime и не строить второй UI, а дать bound таблице первый operator-visible trigger, который собирает bundle из `CONFIG / METRICS / FORMULAS` и шлёт в уже существующий HTTP entrypoint полный uploaded compact registry package без sheet-side усечения.
+- Семантика блока: не менять server-side runtime и не строить второй UI, а дать bound таблице operator-visible trigger line для двух sibling upload contour'ов:
+  - existing compact registry bundle из `CONFIG / METRICS / FORMULAS`;
+  - separate `COST_PRICE` dataset с тем же thin HTTP entrypoint boundary.
 
 # 3. Target contract и смысл результата
 
@@ -60,6 +67,9 @@ update_note: "Создан как канонический модульный д
   - лист `CONFIG`
   - лист `METRICS`
   - лист `FORMULAS`
+- Канонический sibling operator input:
+  - лист `COST_PRICE`
+  - header = `group | cost_price_rub | effective_from`
 - Канонический sheet-side bundle:
   - `bundle_version`
   - `uploaded_at`
@@ -70,6 +80,16 @@ update_note: "Создан как канонический модульный д
   - `status`
   - `bundle_version`
   - `accepted_counts`
+  - `validation_errors`
+  - `activated_at`
+- Канонический sibling cost-price payload:
+  - `dataset_version`
+  - `uploaded_at`
+  - `cost_price_rows`
+- Канонический sibling cost-price upload result:
+  - `status`
+  - `dataset_version`
+  - `accepted_counts.cost_price_rows`
   - `validation_errors`
   - `activated_at`
 
@@ -83,12 +103,21 @@ update_note: "Создан как канонический модульный д
   - `last_http_status`
   - `last_validation_errors`
 - Control block не входит в upload bundle и не меняет server-side contract.
+- `COST_PRICE!F2` хранит sibling `endpoint_url`.
+- `COST_PRICE!F3:F7` фиксирует:
+  - `last_dataset_version`
+  - `last_status`
+  - `last_activated_at`
+  - `last_http_status`
+  - `last_validation_errors`
+- COST_PRICE control block не входит в server payload и не меняет authoritative contract.
 
 ## 3.2 Допущение bounded шага
 
 - Автоматический smoke использует локальный harness Apps Script логики и реальный live HTTP entrypoint внутри repo.
 - Этот шаг не утверждает, что cloud Apps Script уже может ходить в недеплоенный локальный `localhost`.
 - Как только в `CONFIG!I2` указывается внешне достижимый URL materialized entrypoint и Apps Script pushed в bound spreadsheet, тот же trigger становится live operator path без изменения bundle/result contracts.
+- Для `COST_PRICE` действует тот же принцип: sheet-side contour остаётся thin shell и может использовать либо свой explicit endpoint URL, либо derived origin от `CONFIG!I2`, но heavy validation и current-state logic остаются server-side.
 
 ## 3.3 Current authoritative operator package
 
@@ -98,6 +127,13 @@ update_note: "Создан как канонический модульный д
   - `metrics_v2 = 102`
   - `formulas_v2 = 7`
 - Duplicate rejection не должен сдвигать current truth и только обновляет status block как rejected attempt.
+- `COST_PRICE` не подмешивается в current uploaded compact package.
+- Separate `Подготовить лист COST_PRICE` и `Отправить себестоимости` не должны менять поведение existing действий:
+  - `Подготовить листы CONFIG / METRICS / FORMULAS`
+  - `Отправить реестры на сервер`
+  - `POST /v1/sheet-vitrina-v1/refresh`
+  - `Загрузить таблицу`
+- Duplicate `(group, effective_from)` внутри одного COST_PRICE dataset отвергаются server-side как explicit validation error.
 
 # 4. Артефакты и wiring по модулю
 
@@ -125,10 +161,12 @@ update_note: "Создан как канонический модульный д
   - `apps/sheet_vitrina_v1_registry_upload_trigger_harness.js`
 - smoke:
   - `apps/sheet_vitrina_v1_registry_upload_trigger_smoke.py`
+  - `apps/sheet_vitrina_v1_cost_price_upload_smoke.py`
 
 # 6. Какой smoke подтверждён
 
 - Подтверждён локальный bundle-to-runtime smoke через `apps/sheet_vitrina_v1_registry_upload_trigger_smoke.py`.
+- Подтверждён локальный COST_PRICE prepare-to-upload smoke через `apps/sheet_vitrina_v1_cost_price_upload_smoke.py`.
 - Smoke проверяет:
   - что operator sheets `CONFIG / METRICS / FORMULAS` materialize-ят канонический bundle;
   - что именно Apps Script upload function делает thin POST в существующий HTTP entrypoint;
@@ -136,18 +174,27 @@ update_note: "Создан как канонический модульный д
   - что duplicate `bundle_version` отвергается и фиксируется в operator status block;
   - что current truth обновляется через уже существующий runtime DB;
   - что sheet-built bundle сохраняет все rows uploaded compact package, а не только pilot/MVP-subset.
+- COST_PRICE smoke дополнительно проверяет:
+  - что `Подготовить лист COST_PRICE` materialize-ит точные headers `group / cost_price_rub / effective_from`;
+  - что sheet-side payload для себестоимостей уходит отдельно от `config_v2 / metrics_v2 / formulas_v2`;
+  - что accepted COST_PRICE upload обновляет separate runtime current state;
+  - что duplicate `dataset_version` фиксируется в COST_PRICE status block как rejected attempt.
 
 # 7. Что уже доказано по модулю
 
 - В `wb-core` появился первый operator-facing trigger для загрузки реестров из новой таблицы.
+- В том же Apps Script contour появился отдельный bounded trigger для `COST_PRICE`, но он не смешивается с compact registry bundle.
 - Trigger не дублирует server-side validation/runtime логику, а пишет в уже materialized HTTP entrypoint.
-- В таблице появились отдельные service-листы `CONFIG`, `METRICS`, `FORMULAS`.
+- В таблице появились отдельные service-листы `CONFIG`, `METRICS`, `FORMULAS` и отдельный input/service sheet `COST_PRICE`.
 - Оператор получает минимальный persisted feedback по последней загрузке в control block `CONFIG!I2:I7`.
+- Для себестоимостей оператор получает аналогичный persisted feedback в `COST_PRICE!F2:F7`.
 - Sheet-side upload теперь отправляет current authoritative registry lists, уже согласованные с uploaded compact package.
+- COST_PRICE contour пока materialize-ит только отдельный authoritative dataset для будущей read-side integration; он ещё не меняет `DATA_VITRINA` и `STATUS`.
 
 # 8. Что пока не является частью финальной production-сборки
 
 - загрузка server-side current truth обратно в таблицу;
+- integration COST_PRICE values в `DATA_VITRINA` / `STATUS`;
 - отдельная кнопка `обновить витрину`;
 - deploy и внешняя доступность entrypoint;
 - auth-hardening;

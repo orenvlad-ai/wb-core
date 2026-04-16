@@ -30,6 +30,7 @@ def main() -> None:
     server = build_registry_upload_http_server(config, entrypoint=entrypoint)
     host, port = server.server_address
     print(f"registry upload http entrypoint: http://{host}:{port}{config.upload_path}")
+    print(f"cost price upload endpoint: http://{host}:{port}{config.cost_price_upload_path}")
     print(f"sheet vitrina plan endpoint: http://{host}:{port}{config.sheet_plan_path}")
     print(f"sheet vitrina refresh endpoint: http://{host}:{port}{config.sheet_refresh_path}")
     print(f"sheet vitrina status endpoint: http://{host}:{port}{config.sheet_status_path}")

@@ -20,17 +20,20 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "фактическая внешняя project upload"
-built_from_commit: "211593619fb2719d0f836e70a59e24e9dc834d0a"
+built_from_commit: "ba4dc99558cdb54f10a9799dee49ee7058173483"
 docset_version: "wb_core_docs_master_v1"
-built_at: "2026-04-16T09:35:00Z"
+built_at: "2026-04-16T10:08:59Z"
 core_docs_changed:
-  - "docs/modules/07_MODULE__STOCKS_BLOCK.md"
+  - "README.md"
+  - "docs/architecture/01_target_architecture.md"
+  - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
+  - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
   - "wb_core_docs_master/05_REGISTER__MODULE_STATUS_AND_CHECKPOINTS.md"
   - "wb_core_docs_master/09_RUNBOOK__COMMON_SMOKE_AND_DEBUG.md"
 project_upload_required: true
 last_project_upload_at: "2026-04-14T10:23:55Z"
-project_upload_note: "pack changed after stocks regional decomposition fix: live/current WB aliases for South/North-Caucasus and Far/Siberia are normalized server-side, unmapped residual quantity is surfaced in STATUS note, and confirmed external upload of this updated pack is still pending"
+project_upload_note: "pack changed after separate COST_PRICE contour landed: sheet-side menu now has dedicated prepare/upload actions, sibling POST /v1/cost-price/upload stores an authoritative dataset outside the compact registry bundle, and confirmed external upload of this updated pack is still pending"
 ---
 
 # Summary

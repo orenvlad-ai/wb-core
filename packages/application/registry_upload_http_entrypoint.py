@@ -9,6 +9,7 @@ from typing import Any, Callable, Mapping
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock
+from packages.contracts.cost_price_upload import CostPriceUploadResult
 from packages.contracts.registry_upload_file_backed_service import RegistryUploadResult
 
 
@@ -29,6 +30,12 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_bundle_payload(self, payload: Mapping[str, Any]) -> RegistryUploadResult:
         return self.runtime.ingest_bundle(
+            payload,
+            activated_at=self.activated_at_factory(),
+        )
+
+    def handle_cost_price_payload(self, payload: Mapping[str, Any]) -> CostPriceUploadResult:
+        return self.runtime.ingest_cost_price_payload(
             payload,
             activated_at=self.activated_at_factory(),
         )

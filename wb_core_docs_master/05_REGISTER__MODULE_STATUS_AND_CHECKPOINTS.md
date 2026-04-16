@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "211593619fb2719d0f836e70a59e24e9dc834d0a"
+built_from_commit: "ba4dc99558cdb54f10a9799dee49ee7058173483"
 ---
 
 # Summary
@@ -68,6 +68,11 @@ Current main-confirmed operator flow:
 - `POST /v1/sheet-vitrina-v1/refresh`
 - `Загрузить таблицу`
 
+Current sibling operator input flow:
+- `Подготовить лист COST_PRICE`
+- `Отправить себестоимости`
+- flow обновляет только separate `COST_PRICE` authoritative dataset и не меняет current `DATA_VITRINA` / `STATUS` read-side до следующего bounded шага
+
 Current repo-owned operator refresh surface:
 - `GET /sheet-vitrina-v1/operator`
 - page uses `POST /v1/sheet-vitrina-v1/refresh` and `GET /v1/sheet-vitrina-v1/status`
@@ -79,6 +84,7 @@ Current main-confirmed counts для этого flow:
 - refresh materialize-ит date-aware ready snapshot `yesterday_closed + today_current`
 - operator-facing `DATA_VITRINA` = server-driven two-day `date_matrix` `1698` rendered rows / `95` metric keys (`1631` source rows, `34` blocks)
 - operator-facing `STATUS` = per-source/per-slot freshness surface; current-only sources (`stocks`, `prices_snapshot`, `ads_bids`) показывают `not_available` для `yesterday_closed`, а не backfill
+- sibling `COST_PRICE` contour = отдельный sheet/menu/upload path и separate runtime current-state seam вне compact bundle
 
 This is the first bounded MVP checkpoint, not final production parity.
 

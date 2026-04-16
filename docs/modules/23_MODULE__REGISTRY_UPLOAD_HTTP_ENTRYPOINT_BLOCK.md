@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-23-REGISTRY-UPLOAD-HTTP-ENTRYPOINT-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `registry_upload_http_entrypoint_block`."
-scope: "Первый live inbound HTTP entrypoint для V2-реестров и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, thin request -> runtime -> response wiring, server-side `activated_at`, existing refresh/read split, date-aware plan/status read и simple repo-owned HTML page без SPA/build pipeline."
+scope: "Первый live inbound HTTP entrypoint для V2-реестров, separate `COST_PRICE` upload contour и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, sibling cost-price request, thin request -> runtime -> response wiring, server-side `activated_at`, existing refresh/read split, date-aware plan/status read и simple repo-owned HTML page без SPA/build pipeline."
 source_basis:
   - "migration/86_registry_upload_contract.md"
   - "migration/89_registry_upload_db_backed_runtime.md"
@@ -12,10 +12,12 @@ source_basis:
   - "artifacts/registry_upload_http_entrypoint/input/registry_upload_bundle__fixture.json"
   - "artifacts/registry_upload_http_entrypoint/evidence/initial__registry-upload-http-entrypoint__evidence.md"
 related_modules:
+  - "packages/contracts/cost_price_upload.py"
   - "packages/contracts/registry_upload_bundle_v1.py"
   - "packages/contracts/registry_upload_file_backed_service.py"
   - "packages/contracts/registry_upload_db_backed_runtime.py"
   - "packages/contracts/registry_upload_http_entrypoint.py"
+  - "packages/application/cost_price_upload.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/adapters/registry_upload_http_entrypoint.py"
@@ -25,6 +27,7 @@ related_tables:
   - "FORMULAS_V2"
 related_endpoints:
   - "POST /v1/registry-upload/bundle"
+  - "POST /v1/cost-price/upload"
   - "POST /v1/sheet-vitrina-v1/refresh"
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
@@ -32,6 +35,7 @@ related_endpoints:
 related_runners:
   - "apps/registry_upload_http_entrypoint_live.py"
   - "apps/registry_upload_http_entrypoint_smoke.py"
+  - "apps/cost_price_upload_http_entrypoint_smoke.py"
   - "apps/registry_upload_db_backed_runtime_smoke.py"
 related_docs:
   - "migration/86_registry_upload_contract.md"
@@ -39,7 +43,7 @@ related_docs:
   - "migration/90_registry_upload_http_entrypoint.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под date-aware `sheet_vitrina_v1` read model: HTTP entrypoint принимает фактические registry list lengths, не вводит fixed row-count caps и обслуживает simple operator/status routes поверх persisted two-slot ready snapshot."
+update_note: "Обновлён под separate `COST_PRICE` contour и date-aware `sheet_vitrina_v1` read model: HTTP entrypoint принимает фактические registry list lengths, держит sibling cost-price dataset отдельно от compact bundle и обслуживает simple operator/status routes поверх persisted two-slot ready snapshot."
 ---
 
 # 1. Идентификатор и статус
@@ -66,6 +70,10 @@ update_note: "Обновлён под date-aware `sheet_vitrina_v1` read model: 
 - Канонический input:
   - `POST /v1/registry-upload/bundle`
   - request body = `bundle_version + uploaded_at + config_v2 + metrics_v2 + formulas_v2`
+- Канонический sibling input:
+  - `POST /v1/cost-price/upload`
+  - request body = `dataset_version + uploaded_at + cost_price_rows`
+  - `cost_price_rows[]` = `group + cost_price_rub + effective_from`
 - Канонический output:
   - JSON `RegistryUploadResult`
   - `status`
@@ -75,10 +83,19 @@ update_note: "Обновлён под date-aware `sheet_vitrina_v1` read model: 
   - `activated_at`
 - HTTP boundary не должен навязывать fixed row-count presets для `config_v2 / metrics_v2 / formulas_v2`.
 - `accepted_counts` обязаны отражать фактические длины списков из request body после successful ingest.
+- COST_PRICE contour не подмешивается в main compact registry bundle и хранится в runtime как отдельный authoritative dataset/current-state seam.
+- Для `POST /v1/cost-price/upload` server-side validator обязан:
+  - требовать `group`, `cost_price_rub`, `effective_from` на каждой row;
+  - canonicalize `effective_from` к `YYYY-MM-DD`, если sheet/client прислал `DD.MM.YYYY` или ISO datetime;
+  - отвергать duplicate `(group, effective_from)` внутри одного dataset вместо неявного last-row-wins.
 - HTTP семантика bounded шага:
   - `200` для `accepted`
   - `409` для duplicate `bundle_version`
   - `422` для contract-level rejection после parse
+- Для COST_PRICE действует тот же bounded status mapping:
+  - `200` для `accepted`
+  - `409` для duplicate `dataset_version`
+  - `422` для contract-level rejection после parse/validation
 - Для `sheet_vitrina_v1` тот же entrypoint обслуживает ещё четыре узких surface:
   - `POST /v1/sheet-vitrina-v1/refresh` = existing heavy server-side action
   - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
@@ -155,6 +172,7 @@ update_note: "Обновлён под date-aware `sheet_vitrina_v1` read model: 
 # 7. Что уже доказано по модулю
 
 - upload line больше не заканчивается на локальном runtime: в repo появился первый внешний вызываемый boundary.
+- Separate COST_PRICE contour переиспользует тот же app/service boundary и runtime DB, но остаётся отдельным dataset seam без смешивания с `config_v2 / metrics_v2 / formulas_v2`.
 - Repo-owned operator page для explicit refresh теперь живёт на том же thin HTTP entrypoint и убирает ручной `curl` из нормального operator path.
 - Новая HTTP прослойка остаётся тонкой и не тянет за собой deploy, auth, scheduler и большой Apps Script UI.
 - HTTP boundary выровнен с current upload semantics: валидируется содержимое registry rows, а не их заранее зашитое количество.
