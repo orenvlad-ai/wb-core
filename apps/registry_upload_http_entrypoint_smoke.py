@@ -113,6 +113,12 @@ def main() -> None:
                 raise AssertionError(f"operator UI must return 200, got {operator_ui_status}")
             if "Обновление данных витрины" not in operator_ui_html or "Загрузить данные" not in operator_ui_html:
                 raise AssertionError("operator UI must expose the expected minimal page")
+            if "yesterday_closed + today_current" not in operator_ui_html:
+                raise AssertionError("operator UI must describe the current two-slot ready snapshot semantics")
+            if "current-only sources" not in operator_ui_html or "not_available" not in operator_ui_html:
+                raise AssertionError("operator UI must explain that yesterday_closed not_available is expected")
+            if "DATA_VITRINA rows" not in operator_ui_html or "STATUS rows" not in operator_ui_html:
+                raise AssertionError("operator UI must surface row-count fields for the persisted snapshot")
             operator_ui_config = _extract_operator_ui_config(operator_ui_html)
             if operator_ui_config != {
                 "page_title": "Обновление данных витрины",
