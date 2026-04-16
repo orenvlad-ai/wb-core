@@ -189,12 +189,12 @@ update_note: "Обновлён под sibling COST_PRICE contour: existing regis
 - Оператор получает минимальный persisted feedback по последней загрузке в control block `CONFIG!I2:I7`.
 - Для себестоимостей оператор получает аналогичный persisted feedback в `COST_PRICE!F2:F7`.
 - Sheet-side upload теперь отправляет current authoritative registry lists, уже согласованные с uploaded compact package.
-- COST_PRICE contour пока materialize-ит только отдельный authoritative dataset для будущей read-side integration; он ещё не меняет `DATA_VITRINA` и `STATUS`.
+- COST_PRICE contour по-прежнему остаётся upload-only на sheet-side, но его authoritative dataset теперь используется server-side refresh/read contour без новой Apps Script truth logic.
 
 # 8. Что пока не является частью финальной production-сборки
 
 - загрузка server-side current truth обратно в таблицу;
-- integration COST_PRICE values в `DATA_VITRINA` / `STATUS`;
+- server-side integration logic `COST_PRICE` в `DATA_VITRINA` / `STATUS` beyond emitting the upload itself;
 - отдельная кнопка `обновить витрину`;
 - deploy и внешняя доступность entrypoint;
 - auth-hardening;

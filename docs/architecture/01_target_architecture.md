@@ -56,7 +56,7 @@ Target-state — server-first:
 - bounded sheet-side витрина уже есть как `DATA_VITRINA` и `STATUS`;
 - live write и visual presentation подтверждены для этого bounded sheet-side contour;
 - operator-facing upload trigger для `CONFIG / METRICS / FORMULAS` уже materialize-ится в текущей линии;
-- separate operator-facing upload contour для `COST_PRICE` уже materialize-ится в текущей линии, но пока хранится только как отдельный authoritative dataset и не участвует в current `DATA_VITRINA`/`STATUS` read-side;
+- separate operator-facing upload contour для `COST_PRICE` уже materialize-ится в текущей линии как отдельный authoritative dataset и теперь подключён server-side в current `DATA_VITRINA`/`STATUS` read-side через effective-date overlay;
 - compact v3 bootstrap operator sheets уже тоже материализован в текущей линии;
 - первый bounded readback path server-side truth обратно в `DATA_VITRINA` уже является частью текущего `main` как explicit refresh + cheap read split;
 - full replacement operator-table по-прежнему не является частью текущей линии.

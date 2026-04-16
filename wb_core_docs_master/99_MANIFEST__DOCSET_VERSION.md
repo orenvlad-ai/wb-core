@@ -20,20 +20,24 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "фактическая внешняя project upload"
-built_from_commit: "ba4dc99558cdb54f10a9799dee49ee7058173483"
+built_from_commit: "5db3548de01b2299c4f003ad43074f367d3050c8"
 docset_version: "wb_core_docs_master_v1"
-built_at: "2026-04-16T10:08:59Z"
+built_at: "2026-04-16T16:31:02Z"
 core_docs_changed:
   - "README.md"
   - "docs/architecture/01_target_architecture.md"
+  - "docs/architecture/08_open_questions_and_decision_log.md"
+  - "docs/modules/00_INDEX__MODULES.md"
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
+  - "wb_core_docs_master/01_PASSPORT__WEBCORE_PROJECT.md"
   - "wb_core_docs_master/05_REGISTER__MODULE_STATUS_AND_CHECKPOINTS.md"
+  - "wb_core_docs_master/06_REGISTER__LEGACY_TO_WEBCORE_MAP.md"
   - "wb_core_docs_master/09_RUNBOOK__COMMON_SMOKE_AND_DEBUG.md"
 project_upload_required: true
 last_project_upload_at: "2026-04-14T10:23:55Z"
-project_upload_note: "pack changed after separate COST_PRICE contour landed: sheet-side menu now has dedicated prepare/upload actions, sibling POST /v1/cost-price/upload stores an authoritative dataset outside the compact registry bundle, and confirmed external upload of this updated pack is still pending"
+project_upload_note: "pack changed after COST_PRICE read-side integration landed: authoritative COST_PRICE now feeds server-side DATA_VITRINA/STATUS and proxy-profit rows via existing refresh/read contour; confirmed external upload of this updated pack is still pending"
 ---
 
 # Summary

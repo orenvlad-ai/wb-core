@@ -36,6 +36,7 @@ related_runners:
   - "apps/registry_upload_http_entrypoint_live.py"
   - "apps/registry_upload_http_entrypoint_smoke.py"
   - "apps/cost_price_upload_http_entrypoint_smoke.py"
+  - "apps/sheet_vitrina_v1_cost_price_read_side_smoke.py"
   - "apps/registry_upload_db_backed_runtime_smoke.py"
 related_docs:
   - "migration/86_registry_upload_contract.md"
@@ -43,7 +44,7 @@ related_docs:
   - "migration/90_registry_upload_http_entrypoint.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под separate `COST_PRICE` contour и date-aware `sheet_vitrina_v1` read model: HTTP entrypoint принимает фактические registry list lengths, держит sibling cost-price dataset отдельно от compact bundle и обслуживает simple operator/status routes поверх persisted two-slot ready snapshot."
+update_note: "Обновлён под separate `COST_PRICE` contour и date-aware `sheet_vitrina_v1` read model: HTTP entrypoint принимает фактические registry list lengths, держит sibling cost-price dataset отдельно от compact bundle и использует его в existing refresh/plan/status read-side через server-side effective-date overlay без нового public route."
 ---
 
 # 1. Идентификатор и статус
@@ -84,6 +85,10 @@ update_note: "Обновлён под separate `COST_PRICE` contour и date-awar
 - HTTP boundary не должен навязывать fixed row-count presets для `config_v2 / metrics_v2 / formulas_v2`.
 - `accepted_counts` обязаны отражать фактические длины списков из request body после successful ingest.
 - COST_PRICE contour не подмешивается в main compact registry bundle и хранится в runtime как отдельный authoritative dataset/current-state seam.
+- Existing `POST /v1/cost-price/upload` остаётся единственным write path для себестоимостей, а existing `POST /v1/sheet-vitrina-v1/refresh` / `GET /v1/sheet-vitrina-v1/plan` / `GET /v1/sheet-vitrina-v1/status` используют этот current state только server-side:
+  - match по `group`;
+  - choose latest `effective_from <= slot_date`;
+  - surface coverage/diagnostics в `STATUS.cost_price[*]` без отдельного public read route для dataset rows.
 - Для `POST /v1/cost-price/upload` server-side validator обязан:
   - требовать `group`, `cost_price_rub`, `effective_from` на каждой row;
   - canonicalize `effective_from` к `YYYY-MM-DD`, если sheet/client прислал `DD.MM.YYYY` или ISO datetime;
@@ -173,6 +178,7 @@ update_note: "Обновлён под separate `COST_PRICE` contour и date-awar
 
 - upload line больше не заканчивается на локальном runtime: в repo появился первый внешний вызываемый boundary.
 - Separate COST_PRICE contour переиспользует тот же app/service boundary и runtime DB, но остаётся отдельным dataset seam без смешивания с `config_v2 / metrics_v2 / formulas_v2`.
+- New read-side integration не открывает новый public route: authoritative `COST_PRICE` current state читается внутри existing refresh/read contour и materialize-ит operator-facing metrics/diagnostics в already existing `DATA_VITRINA` / `STATUS`.
 - Repo-owned operator page для explicit refresh теперь живёт на том же thin HTTP entrypoint и убирает ручной `curl` из нормального operator path.
 - Новая HTTP прослойка остаётся тонкой и не тянет за собой deploy, auth, scheduler и большой Apps Script UI.
 - HTTP boundary выровнен с current upload semantics: валидируется содержимое registry rows, а не их заранее зашитое количество.
