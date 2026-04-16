@@ -34,7 +34,9 @@ related_endpoints:
   - "GET /sheet-vitrina-v1/operator"
 related_runners:
   - "apps/registry_upload_http_entrypoint_live.py"
+  - "apps/registry_upload_http_entrypoint_hosted_runtime.py"
   - "apps/registry_upload_http_entrypoint_smoke.py"
+  - "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"
   - "apps/cost_price_upload_http_entrypoint_smoke.py"
   - "apps/sheet_vitrina_v1_cost_price_read_side_smoke.py"
   - "apps/registry_upload_db_backed_runtime_smoke.py"
@@ -42,9 +44,10 @@ related_docs:
   - "migration/86_registry_upload_contract.md"
   - "migration/89_registry_upload_db_backed_runtime.md"
   - "migration/90_registry_upload_http_entrypoint.md"
+  - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под separate `COST_PRICE` contour и date-aware `sheet_vitrina_v1` read model: HTTP entrypoint принимает фактические registry list lengths, держит sibling cost-price dataset отдельно от compact bundle и использует его в existing refresh/plan/status read-side через server-side effective-date overlay без нового public route."
+update_note: "Обновлён под separate `COST_PRICE` contour, date-aware `sheet_vitrina_v1` read model и repo-owned hosted deploy contract: HTTP entrypoint принимает фактические registry list lengths, держит sibling cost-price dataset отдельно от compact bundle, использует его в existing refresh/plan/status read-side через server-side effective-date overlay без нового public route и теперь имеет canonical hosted deploy/probe runner вместо hidden operational knowledge."
 ---
 
 # 1. Идентификатор и статус
@@ -132,6 +135,26 @@ update_note: "Обновлён под separate `COST_PRICE` contour и date-awar
   - incomplete nginx publish: live app route уже есть, но public contour не публикует его наружу.
 - Поэтому для нового public route недостаточно проверить только file-level router code в repo: нужен explicit probe live/public route existence.
 
+## 3.3 Hosted deploy contract для live closure
+
+- Hosted runtime contract теперь materialized в repo:
+  - `apps/registry_upload_http_entrypoint_hosted_runtime.py`
+  - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__example.json`
+  - `docs/architecture/10_hosted_runtime_deploy_contract.md`
+- Этот contract фиксирует:
+  - canonical public base URL `https://api.selleros.pro`;
+  - canonical loopback base URL `http://127.0.0.1:8765`;
+  - canonical route paths через existing entrypoint env names;
+  - required target fields `ssh_destination / target_dir / service_name / restart_command / environment_file`;
+  - one repo-owned sequence `deploy -> loopback-probe -> public-probe`.
+- Unknown host-specific values не invent-ятся в repo:
+  - actual `target_dir`
+  - actual `service_name`
+  - actual `restart_command`
+  - actual `status_command`
+  - actual `environment_file`
+- Пока эти values или deploy rights не даны, live task обязана завершаться точным blocker-ом, а не vague ссылкой на “external operational knowledge”.
+
 # 4. Артефакты и wiring по модулю
 
 - input artifact:
@@ -157,8 +180,11 @@ update_note: "Обновлён под separate `COST_PRICE` contour и date-awar
   - `packages/adapters/registry_upload_http_entrypoint.py`
 - live runner:
   - `apps/registry_upload_http_entrypoint_live.py`
+- hosted deploy runner:
+  - `apps/registry_upload_http_entrypoint_hosted_runtime.py`
 - smoke:
   - `apps/registry_upload_http_entrypoint_smoke.py`
+  - `apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py`
 
 # 6. Какой smoke подтверждён
 
@@ -182,13 +208,14 @@ update_note: "Обновлён под separate `COST_PRICE` contour и date-awar
 - Repo-owned operator page для explicit refresh теперь живёт на том же thin HTTP entrypoint и убирает ручной `curl` из нормального operator path.
 - Новая HTTP прослойка остаётся тонкой и не тянет за собой deploy, auth, scheduler и большой Apps Script UI.
 - HTTP boundary выровнен с current upload semantics: валидируется содержимое registry rows, а не их заранее зашитое количество.
+- Live closure для этого блока теперь тоже имеет repo-owned contract: Codex больше не должна угадывать target route/service steps руками, а должна идти через canonical hosted runner.
 
 # 8. Что пока не является частью финальной production-сборки
 
 - Apps Script upload button redesign;
 - Google Sheets UI redesign;
 - operator workflow в таблице;
-- deploy и внешняя доступность entrypoint;
-- auth/hardening;
+- actual deploy rights и внешняя доступность entrypoint;
+- final auth/hardening;
 - background jobs / scheduler;
 - production Postgres redesign и внешняя инфраструктура.

@@ -27,12 +27,12 @@
 
 Главный незакрытый gap текущего `main`:
 - registry upload и bounded reverse-load уже присутствуют в текущей линии;
-- этот документ пока не должен трактоваться как подтверждение repo-owned stable hosted runtime URL, deploy/auth-hardening или production storage binding для registry upload.
+- этот документ теперь признаёт repo-owned hosted runtime deploy/probe contract для `api.selleros.pro`, но не должен трактоваться как подтверждение actual granted deploy access, final auth-hardening или production storage binding.
 
 После этого незакрытым хвостом остаются:
 - full legacy parity по всем metric sections;
-- stable hosted runtime URL и production-bound operator runtime;
-- deploy/auth-hardening и production storage binding.
+- actual granted deploy access и production-bound operator runtime;
+- final auth-hardening и production storage binding.
 
 ## Server-First Architecture
 
@@ -116,7 +116,7 @@ Target-state — server-first:
 Текущее ограничение `main`:
 - contracts, artifact-backed bundle, file-backed service, DB-backed runtime, live HTTP entrypoint, operator-facing sheet trigger и compact v3 bootstrap уже есть;
 - bounded reverse load из server-side truth обратно в таблицу уже смёржен в текущий `main` как persisted ready snapshot в repo-owned runtime SQLite contour;
-- deploy/auth hardening и production storage binding остаются отдельным незакрытым хвостом.
+- hosted runtime deploy/probe contract уже repo-owned, но actual deploy rights, final auth-hardening и production storage binding остаются отдельным незакрытым хвостом.
 
 ### Граница Web-Source
 
