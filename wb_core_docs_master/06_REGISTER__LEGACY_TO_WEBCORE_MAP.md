@@ -24,7 +24,7 @@ update_triggers:
   - "перенос новой legacy capability"
   - "изменение migration boundary"
   - "закрытие крупного compatibility gap"
-built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
+built_from_commit: "5db3548de01b2299c4f003ad43074f367d3050c8"
 ---
 
 # Summary
@@ -40,7 +40,7 @@ built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
 | legacy `CONFIG` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `registry_upload_bundle_v1_block` | перенесён в compact V2/V3 form | не равен full legacy `CONFIG` 1:1 |
 | legacy `METRICS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `sheet_vitrina_v1_mvp_end_to_end_block` | uploaded compact package перенесён | sheet/upload dictionary materialize-ит `102` rows; current truth / server plan держат `95` enabled+show_in_data metrics, а operator-facing `DATA_VITRINA` materialize-ит тот же server-driven set как thin `date_matrix` |
 | legacy `FORMULAS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `registry_upload_bundle_v1_block` | current uploaded set перенесён | sheet-side seed и upload bundle держат `7` formulas rows, нужных authoritative `metrics_v2` |
-| legacy `DATA`/vitrina readback | `sheet_vitrina_v1_mvp_end_to_end_block` | bounded replacement есть | rows materialize-ятся по uploaded package; promo/cogs numeric fill ещё blocked live-source gap'ом |
+| legacy `DATA`/vitrina readback | `sheet_vitrina_v1_mvp_end_to_end_block` | bounded replacement есть | rows materialize-ятся по uploaded package; `COST_PRICE` overlay уже server-side integrated, open gap остаётся у promo-backed и других long-tail live rows |
 | legacy `AI_EXPORT` | отдельного полного replacement пока нет | open gap | compatibility boundary ещё не закрыт |
 | `wb-ai-research` ingest/runtime вокруг registry | `registry_upload_file_backed_service_block`, `registry_upload_db_backed_runtime_block`, `registry_upload_http_entrypoint_block` | перенесено bounded chain-ом | production hardening остаётся отдельно |
 | `wb-ai-research` snapshot consumers | source/data blocks `01–10` | largely migrated | current repo owns contracts/artifacts/smokes |
@@ -55,7 +55,7 @@ built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
 # Known gaps
 
 - full parity beyond current uploaded compact package и long-tail registry rows;
-- live numeric fill для promo/cogs-backed metrics;
+- live numeric fill для promo-backed metrics и других bounded long-tail rows beyond current `COST_PRICE` overlay;
 - окончательная судьба `AI_EXPORT`;
 - production-grade hosted runtime/deploy surface вокруг уже materialized upload/load contour.
 

@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
+built_from_commit: "5db3548de01b2299c4f003ad43074f367d3050c8"
 ---
 
 # Summary
@@ -68,6 +68,11 @@ Current main-confirmed operator flow:
 - `POST /v1/sheet-vitrina-v1/refresh`
 - `Загрузить таблицу`
 
+Current sibling operator input flow:
+- `Подготовить лист COST_PRICE`
+- `Отправить себестоимости`
+- flow обновляет separate `COST_PRICE` authoritative dataset, а existing refresh/read contour затем использует его server-side в current `DATA_VITRINA` / `STATUS`
+
 Current repo-owned operator refresh surface:
 - `GET /sheet-vitrina-v1/operator`
 - page uses `POST /v1/sheet-vitrina-v1/refresh` and `GET /v1/sheet-vitrina-v1/status`
@@ -76,14 +81,19 @@ Current repo-owned operator refresh surface:
 Current main-confirmed counts для этого flow:
 - prepare/upload package = `33 / 102 / 7`
 - current truth / ready snapshot displayed metrics = `95`
-- operator-facing `DATA_VITRINA` = server-driven `date_matrix` `1698` rendered rows / `95` metric keys (`1631` source rows, `34` blocks)
+- refresh materialize-ит date-aware ready snapshot `yesterday_closed + today_current`
+- operator-facing `DATA_VITRINA` = server-driven two-day `date_matrix` `1698` rendered rows / `95` metric keys (`1631` source rows, `34` blocks)
+- operator-facing `STATUS` = per-source/per-slot freshness surface; current-only sources (`stocks`, `prices_snapshot`, `ads_bids`) показывают `not_available` для `yesterday_closed`, а не backfill
+- sibling `COST_PRICE` contour = отдельный sheet/menu/upload path и separate runtime current-state seam вне compact bundle
+- current operator-facing cost overlay = server-side `cost_price_rub`, `avg_cost_price_rub`, `total_proxy_profit_rub`, `proxy_margin_pct_total` с resolution `group + latest effective_from <= slot_date`
 
 This is the first bounded MVP checkpoint, not final production parity.
 
 # Known gaps
 
 - full legacy parity beyond current main-confirmed sheet/upload dictionary;
-- live numeric fill для promo/cogs-backed metrics до появления live HTTP adapters;
+- live numeric fill для promo-backed metrics и других bounded long-tail rows beyond current `COST_PRICE` overlay;
+- отдельный bounded fix по любому remaining non-district / foreign stocks residual, если одной truthful `STATUS` note окажется недостаточно для operator flow;
 - production hardening around runtime/deploy/auth;
 - unresolved long-tail compatibility around `AI_EXPORT`.
 

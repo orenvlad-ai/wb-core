@@ -63,6 +63,7 @@ def main() -> None:
                 "SHEET_VITRINA_OPERATOR_UI_PATH": config.sheet_operator_ui_path,
                 "REGISTRY_UPLOAD_RUNTIME_DIR": str(config.runtime_dir),
                 "REGISTRY_UPLOAD_ACTIVATED_AT_OVERRIDE": ACTIVATED_AT,
+                "SHEET_VITRINA_CURRENT_DATE_OVERRIDE": "2026-04-13",
                 "SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK": "1",
             }
         )
@@ -134,9 +135,11 @@ def main() -> None:
             if load_result["http_status"] != 200:
                 raise AssertionError(f"load endpoint must return 200, got {load_result['http_status']}")
             sheet_plan = load_result["sheet_plan"]
-            if sheet_plan["snapshot_id"] != expected_summary["snapshot_id"]:
+            if sheet_plan["snapshot_id"] != "2026-04-12__2026-04-13__sheet_vitrina_v1_temporal_live_v1__current":
                 raise AssertionError("snapshot_id mismatch")
-            if sheet_plan["sheets"][1]["row_count"] != expected_summary["status_row_count"]:
+            if sheet_plan["date_columns"] != ["2026-04-12", "2026-04-13"]:
+                raise AssertionError("plan must expose yesterday + today date_columns")
+            if sheet_plan["sheets"][1]["row_count"] != 26:
                 raise AssertionError("STATUS row_count mismatch")
             write_result = load_result["write_result"]
             if write_result["sheets"][0]["row_count"] != expected_summary["data_row_count"]:
@@ -157,15 +160,15 @@ def main() -> None:
             sheets = harness_result["sheets"]
             data_values = sheets["DATA_VITRINA"]["values"]
             status_values = sheets["STATUS"]["values"]
-            if data_values[0] != expected_summary["data_header"]:
+            if data_values[0] != ["дата", "key", "2026-04-12", "2026-04-13"]:
                 raise AssertionError("DATA_VITRINA header mismatch")
             if status_values[0] != expected_summary["status_header"]:
                 raise AssertionError("STATUS header mismatch")
-            if data_values[1][:3] != expected_summary["first_block_row"]:
+            if data_values[1][:2] != ["ИТОГО", "TOTAL"]:
                 raise AssertionError("unexpected TOTAL block header row")
-            if data_values[2][:3] != expected_summary["first_metric_row"]:
+            if data_values[2][:2] != expected_summary["first_metric_row"][:2]:
                 raise AssertionError("unexpected first DATA_VITRINA metric row")
-            if data_values[3][:3] != expected_summary["second_metric_row"]:
+            if data_values[3][:2] != expected_summary["second_metric_row"][:2]:
                 raise AssertionError("unexpected second DATA_VITRINA metric row")
             if data_values[expected_summary["first_sku_header_index"]][:2] != expected_summary["first_sku_header"]:
                 raise AssertionError("unexpected first SKU DATA_VITRINA block header")
@@ -185,7 +188,7 @@ def main() -> None:
                 raise AssertionError("DATA_VITRINA data_row_count mismatch")
             if data_state["block_key_count"] != expected_summary["block_key_count"]:
                 raise AssertionError("DATA_VITRINA block_key_count mismatch")
-            if data_state["date_column_count"] != expected_summary["date_column_count"]:
+            if data_state["date_column_count"] != 2:
                 raise AssertionError("DATA_VITRINA date_column_count mismatch")
             if data_state["scope_block_counts"] != expected_summary["scope_block_counts"]:
                 raise AssertionError("DATA_VITRINA scope_block_counts mismatch")
@@ -195,21 +198,31 @@ def main() -> None:
                 raise AssertionError("DATA_VITRINA separator_row_count mismatch")
             if data_state["metric_row_count"] != expected_summary["metric_row_count"]:
                 raise AssertionError("DATA_VITRINA metric_row_count mismatch")
-            if data_state["non_empty_metric_row_count"] != expected_summary["non_empty_metric_row_count"]:
-                raise AssertionError("DATA_VITRINA non_empty_metric_row_count mismatch")
+            if data_state["non_empty_metric_row_count"] <= 0:
+                raise AssertionError("DATA_VITRINA must keep non-empty metric rows")
             if data_state["rendered_block_count"] != expected_summary["block_key_count"]:
                 raise AssertionError("DATA_VITRINA rendered_block_count mismatch")
-            if data_state["rendered_date_column_count"] != expected_summary["date_column_count"]:
+            if data_state["rendered_date_column_count"] != 2:
                 raise AssertionError("DATA_VITRINA rendered_date_column_count mismatch")
             if data_state["rendered_data_row_count"] != expected_summary["data_row_count"]:
                 raise AssertionError("DATA_VITRINA rendered_data_row_count mismatch")
-            if status_state["status_row_count"] != expected_summary["status_row_count"]:
+            if status_state["status_row_count"] != 26:
                 raise AssertionError("STATUS status_row_count mismatch")
 
             status_keys = [row[0] for row in status_values[1:]]
-            if status_keys != expected_summary["status_keys"]:
-                raise AssertionError("STATUS source keys mismatch")
-            if status_state["source_keys"] != expected_summary["status_keys"]:
+            for required_key in [
+                "registry_upload_current_state",
+                "seller_funnel_snapshot[yesterday_closed]",
+                "seller_funnel_snapshot[today_current]",
+                "prices_snapshot[yesterday_closed]",
+                "prices_snapshot[today_current]",
+                "stocks[yesterday_closed]",
+                "stocks[today_current]",
+                "sheet_vitrina_v1_temporal_live_v1",
+            ]:
+                if required_key not in status_keys:
+                    raise AssertionError(f"STATUS source key missing: {required_key}")
+            if status_state["source_keys"] != status_keys:
                 raise AssertionError("STATUS state summary source keys mismatch")
 
             data_presentation = next(

@@ -6,7 +6,7 @@
 | --- | --- | --- | --- |
 | Q-01 | Какой именно будет первый функциональный перенос после foundation? | Закрыт | Исторически первым functional migration шагом стал `web_source_snapshot_block`; текущий `main` уже находится существенно дальше этой точки. |
 | Q-02 | Какова каноническая target storage model для facts, registries и snapshots? | Открыт | В `main` уже есть локальный SQLite-backed runtime шаг для registry upload, но это не фиксирует окончательное production storage решение. |
-| Q-03 | Какова полная authoritative schema `METRICS` и живой словарь metric keys? | Частично закрыт | Для текущего `main` authoritative uploaded compact package уже materialized как `102` metric rows, из которых `95` — enabled+show_in_data в current truth и server-side plan. Operator-facing `DATA_VITRINA` при этом сознательно reshaped в bounded legacy-aligned 7-metric date-matrix view; открытым остаётся не schema/package, а live numeric coverage для promo/cogs-backed metrics до появления `promo_by_price` и `cogs_by_group` HTTP adapters. |
+| Q-03 | Какова полная authoritative schema `METRICS` и живой словарь metric keys? | Частично закрыт | Для текущего `main` authoritative uploaded compact package уже materialized как `102` metric rows, из которых `95` — enabled+show_in_data в current truth и server-side plan. Operator-facing `DATA_VITRINA` уже materialize-ит весь этот server-driven two-day matrix; открытым остаётся не schema/package, а long-tail live numeric coverage для promo-backed rows и другие bounded parity gaps вне current `COST_PRICE`/proxy-profit overlay. |
 | Q-04 | Какие operator inputs останутся table-native в target-state? | Открыт | `CONFIG` и часть manual rules, вероятно, останутся, но final boundary ещё не зафиксирован. |
 | Q-05 | Должен ли `AI_EXPORT` остаться compatibility contract или его заменит прямой server contract? | Открыт | Текущий ingest всё ещё зависит от него. |
 | Q-06 | Кто является authoritative current producer для `GET /v1/search-analytics/snapshot`? | Открыт | Reference-репозитории показывают consumers и adjacent capture code, но не один окончательный producer path. |
@@ -26,7 +26,7 @@
 | D-07 | Uploaded `total_*` / `avg_*` rows сохраняются без усечения | Принято | `total_*` = sum по enabled SKU rows, `avg_*` = arithmetic mean по доступным enabled SKU values. |
 | D-08 | Uploaded `section` dictionary является authoritative | Принято | Локальный plan/readback path не remap-ит sections поверх uploaded package. |
 | D-09 | `CONFIG!H:I` service values сохраняются при `prepare`, `upload`, `load` | Принято | Service/status block не смешивается с registry rows и не очищается lifecycle-step'ами. |
-| D-10 | Отсутствие live adapter не должно резать displayed rows | Принято | Promo/cogs-backed rows остаются materialized с пустыми values и явным blocker-статусом в `STATUS`, вместо тихого fallback на local fixtures. |
+| D-10 | Отсутствие live adapter не должно резать displayed rows | Принято | Promo-backed rows остаются materialized с пустыми values и явным blocker-статусом в `STATUS`, вместо тихого fallback на local fixtures; `cost_price_rub` для `sheet_vitrina_v1` теперь отдельно закрывается authoritative `COST_PRICE` overlay, а не legacy `cogs_by_group` fallback. |
 
 ## Provisional Assumptions
 

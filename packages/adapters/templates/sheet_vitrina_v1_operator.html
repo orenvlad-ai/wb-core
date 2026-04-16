@@ -78,6 +78,19 @@
       color: var(--muted);
     }
 
+    .note {
+      margin: 14px 0 0;
+      max-width: 620px;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+
+    code {
+      font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+      font-size: 0.95em;
+    }
+
     .actions {
       margin-top: 28px;
     }
@@ -233,8 +246,15 @@
       <p class="eyebrow">sheet_vitrina_v1</p>
       <h1>__SHEET_VITRINA_V1_OPERATOR_PAGE_TITLE__</h1>
       <p class="subtitle">
-        Страница запускает существующий server-side refresh. Если дата не передана явно,
-        используется server default `UTC yesterday`.
+        Страница запускает существующий server-side refresh и читает persisted ready snapshot.
+        Current contour materialize-ит два temporal slots: <code>yesterday_closed + today_current</code>.
+        Если <code>as_of_date</code> не передан явно, closed-day base остаётся server default
+        <code>UTC yesterday</code>.
+      </p>
+      <p class="note">
+        <code>STATUS</code> остаётся authoritative: для current-only sources
+        <code>stocks</code>, <code>prices_snapshot</code>, <code>ads_bids</code> значение
+        <code>yesterday_closed = not_available</code> ожидаемо и не означает общий сбой refresh.
       </p>
       <div class="actions">
         <button id="refreshButton" class="primary-button" type="button">Загрузить данные</button>
@@ -253,15 +273,27 @@
               <dd id="asOfDate">-</dd>
             </div>
             <div>
+              <dt>date_columns</dt>
+              <dd id="dateColumns">-</dd>
+            </div>
+            <div>
               <dt>refreshed_at</dt>
               <dd id="refreshedAt">-</dd>
+            </div>
+            <div>
+              <dt>DATA_VITRINA rows</dt>
+              <dd id="dataRows">-</dd>
+            </div>
+            <div>
+              <dt>STATUS rows</dt>
+              <dd id="statusRows">-</dd>
             </div>
           </dl>
         </section>
 
         <section class="block" aria-labelledby="log-title">
           <h2 id="log-title" class="block-title">Result</h2>
-          <pre id="logBlock" class="log-block">Инициализация...</pre>
+          <pre id="logBlock" class="log-block">Читаем последний persisted status...</pre>
         </section>
       </div>
     </section>
@@ -274,7 +306,10 @@
       const refreshButton = document.getElementById("refreshButton");
       const stateBadge = document.getElementById("stateBadge");
       const asOfDate = document.getElementById("asOfDate");
+      const dateColumns = document.getElementById("dateColumns");
       const refreshedAt = document.getElementById("refreshedAt");
+      const dataRows = document.getElementById("dataRows");
+      const statusRows = document.getElementById("statusRows");
       const logBlock = document.getElementById("logBlock");
 
       function setState(nextState) {
@@ -286,6 +321,14 @@
         return value ? String(value) : "-";
       }
 
+      function normalizeState(value, fallback) {
+        const candidate = valueOrDash(value).toLowerCase();
+        if (candidate === "idle" || candidate === "loading" || candidate === "success" || candidate === "error") {
+          return candidate;
+        }
+        return fallback;
+      }
+
       function sheetCount(counts, key) {
         if (!counts || typeof counts[key] !== "number") {
           return "-";
@@ -293,16 +336,42 @@
         return String(counts[key]);
       }
 
+      function formatDateColumns(payload) {
+        const values = Array.isArray(payload.date_columns) ? payload.date_columns.filter(Boolean) : [];
+        return values.length ? values.join(", ") : "-";
+      }
+
+      function formatTemporalSlots(payload) {
+        const slots = Array.isArray(payload.temporal_slots) ? payload.temporal_slots : [];
+        if (!slots.length) {
+          return "-";
+        }
+        return slots
+          .map((item) => {
+            const slotKey = valueOrDash(item && item.slot_key);
+            const columnDate = valueOrDash(item && item.column_date);
+            return slotKey + ": " + columnDate;
+          })
+          .join(", ");
+      }
+
       function renderSnapshot(payload, intro) {
         const counts = payload.sheet_row_counts || {};
         asOfDate.textContent = valueOrDash(payload.as_of_date);
+        dateColumns.textContent = formatDateColumns(payload);
         refreshedAt.textContent = valueOrDash(payload.refreshed_at);
+        dataRows.textContent = sheetCount(counts, "DATA_VITRINA");
+        statusRows.textContent = sheetCount(counts, "STATUS");
         logBlock.textContent = [
           intro,
+          "status: " + valueOrDash(payload.status),
           "as_of_date: " + valueOrDash(payload.as_of_date),
+          "date_columns: " + formatDateColumns(payload),
+          "temporal_slots: " + formatTemporalSlots(payload),
           "refreshed_at: " + valueOrDash(payload.refreshed_at),
           "DATA_VITRINA rows: " + sheetCount(counts, "DATA_VITRINA"),
           "STATUS rows: " + sheetCount(counts, "STATUS"),
+          "STATUS semantics: current-only sources may keep yesterday_closed=not_available",
           "snapshot_id: " + valueOrDash(payload.snapshot_id),
           "bundle_version: " + valueOrDash(payload.bundle_version)
         ].join("\n");
@@ -310,7 +379,10 @@
 
       function renderEmpty(message) {
         asOfDate.textContent = "-";
+        dateColumns.textContent = "-";
         refreshedAt.textContent = "-";
+        dataRows.textContent = "-";
+        statusRows.textContent = "-";
         logBlock.textContent = message;
       }
 
@@ -341,13 +413,19 @@
           if (!response.ok) {
             if (response.status === 422) {
               setState("idle");
-              renderEmpty("Ready snapshot пока не materialized.\n\n" + valueOrDash(payload.error));
+              renderEmpty(
+                [
+                  "Ready snapshot пока не materialized.",
+                  "Explicit refresh соберёт two-slot snapshot `yesterday_closed + today_current`.",
+                  valueOrDash(payload.error)
+                ].join("\n\n")
+              );
               return;
             }
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
-          setState("idle");
-          renderSnapshot(payload, "Последний ready snapshot в runtime contour.");
+          setState(normalizeState(payload.status, "success"));
+          renderSnapshot(payload, "Последний persisted ready snapshot в runtime contour.");
         } catch (error) {
           renderError("Не удалось прочитать status.", error instanceof Error ? error.message : String(error));
         }
@@ -357,7 +435,7 @@
         setState("loading");
         refreshButton.disabled = true;
         refreshButton.textContent = "Загружаем...";
-        logBlock.textContent = "Запускаем server-side refresh...";
+        logBlock.textContent = "Запускаем server-side refresh для two-slot snapshot `yesterday_closed + today_current`...";
         try {
           const response = await fetch(config.refresh_path, {
             method: "POST",
@@ -371,8 +449,8 @@
           if (!response.ok) {
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
-          setState("success");
-          renderSnapshot(payload, "Refresh завершён.");
+          setState(normalizeState(payload.status, "success"));
+          renderSnapshot(payload, "Refresh завершён. Persisted ready snapshot обновлён.");
         } catch (error) {
           renderError("Refresh завершился с ошибкой.", error instanceof Error ? error.message : String(error));
         } finally {

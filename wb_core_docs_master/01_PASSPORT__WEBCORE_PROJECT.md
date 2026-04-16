@@ -33,7 +33,7 @@ update_triggers:
   - "изменение current main-confirmed contour"
   - "merge нового bounded модуля"
   - "смена главного project gap"
-built_from_commit: "cd67e6ef0a2355b6b2373c53d971c68611d79260"
+built_from_commit: "5db3548de01b2299c4f003ad43074f367d3050c8"
 ---
 
 # Summary
@@ -85,7 +85,7 @@ Confirmed contour на текущем `main`:
 # Known gaps
 
 - full legacy parity по всем historical metric sections и registry rows;
-- live numeric fill для promo/cogs-backed metrics до появления `promo_by_price` и `cogs_by_group` HTTP adapters;
+- live numeric fill для promo-backed metrics и других bounded long-tail gaps beyond current `COST_PRICE` overlay;
 - repo-owned production hardening вокруг upload/load runtime;
 - окончательная судьба `AI_EXPORT` как compatibility contract;
 - materialized `packages/domain`, `infra/`, `tests/`, `api/`, `jobs/`, `db/`.

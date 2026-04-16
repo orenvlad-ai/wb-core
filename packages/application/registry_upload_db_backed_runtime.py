@@ -8,12 +8,20 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Mapping
 
+from packages.application.cost_price_upload import CostPriceUploadBlock, parse_cost_price_upload_payload
 from packages.application.registry_upload_bundle_v1 import (
     RegistryUploadBundleV1Block,
     load_registry_upload_bundle_v1_from_path,
     parse_registry_upload_bundle_v1_payload,
 )
 from packages.application.sheet_vitrina_v1 import parse_sheet_write_plan_payload
+from packages.contracts.cost_price_upload import (
+    CostPriceCurrentState,
+    CostPriceRow,
+    CostPriceUploadAcceptedCounts,
+    CostPriceUploadPayload,
+    CostPriceUploadResult,
+)
 from packages.contracts.registry_upload_bundle_v1 import (
     ConfigV2Item,
     FormulaV2Item,
@@ -38,10 +46,12 @@ class RegistryUploadDbBackedRuntime:
         self,
         runtime_dir: Path,
         bundle_block: RegistryUploadBundleV1Block | None = None,
+        cost_price_block: CostPriceUploadBlock | None = None,
     ) -> None:
         self.runtime_dir = runtime_dir
         self.db_path = runtime_dir / DB_FILENAME
         self.bundle_block = bundle_block or RegistryUploadBundleV1Block()
+        self.cost_price_block = cost_price_block or CostPriceUploadBlock()
 
     def ingest_bundle_from_path(self, bundle_path: Path, activated_at: str) -> RegistryUploadResult:
         bundle = load_registry_upload_bundle_v1_from_path(bundle_path)
@@ -99,6 +109,90 @@ class RegistryUploadDbBackedRuntime:
                 formulas_v2=_load_formula_items(conn, bundle_version),
             )
 
+    def ingest_cost_price_payload(
+        self,
+        payload_input: CostPriceUploadPayload | Mapping[str, Any],
+        activated_at: str,
+    ) -> CostPriceUploadResult:
+        payload = _coerce_cost_price_payload(payload_input)
+        errors = self._collect_cost_price_validation_errors(payload, activated_at)
+        if errors:
+            return _rejected_cost_price_result(payload.dataset_version, errors)
+
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            if _cost_price_dataset_version_exists(conn, payload.dataset_version):
+                return _rejected_cost_price_result(
+                    payload.dataset_version,
+                    [f"dataset_version already accepted in runtime DB: {payload.dataset_version}"],
+                )
+
+            result = CostPriceUploadResult(
+                status="accepted",
+                dataset_version=payload.dataset_version,
+                accepted_counts=CostPriceUploadAcceptedCounts(cost_price_rows=len(payload.cost_price_rows)),
+                validation_errors=[],
+                activated_at=activated_at,
+            )
+            _persist_cost_price_payload(conn, payload, result)
+            conn.commit()
+            return result
+
+    def load_cost_price_current_state(self) -> CostPriceCurrentState:
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            current_row = conn.execute(
+                """
+                SELECT dataset_version, activated_at
+                FROM cost_price_current_state
+                WHERE slot = 1
+                """
+            ).fetchone()
+            if current_row is None:
+                raise ValueError("cost price current state is not materialized")
+
+            dataset_version = current_row["dataset_version"]
+            return CostPriceCurrentState(
+                dataset_version=dataset_version,
+                activated_at=current_row["activated_at"],
+                cost_price_rows=_load_cost_price_rows(conn, dataset_version),
+            )
+
+    def load_persisted_cost_price_upload_result(self, dataset_version: str) -> CostPriceUploadResult:
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT status, row_count, validation_errors_json, activated_at
+                FROM cost_price_upload_results
+                WHERE dataset_version = ?
+                """,
+                (dataset_version,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"cost price upload result is not materialized for dataset_version: {dataset_version}")
+
+            return CostPriceUploadResult(
+                status=row["status"],
+                dataset_version=dataset_version,
+                accepted_counts=CostPriceUploadAcceptedCounts(cost_price_rows=row["row_count"]),
+                validation_errors=json.loads(row["validation_errors_json"]),
+                activated_at=row["activated_at"],
+            )
+
+    def list_cost_price_dataset_versions(self) -> list[str]:
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT dataset_version
+                FROM cost_price_upload_versions
+                ORDER BY activated_at, dataset_version
+                """
+            ).fetchall()
+            return [row["dataset_version"] for row in rows]
+
     def save_sheet_vitrina_ready_snapshot(
         self,
         *,
@@ -147,6 +241,9 @@ class RegistryUploadDbBackedRuntime:
             activated_at=current_state.activated_at,
             refreshed_at=refreshed_at,
             as_of_date=plan.as_of_date,
+            date_columns=plan.date_columns,
+            temporal_slots=plan.temporal_slots,
+            source_temporal_policies=plan.source_temporal_policies,
             snapshot_id=plan.snapshot_id,
             plan_version=plan.plan_version,
             sheet_row_counts=_sheet_row_counts_from_plan(plan),
@@ -224,6 +321,9 @@ class RegistryUploadDbBackedRuntime:
                 activated_at=row["activated_at"],
                 refreshed_at=row["refreshed_at"],
                 as_of_date=row["as_of_date"],
+                date_columns=plan.date_columns,
+                temporal_slots=plan.temporal_slots,
+                source_temporal_policies=plan.source_temporal_policies,
                 snapshot_id=row["snapshot_id"],
                 plan_version=row["plan_version"],
                 sheet_row_counts=_sheet_row_counts_from_plan(plan),
@@ -271,6 +371,23 @@ class RegistryUploadDbBackedRuntime:
         errors: list[str] = []
         try:
             self.bundle_block.validate_bundle(bundle, enforce_fixture_uniqueness=False)
+        except ValueError as exc:
+            errors.append(str(exc))
+
+        try:
+            _validate_timestamp(activated_at, field_name="activated_at")
+        except ValueError as exc:
+            errors.append(str(exc))
+        return errors
+
+    def _collect_cost_price_validation_errors(
+        self,
+        payload: CostPriceUploadPayload,
+        activated_at: str,
+    ) -> list[str]:
+        errors: list[str] = []
+        try:
+            self.cost_price_block.validate_dataset(payload)
         except ValueError as exc:
             errors.append(str(exc))
 
@@ -408,6 +525,71 @@ def _persist_bundle(
     )
 
 
+def _persist_cost_price_payload(
+    conn: sqlite3.Connection,
+    payload: CostPriceUploadPayload,
+    result: CostPriceUploadResult,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO cost_price_upload_versions(dataset_version, uploaded_at, activated_at)
+        VALUES(?, ?, ?)
+        """,
+        (payload.dataset_version, payload.uploaded_at, result.activated_at),
+    )
+    conn.execute(
+        """
+        INSERT INTO cost_price_upload_results(
+            dataset_version,
+            status,
+            row_count,
+            validation_errors_json,
+            activated_at
+        )
+        VALUES(?, ?, ?, ?, ?)
+        """,
+        (
+            payload.dataset_version,
+            result.status,
+            result.accepted_counts.cost_price_rows,
+            json.dumps(result.validation_errors, ensure_ascii=False),
+            result.activated_at,
+        ),
+    )
+    conn.executemany(
+        """
+        INSERT INTO cost_price_upload_rows(
+            dataset_version,
+            row_order,
+            group_name,
+            cost_price_rub,
+            effective_from
+        )
+        VALUES(?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                payload.dataset_version,
+                index,
+                item.group,
+                item.cost_price_rub,
+                item.effective_from,
+            )
+            for index, item in enumerate(payload.cost_price_rows, start=1)
+        ],
+    )
+    conn.execute(
+        """
+        INSERT INTO cost_price_current_state(slot, dataset_version, activated_at)
+        VALUES(1, ?, ?)
+        ON CONFLICT(slot) DO UPDATE SET
+            dataset_version = excluded.dataset_version,
+            activated_at = excluded.activated_at
+        """,
+        (payload.dataset_version, result.activated_at),
+    )
+
+
 def _load_config_items(conn: sqlite3.Connection, bundle_version: str) -> list[ConfigV2Item]:
     rows = conn.execute(
         """
@@ -477,10 +659,38 @@ def _load_formula_items(conn: sqlite3.Connection, bundle_version: str) -> list[F
     ]
 
 
+def _load_cost_price_rows(conn: sqlite3.Connection, dataset_version: str) -> list[CostPriceRow]:
+    rows = conn.execute(
+        """
+        SELECT group_name, cost_price_rub, effective_from
+        FROM cost_price_upload_rows
+        WHERE dataset_version = ?
+        ORDER BY row_order
+        """,
+        (dataset_version,),
+    ).fetchall()
+    return [
+        CostPriceRow(
+            group=row["group_name"],
+            cost_price_rub=row["cost_price_rub"],
+            effective_from=row["effective_from"],
+        )
+        for row in rows
+    ]
+
+
 def _coerce_bundle(bundle_input: RegistryUploadBundleV1 | Mapping[str, Any]) -> RegistryUploadBundleV1:
     if isinstance(bundle_input, RegistryUploadBundleV1):
         return bundle_input
     return parse_registry_upload_bundle_v1_payload(bundle_input)
+
+
+def _coerce_cost_price_payload(
+    payload_input: CostPriceUploadPayload | Mapping[str, Any],
+) -> CostPriceUploadPayload:
+    if isinstance(payload_input, CostPriceUploadPayload):
+        return payload_input
+    return parse_cost_price_upload_payload(payload_input)
 
 
 def _accepted_counts(bundle: RegistryUploadBundleV1) -> RegistryUploadAcceptedCounts:
@@ -496,6 +706,16 @@ def _rejected_result(bundle_version: str, errors: list[str]) -> RegistryUploadRe
         status="rejected",
         bundle_version=bundle_version,
         accepted_counts=RegistryUploadAcceptedCounts(config_v2=0, metrics_v2=0, formulas_v2=0),
+        validation_errors=errors,
+        activated_at=None,
+    )
+
+
+def _rejected_cost_price_result(dataset_version: str, errors: list[str]) -> CostPriceUploadResult:
+    return CostPriceUploadResult(
+        status="rejected",
+        dataset_version=dataset_version,
+        accepted_counts=CostPriceUploadAcceptedCounts(cost_price_rows=0),
         validation_errors=errors,
         activated_at=None,
     )
@@ -519,6 +739,16 @@ def _serialize_sheet_vitrina_plan(plan: SheetVitrinaV1Envelope) -> str:
         "plan_version": plan.plan_version,
         "snapshot_id": plan.snapshot_id,
         "as_of_date": plan.as_of_date,
+        "date_columns": plan.date_columns,
+        "temporal_slots": [
+            {
+                "slot_key": item.slot_key,
+                "slot_label": item.slot_label,
+                "column_date": item.column_date,
+            }
+            for item in plan.temporal_slots
+        ],
+        "source_temporal_policies": plan.source_temporal_policies,
         "sheets": [
             {
                 "sheet_name": item.sheet_name,
@@ -563,6 +793,18 @@ def _bundle_version_exists(conn: sqlite3.Connection, bundle_version: str) -> boo
         WHERE bundle_version = ?
         """,
         (bundle_version,),
+    ).fetchone()
+    return row is not None
+
+
+def _cost_price_dataset_version_exists(conn: sqlite3.Connection, dataset_version: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM cost_price_upload_versions
+        WHERE dataset_version = ?
+        """,
+        (dataset_version,),
     ).fetchone()
     return row is not None
 
@@ -640,5 +882,37 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_ready_snapshots_by_bundle_refresh
         ON sheet_vitrina_v1_ready_snapshots(bundle_version, refreshed_at DESC, as_of_date DESC);
+
+        CREATE TABLE IF NOT EXISTS cost_price_upload_versions (
+            dataset_version TEXT PRIMARY KEY,
+            uploaded_at TEXT NOT NULL,
+            activated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS cost_price_upload_results (
+            dataset_version TEXT PRIMARY KEY REFERENCES cost_price_upload_versions(dataset_version) ON DELETE CASCADE,
+            status TEXT NOT NULL,
+            row_count INTEGER NOT NULL,
+            validation_errors_json TEXT NOT NULL,
+            activated_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS cost_price_current_state (
+            slot INTEGER PRIMARY KEY CHECK (slot = 1),
+            dataset_version TEXT NOT NULL REFERENCES cost_price_upload_versions(dataset_version),
+            activated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS cost_price_upload_rows (
+            dataset_version TEXT NOT NULL REFERENCES cost_price_upload_versions(dataset_version) ON DELETE CASCADE,
+            row_order INTEGER NOT NULL,
+            group_name TEXT NOT NULL,
+            cost_price_rub REAL NOT NULL,
+            effective_from TEXT NOT NULL,
+            PRIMARY KEY (dataset_version, row_order)
+        );
+
+        CREATE INDEX IF NOT EXISTS cost_price_upload_rows_by_dataset_group_date
+        ON cost_price_upload_rows(dataset_version, group_name, effective_from, row_order);
         """
     )

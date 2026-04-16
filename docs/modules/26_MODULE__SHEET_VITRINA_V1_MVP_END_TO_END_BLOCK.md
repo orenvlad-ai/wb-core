@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-26-SHEET-VITRINA-V1-MVP-END-TO-END-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `sheet_vitrina_v1_mvp_end_to_end_block`."
-scope: "Первый bounded end-to-end alignment для `sheet_vitrina_v1`: uploaded compact bootstrap `CONFIG / METRICS / FORMULAS`, сохранённый upload trigger, explicit refresh в repo-owned ready snapshot, cheap read этого snapshot в `DATA_VITRINA` и narrow server-side operator page для explicit refresh без возврата heavy logic в Google Sheets."
+scope: "Первый bounded end-to-end alignment для `sheet_vitrina_v1`: uploaded compact bootstrap `CONFIG / METRICS / FORMULAS`, sibling `COST_PRICE` upload contour, сохранённый upload trigger, explicit refresh в repo-owned date-aware ready snapshot, server-side cost overlay в operator-facing rows, cheap read этого snapshot в `DATA_VITRINA` и narrow server-side operator page для explicit refresh без возврата heavy logic в Google Sheets."
 source_basis:
   - "migration/90_registry_upload_http_entrypoint.md"
   - "migration/91_sheet_vitrina_v1_registry_upload_trigger.md"
@@ -16,6 +16,8 @@ related_modules:
   - "gas/sheet_vitrina_v1/RegistryUploadSeedV3.gs"
   - "gas/sheet_vitrina_v1/RegistryUploadTrigger.gs"
   - "gas/sheet_vitrina_v1/PresentationPass.gs"
+  - "packages/contracts/cost_price_upload.py"
+  - "packages/application/cost_price_upload.py"
   - "packages/application/sheet_vitrina_v1_live_plan.py"
   - "packages/application/sheet_vitrina_v1.py"
   - "packages/application/registry_upload_http_entrypoint.py"
@@ -31,11 +33,15 @@ related_tables:
   - "STATUS"
 related_endpoints:
   - "POST /v1/registry-upload/bundle"
+  - "POST /v1/cost-price/upload"
   - "POST /v1/sheet-vitrina-v1/refresh"
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
   - "GET /sheet-vitrina-v1/operator"
 related_runners:
+  - "apps/cost_price_upload_http_entrypoint_smoke.py"
+  - "apps/sheet_vitrina_v1_cost_price_upload_smoke.py"
+  - "apps/sheet_vitrina_v1_cost_price_read_side_smoke.py"
   - "apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py"
   - "apps/sheet_vitrina_v1_refresh_read_split_smoke.py"
   - "apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py"
@@ -50,7 +56,7 @@ related_docs:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён после добавления repo-owned operator page: heavy build остаётся в `POST /v1/sheet-vitrina-v1/refresh`, ready snapshot хранится в repo-owned SQLite runtime table `sheet_vitrina_v1_ready_snapshots`, `GET /v1/sheet-vitrina-v1/plan` и `loadSheetVitrinaTable` читают только этот persisted plan, а operator-facing page/status routes дают narrow explicit refresh surface без curl."
+update_note: "Обновлён под date-aware ready snapshot и authoritative `COST_PRICE` overlay: heavy build остаётся в `POST /v1/sheet-vitrina-v1/refresh`, persisted plan materialize-ит `yesterday_closed + today_current`, `GET /v1/sheet-vitrina-v1/plan` и `loadSheetVitrinaTable` читают только этот persisted plan, а proxy-profit rows / cost diagnostics now resolve server-side from uploaded `COST_PRICE` by `group + max(effective_from <= slot_date)`."
 ---
 
 # 1. Идентификатор и статус
@@ -81,6 +87,11 @@ update_note: "Обновлён после добавления repo-owned operat
   - `Отправить реестры на сервер`
   - `POST /v1/sheet-vitrina-v1/refresh`
   - `Загрузить таблицу`
+- Канонический sibling operator input flow для себестоимостей:
+  - `Подготовить лист COST_PRICE`
+  - `Отправить себестоимости`
+  - separate server-side current state updates `COST_PRICE` dataset
+  - existing refresh/read contour затем подключает этот dataset server-side в `DATA_VITRINA` и `STATUS`
 - Канонический operator-facing refresh surface:
   - `GET /sheet-vitrina-v1/operator`
   - одна primary action `Загрузить данные`
@@ -94,17 +105,69 @@ update_note: "Обновлён после добавления repo-owned operat
   - `POST /v1/registry-upload/bundle`
   - request body = existing upload bundle V1
   - response body = canonical `RegistryUploadResult`
+- Канонический sibling cost-price path:
+  - `POST /v1/cost-price/upload`
+  - request body = `dataset_version + uploaded_at + cost_price_rows`
+  - response body = canonical `CostPriceUploadResult`
+  - dataset хранится отдельно от current registry bundle и подключается в existing refresh/load truth path только server-side
 - Канонический load path:
   - `GET /v1/sheet-vitrina-v1/plan`
-  - response body = existing `SheetVitrinaV1Envelope`-совместимый ready snapshot для `DATA_VITRINA` и `STATUS`
+  - response body = date-aware `SheetVitrinaV1Envelope`-совместимый ready snapshot для `DATA_VITRINA` и `STATUS`
 - Канонический refresh path:
   - `POST /v1/sheet-vitrina-v1/refresh`
-  - response body = `SheetVitrinaV1RefreshResult` со snapshot metadata и row counts
+  - response body = `SheetVitrinaV1RefreshResult` со snapshot metadata, `date_columns`, `temporal_slots`, `source_temporal_policies` и row counts
 - Канонический operator status path:
   - `GET /v1/sheet-vitrina-v1/status`
   - response body = latest persisted `SheetVitrinaV1RefreshResult`-compatible metadata для current bundle / requested `as_of_date`
 
-## 3.1 Expanded operator seed bounded шага
+## 3.1 Date-aware ready snapshot semantics
+
+- Текущий bounded root cause был в single-date surrogate model: server materialize-ил один ready snapshot на `as_of_date` refresh/run и не хранил достаточно явно фактическую temporal nature source values.
+- Current checkpoint заменяет это на two-slot read model:
+  - `yesterday_closed` = requested `as_of_date`
+  - `today_current` = фактическая current UTC date materialization run
+- Persisted ready snapshot теперь обязан хранить и отдавать:
+  - `date_columns`
+  - `temporal_slots`
+  - `source_temporal_policies`
+  - per-source/per-slot `STATUS` rows
+- В bounded live contour используется следующая temporal policy matrix:
+  - `dual_day_capable`: `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `sf_period`, `spp`, `ads_compact`, `fin_report_daily`, `cost_price`
+  - `today_current`: `prices_snapshot`, `ads_bids`, `stocks`
+  - `blocked`: `promo_by_price`
+- Current-only sources не backfill-ятся в closed-day column:
+  - `stocks[yesterday_closed]`, `prices_snapshot[yesterday_closed]`, `ads_bids[yesterday_closed]` materialize-ятся как `not_available`
+  - `today_current` values остаются в своей фактической колонке и не маскируются под yesterday EOD
+- Для `stocks[today_current]` server truth дополнительно обязан:
+  - нормализовать live WB region aliases `Южный +/и Северо-Кавказский` и `Дальневосточный +/и Сибирский` в canonical district metrics;
+  - не терять quantity вне configured district map молча: она остаётся внутри `stock_total` и surface-ится в `STATUS.stocks[today_current].note`
+- Для `cost_price[*]` server truth обязан:
+  - брать только authoritative dataset из separate `POST /v1/cost-price/upload`;
+  - match по `group`;
+  - выбирать latest `effective_from <= slot_date`;
+  - не рисовать fake values при empty/missing/unmatched dataset и честно surface-ить coverage в `STATUS.cost_price[*]`.
+- Таблица остаётся thin shell: ни `load`, ни bound Apps Script не пытаются локально угадывать, какая дата у source values.
+
+## 3.1.1 Cost overlay и новые operator-facing metrics
+
+- Current canonical read-side keys для cost overlay:
+  - `cost_price_rub` = SKU-level resolved себестоимость по authoritative `COST_PRICE`
+  - `avg_cost_price_rub` = weighted average по enabled SKU rows
+  - `total_proxy_profit_rub` = canonical TOTAL key для operator-facing строки `Прибыль прокси всего, ₽`
+  - `proxy_margin_pct_total` = canonical TOTAL key для operator-facing строки `Прокси маржинальность всего, %`
+- `total_proxy_profit_rub` не invent-ится как новый surface key: используется уже существующий canonical uploaded metric key из current bundle.
+- `Прибыль прокси всего` из operator wording фиксируется на canonical row `total_proxy_profit_rub` с текущим repo label `Прибыль прокси всего, ₽`.
+- `Прокси маржинальность всего, %` фиксируется на canonical row `proxy_margin_pct_total`.
+- Расчёт остаётся server-side:
+  - SKU `proxy_profit_rub` / `profit_proxy_rub` uses existing canonical formula `{orderSum}*0,5096-{orderCount}*0,91*{cost_price_rub}-{ads_sum}`;
+  - TOTAL `total_proxy_profit_rub` = sum of SKU `proxy_profit_rub`;
+  - TOTAL `proxy_margin_pct_total` = `total_proxy_profit_rub / total_orderSum`, если denominator допустим.
+- Пустой или неполный `COST_PRICE` dataset не валит refresh/load:
+  - cost-based rows остаются blank;
+  - `STATUS.cost_price[*]` объясняет missing/incomplete coverage;
+  - current truth не подменяет blanks выдуманными значениями.
+
+## 3.2 Expanded operator seed bounded шага
 
 - `config_v2 = 33`
 - `metrics_v2 = 102`
@@ -118,8 +181,8 @@ update_note: "Обновлён после добавления repo-owned operat
   - `95` unique metric keys
   - `34` block headers (`1 TOTAL` + `33 SKU`)
   - `33` separator rows
-  - `1698` rendered data rows при одном дне
-  - header `дата | key | <as_of_date>`
+  - `1698` rendered data rows при тех же metric rows, но уже на двух server-owned date columns
+  - header `дата | key | <yesterday_closed> | <today_current>`
 
 Bounded допущение:
 - seed deliberately не равен full legacy dump;
@@ -128,7 +191,7 @@ Bounded допущение:
 - `DATA_VITRINA` не режет incoming server plan и делает только presentation-side reshape в data-driven `date_matrix`;
 - unsupported live-source tail продолжает фиксироваться в `STATUS`, а не переносится в Apps Script как local truth path.
 
-## 3.2 Явно принятые решения bounded шага
+## 3.3 Явно принятые решения bounded шага
 
 - `openCount` и `open_card_count` сохраняются как разные метрики из разных live sources.
 - Все uploaded `total_*` и `avg_*` rows сохраняются:
@@ -136,14 +199,17 @@ Bounded допущение:
   - `avg_*` = arithmetic mean по доступным enabled SKU values.
 - Uploaded `section` dictionary считается authoritative и не remap-ится локально.
 - `CONFIG!H:I` service/status block сохраняется при `prepare`, `upload`, `load`.
+- Для current-only sources bounded contour честно предпочитает `not_available` в `yesterday_closed`, а не backfill текущих значений в yesterday-column.
 
-## 3.3 Явный live blocker
+## 3.4 Явный live blocker
 
-- `promo_by_price` и `cogs_by_group` не имеют live HTTP adapters в текущем contour.
+- `promo_by_price` не имеет live HTTP adapter в текущем contour.
+- Отдельный historical/EOD path для `stocks[yesterday_closed]` в этом checkpoint не materialized, поэтому yesterday stocks остаются честным gap до отдельного bounded шага, а не подменяются current snapshot-ом.
+- Legacy `cogs_by_group` rule module не используется как live fallback для `sheet_vitrina_v1`: текущий contour опирается только на authoritative `COST_PRICE` dataset.
 - Поэтому full current truth / `STATUS` остаются шире чисто sheet-side presentation pass.
 - Это сознательно лучше, чем тихо подменять server contour локальным fixture/rule path или возвращать heavy aggregation logic в Apps Script.
 
-## 3.4 Service block bounded шага
+## 3.5 Service block bounded шага
 
 - `CONFIG!H:I` остаётся служебной зоной.
 - `CONFIG!I2:I7` сохраняет:
@@ -155,7 +221,7 @@ Bounded допущение:
   - `last_validation_errors`
 - Ни `prepare`, ни `load` не должны очищать этот блок.
 
-## 3.5 Completion semantics для execution handoff
+## 3.6 Completion semantics для execution handoff
 
 - Канонический product flow по-прежнему остаётся `prepare -> upload -> refresh -> load`.
 - Для задач, которые меняют bound Apps Script, sheet-side live behavior, operator UI или другой live operator surface вокруг `sheet_vitrina_v1`, `repo-complete` и local smokes недостаточны.
@@ -209,13 +275,16 @@ Bounded допущение:
   - что `prepare` поднимает operator seed `33 / 102 / 7`;
   - что upload из sheet-side trigger сохраняет current truth в existing runtime без усечения `metrics_v2`;
   - что operator page `GET /sheet-vitrina-v1/operator` отдается тем же server contour и публикует existing refresh/status paths;
-  - что `POST /v1/sheet-vitrina-v1/refresh` вызывает heavy source blocks и обновляет persisted ready snapshot;
-  - что `GET /v1/sheet-vitrina-v1/status` возвращает последний persisted refresh result без live fetch;
+  - что `POST /v1/sheet-vitrina-v1/refresh` вызывает heavy source blocks и обновляет persisted date-aware ready snapshot;
+  - что `GET /v1/sheet-vitrina-v1/status` возвращает последний persisted refresh result без live fetch и с `date_columns` / `temporal_slots`;
   - что `GET /v1/sheet-vitrina-v1/plan` и sheet-side `load` читают только ready snapshot и не делают live fetch;
+  - что authoritative `COST_PRICE` current state резолвится server-side по `group + latest effective_from <= slot_date`;
+  - что `total_proxy_profit_rub` и `proxy_margin_pct_total` materialize-ятся в `DATA_VITRINA` только при applicable `COST_PRICE` coverage;
+  - что empty/missing `COST_PRICE` state оставляет cost-based rows blank и surface-ит truthful `STATUS.cost_price[*]`;
   - что при отсутствии ready snapshot load path возвращает явную ошибку `ready snapshot missing`;
-  - что `DATA_VITRINA` materialize-ит полный server-driven metric set как `date_matrix` и не режется до `7` metric keys;
-  - что repeated load обновляет текущую date-column и добавляет новый день вправо без локального history/truth path;
-  - что `STATUS` фиксирует live sources и blocked sources `promo_by_price` / `cogs_by_group`;
+  - что `DATA_VITRINA` materialize-ит полный server-driven metric set как `date_matrix`, не режется до `7` metric keys и сразу грузит `yesterday_closed + today_current`;
+  - что current-only sources не попадают в yesterday-column и materialize-ятся как `not_available` в `STATUS`;
+  - что `STATUS` фиксирует live sources per temporal slot, `cost_price[*]` coverage и blocked source `promo_by_price`;
   - что service/status block `CONFIG!H:I` сохраняется и не перезаписывается при load.
 
 # 7. Что уже доказано по модулю
@@ -224,16 +293,18 @@ Bounded допущение:
 - Sheet-side upload registry больше не обрезает `METRICS` до subset: current truth хранит полный uploaded compact dictionary `102` rows.
 - Таблица больше не заканчивается на upload-only flow: появился explicit refresh/build action и cheap read path из repo-owned ready snapshot обратно в `DATA_VITRINA`.
 - У explicit refresh появился отдельный repo-owned operator page, поэтому нормальный operator path больше не зависит от ручного `curl`.
-- Read path больше не строит live plan on-demand: heavy fetch живёт только в explicit refresh action, а `load` читает persisted snapshot из current runtime contour.
-- `DATA_VITRINA` теперь materialize-ит полный incoming current-truth row set `95` metric keys / `1631` source rows как operator-facing `date_matrix` (`34` blocks / `1698` rendered rows при одном дне) и не теряет `show_in_data` metrics на sheet-side bridge.
+- Read path больше не строит live plan on-demand: heavy fetch живёт только в explicit refresh action, а `load` читает persisted date-aware snapshot из current runtime contour.
+- Single-date surrogate semantics убраны: current-day values больше не маскируются под `as_of_date`, а `DATA_VITRINA` materialize-ит `yesterday_closed + today_current` как server-owned `date_matrix`.
+- `DATA_VITRINA` materialize-ит полный incoming current-truth row set `95` metric keys / `1631` source rows как operator-facing `date_matrix` (`34` blocks / `1698` rendered rows на двух date columns) и не теряет `show_in_data` metrics на sheet-side bridge.
 - Existing upload contour не ломается: bundle/result contracts и control block сохраняются.
 
 # 8. Что пока не является частью финальной production-сборки
 
 - full legacy parity 1:1 по всем metric sections и registry rows;
-- numeric live fill для promo/cogs-backed metrics до появления `promo_by_price` и `cogs_by_group` HTTP adapters;
+- numeric live fill для promo-backed metrics и других bounded long-tail rows beyond current `COST_PRICE` overlay;
 - full operator-facing legacy parity beyond current server-driven date-matrix scaffold;
 - official-api-backed coverage всех historical metrics beyond current uploaded package;
+- отдельный bounded fix по любому оставшемуся non-district / foreign stocks residual, если он потребует отдельной operator-facing semantics beyond current truthful `STATUS` note;
 - stable hosted runtime URL и production-bound operator runtime;
 - deploy/auth-hardening;
 - daily orchestration;

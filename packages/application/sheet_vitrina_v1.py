@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from packages.contracts.sheet_vitrina_v1 import (
     SheetVitrinaV1Envelope,
     SheetVitrinaV1Request,
+    SheetVitrinaV1TemporalSlot,
     SheetVitrinaWriteTarget,
 )
 
@@ -40,6 +41,16 @@ def build_sheet_write_plan(
 
     data_target = _build_write_target(data_vitrina, data_layout)
     status_target = _build_write_target(status, status_layout)
+    date_columns = _require_date_columns_or_infer(delivery_bundle, data_target.header)
+    temporal_slots = _require_temporal_slots_or_default(
+        delivery_bundle=delivery_bundle,
+        as_of_date=as_of_date,
+        date_columns=date_columns,
+    )
+    source_temporal_policies = _require_string_mapping_or_default(
+        delivery_bundle,
+        "source_temporal_policies",
+    )
 
     if len({data_target.sheet_name, status_target.sheet_name}) != 2:
         raise ValueError("sheet scaffold must contain exactly two distinct sheets")
@@ -48,6 +59,9 @@ def build_sheet_write_plan(
         plan_version=f"{delivery_contract_version}__sheet_scaffold_v1",
         snapshot_id=snapshot_id,
         as_of_date=as_of_date,
+        date_columns=date_columns,
+        temporal_slots=temporal_slots,
+        source_temporal_policies=source_temporal_policies,
         sheets=[data_target, status_target],
     )
 
@@ -63,11 +77,24 @@ def parse_sheet_write_plan_payload(payload: Mapping[str, Any]) -> SheetVitrinaV1
     sheets = [_parse_write_target(item) for item in sheets_raw]
     if len({item.sheet_name for item in sheets}) != 2:
         raise ValueError("sheet write plan payload must contain exactly two distinct sheets")
+    data_target = next((item for item in sheets if item.sheet_name == "DATA_VITRINA"), None)
+    if data_target is None:
+        raise ValueError("sheet write plan payload must contain DATA_VITRINA target")
+    date_columns = _require_date_columns_or_infer(payload, data_target.header)
+    temporal_slots = _require_temporal_slots_or_default(
+        delivery_bundle=payload,
+        as_of_date=as_of_date,
+        date_columns=date_columns,
+    )
+    source_temporal_policies = _require_string_mapping_or_default(payload, "source_temporal_policies")
 
     return SheetVitrinaV1Envelope(
         plan_version=plan_version,
         snapshot_id=snapshot_id,
         as_of_date=as_of_date,
+        date_columns=date_columns,
+        temporal_slots=temporal_slots,
+        source_temporal_policies=source_temporal_policies,
         sheets=sheets,
     )
 
@@ -99,6 +126,78 @@ def _build_write_target(section: Mapping[str, Any], layout: Mapping[str, Any]) -
         row_count=row_count,
         column_count=column_count,
     )
+
+
+def _require_date_columns_or_infer(payload: Mapping[str, Any], header: list[str]) -> list[str]:
+    expected = header[2:] if header[:2] == ["label", "key"] else []
+    raw = payload.get("date_columns")
+    if raw is None:
+        return expected
+    if not isinstance(raw, list):
+        raise ValueError("date_columns must be a list when present")
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not _is_iso_date(item):
+            raise ValueError("date_columns must contain ISO date strings only")
+        out.append(item)
+    if out != expected:
+        raise ValueError("date_columns must match DATA_VITRINA header dates")
+    return out
+
+
+def _require_temporal_slots_or_default(
+    *,
+    delivery_bundle: Mapping[str, Any],
+    as_of_date: str,
+    date_columns: list[str],
+) -> list[SheetVitrinaV1TemporalSlot]:
+    raw = delivery_bundle.get("temporal_slots")
+    if raw is None:
+        default_date = date_columns[0] if date_columns else as_of_date
+        return [
+            SheetVitrinaV1TemporalSlot(
+                slot_key="as_of_date",
+                slot_label="as_of_date",
+                column_date=default_date,
+            )
+        ]
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("temporal_slots must be a non-empty list when present")
+    out: list[SheetVitrinaV1TemporalSlot] = []
+    slot_dates: list[str] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            raise ValueError("temporal_slots must contain objects only")
+        slot_key = _require_str(item, "slot_key")
+        slot_label = _require_str(item, "slot_label")
+        column_date = _require_str(item, "column_date")
+        if not _is_iso_date(column_date):
+            raise ValueError("temporal_slots.column_date must be an ISO date")
+        out.append(
+            SheetVitrinaV1TemporalSlot(
+                slot_key=slot_key,
+                slot_label=slot_label,
+                column_date=column_date,
+            )
+        )
+        slot_dates.append(column_date)
+    if slot_dates != date_columns:
+        raise ValueError("temporal_slots must follow DATA_VITRINA date_columns order")
+    return out
+
+
+def _require_string_mapping_or_default(mapping: Mapping[str, Any], key: str) -> dict[str, str]:
+    value = mapping.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{key} must be an object when present")
+    out: dict[str, str] = {}
+    for item_key, item_value in value.items():
+        if not isinstance(item_key, str) or not isinstance(item_value, str):
+            raise ValueError(f"{key} must contain string pairs only")
+        out[item_key] = item_value
+    return out
 
 
 def _parse_write_target(value: Any) -> SheetVitrinaWriteTarget:

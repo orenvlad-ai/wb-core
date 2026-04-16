@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-19-SHEET-VITRINA-V1-PRESENTATION-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `sheet_vitrina_v1_presentation_block`."
-scope: "Bounded presentation/layout pass для `DATA_VITRINA` и `STATUS`: server-driven `date_matrix` view поверх incoming current-truth rows без локального subset/fallback logic, semantic number formats и жёсткие границы thin sheet-side presentation шага."
+scope: "Bounded presentation/layout pass для `DATA_VITRINA` и `STATUS`: server-driven two-slot `date_matrix` view поверх incoming current-truth rows без локального subset/fallback logic, semantic number formats и жёсткие границы thin sheet-side presentation шага."
 source_basis:
   - "migration/85_sheet_vitrina_v1_presentation.md"
   - "artifacts/sheet_vitrina_v1/evidence/initial__sheet-vitrina-v1__evidence.md"
@@ -26,7 +26,7 @@ related_docs:
   - "docs/modules/18_MODULE__SHEET_VITRINA_V1_WRITE_BRIDGE_BLOCK.md"
   - "artifacts/sheet_vitrina_v1/evidence/initial__sheet-vitrina-v1__evidence.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под server-driven date-matrix presentation: `DATA_VITRINA` visual-но снова близка к legacy sheet, но row set, block set и metric rows полностью зависят от incoming current truth; локальный 7-metric reshape не возвращён."
+update_note: "Обновлён под server-driven two-day date-matrix presentation: `DATA_VITRINA` visual-но снова близка к legacy sheet, но row set, block set, date columns и metric rows полностью зависят от incoming current truth; локальный 7-metric reshape и локальное угадывание дат не возвращены."
 ---
 
 # 1. Идентификатор и статус
@@ -68,11 +68,13 @@ update_note: "Обновлён под server-driven date-matrix presentation: `D
 
 - `A1 = дата`
 - `B1 = key`
-- `C1..` = date columns; первый load materialize-ит текущий `as_of_date`, следующий день добавляется справа
+- `C1..` = server-owned date columns из ready snapshot; текущий bounded live load materialize-ит как минимум `yesterday_closed` и `today_current`
 - incoming flat row set из ready snapshot `GET /v1/sheet-vitrina-v1/plan` reshaped only for presentation:
   - block header row = human title + canonical block key;
   - metric rows = display label + canonical metric key;
   - history по датам живёт только в `C:...`
+- Apps Script bridge не должен локально выводить даты из refresh time или source quirks: authoritative порядок и список колонок приходят из `plan.date_columns`
+- Для current-only sources честный blank в yesterday-column является допустимым результатом; presentation layer не имеет права backfill-ить туда `today_current`
 - блоки идут как `TOTAL`, затем `GROUP:*`, затем `SKU:*`; metric rows внутри блока сохраняют incoming current-truth ordering
 - row grouping / outline / hidden rows intentionally не используются
 
@@ -101,14 +103,14 @@ update_note: "Обновлён под server-driven date-matrix presentation: `D
 - Smoke проверяет:
   - что `DATA_VITRINA` materialize-ит `date_matrix` header `дата | key | <date...>`;
   - что incoming plan больше не режется до `7` metric keys и не требует hardcoded metric list;
-  - что same-day load переписывает текущую date-column, а новый день добавляется вправо;
+  - что current two-day load материализует server-owned `yesterday_closed + today_current`, а same-day rerun только переписывает matching date-columns;
   - что freeze `A:B`, plain header, section rows и semantic formats для `integer / percent / decimal` сохраняются.
 
 # 7. Что уже доказано по модулю
 
 - Новая витрина больше не только рабочая, но и базово читаемая.
 - `DATA_VITRINA` остаётся thin presentation layer над server-driven current truth и больше не теряет rows с `show_in_data = true`.
-- Presentation pass превращает incoming flat composite-key rows в data-driven `date_matrix` без изменения incoming load semantics.
+- Presentation pass превращает incoming flat composite-key rows в data-driven `date_matrix` без изменения incoming load semantics и без локального re-dating source values.
 - `STATUS` визуально отделяет status/date/coverage поля.
 - Это bounded presentation/layout step новой витрины поверх уже живого write bridge.
 

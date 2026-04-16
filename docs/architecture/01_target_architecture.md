@@ -21,6 +21,7 @@
 - `registry_upload_db_backed_runtime_block` как первый DB-backed runtime ingest и current-truth слой для V2-реестров.
 - `registry_upload_http_entrypoint_block` как первый live HTTP/API entrypoint для V2-реестров.
 - `sheet_vitrina_v1_registry_upload_trigger_block` как первый operator-facing Apps Script trigger для отправки `CONFIG / METRICS / FORMULAS` в уже существующий HTTP entrypoint.
+- sibling `COST_PRICE` contour внутри того же app/runtime boundary: отдельный лист `COST_PRICE`, отдельные menu actions и `POST /v1/cost-price/upload` без подмешивания в compact registry bundle.
 - `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` как compact v3 bootstrap для operator sheets `CONFIG / METRICS / FORMULAS`.
 - `sheet_vitrina_v1_mvp_end_to_end_block` как первый bounded end-to-end MVP `prepare -> upload -> refresh -> load DATA_VITRINA`.
 
@@ -55,6 +56,7 @@ Target-state — server-first:
 - bounded sheet-side витрина уже есть как `DATA_VITRINA` и `STATUS`;
 - live write и visual presentation подтверждены для этого bounded sheet-side contour;
 - operator-facing upload trigger для `CONFIG / METRICS / FORMULAS` уже materialize-ится в текущей линии;
+- separate operator-facing upload contour для `COST_PRICE` уже materialize-ится в текущей линии как отдельный authoritative dataset и теперь подключён server-side в current `DATA_VITRINA`/`STATUS` read-side через effective-date overlay;
 - compact v3 bootstrap operator sheets уже тоже материализован в текущей линии;
 - первый bounded readback path server-side truth обратно в `DATA_VITRINA` уже является частью текущего `main` как explicit refresh + cheap read split;
 - full replacement operator-table по-прежнему не является частью текущей линии.

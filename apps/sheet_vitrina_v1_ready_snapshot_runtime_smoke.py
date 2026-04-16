@@ -2,29 +2,31 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.registry_upload_db_backed_runtime import DB_FILENAME, RegistryUploadDbBackedRuntime
-from packages.application.sheet_vitrina_v1 import SheetVitrinaV1Block
-from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Request
+from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock
 
 INPUT_BUNDLE_FIXTURE = (
     ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
 )
 ACTIVATED_AT = "2026-04-13T12:00:03Z"
 REFRESHED_AT = "2026-04-13T12:10:00Z"
+AS_OF_DATE = "2026-04-12"
+TODAY_CURRENT_DATE = "2026-04-13"
 
 
 def main() -> None:
     bundle = _load_json(INPUT_BUNDLE_FIXTURE)
-    plan = SheetVitrinaV1Block().execute(SheetVitrinaV1Request(bundle_type="sheet_vitrina_v1"))
 
     with TemporaryDirectory(prefix="sheet-vitrina-ready-snapshot-runtime-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
@@ -34,6 +36,20 @@ def main() -> None:
             raise AssertionError(f"fixture bundle must be accepted, got {accepted.status}")
 
         current_state = runtime.load_current_state()
+        plan = SheetVitrinaV1LivePlanBlock(
+            runtime=runtime,
+            web_source_block=_SyntheticSuccessBlock("web_source_snapshot"),
+            seller_funnel_block=_SyntheticSuccessBlock("seller_funnel_snapshot"),
+            sales_funnel_history_block=_SyntheticSuccessBlock("sales_funnel_history"),
+            prices_snapshot_block=_SyntheticSuccessBlock("prices_snapshot"),
+            sf_period_block=_SyntheticSuccessBlock("sf_period"),
+            spp_block=_SyntheticSuccessBlock("spp"),
+            ads_bids_block=_SyntheticSuccessBlock("ads_bids"),
+            stocks_block=_SyntheticSuccessBlock("stocks"),
+            ads_compact_block=_SyntheticSuccessBlock("ads_compact"),
+            fin_report_daily_block=_SyntheticSuccessBlock("fin_report_daily"),
+            now_factory=lambda: datetime(2026, 4, 13, 9, 0, tzinfo=timezone.utc),
+        ).build_plan(as_of_date=AS_OF_DATE)
         refresh_result = runtime.save_sheet_vitrina_ready_snapshot(
             current_state=current_state,
             refreshed_at=REFRESHED_AT,
@@ -43,6 +59,13 @@ def main() -> None:
             raise AssertionError("refresh result bundle_version mismatch")
         if refresh_result.snapshot_id != plan.snapshot_id:
             raise AssertionError("refresh result snapshot_id mismatch")
+        if refresh_result.date_columns != [AS_OF_DATE, TODAY_CURRENT_DATE]:
+            raise AssertionError("refresh result must persist both date columns")
+        if [slot.slot_key for slot in refresh_result.temporal_slots] != [
+            "yesterday_closed",
+            "today_current",
+        ]:
+            raise AssertionError("refresh result temporal_slots mismatch")
 
         exact_snapshot = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=plan.as_of_date)
         latest_snapshot = runtime.load_sheet_vitrina_ready_snapshot()
@@ -50,6 +73,8 @@ def main() -> None:
             raise AssertionError("exact ready snapshot mismatch")
         if latest_snapshot.snapshot_id != plan.snapshot_id:
             raise AssertionError("latest ready snapshot mismatch")
+        if exact_snapshot.date_columns != [AS_OF_DATE, TODAY_CURRENT_DATE]:
+            raise AssertionError("persisted ready snapshot must keep both date columns")
 
         next_bundle = dict(bundle)
         next_bundle["bundle_version"] = "sheet_vitrina_v1_snapshot_runtime__2026-04-13T12:20:00Z"
@@ -67,9 +92,36 @@ def main() -> None:
 
         print(f"runtime_db: ok -> {runtime_dir / DB_FILENAME}")
         print(f"refresh_result: ok -> {refresh_result.snapshot_id}")
-        print(f"latest_read: ok -> {latest_snapshot.as_of_date}")
+        print(f"latest_read: ok -> {latest_snapshot.date_columns}")
         print("stale_snapshot_guard: ok -> current bundle requires explicit refresh")
         print("smoke-check passed")
+
+
+class _SyntheticSuccessBlock:
+    def __init__(self, source_key: str) -> None:
+        self.source_key = source_key
+
+    def execute(self, request: object) -> SimpleNamespace:
+        request_date = _request_date(request)
+        payload = SimpleNamespace(
+            kind="success",
+            items=[],
+            snapshot_date=request_date,
+            date=request_date,
+            date_from=request_date,
+            date_to=request_date,
+            detail=f"{self.source_key} synthetic success for {request_date}",
+            storage_total=None,
+        )
+        return SimpleNamespace(result=payload)
+
+
+def _request_date(request: object) -> str:
+    for field in ("snapshot_date", "date", "date_to"):
+        value = getattr(request, field, None)
+        if isinstance(value, str) and value:
+            return value
+    raise AssertionError("synthetic source request must carry a date field")
 
 
 def _load_json(path: Path) -> object:

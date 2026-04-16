@@ -14,3 +14,4 @@ class RegistryUploadHttpEntrypointConfig:
     sheet_status_path: str
     sheet_operator_ui_path: str
     runtime_dir: Path
+    cost_price_upload_path: str = "/v1/cost-price/upload"

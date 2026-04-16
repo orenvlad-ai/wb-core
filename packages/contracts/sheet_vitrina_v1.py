@@ -25,10 +25,20 @@ class SheetVitrinaWriteTarget:
 
 
 @dataclass(frozen=True)
+class SheetVitrinaV1TemporalSlot:
+    slot_key: str
+    slot_label: str
+    column_date: str
+
+
+@dataclass(frozen=True)
 class SheetVitrinaV1Envelope:
     plan_version: str
     snapshot_id: str
     as_of_date: str
+    date_columns: list[str]
+    temporal_slots: list[SheetVitrinaV1TemporalSlot]
+    source_temporal_policies: dict[str, str]
     sheets: list[SheetVitrinaWriteTarget]
 
 
@@ -39,6 +49,9 @@ class SheetVitrinaV1RefreshResult:
     activated_at: str
     refreshed_at: str
     as_of_date: str
+    date_columns: list[str]
+    temporal_slots: list[SheetVitrinaV1TemporalSlot]
+    source_temporal_policies: dict[str, str]
     snapshot_id: str
     plan_version: str
     sheet_row_counts: dict[str, int]

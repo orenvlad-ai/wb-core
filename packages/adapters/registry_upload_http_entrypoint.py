@@ -13,6 +13,7 @@ from typing import Any, Mapping
 from urllib import parse as urllib_parse
 
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.contracts.cost_price_upload import CostPriceUploadResult
 from packages.contracts.registry_upload_file_backed_service import RegistryUploadResult
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 
@@ -20,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_UPLOAD_PATH = "/v1/registry-upload/bundle"
+DEFAULT_COST_PRICE_UPLOAD_PATH = "/v1/cost-price/upload"
 DEFAULT_SHEET_PLAN_PATH = "/v1/sheet-vitrina-v1/plan"
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
@@ -42,6 +44,13 @@ def load_registry_upload_http_entrypoint_config() -> RegistryUploadHttpEntrypoin
     upload_path = os.environ.get("REGISTRY_UPLOAD_HTTP_PATH", DEFAULT_UPLOAD_PATH).strip() or DEFAULT_UPLOAD_PATH
     if not upload_path.startswith("/"):
         raise ValueError("REGISTRY_UPLOAD_HTTP_PATH must start with /")
+
+    cost_price_upload_path = (
+        os.environ.get("COST_PRICE_UPLOAD_HTTP_PATH", DEFAULT_COST_PRICE_UPLOAD_PATH).strip()
+        or DEFAULT_COST_PRICE_UPLOAD_PATH
+    )
+    if not cost_price_upload_path.startswith("/"):
+        raise ValueError("COST_PRICE_UPLOAD_HTTP_PATH must start with /")
 
     sheet_plan_path = os.environ.get("SHEET_VITRINA_HTTP_PATH", DEFAULT_SHEET_PLAN_PATH).strip() or DEFAULT_SHEET_PLAN_PATH
     if not sheet_plan_path.startswith("/"):
@@ -75,6 +84,7 @@ def load_registry_upload_http_entrypoint_config() -> RegistryUploadHttpEntrypoin
         host=host,
         port=port,
         upload_path=upload_path,
+        cost_price_upload_path=cost_price_upload_path,
         sheet_plan_path=sheet_plan_path,
         sheet_refresh_path=sheet_refresh_path,
         sheet_status_path=sheet_status_path,
@@ -91,6 +101,7 @@ def build_registry_upload_http_server(
     handler_cls = _build_handler(
         runtime_entrypoint,
         upload_path=config.upload_path,
+        cost_price_upload_path=config.cost_price_upload_path,
         sheet_plan_path=config.sheet_plan_path,
         sheet_refresh_path=config.sheet_refresh_path,
         sheet_status_path=config.sheet_status_path,
@@ -103,6 +114,7 @@ def _build_handler(
     entrypoint: RegistryUploadHttpEntrypoint,
     *,
     upload_path: str,
+    cost_price_upload_path: str,
     sheet_plan_path: str,
     sheet_refresh_path: str,
     sheet_status_path: str,
@@ -135,6 +147,34 @@ def _build_handler(
                 _write_json_response(
                     self,
                     _http_status_for_result(result),
+                    asdict(result),
+                )
+                return
+
+            if parsed.path == cost_price_upload_path:
+                try:
+                    payload = _load_request_payload(self)
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": str(exc)},
+                    )
+                    return
+
+                try:
+                    result = entrypoint.handle_cost_price_payload(payload)
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"cost price upload runtime failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(
+                    self,
+                    _http_status_for_cost_price_result(result),
                     asdict(result),
                 )
                 return
@@ -336,6 +376,16 @@ def _http_status_for_result(result: RegistryUploadResult) -> HTTPStatus:
         return HTTPStatus.OK
 
     if any("bundle_version already accepted" in error for error in result.validation_errors):
+        return HTTPStatus.CONFLICT
+
+    return HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+def _http_status_for_cost_price_result(result: CostPriceUploadResult) -> HTTPStatus:
+    if result.status == "accepted":
+        return HTTPStatus.OK
+
+    if any("dataset_version already accepted" in error for error in result.validation_errors):
         return HTTPStatus.CONFLICT
 
     return HTTPStatus.UNPROCESSABLE_ENTITY
