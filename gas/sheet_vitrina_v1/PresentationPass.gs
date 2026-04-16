@@ -195,6 +195,8 @@ function isPercentMetricKey_(metricKey) {
     normalized === 'ctr_current' ||
     normalized === 'localizationPercent' ||
     normalized === 'localization_percent' ||
+    normalized === 'ads_cr' ||
+    normalized === 'avg_ads_cr' ||
     /(?:^|_)(ctr|spp|drr)(?:_|$)/i.test(normalized) ||
     /(pct|percent|conversion|share)/i.test(normalized)
   );
