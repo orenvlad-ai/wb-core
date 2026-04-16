@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 from packages.application.cost_price_upload import CostPriceUploadBlock, parse_cost_price_upload_payload
@@ -366,6 +367,60 @@ class RegistryUploadDbBackedRuntime:
                 """
             ).fetchall()
             return [row["bundle_version"] for row in rows]
+
+    def save_temporal_source_snapshot(
+        self,
+        *,
+        source_key: str,
+        snapshot_date: str,
+        captured_at: str,
+        payload: Any,
+    ) -> None:
+        _validate_timestamp(captured_at, field_name="captured_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO temporal_source_snapshots(
+                    source_key,
+                    snapshot_date,
+                    captured_at,
+                    payload_json
+                )
+                VALUES(?, ?, ?, ?)
+                ON CONFLICT(source_key, snapshot_date) DO UPDATE SET
+                    captured_at = excluded.captured_at,
+                    payload_json = excluded.payload_json
+                """,
+                (
+                    source_key,
+                    snapshot_date,
+                    captured_at,
+                    _serialize_temporal_source_payload(payload),
+                ),
+            )
+            conn.commit()
+
+    def load_temporal_source_snapshot(
+        self,
+        *,
+        source_key: str,
+        snapshot_date: str,
+    ) -> tuple[Any | None, str | None]:
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT captured_at, payload_json
+                FROM temporal_source_snapshots
+                WHERE source_key = ? AND snapshot_date = ?
+                """,
+                (source_key, snapshot_date),
+            ).fetchone()
+            if row is None:
+                return None, None
+            return _deserialize_temporal_source_payload(row["payload_json"]), row["captured_at"]
 
     def _collect_validation_errors(self, bundle: RegistryUploadBundleV1, activated_at: str) -> list[str]:
         errors: list[str] = []
@@ -778,6 +833,34 @@ def _deserialize_sheet_vitrina_plan(raw_value: str) -> SheetVitrinaV1Envelope:
     return parse_sheet_write_plan_payload(payload)
 
 
+def _serialize_temporal_source_payload(payload: Any) -> str:
+    return json.dumps(_to_jsonable(payload), ensure_ascii=False)
+
+
+def _deserialize_temporal_source_payload(payload_json: str) -> Any:
+    return _to_namespace(json.loads(payload_json))
+
+
+def _to_jsonable(value: Any) -> Any:
+    if isinstance(value, SimpleNamespace):
+        return {key: _to_jsonable(item) for key, item in vars(value).items()}
+    if hasattr(value, "__dataclass_fields__"):
+        return {key: _to_jsonable(getattr(value, key)) for key in value.__dataclass_fields__}
+    if isinstance(value, dict):
+        return {str(key): _to_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(item) for item in value]
+    return value
+
+
+def _to_namespace(value: Any) -> Any:
+    if isinstance(value, dict):
+        return SimpleNamespace(**{key: _to_namespace(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return [_to_namespace(item) for item in value]
+    return value
+
+
 def _connect(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -914,5 +997,16 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS cost_price_upload_rows_by_dataset_group_date
         ON cost_price_upload_rows(dataset_version, group_name, effective_from, row_order);
+
+        CREATE TABLE IF NOT EXISTS temporal_source_snapshots (
+            source_key TEXT NOT NULL,
+            snapshot_date TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (source_key, snapshot_date)
+        );
+
+        CREATE INDEX IF NOT EXISTS temporal_source_snapshots_by_source_date
+        ON temporal_source_snapshots(source_key, snapshot_date);
         """
     )

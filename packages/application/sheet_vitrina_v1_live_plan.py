@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -398,14 +398,24 @@ class SheetVitrinaV1LivePlanBlock:
                         )
                     )
                     continue
-                status, payload = _capture_live_source(
-                    source_key=source_key,
-                    temporal_slot=slot.slot_key,
-                    temporal_policy=temporal_policy,
-                    column_date=slot.column_date,
-                    requested_nm_ids=requested_nm_ids,
-                    loader=loader,
-                )
+                if source_key in {"seller_funnel_snapshot", "web_source_snapshot"}:
+                    status, payload = self._capture_temporal_web_source(
+                        source_key=source_key,
+                        temporal_slot=slot.slot_key,
+                        temporal_policy=temporal_policy,
+                        column_date=slot.column_date,
+                        requested_nm_ids=requested_nm_ids,
+                        loader=loader,
+                    )
+                else:
+                    status, payload = _capture_live_source(
+                        source_key=source_key,
+                        temporal_slot=slot.slot_key,
+                        temporal_policy=temporal_policy,
+                        column_date=slot.column_date,
+                        requested_nm_ids=requested_nm_ids,
+                        loader=loader,
+                    )
                 statuses.append(status)
                 if source_key == "seller_funnel_snapshot":
                     current_lookups.seller_funnel_lookup = _index_items_by_nm_id(payload)
@@ -470,6 +480,56 @@ class SheetVitrinaV1LivePlanBlock:
             slot_lookups=slot_lookups,
             source_temporal_policies=dict(SOURCE_TEMPORAL_POLICIES),
         )
+
+    def _capture_temporal_web_source(
+        self,
+        *,
+        source_key: str,
+        temporal_slot: str,
+        temporal_policy: str,
+        column_date: str,
+        requested_nm_ids: list[int],
+        loader: Callable[[], Any],
+    ) -> tuple[LiveSourceStatus, Any | None]:
+        status, payload = _capture_live_source(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            loader=loader,
+        )
+        if payload is not None and _is_exact_snapshot_payload(payload, column_date):
+            self.runtime.save_temporal_source_snapshot(
+                source_key=source_key,
+                snapshot_date=column_date,
+                captured_at=_format_runtime_timestamp(self.now_factory()),
+                payload=payload,
+            )
+            return status, payload
+
+        if status.kind != "not_found":
+            return status, payload
+
+        cached_payload, cached_at = self.runtime.load_temporal_source_snapshot(
+            source_key=source_key,
+            snapshot_date=column_date,
+        )
+        if cached_payload is None or not _is_exact_snapshot_payload(cached_payload, column_date):
+            return status, payload
+
+        cached_status, _ = _capture_live_source(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            loader=lambda: cached_payload,
+        )
+        cache_note = "resolution_rule=exact_date_runtime_cache"
+        if cached_at:
+            cache_note = f"{cache_note}; cache_captured_at={cached_at}"
+        return _append_status_note(cached_status, cache_note), cached_payload
 
 
 class _MetricEvaluator:
@@ -1136,6 +1196,19 @@ def _source_policy_supports_slot(temporal_policy: str, temporal_slot: str) -> bo
 
 def _format_temporal_source_key(source_key: str, temporal_slot: str) -> str:
     return f"{source_key}[{temporal_slot}]"
+
+
+def _is_exact_snapshot_payload(payload: Any, column_date: str) -> bool:
+    return str(getattr(payload, "kind", "")) == "success" and _resolve_freshness(payload) == column_date
+
+
+def _append_status_note(status: LiveSourceStatus, suffix: str) -> LiveSourceStatus:
+    merged = "; ".join(part for part in [status.note, suffix] if part)
+    return replace(status, note=merged)
+
+
+def _format_runtime_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _index_items_by_nm_id(payload: Any | None) -> dict[int, Any]:

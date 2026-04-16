@@ -45,6 +45,8 @@ related_runners:
   - "apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py"
   - "apps/sheet_vitrina_v1_refresh_read_split_smoke.py"
   - "apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py"
+  - "apps/web_source_temporal_adapter_smoke.py"
+  - "apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py"
   - "apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py"
   - "apps/registry_upload_http_entrypoint_live.py"
 related_docs:
@@ -135,6 +137,15 @@ update_note: "Обновлён под date-aware ready snapshot и authoritative
   - `dual_day_capable`: `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `sf_period`, `spp`, `ads_compact`, `fin_report_daily`, `cost_price`
   - `today_current`: `prices_snapshot`, `ads_bids`, `stocks`
   - `blocked`: `promo_by_price`
+- Для bot/web-source family (`seller_funnel_snapshot`, `web_source_snapshot`) current server-side read rule теперь bounded и truthful:
+  - сначала source adapter пробует explicit requested date/window;
+  - при `404` source adapter пробует latest payload без query params;
+  - latest payload принимается только если его factual date совпадает с requested slot date;
+  - если source latest уже уехал дальше requested slot date, STATUS surface остаётся truthful `not_found` с `resolution_rule=explicit_or_latest_date_match`.
+- Для тех же bot/web-source sources ready-snapshot runtime дополнительно хранит exact-date successful payloads server-side:
+  - previous `today_current` snapshot может быть переиспользован только как exact same date для следующего `yesterday_closed`;
+  - reuse surface-ится в `STATUS.*[yesterday_closed].note` как `resolution_rule=exact_date_runtime_cache`;
+  - contour не копирует `today_current` в `yesterday_closed` и не invent-ит missing date values без exact-date source-backed payload.
 - Current-only sources не backfill-ятся в closed-day column:
   - `stocks[yesterday_closed]`, `prices_snapshot[yesterday_closed]`, `ads_bids[yesterday_closed]` materialize-ятся как `not_available`
   - `today_current` values остаются в своей фактической колонке и не маскируются под yesterday EOD
@@ -260,10 +271,12 @@ Bounded допущение:
 - local harness:
   - `apps/sheet_vitrina_v1_registry_upload_trigger_harness.js`
 - smoke:
-  - `apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py`
-  - `apps/sheet_vitrina_v1_refresh_read_split_smoke.py`
-  - `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`
-  - `apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py`
+- `apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py`
+- `apps/sheet_vitrina_v1_refresh_read_split_smoke.py`
+- `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`
+- `apps/web_source_temporal_adapter_smoke.py`
+- `apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py`
+- `apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py`
 
 # 6. Какой smoke подтверждён
 
