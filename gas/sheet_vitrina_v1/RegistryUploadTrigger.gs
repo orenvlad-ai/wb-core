@@ -4,7 +4,10 @@ const REGISTRY_UPLOAD_TARGET_SPREADSHEET_NAME = 'WB Core Vitrina V1';
 const REGISTRY_UPLOAD_MENU_ROOT = 'WB Core';
 const REGISTRY_UPLOAD_MENU_PREPARE_LABEL = 'Подготовить листы CONFIG / METRICS / FORMULAS';
 const REGISTRY_UPLOAD_MENU_UPLOAD_LABEL = 'Отправить реестры на сервер';
+const REGISTRY_UPLOAD_MENU_PREPARE_COST_PRICE_LABEL = 'Подготовить лист COST_PRICE';
+const REGISTRY_UPLOAD_MENU_UPLOAD_COST_PRICE_LABEL = 'Отправить себестоимости';
 const REGISTRY_UPLOAD_MENU_LOAD_LABEL = 'Загрузить таблицу';
+const COST_PRICE_UPLOAD_PATH = '/v1/cost-price/upload';
 const SHEET_VITRINA_PLAN_PATH = '/v1/sheet-vitrina-v1/plan';
 
 const REGISTRY_UPLOAD_SHEET_LAYOUTS = {
@@ -33,6 +36,12 @@ const REGISTRY_UPLOAD_SHEET_LAYOUTS = {
   },
 };
 
+const COST_PRICE_SHEET_NAME = 'COST_PRICE';
+const COST_PRICE_SHEET_LAYOUT = {
+  headers: ['group', 'cost_price_rub', 'effective_from'],
+  widths: [220, 140, 140],
+};
+
 const REGISTRY_UPLOAD_CONTROL_HEADERS = ['key', 'value'];
 const REGISTRY_UPLOAD_CONTROL_ROWS = [
   'endpoint_url',
@@ -51,11 +60,30 @@ const REGISTRY_UPLOAD_STATUS_LAST_ROW = 7;
 const REGISTRY_UPLOAD_CONTROL_NOTE =
   'Укажите полный URL HTTP entrypoint вида https://host/v1/registry-upload/bundle';
 
+const COST_PRICE_CONTROL_HEADERS = ['key', 'value'];
+const COST_PRICE_CONTROL_ROWS = [
+  'endpoint_url',
+  'last_dataset_version',
+  'last_status',
+  'last_activated_at',
+  'last_http_status',
+  'last_validation_errors',
+];
+const COST_PRICE_CONTROL_START_COLUMN = 5;
+const COST_PRICE_CONTROL_VALUE_COLUMN = COST_PRICE_CONTROL_START_COLUMN + 1;
+const COST_PRICE_ENDPOINT_ROW = 2;
+const COST_PRICE_STATUS_FIRST_ROW = 3;
+const COST_PRICE_STATUS_LAST_ROW = 7;
+const COST_PRICE_CONTROL_NOTE =
+  'Укажите полный URL HTTP entrypoint вида https://host/v1/cost-price/upload';
+
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu(REGISTRY_UPLOAD_MENU_ROOT)
     .addItem(REGISTRY_UPLOAD_MENU_PREPARE_LABEL, 'prepareRegistryUploadOperatorSheets')
     .addItem(REGISTRY_UPLOAD_MENU_UPLOAD_LABEL, 'uploadRegistryUploadBundle')
+    .addItem(REGISTRY_UPLOAD_MENU_PREPARE_COST_PRICE_LABEL, 'prepareCostPriceSheet')
+    .addItem(REGISTRY_UPLOAD_MENU_UPLOAD_COST_PRICE_LABEL, 'uploadCostPriceSheet')
     .addItem(REGISTRY_UPLOAD_MENU_LOAD_LABEL, 'loadSheetVitrinaTable')
     .addToUi();
 }
@@ -77,6 +105,21 @@ function prepareRegistryUploadOperatorSheets() {
   const message = `Подготовлены листы: ${summary.sheet_names.join(', ')} · seed ${seededCounts.config_v2}/${seededCounts.metrics_v2}/${seededCounts.formulas_v2}`;
   _notifyRegistryUploadOperator_(message, 'success');
   return JSON.stringify(summary);
+}
+
+function prepareCostPriceSheet() {
+  const spreadsheet = getRegistryUploadSpreadsheet_();
+  const created = _ensureCostPriceSheet_(spreadsheet);
+  const summary = _summarizeCostPriceSheet_(spreadsheet, created);
+  const message = `Подготовлен лист COST_PRICE${summary.created ? '' : ' (обновлён)'}`;
+  _notifyRegistryUploadOperator_(message, 'success');
+  return JSON.stringify({
+    ok: 'success',
+    spreadsheet_id: spreadsheet.getId(),
+    spreadsheet_name: spreadsheet.getName(),
+    sheet_name: summary.sheet_name,
+    summary: summary,
+  });
 }
 
 function loadSheetVitrinaTable() {
@@ -131,6 +174,39 @@ function uploadRegistryUploadBundle() {
     return JSON.stringify(response);
   } catch (error) {
     _recordRegistryUploadTransportError_(String(error));
+    _notifyRegistryUploadOperator_(String(error), 'error');
+    throw error;
+  }
+}
+
+function uploadCostPriceSheet() {
+  const spreadsheet = getRegistryUploadSpreadsheet_();
+  spreadsheet.toast('Собираю себестоимости и отправляю на сервер...', REGISTRY_UPLOAD_MENU_ROOT, 5);
+  try {
+    const response = _uploadCostPriceFromSheet_({});
+    const result = response.upload_result;
+    if (result) {
+      const summaryLines = [
+        `Статус: ${result.status}`,
+        `Dataset: ${result.dataset_version}`,
+        `HTTP: ${response.http_status}`,
+      ];
+      if (result.activated_at) {
+        summaryLines.push(`Активировано: ${result.activated_at}`);
+      }
+      if (result.validation_errors.length) {
+        summaryLines.push(`Ошибки: ${result.validation_errors.join('; ')}`);
+      }
+      _notifyRegistryUploadOperator_(summaryLines.join('\n'), result.status === 'accepted' ? 'success' : 'warning');
+    } else {
+      _notifyRegistryUploadOperator_(
+        `HTTP ${response.http_status}: ${response.error || 'unexpected runtime error'}`,
+        'error'
+      );
+    }
+    return JSON.stringify(response);
+  } catch (error) {
+    _recordCostPriceTransportError_(String(error));
     _notifyRegistryUploadOperator_(String(error), 'error');
     throw error;
   }
@@ -197,6 +273,43 @@ function debugUploadRegistryUploadBundleFromSheets(endpointUrl, bundleVersion, u
   );
 }
 
+function debugWriteCostPriceRowsToSheet(costPriceJson, endpointUrl) {
+  const payload = _requireObject_(JSON.parse(String(costPriceJson || '')), 'cost price payload');
+  const spreadsheet = getRegistryUploadSpreadsheet_();
+  prepareCostPriceSheet();
+  _writeCostPriceRowsToSheet_(
+    spreadsheet,
+    Array.isArray(payload.cost_price_rows) ? payload.cost_price_rows : [],
+    String(endpointUrl || '').trim()
+  );
+  return JSON.stringify({
+    ok: 'success',
+    spreadsheet_id: spreadsheet.getId(),
+    spreadsheet_name: spreadsheet.getName(),
+    sheet_name: COST_PRICE_SHEET_NAME,
+    dataset_version: String(payload.dataset_version || ''),
+  });
+}
+
+function debugBuildCostPriceUploadFromSheet(datasetVersion, uploadedAt) {
+  return JSON.stringify(
+    _buildCostPriceUploadFromSheet_({
+      datasetVersion: String(datasetVersion || '').trim(),
+      uploadedAt: String(uploadedAt || '').trim(),
+    })
+  );
+}
+
+function debugUploadCostPriceSheet(endpointUrl, datasetVersion, uploadedAt) {
+  return JSON.stringify(
+    _uploadCostPriceFromSheet_({
+      endpointUrl: String(endpointUrl || '').trim(),
+      datasetVersion: String(datasetVersion || '').trim(),
+      uploadedAt: String(uploadedAt || '').trim(),
+    })
+  );
+}
+
 function debugLoadSheetVitrinaTable(endpointUrl, asOfDate) {
   return JSON.stringify(
     _loadSheetVitrinaTableFromServer_({
@@ -222,6 +335,20 @@ function debugResetRegistryUploadOperatorSheets() {
   });
 }
 
+function debugResetCostPriceSheet() {
+  const spreadsheet = getRegistryUploadSpreadsheet_();
+  prepareCostPriceSheet();
+  const sheet = requireRegistryUploadSheet_(spreadsheet, COST_PRICE_SHEET_NAME);
+  _clearCostPriceSheetData_(sheet);
+  _clearCostPriceStatusBlock_(sheet);
+  return JSON.stringify({
+    ok: 'success',
+    spreadsheet_id: spreadsheet.getId(),
+    spreadsheet_name: spreadsheet.getName(),
+    sheet_name: COST_PRICE_SHEET_NAME,
+  });
+}
+
 function _uploadRegistryUploadBundleFromSheets_(options) {
   const spreadsheet = getRegistryUploadSpreadsheet_();
   const bundle = _buildRegistryUploadBundleFromSheets_({
@@ -231,6 +358,18 @@ function _uploadRegistryUploadBundleFromSheets_(options) {
   const endpointUrl = _resolveRegistryUploadEndpointUrl_(spreadsheet, String(options.endpointUrl || '').trim());
   const response = _postRegistryUploadBundle_(bundle, endpointUrl);
   _writeRegistryUploadStatus_(requireRegistryUploadSheet_(spreadsheet, 'CONFIG'), endpointUrl, response);
+  return response;
+}
+
+function _uploadCostPriceFromSheet_(options) {
+  const spreadsheet = getRegistryUploadSpreadsheet_();
+  const payload = _buildCostPriceUploadFromSheet_({
+    datasetVersion: String(options.datasetVersion || '').trim(),
+    uploadedAt: String(options.uploadedAt || '').trim(),
+  });
+  const endpointUrl = _resolveCostPriceUploadEndpointUrl_(spreadsheet, String(options.endpointUrl || '').trim());
+  const response = _postCostPriceUpload_(payload, endpointUrl);
+  _writeCostPriceStatus_(requireRegistryUploadSheet_(spreadsheet, COST_PRICE_SHEET_NAME), endpointUrl, response);
   return response;
 }
 
@@ -250,6 +389,20 @@ function _buildRegistryUploadBundleFromSheets_(options) {
   };
 }
 
+function _buildCostPriceUploadFromSheet_(options) {
+  const spreadsheet = getRegistryUploadSpreadsheet_();
+  const generatedUploadedAt = _formatRegistryUploadTimestamp_(new Date());
+  const uploadedAt = String(options.uploadedAt || '').trim() || generatedUploadedAt;
+  const datasetVersion =
+    String(options.datasetVersion || '').trim() || `sheet_vitrina_v1_cost_price_upload__${uploadedAt}`;
+
+  return {
+    dataset_version: datasetVersion,
+    uploaded_at: uploadedAt,
+    cost_price_rows: _readCostPriceRows_(requireRegistryUploadSheet_(spreadsheet, COST_PRICE_SHEET_NAME)),
+  };
+}
+
 function _readConfigRegistryItems_(sheet) {
   const rows = _readRegistryUploadRows_(sheet, REGISTRY_UPLOAD_SHEET_LAYOUTS.CONFIG.headers);
   return rows.map((row, index) => ({
@@ -258,6 +411,15 @@ function _readConfigRegistryItems_(sheet) {
     display_name: _requireNonEmptyString_(row.display_name, `CONFIG row ${index + 2}: display_name`),
     group: _requireNonEmptyString_(row.group, `CONFIG row ${index + 2}: group`),
     display_order: _requireIntLike_(row.display_order, `CONFIG row ${index + 2}: display_order`),
+  }));
+}
+
+function _readCostPriceRows_(sheet) {
+  const rows = _readRegistryUploadRows_(sheet, COST_PRICE_SHEET_LAYOUT.headers);
+  return rows.map((row, index) => ({
+    group: _requireNonEmptyString_(row.group, `COST_PRICE row ${index + 2}: group`),
+    cost_price_rub: _requireNumberLike_(row.cost_price_rub, `COST_PRICE row ${index + 2}: cost_price_rub`),
+    effective_from: _requireCostPriceDateLike_(row.effective_from, `COST_PRICE row ${index + 2}: effective_from`),
   }));
 }
 
@@ -314,6 +476,19 @@ function _writeRegistryUploadBundleToSheets_(spreadsheet, bundle, endpointUrl) {
   _clearRegistryUploadStatusBlock_(configSheet);
 }
 
+function _writeCostPriceRowsToSheet_(spreadsheet, rows, endpointUrl) {
+  const sheet = requireRegistryUploadSheet_(spreadsheet, COST_PRICE_SHEET_NAME);
+  _clearCostPriceSheetData_(sheet);
+  if (Array.isArray(rows) && rows.length) {
+    const values = rows.map((item) => COST_PRICE_SHEET_LAYOUT.headers.map((header) => item[header]));
+    sheet.getRange(2, 1, values.length, COST_PRICE_SHEET_LAYOUT.headers.length).setValues(values);
+  }
+  if (endpointUrl) {
+    _setCostPriceEndpointUrl_(sheet, endpointUrl);
+  }
+  _clearCostPriceStatusBlock_(sheet);
+}
+
 function _writeRegistrySheetRows_(spreadsheet, sheetName, rows) {
   const sheet = requireRegistryUploadSheet_(spreadsheet, sheetName);
   const headers = REGISTRY_UPLOAD_SHEET_LAYOUTS[sheetName].headers;
@@ -354,6 +529,12 @@ function _clearRegistryUploadSheetData_(sheet, sheetName) {
   sheet.getRange(startRow, 1, rowCount, headers.length).clearContent();
 }
 
+function _clearCostPriceSheetData_(sheet) {
+  const startRow = 2;
+  const rowCount = Math.max(sheet.getMaxRows() - 1, 1);
+  sheet.getRange(startRow, 1, rowCount, COST_PRICE_SHEET_LAYOUT.headers.length).clearContent();
+}
+
 function _postRegistryUploadBundle_(bundle, endpointUrl) {
   const response = UrlFetchApp.fetch(endpointUrl, {
     method: 'post',
@@ -377,6 +558,46 @@ function _postRegistryUploadBundle_(bundle, endpointUrl) {
   }
 
   if (_isCanonicalRegistryUploadResult_(bodyPayload)) {
+    return {
+      ok: 'success',
+      endpoint_url: endpointUrl,
+      http_status: httpStatus,
+      upload_result: bodyPayload,
+    };
+  }
+
+  return {
+    ok: 'error',
+    endpoint_url: endpointUrl,
+    http_status: httpStatus,
+    error: String(bodyPayload.error || 'unexpected upload response'),
+    response_body: bodyPayload,
+  };
+}
+
+function _postCostPriceUpload_(payload, endpointUrl) {
+  const response = UrlFetchApp.fetch(endpointUrl, {
+    method: 'post',
+    contentType: 'application/json; charset=utf-8',
+    muteHttpExceptions: true,
+    payload: JSON.stringify(payload),
+  });
+
+  const httpStatus = response.getResponseCode();
+  const bodyText = response.getContentText();
+  let bodyPayload = null;
+  try {
+    bodyPayload = JSON.parse(bodyText);
+  } catch (error) {
+    return {
+      ok: 'error',
+      endpoint_url: endpointUrl,
+      http_status: httpStatus,
+      error: `endpoint returned non-JSON response: ${bodyText}`,
+    };
+  }
+
+  if (_isCanonicalCostPriceUploadResult_(bodyPayload)) {
     return {
       ok: 'success',
       endpoint_url: endpointUrl,
@@ -431,6 +652,18 @@ function _isCanonicalRegistryUploadResult_(payload) {
   );
 }
 
+function _isCanonicalCostPriceUploadResult_(payload) {
+  return (
+    payload &&
+    typeof payload === 'object' &&
+    typeof payload.status === 'string' &&
+    typeof payload.dataset_version === 'string' &&
+    payload.accepted_counts &&
+    typeof payload.accepted_counts === 'object' &&
+    Array.isArray(payload.validation_errors)
+  );
+}
+
 function _validateSheetVitrinaPlanPayload_(payload) {
   if (!payload || typeof payload !== 'object') {
     throw new Error('sheet vitrina plan payload must be a JSON object');
@@ -477,6 +710,21 @@ function _ensureRegistryUploadSheet_(spreadsheet, sheetName) {
   return created;
 }
 
+function _ensureCostPriceSheet_(spreadsheet) {
+  let sheet = spreadsheet.getSheetByName(COST_PRICE_SHEET_NAME);
+  const created = !sheet;
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(COST_PRICE_SHEET_NAME);
+  }
+
+  sheet.getRange(1, 1, 1, COST_PRICE_SHEET_LAYOUT.headers.length).setValues([COST_PRICE_SHEET_LAYOUT.headers]);
+  sheet.getRange(1, 1, 1, COST_PRICE_SHEET_LAYOUT.headers.length).setFontWeight('bold');
+  sheet.setFrozenRows(1);
+  COST_PRICE_SHEET_LAYOUT.widths.forEach((width, index) => sheet.setColumnWidth(index + 1, width));
+  _ensureCostPriceControlBlock_(sheet, spreadsheet);
+  return created;
+}
+
 function _summarizeRegistryUploadSheet_(spreadsheet, sheetName, created) {
   const layout = REGISTRY_UPLOAD_SHEET_LAYOUTS[sheetName];
   const sheet = requireRegistryUploadSheet_(spreadsheet, sheetName);
@@ -504,6 +752,20 @@ function _summarizeRegistryUploadSheet_(spreadsheet, sheetName, created) {
   };
 }
 
+function _summarizeCostPriceSheet_(spreadsheet, created) {
+  const sheet = requireRegistryUploadSheet_(spreadsheet, COST_PRICE_SHEET_NAME);
+  return {
+    sheet_name: COST_PRICE_SHEET_NAME,
+    created: created,
+    header: COST_PRICE_SHEET_LAYOUT.headers,
+    data_row_count: _readRegistryUploadRows_(sheet, COST_PRICE_SHEET_LAYOUT.headers).length,
+    last_row: sheet.getLastRow(),
+    last_column: sheet.getLastColumn(),
+    control_header: COST_PRICE_CONTROL_HEADERS,
+    control_rows: COST_PRICE_CONTROL_ROWS,
+  };
+}
+
 function _ensureRegistryUploadControlBlock_(sheet) {
   const existingValues = _readRegistryUploadControlValues_(sheet);
   sheet
@@ -524,12 +786,48 @@ function _ensureRegistryUploadControlBlock_(sheet) {
   sheet.getRange(REGISTRY_UPLOAD_ENDPOINT_ROW, REGISTRY_UPLOAD_CONTROL_VALUE_COLUMN).setNote(REGISTRY_UPLOAD_CONTROL_NOTE);
 }
 
+function _ensureCostPriceControlBlock_(sheet, spreadsheet) {
+  const existingValues = _readCostPriceControlValues_(sheet);
+  const fallbackEndpoint = existingValues.endpoint_url || _deriveCostPriceUploadUrlFromRegistrySheet_(spreadsheet);
+  sheet
+    .getRange(1, COST_PRICE_CONTROL_START_COLUMN, 1, COST_PRICE_CONTROL_HEADERS.length)
+    .setValues([COST_PRICE_CONTROL_HEADERS])
+    .setFontWeight('bold');
+  sheet
+    .getRange(2, COST_PRICE_CONTROL_START_COLUMN, COST_PRICE_CONTROL_ROWS.length, 1)
+    .setValues(COST_PRICE_CONTROL_ROWS.map((label) => [label]));
+  sheet
+    .getRange(2, COST_PRICE_CONTROL_VALUE_COLUMN, COST_PRICE_CONTROL_ROWS.length, 1)
+    .clearContent();
+  sheet.setColumnWidth(COST_PRICE_CONTROL_START_COLUMN, 180);
+  sheet.setColumnWidth(COST_PRICE_CONTROL_VALUE_COLUMN, 320);
+  sheet
+    .getRange(2, COST_PRICE_CONTROL_VALUE_COLUMN, COST_PRICE_CONTROL_ROWS.length, 1)
+    .setValues(
+      COST_PRICE_CONTROL_ROWS.map((key) => [
+        key === 'endpoint_url' ? fallbackEndpoint : existingValues[key],
+      ])
+    );
+  sheet.getRange(COST_PRICE_ENDPOINT_ROW, COST_PRICE_CONTROL_VALUE_COLUMN).setNote(COST_PRICE_CONTROL_NOTE);
+}
+
 function _readRegistryUploadControlValues_(sheet) {
   const values = sheet
     .getRange(2, REGISTRY_UPLOAD_CONTROL_VALUE_COLUMN, REGISTRY_UPLOAD_CONTROL_ROWS.length, 1)
     .getValues();
   const out = {};
   REGISTRY_UPLOAD_CONTROL_ROWS.forEach((key, index) => {
+    out[key] = values[index][0];
+  });
+  return out;
+}
+
+function _readCostPriceControlValues_(sheet) {
+  const values = sheet
+    .getRange(2, COST_PRICE_CONTROL_VALUE_COLUMN, COST_PRICE_CONTROL_ROWS.length, 1)
+    .getValues();
+  const out = {};
+  COST_PRICE_CONTROL_ROWS.forEach((key, index) => {
     out[key] = values[index][0];
   });
   return out;
@@ -551,6 +849,22 @@ function _writeRegistryUploadStatus_(configSheet, endpointUrl, response) {
   configSheet.getRange(7, REGISTRY_UPLOAD_CONTROL_VALUE_COLUMN).setValue(errors);
 }
 
+function _writeCostPriceStatus_(costPriceSheet, endpointUrl, response) {
+  _setCostPriceEndpointUrl_(costPriceSheet, endpointUrl);
+  const datasetVersion = response.upload_result ? response.upload_result.dataset_version : '';
+  const statusValue = response.upload_result ? response.upload_result.status : 'transport_error';
+  const activatedAt = response.upload_result ? String(response.upload_result.activated_at || '') : '';
+  const errors = response.upload_result
+    ? response.upload_result.validation_errors.join('; ')
+    : String(response.error || '');
+
+  costPriceSheet.getRange(3, COST_PRICE_CONTROL_VALUE_COLUMN).setValue(datasetVersion);
+  costPriceSheet.getRange(4, COST_PRICE_CONTROL_VALUE_COLUMN).setValue(statusValue);
+  costPriceSheet.getRange(5, COST_PRICE_CONTROL_VALUE_COLUMN).setValue(activatedAt);
+  costPriceSheet.getRange(6, COST_PRICE_CONTROL_VALUE_COLUMN).setValue(String(response.http_status || ''));
+  costPriceSheet.getRange(7, COST_PRICE_CONTROL_VALUE_COLUMN).setValue(errors);
+}
+
 function _recordRegistryUploadTransportError_(message) {
   const configSheet = requireRegistryUploadSheet_(getRegistryUploadSpreadsheet_(), 'CONFIG');
   configSheet.getRange(3, REGISTRY_UPLOAD_CONTROL_VALUE_COLUMN).setValue('');
@@ -560,8 +874,21 @@ function _recordRegistryUploadTransportError_(message) {
   configSheet.getRange(7, REGISTRY_UPLOAD_CONTROL_VALUE_COLUMN).setValue(message);
 }
 
+function _recordCostPriceTransportError_(message) {
+  const costPriceSheet = requireRegistryUploadSheet_(getRegistryUploadSpreadsheet_(), COST_PRICE_SHEET_NAME);
+  costPriceSheet.getRange(3, COST_PRICE_CONTROL_VALUE_COLUMN).setValue('');
+  costPriceSheet.getRange(4, COST_PRICE_CONTROL_VALUE_COLUMN).setValue('transport_error');
+  costPriceSheet.getRange(5, COST_PRICE_CONTROL_VALUE_COLUMN).setValue('');
+  costPriceSheet.getRange(6, COST_PRICE_CONTROL_VALUE_COLUMN).setValue('');
+  costPriceSheet.getRange(7, COST_PRICE_CONTROL_VALUE_COLUMN).setValue(message);
+}
+
 function _clearRegistryUploadStatusBlock_(configSheet) {
   configSheet.getRange(REGISTRY_UPLOAD_STATUS_FIRST_ROW, REGISTRY_UPLOAD_CONTROL_VALUE_COLUMN, 5, 1).clearContent();
+}
+
+function _clearCostPriceStatusBlock_(costPriceSheet) {
+  costPriceSheet.getRange(COST_PRICE_STATUS_FIRST_ROW, COST_PRICE_CONTROL_VALUE_COLUMN, 5, 1).clearContent();
 }
 
 function _resolveRegistryUploadEndpointUrl_(spreadsheet, endpointUrlOverride) {
@@ -576,18 +903,42 @@ function _resolveRegistryUploadEndpointUrl_(spreadsheet, endpointUrlOverride) {
   return _validateRegistryUploadEndpointUrl_(endpointUrl);
 }
 
+function _resolveCostPriceUploadEndpointUrl_(spreadsheet, endpointUrlOverride) {
+  if (endpointUrlOverride) {
+    return _validateCostPriceEndpointUrl_(endpointUrlOverride);
+  }
+  const costPriceSheet = requireRegistryUploadSheet_(spreadsheet, COST_PRICE_SHEET_NAME);
+  const endpointUrl = String(costPriceSheet.getRange(COST_PRICE_ENDPOINT_ROW, COST_PRICE_CONTROL_VALUE_COLUMN).getValue() || '').trim();
+  if (endpointUrl) {
+    return _validateCostPriceEndpointUrl_(endpointUrl);
+  }
+  const derived = _deriveCostPriceUploadUrlFromRegistrySheet_(spreadsheet);
+  if (derived) {
+    _setCostPriceEndpointUrl_(costPriceSheet, derived);
+    return derived;
+  }
+  throw new Error('COST_PRICE!F2 должен содержать URL cost price upload endpoint или должен быть заполнен CONFIG!I2');
+}
+
 function _deriveSheetVitrinaPlanUrl_(uploadUrl, asOfDate) {
-  const normalizedUploadUrl = _validateRegistryUploadEndpointUrl_(uploadUrl);
-  const hashlessUrl = String(normalizedUploadUrl).split('#')[0];
-  const pathlessUrl = hashlessUrl.split('?')[0];
-  const schemeMarkerIndex = pathlessUrl.indexOf('://');
-  const pathStartIndex = pathlessUrl.indexOf('/', schemeMarkerIndex + 3);
-  const origin = pathStartIndex === -1 ? pathlessUrl : pathlessUrl.slice(0, pathStartIndex);
+  const origin = _extractEndpointOrigin_(_validateRegistryUploadEndpointUrl_(uploadUrl));
   let planUrl = `${origin}${SHEET_VITRINA_PLAN_PATH}`;
   if (asOfDate) {
     planUrl += `?as_of_date=${encodeURIComponent(asOfDate)}`;
   }
   return planUrl;
+}
+
+function _deriveCostPriceUploadUrlFromRegistrySheet_(spreadsheet) {
+  const configSheet = spreadsheet.getSheetByName('CONFIG');
+  if (!configSheet) {
+    return '';
+  }
+  const registryEndpoint = String(configSheet.getRange(REGISTRY_UPLOAD_ENDPOINT_ROW, REGISTRY_UPLOAD_CONTROL_VALUE_COLUMN).getValue() || '').trim();
+  if (!registryEndpoint) {
+    return '';
+  }
+  return `${_extractEndpointOrigin_(_validateRegistryUploadEndpointUrl_(registryEndpoint))}${COST_PRICE_UPLOAD_PATH}`;
 }
 
 function _setRegistryUploadEndpointUrl_(configSheet, endpointUrl) {
@@ -597,11 +948,33 @@ function _setRegistryUploadEndpointUrl_(configSheet, endpointUrl) {
   configSheet.getRange(REGISTRY_UPLOAD_ENDPOINT_ROW, REGISTRY_UPLOAD_CONTROL_VALUE_COLUMN).setValue(endpointUrl);
 }
 
+function _setCostPriceEndpointUrl_(costPriceSheet, endpointUrl) {
+  if (!endpointUrl) {
+    return;
+  }
+  costPriceSheet.getRange(COST_PRICE_ENDPOINT_ROW, COST_PRICE_CONTROL_VALUE_COLUMN).setValue(endpointUrl);
+}
+
 function _validateRegistryUploadEndpointUrl_(endpointUrl) {
   if (!/^https?:\/\//i.test(endpointUrl)) {
     throw new Error(`endpoint URL must start with http:// or https://, got ${endpointUrl}`);
   }
   return endpointUrl;
+}
+
+function _validateCostPriceEndpointUrl_(endpointUrl) {
+  if (!/^https?:\/\//i.test(endpointUrl)) {
+    throw new Error(`endpoint URL must start with http:// or https://, got ${endpointUrl}`);
+  }
+  return endpointUrl;
+}
+
+function _extractEndpointOrigin_(endpointUrl) {
+  const hashlessUrl = String(endpointUrl).split('#')[0];
+  const pathlessUrl = hashlessUrl.split('?')[0];
+  const schemeMarkerIndex = pathlessUrl.indexOf('://');
+  const pathStartIndex = pathlessUrl.indexOf('/', schemeMarkerIndex + 3);
+  return pathStartIndex === -1 ? pathlessUrl : pathlessUrl.slice(0, pathStartIndex);
 }
 
 function _formatRegistryUploadTimestamp_(date) {
@@ -672,6 +1045,43 @@ function _requireBooleanLike_(value, label) {
     return false;
   }
   throw new Error(`${label} must be a boolean`);
+}
+
+function _requireNumberLike_(value, label) {
+  if (value === '' || value === null || value === undefined) {
+    throw new Error(`${label} must be a numeric value`);
+  }
+  if (typeof value === 'number') {
+    if (!isFinite(value)) {
+      throw new Error(`${label} must be a finite numeric value`);
+    }
+    return value;
+  }
+  const normalized = String(value).trim().replace(/\s+/g, '').replace(',', '.');
+  const numberValue = Number(normalized);
+  if (!isFinite(numberValue)) {
+    throw new Error(`${label} must be a numeric value`);
+  }
+  return numberValue;
+}
+
+function _requireCostPriceDateLike_(value, label) {
+  if (Object.prototype.toString.call(value) === '[object Date]' && !isNaN(value.getTime())) {
+    return _formatDateOnly_(value.getFullYear(), value.getMonth() + 1, value.getDate());
+  }
+  const normalized = String(value === null || value === undefined ? '' : value).trim();
+  if (!normalized) {
+    throw new Error(`${label} must be a non-empty date`);
+  }
+  return normalized;
+}
+
+function _formatDateOnly_(year, month, day) {
+  return [year, _padTwoDigits_(month), _padTwoDigits_(day)].join('-');
+}
+
+function _padTwoDigits_(value) {
+  return String(value).padStart(2, '0');
 }
 
 function _isRegistryUploadEmptyCell_(value) {

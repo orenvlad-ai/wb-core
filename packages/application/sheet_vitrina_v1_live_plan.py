@@ -33,6 +33,7 @@ from packages.application.sheet_vitrina_v1 import build_sheet_write_plan
 from packages.application.spp_block import SppBlock
 from packages.application.stocks_block import StocksBlock
 from packages.application.web_source_snapshot_block import WebSourceSnapshotBlock
+from packages.contracts.cost_price_upload import CostPriceCurrentState, CostPriceRow
 from packages.contracts.ads_bids_block import AdsBidsRequest
 from packages.contracts.ads_compact_block import AdsCompactRequest
 from packages.contracts.fin_report_daily_block import FinReportDailyRequest
@@ -71,7 +72,6 @@ TEMPORAL_SLOT_YESTERDAY_CLOSED = "yesterday_closed"
 TEMPORAL_SLOT_TODAY_CURRENT = "today_current"
 BLOCKED_SOURCE_STATUSES = {
     "promo_by_price": "live HTTP adapter is not implemented; rows stay materialized with blank values",
-    "cogs_by_group": "live HTTP adapter is not implemented; rows stay materialized with blank values",
 }
 SOURCE_TEMPORAL_POLICIES = {
     "seller_funnel_snapshot": "dual_day_capable",
@@ -84,8 +84,8 @@ SOURCE_TEMPORAL_POLICIES = {
     "stocks": "today_current",
     "ads_compact": "dual_day_capable",
     "fin_report_daily": "dual_day_capable",
+    "cost_price": "dual_day_capable",
     "promo_by_price": "blocked",
-    "cogs_by_group": "blocked",
 }
 PERCENT_SOURCE_KEYS = {"ctr", "ctr_current", "localizationPercent"}
 DECISION_SUMMARY = {
@@ -126,6 +126,14 @@ class SlotLookups:
     ads_compact_lookup: dict[int, Any]
     fin_lookup: dict[int, Any]
     fin_storage_fee_total: float | None
+    cost_price_lookup: dict[str, "ResolvedCostPrice"]
+
+
+@dataclass(frozen=True)
+class ResolvedCostPrice:
+    group_name: str
+    cost_price_rub: float
+    effective_from: str
 
 
 @dataclass(frozen=True)
@@ -188,7 +196,8 @@ class SheetVitrinaV1LivePlanBlock:
         if not displayed_metrics:
             raise ValueError("current registry metrics_v2 does not contain enabled show_in_data rows")
 
-        live_sources = self._load_live_sources(enabled_config, temporal_slots)
+        cost_price_state = _load_cost_price_current_state(self.runtime)
+        live_sources = self._load_live_sources(enabled_config, temporal_slots, cost_price_state)
         evaluator = _MetricEvaluator(
             enabled_config=enabled_config,
             metrics_by_key=metrics_by_key,
@@ -250,8 +259,10 @@ class SheetVitrinaV1LivePlanBlock:
         self,
         enabled_config: list[ConfigV2Item],
         temporal_slots: list[SheetVitrinaV1TemporalSlot],
+        cost_price_state: CostPriceCurrentState | None,
     ) -> TemporalLiveSources:
         requested_nm_ids = [item.nm_id for item in enabled_config]
+        requested_groups = sorted({item.group for item in enabled_config})
         statuses: list[LiveSourceStatus] = []
         slot_lookups: dict[str, SlotLookups] = {
             slot.slot_key: SlotLookups(
@@ -266,6 +277,7 @@ class SheetVitrinaV1LivePlanBlock:
                 ads_compact_lookup={},
                 fin_lookup={},
                 fin_storage_fee_total=None,
+                cost_price_lookup={},
             )
             for slot in temporal_slots
         }
@@ -421,6 +433,16 @@ class SheetVitrinaV1LivePlanBlock:
                             getattr(storage_total, "fin_storage_fee_total", 0.0)
                         )
 
+        for slot in temporal_slots:
+            cost_price_status, cost_price_lookup = _build_cost_price_status(
+                current_state=cost_price_state,
+                requested_groups=requested_groups,
+                temporal_slot=slot.slot_key,
+                column_date=slot.column_date,
+            )
+            slot_lookups[slot.slot_key].cost_price_lookup = cost_price_lookup
+            statuses.append(cost_price_status)
+
         for source_key, note in BLOCKED_SOURCE_STATUSES.items():
             for slot in temporal_slots:
                 statuses.append(
@@ -464,6 +486,7 @@ class _MetricEvaluator:
         self.formulas_by_id = formulas_by_id
         self.live_sources = live_sources
         self.grouped_config = _group_config(enabled_config)
+        self.config_by_nm_id = {item.nm_id: item for item in enabled_config}
         self.sku_cache: dict[tuple[str, int, str], float | None] = {}
         self.total_cache: dict[tuple[str, str], float | None] = {}
         self.group_cache: dict[tuple[str, str, str], float | None] = {}
@@ -599,6 +622,12 @@ class _MetricEvaluator:
         return float(sum(numeric)) / len(numeric) if numeric else None
 
     def _resolve_direct_sku(self, metric_key: str, nm_id: int, temporal_slot: str) -> float | None:
+        if metric_key == "cost_price_rub":
+            config_item = self.config_by_nm_id.get(nm_id)
+            if config_item is None:
+                return None
+            resolved = self._slot_lookups(temporal_slot).cost_price_lookup.get(config_item.group)
+            return None if resolved is None else float(resolved.cost_price_rub)
         if metric_key == "variable_costs_wb":
             order_sum = self.resolve_sku("orderSum", nm_id, temporal_slot)
             return None if order_sum is None else float(order_sum) * 0.4904
@@ -689,7 +718,6 @@ BLOCKED_SOURCE_METRIC_KEYS = {
     "promo_participation",
     "promo_count_by_price",
     "promo_entry_price_best",
-    "cost_price_rub",
 }
 
 
@@ -995,6 +1023,84 @@ def _build_temporal_gap_status(
     )
 
 
+def _build_cost_price_status(
+    *,
+    current_state: CostPriceCurrentState | None,
+    requested_groups: list[str],
+    temporal_slot: str,
+    column_date: str,
+) -> tuple[LiveSourceStatus, dict[str, ResolvedCostPrice]]:
+    if current_state is None:
+        return (
+            LiveSourceStatus(
+                source_key="cost_price",
+                temporal_slot=temporal_slot,
+                temporal_policy=SOURCE_TEMPORAL_POLICIES["cost_price"],
+                column_date=column_date,
+                kind="missing",
+                freshness="",
+                snapshot_date="",
+                date=column_date,
+                date_from="",
+                date_to="",
+                requested_count=len(requested_groups),
+                covered_count=0,
+                missing_nm_ids=[],
+                note="authoritative COST_PRICE current state is not materialized",
+            ),
+            {},
+        )
+
+    rows_by_group = _index_cost_price_rows(current_state.cost_price_rows)
+    resolved: dict[str, ResolvedCostPrice] = {}
+    unmatched_groups: list[str] = []
+    for group_name in requested_groups:
+        cost_row = _resolve_cost_price_row(rows_by_group, group_name, column_date)
+        if cost_row is None:
+            unmatched_groups.append(group_name)
+            continue
+        resolved[group_name] = cost_row
+
+    matched_count = len(resolved)
+    if matched_count == len(requested_groups):
+        kind = "success"
+    elif matched_count == 0:
+        kind = "missing"
+    else:
+        kind = "incomplete"
+
+    note_payload: dict[str, Any] = {
+        "dataset_version": current_state.dataset_version,
+        "dataset_activated_at": current_state.activated_at,
+        "dataset_row_count": len(current_state.cost_price_rows),
+        "matched_groups": matched_count,
+        "unmatched_groups": len(unmatched_groups),
+        "resolution_rule": "latest_effective_from<=slot_date",
+    }
+    if unmatched_groups:
+        note_payload["missing_groups"] = ",".join(unmatched_groups)
+
+    return (
+        LiveSourceStatus(
+            source_key="cost_price",
+            temporal_slot=temporal_slot,
+            temporal_policy=SOURCE_TEMPORAL_POLICIES["cost_price"],
+            column_date=column_date,
+            kind=kind,
+            freshness=current_state.activated_at[:10],
+            snapshot_date=current_state.activated_at[:10],
+            date=column_date,
+            date_from="",
+            date_to="",
+            requested_count=len(requested_groups),
+            covered_count=matched_count,
+            missing_nm_ids=[],
+            note=_format_note(note_payload),
+        ),
+        resolved,
+    )
+
+
 def _status_note_from_payload(payload: Any) -> str:
     parts: list[str] = []
     detail = getattr(payload, "detail", "")
@@ -1039,6 +1145,30 @@ def _index_items_by_nm_id(payload: Any | None) -> dict[int, Any]:
     if not isinstance(items, list):
         return {}
     return {int(item.nm_id): item for item in items if isinstance(getattr(item, "nm_id", None), int)}
+
+
+def _index_cost_price_rows(cost_price_rows: list[CostPriceRow]) -> dict[str, list[CostPriceRow]]:
+    grouped: dict[str, list[CostPriceRow]] = {}
+    for row in sorted(cost_price_rows, key=lambda item: (item.group, item.effective_from)):
+        grouped.setdefault(row.group, []).append(row)
+    return grouped
+
+
+def _resolve_cost_price_row(
+    rows_by_group: Mapping[str, list[CostPriceRow]],
+    group_name: str,
+    column_date: str,
+) -> ResolvedCostPrice | None:
+    candidates = rows_by_group.get(group_name, [])
+    applicable = [row for row in candidates if row.effective_from <= column_date]
+    if not applicable:
+        return None
+    selected = applicable[-1]
+    return ResolvedCostPrice(
+        group_name=group_name,
+        cost_price_rub=float(selected.cost_price_rub),
+        effective_from=selected.effective_from,
+    )
 
 
 def _index_history_items(payload: Any | None) -> dict[int, dict[str, float]]:
@@ -1115,6 +1245,15 @@ def _group_config(config_items: list[ConfigV2Item]) -> dict[str, list[ConfigV2It
     }
 
 
+def _load_cost_price_current_state(runtime: RegistryUploadDbBackedRuntime) -> CostPriceCurrentState | None:
+    try:
+        return runtime.load_cost_price_current_state()
+    except ValueError as exc:
+        if "cost price current state is not materialized" in str(exc):
+            return None
+        raise
+
+
 def _split_ratio(value: str) -> tuple[str, str]:
     if "/" not in value:
         raise ValueError(f"ratio calc_ref must contain numerator/denominator: {value}")
@@ -1140,7 +1279,7 @@ def _evaluate_formula(expression: str, resolver: Callable[[str], float | None]) 
             return None
         values[dependency] = float(resolved)
 
-    normalized = re.sub(r"(?<=\\d),(?=\\d)", ".", expr)
+    normalized = re.sub(r"(?<=\d),(?=\d)", ".", expr)
     normalized = FORMULA_TOKEN_RE.sub(lambda match: str(values[match.group(1)]), normalized)
     node = ast.parse(normalized, mode="eval")
     return float(_eval_ast(node.body))
@@ -1154,7 +1293,7 @@ def _evaluate_condition(expression: str, resolver: Callable[[str], float | None]
         if resolved is None:
             return False
         values[dependency] = float(resolved)
-    normalized = re.sub(r"(?<=\\d),(?=\\d)", ".", expression)
+    normalized = re.sub(r"(?<=\d),(?=\d)", ".", expression)
     normalized = FORMULA_TOKEN_RE.sub(lambda match: str(values[match.group(1)]), normalized)
     normalized = normalized.replace("<>", "!=")
     normalized = re.sub(r"(?<![<>=!])=(?!=)", "==", normalized)

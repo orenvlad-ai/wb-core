@@ -25,7 +25,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "211593619fb2719d0f836e70a59e24e9dc834d0a"
+built_from_commit: "5db3548de01b2299c4f003ad43074f367d3050c8"
 ---
 
 # Summary
@@ -45,11 +45,14 @@ python3 apps/registry_upload_bundle_v1_smoke.py
 python3 apps/registry_upload_file_backed_service_smoke.py
 python3 apps/registry_upload_db_backed_runtime_smoke.py
 python3 apps/registry_upload_http_entrypoint_smoke.py
+python3 apps/cost_price_upload_http_entrypoint_smoke.py
 python3 apps/official_api_token_path_smoke.py
 python3 apps/stocks_block_smoke.py
 python3 apps/stocks_block_region_mapping_smoke.py
 python3 apps/stocks_block_batching_smoke.py
 python3 apps/sheet_vitrina_v1_registry_upload_trigger_smoke.py
+python3 apps/sheet_vitrina_v1_cost_price_upload_smoke.py
+python3 apps/sheet_vitrina_v1_cost_price_read_side_smoke.py
 python3 apps/sheet_vitrina_v1_registry_seed_v3_bootstrap_smoke.py
 python3 apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py
 python3 apps/sheet_vitrina_v1_refresh_read_split_smoke.py
@@ -71,6 +74,7 @@ Current canonical WB secret path for official adapters:
 
 Expected routes:
 - `POST /v1/registry-upload/bundle`
+- `POST /v1/cost-price/upload`
 - `POST /v1/sheet-vitrina-v1/refresh`
 - `GET /v1/sheet-vitrina-v1/plan`
 - `GET /v1/sheet-vitrina-v1/status`
@@ -82,6 +86,8 @@ Expected routes:
 clasp push
 clasp run prepareRegistryUploadOperatorSheets
 clasp run uploadRegistryUploadBundle
+clasp run prepareCostPriceSheet
+clasp run uploadCostPriceSheet
 # open the narrow repo-owned operator page for explicit refresh
 python3 -m webbrowser http://127.0.0.1:8765/sheet-vitrina-v1/operator
 # curl remains a fallback if browser/UI surface is unavailable
@@ -135,6 +141,12 @@ clasp run getSheetVitrinaV1PresentationSnapshot
 - `CONFIG / METRICS / FORMULAS` have expected headers and non-empty rows;
 - `prepareRegistryUploadOperatorSheets` currently materializes `33 / 102 / 7`;
 - `uploadRegistryUploadBundle` accepts and persists factual registry sheet lengths; на текущем contour это `33 / 102 / 7`, но проверка не должна зависеть от hardcoded row caps;
+- `COST_PRICE` has exact headers `group / cost_price_rub / effective_from`;
+- `prepareCostPriceSheet` materializes only `COST_PRICE` and its local control block, не меняя existing registry/upload actions;
+- `uploadCostPriceSheet` sends `dataset_version + uploaded_at + cost_price_rows` в separate `POST /v1/cost-price/upload`, а не подмешивает rows в `config_v2 / metrics_v2 / formulas_v2`;
+- current COST_PRICE checkpoint проверяется по accepted/rejected upload result, separate runtime current state и server-side refresh/read integration;
+- applicable себестоимость резолвится server-side по `group + latest effective_from <= slot_date`;
+- operator-facing derived rows используют canonical keys `total_proxy_profit_rub` и `proxy_margin_pct_total`;
 - `GET /sheet-vitrina-v1/operator` поднимает simple operator page без SPA/build pipeline;
 - operator page показывает только narrow status/log surface: `idle / loading / success / error`, `as_of_date`, `date_columns`, `refreshed_at`, `DATA_VITRINA` / `STATUS` row counts и текст ошибки;
 - `POST /v1/sheet-vitrina-v1/refresh` обновляет date-aware ready snapshot в repo-owned SQLite runtime contour;
@@ -142,15 +154,17 @@ clasp run getSheetVitrinaV1PresentationSnapshot
 - `CONFIG!H:I` preserves `endpoint_url`, `last_bundle_version`, `last_status`, `last_http_status`;
 - current truth / ready snapshot keep `95` enabled+show_in_data metrics;
 - `DATA_VITRINA` keeps the same server-driven truth as operator-facing two-day `date_matrix`: `1631` source rows, `34` blocks, `33` separators, `1698` rendered rows и `95` unique metric keys при `yesterday_closed + today_current`;
-- `STATUS` names live sources per temporal slot, such as `seller_funnel_snapshot[yesterday_closed]`, `seller_funnel_snapshot[today_current]`, `stocks[today_current]`, plus blocked `promo_by_price` / `cogs_by_group`;
+- `STATUS` names live sources per temporal slot, such as `seller_funnel_snapshot[yesterday_closed]`, `seller_funnel_snapshot[today_current]`, `stocks[today_current]`, `cost_price[yesterday_closed]`, `cost_price[today_current]`, plus blocked `promo_by_price`;
 - current-only sources (`stocks`, `prices_snapshot`, `ads_bids`) are expected to show `not_available` for `yesterday_closed` instead of copying `today_current` into a closed-day column;
-- blank values для promo/cogs-backed metrics трактуются как известный live-adapter gap на стороне current truth / `STATUS`, а не как повод переносить heavy fallback logic в Apps Script.
+- blank values для promo-backed metrics и unmatched/missing `COST_PRICE` coverage трактуются как truthful current-truth/status signal, а не как повод переносить heavy fallback logic в Apps Script.
 
 ## Common failure signatures
 
 | Signal | Meaning |
 | --- | --- |
 | `CONFIG!I2 должен содержать URL registry upload endpoint` | sheet-side endpoint URL is missing |
+| `COST_PRICE!F2 должен содержать URL cost price upload endpoint или должен быть заполнен CONFIG!I2` | COST_PRICE upload path has no explicit URL and cannot derive origin from registry upload control block |
+| `STATUS.cost_price[*] = missing` or `incomplete` | authoritative COST_PRICE dataset is empty, not materialized, or does not cover every enabled group for the requested slot date |
 | public `404` JSON / `{"detail":"Not Found"}` на ожидаемом public route | route есть в repo intent, но live deploy или publish wiring stale/incomplete |
 | `sheet_vitrina_v1 ready snapshot missing` после upload | load path is cheap-read only; explicit refresh has not materialized snapshot for the current bundle / date yet |
 | `Ready snapshot пока не materialized.` на `/sheet-vitrina-v1/operator` | operator page честно сообщает, что explicit refresh ещё не запускался для current bundle / date |

@@ -29,6 +29,8 @@ function main() {
       ? runSeedBootstrapMode({ context, spreadsheet, options })
       : options.mode === 'mvp_end_to_end'
         ? runMvpEndToEndMode({ context, spreadsheet, options })
+      : options.mode === 'cost_price_upload'
+        ? runCostPriceUploadMode({ context, spreadsheet, options })
       : options.mode === 'load_only'
         ? runLoadOnlyMode({ context, spreadsheet, options })
       : options.mode === 'server_driven_materialization'
@@ -49,11 +51,14 @@ function parseArgs(argv) {
   }
   options.mode = options.mode || 'bundle_upload';
   const requiredKeys = ['scriptPath'];
-  if (!['server_driven_materialization', 'load_only'].includes(options.mode)) {
+  if (!['server_driven_materialization', 'load_only', 'cost_price_upload'].includes(options.mode)) {
     requiredKeys.push('endpointUrl', 'bundleVersion', 'uploadedAt');
   }
   if (options.mode === 'bundle_upload') {
     requiredKeys.push('fixturePath');
+  }
+  if (options.mode === 'cost_price_upload') {
+    requiredKeys.push('fixturePath', 'endpointUrl', 'datasetVersion', 'uploadedAt');
   }
   if (options.mode === 'mvp_end_to_end') {
     requiredKeys.push('asOfDate', 'refreshUrl');
@@ -127,6 +132,35 @@ function runSeedBootstrapMode({ context, spreadsheet, options }) {
     built_bundle: builtBundle,
     accepted_response: acceptedResponse,
     status_block: statusBlock,
+  };
+}
+
+function runCostPriceUploadMode({ context, spreadsheet, options }) {
+  const prepareResult = parseJsonString(context.prepareCostPriceSheet());
+  const fixture = JSON.parse(fs.readFileSync(path.resolve(options.fixturePath), 'utf8'));
+  parseJsonString(context.debugWriteCostPriceRowsToSheet(JSON.stringify(fixture), options.endpointUrl));
+  const builtPayload = parseJsonString(
+    context.debugBuildCostPriceUploadFromSheet(options.datasetVersion, options.uploadedAt)
+  );
+  const acceptedResponse = parseJsonString(
+    context.debugUploadCostPriceSheet(options.endpointUrl, options.datasetVersion, options.uploadedAt)
+  );
+  const duplicateResponse = parseJsonString(
+    context.debugUploadCostPriceSheet(options.endpointUrl, options.datasetVersion, options.uploadedAt)
+  );
+
+  const costPriceSheet = spreadsheet.getSheetByName('COST_PRICE');
+  const statusBlock = readCostPriceStatusBlock(costPriceSheet);
+
+  parseJsonString(context.debugResetCostPriceSheet());
+
+  return {
+    prepare_result: prepareResult,
+    built_payload: builtPayload,
+    accepted_response: acceptedResponse,
+    duplicate_response: duplicateResponse,
+    status_block: statusBlock,
+    sheet: snapshotSheet(costPriceSheet),
   };
 }
 
@@ -263,6 +297,17 @@ function writeStatusBlock(configSheet, values) {
   configSheet.getRange(5, 9).setValue(values.last_activated_at || '');
   configSheet.getRange(6, 9).setValue(values.last_http_status || '');
   configSheet.getRange(7, 9).setValue(values.last_validation_errors || '');
+}
+
+function readCostPriceStatusBlock(costPriceSheet) {
+  return {
+    endpoint_url: String(costPriceSheet.getCellValue(2, 6) || ''),
+    last_dataset_version: String(costPriceSheet.getCellValue(3, 6) || ''),
+    last_status: String(costPriceSheet.getCellValue(4, 6) || ''),
+    last_activated_at: String(costPriceSheet.getCellValue(5, 6) || ''),
+    last_http_status: String(costPriceSheet.getCellValue(6, 6) || ''),
+    last_validation_errors: String(costPriceSheet.getCellValue(7, 6) || ''),
+  };
 }
 
 function writePlanDirectlyToSheet(spreadsheet, target) {
