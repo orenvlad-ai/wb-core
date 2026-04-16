@@ -20,9 +20,9 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "изменение build metadata pack"
-built_from_commit: "4e7c988fe9078c9a3d64be6eb618c52fbad0f3ae"
+built_from_commit: "a60ff1aa93c835a19eb291fbe53fd6e4b260d5f0"
 docset_version: "wb_core_docs_master_v1"
-built_at: "2026-04-17T17:14:00Z"
+built_at: "2026-04-17T17:24:00Z"
 core_docs_changed:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
