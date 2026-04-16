@@ -104,6 +104,12 @@ def main() -> None:
                 raise AssertionError(f"operator UI must return 200, got {operator_ui_status}")
             if "Обновление данных витрины" not in operator_ui_html or "Загрузить данные" not in operator_ui_html:
                 raise AssertionError("operator UI must expose the expected operator controls")
+            if "yesterday_closed + today_current" not in operator_ui_html:
+                raise AssertionError("operator UI must explain the two-slot ready snapshot semantics")
+            if "current-only sources" not in operator_ui_html or "not_available" not in operator_ui_html:
+                raise AssertionError("operator UI must keep the bounded current-only not_available note")
+            if "DATA_VITRINA rows" not in operator_ui_html or "STATUS rows" not in operator_ui_html:
+                raise AssertionError("operator UI must expose row-count fields for the persisted snapshot")
             operator_ui_config = _extract_operator_ui_config(operator_ui_html)
             if operator_ui_config["refresh_path"] != config.sheet_refresh_path:
                 raise AssertionError("operator UI must point to the existing refresh endpoint")
