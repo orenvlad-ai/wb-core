@@ -20,15 +20,11 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "изменение build metadata pack"
-built_from_commit: "4252a90bac0329eb046644205950c974c91981c5"
+built_from_commit: "0b9cd8006b6134662b878b00a868e6aeaf05c380"
 docset_version: "wb_core_docs_master_v1"
-built_at: "2026-04-16T19:22:09Z"
+built_at: "2026-04-16T21:31:23Z"
 core_docs_changed:
-  - "docs/architecture/03_source_of_truth_policy.md"
-  - "docs/architecture/07_codex_execution_protocol.md"
-  - "wb_core_docs_master/00_INDEX__WEBCORE_PROJECT_DOCS.md"
-  - "wb_core_docs_master/02_POLICY__DOCS_SYNC_AND_CODEX_PROTOCOL.md"
-  - "wb_core_docs_master/07_REGISTER__DO_NOT_LOSE_CONSTRAINTS.md"
+  - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "wb_core_docs_master/09_RUNBOOK__COMMON_SMOKE_AND_DEBUG.md"
 ---
 

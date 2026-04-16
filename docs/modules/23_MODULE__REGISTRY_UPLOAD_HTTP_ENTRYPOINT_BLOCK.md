@@ -44,7 +44,7 @@ related_docs:
   - "migration/90_registry_upload_http_entrypoint.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под separate `COST_PRICE` contour и date-aware `sheet_vitrina_v1` read model: HTTP entrypoint принимает фактические registry list lengths, держит sibling cost-price dataset отдельно от compact bundle и использует его в existing refresh/plan/status read-side через server-side effective-date overlay без нового public route."
+update_note: "Обновлён под separate `COST_PRICE` contour, date-aware `sheet_vitrina_v1` read model и актуальную narrow operator UI norm: HTTP entrypoint принимает фактические registry list lengths, держит sibling cost-price dataset отдельно от compact bundle, использует его в existing refresh/plan/status read-side через server-side effective-date overlay без нового public route и отдаёт repo-owned operator page без explanatory date subtitle/subcopy."
 ---
 
 # 1. Идентификатор и статус
@@ -107,6 +107,8 @@ update_note: "Обновлён под separate `COST_PRICE` contour и date-awar
   - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result
   - `GET /sheet-vitrina-v1/operator` = simple repo-owned page с одной primary action `Загрузить данные`
 - Operator page не invent-ит новый heavy route: UI вызывает существующий `POST /v1/sheet-vitrina-v1/refresh` и читает только cheap status surface.
+- Operator page keeps narrow Russian chrome for operator-visible labels (`Загрузить данные`, compact `Статус` / `Результат`, row-count labels) without explanatory subtitle/subcopy про refresh/date defaults/temporal slots под заголовком или кнопкой.
+- Raw log entries, raw backend errors и canonical technical identifiers/values на operator page не локализуются и не переписываются.
 - Для current checkpoint `plan/status` обязаны surface-ить temporal metadata, достаточную для thin operators:
   - `date_columns`
   - `temporal_slots`
