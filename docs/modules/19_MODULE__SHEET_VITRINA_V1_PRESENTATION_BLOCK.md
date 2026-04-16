@@ -20,6 +20,7 @@ related_endpoints: []
 related_runners:
   - "apps/sheet_vitrina_v1_smoke.py"
   - "apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py"
+  - "apps/sheet_vitrina_v1_presentation_percent_smoke.py"
   - "apps/sheet_vitrina_v1_presentation_live.py"
 related_docs:
   - "migration/85_sheet_vitrina_v1_presentation.md"
@@ -60,6 +61,7 @@ update_note: "Обновлён под server-driven two-day date-matrix presenta
   - plain readable header styling without dark fill;
   - semantic number/date formatting;
   - базовые alignments.
+- Percent-format classification остаётся canonical-key driven; `ads_cr` и `avg_ads_cr` явно относятся к percent rows и не должны деградировать до integer pattern.
 - Канонические visual targets:
   - `DATA_VITRINA`
   - `STATUS`
@@ -94,17 +96,20 @@ update_note: "Обновлён под server-driven two-day date-matrix presenta
 - artifact-backed smoke: `apps/sheet_vitrina_v1_smoke.py`
 - live write runner: `apps/sheet_vitrina_v1_live_write.py`
 - targeted server-driven smoke: `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`
+- targeted percent-format smoke: `apps/sheet_vitrina_v1_presentation_percent_smoke.py`
 - Apps Script bridge: `gas/sheet_vitrina_v1/WideVitrinaBridge.gs`
 - Apps Script presentation reference: `gas/sheet_vitrina_v1/PresentationPass.gs`
 
 # 6. Какой smoke подтверждён
 
 - Подтверждён targeted smoke через `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`.
+- Подтверждён targeted smoke через `apps/sheet_vitrina_v1_presentation_percent_smoke.py`.
 - Smoke проверяет:
   - что `DATA_VITRINA` materialize-ит `date_matrix` header `дата | key | <date...>`;
   - что incoming plan больше не режется до `7` metric keys и не требует hardcoded metric list;
   - что current two-day load материализует server-owned `yesterday_closed + today_current`, а same-day rerun только переписывает matching date-columns;
   - что freeze `A:B`, plain header, section rows и semantic formats для `integer / percent / decimal` сохраняются.
+  - что canonical `ads_cr` и `avg_ads_cr` сохраняют percent pattern и не попадают в integer formatting.
 
 # 7. Что уже доказано по модулю
 
