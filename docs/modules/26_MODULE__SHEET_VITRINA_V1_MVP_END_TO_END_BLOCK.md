@@ -42,6 +42,7 @@ related_runners:
   - "apps/cost_price_upload_http_entrypoint_smoke.py"
   - "apps/sheet_vitrina_v1_cost_price_upload_smoke.py"
   - "apps/sheet_vitrina_v1_cost_price_read_side_smoke.py"
+  - "apps/sheet_vitrina_v1_business_time_smoke.py"
   - "apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py"
   - "apps/sheet_vitrina_v1_refresh_read_split_smoke.py"
   - "apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py"
@@ -58,7 +59,7 @@ related_docs:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под date-aware ready snapshot и authoritative `COST_PRICE` overlay: heavy build остаётся в `POST /v1/sheet-vitrina-v1/refresh`, persisted plan materialize-ит `yesterday_closed + today_current`, `GET /v1/sheet-vitrina-v1/plan` и `loadSheetVitrinaTable` читают только этот persisted plan, а proxy-profit rows / cost diagnostics now resolve server-side from uploaded `COST_PRICE` by `group + max(effective_from <= slot_date)`."
+update_note: "Обновлён под EKT-aligned date-aware ready snapshot, authoritative `COST_PRICE` overlay и daily live refresh timer: heavy build остаётся в `POST /v1/sheet-vitrina-v1/refresh`, persisted plan materialize-ит `yesterday_closed + today_current` по `Asia/Yekaterinburg`, `GET /v1/sheet-vitrina-v1/plan` и `loadSheetVitrinaTable` читают только этот persisted plan, а live systemd timer вызывает тот же refresh route ежедневно в `11:00 Asia/Yekaterinburg`."
 ---
 
 # 1. Идентификатор и статус
@@ -127,7 +128,11 @@ update_note: "Обновлён под date-aware ready snapshot и authoritative
 - Текущий bounded root cause был в single-date surrogate model: server materialize-ил один ready snapshot на `as_of_date` refresh/run и не хранил достаточно явно фактическую temporal nature source values.
 - Current checkpoint заменяет это на two-slot read model:
   - `yesterday_closed` = requested `as_of_date`
-  - `today_current` = фактическая current UTC date materialization run
+  - `today_current` = фактическая current business date materialization run в `Asia/Yekaterinburg`
+- Canonical business timezone для default-date semantics = `Asia/Yekaterinburg`:
+  - default `as_of_date` = previous business day in `Asia/Yekaterinburg`;
+  - `today_current` / current-only freshness = current business day in `Asia/Yekaterinburg`;
+  - contour не использует host-local timezone как implicit source of truth.
 - Persisted ready snapshot теперь обязан хранить и отдавать:
   - `date_columns`
   - `temporal_slots`
@@ -168,6 +173,20 @@ update_note: "Обновлён под date-aware ready snapshot и authoritative
   - `proxy_margin_pct_total` = canonical TOTAL key для operator-facing строки `Прокси маржинальность всего, %`
 - `total_proxy_profit_rub` не invent-ится как новый surface key: используется уже существующий canonical uploaded metric key из current bundle.
 - `Прибыль прокси всего` из operator wording фиксируется на canonical row `total_proxy_profit_rub` с текущим repo label `Прибыль прокси всего, ₽`.
+
+## 3.1.2 Daily live refresh scheduling
+
+- Daily auto-refresh materialize-ится поверх existing heavy route, а не через новый scheduler contour:
+  - timer target = `POST /v1/sheet-vitrina-v1/refresh`
+  - schedule = `11:00 Asia/Yekaterinburg`
+  - current live host keeps `Etc/UTC`, поэтому systemd timer stores `OnCalendar=*-*-* 06:00:00 UTC`
+- Schedule storage lives in live-owned systemd units:
+  - `/etc/systemd/system/wb-core-sheet-vitrina-refresh.service`
+  - `/etc/systemd/system/wb-core-sheet-vitrina-refresh.timer`
+- Repo-owned truth при этом остаётся в current code:
+  - default `as_of_date` / `today_current` semantics live in `packages/business_time.py`
+  - heavy refresh logic stays in existing `POST /v1/sheet-vitrina-v1/refresh`
+  - Apps Script remains thin shell and does not own scheduling or date math
 - `Прокси маржинальность всего, %` фиксируется на canonical row `proxy_margin_pct_total`.
 - Расчёт остаётся server-side:
   - SKU `proxy_profit_rub` / `profit_proxy_rub` uses existing canonical formula `{orderSum}*0,5096-{orderCount}*0,91*{cost_price_rub}-{ads_sum}`;
@@ -259,6 +278,8 @@ Bounded допущение:
   - `gas/sheet_vitrina_v1/RegistryUploadSeedV3.gs`
   - `gas/sheet_vitrina_v1/RegistryUploadTrigger.gs`
   - `gas/sheet_vitrina_v1/PresentationPass.gs`
+- timezone helper:
+  - `packages/business_time.py`
 - application:
   - `packages/application/sheet_vitrina_v1_live_plan.py`
   - `packages/application/sheet_vitrina_v1.py`
@@ -271,6 +292,7 @@ Bounded допущение:
 - local harness:
   - `apps/sheet_vitrina_v1_registry_upload_trigger_harness.js`
 - smoke:
+- `apps/sheet_vitrina_v1_business_time_smoke.py`
 - `apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py`
 - `apps/sheet_vitrina_v1_refresh_read_split_smoke.py`
 - `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`
@@ -281,6 +303,7 @@ Bounded допущение:
 # 6. Какой smoke подтверждён
 
 - Подтверждён локальный end-to-end smoke через `apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py`.
+- Подтверждён targeted business-time smoke через `apps/sheet_vitrina_v1_business_time_smoke.py`.
 - Подтверждён targeted runtime smoke через `apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py`.
 - Подтверждён split refresh/read smoke через `apps/sheet_vitrina_v1_refresh_read_split_smoke.py`.
 - Подтверждён targeted server-driven smoke через `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`.
@@ -320,6 +343,6 @@ Bounded допущение:
 - отдельный bounded fix по любому оставшемуся non-district / foreign stocks residual, если он потребует отдельной operator-facing semantics beyond current truthful `STATUS` note;
 - stable hosted runtime URL и production-bound operator runtime;
 - deploy/auth-hardening;
-- daily orchestration;
+- generic orchestration platform beyond current one daily timer;
 - кабинет/панель администрирования;
 - большой UI/UX redesign таблицы.

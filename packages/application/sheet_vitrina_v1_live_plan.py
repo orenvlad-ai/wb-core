@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -33,6 +33,12 @@ from packages.application.sheet_vitrina_v1 import build_sheet_write_plan
 from packages.application.spp_block import SppBlock
 from packages.application.stocks_block import StocksBlock
 from packages.application.web_source_snapshot_block import WebSourceSnapshotBlock
+from packages.business_time import (
+    business_date_from_timestamp,
+    business_datetime_for_override,
+    current_business_date_iso,
+    default_business_as_of_date,
+)
 from packages.contracts.cost_price_upload import CostPriceCurrentState, CostPriceRow
 from packages.contracts.ads_bids_block import AdsBidsRequest
 from packages.contracts.ads_compact_block import AdsCompactRequest
@@ -178,7 +184,7 @@ class SheetVitrinaV1LivePlanBlock:
         effective_date = _resolve_as_of_date(as_of_date)
         temporal_slots = _build_temporal_slots(
             as_of_date=effective_date,
-            current_date=self.now_factory().astimezone(timezone.utc).date().isoformat(),
+            current_date=current_business_date_iso(self.now_factory()),
         )
         enabled_config = sorted(
             [item for item in current_state.config_v2 if item.enabled],
@@ -854,8 +860,8 @@ def _build_status_rows(
         [
             "registry_upload_current_state",
             "success",
-            current_state.activated_at[:10],
-            current_state.activated_at[:10],
+            business_date_from_timestamp(current_state.activated_at),
+            business_date_from_timestamp(current_state.activated_at),
             "",
             "",
             "",
@@ -1147,8 +1153,8 @@ def _build_cost_price_status(
             temporal_policy=SOURCE_TEMPORAL_POLICIES["cost_price"],
             column_date=column_date,
             kind=kind,
-            freshness=current_state.activated_at[:10],
-            snapshot_date=current_state.activated_at[:10],
+            freshness=business_date_from_timestamp(current_state.activated_at),
+            snapshot_date=business_date_from_timestamp(current_state.activated_at),
             date=column_date,
             date_from="",
             date_to="",
@@ -1296,8 +1302,7 @@ def _utc_now() -> datetime:
 def _default_now_factory() -> datetime:
     override = str(os.environ.get("SHEET_VITRINA_CURRENT_DATE_OVERRIDE", "") or "").strip()
     if override:
-        datetime.strptime(override, "%Y-%m-%d")
-        return datetime.fromisoformat(f"{override}T12:00:00+00:00")
+        return business_datetime_for_override(override)
     return _utc_now()
 
 
@@ -1305,7 +1310,7 @@ def _resolve_as_of_date(value: str | None) -> str:
     if value:
         datetime.strptime(value, "%Y-%m-%d")
         return value
-    return str((datetime.now(timezone.utc).date() - timedelta(days=1)))
+    return default_business_as_of_date()
 
 
 def _group_config(config_items: list[ConfigV2Item]) -> dict[str, list[ConfigV2Item]]:

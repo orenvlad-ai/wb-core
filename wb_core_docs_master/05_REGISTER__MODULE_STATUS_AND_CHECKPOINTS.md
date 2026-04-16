@@ -77,6 +77,8 @@ Current repo-owned operator refresh surface:
 - `GET /sheet-vitrina-v1/operator`
 - page uses `POST /v1/sheet-vitrina-v1/refresh` and `GET /v1/sheet-vitrina-v1/status`
 - page stays intentionally narrow: one button `Загрузить данные`, compact status, minimal result/log
+- server-side business timezone = `Asia/Yekaterinburg` for default `as_of_date`, `today_current` and operator-facing freshness dates
+- live daily auto-refresh = `wb-core-sheet-vitrina-refresh.timer` -> existing `POST /v1/sheet-vitrina-v1/refresh` at `11:00 Asia/Yekaterinburg` (`06:00 UTC` on current host)
 
 Current main-confirmed counts для этого flow:
 - prepare/upload package = `33 / 102 / 7`
@@ -96,6 +98,7 @@ This is the first bounded MVP checkpoint, not final production parity.
 - live numeric fill для promo-backed metrics и других bounded long-tail rows beyond current `COST_PRICE` overlay;
 - отдельный bounded fix по любому remaining non-district / foreign stocks residual, если одной truthful `STATUS` note окажется недостаточно для operator flow;
 - production hardening around runtime/deploy/auth;
+- generic orchestration platform beyond current one daily timer;
 - unresolved long-tail compatibility around `AI_EXPORT`.
 
 # Not in scope

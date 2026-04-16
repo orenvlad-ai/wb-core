@@ -11,6 +11,7 @@ source_basis:
   - "apps/registry_upload_file_backed_service_smoke.py"
   - "apps/registry_upload_db_backed_runtime_smoke.py"
   - "apps/registry_upload_http_entrypoint_smoke.py"
+  - "apps/sheet_vitrina_v1_business_time_smoke.py"
   - "apps/sheet_vitrina_v1_registry_upload_trigger_smoke.py"
   - "apps/sheet_vitrina_v1_registry_seed_v3_bootstrap_smoke.py"
   - "apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py"
@@ -25,7 +26,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "5db3548de01b2299c4f003ad43074f367d3050c8"
+built_from_commit: "ec20628b230ae86c31c09e01657d322a3b5664ae"
 ---
 
 # Summary
@@ -47,6 +48,7 @@ python3 apps/registry_upload_db_backed_runtime_smoke.py
 python3 apps/registry_upload_http_entrypoint_smoke.py
 python3 apps/cost_price_upload_http_entrypoint_smoke.py
 python3 apps/official_api_token_path_smoke.py
+python3 apps/sheet_vitrina_v1_business_time_smoke.py
 python3 apps/stocks_block_smoke.py
 python3 apps/stocks_block_region_mapping_smoke.py
 python3 apps/stocks_block_batching_smoke.py
@@ -71,6 +73,11 @@ python3 apps/registry_upload_http_entrypoint_live.py
 Current canonical WB secret path for official adapters:
 - `WB_API_TOKEN`
 - keep live service/env aligned to one canonical WB token path before calling a live task complete
+
+Current canonical business timezone for server-side `sheet_vitrina_v1` date math:
+- `Asia/Yekaterinburg`
+- default `as_of_date` = previous business day in `Asia/Yekaterinburg`
+- `today_current` / current-only freshness = current business day in `Asia/Yekaterinburg`
 
 Expected routes:
 - `POST /v1/registry-upload/bundle`
@@ -113,8 +120,13 @@ clasp run getSheetVitrinaV1PresentationSnapshot
 - минимальная норма:
   - обновить existing live runtime;
   - перезапустить/reload нужный process/service;
+  - если change затрагивает daily refresh semantics, обновить и timer wiring;
   - проверить route на loopback/runtime contour;
   - проверить route снаружи через public URL;
+- current live `sheet_vitrina_v1` contour:
+  - service = `wb-core-registry-http.service`
+  - timer = `wb-core-sheet-vitrina-refresh.timer`
+  - schedule = `11:00 Asia/Yekaterinburg` = `06:00 UTC` in current systemd host timezone
 - route change не считается complete, пока public probe не подтвердил expected content type / response shape.
 
 ### GAS/sheet closure
@@ -150,7 +162,9 @@ clasp run getSheetVitrinaV1PresentationSnapshot
 - `GET /sheet-vitrina-v1/operator` поднимает simple operator page без SPA/build pipeline;
 - operator page показывает только narrow status/log surface: `idle / loading / success / error`, `as_of_date`, `date_columns`, `refreshed_at`, `DATA_VITRINA` / `STATUS` row counts и текст ошибки;
 - `POST /v1/sheet-vitrina-v1/refresh` обновляет date-aware ready snapshot в repo-owned SQLite runtime contour;
+- empty/default refresh request must resolve `as_of_date` by `Asia/Yekaterinburg`, not by UTC/host-local clock;
 - `GET /v1/sheet-vitrina-v1/status` читает последний persisted refresh result, не триггерит heavy source fetch и показывает `date_columns` / `temporal_slots`;
+- around UTC boundary `19:00–23:59`, `today_current` must already point to next `Asia/Yekaterinburg` business day;
 - `CONFIG!H:I` preserves `endpoint_url`, `last_bundle_version`, `last_status`, `last_http_status`;
 - current truth / ready snapshot keep `95` enabled+show_in_data metrics;
 - `DATA_VITRINA` keeps the same server-driven truth as operator-facing two-day `date_matrix`: `1631` source rows, `34` blocks, `33` separators, `1698` rendered rows и `95` unique metric keys при `yesterday_closed + today_current`;
@@ -171,6 +185,7 @@ clasp run getSheetVitrinaV1PresentationSnapshot
 | `Ready snapshot пока не materialized.` на `/sheet-vitrina-v1/operator` | operator page честно сообщает, что explicit refresh ещё не запускался для current bundle / date |
 | `sheet vitrina endpoint returned non-JSON response` | wrong publish/upstream route or HTML error surface instead of expected JSON |
 | `today_current` values оказались под yesterday date column | live runtime или GAS publish stale; current contour всё ещё использует single-date surrogate вместо two-slot ready snapshot |
+| default refresh without `as_of_date` materialize-ит `UTC yesterday` / `UTC today` вместо EKT dates | stale deploy or stale business-time helper; current runtime still uses UTC-bound default-date semantics instead of `Asia/Yekaterinburg` |
 | `required env WB_API_TOKEN is not set` | live/runtime secret boundary is not aligned with the canonical WB token path |
 | `official stocks request failed with status 429` in `STATUS.stocks[today_current].note` | live runtime still hits WB inventory limiter; confirm batched `stocks` path is deployed, no stale runtime remains, and upstream wait headers are being honored |
 | `STATUS.stocks[today_current] = error` with blank stock rows after refresh | bounded refresh stayed honest about stocks failure; investigate upstream inventory rate-limit / token scope instead of treating blanks as fresh stock values |
