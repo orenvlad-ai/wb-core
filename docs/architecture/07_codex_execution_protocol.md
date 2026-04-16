@@ -81,7 +81,7 @@ Execution handoff должен явно различать четыре сост
 - `pack-complete`:
   - если задача меняет policy/contract/checkpoint/runbook/status wording, обновлены и primary canonical docs, и затронутый `wb_core_docs_master`;
   - manifest обновлён;
-  - если внешний ChatGPT Project ещё не обновлён, `project_upload_required = true` сохраняется.
+  - если задача меняла primary docs или `wb_core_docs_master/`, финальный handoff явно напоминает про один human-only шаг: после merge загрузить актуальный pack во внешний ChatGPT Project.
 
 Важно:
 - `repo-complete` не означает, что задача полностью завершена.
@@ -89,7 +89,8 @@ Execution handoff должен явно различать четыре сост
 - Для таких задач Codex по умолчанию должна пытаться закрыть `repo-complete + live-complete + sheet-complete + verify` в одном bounded execution, если это безопасно и требуемые доступы уже доступны.
 - Human-only step допускается только там, где действительно нужны логин, права, ручной merge, ручная UI-проверка или решение по риску.
 - Если `live-complete` или `sheet-complete` не достигнуты, финальный отчёт обязан явно назвать это состояние и точный blocker, а не маскировать задачу как "готово".
-- `pack-complete` не равен внешнему upload в ChatGPT Project: внешний upload остаётся отдельным operational step, но repo-owned pack sync должен быть доведён в той же задаче.
+- `pack-complete` не равен внешнему upload в ChatGPT Project: внешний upload остаётся отдельным human-only post-merge step.
+- Repo-owned pack sync должен быть доведён в той же задаче, но отдельный post-upload manifest-sync больше не требуется.
 
 ## Execution Step Discipline
 
@@ -201,7 +202,8 @@ Assistant ведёт bounded работу по шагам.
   - обновить primary repo docs;
   - обновить затронутые файлы в `wb_core_docs_master/`;
   - обновить `wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`;
-  - поставить `project_upload_required = true`, пока pack не будет загружен в внешний ChatGPT Project;
+  - если в этой задаче менялись primary docs или `wb_core_docs_master/`, в финальном handoff явно напомнить один human-only следующий шаг: после merge загрузить актуальный pack во внешний ChatGPT Project;
+- manifest для `wb_core_docs_master` остаётся build-metadata файлом и не ведёт operational state внешней загрузки;
 - legacy knowledge в `wb_core_docs_master` разрешён только в register-слое (`LEGACY_TO_WEBCORE_MAP`, `DO_NOT_LOSE_CONSTRAINTS`), а не как перенос полного legacy-корпуса;
 - создание или изменение `wb_core_docs_master` без Git-фиксации так же считается незавершённой задачей.
 

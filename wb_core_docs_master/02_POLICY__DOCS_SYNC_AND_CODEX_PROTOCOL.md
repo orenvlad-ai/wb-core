@@ -4,7 +4,7 @@ doc_id: "WB-CORE-PROJECT-02-POLICY"
 doc_type: "project_policy"
 status: "active"
 purpose: "Кратко зафиксировать двухслойную схему документации, execution contract, task classification matrix и обязательный sync-протокол для Codex."
-scope: "Primary vs secondary docs, update order, manifest discipline, upload-required flag, L1/L2/L3 execution matrix, Codex-first execution contract и запреты на dump-copy."
+scope: "Primary vs secondary docs, update order, manifest discipline как build metadata, post-merge external upload reminder, L1/L2/L3 execution matrix, Codex-first execution contract и запреты на dump-copy."
 source_basis:
   - "docs/architecture/03_source_of_truth_policy.md"
   - "docs/architecture/07_codex_execution_protocol.md"
@@ -59,8 +59,10 @@ built_from_commit: "e4c08c83e0f19e8f270ac8ee93812a751f57a021"
 1. обновить primary canonical docs;
 2. обновить затронутые файлы в `wb_core_docs_master/`;
 3. обновить `99_MANIFEST__DOCSET_VERSION.md`;
-4. установить `project_upload_required = true`;
-5. зафиксировать результат в Git.
+4. зафиксировать результат в Git.
+
+Если в задаче менялись primary docs или `wb_core_docs_master/`, после merge пользователь делает один human-only шаг: загружает актуальный pack во внешний ChatGPT Project.
+Assistant обязана явно напомнить про этот шаг в финальном handoff.
 
 ## Manifest rule
 
@@ -69,10 +71,20 @@ Manifest обязан хранить:
 - `built_from_commit`
 - `built_at`
 - `core_docs_changed`
+
+Manifest не должен хранить:
 - `project_upload_required`
 - `last_project_upload_at`
+- `project_upload_note`
 
-Если pack изменён, а external ChatGPT Project ещё не обновлён, `project_upload_required` должен оставаться `true`.
+Manifest остаётся build/pack metadata файлом и не ведёт operational state внешней загрузки.
+
+## External Project upload closure
+
+- Внешний upload в ChatGPT Project остаётся manual/human-only step.
+- Если менялись primary docs или `wb_core_docs_master/`, этот шаг делается после merge.
+- Отдельный post-upload manifest sync больше не нужен.
+- Напоминание об upload живёт в governance/handoff rules, а не как recursive state machine внутри pack.
 
 ## Execution contract hardening
 
@@ -95,7 +107,7 @@ Manifest обязан хранить:
 - `repo-complete` = repo update + local validation + canonical result не остаётся только в рабочем дереве.
 - `live-complete` = live runtime/service/publish contour обновлён и public probe подтверждён.
 - `sheet-complete` = bound Apps Script/sheet publish step выполнен и минимальный live sheet verify подтверждён.
-- `pack-complete` = primary docs, `wb_core_docs_master` и manifest синхронизированы; `project_upload_required = true` сохраняется, пока внешний Project не обновлён.
+- `pack-complete` = primary docs, `wb_core_docs_master` и manifest синхронизированы в repo; если docs/pack менялись, финальный handoff напоминает про post-merge upload актуального pack во внешний Project.
 
 Правило completion такое:
 - если задача меняет public route, runtime/service/nginx publish, bound Apps Script, operator UI или live sheet behavior, `repo-complete` недостаточно;

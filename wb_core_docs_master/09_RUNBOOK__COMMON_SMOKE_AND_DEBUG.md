@@ -118,7 +118,7 @@ clasp run getSheetVitrinaV1State
   - обновить primary docs;
   - обновить затронутый `wb_core_docs_master`;
   - обновить manifest;
-  - сохранить `project_upload_required = true`, пока внешний Project не обновлён.
+  - в финальном handoff напомнить один human-only шаг: после merge загрузить актуальный pack во внешний Project.
 
 ## What to verify in sheet
 

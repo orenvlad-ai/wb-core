@@ -3,8 +3,8 @@ title: "Manifest: wb_core_docs_master"
 doc_id: "WB-CORE-PROJECT-99-MANIFEST"
 doc_type: "manifest"
 status: "active"
-purpose: "Зафиксировать версию curated-pack, связь с repo commit и флаг необходимости внешней project upload."
-scope: "Docset version, build metadata, changed core docs, upload-required flag и состояние последней внешней загрузки."
+purpose: "Зафиксировать версию curated-pack, связь с repo commit и состав последней repo-owned pack сборки."
+scope: "Docset version, build metadata, changed core docs и связь pack с repo commit."
 source_basis:
   - "README.md"
   - "docs/architecture/03_source_of_truth_policy.md"
@@ -19,50 +19,41 @@ related_paths:
 update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
-  - "фактическая внешняя project upload"
-built_from_commit: "d932ec8477469f5a4bb2f812db3c7333f4946670"
+  - "изменение build metadata pack"
+built_from_commit: "5db3548de01b2299c4f003ad43074f367d3050c8"
 docset_version: "wb_core_docs_master_v1"
-built_at: "2026-04-15T19:14:21Z"
+built_at: "2026-04-16T16:31:02Z"
 core_docs_changed:
-  - "docs/architecture/00_migration_charter.md"
-  - "docs/architecture/01_target_architecture.md"
+  - "docs/architecture/03_source_of_truth_policy.md"
   - "docs/architecture/07_codex_execution_protocol.md"
-  - "docs/modules/00_INDEX__MODULES.md"
-  - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
-  - "docs/modules/19_MODULE__SHEET_VITRINA_V1_PRESENTATION_BLOCK.md"
-  - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
-  - "migration/93_sheet_vitrina_v1_mvp_end_to_end.md"
-  - "wb_core_docs_master/01_PASSPORT__WEBCORE_PROJECT.md"
+  - "wb_core_docs_master/00_INDEX__WEBCORE_PROJECT_DOCS.md"
   - "wb_core_docs_master/02_POLICY__DOCS_SYNC_AND_CODEX_PROTOCOL.md"
-  - "wb_core_docs_master/03_GLOSSARY__TERMS_ALIASES_AND_CANONICAL_NAMES.md"
   - "wb_core_docs_master/07_REGISTER__DO_NOT_LOSE_CONSTRAINTS.md"
   - "wb_core_docs_master/09_RUNBOOK__COMMON_SMOKE_AND_DEBUG.md"
-project_upload_required: true
-last_project_upload_at: "2026-04-14T10:23:55Z"
-project_upload_note: "pack изменён после hardening execution protocol: для live/public/GAS задач `repo-complete` больше не считается достаточным closure без live deploy / public probe / sheet verify; требуется повторный внешний upload в ChatGPT Project WebCore"
 ---
 
 # Summary
 
-Этот manifest отвечает на три вопроса:
+Этот manifest отвечает на два вопроса:
 - из какого repo commit собран текущий curated-pack;
-- нужно ли заново загружать его в внешний ChatGPT Project.
-- подтверждена ли уже актуальная внешняя загрузка curated-pack в ChatGPT Project WebCore.
+- какие primary/pack docs вошли в текущую repo-owned пересборку.
+
+Внешний upload в ChatGPT Project живёт вне этого manifest и регулируется governance/handoff rules.
 
 # Current norm
 
 - `docset_version` меняется только при осмысленной пересборке pack.
 - `built_from_commit` указывает на repo commit, от которого отталкивался pack.
-- `project_upload_required = true` означает, что pack уже изменён в repo, но ещё не подтверждён как заново загруженный во внешний Project.
-- `last_project_upload_at` обновляется только после реальной внешней загрузки, а не после локального commit.
-- `project_upload_note` можно использовать для короткой фиксации особого upload-события, если это помогает audit trail.
-- При изменении operator-facing sheet semantics или project-pack wording manifest должен явно отражать необходимость повторной внешней project upload.
+- `core_docs_changed` хранит repo-owned список primary/pack docs, которые меняют текущую сборку.
+- manifest не хранит operational state внешней загрузки и не требует post-upload repo sync.
+- Если docs/pack менялись, внешний upload текущего pack делается после merge как отдельный human-only шаг, но этот факт не трекается внутри самого pack.
 
 # Known gaps
 
-- Автоматическая синхронизация pack -> Project не materialized.
+- Автоматическая синхронизация pack -> Project не materialized и остаётся вне repo-owned metadata.
 
 # Not in scope
 
+- Operational audit trail внешних project uploads.
 - История всех предыдущих pack versions.
 - Полный changelog по каждому файлу pack.

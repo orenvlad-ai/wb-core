@@ -47,7 +47,7 @@ built_from_commit: "33be18836bb46f029b48fd19f28d45300171602a"
 | `06_REGISTER__LEGACY_TO_WEBCORE_MAP.md` | тонкая карта legacy -> `wb-core` |
 | `07_REGISTER__DO_NOT_LOSE_CONSTRAINTS.md` | do-not-lose ограничения |
 | `09_RUNBOOK__COMMON_SMOKE_AND_DEBUG.md` | compact smoke/debug runbook |
-| `99_MANIFEST__DOCSET_VERSION.md` | version/manifest и upload flag |
+| `99_MANIFEST__DOCSET_VERSION.md` | version/manifest и build metadata |
 
 Primary canonical docs остаются в:
 - `README.md`
@@ -59,7 +59,7 @@ Primary canonical docs остаются в:
 
 - Pack не покрывает весь текст module docs и не заменяет их.
 - Pack не включает полный legacy-корпус.
-- Upload в внешний ChatGPT Project остаётся отдельным operational шагом и контролируется через manifest.
+- Upload в внешний ChatGPT Project остаётся отдельным human-only шагом после merge, если менялись primary docs или pack.
 
 # Not in scope
 

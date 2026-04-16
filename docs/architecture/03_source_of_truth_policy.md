@@ -28,6 +28,9 @@ Documentation truth в `wb-core` двухслойный:
 
 сначала обновляется primary canonical doc, а затем затронутый secondary project-pack файл и `wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`.
 
+Если изменение затронуло primary docs или `wb_core_docs_master/`, внешний ChatGPT Project обновляется уже после merge как один human-only step по загрузке актуального pack.
+Этот upload reminder живёт в governance/handoff rules, а не во внутреннем upload-state самого pack.
+
 Факты из reference:
 - `wb-ai-research/RECONCILE_SUMMARY.md` фиксирует drift между runtime и Git для `wb-ai/analyze.py`;
 - `wb-web-bot/RECONCILE_SUMMARY.md` фиксирует тот же класс drift для `bot/fetch_report.py`.
@@ -95,6 +98,8 @@ Anti-drift rules:
 - никакого manual production patch без того же изменения в Git;
 - никакой runtime snapshot не принимается как truth без reconcile evidence;
 - никакое contract change не проходит без обновления docs/tests/inventory;
-- никакое изменение project-pack не проходит без синхронизации с primary repo docs и manifest-флагом `project_upload_required = true`;
+- никакое изменение project-pack не проходит без синхронизации с primary repo docs и manifest как build-metadata файла;
+- если в задаче менялись primary docs или `wb_core_docs_master/`, финальный handoff обязан явно напомнить про один human-only шаг: после merge загрузить актуальный pack во внешний ChatGPT Project;
+- manifest внутри pack не должен становиться operational tracker-ом внешней загрузки и не должен требовать post-upload repo-sync loop;
 - никакой cutover по принципу "на сервере вроде работает";
 - каждый migrated module должен давать reviewable evidence версии кода, версии конфига и snapshot/version semantics.
