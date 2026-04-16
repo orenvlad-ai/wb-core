@@ -43,7 +43,7 @@ built_from_commit: "f2ecd83242baef9f7d022d898a7162d30ba48efc"
 | `C-06` | `wb_core_docs_master` не может становиться dump-копией repo docs или полным legacy mirror. |
 | `C-07` | Legacy knowledge разрешён только как thin register/map/constraint layer. |
 | `C-08` | При изменении contract/status/checkpoint/smoke/glossary/runbook нужно обновлять и primary docs, и затронутый project-pack, и manifest. |
-| `C-09` | `project_upload_required = true` нельзя сбрасывать до фактической внешней загрузки project-pack. |
+| `C-09` | Если в задаче менялись primary docs или `wb_core_docs_master/`, финальный handoff обязан напомнить один human-only post-merge шаг: загрузить актуальный pack во внешний ChatGPT Project. Отдельный post-upload manifest sync не нужен. |
 | `C-10` | Bounded steps не должны тихо превращаться в deploy/platform redesign, full parity campaign или новый parallel contour. |
 | `C-11` | Для новых WebCore chat prompts prompt к Codex обязан явно содержать `Класс задачи`, `Причина классификации`, `Режим выполнения` и заканчиваться блоками `=== ДЛЯ КУРАТОРА ===` и `=== СЖАТАЯ ПРОВЕРКА ===`; без этого execution handoff считается неполным. |
 | `C-12` | Bounded и безопасная техническая работа должна сначала идти через Codex; пользователю можно отдавать только human-only step: логин, права, ручной merge, ручная UI-проверка или решение по риску. |
