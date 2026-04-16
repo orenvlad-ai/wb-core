@@ -20,9 +20,9 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "изменение build metadata pack"
-built_from_commit: "c8200f902c5ccbc02c43ebd8daedbc8161c18429"
+built_from_commit: "bf691ef78b122e3255200e6e14565c9a704413bb"
 docset_version: "wb_core_docs_master_v1"
-built_at: "2026-04-16T19:00:19Z"
+built_at: "2026-04-16T19:12:19Z"
 core_docs_changed:
   - "docs/architecture/03_source_of_truth_policy.md"
   - "docs/architecture/07_codex_execution_protocol.md"
