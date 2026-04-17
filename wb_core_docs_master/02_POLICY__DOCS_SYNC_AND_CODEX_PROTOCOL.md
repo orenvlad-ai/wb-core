@@ -4,7 +4,7 @@ doc_id: "WB-CORE-PROJECT-02-POLICY"
 doc_type: "project_policy"
 status: "active"
 purpose: "Кратко зафиксировать двухслойную схему документации, execution contract, task classification matrix и обязательный sync-протокол для Codex."
-scope: "Primary vs secondary docs, update order, manifest discipline как build metadata, post-merge external upload reminder, L1/L2/L3 execution matrix, Codex-first execution contract и запреты на dump-copy."
+scope: "Primary vs secondary docs, update order, manifest discipline как build metadata, post-merge external upload reminder, L1/L2/L3 execution matrix, Codex-first execution contract, GitHub merge ownership и запреты на dump-copy."
 source_basis:
   - "docs/architecture/03_source_of_truth_policy.md"
   - "docs/architecture/07_codex_execution_protocol.md"
@@ -22,7 +22,7 @@ update_triggers:
   - "изменение docs governance"
   - "изменение Codex execution rule"
   - "изменение project-pack support rule"
-built_from_commit: "0b9cd8078fca3f3f4ad7325768fef4b31cb87c7e"
+built_from_commit: "2e6bfd43a88e693a30b130516f5f8ce66889b801"
 ---
 
 # Summary
@@ -33,7 +33,7 @@ built_from_commit: "0b9cd8078fca3f3f4ad7325768fef4b31cb87c7e"
 
 Новая норма не может появиться сначала в project-pack. Сначала правится primary doc, потом pack.
 
-Для новых WebCore chat execution handoff действует единый contract: задача сначала классифицируется как `L1 / L2 / L3`, bounded безопасная техработа сначала идёт через Codex, а prompt для Codex обязан иметь обязательный classification header и два стандартных финальных блока.
+Для новых WebCore chat execution handoff действует единый contract: задача сначала классифицируется как `L1 / L2 / L3`, bounded безопасная техработа сначала идёт через Codex, обычный GitHub merge при working `gh` access остаётся Codex-owned routine, а prompt для Codex обязан иметь обязательный classification header и два стандартных финальных блока.
 
 # Current norm
 
@@ -96,8 +96,13 @@ Manifest остаётся build/pack metadata файлом и не ведёт op
 - One step = one action: если нужен manual step, один ответ должен содержать один практический следующий шаг.
 - Assistant не должна дробить bounded работу без пользы, но и не должна смешивать в одном ответе несколько независимых рискованных действий.
 - Для bounded и безопасной технической работы действует Codex-first rule: сначала выбирается путь через Codex.
-- Пользователя подключают только для human-only step: логин, права, ручной merge, ручная UI-проверка, решение по риску.
+- Пользователя подключают только для human-only step: логин, права, branch-protection approval / blocker-driven manual merge fallback, ручная UI-проверка, решение по риску.
 - Техническую рутину, которую Codex может безопасно выполнить сама, нельзя перекладывать на пользователя.
+- Для GitHub closure сначала проверяется `gh auth status -h github.com`.
+- Если `gh` доступен, auth валиден и execution context имеет repo write/merge access, обычные `gh pr ready`, `gh pr edit --base ...`, `gh pr merge --delete-branch` являются Codex-owned routine, включая stacked/base-branch merge sequence.
+- Auto-merge остаётся optional enhancement и не заменяет обычный merge для stacked/base-branch sequence.
+- Manual merge допустим только как fallback-blocker case: нет `gh`, нет auth, недостаточные scopes/permissions, GitHub вернул write blocker или branch protection требует human approval.
+- Это правило не отменяет task-scope discipline: commit/push/open PR по-прежнему должны быть явно запрошены задачей, но внутри уже запрошенного GitHub closure routine merge ownership остаётся у Codex.
 - Любой prompt для Codex обязан начинаться с classification header (`Класс задачи`, `Причина классификации`, `Режим выполнения`) и заканчиваться блоками `=== ДЛЯ КУРАТОРА ===` и `=== СЖАТАЯ ПРОВЕРКА ===`.
 - В `=== ДЛЯ КУРАТОРА ===` обязательны поля `Статус`, `Что сделано`, `Изменённые/созданные файлы`, `Ключевой результат`, `Что НЕ тронуто / что осталось вне scope`, `Следующий шаг`, `Если есть блокер — точная причина`; при наличии Git-изменений дополнительно обязательны `Commit hash`, `Push`, `PR`, `Ссылка на PR`.
 - В `=== СЖАТАЯ ПРОВЕРКА ===` обязательны `3-5 коротких пунктов по сути` и `одна строка с главным выводом`.
@@ -112,7 +117,7 @@ Manifest остаётся build/pack metadata файлом и не ведёт op
 Правило completion такое:
 - если задача меняет public route, runtime/service/nginx publish, bound Apps Script, operator UI или live sheet behavior, `repo-complete` недостаточно;
 - Codex по умолчанию должна пытаться закрыть repo + deploy + `clasp` + verify в одном bounded execution, если это безопасно и доступно;
-- human-only step остаётся только для логина, прав, ручного merge, ручной UI-проверки или решения по риску;
+- human-only step остаётся только для логина, прав, branch-protection approval / blocker-driven manual merge fallback, ручной UI-проверки или решения по риску;
 - для live/public/GAS задачи в финальном отчёте отдельно фиксируются `repo state`, `live deploy state`, `public verify result`, `sheet verify result`.
 - Если hosted contour уже имеет repo-owned deploy runner, blocker должен называть конкретный missing access/value, а не ссылаться на неопределённое “внешнее operational знание”.
 
