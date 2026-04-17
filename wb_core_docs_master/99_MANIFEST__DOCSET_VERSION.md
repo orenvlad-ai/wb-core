@@ -20,9 +20,9 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "изменение build metadata pack"
-built_from_commit: "a097038fcebcb7a6c314e1bf16828cc2ee03383d"
-docset_version: "wb_core_docs_master_v3"
-built_at: "2026-04-17T17:12:30Z"
+built_from_commit: "2e6bfd43a88e693a30b130516f5f8ce66889b801"
+docset_version: "wb_core_docs_master_v4"
+built_at: "2026-04-17T17:29:30Z"
 core_docs_changed:
   - "docs/architecture/07_codex_execution_protocol.md"
   - "wb_core_docs_master/02_POLICY__DOCS_SYNC_AND_CODEX_PROTOCOL.md"
