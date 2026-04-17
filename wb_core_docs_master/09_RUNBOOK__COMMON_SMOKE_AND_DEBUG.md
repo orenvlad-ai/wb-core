@@ -130,6 +130,22 @@ clasp run getSheetVitrinaV1State
 clasp run getSheetVitrinaV1PresentationSnapshot
 ```
 
+## GitHub PR closure
+
+```bash
+gh auth status -h github.com
+gh pr ready <pr_number>
+gh pr edit <pr_number> --base <base_branch>
+gh pr merge <pr_number> --merge --delete-branch
+```
+
+Operational rule:
+- сначала проверять `gh auth status -h github.com`;
+- если auth валиден, `gh` доступен и execution context имеет repo write/merge access, обычные `ready`, `retarget`, `merge`, `delete branch` являются Codex-owned routine;
+- это одинаково относится и к stacked PR sequence, где merge идёт не в `main`, а в промежуточную base branch;
+- auto-merge optional и не заменяет обычный merge для такого sequence;
+- manual merge допустим только как fallback-blocker case: нет `gh`, нет auth, недостаточные scopes/permissions, GitHub вернул write blocker или branch protection требует human approval.
+
 ## Post-change closure
 
 ### Repo-only closure
@@ -223,6 +239,8 @@ clasp run getSheetVitrinaV1PresentationSnapshot
 | `ReferenceError: URL is not defined` | Apps Script runtime bug in sheet-side URL derivation |
 | `registry upload bundle must contain 5-64 metrics_v2 entries` | live runtime still serves stale validator / stale deploy and is not aligned with current repo semantics |
 | `ACCESS_TOKEN_SCOPE_INSUFFICIENT` for `clasp` | local GAS OAuth scopes are insufficient for content read/write |
+| `gh: command not found` or `gh auth status -h github.com` shows no active auth | current execution context cannot own ordinary GitHub PR closure; return exact blocker and one minimal manual next step |
+| `gh pr merge` returns permission / protection error | ordinary merge is blocked by missing write rights or branch protection; keep merge as human-only fallback only for this blocker case |
 
 # Known gaps
 

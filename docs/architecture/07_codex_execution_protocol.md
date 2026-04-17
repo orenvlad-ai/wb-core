@@ -87,7 +87,7 @@ Execution handoff должен явно различать четыре сост
 - `repo-complete` не означает, что задача полностью завершена.
 - Если задача меняет public HTTP route, runtime/service/nginx publish, bound Apps Script, operator UI или live sheet behavior, execution handoff не считается complete на этапе "код готов в repo".
 - Для таких задач Codex по умолчанию должна пытаться закрыть `repo-complete + live-complete + sheet-complete + verify` в одном bounded execution, если это безопасно и требуемые доступы уже доступны.
-- Human-only step допускается только там, где действительно нужны логин, права, ручной merge, ручная UI-проверка или решение по риску.
+- Human-only step допускается только там, где действительно нужны логин, права, branch-protection approval / явный GitHub write blocker, ручная UI-проверка или решение по риску.
 - Если `live-complete` или `sheet-complete` не достигнуты, финальный отчёт обязан явно назвать это состояние и точный blocker, а не маскировать задачу как "готово".
 - Если hosted runtime уже имеет repo-owned deploy/probe contract, отсутствие deploy access или target values больше не считается "неизвестным operational контекстом": в blocker нужно точно назвать, каких именно values/rights не хватает.
 - `pack-complete` не равен внешнему upload в ChatGPT Project: внешний upload остаётся отдельным human-only post-merge step.
@@ -106,11 +106,26 @@ Assistant ведёт bounded работу по шагам.
 
 Если bounded и безопасную техническую работу можно выполнить через Codex, assistant должна сначала выбирать путь через Codex, а не перекладывать эту работу на пользователя.
 
-- Пользователя подключают только там, где действительно нужен human-only step: логин, права, ручной merge, ручная UI-проверка, решение по риску.
+- Пользователя подключают только там, где действительно нужен human-only step: логин, права, branch-protection approval / blocker-driven manual merge fallback, ручная UI-проверка, решение по риску.
 - Техническую рутину, которую Codex может безопасно выполнить сама, просить у пользователя нельзя.
 - Если manual step неизбежен, он формулируется как один минимальный следующий шаг.
 - Если задача по смыслу требует live/runtime/GAS closure и безопасные доступы уже есть, Codex не должна по умолчанию останавливаться на `repo-complete`; она должна пытаться дотянуть deploy / `clasp push` / public verify до полного bounded completion.
 - Для hosted runtime family вокруг `registry_upload_http_entrypoint_block` canonical repo-owned path теперь живёт в `apps/registry_upload_http_entrypoint_hosted_runtime.py`; если задача затрагивает этот contour, сначала используется этот runner, а не ручное угадывание host/service steps.
+
+## GitHub Merge Ownership
+
+Если задача включает GitHub closure в текущем Codex CLI / локальном execution context, обычный PR merge больше не считается default human-only step.
+
+- Сначала проверяется `gh auth status -h github.com`.
+- Если `gh` доступен, active auth валиден и у текущего execution context есть repo write/merge access, обычные GitHub operations считаются Codex-owned technical routine:
+  - `gh pr ready`
+  - retarget через `gh pr edit --base ...`
+  - `gh pr merge --delete-branch`
+- Эта норма одинаково действует и для stacked PR sequence: merge в промежуточную base branch так же Codex-owned, как и merge в `main`.
+- Auto-merge остаётся optional enhancement и не заменяет обычный merge для stacked/base-branch sequence.
+- Manual merge допустим только как fallback-blocker case: `gh` отсутствует, auth неактивен, scopes/permissions недостаточны, GitHub возвращает явный write blocker, или branch protection требует human approval.
+- Если обычный merge из текущего execution context невозможен, финальный handoff обязан назвать точный blocker и вернуть один минимальный human-only следующий шаг.
+- Это правило не отменяет task-scope discipline: commit/push/open PR по-прежнему должны быть явно запрошены задачей, но внутри уже запрошенного GitHub closure routine merge ownership остаётся у Codex, а не у пользователя.
 
 ## Mandatory Codex Prompt Footer
 
