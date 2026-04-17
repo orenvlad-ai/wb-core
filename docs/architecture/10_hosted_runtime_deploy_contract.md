@@ -15,8 +15,10 @@ Contract покрывает hosted contour на `api.selleros.pro` для routes
 - `POST /v1/registry-upload/bundle`
 - `POST /v1/cost-price/upload`
 - `POST /v1/sheet-vitrina-v1/refresh`
+- `POST /v1/sheet-vitrina-v1/load`
 - `GET /v1/sheet-vitrina-v1/plan`
 - `GET /v1/sheet-vitrina-v1/status`
+- `GET /v1/sheet-vitrina-v1/job`
 - `GET /sheet-vitrina-v1/operator`
 
 Contract не меняет public HTTP schema этих routes и не переносит truth logic в Apps Script.
@@ -109,10 +111,11 @@ For live/public tasks affecting this contour the canonical sequence is:
 Loopback/runtime probe validates the hosted process behind the reverse proxy or equivalent publish layer.
 
 Public probe validates:
-- `GET /sheet-vitrina-v1/operator` returns `200` + `text/html` and still contains the compact operator tokens for refresh plus server/time block (`Загрузить данные`, `Сервер и расписание`, `Часовой пояс`, `Автообновление`)
+- `GET /sheet-vitrina-v1/operator` returns `200` + `text/html` and still contains the compact operator tokens for separated refresh/load plus server/time block (`Загрузить данные`, `Отправить данные`, `Живой лог`, `Сервер и расписание`, `Часовой пояс`, `Автообновление`)
 - `GET /v1/sheet-vitrina-v1/status` returns JSON with either success shape including `server_context` or truthful `422 {"error": ..., "server_context": ...}`
 - `GET /v1/sheet-vitrina-v1/plan` returns JSON with either success shape or truthful `422 {"error": ...}`
 - `POST /v1/sheet-vitrina-v1/refresh` returns JSON with either success shape including `server_context` or truthful `422 {"error": ...}`
+- `POST /v1/sheet-vitrina-v1/load` and `GET /v1/sheet-vitrina-v1/job` are operator-facing live/write routes and therefore are verified as part of task-level GAS/sheet closure, not by default public probe
 
 Timeout, non-JSON body, wrong content type, `404`, stale HTML error surface or missing operator route tokens are treated as stale deploy/publish symptoms.
 

@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-26-SHEET-VITRINA-V1-MVP-END-TO-END-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `sheet_vitrina_v1_mvp_end_to_end_block`."
-scope: "Первый bounded end-to-end alignment для `sheet_vitrina_v1`: uploaded compact bootstrap `CONFIG / METRICS / FORMULAS`, sibling `COST_PRICE` upload contour, сохранённый upload trigger, explicit refresh в repo-owned date-aware ready snapshot, server-side cost overlay в operator-facing rows, cheap read этого snapshot в `DATA_VITRINA` и narrow server-side operator page для explicit refresh без возврата heavy logic в Google Sheets."
+scope: "Первый bounded end-to-end alignment для `sheet_vitrina_v1`: uploaded compact bootstrap `CONFIG / METRICS / FORMULAS`, sibling `COST_PRICE` upload contour, сохранённый upload trigger, explicit refresh в repo-owned date-aware ready snapshot, separate load этого snapshot в live sheet, server-side cost overlay в operator-facing rows, cheap read этого snapshot в `DATA_VITRINA` и narrow server-side operator page без возврата heavy logic в Google Sheets."
 source_basis:
   - "migration/90_registry_upload_http_entrypoint.md"
   - "migration/91_sheet_vitrina_v1_registry_upload_trigger.md"
@@ -20,6 +20,7 @@ related_modules:
   - "packages/application/cost_price_upload.py"
   - "packages/application/sheet_vitrina_v1_live_plan.py"
   - "packages/application/sheet_vitrina_v1.py"
+  - "packages/application/sheet_vitrina_v1_load_bridge.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/adapters/registry_upload_http_entrypoint.py"
@@ -36,8 +37,10 @@ related_endpoints:
   - "POST /v1/registry-upload/bundle"
   - "POST /v1/cost-price/upload"
   - "POST /v1/sheet-vitrina-v1/refresh"
+  - "POST /v1/sheet-vitrina-v1/load"
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
+  - "GET /v1/sheet-vitrina-v1/job"
   - "GET /sheet-vitrina-v1/operator"
 related_runners:
   - "apps/cost_price_upload_http_entrypoint_smoke.py"
@@ -48,6 +51,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_refresh_read_split_smoke.py"
   - "apps/sheet_vitrina_v1_web_source_current_sync_smoke.py"
   - "apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py"
+  - "apps/sheet_vitrina_v1_operator_load_smoke.py"
   - "apps/web_source_temporal_adapter_smoke.py"
   - "apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py"
   - "apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py"
@@ -63,7 +67,7 @@ related_docs:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под EKT-aligned date-aware ready snapshot, authoritative `COST_PRICE` overlay, bounded current-day web-source sync, daily live refresh timer, server-driven operator schedule block и repo-owned hosted deploy contract: heavy build остаётся в `POST /v1/sheet-vitrina-v1/refresh`, persisted plan materialize-ит `yesterday_closed + today_current` по `Asia/Yekaterinburg`, `GET /v1/sheet-vitrina-v1/plan` и `loadSheetVitrinaTable` читают только этот persisted plan, proxy-profit rows / cost diagnostics resolve server-side from uploaded `COST_PRICE` by `group + max(effective_from <= slot_date)`, operator page читает timezone/scheduler facts через existing `GET /v1/sheet-vitrina-v1/status` / `POST /v1/sheet-vitrina-v1/refresh` field `server_context`, а refresh contour при missing exact-date `seller_funnel_snapshot` / `web_source_snapshot` может bounded-trigger'ить server-local producer/handoff seam; live closure для hosted operator/runtime contour теперь идёт через один canonical runner."
+update_note: "Обновлён под EKT-aligned date-aware ready snapshot, authoritative `COST_PRICE` overlay, bounded current-day web-source sync, daily live refresh timer, separate operator `refresh`/`load` actions и repo-owned hosted deploy contract: heavy build остаётся в `POST /v1/sheet-vitrina-v1/refresh`, persisted plan materialize-ит `yesterday_closed + today_current` по `Asia/Yekaterinburg`, `GET /v1/sheet-vitrina-v1/plan`, `POST /v1/sheet-vitrina-v1/load` и existing Apps Script `loadSheetVitrinaTable` читают только этот persisted plan, proxy-profit rows / cost diagnostics resolve server-side from uploaded `COST_PRICE` by `group + max(effective_from <= slot_date)`, operator page читает timezone/scheduler facts через `server_context`, а live progress/log идёт через narrow async job poll без нового orchestration platform."
 ---
 
 # 1. Идентификатор и статус
@@ -101,9 +105,11 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - existing refresh/read contour затем подключает этот dataset server-side в `DATA_VITRINA` и `STATUS`
 - Канонический operator-facing refresh surface:
   - `GET /sheet-vitrina-v1/operator`
-  - одна primary action `Загрузить данные`
-  - page вызывает existing `POST /v1/sheet-vitrina-v1/refresh`
-  - page читает `GET /v1/sheet-vitrina-v1/status` для minimal status/log без отдельного audit subsystem
+  - две explicit actions `Загрузить данные` и `Отправить данные`
+  - `Загрузить данные` вызывает existing `POST /v1/sheet-vitrina-v1/refresh` и materialize-ит ready snapshot only
+  - `Отправить данные` вызывает `POST /v1/sheet-vitrina-v1/load` и пишет в live sheet только already prepared snapshot
+  - page читает `GET /v1/sheet-vitrina-v1/status` для compact status block
+  - page читает `GET /v1/sheet-vitrina-v1/job` для live построчного operator log без отдельного audit subsystem
   - page дополнительно показывает compact block `Сервер и расписание`, который заполняется только из server-driven `server_context`
 - Канонический prepare output:
   - `CONFIG` с uploaded compact rows
@@ -124,11 +130,18 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
 - Канонический refresh path:
   - `POST /v1/sheet-vitrina-v1/refresh`
   - response body = `SheetVitrinaV1RefreshResult` со snapshot metadata, `date_columns`, `temporal_slots`, `source_temporal_policies` и row counts
+- Канонический operator load path:
+  - `POST /v1/sheet-vitrina-v1/load`
+  - response body = snapshot metadata + thin bridge result для existing bound Apps Script write path
+  - route не триггерит refresh автоматически и truthfully падает при missing/invalid ready snapshot
 - Канонический operator status path:
   - `GET /v1/sheet-vitrina-v1/status`
   - response body = latest persisted `SheetVitrinaV1RefreshResult`-compatible metadata для current bundle / requested `as_of_date`
   - same response additionally carries `server_context` with business timezone/current time and daily refresh trigger metadata
   - when ready snapshot is still missing, route stays truthful `422`, but error payload still carries `server_context` for the operator page empty state
+- Канонический operator live-log path:
+  - `GET /v1/sheet-vitrina-v1/job`
+  - response body = current async action status + postрочный live log для `refresh` или `load`
 
 ## 3.1 Date-aware ready snapshot semantics
 
@@ -175,6 +188,10 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - выбирать latest `effective_from <= slot_date`;
   - не рисовать fake values при empty/missing/unmatched dataset и честно surface-ить coverage в `STATUS.cost_price[*]`.
 - Таблица остаётся thin shell: ни `load`, ни bound Apps Script не пытаются локально угадывать, какая дата у source values.
+- `POST /v1/sheet-vitrina-v1/load` тоже остаётся thin bridge:
+  - сначала server contour читает уже persisted ready snapshot;
+  - затем передаёт его в existing bound Apps Script bridge;
+  - route не rebuild-ит truth и не подмешивает implicit refresh.
 
 ## 3.1.1 Cost overlay и новые operator-facing metrics
 
@@ -323,16 +340,19 @@ Bounded допущение:
 - Подтверждён targeted business-time smoke через `apps/sheet_vitrina_v1_business_time_smoke.py`.
 - Подтверждён targeted runtime smoke через `apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py`.
 - Подтверждён split refresh/read smoke через `apps/sheet_vitrina_v1_refresh_read_split_smoke.py`.
+- Подтверждён operator async refresh/load smoke через `apps/sheet_vitrina_v1_operator_load_smoke.py`.
 - Подтверждён targeted current-day web-source sync smoke через `apps/sheet_vitrina_v1_web_source_current_sync_smoke.py`.
 - Подтверждён targeted server-driven smoke через `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`.
 - Smoke проверяет:
   - что `prepare` поднимает operator seed `33 / 102 / 7`;
   - что upload из sheet-side trigger сохраняет current truth в existing runtime без усечения `metrics_v2`;
-  - что operator page `GET /sheet-vitrina-v1/operator` отдается тем же server contour и публикует existing refresh/status paths;
-  - что operator page показывает compact `Сервер и расписание` block с русскими labels;
+  - что operator page `GET /sheet-vitrina-v1/operator` отдается тем же server contour и публикует refresh/load/status/job paths;
+  - что operator page показывает compact `Сервер и расписание` block с русскими labels и отдельный `Живой лог`;
   - что `POST /v1/sheet-vitrina-v1/refresh` вызывает heavy source blocks и обновляет persisted date-aware ready snapshot;
+  - что `POST /v1/sheet-vitrina-v1/load` пишет в live shell только already prepared snapshot и не триггерит heavy refresh заново;
   - что `GET /v1/sheet-vitrina-v1/status` возвращает последний persisted refresh result без live fetch и с `date_columns` / `temporal_slots` plus `server_context`;
   - что `GET /v1/sheet-vitrina-v1/status` до первого refresh остаётся truthful `422`, но всё равно несёт `server_context`;
+  - что `GET /v1/sheet-vitrina-v1/job` показывает построчные start / key steps / finish / error для operator actions;
   - что `GET /v1/sheet-vitrina-v1/plan` и sheet-side `load` читают только ready snapshot и не делают live fetch;
   - что authoritative `COST_PRICE` current state резолвится server-side по `group + latest effective_from <= slot_date`;
   - что `total_proxy_profit_rub` и `proxy_margin_pct_total` materialize-ятся в `DATA_VITRINA` только при applicable `COST_PRICE` coverage;

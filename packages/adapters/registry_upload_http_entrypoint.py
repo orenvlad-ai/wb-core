@@ -24,7 +24,9 @@ DEFAULT_UPLOAD_PATH = "/v1/registry-upload/bundle"
 DEFAULT_COST_PRICE_UPLOAD_PATH = "/v1/cost-price/upload"
 DEFAULT_SHEET_PLAN_PATH = "/v1/sheet-vitrina-v1/plan"
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
+DEFAULT_SHEET_LOAD_PATH = "/v1/sheet-vitrina-v1/load"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
+DEFAULT_SHEET_JOB_PATH = "/v1/sheet-vitrina-v1/job"
 DEFAULT_SHEET_OPERATOR_UI_PATH = "/sheet-vitrina-v1/operator"
 DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
 OPERATOR_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_operator.html"
@@ -104,7 +106,9 @@ def build_registry_upload_http_server(
         cost_price_upload_path=config.cost_price_upload_path,
         sheet_plan_path=config.sheet_plan_path,
         sheet_refresh_path=config.sheet_refresh_path,
+        sheet_load_path=DEFAULT_SHEET_LOAD_PATH,
         sheet_status_path=config.sheet_status_path,
+        sheet_job_path=DEFAULT_SHEET_JOB_PATH,
         sheet_operator_ui_path=config.sheet_operator_ui_path,
     )
     return RegistryUploadHttpServer((config.host, config.port), handler_cls)
@@ -117,7 +121,9 @@ def _build_handler(
     cost_price_upload_path: str,
     sheet_plan_path: str,
     sheet_refresh_path: str,
+    sheet_load_path: str,
     sheet_status_path: str,
+    sheet_job_path: str,
     sheet_operator_ui_path: str,
 ) -> type[BaseHTTPRequestHandler]:
     class RegistryUploadHandler(BaseHTTPRequestHandler):
@@ -183,11 +189,31 @@ def _build_handler(
                 try:
                     payload = _load_optional_request_payload(self)
                     as_of_date = _resolve_as_of_date(parsed.query, payload)
+                    async_requested = _resolve_async_requested(payload)
                 except ValueError as exc:
                     _write_json_response(
                         self,
                         HTTPStatus.BAD_REQUEST,
                         {"error": str(exc)},
+                    )
+                    return
+
+                if async_requested:
+                    try:
+                        job_payload = entrypoint.start_sheet_refresh_job(as_of_date=as_of_date or None)
+                    except Exception as exc:  # pragma: no cover - bounded fallback
+                        _write_json_response(
+                            self,
+                            HTTPStatus.INTERNAL_SERVER_ERROR,
+                            {"error": f"sheet vitrina refresh runtime failed: {exc}"},
+                        )
+                        return
+
+                    job_payload["job_path"] = _build_sheet_job_url(sheet_job_path, job_payload["job_id"])
+                    _write_json_response(
+                        self,
+                        HTTPStatus.ACCEPTED,
+                        job_payload,
                     )
                     return
 
@@ -215,6 +241,62 @@ def _build_handler(
                 )
                 return
 
+            if parsed.path == sheet_load_path:
+                try:
+                    payload = _load_optional_request_payload(self)
+                    as_of_date = _resolve_as_of_date(parsed.query, payload)
+                    async_requested = _resolve_async_requested(payload)
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": str(exc)},
+                    )
+                    return
+
+                if async_requested:
+                    try:
+                        job_payload = entrypoint.start_sheet_load_job(as_of_date=as_of_date or None)
+                    except Exception as exc:  # pragma: no cover - bounded fallback
+                        _write_json_response(
+                            self,
+                            HTTPStatus.INTERNAL_SERVER_ERROR,
+                            {"error": f"sheet vitrina load runtime failed: {exc}"},
+                        )
+                        return
+
+                    job_payload["job_path"] = _build_sheet_job_url(sheet_job_path, job_payload["job_id"])
+                    _write_json_response(
+                        self,
+                        HTTPStatus.ACCEPTED,
+                        job_payload,
+                    )
+                    return
+
+                try:
+                    load_result = entrypoint.handle_sheet_load_request(as_of_date=as_of_date or None)
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina load runtime failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(
+                    self,
+                    HTTPStatus.OK,
+                    load_result,
+                )
+                return
+
             _write_json_response(
                 self,
                 HTTPStatus.NOT_FOUND,
@@ -230,8 +312,41 @@ def _build_handler(
                     HTTPStatus.OK,
                     _render_sheet_vitrina_operator_ui(
                         refresh_path=sheet_refresh_path,
+                        load_path=sheet_load_path,
                         status_path=sheet_status_path,
+                        job_path=sheet_job_path,
                     ),
+                )
+                return
+
+            if parsed.path == sheet_job_path:
+                try:
+                    job_id = _resolve_job_id_from_query(parsed.query)
+                    payload = entrypoint.handle_sheet_operator_job_request(job_id)
+                except ValueError as exc:
+                    status = (
+                        HTTPStatus.NOT_FOUND
+                        if "operator job not found" in str(exc)
+                        else HTTPStatus.BAD_REQUEST
+                    )
+                    _write_json_response(
+                        self,
+                        status,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina job runtime failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(
+                    self,
+                    HTTPStatus.OK,
+                    payload,
                 )
                 return
 
@@ -374,6 +489,30 @@ def _resolve_as_of_date_from_query(query_string: str) -> str:
     return str(query.get("as_of_date", [""])[0]).strip()
 
 
+def _resolve_job_id_from_query(query_string: str) -> str:
+    query = urllib_parse.parse_qs(query_string)
+    job_id = str(query.get("job_id", [""])[0]).strip()
+    if not job_id:
+        raise ValueError("job_id query parameter is required")
+    return job_id
+
+
+def _resolve_async_requested(payload: Mapping[str, Any]) -> bool:
+    if "async" in payload:
+        raw = payload["async"]
+        if not isinstance(raw, bool):
+            raise ValueError("async must be boolean when provided")
+        return raw
+
+    if "wait" in payload:
+        raw = payload["wait"]
+        if not isinstance(raw, bool):
+            raise ValueError("wait must be boolean when provided")
+        return not raw
+
+    return False
+
+
 def _http_status_for_result(result: RegistryUploadResult) -> HTTPStatus:
     if result.status == "accepted":
         return HTTPStatus.OK
@@ -420,11 +559,23 @@ def _write_html_response(
     handler.wfile.write(body)
 
 
-def _render_sheet_vitrina_operator_ui(*, refresh_path: str, status_path: str) -> str:
+def _build_sheet_job_url(job_path: str, job_id: str) -> str:
+    return f"{job_path}?{urllib_parse.urlencode({'job_id': job_id})}"
+
+
+def _render_sheet_vitrina_operator_ui(
+    *,
+    refresh_path: str,
+    load_path: str,
+    status_path: str,
+    job_path: str,
+) -> str:
     config_payload = {
         "page_title": "Обновление данных витрины",
         "refresh_path": refresh_path,
+        "load_path": load_path,
         "status_path": status_path,
+        "job_path": job_path,
     }
     template = OPERATOR_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     return (

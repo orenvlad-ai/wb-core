@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-23-REGISTRY-UPLOAD-HTTP-ENTRYPOINT-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `registry_upload_http_entrypoint_block`."
-scope: "Первый live inbound HTTP entrypoint для V2-реестров, separate `COST_PRICE` upload contour и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, sibling cost-price request, thin request -> runtime -> response wiring, server-side `activated_at`, existing refresh/read split, date-aware plan/status read и simple repo-owned HTML page без SPA/build pipeline."
+scope: "Первый live inbound HTTP entrypoint для V2-реестров, separate `COST_PRICE` upload contour и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, sibling cost-price request, thin request -> runtime -> response wiring, server-side `activated_at`, separated refresh/load actions, date-aware plan/status read и simple repo-owned HTML page без SPA/build pipeline."
 source_basis:
   - "migration/86_registry_upload_contract.md"
   - "migration/89_registry_upload_db_backed_runtime.md"
@@ -20,6 +20,7 @@ related_modules:
   - "packages/application/cost_price_upload.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
+  - "packages/application/sheet_vitrina_v1_load_bridge.py"
   - "packages/adapters/registry_upload_http_entrypoint.py"
 related_tables:
   - "CONFIG_V2"
@@ -29,14 +30,17 @@ related_endpoints:
   - "POST /v1/registry-upload/bundle"
   - "POST /v1/cost-price/upload"
   - "POST /v1/sheet-vitrina-v1/refresh"
+  - "POST /v1/sheet-vitrina-v1/load"
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
+  - "GET /v1/sheet-vitrina-v1/job"
   - "GET /sheet-vitrina-v1/operator"
 related_runners:
   - "apps/registry_upload_http_entrypoint_live.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime.py"
   - "apps/registry_upload_http_entrypoint_smoke.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"
+  - "apps/sheet_vitrina_v1_operator_load_smoke.py"
   - "apps/cost_price_upload_http_entrypoint_smoke.py"
   - "apps/sheet_vitrina_v1_cost_price_read_side_smoke.py"
   - "apps/sheet_vitrina_v1_business_time_smoke.py"
@@ -48,7 +52,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned date-aware `sheet_vitrina_v1` read model, bounded current-day web-source sync, live daily refresh timer, repo-owned hosted deploy contract и актуальную narrow operator UI norm: HTTP entrypoint принимает фактические registry list lengths, держит sibling cost-price dataset отдельно от compact bundle, использует его в existing refresh/plan/status read-side через server-side effective-date overlay без нового public route, считает default `as_of_date` / `today_current` по `Asia/Yekaterinburg`, а refresh contour при missing `today_current` web-source snapshot может bounded-trigger'ить server-local producer/handoff seam; repo-owned operator page при этом остаётся narrow, не добавляет explanatory date subtitle/subcopy и показывает compact server-driven block `Сервер и расписание` через existing `server_context`, а live closure описывается canonical hosted deploy/probe runner вместо hidden operational knowledge."
+update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned date-aware `sheet_vitrina_v1` read model, bounded current-day web-source sync, live daily refresh timer, separate operator `refresh`/`load` actions и repo-owned hosted deploy contract: HTTP entrypoint принимает фактические registry list lengths, держит sibling cost-price dataset отдельно от compact bundle, использует его в existing refresh/plan/status read-side через server-side effective-date overlay без нового business route, считает default `as_of_date` / `today_current` по `Asia/Yekaterinburg`, а refresh contour при missing `today_current` web-source snapshot может bounded-trigger'ить server-local producer/handoff seam; repo-owned operator page при этом остаётся narrow, получает вторую action `Отправить данные`, читает live построчный log через narrow async job route, а load path передаёт уже готовый snapshot в existing bound Apps Script bridge без возврата heavy logic в browser или GAS."
 ---
 
 # 1. Идентификатор и статус
@@ -105,24 +109,29 @@ update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned
   - `200` для `accepted`
   - `409` для duplicate `dataset_version`
   - `422` для contract-level rejection после parse/validation
-- Для `sheet_vitrina_v1` тот же entrypoint обслуживает ещё четыре узких surface:
+- Для `sheet_vitrina_v1` тот же entrypoint обслуживает ещё шесть узких surface:
   - `POST /v1/sheet-vitrina-v1/refresh` = existing heavy server-side action
+  - `POST /v1/sheet-vitrina-v1/load` = thin operator action, который пишет уже готовый snapshot в live sheet через existing bound Apps Script bridge
   - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
   - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result
-  - `GET /sheet-vitrina-v1/operator` = simple repo-owned page с одной primary action `Загрузить данные`
+  - `GET /v1/sheet-vitrina-v1/job` = cheap poll/read surface для live operator log и async action state
+  - `GET /sheet-vitrina-v1/operator` = simple repo-owned page с двумя explicit actions `Загрузить данные` / `Отправить данные`
 - Внутри existing `POST /v1/sheet-vitrina-v1/refresh` live contour теперь допускает bounded server-local sync для `seller_funnel_snapshot` и `web_source_snapshot`:
   - сначала refresh проверяет, materialized ли exact-date `today_current` snapshot в local `wb-ai` read-side;
   - если exact-date snapshot отсутствует, refresh может вызвать server-local owner path `/opt/wb-web-bot` (`bot.runner_day`, `bot.runner_sales_funnel_day`) и затем `/opt/wb-ai/run_web_source_handoff.py`;
   - после этого refresh повторно валидирует exact-date local API availability и только потом читает live sources;
   - contour не открывает новый public producer route, не backfill-ит yesterday в today и остаётся bounded orchestration boundary поверх existing owner path.
-- Operator page не invent-ит новый heavy route: UI вызывает существующий `POST /v1/sheet-vitrina-v1/refresh` и читает только cheap status surface.
-- Operator page keeps narrow Russian chrome for operator-visible labels (`Загрузить данные`, compact `Статус` / `Результат`, row-count labels) without explanatory subtitle/subcopy про refresh/date defaults/temporal slots под заголовком или кнопкой.
+- Operator page не invent-ит новый heavy route: UI запускает existing heavy `POST /v1/sheet-vitrina-v1/refresh` отдельно от narrow `POST /v1/sheet-vitrina-v1/load`, а live progress читает только через cheap poll surface `GET /v1/sheet-vitrina-v1/job`.
+- Operator page keeps narrow Russian chrome for operator-visible labels (`Загрузить данные`, `Отправить данные`, compact `Статус` / `Живой лог`, row-count labels) without explanatory subtitle/subcopy про refresh/date defaults/temporal slots под заголовком или кнопкой.
 - Operator page добавляет один compact server-driven info block `Сервер и расписание`:
   - `Часовой пояс`
   - `Текущее время сервера`
   - `Автообновление`
   - `Технический триггер`
 - Этот block не hardcode-ится в UI: page читает его только из existing `GET /v1/sheet-vitrina-v1/status` / `POST /v1/sheet-vitrina-v1/refresh` response field `server_context`.
+- Operator live-log обязан показывать построчный start / key steps / finish / error для обеих operator actions:
+  - `refresh` = build/persist ready snapshot only
+  - `load` = write already prepared snapshot only
 - Raw log entries, raw backend errors и canonical technical identifiers/values на operator page не локализуются и не переписываются.
 - Для current checkpoint `plan/status` обязаны surface-ить temporal metadata, достаточную для thin operators:
   - `date_columns`
@@ -226,10 +235,11 @@ update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned
   - что request body попадает в существующий DB-backed runtime, а не в дублирующую ingest-логику;
   - что accepted response возвращается в канонической форме;
   - что current server-side truth обновляется через runtime DB;
-  - что operator page `GET /sheet-vitrina-v1/operator` отдается тем же contour и публикует правильные refresh/status paths;
+  - что operator page `GET /sheet-vitrina-v1/operator` отдается тем же contour и публикует правильные refresh/load/status/job paths;
   - что operator page рендерит compact `Сервер и расписание` block с русскими labels, а не hardcoded timezone text;
   - что `GET /v1/sheet-vitrina-v1/status` до refresh честно возвращает `ready snapshot missing`;
   - что `GET /v1/sheet-vitrina-v1/status` до refresh всё равно несёт `server_context` с `Asia/Yekaterinburg` и current scheduler trigger metadata;
+  - что async operator `refresh` / `load` live-log surface отдаёт построчные шаги и не смешивает `refresh` с `load`;
   - что duplicate `bundle_version` возвращает rejected result и HTTP `409`;
   - что accepted HTTP response сохраняет фактические request counts;
   - что synthetic oversized bundle проходит тот же HTTP boundary без hardcoded row-count caps.

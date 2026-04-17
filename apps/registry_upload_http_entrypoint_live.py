@@ -10,6 +10,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.registry_upload_http_entrypoint import (
+    DEFAULT_SHEET_JOB_PATH,
+    DEFAULT_SHEET_LOAD_PATH,
     build_registry_upload_http_server,
     load_registry_upload_http_entrypoint_config,
 )
@@ -33,7 +35,9 @@ def main() -> None:
     print(f"cost price upload endpoint: http://{host}:{port}{config.cost_price_upload_path}")
     print(f"sheet vitrina plan endpoint: http://{host}:{port}{config.sheet_plan_path}")
     print(f"sheet vitrina refresh endpoint: http://{host}:{port}{config.sheet_refresh_path}")
+    print(f"sheet vitrina load endpoint: http://{host}:{port}{DEFAULT_SHEET_LOAD_PATH}")
     print(f"sheet vitrina status endpoint: http://{host}:{port}{config.sheet_status_path}")
+    print(f"sheet vitrina job endpoint: http://{host}:{port}{DEFAULT_SHEET_JOB_PATH}")
     print(f"sheet vitrina operator page: http://{host}:{port}{config.sheet_operator_ui_path}")
     print(f"runtime dir: {config.runtime_dir}")
     try:
