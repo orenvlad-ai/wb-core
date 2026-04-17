@@ -23,6 +23,7 @@ related_modules:
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/adapters/registry_upload_http_entrypoint.py"
+  - "packages/adapters/web_source_current_sync.py"
   - "packages/adapters/web_source_snapshot_block.py"
   - "packages/adapters/seller_funnel_snapshot_block.py"
 related_tables:
@@ -42,9 +43,13 @@ related_runners:
   - "apps/cost_price_upload_http_entrypoint_smoke.py"
   - "apps/sheet_vitrina_v1_cost_price_upload_smoke.py"
   - "apps/sheet_vitrina_v1_cost_price_read_side_smoke.py"
+  - "apps/sheet_vitrina_v1_business_time_smoke.py"
   - "apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py"
   - "apps/sheet_vitrina_v1_refresh_read_split_smoke.py"
+  - "apps/sheet_vitrina_v1_web_source_current_sync_smoke.py"
   - "apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py"
+  - "apps/web_source_temporal_adapter_smoke.py"
+  - "apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py"
   - "apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py"
   - "apps/registry_upload_http_entrypoint_live.py"
 related_docs:
@@ -56,7 +61,7 @@ related_docs:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под date-aware ready snapshot и authoritative `COST_PRICE` overlay: heavy build остаётся в `POST /v1/sheet-vitrina-v1/refresh`, persisted plan materialize-ит `yesterday_closed + today_current`, `GET /v1/sheet-vitrina-v1/plan` и `loadSheetVitrinaTable` читают только этот persisted plan, а proxy-profit rows / cost diagnostics now resolve server-side from uploaded `COST_PRICE` by `group + max(effective_from <= slot_date)`."
+update_note: "Обновлён под EKT-aligned date-aware ready snapshot, authoritative `COST_PRICE` overlay, bounded current-day web-source sync и daily live refresh timer: heavy build остаётся в `POST /v1/sheet-vitrina-v1/refresh`, persisted plan materialize-ит `yesterday_closed + today_current` по `Asia/Yekaterinburg`, `GET /v1/sheet-vitrina-v1/plan` и `loadSheetVitrinaTable` читают только этот persisted plan, а refresh contour при missing exact-date `seller_funnel_snapshot` / `web_source_snapshot` может bounded-trigger'ить server-local producer/handoff seam."
 ---
 
 # 1. Идентификатор и статус
@@ -125,7 +130,11 @@ update_note: "Обновлён под date-aware ready snapshot и authoritative
 - Текущий bounded root cause был в single-date surrogate model: server materialize-ил один ready snapshot на `as_of_date` refresh/run и не хранил достаточно явно фактическую temporal nature source values.
 - Current checkpoint заменяет это на two-slot read model:
   - `yesterday_closed` = requested `as_of_date`
-  - `today_current` = фактическая current UTC date materialization run
+  - `today_current` = фактическая current business date materialization run в `Asia/Yekaterinburg`
+- Canonical business timezone для default-date semantics = `Asia/Yekaterinburg`:
+  - default `as_of_date` = previous business day in `Asia/Yekaterinburg`;
+  - `today_current` / current-only freshness = current business day in `Asia/Yekaterinburg`;
+  - contour не использует host-local timezone как implicit source of truth.
 - Persisted ready snapshot теперь обязан хранить и отдавать:
   - `date_columns`
   - `temporal_slots`
@@ -135,6 +144,20 @@ update_note: "Обновлён под date-aware ready snapshot и authoritative
   - `dual_day_capable`: `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `sf_period`, `spp`, `ads_compact`, `fin_report_daily`, `cost_price`
   - `today_current`: `prices_snapshot`, `ads_bids`, `stocks`
   - `blocked`: `promo_by_price`
+- Для bot/web-source family (`seller_funnel_snapshot`, `web_source_snapshot`) current server-side read rule теперь bounded и truthful:
+  - сначала source adapter пробует explicit requested date/window;
+  - при `404` source adapter пробует latest payload без query params;
+  - latest payload принимается только если его factual date совпадает с requested slot date;
+  - если source latest уже уехал дальше requested slot date, STATUS surface остаётся truthful `not_found` с `resolution_rule=explicit_or_latest_date_match`.
+- Для `today_current` тот же refresh contour теперь может bounded-materialize-ить missing web-source snapshot перед read-side fetch:
+  - refresh сначала проверяет local `wb-ai` exact-date availability;
+  - при miss он вызывает server-local owner path `/opt/wb-web-bot` same-day runners и затем `/opt/wb-ai/run_web_source_handoff.py`;
+  - после successful handoff refresh читает уже materialized exact-date local snapshot;
+  - если sync path падает, `STATUS.web_source_snapshot[today_current].note` / `STATUS.seller_funnel_snapshot[today_current].note` получают `current_day_web_source_sync_failed=...`, а values остаются truthful blank вместо invented fill.
+- Для тех же bot/web-source sources ready-snapshot runtime дополнительно хранит exact-date successful payloads server-side:
+  - previous `today_current` snapshot может быть переиспользован только как exact same date для следующего `yesterday_closed`;
+  - reuse surface-ится в `STATUS.*[yesterday_closed].note` как `resolution_rule=exact_date_runtime_cache`;
+  - contour не копирует `today_current` в `yesterday_closed` и не invent-ит missing date values без exact-date source-backed payload.
 - Current-only sources не backfill-ятся в closed-day column:
   - `stocks[yesterday_closed]`, `prices_snapshot[yesterday_closed]`, `ads_bids[yesterday_closed]` materialize-ятся как `not_available`
   - `today_current` values остаются в своей фактической колонке и не маскируются под yesterday EOD
@@ -157,6 +180,20 @@ update_note: "Обновлён под date-aware ready snapshot и authoritative
   - `proxy_margin_pct_total` = canonical TOTAL key для operator-facing строки `Прокси маржинальность всего, %`
 - `total_proxy_profit_rub` не invent-ится как новый surface key: используется уже существующий canonical uploaded metric key из current bundle.
 - `Прибыль прокси всего` из operator wording фиксируется на canonical row `total_proxy_profit_rub` с текущим repo label `Прибыль прокси всего, ₽`.
+
+## 3.1.2 Daily live refresh scheduling
+
+- Daily auto-refresh materialize-ится поверх existing heavy route, а не через новый scheduler contour:
+  - timer target = `POST /v1/sheet-vitrina-v1/refresh`
+  - schedule = `11:00 Asia/Yekaterinburg`
+  - current live host keeps `Etc/UTC`, поэтому systemd timer stores `OnCalendar=*-*-* 06:00:00 UTC`
+- Schedule storage lives in live-owned systemd units:
+  - `/etc/systemd/system/wb-core-sheet-vitrina-refresh.service`
+  - `/etc/systemd/system/wb-core-sheet-vitrina-refresh.timer`
+- Repo-owned truth при этом остаётся в current code:
+  - default `as_of_date` / `today_current` semantics live in `packages/business_time.py`
+  - heavy refresh logic stays in existing `POST /v1/sheet-vitrina-v1/refresh`
+  - Apps Script remains thin shell and does not own scheduling or date math
 - `Прокси маржинальность всего, %` фиксируется на canonical row `proxy_margin_pct_total`.
 - Расчёт остаётся server-side:
   - SKU `proxy_profit_rub` / `profit_proxy_rub` uses existing canonical formula `{orderSum}*0,5096-{orderCount}*0,91*{cost_price_rub}-{ads_sum}`;
@@ -248,6 +285,8 @@ Bounded допущение:
   - `gas/sheet_vitrina_v1/RegistryUploadSeedV3.gs`
   - `gas/sheet_vitrina_v1/RegistryUploadTrigger.gs`
   - `gas/sheet_vitrina_v1/PresentationPass.gs`
+- timezone helper:
+  - `packages/business_time.py`
 - application:
   - `packages/application/sheet_vitrina_v1_live_plan.py`
   - `packages/application/sheet_vitrina_v1.py`
@@ -260,16 +299,21 @@ Bounded допущение:
 - local harness:
   - `apps/sheet_vitrina_v1_registry_upload_trigger_harness.js`
 - smoke:
-  - `apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py`
-  - `apps/sheet_vitrina_v1_refresh_read_split_smoke.py`
-  - `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`
-  - `apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py`
+- `apps/sheet_vitrina_v1_business_time_smoke.py`
+- `apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py`
+- `apps/sheet_vitrina_v1_refresh_read_split_smoke.py`
+- `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`
+- `apps/web_source_temporal_adapter_smoke.py`
+- `apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py`
+- `apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py`
 
 # 6. Какой smoke подтверждён
 
 - Подтверждён локальный end-to-end smoke через `apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py`.
+- Подтверждён targeted business-time smoke через `apps/sheet_vitrina_v1_business_time_smoke.py`.
 - Подтверждён targeted runtime smoke через `apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py`.
 - Подтверждён split refresh/read smoke через `apps/sheet_vitrina_v1_refresh_read_split_smoke.py`.
+- Подтверждён targeted current-day web-source sync smoke через `apps/sheet_vitrina_v1_web_source_current_sync_smoke.py`.
 - Подтверждён targeted server-driven smoke через `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`.
 - Smoke проверяет:
   - что `prepare` поднимает operator seed `33 / 102 / 7`;
@@ -294,6 +338,7 @@ Bounded допущение:
 - Таблица больше не заканчивается на upload-only flow: появился explicit refresh/build action и cheap read path из repo-owned ready snapshot обратно в `DATA_VITRINA`.
 - У explicit refresh появился отдельный repo-owned operator page, поэтому нормальный operator path больше не зависит от ручного `curl`.
 - Read path больше не строит live plan on-demand: heavy fetch живёт только в explicit refresh action, а `load` читает persisted date-aware snapshot из current runtime contour.
+- При missing current-day bot/web-source snapshot refresh больше не ограничен pure read-side fallback: он может bounded-trigger'ить same-day capture/handoff на server host и затем materialize-ить truthful `today_current` values в том же operator flow.
 - Single-date surrogate semantics убраны: current-day values больше не маскируются под `as_of_date`, а `DATA_VITRINA` materialize-ит `yesterday_closed + today_current` как server-owned `date_matrix`.
 - `DATA_VITRINA` materialize-ит полный incoming current-truth row set `95` metric keys / `1631` source rows как operator-facing `date_matrix` (`34` blocks / `1698` rendered rows на двух date columns) и не теряет `show_in_data` metrics на sheet-side bridge.
 - Existing upload contour не ломается: bundle/result contracts и control block сохраняются.
@@ -307,6 +352,6 @@ Bounded допущение:
 - отдельный bounded fix по любому оставшемуся non-district / foreign stocks residual, если он потребует отдельной operator-facing semantics beyond current truthful `STATUS` note;
 - stable hosted runtime URL и production-bound operator runtime;
 - deploy/auth-hardening;
-- daily orchestration;
+- generic orchestration platform beyond current one daily timer;
 - кабинет/панель администрирования;
 - большой UI/UX redesign таблицы.

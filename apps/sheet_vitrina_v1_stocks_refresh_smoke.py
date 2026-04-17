@@ -40,11 +40,11 @@ from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHtt
 INPUT_BUNDLE_FIXTURE = (
     ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
 )
-ACTIVATED_AT = "2026-04-16T10:00:00Z"
-REFRESHED_AT = "2026-04-16T10:05:00Z"
+ACTIVATED_AT = "2026-04-16T21:00:00Z"
+REFRESHED_AT = "2026-04-16T21:05:00Z"
 NORMAL_AS_OF_DATE = "2026-04-15"
 RATE_LIMIT_AS_OF_DATE = "2026-04-14"
-TODAY_CURRENT_DATE = "2026-04-16"
+TODAY_CURRENT_DATE = "2026-04-17"
 TOKEN_ENV = "WB_STOCKS_REFRESH_SMOKE_TOKEN"
 
 
@@ -78,8 +78,8 @@ def _check_refresh_uses_batched_stocks_request(bundle: dict[str, Any]) -> None:
             raise AssertionError(f"stocks status must be success, got {stocks_status}")
         if stocks_status["requested_count"] != 33 or stocks_status["covered_count"] != 33:
             raise AssertionError(f"stocks coverage mismatch: {stocks_status}")
-        if not stocks_status["freshness"]:
-            raise AssertionError("stocks status must expose non-empty freshness")
+        if stocks_status["freshness"] != TODAY_CURRENT_DATE:
+            raise AssertionError(f"stocks freshness must follow EKT current date, got {stocks_status}")
 
         if len(stocks_api.request_bodies) != 1:
             raise AssertionError("refresh path must use one batched stocks request for current bundle")
@@ -264,11 +264,12 @@ def _build_entrypoint(*, runtime_dir: Path, stocks_base_url: str) -> RegistryUpl
                 min_request_interval_seconds=0.0,
                 max_retries_on_429=1,
                 reuse_ttl_seconds=0.0,
+                now_factory=lambda: datetime(2026, 4, 16, 21, 30, tzinfo=timezone.utc),
             )
         ),
         ads_compact_block=_SyntheticSuccessBlock("ads_compact"),
         fin_report_daily_block=_SyntheticSuccessBlock("fin_report_daily"),
-        now_factory=lambda: datetime(2026, 4, 16, 9, 0, tzinfo=timezone.utc),
+        now_factory=lambda: datetime(2026, 4, 16, 21, 30, tzinfo=timezone.utc),
     )
     return entrypoint
 

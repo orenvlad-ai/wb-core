@@ -42,21 +42,24 @@ class HttpBackedWebSourceSnapshotSource:
         self._base_url = base_url.rstrip("/")
 
     def fetch(self, request: WebSourceSnapshotRequest) -> Mapping[str, Any]:
-        url = self._build_url(request)
         try:
-            with _open_url(url) as response:
-                body = response.read().decode("utf-8")
-                return json.loads(body)
+            return self._load_json(self._build_url(request))
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8")
             if exc.code == 404:
-                return json.loads(body)
+                explicit_not_found = json.loads(body)
+                if request.scenario != "normal":
+                    return explicit_not_found
+                return self._resolve_latest_match_or_not_found(request, explicit_not_found)
             raise RuntimeError(f"snapshot request failed with status {exc.code}: {body}") from exc
 
     def _build_url(self, snapshot_request: WebSourceSnapshotRequest) -> str:
         params = self._build_query(snapshot_request)
         query = parse.urlencode(params)
         return f"{self._base_url}/v1/search-analytics/snapshot?{query}"
+
+    def _build_latest_url(self) -> str:
+        return f"{self._base_url}/v1/search-analytics/snapshot"
 
     def _build_query(self, snapshot_request: WebSourceSnapshotRequest) -> dict[str, str]:
         if snapshot_request.scenario == "normal":
@@ -70,6 +73,39 @@ class HttpBackedWebSourceSnapshotSource:
                 "date_to": "1900-01-01",
             }
         raise ValueError(f"unsupported scenario: {snapshot_request.scenario}")
+
+    def _resolve_latest_match_or_not_found(
+        self,
+        request: WebSourceSnapshotRequest,
+        explicit_not_found: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        try:
+            latest_payload = self._load_json(self._build_latest_url())
+        except error.HTTPError as exc:
+            body = exc.read().decode("utf-8")
+            if exc.code == 404:
+                return explicit_not_found
+            raise RuntimeError(f"snapshot request failed with status {exc.code}: {body}") from exc
+
+        if (
+            str(latest_payload.get("date_from", "") or "") == request.date_from
+            and str(latest_payload.get("date_to", "") or "") == request.date_to
+        ):
+            return latest_payload
+
+        return {
+            "detail": (
+                f"requested_window={request.date_from}..{request.date_to}; "
+                f"latest_available_window={str(latest_payload.get('date_from', '') or '')}"
+                f"..{str(latest_payload.get('date_to', '') or '')}; "
+                "resolution_rule=explicit_or_latest_date_match"
+            )
+        }
+
+    def _load_json(self, url: str) -> Mapping[str, Any]:
+        with _open_url(url) as response:
+            body = response.read().decode("utf-8")
+            return json.loads(body)
 
 
 def _open_url(url: str):

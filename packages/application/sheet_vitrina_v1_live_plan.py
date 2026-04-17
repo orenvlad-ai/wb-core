@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import re
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, Protocol
 
 from packages.adapters.ads_bids_block import HttpBackedAdsBidsSource
 from packages.adapters.ads_compact_block import HttpBackedAdsCompactSource
@@ -20,6 +20,7 @@ from packages.adapters.seller_funnel_snapshot_block import HttpBackedSellerFunne
 from packages.adapters.sf_period_block import HttpBackedSfPeriodSource
 from packages.adapters.spp_block import HttpBackedSppSource
 from packages.adapters.stocks_block import HttpBackedStocksSource
+from packages.adapters.web_source_current_sync import ShellBackedWebSourceCurrentSync
 from packages.adapters.web_source_snapshot_block import HttpBackedWebSourceSnapshotSource
 from packages.application.ads_bids_block import AdsBidsBlock
 from packages.application.ads_compact_block import AdsCompactBlock
@@ -33,6 +34,12 @@ from packages.application.sheet_vitrina_v1 import build_sheet_write_plan
 from packages.application.spp_block import SppBlock
 from packages.application.stocks_block import StocksBlock
 from packages.application.web_source_snapshot_block import WebSourceSnapshotBlock
+from packages.business_time import (
+    business_date_from_timestamp,
+    business_datetime_for_override,
+    current_business_date_iso,
+    default_business_as_of_date,
+)
 from packages.contracts.cost_price_upload import CostPriceCurrentState, CostPriceRow
 from packages.contracts.ads_bids_block import AdsBidsRequest
 from packages.contracts.ads_compact_block import AdsCompactRequest
@@ -144,6 +151,11 @@ class TemporalLiveSources:
     source_temporal_policies: dict[str, str]
 
 
+class CurrentWebSourceSync(Protocol):
+    def ensure_snapshot(self, snapshot_date: str) -> None:
+        raise NotImplementedError
+
+
 class SheetVitrinaV1LivePlanBlock:
     def __init__(
         self,
@@ -158,6 +170,7 @@ class SheetVitrinaV1LivePlanBlock:
         stocks_block: StocksBlock | None = None,
         ads_compact_block: AdsCompactBlock | None = None,
         fin_report_daily_block: FinReportDailyBlock | None = None,
+        current_web_source_sync: CurrentWebSourceSync | None = None,
         now_factory: Callable[[], datetime] | None = None,
     ) -> None:
         self.runtime = runtime
@@ -171,14 +184,16 @@ class SheetVitrinaV1LivePlanBlock:
         self.stocks_block = stocks_block or StocksBlock(HttpBackedStocksSource())
         self.ads_compact_block = ads_compact_block or AdsCompactBlock(HttpBackedAdsCompactSource())
         self.fin_report_daily_block = fin_report_daily_block or FinReportDailyBlock(HttpBackedFinReportDailySource())
+        self.current_web_source_sync = current_web_source_sync or ShellBackedWebSourceCurrentSync()
         self.now_factory = now_factory or _default_now_factory
 
     def build_plan(self, as_of_date: str | None = None) -> SheetVitrinaV1Envelope:
         current_state = self.runtime.load_current_state()
         effective_date = _resolve_as_of_date(as_of_date)
+        current_date = current_business_date_iso(self.now_factory())
         temporal_slots = _build_temporal_slots(
             as_of_date=effective_date,
-            current_date=self.now_factory().astimezone(timezone.utc).date().isoformat(),
+            current_date=current_date,
         )
         enabled_config = sorted(
             [item for item in current_state.config_v2 if item.enabled],
@@ -197,7 +212,13 @@ class SheetVitrinaV1LivePlanBlock:
             raise ValueError("current registry metrics_v2 does not contain enabled show_in_data rows")
 
         cost_price_state = _load_cost_price_current_state(self.runtime)
-        live_sources = self._load_live_sources(enabled_config, temporal_slots, cost_price_state)
+        current_web_source_sync_note = self._sync_current_web_source_snapshot(current_date)
+        live_sources = self._load_live_sources(
+            enabled_config,
+            temporal_slots,
+            cost_price_state,
+            current_web_source_sync_note=current_web_source_sync_note,
+        )
         evaluator = _MetricEvaluator(
             enabled_config=enabled_config,
             metrics_by_key=metrics_by_key,
@@ -255,11 +276,19 @@ class SheetVitrinaV1LivePlanBlock:
             status_layout=_load_json(STATUS_LAYOUT_PATH),
         )
 
+    def _sync_current_web_source_snapshot(self, current_date: str) -> str | None:
+        try:
+            self.current_web_source_sync.ensure_snapshot(current_date)
+        except Exception as exc:  # pragma: no cover - bounded runtime fallback
+            return f"current_day_web_source_sync_failed={exc}"
+        return None
+
     def _load_live_sources(
         self,
         enabled_config: list[ConfigV2Item],
         temporal_slots: list[SheetVitrinaV1TemporalSlot],
         cost_price_state: CostPriceCurrentState | None,
+        current_web_source_sync_note: str | None = None,
     ) -> TemporalLiveSources:
         requested_nm_ids = [item.nm_id for item in enabled_config]
         requested_groups = sorted({item.group for item in enabled_config})
@@ -398,14 +427,29 @@ class SheetVitrinaV1LivePlanBlock:
                         )
                     )
                     continue
-                status, payload = _capture_live_source(
-                    source_key=source_key,
-                    temporal_slot=slot.slot_key,
-                    temporal_policy=temporal_policy,
-                    column_date=slot.column_date,
-                    requested_nm_ids=requested_nm_ids,
-                    loader=loader,
-                )
+                if source_key in {"seller_funnel_snapshot", "web_source_snapshot"}:
+                    status, payload = self._capture_temporal_web_source(
+                        source_key=source_key,
+                        temporal_slot=slot.slot_key,
+                        temporal_policy=temporal_policy,
+                        column_date=slot.column_date,
+                        requested_nm_ids=requested_nm_ids,
+                        loader=loader,
+                        current_web_source_sync_note=(
+                            current_web_source_sync_note
+                            if slot.slot_key == TEMPORAL_SLOT_TODAY_CURRENT
+                            else None
+                        ),
+                    )
+                else:
+                    status, payload = _capture_live_source(
+                        source_key=source_key,
+                        temporal_slot=slot.slot_key,
+                        temporal_policy=temporal_policy,
+                        column_date=slot.column_date,
+                        requested_nm_ids=requested_nm_ids,
+                        loader=loader,
+                    )
                 statuses.append(status)
                 if source_key == "seller_funnel_snapshot":
                     current_lookups.seller_funnel_lookup = _index_items_by_nm_id(payload)
@@ -469,6 +513,63 @@ class SheetVitrinaV1LivePlanBlock:
             statuses=statuses,
             slot_lookups=slot_lookups,
             source_temporal_policies=dict(SOURCE_TEMPORAL_POLICIES),
+        )
+
+    def _capture_temporal_web_source(
+        self,
+        *,
+        source_key: str,
+        temporal_slot: str,
+        temporal_policy: str,
+        column_date: str,
+        requested_nm_ids: list[int],
+        loader: Callable[[], Any],
+        current_web_source_sync_note: str | None = None,
+    ) -> tuple[LiveSourceStatus, Any | None]:
+        status, payload = _capture_live_source(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            loader=loader,
+        )
+        if payload is not None and _is_exact_snapshot_payload(payload, column_date):
+            self.runtime.save_temporal_source_snapshot(
+                source_key=source_key,
+                snapshot_date=column_date,
+                captured_at=_format_runtime_timestamp(self.now_factory()),
+                payload=payload,
+            )
+            return _append_current_web_source_sync_note(status, current_web_source_sync_note), payload
+
+        if status.kind != "not_found":
+            return _append_current_web_source_sync_note(status, current_web_source_sync_note), payload
+
+        cached_payload, cached_at = self.runtime.load_temporal_source_snapshot(
+            source_key=source_key,
+            snapshot_date=column_date,
+        )
+        if cached_payload is None or not _is_exact_snapshot_payload(cached_payload, column_date):
+            return _append_current_web_source_sync_note(status, current_web_source_sync_note), payload
+
+        cached_status, _ = _capture_live_source(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            loader=lambda: cached_payload,
+        )
+        cache_note = "resolution_rule=exact_date_runtime_cache"
+        if cached_at:
+            cache_note = f"{cache_note}; cache_captured_at={cached_at}"
+        return (
+            _append_current_web_source_sync_note(
+                _append_status_note(cached_status, cache_note),
+                current_web_source_sync_note,
+            ),
+            cached_payload,
         )
 
 
@@ -794,8 +895,8 @@ def _build_status_rows(
         [
             "registry_upload_current_state",
             "success",
-            current_state.activated_at[:10],
-            current_state.activated_at[:10],
+            business_date_from_timestamp(current_state.activated_at),
+            business_date_from_timestamp(current_state.activated_at),
             "",
             "",
             "",
@@ -1087,8 +1188,8 @@ def _build_cost_price_status(
             temporal_policy=SOURCE_TEMPORAL_POLICIES["cost_price"],
             column_date=column_date,
             kind=kind,
-            freshness=current_state.activated_at[:10],
-            snapshot_date=current_state.activated_at[:10],
+            freshness=business_date_from_timestamp(current_state.activated_at),
+            snapshot_date=business_date_from_timestamp(current_state.activated_at),
             date=column_date,
             date_from="",
             date_to="",
@@ -1136,6 +1237,28 @@ def _source_policy_supports_slot(temporal_policy: str, temporal_slot: str) -> bo
 
 def _format_temporal_source_key(source_key: str, temporal_slot: str) -> str:
     return f"{source_key}[{temporal_slot}]"
+
+
+def _is_exact_snapshot_payload(payload: Any, column_date: str) -> bool:
+    return str(getattr(payload, "kind", "")) == "success" and _resolve_freshness(payload) == column_date
+
+
+def _append_status_note(status: LiveSourceStatus, suffix: str) -> LiveSourceStatus:
+    merged = "; ".join(part for part in [status.note, suffix] if part)
+    return replace(status, note=merged)
+
+
+def _append_current_web_source_sync_note(
+    status: LiveSourceStatus,
+    note: str | None,
+) -> LiveSourceStatus:
+    if not note or status.kind == "success":
+        return status
+    return _append_status_note(status, note)
+
+
+def _format_runtime_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _index_items_by_nm_id(payload: Any | None) -> dict[int, Any]:
@@ -1223,8 +1346,7 @@ def _utc_now() -> datetime:
 def _default_now_factory() -> datetime:
     override = str(os.environ.get("SHEET_VITRINA_CURRENT_DATE_OVERRIDE", "") or "").strip()
     if override:
-        datetime.strptime(override, "%Y-%m-%d")
-        return datetime.fromisoformat(f"{override}T12:00:00+00:00")
+        return business_datetime_for_override(override)
     return _utc_now()
 
 
@@ -1232,7 +1354,7 @@ def _resolve_as_of_date(value: str | None) -> str:
     if value:
         datetime.strptime(value, "%Y-%m-%d")
         return value
-    return str((datetime.now(timezone.utc).date() - timedelta(days=1)))
+    return default_business_as_of_date()
 
 
 def _group_config(config_items: list[ConfigV2Item]) -> dict[str, list[ConfigV2Item]]:

@@ -2,9 +2,11 @@
 
 from dataclasses import asdict
 import json
+import os
+import ssl
 import sys
 from pathlib import Path
-from urllib import request as urllib_request
+from urllib import error, request as urllib_request
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +22,7 @@ LATEST_SNAPSHOT_URL = "https://api.selleros.pro/v1/search-analytics/snapshot"
 
 
 def _resolve_latest_window() -> tuple[str, str]:
-    with urllib_request.urlopen(LATEST_SNAPSHOT_URL) as response:
+    with _open_url(LATEST_SNAPSHOT_URL) as response:
         payload = json.loads(response.read().decode("utf-8"))
 
     date_from = payload.get("date_from")
@@ -68,6 +70,19 @@ def main() -> None:
         expected_kind="not_found",
     )
     print("http-smoke-check passed")
+
+
+def _open_url(url: str):
+    try:
+        return urllib_request.urlopen(url)
+    except error.URLError as exc:
+        ssl_reason = getattr(exc, "reason", None)
+        if (
+            os.environ.get("SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK", "").strip() == "1"
+            and isinstance(ssl_reason, ssl.SSLCertVerificationError)
+        ):
+            return urllib_request.urlopen(url, context=ssl._create_unverified_context())
+        raise
 
 
 if __name__ == "__main__":
