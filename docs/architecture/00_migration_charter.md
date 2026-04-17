@@ -68,11 +68,11 @@ Foundation-этап уже пройден. Текущее состояние `ma
 - первый bounded refresh/read split с repo-owned ready snapshot для reverse-load обратно в `DATA_VITRINA`.
 
 На текущем `main` ещё не собраны:
-- deploy/auth-hardening и production storage binding вокруг registry upload.
+- actual deploy rights/publish wiring hardening и production storage binding вокруг registry upload.
 
 После этого на линии остаются:
 - full legacy parity по всем metric sections и registry rows;
-- stable hosted runtime URL, deploy/auth-hardening и production storage binding.
+- actual hosted deploy rights/publish wiring, final auth-hardening и production storage binding.
 
 ## Почему Выбран Greenfield Sidecar Migration
 

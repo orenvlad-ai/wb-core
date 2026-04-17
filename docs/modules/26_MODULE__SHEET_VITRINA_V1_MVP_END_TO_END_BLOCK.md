@@ -52,16 +52,18 @@ related_runners:
   - "apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py"
   - "apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py"
   - "apps/registry_upload_http_entrypoint_live.py"
+  - "apps/registry_upload_http_entrypoint_hosted_runtime.py"
 related_docs:
   - "migration/90_registry_upload_http_entrypoint.md"
   - "migration/91_sheet_vitrina_v1_registry_upload_trigger.md"
   - "migration/92_sheet_vitrina_v1_registry_seed_v3_bootstrap.md"
   - "migration/93_sheet_vitrina_v1_mvp_end_to_end.md"
+  - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под EKT-aligned date-aware ready snapshot, authoritative `COST_PRICE` overlay, bounded current-day web-source sync и daily live refresh timer: heavy build остаётся в `POST /v1/sheet-vitrina-v1/refresh`, persisted plan materialize-ит `yesterday_closed + today_current` по `Asia/Yekaterinburg`, `GET /v1/sheet-vitrina-v1/plan` и `loadSheetVitrinaTable` читают только этот persisted plan, а refresh contour при missing exact-date `seller_funnel_snapshot` / `web_source_snapshot` может bounded-trigger'ить server-local producer/handoff seam."
+update_note: "Обновлён под EKT-aligned date-aware ready snapshot, authoritative `COST_PRICE` overlay, bounded current-day web-source sync, daily live refresh timer и repo-owned hosted deploy contract: heavy build остаётся в `POST /v1/sheet-vitrina-v1/refresh`, persisted plan materialize-ит `yesterday_closed + today_current` по `Asia/Yekaterinburg`, `GET /v1/sheet-vitrina-v1/plan` и `loadSheetVitrinaTable` читают только этот persisted plan, proxy-profit rows / cost diagnostics resolve server-side from uploaded `COST_PRICE` by `group + max(effective_from <= slot_date)`, а refresh contour при missing exact-date `seller_funnel_snapshot` / `web_source_snapshot` может bounded-trigger'ить server-local producer/handoff seam; live closure для hosted operator/runtime contour теперь идёт через один canonical runner."
 ---
 
 # 1. Идентификатор и статус
@@ -268,6 +270,11 @@ Bounded допущение:
   - явную фиксацию, достигнуты ли `live-complete` и `sheet-complete`.
 - Если изменение затрагивает registry/upload/current bundle/readiness semantics, done criteria должны проверять не только local smokes, но и связку `refresh -> load` для текущего bundle/date.
 - Если изменение затрагивает public operator route или runtime publish, done criteria должны включать и public route probe, а не только router code в repo.
+- Для hosted runtime/publish closure canonical repo-owned path теперь фиксирован:
+  - `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py deploy`
+  - `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py loopback-probe`
+  - `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py public-probe`
+- Этот runner применим и к current branch/PR without merge-before-verify, потому что деплоит current checked-out worktree, а не требует сначала merge в `main`.
 - Если `clasp` credentials, spreadsheet access, live runtime access или publish rights недоступны, final handoff обязан явно назвать blocker и не маркировать задачу как fully complete.
 
 # 4. Артефакты и wiring по модулю

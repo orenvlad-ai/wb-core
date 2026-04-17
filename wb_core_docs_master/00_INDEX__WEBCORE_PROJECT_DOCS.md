@@ -22,7 +22,7 @@ update_triggers:
   - "изменение состава pack"
   - "изменение роли `wb_core_docs_master`"
   - "изменение policy двухслойной схемы docs"
-built_from_commit: "f2ecd83242baef9f7d022d898a7162d30ba48efc"
+built_from_commit: "0b9cd8078fca3f3f4ad7325768fef4b31cb87c7e"
 ---
 
 # Summary
@@ -60,6 +60,7 @@ Primary canonical docs остаются в:
 - Pack не покрывает весь текст module docs и не заменяет их.
 - Pack не включает полный legacy-корпус.
 - Upload в внешний ChatGPT Project остаётся отдельным human-only шагом после merge, если менялись primary docs или pack.
+- Hosted runtime deploy/probe contract теперь materialized в primary docs и отражается в pack как compact navigation/runbook knowledge, а не как hidden operational memory.
 
 # Not in scope
 

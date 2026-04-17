@@ -89,6 +89,7 @@ Execution handoff должен явно различать четыре сост
 - Для таких задач Codex по умолчанию должна пытаться закрыть `repo-complete + live-complete + sheet-complete + verify` в одном bounded execution, если это безопасно и требуемые доступы уже доступны.
 - Human-only step допускается только там, где действительно нужны логин, права, ручной merge, ручная UI-проверка или решение по риску.
 - Если `live-complete` или `sheet-complete` не достигнуты, финальный отчёт обязан явно назвать это состояние и точный blocker, а не маскировать задачу как "готово".
+- Если hosted runtime уже имеет repo-owned deploy/probe contract, отсутствие deploy access или target values больше не считается "неизвестным operational контекстом": в blocker нужно точно назвать, каких именно values/rights не хватает.
 - `pack-complete` не равен внешнему upload в ChatGPT Project: внешний upload остаётся отдельным human-only post-merge step.
 - Repo-owned pack sync должен быть доведён в той же задаче, но отдельный post-upload manifest-sync больше не требуется.
 
@@ -109,6 +110,7 @@ Assistant ведёт bounded работу по шагам.
 - Техническую рутину, которую Codex может безопасно выполнить сама, просить у пользователя нельзя.
 - Если manual step неизбежен, он формулируется как один минимальный следующий шаг.
 - Если задача по смыслу требует live/runtime/GAS closure и безопасные доступы уже есть, Codex не должна по умолчанию останавливаться на `repo-complete`; она должна пытаться дотянуть deploy / `clasp push` / public verify до полного bounded completion.
+- Для hosted runtime family вокруг `registry_upload_http_entrypoint_block` canonical repo-owned path теперь живёт в `apps/registry_upload_http_entrypoint_hosted_runtime.py`; если задача затрагивает этот contour, сначала используется этот runner, а не ручное угадывание host/service steps.
 
 ## Mandatory Codex Prompt Footer
 
@@ -230,7 +232,7 @@ Codex не должна без явного разрешения:
 - добавлять business или production runtime code во время foundation-only work;
 - создавать CI/CD workflows;
 - создавать миграции БД;
-- создавать deploy scripts;
+- создавать ad-hoc deploy scripts вне already fixed repo-owned deploy contract;
 - создавать или заменять operator table;
 - делать commit, push или открывать PR;
 - перекладывать на пользователя bounded безопасную техническую рутину, которую может выполнить сама, кроме human-only steps;

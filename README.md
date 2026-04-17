@@ -33,7 +33,7 @@ Legacy-репозитории остаются рабочими, но счита
 Главные незакрытые gaps на текущем `main`:
 - full legacy parity по всем историческим registry rows и metric sections;
 - full legacy parity beyond current `102`-row uploaded metric dictionary и beyond current server-driven two-day read-side без поломки текущего contour;
-- repo-owned stable hosted runtime URL, deploy/auth-hardening и production storage binding вокруг уже materialized upload/load линии;
+- repo-owned hosted runtime deploy/probe contract теперь materialized в repo, но actual deploy access, publish wiring hardening и production storage binding вокруг уже materialized upload/load линии ещё не закрыты;
 - окончательное решение по судьбе `AI_EXPORT` как compatibility contract или прямой замене server-side contract.
 
 ## Что repo уже содержит
@@ -72,13 +72,13 @@ Legacy-репозитории остаются рабочими, но счита
 13. Появление `wb_core_docs_master` как secondary compact project-pack поверх primary canonical repo docs.
 14. Отдельный bounded contour для `COST_PRICE`: `COST_PRICE` sheet-side prepare/upload, sibling `POST /v1/cost-price/upload` и separate authoritative dataset в том же runtime/app boundary.
 15. Server-side read-side integration `COST_PRICE` в `sheet_vitrina_v1`: authoritative resolution по `group + max(effective_from <= slot_date)`, truthful `STATUS.cost_price[*]` и operator-facing derived metrics `total_proxy_profit_rub` / `proxy_margin_pct_total`.
-16. После этого остаются full parity, stable hosted runtime URL, deploy/auth-hardening и production/runtime hardening вокруг уже materialized contour.
+16. После этого остаются full parity, actual hosted deploy access/publish wiring hardening и production/runtime hardening вокруг уже materialized contour.
 
 ## Что не следует считать частью текущего `main`
 
 - full legacy parity по всем историческим registry rows и metric sections;
-- stable hosted runtime URL, production storage binding, deploy и auth-hardening для registry upload;
-- deployed/auth-hardened API, jobs и operator runtime для registry upload;
+- production storage binding и final auth-hardening для registry upload;
+- granted deploy access + live publish wiring для already materialized hosted runtime contract;
 - материализованные слои `packages/domain`, `infra/`, `tests/`, `api/`, `jobs/`, `db/`.
 
 ## Двухслойная Схема Docs
@@ -98,6 +98,7 @@ Legacy-репозитории остаются рабочими, но счита
 - [wb_core_docs_master/00_INDEX__WEBCORE_PROJECT_DOCS.md](wb_core_docs_master/00_INDEX__WEBCORE_PROJECT_DOCS.md)
 - [docs/architecture/00_migration_charter.md](docs/architecture/00_migration_charter.md)
 - [docs/architecture/01_target_architecture.md](docs/architecture/01_target_architecture.md)
+- [docs/architecture/10_hosted_runtime_deploy_contract.md](docs/architecture/10_hosted_runtime_deploy_contract.md)
 - [migration/75_registry_v2_minimal_schema.md](migration/75_registry_v2_minimal_schema.md)
 - [migration/76_metric_runtime_registry_minimal_schema.md](migration/76_metric_runtime_registry_minimal_schema.md)
 - [migration/77_registry_implementation_path.md](migration/77_registry_implementation_path.md)

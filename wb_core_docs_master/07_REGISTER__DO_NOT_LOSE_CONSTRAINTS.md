@@ -22,7 +22,7 @@ update_triggers:
   - "изменение migration boundary"
   - "изменение operator/runtime invariant"
   - "изменение docs governance"
-built_from_commit: "f2ecd83242baef9f7d022d898a7162d30ba48efc"
+built_from_commit: "0b9cd8078fca3f3f4ad7325768fef4b31cb87c7e"
 ---
 
 # Summary
@@ -57,7 +57,7 @@ built_from_commit: "f2ecd83242baef9f7d022d898a7162d30ba48efc"
 # Known gaps
 
 - Operator-facing sheet сейчас intentionally остаётся thin presentation layer поверх current truth; это не новый source-of-truth layer и не место для local subset/fallback logic.
-- Hosted runtime/deploy hardening пока operational, а не repo-owned contract layer.
+- Hosted runtime deploy/probe contract должен оставаться repo-owned; human-only boundary допускается только для actual access/credentials/target values, а не для route/service archaeology.
 
 # Not in scope
 

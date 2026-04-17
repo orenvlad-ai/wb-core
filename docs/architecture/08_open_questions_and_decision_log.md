@@ -11,7 +11,7 @@
 | Q-05 | Должен ли `AI_EXPORT` остаться compatibility contract или его заменит прямой server contract? | Открыт | Текущий ingest всё ещё зависит от него. |
 | Q-06 | Кто является authoritative current producer для `GET /v1/search-analytics/snapshot`? | Открыт | Reference-репозитории показывают consumers и adjacent capture code, но не один окончательный producer path. |
 | Q-07 | Какие operator-visible outputs обязательны для первых cutover кроме raw parity? | Открыт | Сейчас существуют `DATA`, отчёты и machine-readable export. |
-| Q-08 | Каким будет первый server-side ingest/runtime step для registry upload path после `registry_upload_bundle_v1_block`? | Закрыт | Bounded chain уже дошёл до `registry_upload_file_backed_service_block`, `registry_upload_db_backed_runtime_block`, `registry_upload_http_entrypoint_block`, `sheet_vitrina_v1_registry_upload_trigger_block`, `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` и `sheet_vitrina_v1_mvp_end_to_end_block`; следующий отдельный gap уже лежит не на стороне ingest/runtime, а на стороне full parity, repo-owned stable hosted runtime и production hardening. |
+| Q-08 | Каким будет первый server-side ingest/runtime step для registry upload path после `registry_upload_bundle_v1_block`? | Закрыт | Bounded chain уже дошёл до `registry_upload_file_backed_service_block`, `registry_upload_db_backed_runtime_block`, `registry_upload_http_entrypoint_block`, `sheet_vitrina_v1_registry_upload_trigger_block`, `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` и `sheet_vitrina_v1_mvp_end_to_end_block`; hosted deploy/probe contract теперь тоже repo-owned, а следующий отдельный gap лежит уже в actual deploy rights, publish wiring, full parity и production hardening. |
 
 ## Незакрытые Решения
 

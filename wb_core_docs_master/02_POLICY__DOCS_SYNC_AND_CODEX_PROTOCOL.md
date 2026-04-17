@@ -22,7 +22,7 @@ update_triggers:
   - "изменение docs governance"
   - "изменение Codex execution rule"
   - "изменение project-pack support rule"
-built_from_commit: "f2ecd83242baef9f7d022d898a7162d30ba48efc"
+built_from_commit: "0b9cd8078fca3f3f4ad7325768fef4b31cb87c7e"
 ---
 
 # Summary
@@ -114,6 +114,7 @@ Manifest остаётся build/pack metadata файлом и не ведёт op
 - Codex по умолчанию должна пытаться закрыть repo + deploy + `clasp` + verify в одном bounded execution, если это безопасно и доступно;
 - human-only step остаётся только для логина, прав, ручного merge, ручной UI-проверки или решения по риску;
 - для live/public/GAS задачи в финальном отчёте отдельно фиксируются `repo state`, `live deploy state`, `public verify result`, `sheet verify result`.
+- Если hosted contour уже имеет repo-owned deploy runner, blocker должен называть конкретный missing access/value, а не ссылаться на неопределённое “внешнее operational знание”.
 
 ## Legacy rule
 

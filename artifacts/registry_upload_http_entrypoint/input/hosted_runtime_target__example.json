@@ -1,0 +1,22 @@
+{
+  "target_id": "selleros_api_hosted_runtime",
+  "public_base_url": "https://api.selleros.pro",
+  "loopback_base_url": "http://127.0.0.1:8765",
+  "ssh_destination": "api.selleros.pro",
+  "target_dir": "__SET_ME__",
+  "service_name": "__SET_ME__",
+  "restart_command": "__SET_ME__",
+  "status_command": "__SET_ME__",
+  "environment_file": "__SET_ME__",
+  "runtime_env": {
+    "REGISTRY_UPLOAD_HTTP_HOST": "127.0.0.1",
+    "REGISTRY_UPLOAD_HTTP_PORT": "8765",
+    "REGISTRY_UPLOAD_RUNTIME_DIR": "__SET_ME__",
+    "REGISTRY_UPLOAD_HTTP_PATH": "/v1/registry-upload/bundle",
+    "COST_PRICE_UPLOAD_HTTP_PATH": "/v1/cost-price/upload",
+    "SHEET_VITRINA_HTTP_PATH": "/v1/sheet-vitrina-v1/plan",
+    "SHEET_VITRINA_REFRESH_HTTP_PATH": "/v1/sheet-vitrina-v1/refresh",
+    "SHEET_VITRINA_STATUS_HTTP_PATH": "/v1/sheet-vitrina-v1/status",
+    "SHEET_VITRINA_OPERATOR_UI_PATH": "/sheet-vitrina-v1/operator"
+  }
+}

@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "5db3548de01b2299c4f003ad43074f367d3050c8"
+built_from_commit: "0b9cd8078fca3f3f4ad7325768fef4b31cb87c7e"
 ---
 
 # Summary
@@ -100,10 +100,11 @@ This is the first bounded MVP checkpoint, not final production parity.
 - отдельный bounded fix по любому remaining non-district / foreign stocks residual, если одной truthful `STATUS` note окажется недостаточно для operator flow;
 - production hardening around runtime/deploy/auth;
 - generic orchestration platform beyond current one daily timer;
+- actual deploy rights/publish wiring for hosted contour;
 - unresolved long-tail compatibility around `AI_EXPORT`.
 
 # Not in scope
 
 - Полные module doc narratives.
 - Artifact/evidence details по каждому модулю.
-- Operational deploy status как canonical repo fact.
+- Hidden operational deploy knowledge вместо repo-owned contract.

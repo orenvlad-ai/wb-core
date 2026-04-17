@@ -24,7 +24,7 @@ update_triggers:
   - "перенос новой legacy capability"
   - "изменение migration boundary"
   - "закрытие крупного compatibility gap"
-built_from_commit: "5db3548de01b2299c4f003ad43074f367d3050c8"
+built_from_commit: "0b9cd8078fca3f3f4ad7325768fef4b31cb87c7e"
 ---
 
 # Summary
@@ -42,7 +42,7 @@ built_from_commit: "5db3548de01b2299c4f003ad43074f367d3050c8"
 | legacy `FORMULAS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `registry_upload_bundle_v1_block` | current uploaded set перенесён | sheet-side seed и upload bundle держат `7` formulas rows, нужных authoritative `metrics_v2` |
 | legacy `DATA`/vitrina readback | `sheet_vitrina_v1_mvp_end_to_end_block` | bounded replacement есть | rows materialize-ятся по uploaded package; `COST_PRICE` overlay уже server-side integrated, open gap остаётся у promo-backed и других long-tail live rows |
 | legacy `AI_EXPORT` | отдельного полного replacement пока нет | open gap | compatibility boundary ещё не закрыт |
-| `wb-ai-research` ingest/runtime вокруг registry | `registry_upload_file_backed_service_block`, `registry_upload_db_backed_runtime_block`, `registry_upload_http_entrypoint_block` | перенесено bounded chain-ом | production hardening остаётся отдельно |
+| `wb-ai-research` ingest/runtime вокруг registry | `registry_upload_file_backed_service_block`, `registry_upload_db_backed_runtime_block`, `registry_upload_http_entrypoint_block` | перенесено bounded chain-ом | repo-owned deploy/probe contract есть, actual deploy rights/hardening остаются отдельно |
 | `wb-ai-research` snapshot consumers | source/data blocks `01–10` | largely migrated | current repo owns contracts/artifacts/smokes |
 | `wb-web-bot` browser web-source capture | `web_source_snapshot_block` consumer boundary | thin adapter boundary only | browser internals не перенесены как domain logic |
 
@@ -57,7 +57,7 @@ built_from_commit: "5db3548de01b2299c4f003ad43074f367d3050c8"
 - full parity beyond current uploaded compact package и long-tail registry rows;
 - live numeric fill для promo-backed metrics и других bounded long-tail rows beyond current `COST_PRICE` overlay;
 - окончательная судьба `AI_EXPORT`;
-- production-grade hosted runtime/deploy surface вокруг уже materialized upload/load contour.
+- actual production-grade rights/wiring/hardening вокруг уже repo-owned hosted deploy contract.
 
 # Not in scope
 

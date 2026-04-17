@@ -33,7 +33,7 @@ update_triggers:
   - "изменение current main-confirmed contour"
   - "merge нового bounded модуля"
   - "смена главного project gap"
-built_from_commit: "5db3548de01b2299c4f003ad43074f367d3050c8"
+built_from_commit: "0b9cd8078fca3f3f4ad7325768fef4b31cb87c7e"
 ---
 
 # Summary
@@ -86,13 +86,13 @@ Confirmed contour на текущем `main`:
 
 - full legacy parity по всем historical metric sections и registry rows;
 - live numeric fill для promo-backed metrics и других bounded long-tail gaps beyond current `COST_PRICE` overlay;
-- repo-owned production hardening вокруг upload/load runtime;
+- repo-owned hosted deploy/probe contract вокруг upload/load runtime;
 - окончательная судьба `AI_EXPORT` как compatibility contract;
 - materialized `packages/domain`, `infra/`, `tests/`, `api/`, `jobs/`, `db/`.
 
 # Not in scope
 
 - перенос всего legacy 1:1;
-- описание production deploy как уже canonical части repo;
+- утверждение, что actual deploy rights или final production hardening уже materialized в repo;
 - operator UX redesign;
 - полный architectural redesign `wb-core`.

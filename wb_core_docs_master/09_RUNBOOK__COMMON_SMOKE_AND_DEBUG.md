@@ -7,10 +7,12 @@ purpose: "Дать компактный набор частых smoke/debug ко
 scope: "Registry upload chain, sheet-side MVP flow, live GAS checks, common failure signatures и минимальные debug entrypoints."
 source_basis:
   - "README.md"
+  - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "apps/registry_upload_bundle_v1_smoke.py"
   - "apps/registry_upload_file_backed_service_smoke.py"
   - "apps/registry_upload_db_backed_runtime_smoke.py"
   - "apps/registry_upload_http_entrypoint_smoke.py"
+  - "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"
   - "apps/sheet_vitrina_v1_business_time_smoke.py"
   - "apps/sheet_vitrina_v1_registry_upload_trigger_smoke.py"
   - "apps/sheet_vitrina_v1_registry_seed_v3_bootstrap_smoke.py"
@@ -26,7 +28,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "0b9cd8006b6134662b878b00a868e6aeaf05c380"
+built_from_commit: "da3b163d45b7d03b8e9ec17e3fcc0c502c207ac0"
 ---
 
 # Summary
@@ -46,6 +48,7 @@ python3 apps/registry_upload_bundle_v1_smoke.py
 python3 apps/registry_upload_file_backed_service_smoke.py
 python3 apps/registry_upload_db_backed_runtime_smoke.py
 python3 apps/registry_upload_http_entrypoint_smoke.py
+python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py
 python3 apps/cost_price_upload_http_entrypoint_smoke.py
 python3 apps/official_api_token_path_smoke.py
 python3 apps/sheet_vitrina_v1_business_time_smoke.py
@@ -70,6 +73,26 @@ git diff --check
 ```bash
 python3 apps/registry_upload_http_entrypoint_live.py
 ```
+
+## Hosted runtime contract
+
+```bash
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py print-plan
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py deploy --dry-run
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py loopback-probe --as-of-date AUTO_YESTERDAY
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py public-probe --as-of-date AUTO_YESTERDAY
+SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1 \
+  python3 apps/registry_upload_http_entrypoint_hosted_runtime.py public-probe --as-of-date AUTO_YESTERDAY
+```
+
+Required local env for the runner itself:
+- `WB_CORE_HOSTED_RUNTIME_TARGET_FILE`
+- optional `WB_CORE_HOSTED_RUNTIME_SSH_IDENTITY_FILE`
+- optional `WB_CORE_HOSTED_RUNTIME_SSH_OPTIONS`
+- optional `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1` only when local trust store cannot verify current selleros certificate chain
+
+Canonical target template:
+- `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__example.json`
 
 Current canonical WB secret path for official adapters:
 - `WB_API_TOKEN`
@@ -119,16 +142,17 @@ clasp run getSheetVitrinaV1PresentationSnapshot
 
 - если change затрагивает public HTTP route, runtime/service wiring или nginx/proxy publish, после repo update нужно закрыть и live contour;
 - минимальная норма:
-  - обновить existing live runtime;
-  - перезапустить/reload нужный process/service;
+  - обновить existing live runtime через canonical runner `deploy` или equivalent bounded path;
+  - перезапустить/reload нужный process/service через canonical `restart_command` или live-owned equivalent;
   - если change затрагивает daily refresh semantics, обновить и timer wiring;
-  - проверить route на loopback/runtime contour;
-  - проверить route снаружи через public URL;
+  - проверить route на loopback/runtime contour через `loopback-probe` или equivalent probe;
+  - проверить route снаружи через public URL через `public-probe` или equivalent probe;
 - current live `sheet_vitrina_v1` contour:
   - service = `wb-core-registry-http.service`
   - timer = `wb-core-sheet-vitrina-refresh.timer`
   - schedule = `11:00 Asia/Yekaterinburg` = `06:00 UTC` in current systemd host timezone
 - route change не считается complete, пока public probe не подтвердил expected content type / response shape.
+- если runner уже materialized, но `ssh_destination / target_dir / service_name / restart_command / environment_file` или access отсутствуют, это фиксируется как точный blocker, а не как vague ops-gap.
 
 ### GAS/sheet closure
 
@@ -203,7 +227,7 @@ clasp run getSheetVitrinaV1PresentationSnapshot
 # Known gaps
 
 - This runbook is compact and does not replace module-specific evidence.
-- It intentionally omits full deploy/platform operations.
+- It intentionally omits full SRE hardening beyond the canonical hosted deploy/probe contract.
 
 # Not in scope
 
