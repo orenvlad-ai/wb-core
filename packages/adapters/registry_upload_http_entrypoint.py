@@ -244,7 +244,10 @@ def _build_handler(
                     _write_json_response(
                         self,
                         HTTPStatus.UNPROCESSABLE_ENTITY,
-                        {"error": str(exc)},
+                        {
+                            "error": str(exc),
+                            "server_context": entrypoint.build_sheet_server_context(),
+                        },
                     )
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback

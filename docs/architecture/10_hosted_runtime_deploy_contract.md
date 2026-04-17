@@ -109,10 +109,10 @@ For live/public tasks affecting this contour the canonical sequence is:
 Loopback/runtime probe validates the hosted process behind the reverse proxy or equivalent publish layer.
 
 Public probe validates:
-- `GET /sheet-vitrina-v1/operator` returns `200` + `text/html`
-- `GET /v1/sheet-vitrina-v1/status` returns JSON with either success shape or truthful `422 {"error": ...}`
+- `GET /sheet-vitrina-v1/operator` returns `200` + `text/html` and still contains the compact operator tokens for refresh plus server/time block (`Загрузить данные`, `Сервер и расписание`, `Часовой пояс`, `Автообновление`)
+- `GET /v1/sheet-vitrina-v1/status` returns JSON with either success shape including `server_context` or truthful `422 {"error": ..., "server_context": ...}`
 - `GET /v1/sheet-vitrina-v1/plan` returns JSON with either success shape or truthful `422 {"error": ...}`
-- `POST /v1/sheet-vitrina-v1/refresh` returns JSON with either success shape or truthful `422 {"error": ...}`
+- `POST /v1/sheet-vitrina-v1/refresh` returns JSON with either success shape including `server_context` or truthful `422 {"error": ...}`
 
 Timeout, non-JSON body, wrong content type, `404`, stale HTML error surface or missing operator route tokens are treated as stale deploy/publish symptoms.
 

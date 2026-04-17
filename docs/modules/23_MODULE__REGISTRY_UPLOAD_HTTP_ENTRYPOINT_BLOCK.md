@@ -48,7 +48,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned date-aware `sheet_vitrina_v1` read model, bounded current-day web-source sync, live daily refresh timer, repo-owned hosted deploy contract и актуальную narrow operator UI norm: HTTP entrypoint принимает фактические registry list lengths, держит sibling cost-price dataset отдельно от compact bundle, использует его в existing refresh/plan/status read-side через server-side effective-date overlay без нового public route, считает default `as_of_date` / `today_current` по `Asia/Yekaterinburg`, а refresh contour при missing `today_current` web-source snapshot может bounded-trigger'ить server-local producer/handoff seam; repo-owned operator page при этом остаётся narrow и не добавляет explanatory date subtitle/subcopy, а live closure описывается canonical hosted deploy/probe runner вместо hidden operational knowledge."
+update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned date-aware `sheet_vitrina_v1` read model, bounded current-day web-source sync, live daily refresh timer, repo-owned hosted deploy contract и актуальную narrow operator UI norm: HTTP entrypoint принимает фактические registry list lengths, держит sibling cost-price dataset отдельно от compact bundle, использует его в existing refresh/plan/status read-side через server-side effective-date overlay без нового public route, считает default `as_of_date` / `today_current` по `Asia/Yekaterinburg`, а refresh contour при missing `today_current` web-source snapshot может bounded-trigger'ить server-local producer/handoff seam; repo-owned operator page при этом остаётся narrow, не добавляет explanatory date subtitle/subcopy и показывает compact server-driven block `Сервер и расписание` через existing `server_context`, а live closure описывается canonical hosted deploy/probe runner вместо hidden operational knowledge."
 ---
 
 # 1. Идентификатор и статус
@@ -117,11 +117,26 @@ update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned
   - contour не открывает новый public producer route, не backfill-ит yesterday в today и остаётся bounded orchestration boundary поверх existing owner path.
 - Operator page не invent-ит новый heavy route: UI вызывает существующий `POST /v1/sheet-vitrina-v1/refresh` и читает только cheap status surface.
 - Operator page keeps narrow Russian chrome for operator-visible labels (`Загрузить данные`, compact `Статус` / `Результат`, row-count labels) without explanatory subtitle/subcopy про refresh/date defaults/temporal slots под заголовком или кнопкой.
+- Operator page добавляет один compact server-driven info block `Сервер и расписание`:
+  - `Часовой пояс`
+  - `Текущее время сервера`
+  - `Автообновление`
+  - `Технический триггер`
+- Этот block не hardcode-ится в UI: page читает его только из existing `GET /v1/sheet-vitrina-v1/status` / `POST /v1/sheet-vitrina-v1/refresh` response field `server_context`.
 - Raw log entries, raw backend errors и canonical technical identifiers/values на operator page не локализуются и не переписываются.
 - Для current checkpoint `plan/status` обязаны surface-ить temporal metadata, достаточную для thin operators:
   - `date_columns`
   - `temporal_slots`
   - `source_temporal_policies`
+- Для operator-facing time/scheduler chrome existing `status/refresh` surface теперь дополнительно обязаны отдавать `server_context`:
+  - `business_timezone`
+  - `business_now`
+  - `default_as_of_date`
+  - `today_current_date`
+  - `daily_refresh_business_time`
+  - `daily_refresh_systemd_time`
+  - `daily_refresh_systemd_oncalendar`
+- Если ready snapshot ещё не materialized, `GET /v1/sheet-vitrina-v1/status` сохраняет truthful `422`, но error payload всё равно обязан нести `server_context`, чтобы operator page могла показать актуальные server/timezone/scheduler facts уже на empty state.
 - Это нужно, чтобы public/runtime/operator contour не маскировал `today_current` values под surrogate `as_of_date`.
 - Canonical business timezone для server-side default-date semantics = `Asia/Yekaterinburg`:
   - default `as_of_date` = previous business day in `Asia/Yekaterinburg`;
@@ -212,7 +227,9 @@ update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned
   - что accepted response возвращается в канонической форме;
   - что current server-side truth обновляется через runtime DB;
   - что operator page `GET /sheet-vitrina-v1/operator` отдается тем же contour и публикует правильные refresh/status paths;
+  - что operator page рендерит compact `Сервер и расписание` block с русскими labels, а не hardcoded timezone text;
   - что `GET /v1/sheet-vitrina-v1/status` до refresh честно возвращает `ready snapshot missing`;
+  - что `GET /v1/sheet-vitrina-v1/status` до refresh всё равно несёт `server_context` с `Asia/Yekaterinburg` и current scheduler trigger metadata;
   - что duplicate `bundle_version` возвращает rejected result и HTTP `409`;
   - что accepted HTTP response сохраняет фактические request counts;
   - что synthetic oversized bundle проходит тот же HTTP boundary без hardcoded row-count caps.
@@ -224,6 +241,7 @@ update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned
 - Separate COST_PRICE contour переиспользует тот же app/service boundary и runtime DB, но остаётся отдельным dataset seam без смешивания с `config_v2 / metrics_v2 / formulas_v2`.
 - New read-side integration не открывает новый public route: authoritative `COST_PRICE` current state читается внутри existing refresh/read contour и materialize-ит operator-facing metrics/diagnostics в already existing `DATA_VITRINA` / `STATUS`.
 - Repo-owned operator page для explicit refresh теперь живёт на том же thin HTTP entrypoint и убирает ручной `curl` из нормального operator path.
+- Existing operator page/status surface теперь server-driven показывает текущую EKT business-time truth и current timer trigger metadata без отдельного meta route и без hardcoded UI copy.
 - Live service остаётся тонкой loopback HTTP boundary (`wb-core-registry-http.service` -> `127.0.0.1:8765`) и не переносит heavy truth в Apps Script.
 - Existing live daily refresh scheduler materialize-ится как external systemd timer `wb-core-sheet-vitrina-refresh.timer`, который вызывает тот же existing `POST /v1/sheet-vitrina-v1/refresh` ежедневно в `11:00 Asia/Yekaterinburg` (`06:00 UTC` на current host).
 - Если bot/web-source family не успела materialize-ить current-day snapshot по daily cron/handoff policy, same refresh route теперь может bounded-trigger'ить server-local same-day capture + handoff и закрыть `today_current` без возврата heavy producer logic в Apps Script.

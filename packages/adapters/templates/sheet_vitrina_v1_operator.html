@@ -264,6 +264,28 @@
           </dl>
         </section>
 
+        <section class="block" aria-labelledby="server-title">
+          <h2 id="server-title" class="block-title">Сервер и расписание</h2>
+          <dl class="meta-grid">
+            <div>
+              <dt>Часовой пояс</dt>
+              <dd id="serverTimezone">-</dd>
+            </div>
+            <div>
+              <dt>Текущее время сервера</dt>
+              <dd id="serverNow">-</dd>
+            </div>
+            <div>
+              <dt>Автообновление</dt>
+              <dd id="serverRefreshTime">-</dd>
+            </div>
+            <div>
+              <dt>Технический триггер</dt>
+              <dd id="serverTrigger">-</dd>
+            </div>
+          </dl>
+        </section>
+
         <section class="block" aria-labelledby="log-title">
           <h2 id="log-title" class="block-title">Результат</h2>
           <pre id="logBlock" class="log-block">Читаем последний статус...</pre>
@@ -283,6 +305,10 @@
       const refreshedAt = document.getElementById("refreshedAt");
       const dataRows = document.getElementById("dataRows");
       const statusRows = document.getElementById("statusRows");
+      const serverTimezone = document.getElementById("serverTimezone");
+      const serverNow = document.getElementById("serverNow");
+      const serverRefreshTime = document.getElementById("serverRefreshTime");
+      const serverTrigger = document.getElementById("serverTrigger");
       const logBlock = document.getElementById("logBlock");
       const stateLabels = {
         idle: "ожидание",
@@ -334,8 +360,40 @@
           .join(", ");
       }
 
+      function formatBusinessNow(value) {
+        const normalized = valueOrDash(value);
+        if (normalized === "-") {
+          return normalized;
+        }
+        return normalized.replace("T", " ");
+      }
+
+      function formatServerTrigger(context) {
+        const systemdTime = valueOrDash(context && context.daily_refresh_systemd_time);
+        const onCalendar = valueOrDash(context && context.daily_refresh_systemd_oncalendar);
+        if (systemdTime === "-" && onCalendar === "-") {
+          return "-";
+        }
+        if (systemdTime === "-") {
+          return "OnCalendar=" + onCalendar;
+        }
+        if (onCalendar === "-") {
+          return systemdTime;
+        }
+        return systemdTime + " · OnCalendar=" + onCalendar;
+      }
+
+      function renderServerContext(payload) {
+        const context = payload && payload.server_context ? payload.server_context : {};
+        serverTimezone.textContent = valueOrDash(context.business_timezone);
+        serverNow.textContent = formatBusinessNow(context.business_now);
+        serverRefreshTime.textContent = valueOrDash(context.daily_refresh_business_time);
+        serverTrigger.textContent = formatServerTrigger(context);
+      }
+
       function renderSnapshot(payload, intro) {
         const counts = payload.sheet_row_counts || {};
+        renderServerContext(payload);
         asOfDate.textContent = valueOrDash(payload.as_of_date);
         dateColumns.textContent = formatDateColumns(payload);
         refreshedAt.textContent = valueOrDash(payload.refreshed_at);
@@ -355,7 +413,8 @@
         ].join("\n");
       }
 
-      function renderEmpty(message) {
+      function renderEmpty(message, payload) {
+        renderServerContext(payload);
         asOfDate.textContent = "-";
         dateColumns.textContent = "-";
         refreshedAt.textContent = "-";
@@ -395,7 +454,8 @@
                 [
                   "Снимок пока не подготовлен.",
                   valueOrDash(payload.error)
-                ].join("\n\n")
+                ].join("\n\n"),
+                payload
               );
               return;
             }

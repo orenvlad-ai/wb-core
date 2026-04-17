@@ -38,6 +38,7 @@ ACTIVATED_AT = "2026-04-13T12:00:03Z"
 REFRESHED_AT = "2026-04-13T12:05:00Z"
 AS_OF_DATE = "2026-04-12"
 TODAY_CURRENT_DATE = "2026-04-13"
+SERVER_NOW = datetime(2026, 4, 13, 8, 0, tzinfo=timezone.utc)
 CURRENT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "stocks"}
 
 
@@ -72,11 +73,12 @@ def main() -> None:
             runtime=runtime,
             activated_at_factory=lambda: ACTIVATED_AT,
             refreshed_at_factory=lambda: REFRESHED_AT,
+            now_factory=lambda: SERVER_NOW,
         )
         counters = _build_counting_blocks()
         entrypoint.sheet_plan_block = SheetVitrinaV1LivePlanBlock(
             runtime=runtime,
-            now_factory=lambda: datetime(2026, 4, 13, 8, 0, tzinfo=timezone.utc),
+            now_factory=lambda: SERVER_NOW,
             **counters,
         )
 
@@ -108,6 +110,10 @@ def main() -> None:
                 raise AssertionError("operator UI must keep the compact Russian chrome")
             if "Строки DATA_VITRINA" not in operator_ui_html or "Строки STATUS" not in operator_ui_html:
                 raise AssertionError("operator UI must expose row-count fields with Russian labels")
+            if "Сервер и расписание" not in operator_ui_html or "Часовой пояс" not in operator_ui_html:
+                raise AssertionError("operator UI must expose the compact server context block")
+            if "Автообновление" not in operator_ui_html or "Технический триггер" not in operator_ui_html:
+                raise AssertionError("operator UI must expose scheduler labels in Russian")
             if "Снимок пока не подготовлен." not in operator_ui_html:
                 raise AssertionError("operator UI must keep the Russian empty-state helper text")
             if (
@@ -144,6 +150,16 @@ def main() -> None:
             pre_refresh_status, pre_refresh_payload = _get_json(status_url)
             if pre_refresh_status != 422 or "ready snapshot missing" not in str(pre_refresh_payload.get("error", "")):
                 raise AssertionError("cheap status endpoint must report missing ready snapshot before refresh")
+            if pre_refresh_payload.get("server_context") != {
+                "business_timezone": "Asia/Yekaterinburg",
+                "business_now": "2026-04-13T13:00:00+05:00",
+                "default_as_of_date": AS_OF_DATE,
+                "today_current_date": TODAY_CURRENT_DATE,
+                "daily_refresh_business_time": "11:00 Asia/Yekaterinburg",
+                "daily_refresh_systemd_time": "06:00:00 UTC",
+                "daily_refresh_systemd_oncalendar": "*-*-* 06:00:00 UTC",
+            }:
+                raise AssertionError("cheap status endpoint must expose server_context even before refresh")
 
             refresh_status, refresh_payload = _post_json(refresh_url, {"as_of_date": AS_OF_DATE})
             if refresh_status != 200:
@@ -156,6 +172,16 @@ def main() -> None:
                 raise AssertionError("refresh_result as_of_date mismatch")
             if refresh_payload["date_columns"] != [AS_OF_DATE, TODAY_CURRENT_DATE]:
                 raise AssertionError("refresh_result date_columns mismatch")
+            if refresh_payload["server_context"] != {
+                "business_timezone": "Asia/Yekaterinburg",
+                "business_now": "2026-04-13T13:00:00+05:00",
+                "default_as_of_date": AS_OF_DATE,
+                "today_current_date": TODAY_CURRENT_DATE,
+                "daily_refresh_business_time": "11:00 Asia/Yekaterinburg",
+                "daily_refresh_systemd_time": "06:00:00 UTC",
+                "daily_refresh_systemd_oncalendar": "*-*-* 06:00:00 UTC",
+            }:
+                raise AssertionError("refresh_result must expose the same server_context block")
             if [slot["slot_key"] for slot in refresh_payload["temporal_slots"]] != [
                 "yesterday_closed",
                 "today_current",
@@ -174,6 +200,8 @@ def main() -> None:
                 raise AssertionError("status endpoint row counts must match refresh result")
             if status_payload["date_columns"] != [AS_OF_DATE, TODAY_CURRENT_DATE]:
                 raise AssertionError("status endpoint must expose both materialized dates")
+            if status_payload["server_context"] != refresh_payload["server_context"]:
+                raise AssertionError("status endpoint must expose the same server_context metadata")
 
             plan_status, plan_payload = _get_json(f"{plan_url}?{urllib_parse.urlencode({'as_of_date': AS_OF_DATE})}")
             if plan_status != 200:

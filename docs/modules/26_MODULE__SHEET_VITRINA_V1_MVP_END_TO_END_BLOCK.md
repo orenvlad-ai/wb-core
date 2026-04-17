@@ -63,7 +63,7 @@ related_docs:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под EKT-aligned date-aware ready snapshot, authoritative `COST_PRICE` overlay, bounded current-day web-source sync, daily live refresh timer и repo-owned hosted deploy contract: heavy build остаётся в `POST /v1/sheet-vitrina-v1/refresh`, persisted plan materialize-ит `yesterday_closed + today_current` по `Asia/Yekaterinburg`, `GET /v1/sheet-vitrina-v1/plan` и `loadSheetVitrinaTable` читают только этот persisted plan, proxy-profit rows / cost diagnostics resolve server-side from uploaded `COST_PRICE` by `group + max(effective_from <= slot_date)`, а refresh contour при missing exact-date `seller_funnel_snapshot` / `web_source_snapshot` может bounded-trigger'ить server-local producer/handoff seam; live closure для hosted operator/runtime contour теперь идёт через один canonical runner."
+update_note: "Обновлён под EKT-aligned date-aware ready snapshot, authoritative `COST_PRICE` overlay, bounded current-day web-source sync, daily live refresh timer, server-driven operator schedule block и repo-owned hosted deploy contract: heavy build остаётся в `POST /v1/sheet-vitrina-v1/refresh`, persisted plan materialize-ит `yesterday_closed + today_current` по `Asia/Yekaterinburg`, `GET /v1/sheet-vitrina-v1/plan` и `loadSheetVitrinaTable` читают только этот persisted plan, proxy-profit rows / cost diagnostics resolve server-side from uploaded `COST_PRICE` by `group + max(effective_from <= slot_date)`, operator page читает timezone/scheduler facts через existing `GET /v1/sheet-vitrina-v1/status` / `POST /v1/sheet-vitrina-v1/refresh` field `server_context`, а refresh contour при missing exact-date `seller_funnel_snapshot` / `web_source_snapshot` может bounded-trigger'ить server-local producer/handoff seam; live closure для hosted operator/runtime contour теперь идёт через один canonical runner."
 ---
 
 # 1. Идентификатор и статус
@@ -104,6 +104,7 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - одна primary action `Загрузить данные`
   - page вызывает existing `POST /v1/sheet-vitrina-v1/refresh`
   - page читает `GET /v1/sheet-vitrina-v1/status` для minimal status/log без отдельного audit subsystem
+  - page дополнительно показывает compact block `Сервер и расписание`, который заполняется только из server-driven `server_context`
 - Канонический prepare output:
   - `CONFIG` с uploaded compact rows
   - `METRICS` с uploaded compact rows
@@ -126,6 +127,8 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
 - Канонический operator status path:
   - `GET /v1/sheet-vitrina-v1/status`
   - response body = latest persisted `SheetVitrinaV1RefreshResult`-compatible metadata для current bundle / requested `as_of_date`
+  - same response additionally carries `server_context` with business timezone/current time and daily refresh trigger metadata
+  - when ready snapshot is still missing, route stays truthful `422`, but error payload still carries `server_context` for the operator page empty state
 
 ## 3.1 Date-aware ready snapshot semantics
 
@@ -326,8 +329,10 @@ Bounded допущение:
   - что `prepare` поднимает operator seed `33 / 102 / 7`;
   - что upload из sheet-side trigger сохраняет current truth в existing runtime без усечения `metrics_v2`;
   - что operator page `GET /sheet-vitrina-v1/operator` отдается тем же server contour и публикует existing refresh/status paths;
+  - что operator page показывает compact `Сервер и расписание` block с русскими labels;
   - что `POST /v1/sheet-vitrina-v1/refresh` вызывает heavy source blocks и обновляет persisted date-aware ready snapshot;
-  - что `GET /v1/sheet-vitrina-v1/status` возвращает последний persisted refresh result без live fetch и с `date_columns` / `temporal_slots`;
+  - что `GET /v1/sheet-vitrina-v1/status` возвращает последний persisted refresh result без live fetch и с `date_columns` / `temporal_slots` plus `server_context`;
+  - что `GET /v1/sheet-vitrina-v1/status` до первого refresh остаётся truthful `422`, но всё равно несёт `server_context`;
   - что `GET /v1/sheet-vitrina-v1/plan` и sheet-side `load` читают только ready snapshot и не делают live fetch;
   - что authoritative `COST_PRICE` current state резолвится server-side по `group + latest effective_from <= slot_date`;
   - что `total_proxy_profit_rub` и `proxy_margin_pct_total` materialize-ятся в `DATA_VITRINA` только при applicable `COST_PRICE` coverage;
