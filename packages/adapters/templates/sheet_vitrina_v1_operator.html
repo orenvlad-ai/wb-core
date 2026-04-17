@@ -135,12 +135,60 @@
     }
 
     .block-title {
-      margin: 0 0 16px;
+      margin: 0;
       font-size: 13px;
       font-weight: 700;
       letter-spacing: 0.04em;
       text-transform: uppercase;
       color: var(--muted);
+    }
+
+    .block-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .log-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .log-download-button {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: #ffffff;
+      color: var(--text);
+      border-radius: 10px;
+      padding: 8px 12px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background-color 120ms ease, transform 120ms ease;
+    }
+
+    .log-download-button:hover:not(:disabled) {
+      background: #eef2f6;
+      transform: translateY(-1px);
+    }
+
+    .log-download-button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+      transform: none;
+    }
+
+    .log-viewport {
+      max-height: 420px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #f7f9fc;
+      padding: 16px;
     }
 
     .status-row {
@@ -305,8 +353,15 @@
         </section>
 
         <section class="block" aria-labelledby="log-title">
-          <h2 id="log-title" class="block-title">Живой лог</h2>
-          <pre id="logBlock" class="log-block">Читаем последний статус...</pre>
+          <div class="block-header">
+            <h2 id="log-title" class="block-title">Лог</h2>
+            <div class="log-actions">
+              <button id="downloadButton" class="log-download-button" type="button" disabled>Скачать лог</button>
+            </div>
+          </div>
+          <div id="logViewport" class="log-viewport">
+            <pre id="logBlock" class="log-block">Читаем последний статус...</pre>
+          </div>
         </section>
       </div>
     </section>
@@ -328,6 +383,8 @@
       const serverNow = document.getElementById("serverNow");
       const serverRefreshTime = document.getElementById("serverRefreshTime");
       const serverTrigger = document.getElementById("serverTrigger");
+      const downloadButton = document.getElementById("downloadButton");
+      const logViewport = document.getElementById("logViewport");
       const logBlock = document.getElementById("logBlock");
       const stateLabels = {
         idle: "ожидание",
@@ -346,6 +403,7 @@
         }
       };
       let activeJobId = null;
+      let completedJob = null;
 
       function setState(nextState) {
         stateBadge.textContent = stateLabels[nextState] || nextState;
@@ -443,7 +501,7 @@
       function renderSnapshotSummary(payload, intro) {
         const counts = payload.sheet_row_counts || {};
         renderSnapshotFields(payload);
-        logBlock.textContent = [
+        renderLogText([
           intro,
           "Статус: " + valueOrDash(payload.status),
           "Дата среза: " + valueOrDash(payload.as_of_date),
@@ -454,7 +512,7 @@
           "Строки STATUS: " + sheetCount(counts, "STATUS"),
           "snapshot_id: " + valueOrDash(payload.snapshot_id),
           "bundle_version: " + valueOrDash(payload.bundle_version)
-        ].join("\n");
+        ].join("\n"));
       }
 
       function renderEmpty(message, payload) {
@@ -464,12 +522,14 @@
         refreshedAt.textContent = "-";
         dataRows.textContent = "-";
         statusRows.textContent = "-";
-        logBlock.textContent = message;
+        setCompletedJob(null);
+        renderLogText(message);
       }
 
       function renderError(message, detail) {
         setState("error");
-        logBlock.textContent = [message, detail].filter(Boolean).join("\n\n");
+        setCompletedJob(null);
+        renderLogText([message, detail].filter(Boolean).join("\n\n"));
       }
 
       function renderJob(job) {
@@ -478,9 +538,20 @@
         if (job.result) {
           renderSnapshotFields(job.result);
         }
-        logBlock.textContent = Array.isArray(job.log_lines) && job.log_lines.length
+        renderLogText(Array.isArray(job.log_lines) && job.log_lines.length
           ? job.log_lines.join("\n")
-          : "Лог пока пуст.";
+          : "Лог пока пуст.");
+        setCompletedJob(job.status === "running" ? null : job);
+      }
+
+      function renderLogText(text) {
+        logBlock.textContent = text;
+        logViewport.scrollTop = logViewport.scrollHeight;
+      }
+
+      function setCompletedJob(job) {
+        completedJob = job && job.job_id && job.status !== "running" ? job : null;
+        downloadButton.disabled = !completedJob;
       }
 
       async function readJson(response) {
@@ -505,6 +576,7 @@
           if (!response.ok) {
             if (response.status === 422) {
               setState("idle");
+              setCompletedJob(null);
               renderEmpty(
                 [
                   "Снимок пока не подготовлен.",
@@ -521,6 +593,7 @@
             renderSnapshotFields(payload);
             return;
           }
+          setCompletedJob(null);
           renderSnapshotSummary(payload, "Показан последний сохранённый снимок.");
         } catch (error) {
           if (activeJobId) {
@@ -555,7 +628,8 @@
           : "Запускаем отправку готового snapshot в таблицу...";
         setState("loading");
         setActionState(actionName);
-        logBlock.textContent = startMessage;
+        setCompletedJob(null);
+        renderLogText(startMessage);
         try {
           const response = await fetch(path, {
             method: "POST",
@@ -572,6 +646,7 @@
           activeJobId = valueOrDash(payload.job_id);
           renderJob(payload);
           const finalJob = await pollJob(payload.job_id);
+          setCompletedJob(finalJob);
           if (finalJob.result) {
             if (actionName === "refresh") {
               renderSnapshotFields(finalJob.result);
@@ -590,9 +665,56 @@
         }
       }
 
+      function fallbackLogFilename(job) {
+        const operation = valueOrDash(job && job.operation).replace(/[^a-zA-Z0-9_-]+/g, "-") || "job";
+        const jobId = valueOrDash(job && job.job_id).replace(/[^a-zA-Z0-9_-]+/g, "-") || "unknown";
+        return "sheet-vitrina-v1-" + operation + "-" + jobId + ".txt";
+      }
+
+      function filenameFromDisposition(value) {
+        if (!value) {
+          return "";
+        }
+        const match = /filename=\"?([^\";]+)\"?/i.exec(value);
+        return match ? match[1] : "";
+      }
+
+      async function downloadCurrentLog() {
+        if (!completedJob || !completedJob.download_path) {
+          return;
+        }
+        downloadButton.disabled = true;
+        try {
+          const response = await fetch(completedJob.download_path, {
+            method: "GET",
+            headers: { "Accept": "text/plain" }
+          });
+          const text = await response.text();
+          if (!response.ok) {
+            throw new Error(text || ("HTTP " + response.status));
+          }
+          const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          const disposition = response.headers.get("Content-Disposition");
+          link.href = url;
+          link.download = filenameFromDisposition(disposition) || completedJob.log_filename || fallbackLogFilename(completedJob);
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          URL.revokeObjectURL(url);
+        } catch (error) {
+          renderError("Не удалось скачать лог.", error instanceof Error ? error.message : String(error));
+        } finally {
+          downloadButton.disabled = !completedJob;
+        }
+      }
+
       refreshButton.addEventListener("click", () => runAction("refresh"));
       loadButton.addEventListener("click", () => runAction("load"));
+      downloadButton.addEventListener("click", downloadCurrentLog);
       setActionState(null);
+      setCompletedJob(null);
       loadStatus();
     })();
   </script>

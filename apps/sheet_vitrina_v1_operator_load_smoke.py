@@ -149,8 +149,9 @@ def main() -> None:
             operator_status, operator_html = _get_text(operator_url)
             if operator_status != 200:
                 raise AssertionError(f"operator UI must return 200, got {operator_status}")
-            if "Отправить данные" not in operator_html or DEFAULT_SHEET_JOB_PATH not in operator_html:
-                raise AssertionError("operator UI must expose load action and operator job path")
+            for expected in ("Отправить данные", "Скачать лог", "Лог", "max-height: 420px", DEFAULT_SHEET_JOB_PATH):
+                if expected not in operator_html:
+                    raise AssertionError(f"operator UI must expose {expected!r}")
 
             upload_status, upload_payload = _post_json(upload_url, bundle)
             if upload_status != 200 or upload_payload.get("status") != "accepted":
@@ -177,10 +178,10 @@ def main() -> None:
                 raise AssertionError(f"async refresh job must succeed, got {refresh_job}")
             refresh_logs = "\n".join(refresh_job.get("log_lines", []))
             for expected in (
-                "Старт refresh ready snapshot.",
-                "Собираем ready snapshot на сервере...",
-                "Сохраняем ready snapshot в runtime...",
-                "Refresh завершён:",
+                "event=cycle_start cycle=refresh",
+                "event=source_step_start source=seller_funnel_snapshot",
+                "event=metric_batch_result",
+                "event=cycle_finish cycle=refresh",
             ):
                 if expected not in refresh_logs:
                     raise AssertionError(f"refresh live-log must contain {expected!r}")
@@ -198,6 +199,8 @@ def main() -> None:
                 raise AssertionError(f"async load must return 202, got {load_start_status}")
             if load_start_payload.get("operation") != "load":
                 raise AssertionError("async load must expose load operation metadata")
+            if "download_path" not in load_start_payload or "log_filename" not in load_start_payload:
+                raise AssertionError("async load start payload must expose per-run log download metadata")
 
             time.sleep(0.1)
             running_load_status, running_load_payload = _get_json(
@@ -209,14 +212,14 @@ def main() -> None:
                 raise AssertionError("load job must stay running long enough for live-log polling")
             running_logs = "\n".join(running_load_payload.get("log_lines", []))
             for expected in (
-                "Старт load готового snapshot в live sheet.",
-                "Ready snapshot найден:",
-                "Передаём ready snapshot в bound sheet bridge...",
+                "event=cycle_start cycle=load",
+                "event=snapshot_lookup_finish cycle=load",
+                "event=bridge_start cycle=load",
                 "Тестовый sheet bridge принял ready snapshot.",
             ):
                 if expected not in running_logs:
                     raise AssertionError(f"running load live-log must contain {expected!r}")
-            if "Load завершён:" in running_logs:
+            if "event=cycle_finish cycle=load" in running_logs:
                 raise AssertionError("running load live-log must not jump to final success before completion")
 
             load_job = _wait_for_job(job_url, str(load_start_payload["job_id"]))
@@ -224,8 +227,11 @@ def main() -> None:
                 raise AssertionError(f"async load job must succeed, got {load_job}")
             load_logs = "\n".join(load_job.get("log_lines", []))
             for expected in (
+                "event=snapshot_source_status cycle=load",
+                "event=metric_batch_result cycle=load",
                 "Тестовый sheet bridge записал данные в live shell.",
-                "Load завершён:",
+                "event=bridge_sheet_state cycle=load",
+                "event=cycle_finish cycle=load",
             ):
                 if expected not in load_logs:
                     raise AssertionError(f"load live-log must contain {expected!r}")
@@ -233,6 +239,8 @@ def main() -> None:
                 raise AssertionError("load result must surface bridge payload")
             if load_job["result"]["refreshed_at"] != REFRESHED_AT:
                 raise AssertionError("load result must keep the persisted refresh timestamp")
+            if int(load_job.get("log_line_count", 0)) < 10:
+                raise AssertionError("load job must expose detailed diagnostic log with multiple lines")
             if load_runner.calls != [refresh_job["result"]["snapshot_id"]]:
                 raise AssertionError("load bridge must run exactly once on the prepared ready snapshot")
             if {
@@ -240,6 +248,16 @@ def main() -> None:
                 for key, block in counters.items()
             } != before_load_requests:
                 raise AssertionError("load must not trigger heavy source blocks or implicit refresh")
+            download_status, download_text, download_headers = _get_text_with_headers(
+                f"{job_url}?{urllib_parse.urlencode({'job_id': load_job['job_id'], 'format': 'text', 'download': '1'})}"
+            )
+            if download_status != 200:
+                raise AssertionError(f"log text download must return 200, got {download_status}")
+            content_disposition = download_headers.get("Content-Disposition", "")
+            if "attachment;" not in content_disposition or ".txt" not in content_disposition:
+                raise AssertionError("log text download must expose attachment Content-Disposition")
+            if "event=cycle_finish cycle=load" not in download_text or "Тестовый sheet bridge записал данные в live shell." not in download_text:
+                raise AssertionError("downloaded log must match the concrete completed run")
 
             status_after_load, status_payload = _get_json(
                 f"{base_url}{config.sheet_status_path}?{urllib_parse.urlencode({'as_of_date': AS_OF_DATE})}"
@@ -347,6 +365,15 @@ def _get_text(url: str) -> tuple[int, str]:
             return response.status, response.read().decode("utf-8")
     except error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8")
+
+
+def _get_text_with_headers(url: str) -> tuple[int, str, dict[str, str]]:
+    req = urllib_request.Request(url, method="GET")
+    try:
+        with urllib_request.urlopen(req) as response:
+            return response.status, response.read().decode("utf-8"), dict(response.headers.items())
+    except error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8"), dict(exc.headers.items())
 
 
 def _reserve_free_port() -> int:

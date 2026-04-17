@@ -209,11 +209,10 @@ def _build_handler(
                         )
                         return
 
-                    job_payload["job_path"] = _build_sheet_job_url(sheet_job_path, job_payload["job_id"])
                     _write_json_response(
                         self,
                         HTTPStatus.ACCEPTED,
-                        job_payload,
+                        _with_sheet_job_urls(job_payload, sheet_job_path),
                     )
                     return
 
@@ -265,11 +264,10 @@ def _build_handler(
                         )
                         return
 
-                    job_payload["job_path"] = _build_sheet_job_url(sheet_job_path, job_payload["job_id"])
                     _write_json_response(
                         self,
                         HTTPStatus.ACCEPTED,
-                        job_payload,
+                        _with_sheet_job_urls(job_payload, sheet_job_path),
                     )
                     return
 
@@ -322,7 +320,11 @@ def _build_handler(
             if parsed.path == sheet_job_path:
                 try:
                     job_id = _resolve_job_id_from_query(parsed.query)
-                    payload = entrypoint.handle_sheet_operator_job_request(job_id)
+                    response_format = _resolve_job_response_format(parsed.query)
+                    if response_format == "text":
+                        body_text, filename = entrypoint.handle_sheet_operator_job_text_request(job_id)
+                    else:
+                        payload = entrypoint.handle_sheet_operator_job_request(job_id)
                 except ValueError as exc:
                     status = (
                         HTTPStatus.NOT_FOUND
@@ -343,11 +345,20 @@ def _build_handler(
                     )
                     return
 
-                _write_json_response(
-                    self,
-                    HTTPStatus.OK,
-                    payload,
-                )
+                if response_format == "text":
+                    _write_text_response(
+                        self,
+                        HTTPStatus.OK,
+                        body_text,
+                        filename=filename,
+                        as_attachment=_resolve_download_requested(parsed.query),
+                    )
+                else:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.OK,
+                        _with_sheet_job_urls(payload, sheet_job_path),
+                    )
                 return
 
             if parsed.path == sheet_status_path:
@@ -497,6 +508,20 @@ def _resolve_job_id_from_query(query_string: str) -> str:
     return job_id
 
 
+def _resolve_job_response_format(query_string: str) -> str:
+    query = urllib_parse.parse_qs(query_string)
+    value = str(query.get("format", ["json"])[0] or "json").strip().lower()
+    if value not in {"json", "text"}:
+        raise ValueError("format query parameter must be json or text")
+    return value
+
+
+def _resolve_download_requested(query_string: str) -> bool:
+    query = urllib_parse.parse_qs(query_string)
+    value = str(query.get("download", ["0"])[0] or "0").strip().lower()
+    return value in {"1", "true", "yes"}
+
+
 def _resolve_async_requested(payload: Mapping[str, Any]) -> bool:
     if "async" in payload:
         raw = payload["async"]
@@ -559,8 +584,49 @@ def _write_html_response(
     handler.wfile.write(body)
 
 
+def _write_text_response(
+    handler: BaseHTTPRequestHandler,
+    status: HTTPStatus,
+    body_text: str,
+    *,
+    filename: str | None = None,
+    as_attachment: bool = False,
+) -> None:
+    body = body_text.encode("utf-8")
+    handler.send_response(status.value)
+    handler.send_header("Content-Type", "text/plain; charset=utf-8")
+    if filename:
+        disposition = "attachment" if as_attachment else "inline"
+        handler.send_header(
+            "Content-Disposition",
+            f'{disposition}; filename="{filename}"',
+        )
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
 def _build_sheet_job_url(job_path: str, job_id: str) -> str:
     return f"{job_path}?{urllib_parse.urlencode({'job_id': job_id})}"
+
+
+def _build_sheet_job_download_url(job_path: str, job_id: str) -> str:
+    return (
+        f"{job_path}?"
+        f"{urllib_parse.urlencode({'job_id': job_id, 'format': 'text', 'download': '1'})}"
+    )
+
+
+def _with_sheet_job_urls(payload: Mapping[str, Any], job_path: str) -> dict[str, Any]:
+    normalized = dict(payload)
+    job_id = str(normalized.get("job_id", "") or "").strip()
+    if not job_id:
+        return normalized
+    operation = str(normalized.get("operation", "") or "job").strip()
+    normalized["job_path"] = _build_sheet_job_url(job_path, job_id)
+    normalized["download_path"] = _build_sheet_job_download_url(job_path, job_id)
+    normalized["log_filename"] = f"sheet-vitrina-v1-{operation}-{job_id}.txt"
+    return normalized
 
 
 def _render_sheet_vitrina_operator_ui(

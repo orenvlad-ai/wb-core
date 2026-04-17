@@ -101,6 +101,81 @@ DECISION_SUMMARY = {
     "section_dictionary": "uploaded section values are authoritative and are not remapped",
     "config_service_values": "CONFIG!H:I service block is preserved across prepare/reprepare",
 }
+SOURCE_DIAGNOSTIC_SPECS = {
+    "seller_funnel_snapshot": {
+        "module": "packages.application.seller_funnel_snapshot_block",
+        "block": "SellerFunnelSnapshotBlock",
+        "adapter": "HttpBackedSellerFunnelSnapshotSource",
+        "endpoint": "GET /v1/sales-funnel/daily?date=<YYYY-MM-DD>",
+    },
+    "sales_funnel_history": {
+        "module": "packages.application.sales_funnel_history_block",
+        "block": "SalesFunnelHistoryBlock",
+        "adapter": "HttpBackedSalesFunnelHistorySource",
+        "endpoint": "POST /api/analytics/v3/sales-funnel/products/history",
+    },
+    "web_source_snapshot": {
+        "module": "packages.application.web_source_snapshot_block",
+        "block": "WebSourceSnapshotBlock",
+        "adapter": "HttpBackedWebSourceSnapshotSource",
+        "endpoint": "GET /v1/search-analytics/snapshot?date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>",
+    },
+    "prices_snapshot": {
+        "module": "packages.application.prices_snapshot_block",
+        "block": "PricesSnapshotBlock",
+        "adapter": "HttpBackedPricesSnapshotSource",
+        "endpoint": "POST /api/v2/list/goods/filter",
+    },
+    "sf_period": {
+        "module": "packages.application.sf_period_block",
+        "block": "SfPeriodBlock",
+        "adapter": "HttpBackedSfPeriodSource",
+        "endpoint": "POST /api/analytics/v3/sales-funnel/products",
+    },
+    "spp": {
+        "module": "packages.application.spp_block",
+        "block": "SppBlock",
+        "adapter": "HttpBackedSppSource",
+        "endpoint": "GET /api/v1/supplier/sales?dateFrom=<YYYY-MM-DD>",
+    },
+    "ads_bids": {
+        "module": "packages.application.ads_bids_block",
+        "block": "AdsBidsBlock",
+        "adapter": "HttpBackedAdsBidsSource",
+        "endpoint": "GET /adv/v1/promotion/count + GET /api/advert/v2/adverts",
+    },
+    "stocks": {
+        "module": "packages.application.stocks_block",
+        "block": "StocksBlock",
+        "adapter": "HttpBackedStocksSource",
+        "endpoint": "POST /api/analytics/v1/stocks-report/wb-warehouses",
+    },
+    "ads_compact": {
+        "module": "packages.application.ads_compact_block",
+        "block": "AdsCompactBlock",
+        "adapter": "HttpBackedAdsCompactSource",
+        "endpoint": "GET /adv/v1/promotion/count + GET /adv/v3/fullstats",
+    },
+    "fin_report_daily": {
+        "module": "packages.application.fin_report_daily_block",
+        "block": "FinReportDailyBlock",
+        "adapter": "HttpBackedFinReportDailySource",
+        "endpoint": "GET /api/v5/supplier/reportDetailByPeriod?period=daily",
+    },
+    "cost_price": {
+        "module": "packages.application.sheet_vitrina_v1_live_plan",
+        "block": "cost_price_overlay",
+        "adapter": "RegistryUploadDbBackedRuntime",
+        "endpoint": "sqlite://cost_price_current_state",
+    },
+    "promo_by_price": {
+        "module": "packages.application.sheet_vitrina_v1_live_plan",
+        "block": "promo_by_price_placeholder",
+        "adapter": "blocked_source",
+        "endpoint": "blocked:no_live_http_adapter",
+    },
+}
+LivePlanLogEmitter = Callable[[str], None]
 
 
 @dataclass(frozen=True)
@@ -187,13 +262,30 @@ class SheetVitrinaV1LivePlanBlock:
         self.current_web_source_sync = current_web_source_sync or ShellBackedWebSourceCurrentSync()
         self.now_factory = now_factory or _default_now_factory
 
-    def build_plan(self, as_of_date: str | None = None) -> SheetVitrinaV1Envelope:
+    def build_plan(
+        self,
+        as_of_date: str | None = None,
+        log: LivePlanLogEmitter | None = None,
+    ) -> SheetVitrinaV1Envelope:
+        emit = log or _noop_live_plan_log
         current_state = self.runtime.load_current_state()
         effective_date = _resolve_as_of_date(as_of_date)
         current_date = current_business_date_iso(self.now_factory())
         temporal_slots = _build_temporal_slots(
             as_of_date=effective_date,
             current_date=current_date,
+        )
+        emit(
+            _format_log_event(
+                "refresh_plan_context",
+                bundle_version=current_state.bundle_version,
+                requested_as_of_date=as_of_date or "default",
+                resolved_as_of_date=effective_date,
+                current_business_date=current_date,
+                temporal_slots=",".join(
+                    f"{slot.slot_key}:{slot.column_date}" for slot in temporal_slots
+                ),
+            )
         )
         enabled_config = sorted(
             [item for item in current_state.config_v2 if item.enabled],
@@ -210,14 +302,40 @@ class SheetVitrinaV1LivePlanBlock:
         )
         if not displayed_metrics:
             raise ValueError("current registry metrics_v2 does not contain enabled show_in_data rows")
+        emit(
+            _format_log_event(
+                "refresh_registry_state",
+                enabled_config_count=len(enabled_config),
+                displayed_metrics=len(displayed_metrics),
+                formulas=len(current_state.formulas_v2),
+            )
+        )
 
         cost_price_state = _load_cost_price_current_state(self.runtime)
+        emit(
+            _format_log_event(
+                "current_web_source_sync_start",
+                source="current_day_web_source_sync",
+                target_date=current_date,
+                block="ShellBackedWebSourceCurrentSync",
+            )
+        )
         current_web_source_sync_note = self._sync_current_web_source_snapshot(current_date)
+        emit(
+            _format_log_event(
+                "current_web_source_sync_finish",
+                source="current_day_web_source_sync",
+                target_date=current_date,
+                status="error" if current_web_source_sync_note else "success",
+                note=current_web_source_sync_note or "snapshot ensured or already materialized",
+            )
+        )
         live_sources = self._load_live_sources(
             enabled_config,
             temporal_slots,
             cost_price_state,
             current_web_source_sync_note=current_web_source_sync_note,
+            log=emit,
         )
         evaluator = _MetricEvaluator(
             enabled_config=enabled_config,
@@ -234,6 +352,20 @@ class SheetVitrinaV1LivePlanBlock:
             data_rows.extend(rows)
             scope_row_counts[metric.scope] = scope_row_counts.get(metric.scope, 0) + len(rows)
             section_row_counts[metric.section] = section_row_counts.get(metric.section, 0) + len(rows)
+        emit(
+            _format_log_event(
+                "metric_rows_materialized",
+                rows=len(data_rows),
+                scope_row_counts=_format_counter(scope_row_counts),
+                section_row_counts=_format_counter(section_row_counts),
+            )
+        )
+        _emit_metric_batch_logs(
+            emit,
+            displayed_metrics=displayed_metrics,
+            data_rows=data_rows,
+            temporal_slots=temporal_slots,
+        )
 
         data_header = ["label", "key", *[slot.column_date for slot in temporal_slots]]
         status_rows = _build_status_rows(
@@ -244,6 +376,13 @@ class SheetVitrinaV1LivePlanBlock:
             temporal_slots=temporal_slots,
             scope_row_counts=scope_row_counts,
             section_row_counts=section_row_counts,
+        )
+        emit(
+            _format_log_event(
+                "status_sheet_materialized",
+                rows=len(status_rows),
+                blocked_sources=",".join(sorted(BLOCKED_SOURCE_STATUSES)),
+            )
         )
         delivery_bundle = {
             "delivery_contract_version": DELIVERY_CONTRACT_VERSION,
@@ -289,7 +428,9 @@ class SheetVitrinaV1LivePlanBlock:
         temporal_slots: list[SheetVitrinaV1TemporalSlot],
         cost_price_state: CostPriceCurrentState | None,
         current_web_source_sync_note: str | None = None,
+        log: LivePlanLogEmitter | None = None,
     ) -> TemporalLiveSources:
+        emit = log or _noop_live_plan_log
         requested_nm_ids = [item.nm_id for item in enabled_config]
         requested_groups = sorted({item.group for item in enabled_config})
         statuses: list[LiveSourceStatus] = []
@@ -416,16 +557,24 @@ class SheetVitrinaV1LivePlanBlock:
                 ),
             ]:
                 temporal_policy = SOURCE_TEMPORAL_POLICIES[source_key]
+                _emit_source_request_log(
+                    emit,
+                    source_key=source_key,
+                    temporal_slot=slot.slot_key,
+                    temporal_policy=temporal_policy,
+                    column_date=slot.column_date,
+                    requested_nm_ids=requested_nm_ids,
+                )
                 if not _source_policy_supports_slot(temporal_policy, slot.slot_key):
-                    statuses.append(
-                        _build_temporal_gap_status(
-                            source_key=source_key,
-                            temporal_slot=slot.slot_key,
-                            temporal_policy=temporal_policy,
-                            column_date=slot.column_date,
-                            requested_count=len(requested_nm_ids),
-                        )
+                    gap_status = _build_temporal_gap_status(
+                        source_key=source_key,
+                        temporal_slot=slot.slot_key,
+                        temporal_policy=temporal_policy,
+                        column_date=slot.column_date,
+                        requested_count=len(requested_nm_ids),
                     )
+                    statuses.append(gap_status)
+                    _emit_source_status_log(emit, gap_status)
                     continue
                 if source_key in {"seller_funnel_snapshot", "web_source_snapshot"}:
                     status, payload = self._capture_temporal_web_source(
@@ -451,6 +600,7 @@ class SheetVitrinaV1LivePlanBlock:
                         loader=loader,
                     )
                 statuses.append(status)
+                _emit_source_status_log(emit, status)
                 if source_key == "seller_funnel_snapshot":
                     current_lookups.seller_funnel_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "sales_funnel_history":
@@ -478,6 +628,15 @@ class SheetVitrinaV1LivePlanBlock:
                         )
 
         for slot in temporal_slots:
+            _emit_source_request_log(
+                emit,
+                source_key="cost_price",
+                temporal_slot=slot.slot_key,
+                temporal_policy=SOURCE_TEMPORAL_POLICIES["cost_price"],
+                column_date=slot.column_date,
+                requested_nm_ids=requested_nm_ids,
+                requested_groups=requested_groups,
+            )
             cost_price_status, cost_price_lookup = _build_cost_price_status(
                 current_state=cost_price_state,
                 requested_groups=requested_groups,
@@ -486,27 +645,36 @@ class SheetVitrinaV1LivePlanBlock:
             )
             slot_lookups[slot.slot_key].cost_price_lookup = cost_price_lookup
             statuses.append(cost_price_status)
+            _emit_source_status_log(emit, cost_price_status)
 
         for source_key, note in BLOCKED_SOURCE_STATUSES.items():
             for slot in temporal_slots:
-                statuses.append(
-                    LiveSourceStatus(
-                        source_key=source_key,
-                        temporal_slot=slot.slot_key,
-                        temporal_policy="blocked",
-                        column_date=slot.column_date,
-                        kind="blocked",
-                        freshness="",
-                        snapshot_date="",
-                        date="",
-                        date_from="",
-                        date_to="",
-                        requested_count=len(requested_nm_ids),
-                        covered_count=0,
-                        missing_nm_ids=[],
-                        note=note,
-                    )
+                blocked_status = LiveSourceStatus(
+                    source_key=source_key,
+                    temporal_slot=slot.slot_key,
+                    temporal_policy="blocked",
+                    column_date=slot.column_date,
+                    kind="blocked",
+                    freshness="",
+                    snapshot_date="",
+                    date="",
+                    date_from="",
+                    date_to="",
+                    requested_count=len(requested_nm_ids),
+                    covered_count=0,
+                    missing_nm_ids=[],
+                    note=note,
                 )
+                statuses.append(blocked_status)
+                _emit_source_request_log(
+                    emit,
+                    source_key=source_key,
+                    temporal_slot=slot.slot_key,
+                    temporal_policy="blocked",
+                    column_date=slot.column_date,
+                    requested_nm_ids=requested_nm_ids,
+                )
+                _emit_source_status_log(emit, blocked_status)
 
         return TemporalLiveSources(
             temporal_slots=temporal_slots,
@@ -1498,6 +1666,169 @@ def _format_counter(value: Mapping[str, int]) -> str:
 
 def _format_note(value: Mapping[str, Any]) -> str:
     return "; ".join(f"{key}={value[key]}" for key in value if value[key] not in (None, ""))
+
+
+def _format_log_event(event: str, **fields: Any) -> str:
+    parts = [f"event={event}"]
+    for key, value in fields.items():
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, bool):
+            normalized: Any = str(value).lower()
+        elif isinstance(value, float):
+            normalized: Any = round(value, 6)
+        else:
+            normalized = value
+        text = str(normalized)
+        if any(char.isspace() or char in {'"', ";", "="} for char in text):
+            text = json.dumps(text, ensure_ascii=False)
+        parts.append(f"{key}={text}")
+    return " ".join(parts)
+
+
+def _emit_source_request_log(
+    emit: LivePlanLogEmitter,
+    *,
+    source_key: str,
+    temporal_slot: str,
+    temporal_policy: str,
+    column_date: str,
+    requested_nm_ids: list[int],
+    requested_groups: list[str] | None = None,
+) -> None:
+    spec = SOURCE_DIAGNOSTIC_SPECS.get(source_key, {})
+    request_context: dict[str, Any] = {
+        "column_date": column_date,
+        "requested_nm_ids": len(requested_nm_ids),
+    }
+    if source_key in {"seller_funnel_snapshot"}:
+        request_context["date"] = column_date
+    elif source_key in {"sales_funnel_history", "web_source_snapshot"}:
+        request_context["date_from"] = column_date
+        request_context["date_to"] = column_date
+    elif source_key == "cost_price":
+        request_context["requested_groups"] = len(requested_groups or [])
+        request_context["resolution_rule"] = "latest_effective_from<=slot_date"
+    else:
+        request_context["snapshot_date"] = column_date
+    emit(
+        _format_log_event(
+            "source_step_start",
+            source=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            module=spec.get("module"),
+            block=spec.get("block"),
+            adapter=spec.get("adapter"),
+            endpoint=spec.get("endpoint"),
+            **request_context,
+        )
+    )
+
+
+def _emit_source_status_log(emit: LivePlanLogEmitter, status: LiveSourceStatus) -> None:
+    spec = SOURCE_DIAGNOSTIC_SPECS.get(status.source_key, {})
+    emit(
+        _format_log_event(
+            "source_step_finish",
+            source=status.source_key,
+            temporal_slot=status.temporal_slot,
+            temporal_policy=status.temporal_policy,
+            column_date=status.column_date,
+            module=spec.get("module"),
+            block=spec.get("block"),
+            adapter=spec.get("adapter"),
+            endpoint=spec.get("endpoint"),
+            kind=status.kind,
+            freshness=status.freshness,
+            snapshot_date=status.snapshot_date,
+            date=status.date,
+            date_from=status.date_from,
+            date_to=status.date_to,
+            requested_count=status.requested_count,
+            covered_count=status.covered_count,
+            missing_count=len(status.missing_nm_ids),
+            missing_nm_ids=_format_missing_nm_ids(status.missing_nm_ids[:20]),
+            note=status.note,
+        )
+    )
+
+
+def _emit_metric_batch_logs(
+    emit: LivePlanLogEmitter,
+    *,
+    displayed_metrics: list[MetricV2Item],
+    data_rows: list[list[Any]],
+    temporal_slots: list[SheetVitrinaV1TemporalSlot],
+) -> None:
+    metric_meta = {item.metric_key: item for item in displayed_metrics}
+    summaries: dict[str, dict[str, Any]] = {}
+    for row in data_rows:
+        if len(row) < 2:
+            continue
+        key = str(row[1] or "")
+        if "|" not in key:
+            continue
+        scope_token, metric_key = key.split("|", 1)
+        metric = metric_meta.get(metric_key)
+        summary = summaries.setdefault(
+            metric_key,
+            {
+                "scope": getattr(metric, "scope", ""),
+                "section": getattr(metric, "section", ""),
+                "label_ru": getattr(metric, "label_ru", ""),
+                "rows": 0,
+                "non_zero": 0,
+                "zero": 0,
+                "blank": 0,
+                "text": 0,
+                "row_scopes": set(),
+            },
+        )
+        summary["rows"] += 1
+        summary["row_scopes"].add(scope_token.split(":", 1)[0])
+        for cell in row[2 : 2 + len(temporal_slots)]:
+            if cell in ("", None):
+                summary["blank"] += 1
+                continue
+            if isinstance(cell, (int, float)):
+                if float(cell) == 0.0:
+                    summary["zero"] += 1
+                else:
+                    summary["non_zero"] += 1
+                continue
+            summary["text"] += 1
+
+    for metric_key in sorted(summaries):
+        summary = summaries[metric_key]
+        blocked = (
+            metric_key in BLOCKED_SOURCE_METRIC_KEYS
+            and summary["non_zero"] == 0
+            and summary["zero"] == 0
+            and summary["blank"] > 0
+        )
+        emit(
+            _format_log_event(
+                "metric_batch_result",
+                metric_key=metric_key,
+                label_ru=summary["label_ru"],
+                scope=summary["scope"],
+                section=summary["section"],
+                row_scopes=",".join(sorted(summary["row_scopes"])),
+                rows=summary["rows"],
+                slot_cells=summary["rows"] * len(temporal_slots),
+                non_zero=summary["non_zero"],
+                zero=summary["zero"],
+                blank=summary["blank"],
+                text=summary["text"],
+                blocked=blocked,
+                blocked_source="promo_by_price" if blocked else "",
+            )
+        )
+
+
+def _noop_live_plan_log(_: str) -> None:
+    return
 
 
 def _load_json(path: Path) -> Mapping[str, Any]:

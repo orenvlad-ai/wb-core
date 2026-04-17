@@ -109,8 +109,10 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - `Загрузить данные` вызывает existing `POST /v1/sheet-vitrina-v1/refresh` и materialize-ит ready snapshot only
   - `Отправить данные` вызывает `POST /v1/sheet-vitrina-v1/load` и пишет в live sheet только already prepared snapshot
   - page читает `GET /v1/sheet-vitrina-v1/status` для compact status block
-  - page читает `GET /v1/sheet-vitrina-v1/job` для live построчного operator log без отдельного audit subsystem
+  - page читает `GET /v1/sheet-vitrina-v1/job` для detailed построчного operator log без отдельного audit subsystem
+  - тот же `job` route поддерживает text-export конкретного completed run через `format=text&download=1`
   - page дополнительно показывает compact block `Сервер и расписание`, который заполняется только из server-driven `server_context`
+  - log block остаётся fixed-height scrollable viewport с title `Лог` и одной bounded action `Скачать лог`
 - Канонический prepare output:
   - `CONFIG` с uploaded compact rows
   - `METRICS` с uploaded compact rows
@@ -141,7 +143,8 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - when ready snapshot is still missing, route stays truthful `422`, but error payload still carries `server_context` for the operator page empty state
 - Канонический operator live-log path:
   - `GET /v1/sheet-vitrina-v1/job`
-  - response body = current async action status + postрочный live log для `refresh` или `load`
+  - default response body = current async action status + detailed postрочный live log для `refresh` или `load`
+  - `GET /v1/sheet-vitrina-v1/job?job_id=...&format=text&download=1` = plain `.txt` export ровно этого run log
 
 ## 3.1 Date-aware ready snapshot semantics
 
@@ -347,7 +350,7 @@ Bounded допущение:
   - что `prepare` поднимает operator seed `33 / 102 / 7`;
   - что upload из sheet-side trigger сохраняет current truth в existing runtime без усечения `metrics_v2`;
   - что operator page `GET /sheet-vitrina-v1/operator` отдается тем же server contour и публикует refresh/load/status/job paths;
-  - что operator page показывает compact `Сервер и расписание` block с русскими labels и отдельный `Живой лог`;
+  - что operator page показывает compact `Сервер и расписание` block с русскими labels, отдельный `Лог`, fixed-height scroll viewport и `Скачать лог`;
   - что `POST /v1/sheet-vitrina-v1/refresh` вызывает heavy source blocks и обновляет persisted date-aware ready snapshot;
   - что `POST /v1/sheet-vitrina-v1/load` пишет в live shell только already prepared snapshot и не триггерит heavy refresh заново;
   - что `GET /v1/sheet-vitrina-v1/status` возвращает последний persisted refresh result без live fetch и с `date_columns` / `temporal_slots` plus `server_context`;
