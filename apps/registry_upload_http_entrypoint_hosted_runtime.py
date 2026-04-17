@@ -562,10 +562,11 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         tokens = [
             "Загрузить данные",
             "Отправить данные",
+            "Скачать лог",
             "Сервер и расписание",
             "Часовой пояс",
             "Автообновление",
-            "Живой лог",
+            "Лог",
             route_paths["SHEET_VITRINA_REFRESH_HTTP_PATH"],
             route_paths["SHEET_VITRINA_STATUS_HTTP_PATH"],
             DEFAULT_SHEET_LOAD_PATH,

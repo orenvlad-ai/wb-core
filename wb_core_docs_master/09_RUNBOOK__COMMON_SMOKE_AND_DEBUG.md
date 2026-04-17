@@ -209,7 +209,7 @@ Operational rule:
 - applicable себестоимость резолвится server-side по `group + latest effective_from <= slot_date`;
 - operator-facing derived rows используют canonical keys `total_proxy_profit_rub` и `proxy_margin_pct_total`;
 - `GET /sheet-vitrina-v1/operator` поднимает simple operator page без SPA/build pipeline;
-- operator page показывает только narrow status/log surface: separate actions `Загрузить данные` / `Отправить данные`, compact Russian chrome для status/live-log и row-count labels плюс один compact server-driven block `Сервер и расписание`; raw log/error text и technical values при этом могут оставаться canonical;
+- operator page показывает только narrow status/log surface: separate actions `Загрузить данные` / `Отправить данные`, compact Russian chrome для status/`Лог` и row-count labels плюс один compact server-driven block `Сервер и расписание`; log viewport при этом fixed-height scrollable, completed run можно скачать через `Скачать лог`, а raw log/error text и technical values остаются canonical;
 - `POST /v1/sheet-vitrina-v1/refresh` обновляет date-aware ready snapshot в repo-owned SQLite runtime contour;
 - `POST /v1/sheet-vitrina-v1/load` пишет в live sheet только already prepared snapshot и truthfully падает при missing ready snapshot / bridge blocker;
 - empty/default refresh request must resolve `as_of_date` by `Asia/Yekaterinburg`, not by UTC/host-local clock;

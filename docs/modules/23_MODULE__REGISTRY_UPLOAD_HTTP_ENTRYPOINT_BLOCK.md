@@ -122,16 +122,25 @@ update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned
   - после этого refresh повторно валидирует exact-date local API availability и только потом читает live sources;
   - contour не открывает новый public producer route, не backfill-ит yesterday в today и остаётся bounded orchestration boundary поверх existing owner path.
 - Operator page не invent-ит новый heavy route: UI запускает existing heavy `POST /v1/sheet-vitrina-v1/refresh` отдельно от narrow `POST /v1/sheet-vitrina-v1/load`, а live progress читает только через cheap poll surface `GET /v1/sheet-vitrina-v1/job`.
-- Operator page keeps narrow Russian chrome for operator-visible labels (`Загрузить данные`, `Отправить данные`, compact `Статус` / `Живой лог`, row-count labels) without explanatory subtitle/subcopy про refresh/date defaults/temporal slots под заголовком или кнопкой.
+- Operator page keeps narrow Russian chrome for operator-visible labels (`Загрузить данные`, `Отправить данные`, compact `Статус` / `Лог`, row-count labels, `Скачать лог`) without explanatory subtitle/subcopy про refresh/date defaults/temporal slots под заголовком или кнопкой.
 - Operator page добавляет один compact server-driven info block `Сервер и расписание`:
   - `Часовой пояс`
   - `Текущее время сервера`
   - `Автообновление`
   - `Технический триггер`
 - Этот block не hardcode-ится в UI: page читает его только из existing `GET /v1/sheet-vitrina-v1/status` / `POST /v1/sheet-vitrina-v1/refresh` response field `server_context`.
-- Operator live-log обязан показывать построчный start / key steps / finish / error для обеих operator actions:
+- Operator log surface обязан показывать построчный start / key steps / finish / error для обеих operator actions:
   - `refresh` = build/persist ready snapshot only
   - `load` = write already prepared snapshot only
+- Один и тот же `GET /v1/sheet-vitrina-v1/job` route остаётся canonical operator job surface, но теперь поддерживает два bounded режима:
+  - default JSON poll = current async state + detailed per-run log lines
+  - `format=text&download=1` = plain-text export именно текущего requested `job_id` без отдельного historical dump route
+- Live log lines должны быть machine-useful и server-driven:
+  - route/cycle identity (`refresh` vs `load`)
+  - source/module/adapter/endpoint step markers
+  - source result semantics (`success`, `incomplete`, `missing`, `blocked`, `error`, `not_available`) с requested/covered/missing counts и raw note/detail
+  - metric-batch summaries с явным разделением `non_zero` / `zero` / `blank` и truthful blocked cases
+  - bridge/write result lines for load (`bridge_start`, per-sheet write/state summary, final result)
 - Raw log entries, raw backend errors и canonical technical identifiers/values на operator page не локализуются и не переписываются.
 - Для current checkpoint `plan/status` обязаны surface-ить temporal metadata, достаточную для thin operators:
   - `date_columns`

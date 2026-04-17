@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,13 +21,20 @@ from packages.business_time import (
     default_business_as_of_date,
     to_business_datetime,
 )
-from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock
+from packages.application.sheet_vitrina_v1_live_plan import (
+    BLOCKED_SOURCE_METRIC_KEYS,
+    DELIVERY_CONTRACT_VERSION,
+    SOURCE_DIAGNOSTIC_SPECS,
+    SheetVitrinaV1LivePlanBlock,
+)
 from packages.contracts.cost_price_upload import CostPriceUploadResult
 from packages.contracts.registry_upload_file_backed_service import RegistryUploadResult
 from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope
 
 OperatorLogEmitter = Callable[[str], None]
 SheetLoadRunner = Callable[[SheetVitrinaV1Envelope, OperatorLogEmitter], dict[str, Any]]
+SHEET_VITRINA_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/refresh"
+SHEET_VITRINA_LOAD_ROUTE = "/v1/sheet-vitrina-v1/load"
 
 
 class RegistryUploadHttpEntrypoint:
@@ -90,6 +98,9 @@ class RegistryUploadHttpEntrypoint:
     def handle_sheet_operator_job_request(self, job_id: str) -> dict[str, Any]:
         return self.operator_jobs.get(job_id)
 
+    def handle_sheet_operator_job_text_request(self, job_id: str) -> tuple[str, str]:
+        return self.operator_jobs.get_text(job_id)
+
     def _run_sheet_refresh(
         self,
         *,
@@ -97,20 +108,54 @@ class RegistryUploadHttpEntrypoint:
         log: OperatorLogEmitter | None,
     ) -> dict[str, Any]:
         emit = log or _noop_log
-        emit("Старт refresh ready snapshot.")
         current_state = self.runtime.load_current_state()
-        emit(f"Активный bundle_version: {current_state.bundle_version}")
-        if as_of_date:
-            emit(f"Запрошен as_of_date={as_of_date}.")
-        else:
-            emit("as_of_date не указан, используем server-side default.")
-        emit("Собираем ready snapshot на сервере...")
-        plan = self.sheet_plan_block.build_plan(as_of_date=as_of_date)
         emit(
-            "Ready snapshot собран: "
-            f"{plan.snapshot_id} · даты {', '.join(plan.date_columns) or plan.as_of_date}"
+            _format_log_event(
+                "cycle_start",
+                cycle="refresh",
+                route=SHEET_VITRINA_REFRESH_ROUTE,
+                requested_as_of_date=as_of_date or "default",
+                action="build_ready_snapshot_only",
+            )
         )
-        emit("Сохраняем ready snapshot в runtime...")
+        emit(
+            _format_log_event(
+                "bundle_selected",
+                cycle="refresh",
+                bundle_version=current_state.bundle_version,
+                activated_at=current_state.activated_at,
+            )
+        )
+        emit(
+            _format_log_event(
+                "refresh_build_start",
+                cycle="refresh",
+                route=SHEET_VITRINA_REFRESH_ROUTE,
+                step="server_build_plan",
+            )
+        )
+        plan = self.sheet_plan_block.build_plan(as_of_date=as_of_date, log=emit)
+        row_counts = _sheet_row_counts(plan)
+        emit(
+            _format_log_event(
+                "refresh_snapshot_ready",
+                cycle="refresh",
+                snapshot_id=plan.snapshot_id,
+                plan_version=plan.plan_version,
+                as_of_date=plan.as_of_date,
+                date_columns=",".join(plan.date_columns),
+                data_rows=row_counts.get("DATA_VITRINA"),
+                status_rows=row_counts.get("STATUS"),
+            )
+        )
+        emit(
+            _format_log_event(
+                "refresh_runtime_save_start",
+                cycle="refresh",
+                runtime_store="sheet_vitrina_ready_snapshot",
+                snapshot_id=plan.snapshot_id,
+            )
+        )
         refresh_result = self.runtime.save_sheet_vitrina_ready_snapshot(
             current_state=current_state,
             refreshed_at=self.refreshed_at_factory(),
@@ -118,7 +163,25 @@ class RegistryUploadHttpEntrypoint:
         )
         payload = asdict(refresh_result)
         payload["server_context"] = self.build_sheet_server_context()
-        emit(f"Refresh завершён: snapshot_id={refresh_result.snapshot_id}")
+        emit(
+            _format_log_event(
+                "refresh_runtime_save_finish",
+                cycle="refresh",
+                snapshot_id=refresh_result.snapshot_id,
+                refreshed_at=refresh_result.refreshed_at,
+                data_rows=refresh_result.sheet_row_counts.get("DATA_VITRINA"),
+                status_rows=refresh_result.sheet_row_counts.get("STATUS"),
+            )
+        )
+        emit(
+            _format_log_event(
+                "cycle_finish",
+                cycle="refresh",
+                status="success",
+                route=SHEET_VITRINA_REFRESH_ROUTE,
+                snapshot_id=refresh_result.snapshot_id,
+            )
+        )
         return payload
 
     def _run_sheet_load(
@@ -128,26 +191,70 @@ class RegistryUploadHttpEntrypoint:
         log: OperatorLogEmitter | None,
     ) -> dict[str, Any]:
         emit = log or _noop_log
-        emit("Старт load готового snapshot в live sheet.")
         current_state = self.runtime.load_current_state()
-        emit(f"Активный bundle_version: {current_state.bundle_version}")
-        if as_of_date:
-            emit(f"Ищем ready snapshot для as_of_date={as_of_date}.")
-        else:
-            emit("Ищем последний persisted ready snapshot для current bundle.")
+        emit(
+            _format_log_event(
+                "cycle_start",
+                cycle="load",
+                route=SHEET_VITRINA_LOAD_ROUTE,
+                requested_as_of_date=as_of_date or "latest_bundle_snapshot",
+                action="write_prepared_snapshot_only",
+            )
+        )
+        emit(
+            _format_log_event(
+                "bundle_selected",
+                cycle="load",
+                bundle_version=current_state.bundle_version,
+                activated_at=current_state.activated_at,
+            )
+        )
+        emit(
+            _format_log_event(
+                "snapshot_lookup_start",
+                cycle="load",
+                route=SHEET_VITRINA_LOAD_ROUTE,
+                requested_as_of_date=as_of_date or "latest",
+            )
+        )
         plan = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=as_of_date)
         refresh_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=plan.as_of_date)
+        row_counts = _sheet_row_counts(plan)
         emit(
-            "Ready snapshot найден: "
-            f"{plan.snapshot_id} · даты {', '.join(plan.date_columns) or plan.as_of_date}"
+            _format_log_event(
+                "snapshot_lookup_finish",
+                cycle="load",
+                snapshot_id=plan.snapshot_id,
+                plan_version=plan.plan_version,
+                as_of_date=plan.as_of_date,
+                date_columns=",".join(plan.date_columns),
+                refreshed_at=refresh_status.refreshed_at,
+                data_rows=row_counts.get("DATA_VITRINA"),
+                status_rows=row_counts.get("STATUS"),
+            )
         )
-        emit("Передаём ready snapshot в bound sheet bridge...")
-        bridge_result = self.sheet_load_runner(plan, emit)
-        row_counts = {item.sheet_name: item.row_count for item in plan.sheets}
+        _emit_plan_status_sheet_log(plan, emit, cycle="load")
+        _emit_plan_metric_sheet_log(plan, emit, cycle="load")
         emit(
-            "Load завершён: "
-            f"DATA_VITRINA={row_counts.get('DATA_VITRINA', '-')} "
-            f"STATUS={row_counts.get('STATUS', '-')}"
+            _format_log_event(
+                "bridge_start",
+                cycle="load",
+                snapshot_id=plan.snapshot_id,
+                bridge_runner=getattr(self.sheet_load_runner, "__name__", self.sheet_load_runner.__class__.__name__),
+            )
+        )
+        bridge_result = self.sheet_load_runner(plan, emit)
+        _emit_bridge_result_log(bridge_result, emit, cycle="load")
+        emit(
+            _format_log_event(
+                "cycle_finish",
+                cycle="load",
+                status="success",
+                route=SHEET_VITRINA_LOAD_ROUTE,
+                snapshot_id=plan.snapshot_id,
+                data_rows=row_counts.get("DATA_VITRINA"),
+                status_rows=row_counts.get("STATUS"),
+            )
         )
         payload = {
             "status": "success",
@@ -212,6 +319,7 @@ class SheetVitrinaV1OperatorJob:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "log_lines": list(self.log_lines),
+            "log_line_count": len(self.log_lines),
         }
         if self.result is not None:
             payload["result"] = self.result
@@ -257,6 +365,17 @@ class SheetVitrinaV1OperatorJobStore:
                 raise ValueError(f"sheet_vitrina_v1 operator job not found: {job_id}")
             return job.snapshot()
 
+    def get_text(self, job_id: str) -> tuple[str, str]:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise ValueError(f"sheet_vitrina_v1 operator job not found: {job_id}")
+            text = "\n".join(job.log_lines).rstrip()
+            if text:
+                text = f"{text}\n"
+            filename = f"sheet-vitrina-v1-{job.operation}-{job.job_id}.txt"
+            return text or "Лог пока пуст.\n", filename
+
     def _run(
         self,
         job_id: str,
@@ -284,8 +403,238 @@ class SheetVitrinaV1OperatorJobStore:
         with self._lock:
             job = self._jobs[job_id]
             job.log_lines.append(f"{timestamp} {message}")
-            if len(job.log_lines) > 200:
-                job.log_lines = job.log_lines[-200:]
+            if len(job.log_lines) > 4000:
+                job.log_lines = job.log_lines[-4000:]
+
+
+def _sheet_row_counts(plan: SheetVitrinaV1Envelope) -> dict[str, int]:
+    return {item.sheet_name: item.row_count for item in plan.sheets}
+
+
+def _find_sheet(plan: SheetVitrinaV1Envelope, sheet_name: str) -> Any | None:
+    for sheet in plan.sheets:
+        if sheet.sheet_name == sheet_name:
+            return sheet
+    return None
+
+
+def _emit_plan_status_sheet_log(
+    plan: SheetVitrinaV1Envelope,
+    emit: OperatorLogEmitter,
+    *,
+    cycle: str,
+) -> None:
+    status_sheet = _find_sheet(plan, "STATUS")
+    if status_sheet is None:
+        emit(_format_log_event("status_sheet_missing", cycle=cycle, sheet="STATUS"))
+        return
+    emit(
+        _format_log_event(
+            "status_sheet_selected",
+            cycle=cycle,
+            sheet="STATUS",
+            rows=status_sheet.row_count,
+            columns=status_sheet.column_count,
+        )
+    )
+    for row in status_sheet.rows:
+        if len(row) < 11:
+            continue
+        source_key = str(row[0] or "")
+        kind = str(row[1] or "")
+        note = str(row[10] or "")
+        if source_key == "registry_upload_current_state":
+            emit(
+                _format_log_event(
+                    "status_registry_state",
+                    cycle=cycle,
+                    source=source_key,
+                    kind=kind,
+                    snapshot_date=row[3],
+                    requested_count=row[7],
+                    covered_count=row[8],
+                    note=note,
+                )
+            )
+            continue
+        if source_key == DELIVERY_CONTRACT_VERSION:
+            emit(
+                _format_log_event(
+                    "status_delivery_contract",
+                    cycle=cycle,
+                    source=source_key,
+                    kind=kind,
+                    snapshot_date=row[3],
+                    requested_count=row[7],
+                    covered_count=row[8],
+                    note=note,
+                )
+            )
+            continue
+        source_name, temporal_slot = _split_temporal_source_key(source_key)
+        spec = SOURCE_DIAGNOSTIC_SPECS.get(source_name, {})
+        emit(
+            _format_log_event(
+                "snapshot_source_status",
+                cycle=cycle,
+                source=source_name,
+                temporal_slot=temporal_slot,
+                module=spec.get("module"),
+                block=spec.get("block"),
+                adapter=spec.get("adapter"),
+                endpoint=spec.get("endpoint"),
+                kind=kind,
+                freshness=row[2],
+                snapshot_date=row[3],
+                date=row[4],
+                date_from=row[5],
+                date_to=row[6],
+                requested_count=row[7],
+                covered_count=row[8],
+                missing_nm_ids=row[9],
+                note=note,
+            )
+        )
+
+
+def _emit_plan_metric_sheet_log(
+    plan: SheetVitrinaV1Envelope,
+    emit: OperatorLogEmitter,
+    *,
+    cycle: str,
+) -> None:
+    data_sheet = _find_sheet(plan, "DATA_VITRINA")
+    if data_sheet is None:
+        emit(_format_log_event("metric_sheet_missing", cycle=cycle, sheet="DATA_VITRINA"))
+        return
+    summaries: dict[str, dict[str, Any]] = {}
+    slot_count = max(len(plan.date_columns), 1)
+    for row in data_sheet.rows:
+        if len(row) < 2:
+            continue
+        key = str(row[1] or "")
+        if "|" not in key:
+            continue
+        scope_token, metric_key = key.split("|", 1)
+        summary = summaries.setdefault(
+            metric_key,
+            {
+                "label_ru": str(row[0] or ""),
+                "row_scopes": set(),
+                "rows": 0,
+                "non_zero": 0,
+                "zero": 0,
+                "blank": 0,
+                "text": 0,
+            },
+        )
+        summary["row_scopes"].add(scope_token.split(":", 1)[0])
+        summary["rows"] += 1
+        for cell in row[2 : 2 + slot_count]:
+            if cell in ("", None):
+                summary["blank"] += 1
+            elif isinstance(cell, (int, float)):
+                if float(cell) == 0.0:
+                    summary["zero"] += 1
+                else:
+                    summary["non_zero"] += 1
+            else:
+                summary["text"] += 1
+
+    for metric_key in sorted(summaries):
+        summary = summaries[metric_key]
+        blocked = (
+            metric_key in BLOCKED_SOURCE_METRIC_KEYS
+            and summary["non_zero"] == 0
+            and summary["zero"] == 0
+            and summary["blank"] > 0
+        )
+        emit(
+            _format_log_event(
+                "metric_batch_result",
+                cycle=cycle,
+                metric_key=metric_key,
+                label_ru=summary["label_ru"],
+                row_scopes=",".join(sorted(summary["row_scopes"])),
+                rows=summary["rows"],
+                slot_cells=summary["rows"] * slot_count,
+                non_zero=summary["non_zero"],
+                zero=summary["zero"],
+                blank=summary["blank"],
+                text=summary["text"],
+                blocked=blocked,
+                blocked_source="promo_by_price" if blocked else "",
+            )
+        )
+
+
+def _emit_bridge_result_log(
+    bridge_result: dict[str, Any],
+    emit: OperatorLogEmitter,
+    *,
+    cycle: str,
+) -> None:
+    emit(
+        _format_log_event(
+            "bridge_finish",
+            cycle=cycle,
+            bridge=bridge_result.get("bridge"),
+            script_id=bridge_result.get("script_id"),
+            spreadsheet_id=bridge_result.get("spreadsheet_id"),
+        )
+    )
+    write_result = bridge_result.get("write_result")
+    if isinstance(write_result, Mapping):
+        for item in write_result.get("sheets", []) or []:
+            if not isinstance(item, Mapping):
+                continue
+            emit(
+                _format_log_event(
+                    "bridge_write_sheet",
+                    cycle=cycle,
+                    sheet=item.get("sheet_name"),
+                    row_count=item.get("row_count"),
+                    write_rect=item.get("write_rect"),
+                )
+            )
+    sheet_state = bridge_result.get("sheet_state")
+    if isinstance(sheet_state, Mapping):
+        for item in sheet_state.get("sheets", []) or []:
+            if not isinstance(item, Mapping):
+                continue
+            emit(
+                _format_log_event(
+                    "bridge_sheet_state",
+                    cycle=cycle,
+                    sheet=item.get("sheet_name"),
+                    present=item.get("present"),
+                    last_row=item.get("last_row"),
+                    last_column=item.get("last_column"),
+                )
+            )
+
+
+def _split_temporal_source_key(source_key: str) -> tuple[str, str]:
+    if source_key.endswith("]") and "[" in source_key:
+        name, slot = source_key[:-1].split("[", 1)
+        return name, slot
+    return source_key, ""
+
+
+def _format_log_event(event: str, **fields: Any) -> str:
+    parts = [f"event={event}"]
+    for key, value in fields.items():
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, bool):
+            normalized = str(value).lower()
+        else:
+            normalized = round(value, 6) if isinstance(value, float) else value
+        text = str(normalized)
+        if any(char.isspace() or char in {'"', ";", "="} for char in text):
+            text = json.dumps(text, ensure_ascii=False)
+        parts.append(f"{key}={text}")
+    return " ".join(parts)
 
 
 def _noop_log(_: str) -> None:
