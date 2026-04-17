@@ -547,6 +547,9 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         body = str(result.get("body_excerpt", ""))
         tokens = [
             "Загрузить данные",
+            "Сервер и расписание",
+            "Часовой пояс",
+            "Автообновление",
             route_paths["SHEET_VITRINA_REFRESH_HTTP_PATH"],
             route_paths["SHEET_VITRINA_STATUS_HTTP_PATH"],
         ]
@@ -585,7 +588,9 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
                 "snapshot_id",
                 "plan_version",
                 "sheet_row_counts",
+                "server_context",
             ],
+            error_keys=["error", "server_context"],
         )
         return evaluation
 
@@ -620,6 +625,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
                 "snapshot_id",
                 "plan_version",
                 "sheet_row_counts",
+                "server_context",
             ],
         )
         return evaluation
@@ -629,14 +635,24 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
     return evaluation
 
 
-def _validate_json_result(status: int, payload: dict[str, Any], *, success_keys: list[str]) -> tuple[bool, str]:
+def _validate_json_result(
+    status: int,
+    payload: dict[str, Any],
+    *,
+    success_keys: list[str],
+    error_keys: list[str] | None = None,
+) -> tuple[bool, str]:
     if status == 200:
         missing = [key for key in success_keys if key not in payload]
         if missing:
             return False, f"200 JSON missing keys: {missing}"
         return True, "200 JSON shape ok"
     if status == 422:
-        return ("error" in payload, "422 JSON error shape ok" if "error" in payload else "422 JSON missing error key")
+        required_error_keys = error_keys or ["error"]
+        missing = [key for key in required_error_keys if key not in payload]
+        if missing:
+            return False, f"422 JSON missing keys: {missing}"
+        return True, "422 JSON error shape ok"
     return False, f"unexpected HTTP status {status}"
 
 
@@ -696,12 +712,13 @@ def _build_remote_probe_script(
         "include_refresh": include_refresh,
         "timeout_seconds": timeout_seconds,
     }
+    payload_json = json.dumps(payload, ensure_ascii=True)
     return f"""import json
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
-PAYLOAD = {json.dumps(payload, ensure_ascii=True)}
+PAYLOAD = json.loads({payload_json!r})
 
 def _append_as_of_date(url, as_of_date):
     if not as_of_date:

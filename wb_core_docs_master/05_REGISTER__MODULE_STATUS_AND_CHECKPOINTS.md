@@ -76,7 +76,8 @@ Current sibling operator input flow:
 Current repo-owned operator refresh surface:
 - `GET /sheet-vitrina-v1/operator`
 - page uses `POST /v1/sheet-vitrina-v1/refresh` and `GET /v1/sheet-vitrina-v1/status`
-- page stays intentionally narrow: one button `Загрузить данные`, compact status, minimal result/log
+- page stays intentionally narrow: one button `Загрузить данные`, compact status, one compact `Сервер и расписание` block, minimal result/log
+- status/refresh responses drive the block through `server_context`, so timezone/scheduler wording is not hardcoded in UI
 - server-side business timezone = `Asia/Yekaterinburg` for default `as_of_date`, `today_current` and operator-facing freshness dates
 - live daily auto-refresh = `wb-core-sheet-vitrina-refresh.timer` -> existing `POST /v1/sheet-vitrina-v1/refresh` at `11:00 Asia/Yekaterinburg` (`06:00 UTC` on current host)
 
