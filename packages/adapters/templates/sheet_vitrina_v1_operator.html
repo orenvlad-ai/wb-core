@@ -77,14 +77,15 @@
 
     .actions {
       margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
     }
 
-    .primary-button {
+    .action-button {
       appearance: none;
       border: 0;
       border-radius: 12px;
-      background: var(--accent);
-      color: #ffffff;
       font: inherit;
       font-size: 15px;
       font-weight: 600;
@@ -93,12 +94,28 @@
       transition: background-color 120ms ease, transform 120ms ease;
     }
 
+    .primary-button {
+      background: var(--accent);
+      color: #ffffff;
+    }
+
     .primary-button:hover:not(:disabled) {
       background: var(--accent-hover);
       transform: translateY(-1px);
     }
 
-    .primary-button:disabled {
+    .secondary-button {
+      background: var(--idle-bg);
+      color: var(--idle-text);
+      border: 1px solid var(--border);
+    }
+
+    .secondary-button:hover:not(:disabled) {
+      background: #e1e7ee;
+      transform: translateY(-1px);
+    }
+
+    .action-button:disabled {
       cursor: wait;
       opacity: 0.72;
       transform: none;
@@ -218,7 +235,7 @@
         grid-template-columns: 1fr;
       }
 
-      .primary-button {
+      .action-button {
         width: 100%;
       }
     }
@@ -230,7 +247,8 @@
       <p class="eyebrow">sheet_vitrina_v1</p>
       <h1>__SHEET_VITRINA_V1_OPERATOR_PAGE_TITLE__</h1>
       <div class="actions">
-        <button id="refreshButton" class="primary-button" type="button">Загрузить данные</button>
+        <button id="refreshButton" class="action-button primary-button" type="button">Загрузить данные</button>
+        <button id="loadButton" class="action-button secondary-button" type="button">Отправить данные</button>
       </div>
 
       <div class="grid">
@@ -287,7 +305,7 @@
         </section>
 
         <section class="block" aria-labelledby="log-title">
-          <h2 id="log-title" class="block-title">Результат</h2>
+          <h2 id="log-title" class="block-title">Живой лог</h2>
           <pre id="logBlock" class="log-block">Читаем последний статус...</pre>
         </section>
       </div>
@@ -299,6 +317,7 @@
     (() => {
       const config = JSON.parse(document.getElementById("sheet-vitrina-v1-operator-config").textContent);
       const refreshButton = document.getElementById("refreshButton");
+      const loadButton = document.getElementById("loadButton");
       const stateBadge = document.getElementById("stateBadge");
       const asOfDate = document.getElementById("asOfDate");
       const dateColumns = document.getElementById("dateColumns");
@@ -316,10 +335,30 @@
         success: "успех",
         error: "ошибка"
       };
+      const actionLabels = {
+        refresh: {
+          idle: "Загрузить данные",
+          loading: "Загружаем..."
+        },
+        load: {
+          idle: "Отправить данные",
+          loading: "Отправляем..."
+        }
+      };
+      let activeJobId = null;
 
       function setState(nextState) {
         stateBadge.textContent = stateLabels[nextState] || nextState;
         stateBadge.className = "badge is-" + nextState;
+      }
+
+      function setActionState(activeAction) {
+        const refreshLoading = activeAction === "refresh";
+        const loadLoading = activeAction === "load";
+        refreshButton.disabled = Boolean(activeAction);
+        loadButton.disabled = Boolean(activeAction);
+        refreshButton.textContent = refreshLoading ? actionLabels.refresh.loading : actionLabels.refresh.idle;
+        loadButton.textContent = loadLoading ? actionLabels.load.loading : actionLabels.load.idle;
       }
 
       function valueOrDash(value) {
@@ -391,14 +430,19 @@
         serverTrigger.textContent = formatServerTrigger(context);
       }
 
-      function renderSnapshot(payload, intro) {
+      function renderSnapshotFields(payload) {
         const counts = payload.sheet_row_counts || {};
         renderServerContext(payload);
         asOfDate.textContent = valueOrDash(payload.as_of_date);
         dateColumns.textContent = formatDateColumns(payload);
-        refreshedAt.textContent = valueOrDash(payload.refreshed_at);
+        refreshedAt.textContent = valueOrDash(payload.refreshed_at || payload.finished_at);
         dataRows.textContent = sheetCount(counts, "DATA_VITRINA");
         statusRows.textContent = sheetCount(counts, "STATUS");
+      }
+
+      function renderSnapshotSummary(payload, intro) {
+        const counts = payload.sheet_row_counts || {};
+        renderSnapshotFields(payload);
         logBlock.textContent = [
           intro,
           "Статус: " + valueOrDash(payload.status),
@@ -426,6 +470,17 @@
       function renderError(message, detail) {
         setState("error");
         logBlock.textContent = [message, detail].filter(Boolean).join("\n\n");
+      }
+
+      function renderJob(job) {
+        const nextState = job.status === "running" ? "loading" : normalizeState(job.status, "success");
+        setState(nextState);
+        if (job.result) {
+          renderSnapshotFields(job.result);
+        }
+        logBlock.textContent = Array.isArray(job.log_lines) && job.log_lines.length
+          ? job.log_lines.join("\n")
+          : "Лог пока пуст.";
       }
 
       async function readJson(response) {
@@ -462,41 +517,82 @@
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
           setState(normalizeState(payload.status, "success"));
-          renderSnapshot(payload, "Показан последний сохранённый снимок.");
+          if (activeJobId) {
+            renderSnapshotFields(payload);
+            return;
+          }
+          renderSnapshotSummary(payload, "Показан последний сохранённый снимок.");
         } catch (error) {
+          if (activeJobId) {
+            return;
+          }
           renderError("Не удалось прочитать статус.", error instanceof Error ? error.message : String(error));
         }
       }
 
-      async function runRefresh() {
-        setState("loading");
-        refreshButton.disabled = true;
-        refreshButton.textContent = "Загружаем...";
-        logBlock.textContent = "Запускаем обновление...";
-        try {
-          const response = await fetch(config.refresh_path, {
-            method: "POST",
-            headers: {
-              "Accept": "application/json",
-              "Content-Type": "application/json; charset=utf-8"
-            },
-            body: JSON.stringify({})
+      async function pollJob(jobId) {
+        while (true) {
+          const response = await fetch(config.job_path + "?job_id=" + encodeURIComponent(jobId), {
+            method: "GET",
+            headers: { "Accept": "application/json" }
           });
           const payload = await readJson(response);
           if (!response.ok) {
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
-          setState(normalizeState(payload.status, "success"));
-          renderSnapshot(payload, "Обновление завершено. Снимок обновлён.");
-        } catch (error) {
-          renderError("Обновление завершилось с ошибкой.", error instanceof Error ? error.message : String(error));
-        } finally {
-          refreshButton.disabled = false;
-          refreshButton.textContent = "Загрузить данные";
+          renderJob(payload);
+          if (payload.status !== "running") {
+            return payload;
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 700));
         }
       }
 
-      refreshButton.addEventListener("click", runRefresh);
+      async function runAction(actionName) {
+        const path = actionName === "refresh" ? config.refresh_path : config.load_path;
+        const startMessage = actionName === "refresh"
+          ? "Запускаем refresh ready snapshot..."
+          : "Запускаем отправку готового snapshot в таблицу...";
+        setState("loading");
+        setActionState(actionName);
+        logBlock.textContent = startMessage;
+        try {
+          const response = await fetch(path, {
+            method: "POST",
+            headers: {
+              "Accept": "application/json",
+              "Content-Type": "application/json; charset=utf-8"
+            },
+            body: JSON.stringify({ async: true })
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          activeJobId = valueOrDash(payload.job_id);
+          renderJob(payload);
+          const finalJob = await pollJob(payload.job_id);
+          if (finalJob.result) {
+            if (actionName === "refresh") {
+              renderSnapshotFields(finalJob.result);
+            } else if (actionName === "load") {
+              renderSnapshotFields(finalJob.result);
+            }
+          }
+        } catch (error) {
+          renderError(
+            actionName === "refresh" ? "Refresh завершился с ошибкой." : "Отправка завершилась с ошибкой.",
+            error instanceof Error ? error.message : String(error)
+          );
+        } finally {
+          activeJobId = null;
+          setActionState(null);
+        }
+      }
+
+      refreshButton.addEventListener("click", () => runAction("refresh"));
+      loadButton.addEventListener("click", () => runAction("load"));
+      setActionState(null);
       loadStatus();
     })();
   </script>

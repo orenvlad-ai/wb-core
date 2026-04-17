@@ -18,6 +18,7 @@ source_basis:
   - "apps/sheet_vitrina_v1_registry_seed_v3_bootstrap_smoke.py"
   - "apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py"
   - "apps/sheet_vitrina_v1_refresh_read_split_smoke.py"
+  - "apps/sheet_vitrina_v1_operator_load_smoke.py"
   - "apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py"
 source_of_truth_level: "secondary_project_pack"
 related_paths:
@@ -61,6 +62,7 @@ python3 apps/sheet_vitrina_v1_cost_price_read_side_smoke.py
 python3 apps/sheet_vitrina_v1_registry_seed_v3_bootstrap_smoke.py
 python3 apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py
 python3 apps/sheet_vitrina_v1_refresh_read_split_smoke.py
+python3 apps/sheet_vitrina_v1_operator_load_smoke.py
 python3 apps/sheet_vitrina_v1_web_source_current_sync_smoke.py
 python3 apps/sheet_vitrina_v1_stocks_refresh_smoke.py
 python3 apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py
@@ -107,8 +109,10 @@ Expected routes:
 - `POST /v1/registry-upload/bundle`
 - `POST /v1/cost-price/upload`
 - `POST /v1/sheet-vitrina-v1/refresh`
+- `POST /v1/sheet-vitrina-v1/load`
 - `GET /v1/sheet-vitrina-v1/plan`
 - `GET /v1/sheet-vitrina-v1/status`
+- `GET /v1/sheet-vitrina-v1/job`
 - `GET /sheet-vitrina-v1/operator`
 
 ## Live GAS checks
@@ -123,6 +127,9 @@ clasp run uploadCostPriceSheet
 python3 -m webbrowser http://127.0.0.1:8765/sheet-vitrina-v1/operator
 # curl remains a fallback if browser/UI surface is unavailable
 curl -X POST http://127.0.0.1:8765/v1/sheet-vitrina-v1/refresh \
+  -H 'Content-Type: application/json' \
+  -d '{"as_of_date":"2026-04-12"}'
+curl -X POST http://127.0.0.1:8765/v1/sheet-vitrina-v1/load \
   -H 'Content-Type: application/json' \
   -d '{"as_of_date":"2026-04-12"}'
 clasp run loadSheetVitrinaTable
@@ -168,6 +175,7 @@ Operational rule:
   - timer = `wb-core-sheet-vitrina-refresh.timer`
   - schedule = `11:00 Asia/Yekaterinburg` = `06:00 UTC` in current systemd host timezone
 - route change не считается complete, пока public probe не подтвердил expected content type / response shape.
+- если change затрагивает operator `load` или live sheet write path, closure дополнительно требует `clasp push` и sheet verify по `POST /v1/sheet-vitrina-v1/load` или equivalent existing Apps Script menu flow.
 - если runner уже materialized, но `ssh_destination / target_dir / service_name / restart_command / environment_file` или access отсутствуют, это фиксируется как точный blocker, а не как vague ops-gap.
 
 ### GAS/sheet closure
@@ -201,8 +209,9 @@ Operational rule:
 - applicable себестоимость резолвится server-side по `group + latest effective_from <= slot_date`;
 - operator-facing derived rows используют canonical keys `total_proxy_profit_rub` и `proxy_margin_pct_total`;
 - `GET /sheet-vitrina-v1/operator` поднимает simple operator page без SPA/build pipeline;
-- operator page показывает только narrow status/log surface: одна primary action `Загрузить данные`, compact Russian chrome для status/result и row-count labels плюс один compact server-driven block `Сервер и расписание`; raw log/error text и technical values при этом могут оставаться canonical;
+- operator page показывает только narrow status/log surface: separate actions `Загрузить данные` / `Отправить данные`, compact Russian chrome для status/live-log и row-count labels плюс один compact server-driven block `Сервер и расписание`; raw log/error text и technical values при этом могут оставаться canonical;
 - `POST /v1/sheet-vitrina-v1/refresh` обновляет date-aware ready snapshot в repo-owned SQLite runtime contour;
+- `POST /v1/sheet-vitrina-v1/load` пишет в live sheet только already prepared snapshot и truthfully падает при missing ready snapshot / bridge blocker;
 - empty/default refresh request must resolve `as_of_date` by `Asia/Yekaterinburg`, not by UTC/host-local clock;
 - `GET /v1/sheet-vitrina-v1/status` читает последний persisted refresh result, не триггерит heavy source fetch и показывает `date_columns` / `temporal_slots` plus `server_context`;
 - при missing ready snapshot тот же `GET /v1/sheet-vitrina-v1/status` остаётся truthful `422`, но всё равно отдаёт `server_context`, чтобы operator page показывала текущие timezone/scheduler facts уже в empty state;

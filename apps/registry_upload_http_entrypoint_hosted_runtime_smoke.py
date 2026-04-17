@@ -121,6 +121,10 @@ def main() -> None:
             if public_probe["ok"] is not True:
                 raise AssertionError("public probe must succeed against local live runner")
             route_map = {item["route"]: item for item in public_probe["routes"]}
+            if route_map["load_route"]["http_status"] != 404:
+                raise AssertionError("GET load-route probe must reach app-level 404")
+            if route_map["job"]["http_status"] != 404:
+                raise AssertionError("job-route probe must reach app-level 404 for fake job id")
             if route_map["status"]["http_status"] != 422:
                 raise AssertionError("status before refresh must stay 422 ready snapshot missing")
             if route_map["plan"]["http_status"] != 422:

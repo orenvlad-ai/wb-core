@@ -24,6 +24,8 @@ if str(ROOT) not in sys.path:
 
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_COST_PRICE_UPLOAD_PATH,
+    DEFAULT_SHEET_JOB_PATH,
+    DEFAULT_SHEET_LOAD_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_REFRESH_PATH,
@@ -189,6 +191,18 @@ def collect_public_surface(
             name="operator",
             method="GET",
             url=f"{base_url}{route_paths['SHEET_VITRINA_OPERATOR_UI_PATH']}",
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
+            name="load_route",
+            method="GET",
+            url=f"{base_url}{DEFAULT_SHEET_LOAD_PATH}",
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
+            name="job",
+            method="GET",
+            url=f"{base_url}{DEFAULT_SHEET_JOB_PATH}?job_id=hosted_runtime_probe",
             timeout_seconds=timeout_seconds,
         ),
         _collect_http_probe(
@@ -547,11 +561,15 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         body = str(result.get("body_excerpt", ""))
         tokens = [
             "Загрузить данные",
+            "Отправить данные",
             "Сервер и расписание",
             "Часовой пояс",
             "Автообновление",
+            "Живой лог",
             route_paths["SHEET_VITRINA_REFRESH_HTTP_PATH"],
             route_paths["SHEET_VITRINA_STATUS_HTTP_PATH"],
+            DEFAULT_SHEET_LOAD_PATH,
+            DEFAULT_SHEET_JOB_PATH,
         ]
         missing_tokens = [token for token in tokens if token not in body]
         evaluation["ok"] = status == 200 and "text/html" in content_type and not missing_tokens
@@ -607,6 +625,26 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
                 "source_temporal_policies",
                 "sheets",
             ],
+        )
+        return evaluation
+
+    if route == "load_route":
+        error_text = str(payload.get("error", "") or "")
+        evaluation["ok"] = status == 404 and "unsupported path" in error_text
+        evaluation["detail"] = (
+            "load route is publicly published and reaches app-level 404 on GET"
+            if evaluation["ok"]
+            else "expected app-level JSON 404 for GET load route probe"
+        )
+        return evaluation
+
+    if route == "job":
+        error_text = str(payload.get("error", "") or "")
+        evaluation["ok"] = status == 404 and "operator job not found" in error_text
+        evaluation["detail"] = (
+            "job route is publicly published"
+            if evaluation["ok"]
+            else "expected JSON 404 operator job not found for job route probe"
         )
         return evaluation
 

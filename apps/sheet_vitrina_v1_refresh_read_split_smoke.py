@@ -19,6 +19,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.registry_upload_http_entrypoint import (
+    DEFAULT_SHEET_JOB_PATH,
+    DEFAULT_SHEET_LOAD_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_REFRESH_PATH,
     DEFAULT_SHEET_STATUS_PATH,
@@ -104,9 +106,13 @@ def main() -> None:
             operator_ui_status, operator_ui_html = _get_text(operator_ui_url)
             if operator_ui_status != 200:
                 raise AssertionError(f"operator UI must return 200, got {operator_ui_status}")
-            if "Обновление данных витрины" not in operator_ui_html or "Загрузить данные" not in operator_ui_html:
+            if (
+                "Обновление данных витрины" not in operator_ui_html
+                or "Загрузить данные" not in operator_ui_html
+                or "Отправить данные" not in operator_ui_html
+            ):
                 raise AssertionError("operator UI must expose the expected operator controls")
-            if "Статус" not in operator_ui_html or "Результат" not in operator_ui_html or "ожидание" not in operator_ui_html:
+            if "Статус" not in operator_ui_html or "Живой лог" not in operator_ui_html or "ожидание" not in operator_ui_html:
                 raise AssertionError("operator UI must keep the compact Russian chrome")
             if "Строки DATA_VITRINA" not in operator_ui_html or "Строки STATUS" not in operator_ui_html:
                 raise AssertionError("operator UI must expose row-count fields with Russian labels")
@@ -125,8 +131,12 @@ def main() -> None:
             operator_ui_config = _extract_operator_ui_config(operator_ui_html)
             if operator_ui_config["refresh_path"] != config.sheet_refresh_path:
                 raise AssertionError("operator UI must point to the existing refresh endpoint")
+            if operator_ui_config["load_path"] != DEFAULT_SHEET_LOAD_PATH:
+                raise AssertionError("operator UI must point to the existing load endpoint")
             if operator_ui_config["status_path"] != config.sheet_status_path:
                 raise AssertionError("operator UI must point to the cheap status endpoint")
+            if operator_ui_config["job_path"] != DEFAULT_SHEET_JOB_PATH:
+                raise AssertionError("operator UI must point to the operator job endpoint")
             refresh_url = f"http://127.0.0.1:{config.port}{operator_ui_config['refresh_path']}"
             status_url = (
                 f"http://127.0.0.1:{config.port}{operator_ui_config['status_path']}"
