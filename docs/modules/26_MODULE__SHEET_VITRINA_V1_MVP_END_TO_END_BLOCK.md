@@ -23,6 +23,7 @@ related_modules:
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/adapters/registry_upload_http_entrypoint.py"
+  - "packages/adapters/web_source_current_sync.py"
   - "packages/adapters/web_source_snapshot_block.py"
   - "packages/adapters/seller_funnel_snapshot_block.py"
 related_tables:
@@ -45,6 +46,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_business_time_smoke.py"
   - "apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py"
   - "apps/sheet_vitrina_v1_refresh_read_split_smoke.py"
+  - "apps/sheet_vitrina_v1_web_source_current_sync_smoke.py"
   - "apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py"
   - "apps/web_source_temporal_adapter_smoke.py"
   - "apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py"
@@ -59,7 +61,7 @@ related_docs:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под EKT-aligned date-aware ready snapshot, authoritative `COST_PRICE` overlay и daily live refresh timer: heavy build остаётся в `POST /v1/sheet-vitrina-v1/refresh`, persisted plan materialize-ит `yesterday_closed + today_current` по `Asia/Yekaterinburg`, `GET /v1/sheet-vitrina-v1/plan` и `loadSheetVitrinaTable` читают только этот persisted plan, а live systemd timer вызывает тот же refresh route ежедневно в `11:00 Asia/Yekaterinburg`."
+update_note: "Обновлён под EKT-aligned date-aware ready snapshot, authoritative `COST_PRICE` overlay, bounded current-day web-source sync и daily live refresh timer: heavy build остаётся в `POST /v1/sheet-vitrina-v1/refresh`, persisted plan materialize-ит `yesterday_closed + today_current` по `Asia/Yekaterinburg`, `GET /v1/sheet-vitrina-v1/plan` и `loadSheetVitrinaTable` читают только этот persisted plan, а refresh contour при missing exact-date `seller_funnel_snapshot` / `web_source_snapshot` может bounded-trigger'ить server-local producer/handoff seam."
 ---
 
 # 1. Идентификатор и статус
@@ -147,6 +149,11 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - при `404` source adapter пробует latest payload без query params;
   - latest payload принимается только если его factual date совпадает с requested slot date;
   - если source latest уже уехал дальше requested slot date, STATUS surface остаётся truthful `not_found` с `resolution_rule=explicit_or_latest_date_match`.
+- Для `today_current` тот же refresh contour теперь может bounded-materialize-ить missing web-source snapshot перед read-side fetch:
+  - refresh сначала проверяет local `wb-ai` exact-date availability;
+  - при miss он вызывает server-local owner path `/opt/wb-web-bot` same-day runners и затем `/opt/wb-ai/run_web_source_handoff.py`;
+  - после successful handoff refresh читает уже materialized exact-date local snapshot;
+  - если sync path падает, `STATUS.web_source_snapshot[today_current].note` / `STATUS.seller_funnel_snapshot[today_current].note` получают `current_day_web_source_sync_failed=...`, а values остаются truthful blank вместо invented fill.
 - Для тех же bot/web-source sources ready-snapshot runtime дополнительно хранит exact-date successful payloads server-side:
   - previous `today_current` snapshot может быть переиспользован только как exact same date для следующего `yesterday_closed`;
   - reuse surface-ится в `STATUS.*[yesterday_closed].note` как `resolution_rule=exact_date_runtime_cache`;
@@ -306,6 +313,7 @@ Bounded допущение:
 - Подтверждён targeted business-time smoke через `apps/sheet_vitrina_v1_business_time_smoke.py`.
 - Подтверждён targeted runtime smoke через `apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py`.
 - Подтверждён split refresh/read smoke через `apps/sheet_vitrina_v1_refresh_read_split_smoke.py`.
+- Подтверждён targeted current-day web-source sync smoke через `apps/sheet_vitrina_v1_web_source_current_sync_smoke.py`.
 - Подтверждён targeted server-driven smoke через `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`.
 - Smoke проверяет:
   - что `prepare` поднимает operator seed `33 / 102 / 7`;
@@ -330,6 +338,7 @@ Bounded допущение:
 - Таблица больше не заканчивается на upload-only flow: появился explicit refresh/build action и cheap read path из repo-owned ready snapshot обратно в `DATA_VITRINA`.
 - У explicit refresh появился отдельный repo-owned operator page, поэтому нормальный operator path больше не зависит от ручного `curl`.
 - Read path больше не строит live plan on-demand: heavy fetch живёт только в explicit refresh action, а `load` читает persisted date-aware snapshot из current runtime contour.
+- При missing current-day bot/web-source snapshot refresh больше не ограничен pure read-side fallback: он может bounded-trigger'ить same-day capture/handoff на server host и затем materialize-ить truthful `today_current` values в том же operator flow.
 - Single-date surrogate semantics убраны: current-day values больше не маскируются под `as_of_date`, а `DATA_VITRINA` materialize-ит `yesterday_closed + today_current` как server-owned `date_matrix`.
 - `DATA_VITRINA` materialize-ит полный incoming current-truth row set `95` metric keys / `1631` source rows как operator-facing `date_matrix` (`34` blocks / `1698` rendered rows на двух date columns) и не теряет `show_in_data` metrics на sheet-side bridge.
 - Existing upload contour не ломается: bundle/result contracts и control block сохраняются.

@@ -45,7 +45,7 @@ related_docs:
   - "migration/90_registry_upload_http_entrypoint.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned date-aware `sheet_vitrina_v1` read model и live daily refresh timer: HTTP entrypoint принимает фактические registry list lengths, держит sibling cost-price dataset отдельно от compact bundle, использует его в existing refresh/plan/status read-side через server-side effective-date overlay без нового public route, считает default `as_of_date` / `today_current` по `Asia/Yekaterinburg` и остаётся target для existing systemd daily refresh schedule."
+update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned date-aware `sheet_vitrina_v1` read model, bounded current-day web-source sync и live daily refresh timer: HTTP entrypoint принимает фактические registry list lengths, держит sibling cost-price dataset отдельно от compact bundle, использует его в existing refresh/plan/status read-side через server-side effective-date overlay без нового public route, считает default `as_of_date` / `today_current` по `Asia/Yekaterinburg`, а refresh contour при missing `today_current` web-source snapshot может bounded-trigger'ить server-local producer/handoff seam."
 ---
 
 # 1. Идентификатор и статус
@@ -107,6 +107,11 @@ update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned
   - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
   - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result
   - `GET /sheet-vitrina-v1/operator` = simple repo-owned page с одной primary action `Загрузить данные`
+- Внутри existing `POST /v1/sheet-vitrina-v1/refresh` live contour теперь допускает bounded server-local sync для `seller_funnel_snapshot` и `web_source_snapshot`:
+  - сначала refresh проверяет, materialized ли exact-date `today_current` snapshot в local `wb-ai` read-side;
+  - если exact-date snapshot отсутствует, refresh может вызвать server-local owner path `/opt/wb-web-bot` (`bot.runner_day`, `bot.runner_sales_funnel_day`) и затем `/opt/wb-ai/run_web_source_handoff.py`;
+  - после этого refresh повторно валидирует exact-date local API availability и только потом читает live sources;
+  - contour не открывает новый public producer route, не backfill-ит yesterday в today и остаётся bounded orchestration boundary поверх existing owner path.
 - Operator page не invent-ит новый heavy route: UI вызывает существующий `POST /v1/sheet-vitrina-v1/refresh` и читает только cheap status surface.
 - Для current checkpoint `plan/status` обязаны surface-ить temporal metadata, достаточную для thin operators:
   - `date_columns`
@@ -166,11 +171,13 @@ update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned
 - smoke:
   - `apps/registry_upload_http_entrypoint_smoke.py`
   - `apps/sheet_vitrina_v1_business_time_smoke.py`
+  - `apps/sheet_vitrina_v1_web_source_current_sync_smoke.py`
 
 # 6. Какой smoke подтверждён
 
 - Подтверждён локальный integration smoke через `apps/registry_upload_http_entrypoint_smoke.py`.
 - Подтверждён targeted boundary/default-date smoke через `apps/sheet_vitrina_v1_business_time_smoke.py`.
+- Подтверждён targeted current-day web-source sync smoke через `apps/sheet_vitrina_v1_web_source_current_sync_smoke.py`.
 - Smoke проверяет:
   - что HTTP entrypoint реально поднимается и принимает `POST`;
   - что request body попадает в существующий DB-backed runtime, а не в дублирующую ingest-логику;
@@ -191,6 +198,7 @@ update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned
 - Repo-owned operator page для explicit refresh теперь живёт на том же thin HTTP entrypoint и убирает ручной `curl` из нормального operator path.
 - Live service остаётся тонкой loopback HTTP boundary (`wb-core-registry-http.service` -> `127.0.0.1:8765`) и не переносит heavy truth в Apps Script.
 - Existing live daily refresh scheduler materialize-ится как external systemd timer `wb-core-sheet-vitrina-refresh.timer`, который вызывает тот же existing `POST /v1/sheet-vitrina-v1/refresh` ежедневно в `11:00 Asia/Yekaterinburg` (`06:00 UTC` на current host).
+- Если bot/web-source family не успела materialize-ить current-day snapshot по daily cron/handoff policy, same refresh route теперь может bounded-trigger'ить server-local same-day capture + handoff и закрыть `today_current` без возврата heavy producer logic в Apps Script.
 - HTTP boundary выровнен с current upload semantics: валидируется содержимое registry rows, а не их заранее зашитое количество.
 
 # 8. Что пока не является частью финальной production-сборки

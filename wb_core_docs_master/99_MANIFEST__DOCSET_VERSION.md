@@ -20,10 +20,11 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "изменение build metadata pack"
-built_from_commit: "ec20628b230ae86c31c09e01657d322a3b5664ae"
+built_from_commit: "133d6a8a264109596a6c1102a8218ee609282282"
 docset_version: "wb_core_docs_master_v2"
-built_at: "2026-04-16T21:21:05Z"
+built_at: "2026-04-17T16:43:30Z"
 core_docs_changed:
+  - "docs/modules/00_INDEX__MODULES.md"
   - "docs/architecture/01_target_architecture.md"
   - "docs/modules/07_MODULE__STOCKS_BLOCK.md"
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
