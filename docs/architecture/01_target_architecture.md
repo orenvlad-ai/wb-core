@@ -102,7 +102,7 @@ Target-state — server-first:
 Текущий `main` уже реализует bounded read-side/sheet-side форму этого правила:
 - таблица и витрина получают controlled bundles;
 - registry upload bundle, file-backed service, DB-backed runtime, live HTTP entrypoint, sheet-side upload trigger и compact v3 bootstrap уже материализованы;
-- bounded reverse-load обратно в `DATA_VITRINA` уже является частью `main` как первый controlled refresh/read path без daily orchestration и без deploy.
+- bounded reverse-load обратно в `DATA_VITRINA` уже является частью `main` как первый controlled refresh/read path с canonical business timezone `Asia/Yekaterinburg` и live daily refresh timer поверх existing server contour.
 
 ### Граница Сервера
 

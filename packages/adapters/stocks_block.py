@@ -13,6 +13,7 @@ from typing import Any, Callable, Mapping, Protocol
 from urllib import error, request as urllib_request
 
 from packages.adapters.official_api_runtime import DEFAULT_WB_API_TOKEN_ENV, load_runtime_config
+from packages.business_time import business_date_iso
 from packages.contracts.stocks_block import StocksRequest
 
 
@@ -174,7 +175,7 @@ class HttpBackedStocksSource:
             offset += self._page_limit
 
         snapshot_dt = self._now_factory().astimezone(timezone.utc).replace(microsecond=0)
-        snapshot_date = snapshot_dt.date().isoformat()
+        snapshot_date = business_date_iso(snapshot_dt)
         snapshot_ts = snapshot_dt.strftime("%Y-%m-%d %H:%M:%S")
         rows = self._parse_items_to_rows(
             items=items,

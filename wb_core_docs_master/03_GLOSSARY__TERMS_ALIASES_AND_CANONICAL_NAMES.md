@@ -48,7 +48,7 @@ built_from_commit: "23491a0b8313e45403ac6b4afdb8f7bd0a178134"
 | `STATUS` | `status sheet` | operator-facing freshness/source sheet |
 | `prepare -> upload -> refresh -> load` | `MVP flow`, `end-to-end flow` | canonical current bounded operator/server scenario |
 | `ready snapshot` | `materialized snapshot`, `persisted sheet plan` | persisted server-side read-model for `DATA_VITRINA` / `STATUS` |
-| `yesterday_closed / today_current` | `temporal slots`, `date columns` | server-owned bounded two-day temporal slots inside current `sheet_vitrina_v1` ready snapshot |
+| `yesterday_closed / today_current` | `temporal slots`, `date columns` | server-owned bounded two-day temporal slots inside current `sheet_vitrina_v1` ready snapshot, counted in canonical business timezone `Asia/Yekaterinburg` |
 | `AI_EXPORT` | `legacy export` | compatibility/open-gap term, не новый canonical target |
 
 ## Naming notes

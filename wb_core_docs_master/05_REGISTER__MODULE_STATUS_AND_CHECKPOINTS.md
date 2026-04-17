@@ -77,6 +77,8 @@ Current repo-owned operator refresh surface:
 - `GET /sheet-vitrina-v1/operator`
 - page uses `POST /v1/sheet-vitrina-v1/refresh` and `GET /v1/sheet-vitrina-v1/status`
 - page stays intentionally narrow: one button `Загрузить данные`, compact status, minimal result/log
+- server-side business timezone = `Asia/Yekaterinburg` for default `as_of_date`, `today_current` and operator-facing freshness dates
+- live daily auto-refresh = `wb-core-sheet-vitrina-refresh.timer` -> existing `POST /v1/sheet-vitrina-v1/refresh` at `11:00 Asia/Yekaterinburg` (`06:00 UTC` on current host)
 
 Current main-confirmed counts для этого flow:
 - prepare/upload package = `33 / 102 / 7`
@@ -84,6 +86,8 @@ Current main-confirmed counts для этого flow:
 - refresh materialize-ит date-aware ready snapshot `yesterday_closed + today_current`
 - operator-facing `DATA_VITRINA` = server-driven two-day `date_matrix` `1698` rendered rows / `95` metric keys (`1631` source rows, `34` blocks)
 - operator-facing `STATUS` = per-source/per-slot freshness surface; current-only sources (`stocks`, `prices_snapshot`, `ads_bids`) показывают `not_available` для `yesterday_closed`, а не backfill
+- bot/web-source family (`seller_funnel_snapshot`, `web_source_snapshot`) uses bounded `explicit-date -> latest-if-date-matches` reads for `today_current`; exact-date runtime cache may truthfully surface previous captured day as next `yesterday_closed`, with explicit `STATUS` note instead of slot-copying
+- if exact-date `today_current` snapshot is still missing for bot/web-source family, refresh may bounded-trigger server-local same-day capture in `/opt/wb-web-bot` plus `/opt/wb-ai/run_web_source_handoff.py` before final read-side fetch
 - sibling `COST_PRICE` contour = отдельный sheet/menu/upload path и separate runtime current-state seam вне compact bundle
 - current operator-facing cost overlay = server-side `cost_price_rub`, `avg_cost_price_rub`, `total_proxy_profit_rub`, `proxy_margin_pct_total` с resolution `group + latest effective_from <= slot_date`
 
@@ -94,7 +98,9 @@ This is the first bounded MVP checkpoint, not final production parity.
 - full legacy parity beyond current main-confirmed sheet/upload dictionary;
 - live numeric fill для promo-backed metrics и других bounded long-tail rows beyond current `COST_PRICE` overlay;
 - отдельный bounded fix по любому remaining non-district / foreign stocks residual, если одной truthful `STATUS` note окажется недостаточно для operator flow;
-- actual deploy rights/publish wiring and final hardening around runtime/auth;
+- production hardening around runtime/deploy/auth;
+- generic orchestration platform beyond current one daily timer;
+- actual deploy rights/publish wiring for hosted contour;
 - unresolved long-tail compatibility around `AI_EXPORT`.
 
 # Not in scope

@@ -49,7 +49,7 @@ update_note: "Обновлён под batched `wb-warehouses` checkpoint и date
 - Исторический repo-checkpoint до этого fix использовал `POST /api/v2/stocks-report/products/sizes` per `nmId`; на bundle с десятками enabled SKU такой fan-out мог приходить в `429`.
 - Current main-confirmed official path: `POST /api/analytics/v1/stocks-report/wb-warehouses` c batched `nmIds`, `limit/offset` pagination и analytics-capable token.
 - Current canonical runtime secret path для official stocks adapter: `WB_API_TOKEN`.
-- Результат остаётся на уровне `nmId`, но `snapshot_date` в success теперь отражает фактический день получения current WB warehouses inventory; он может отличаться от requested sheet `as_of_date`, и именно это считается честным freshness signal.
+- Результат остаётся на уровне `nmId`, но `snapshot_date` в success теперь отражает фактический день получения current WB warehouses inventory в canonical business timezone `Asia/Yekaterinburg`, а не UTC/host-local дату; он может отличаться от requested sheet `as_of_date`, и именно это считается честным freshness signal.
 - В bounded `sheet_vitrina_v1` contour `stocks` классифицируется как `today_current` source:
   - `stocks[today_current]` materialize-ит фактический current inventory snapshot;
   - `stocks[yesterday_closed]` не invent-ится и остаётся `not_available`, пока не появится отдельный безопасный historical/EOD path.
