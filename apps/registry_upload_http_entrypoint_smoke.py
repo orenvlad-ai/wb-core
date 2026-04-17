@@ -113,12 +113,18 @@ def main() -> None:
                 raise AssertionError(f"operator UI must return 200, got {operator_ui_status}")
             if "Обновление данных витрины" not in operator_ui_html or "Загрузить данные" not in operator_ui_html:
                 raise AssertionError("operator UI must expose the expected minimal page")
-            if "yesterday_closed + today_current" not in operator_ui_html:
-                raise AssertionError("operator UI must describe the current two-slot ready snapshot semantics")
-            if "current-only sources" not in operator_ui_html or "not_available" not in operator_ui_html:
-                raise AssertionError("operator UI must explain that yesterday_closed not_available is expected")
-            if "DATA_VITRINA rows" not in operator_ui_html or "STATUS rows" not in operator_ui_html:
-                raise AssertionError("operator UI must surface row-count fields for the persisted snapshot")
+            if "Статус" not in operator_ui_html or "Результат" not in operator_ui_html or "ожидание" not in operator_ui_html:
+                raise AssertionError("operator UI must keep the compact Russian chrome")
+            if "Строки DATA_VITRINA" not in operator_ui_html or "Строки STATUS" not in operator_ui_html:
+                raise AssertionError("operator UI must surface row-count fields with Russian labels")
+            if "Снимок пока не подготовлен." not in operator_ui_html:
+                raise AssertionError("operator UI must keep the Russian empty-state helper text")
+            if (
+                "UTC yesterday" in operator_ui_html
+                or "server-side refresh" in operator_ui_html
+                or "Ready snapshot пока не materialized." in operator_ui_html
+            ):
+                raise AssertionError("operator UI must not keep the stale explanatory date subtitle")
             operator_ui_config = _extract_operator_ui_config(operator_ui_html)
             if operator_ui_config != {
                 "page_title": "Обновление данных витрины",
