@@ -20,7 +20,7 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "изменение build metadata pack"
-built_from_commit: "133d6a8cb0629cabde8d07194e3d2d876cfa54d8"
+built_from_commit: "133d6a8a264109596a6c1102a8218ee609282282"
 docset_version: "wb_core_docs_master_v2"
 built_at: "2026-04-17T16:43:30Z"
 core_docs_changed:
