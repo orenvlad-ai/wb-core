@@ -20,9 +20,9 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "изменение build metadata pack"
-built_from_commit: "da3b163d45b7d03b8e9ec17e3fcc0c502c207ac0"
+built_from_commit: "a097038fcebcb7a6c314e1bf16828cc2ee03383d"
 docset_version: "wb_core_docs_master_v3"
-built_at: "2026-04-17T17:04:48Z"
+built_at: "2026-04-17T17:12:30Z"
 core_docs_changed:
   - "README.md"
   - "docs/architecture/00_migration_charter.md"
