@@ -27,7 +27,7 @@ DISTRICT_KEYS = (
 @dataclass(frozen=True)
 class WbRegionalSupplySettings:
     sales_avg_period_days: int
-    supply_horizon_days: int
+    cycle_supply_days: int
     lead_time_to_region_days: int
     safety_days: int
     order_batch_qty: int

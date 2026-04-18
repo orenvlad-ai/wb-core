@@ -74,7 +74,8 @@ _TEMPLATE_HEADERS = {
 _RESULT_HEADERS = ["nmId", "Комментарий SKU", "Рекомендовано к заказу"]
 _WEIGHT_COEFFICIENT = 0.08593
 _VOLUME_DIVISOR = 204.38
-_DEFAULT_SALES_AVG_PERIOD_DAYS = 21
+_DEFAULT_SALES_AVG_PERIOD_DAYS = 14
+_DEFAULT_CYCLE_ORDER_DAYS = 14
 _COVERAGE_CONTRACT_NOTE = (
     "Файлы «Товары в пути от фабрики» и «Товары в пути от ФФ на Wildberries» необязательны: "
     "если файл не загружен, соответствующий inbound считается как 0. "
@@ -290,7 +291,8 @@ class FactoryOrderSupplyBlock:
             demand_horizon = daily_demand_total * horizon_days
             safety_mp_units = daily_demand_total * settings.safety_days_mp
             safety_ff_units = daily_demand_total * settings.safety_days_ff
-            target_qty = demand_horizon + safety_mp_units + safety_ff_units
+            cycle_order_units = daily_demand_total * settings.cycle_order_days
+            target_qty = demand_horizon + safety_mp_units + safety_ff_units + cycle_order_units
             stock_total_mp = float(stock_total_by_nm.get(nm_id, 0.0))
             stock_ff = float(stock_ff_by_nm.get(nm_id, 0.0))
             inbound_factory_to_ff = float(inbound_factory_by_nm.get(nm_id, 0.0))
@@ -445,6 +447,7 @@ class FactoryOrderSupplyBlock:
                 lead_time_ff_to_wb_days=int(settings_payload.get("lead_time_ff_to_wb_days", 0)),
                 safety_days_mp=int(settings_payload.get("safety_days_mp", 0)),
                 safety_days_ff=int(settings_payload.get("safety_days_ff", 0)),
+                cycle_order_days=int(settings_payload.get("cycle_order_days", 0)),
                 order_batch_qty=int(settings_payload.get("order_batch_qty", 0)),
                 report_date_override=(
                     str(settings_payload.get("report_date_override"))
@@ -603,14 +606,15 @@ def _parse_settings(payload: Mapping[str, Any]) -> FactoryOrderSettings:
         prod_lead_time_days=_parse_positive_int(payload.get("prod_lead_time_days"), "Срок производства"),
         lead_time_factory_to_ff_days=_parse_positive_int(
             payload.get("lead_time_factory_to_ff_days"),
-            "Срок фабрика -> ФФ",
+            "Доставка фабрики -> ФФ",
         ),
         lead_time_ff_to_wb_days=_parse_positive_int(
             payload.get("lead_time_ff_to_wb_days"),
-            "Срок ФФ -> Wildberries",
+            "Доставка ФФ -> Wildberries",
         ),
         safety_days_mp=_parse_nonnegative_int(payload.get("safety_days_mp"), "Страховой запас MP"),
         safety_days_ff=_parse_nonnegative_int(payload.get("safety_days_ff"), "Страховой запас ФФ"),
+        cycle_order_days=_parse_cycle_order_days(payload.get("cycle_order_days")),
         order_batch_qty=_parse_positive_int(payload.get("order_batch_qty"), "Кратность штук в коробке"),
         report_date_override=_parse_optional_date(payload.get("report_date_override"), row_index=None, field_label="Дата отчёта"),
         sales_avg_period_days=_parse_sales_avg_period_days(payload.get("sales_avg_period_days")),
@@ -626,6 +630,18 @@ def _parse_sales_avg_period_days(value: Any) -> int:
         raise ValueError("Период усреднения продаж должен быть целым числом") from exc
     if numeric <= 0:
         return _DEFAULT_SALES_AVG_PERIOD_DAYS
+    return numeric
+
+
+def _parse_cycle_order_days(value: Any) -> int:
+    if value in ("", None):
+        return _DEFAULT_CYCLE_ORDER_DAYS
+    try:
+        numeric = int(str(value).strip())
+    except ValueError as exc:
+        raise ValueError("Цикл заказов должен быть целым числом") from exc
+    if numeric <= 0:
+        return _DEFAULT_CYCLE_ORDER_DAYS
     return numeric
 
 

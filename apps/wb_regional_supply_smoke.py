@@ -109,7 +109,17 @@ def main() -> None:
 
         result = regional_block.calculate(
             {
-                "sales_avg_period_days": 7,
+                "sales_avg_period_days": 14,
+                "cycle_supply_days": 5,
+                "lead_time_to_region_days": 2,
+                "safety_days": 1,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+            }
+        )
+        legacy_alias_result = regional_block.calculate(
+            {
+                "sales_avg_period_days": 14,
                 "supply_horizon_days": 5,
                 "lead_time_to_region_days": 2,
                 "safety_days": 1,
@@ -119,6 +129,8 @@ def main() -> None:
         )
         if result.summary.total_qty != 100:
             raise AssertionError(f"regional summary total must reflect FF-limited allocation, got {result.summary.total_qty}")
+        if legacy_alias_result.summary.total_qty != result.summary.total_qty:
+            raise AssertionError("legacy supply_horizon_days alias must keep the same WB regional math")
         districts = {item.district_key: item for item in result.districts}
         if districts["central"].total_qty != 50 or districts["central"].deficit_qty != 100:
             raise AssertionError("central district must keep one box allocated and truthful deficit")
@@ -158,7 +170,7 @@ def main() -> None:
 def _seed_runtime_sales_history(runtime: RegistryUploadDbBackedRuntime, *, active_nm_ids: list[int]) -> None:
     report_date = date(2026, 4, 18)
     items: list[SalesFunnelHistoryItem] = []
-    for offset in range(7, 0, -1):
+    for offset in range(14, 0, -1):
         snapshot_date = (report_date - timedelta(days=offset)).isoformat()
         for nm_id in active_nm_ids:
             value = 60.0 if nm_id == MAIN_NM_ID else 0.0
@@ -174,7 +186,7 @@ def _seed_runtime_sales_history(runtime: RegistryUploadDbBackedRuntime, *, activ
         runtime=runtime,
         payload=SalesFunnelHistorySuccess(
             kind="success",
-            date_from="2026-04-11",
+            date_from="2026-04-04",
             date_to="2026-04-17",
             count=len(items),
             items=items,

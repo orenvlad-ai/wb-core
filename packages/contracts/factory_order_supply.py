@@ -17,6 +17,7 @@ class FactoryOrderSettings:
     lead_time_ff_to_wb_days: int
     safety_days_mp: int
     safety_days_ff: int
+    cycle_order_days: int
     order_batch_qty: int
     report_date_override: str | None
     sales_avg_period_days: int

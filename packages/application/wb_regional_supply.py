@@ -54,7 +54,8 @@ _SHARED_STOCK_LABEL = "Остатки ФФ"
 _DISTRICT_FILE_HEADERS = ["nmId", "SKU", "Количество к поставке"]
 _WEIGHT_COEFFICIENT = 0.08593
 _VOLUME_DIVISOR = 204.38
-_DEFAULT_SALES_AVG_PERIOD_DAYS = 7
+_DEFAULT_SALES_AVG_PERIOD_DAYS = 14
+_DEFAULT_CYCLE_SUPPLY_DAYS = 7
 _METHODOLOGY_NOTE = (
     "Расчёт использует общий файл «Остатки ФФ» из этой же вкладки. "
     "Сервер берёт total orderCount по SKU и current stock rows по 6 федеральным округам; "
@@ -170,7 +171,7 @@ class WbRegionalSupplyBlock:
                     0.0,
                 )
                 target_stock_after_arrival = district_daily_demand * (
-                    settings.supply_horizon_days + settings.safety_days
+                    settings.cycle_supply_days + settings.safety_days
                 )
                 raw_recommendation = max(target_stock_after_arrival - projected_stock_on_eta, 0.0)
                 full_recommendation_qty = (
@@ -241,7 +242,7 @@ class WbRegionalSupplyBlock:
             calculation_id=uuid4().hex,
             calculated_at=self.timestamp_factory(),
             report_date=report_date,
-            horizon_days=settings.supply_horizon_days,
+            horizon_days=settings.cycle_supply_days,
             active_sku_count=len(active_skus),
             methodology_note=self.sales_history.build_operator_note(_METHODOLOGY_NOTE),
             settings=settings,
@@ -339,7 +340,12 @@ class WbRegionalSupplyBlock:
                 sales_avg_period_days=int(
                     settings_payload.get("sales_avg_period_days", _DEFAULT_SALES_AVG_PERIOD_DAYS)
                 ),
-                supply_horizon_days=int(settings_payload.get("supply_horizon_days", 0)),
+                cycle_supply_days=int(
+                    settings_payload.get(
+                        "cycle_supply_days",
+                        settings_payload.get("supply_horizon_days", 0),
+                    )
+                ),
                 lead_time_to_region_days=int(settings_payload.get("lead_time_to_region_days", 0)),
                 safety_days=int(settings_payload.get("safety_days", 0)),
                 order_batch_qty=int(settings_payload.get("order_batch_qty", 0)),
@@ -453,7 +459,7 @@ def _default_timestamp_factory() -> str:
 def _parse_settings(payload: Mapping[str, Any]) -> WbRegionalSupplySettings:
     return WbRegionalSupplySettings(
         sales_avg_period_days=_parse_sales_avg_period_days(payload.get("sales_avg_period_days")),
-        supply_horizon_days=_parse_positive_int(payload.get("supply_horizon_days"), "Горизонт покрытия поставки"),
+        cycle_supply_days=_parse_cycle_supply_days(payload),
         lead_time_to_region_days=_parse_positive_int(
             payload.get("lead_time_to_region_days"),
             "Срок доставки до склада Wildberries",
@@ -476,6 +482,21 @@ def _parse_sales_avg_period_days(value: Any) -> int:
         raise ValueError("Период усреднения продаж должен быть целым числом") from exc
     if numeric <= 0:
         return _DEFAULT_SALES_AVG_PERIOD_DAYS
+    return numeric
+
+
+def _parse_cycle_supply_days(payload: Mapping[str, Any]) -> int:
+    raw_value = payload.get("cycle_supply_days")
+    if raw_value in ("", None):
+        raw_value = payload.get("supply_horizon_days")
+    if raw_value in ("", None):
+        return _DEFAULT_CYCLE_SUPPLY_DAYS
+    try:
+        numeric = int(str(raw_value).strip())
+    except ValueError as exc:
+        raise ValueError("Цикл поставок должен быть целым числом") from exc
+    if numeric <= 0:
+        return _DEFAULT_CYCLE_SUPPLY_DAYS
     return numeric
 
 
@@ -600,4 +621,3 @@ def _coverage_days(*, projected_stock: float, allocated_qty: int, avg_day: float
 def _truncate_sheet_name(value: str) -> str:
     normalized = str(value or "").strip() or "Рекомендация"
     return normalized[:31]
-

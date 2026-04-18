@@ -119,13 +119,19 @@ def main() -> None:
                 raise AssertionError(f"operator page must return 200, got {operator_status}")
             for expected in (
                 "Общий вход для двух расчётов",
-                "Поставка на Wildberries по федеральным округам",
-                "Рассчитать поставки по округам",
+                "Поставка на Wildberries",
+                "Цикл поставок, дней",
+                "Доставка до склада Wildberries, дней",
+                "Рассчитать поставку на Wildberries",
                 "Сводка по федеральным округам",
                 "XLSX по округам",
             ):
                 if expected not in operator_html:
                     raise AssertionError(f"operator page must expose {expected!r}")
+            if "https://docs.google.com/spreadsheets/d/" not in operator_html:
+                raise AssertionError("operator page must expose a clickable live sheet link")
+            if "value=\"14\"" not in operator_html or "value=\"15\"" not in operator_html or "value=\"250\"" not in operator_html:
+                raise AssertionError("operator page must prefill the WB defaults directly in the form")
 
             stock_template_status, stock_template_bytes, _ = _get_bytes(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH}"
@@ -160,8 +166,8 @@ def main() -> None:
             calc_status, calc_payload = _post_json(
                 f"{base_url}{DEFAULT_WB_REGIONAL_CALCULATE_PATH}",
                 {
-                    "sales_avg_period_days": 7,
-                    "supply_horizon_days": 5,
+                    "sales_avg_period_days": 14,
+                    "cycle_supply_days": 5,
                     "lead_time_to_region_days": 2,
                     "safety_days": 1,
                     "order_batch_qty": 50,
@@ -195,8 +201,8 @@ def main() -> None:
             blocked_status, blocked_payload = _post_json(
                 f"{base_url}{DEFAULT_WB_REGIONAL_CALCULATE_PATH}",
                 {
-                    "sales_avg_period_days": 7,
-                    "supply_horizon_days": 5,
+                    "sales_avg_period_days": 14,
+                    "cycle_supply_days": 5,
                     "lead_time_to_region_days": 2,
                     "safety_days": 1,
                     "order_batch_qty": 50,
@@ -220,7 +226,7 @@ def main() -> None:
 def _seed_runtime_sales_history(runtime: RegistryUploadDbBackedRuntime, *, active_nm_ids: list[int]) -> None:
     report_date = date(2026, 4, 18)
     items: list[SalesFunnelHistoryItem] = []
-    for offset in range(7, 0, -1):
+    for offset in range(14, 0, -1):
         snapshot_date = (report_date - timedelta(days=offset)).isoformat()
         for nm_id in active_nm_ids:
             value = 60.0 if nm_id == MAIN_NM_ID else 0.0
@@ -236,7 +242,7 @@ def _seed_runtime_sales_history(runtime: RegistryUploadDbBackedRuntime, *, activ
         runtime=runtime,
         payload=SalesFunnelHistorySuccess(
             kind="success",
-            date_from="2026-04-11",
+            date_from="2026-04-04",
             date_to="2026-04-17",
             count=len(items),
             items=items,

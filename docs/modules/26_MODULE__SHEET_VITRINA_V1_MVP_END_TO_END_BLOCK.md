@@ -133,11 +133,15 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - top-level tab `Расчёт поставок`
   - shared block `Остатки ФФ` reused by both supply calculations
   - bounded subsection `Заказ на фабрике`
-  - bounded subsection `Поставка на Wildberries по федеральным округам`
-  - explicit actions `Скачать шаблон остатков ФФ`, `Загрузить остатки ФФ`, `Скачать шаблон товаров в пути от фабрики`, `Загрузить товары в пути от фабрики`, `Скачать шаблон товаров в пути от ФФ на Wildberries`, `Загрузить товары в пути от ФФ на Wildberries`, `Рассчитать заказ на фабрике`, `Скачать рекомендацию`, `Рассчитать поставки по округам`
-  - server-side settings validation for `prod_lead_time_days`, `lead_time_factory_to_ff_days`, `lead_time_ff_to_wb_days`, `safety_days_mp`, `safety_days_ff`, `order_batch_qty`, `report_date_override`, `sales_avg_period_days`
-  - server-side settings validation for regional block `sales_avg_period_days`, `supply_horizon_days`, `lead_time_to_region_days`, `safety_days`, `order_batch_qty`, `report_date_override`
+  - bounded subsection `Поставка на Wildberries`
+  - explicit actions `Скачать шаблон остатков ФФ`, `Скачать шаблон товаров в пути от фабрики`, `Скачать шаблон товаров в пути от ФФ на Wildberries`, `Рассчитать заказ на фабрике`, `Скачать рекомендацию`, `Рассчитать поставку на Wildberries`
+  - uploads for all operator XLSX files start automatically right after file selection; current uploaded file download/delete lifecycle stays visible in the same block
+  - server-side settings validation for `prod_lead_time_days`, `lead_time_factory_to_ff_days`, `lead_time_ff_to_wb_days`, `safety_days_mp`, `safety_days_ff`, `cycle_order_days`, `order_batch_qty`, `report_date_override`, `sales_avg_period_days`
+  - server-side settings validation for regional block `sales_avg_period_days`, `cycle_supply_days`, `lead_time_to_region_days`, `safety_days`, `order_batch_qty`, `report_date_override`
   - operator-facing label for `order_batch_qty` = `Кратность штук в коробке`
+  - operator-facing cycle vocabulary is unified: factory uses `Цикл заказов`, WB block uses `Цикл поставок`
+  - page-load defaults are server/operator-owned contract: factory `30/30/15/15/15/14/250/14`, regional `14/7/15/15/250`, manual dates empty
+  - upper `sheet_vitrina_v1` label is a clickable link to the current live spreadsheet target resolved from the bound Apps Script target config
   - authoritative `orderCount` history for this contour lives only server-side in `temporal_source_snapshots[source_key=sales_funnel_history]`
   - UI accepts any positive `sales_avg_period_days`; backend calculates any fully covered lookback window and returns an exact coverage blocker only when requested history reaches outside the persisted authoritative window
   - live `DATA_VITRINA` may seed a one-time bounded historical reconcile window `2026-03-01..2026-04-18`, but this is migration input only; ongoing source of truth stays server-side and future exact-date days continue through existing refresh/runtime flow

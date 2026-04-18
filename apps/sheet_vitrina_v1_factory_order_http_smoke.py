@@ -160,13 +160,30 @@ def main() -> None:
                 "Обновление данных витрины",
                 "Расчёт поставок",
                 "Заказ на фабрике",
+                "Цикл заказов, дней",
+                "Поставка на Wildberries",
                 "Кратность штук в коробке",
                 "Скачать загруженный файл",
-                "Удалить этот файл",
                 "Рассчитать заказ на фабрике",
             ):
                 if expected not in operator_html:
                     raise AssertionError(f"operator page must expose {expected!r}")
+            if "https://docs.google.com/spreadsheets/d/" not in operator_html:
+                raise AssertionError("operator page must expose the live sheet link")
+            if (
+                "Загрузить остатки ФФ" in operator_html
+                or "Загрузить товары в пути от фабрики" in operator_html
+                or "Загрузить товары в пути от ФФ на Wildberries" in operator_html
+                or ".addEventListener(\"change\", () => uploadDataset(" not in operator_html
+            ):
+                raise AssertionError("operator page must use auto-upload after file pick without separate upload buttons")
+            if (
+                "value=\"30\"" not in operator_html
+                or "value=\"15\"" not in operator_html
+                or "value=\"14\"" not in operator_html
+                or "value=\"250\"" not in operator_html
+            ):
+                raise AssertionError("operator page must prefill the new factory defaults in the form")
 
             stock_template_status, stock_template_bytes, stock_template_headers = _get_bytes(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH}"
@@ -216,6 +233,7 @@ def main() -> None:
                     "lead_time_ff_to_wb_days": 2,
                     "safety_days_mp": 3,
                     "safety_days_ff": 2,
+                    "cycle_order_days": 14,
                     "order_batch_qty": 50,
                     "report_date_override": "2026-04-18",
                     "sales_avg_period_days": 3,
@@ -285,6 +303,7 @@ def main() -> None:
                     "lead_time_ff_to_wb_days": 2,
                     "safety_days_mp": 3,
                     "safety_days_ff": 2,
+                    "cycle_order_days": 14,
                     "order_batch_qty": 50,
                     "report_date_override": "2026-04-18",
                     "sales_avg_period_days": 7,
@@ -334,6 +353,7 @@ def main() -> None:
                     "lead_time_ff_to_wb_days": 3,
                     "safety_days_mp": 1,
                     "safety_days_ff": 1,
+                    "cycle_order_days": 14,
                     "order_batch_qty": 25,
                     "report_date_override": "2026-04-18",
                     "sales_avg_period_days": 3,
@@ -354,6 +374,7 @@ def main() -> None:
                         "lead_time_ff_to_wb_days": 2,
                         "safety_days_mp": 3,
                         "safety_days_ff": 2,
+                        "cycle_order_days": 14,
                         "order_batch_qty": 50,
                         "report_date_override": "2026-04-18",
                         "sales_avg_period_days": period_days,
@@ -382,16 +403,51 @@ def main() -> None:
                 },
             )
             if default_period_status != 200:
-                raise AssertionError(f"HTTP calc must keep legacy default sales_avg_period_days, got {default_period_status} {default_period_payload}")
+                raise AssertionError(f"HTTP calc must keep current default sales_avg_period_days, got {default_period_status} {default_period_payload}")
             default_sku = next(item for item in default_period_payload.get("rows", []) if item.get("nm_id") == 210183919)
             if round(float(default_sku.get("daily_demand_total", 0.0)), 2) != _expected_average(
                 210183919,
                 report_date="2026-04-18",
-                period_days=21,
+                period_days=14,
             ):
-                raise AssertionError("missing sales_avg_period_days must fall back to the legacy 21-day window in HTTP calc")
-            if int(default_period_payload.get("settings", {}).get("sales_avg_period_days", 0)) != 21:
-                raise AssertionError("HTTP calc payload must persist the legacy 21-day default window")
+                raise AssertionError("missing sales_avg_period_days must fall back to the current 14-day window in HTTP calc")
+            if int(default_period_payload.get("settings", {}).get("sales_avg_period_days", 0)) != 14:
+                raise AssertionError("HTTP calc payload must persist the current 14-day sales average default")
+            if int(default_period_payload.get("settings", {}).get("cycle_order_days", 0)) != 14:
+                raise AssertionError("HTTP calc payload must persist the current 14-day cycle_order_days default")
+
+            cycle_short_status, cycle_short_payload = _post_json(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
+                {
+                    "prod_lead_time_days": 10,
+                    "lead_time_factory_to_ff_days": 5,
+                    "lead_time_ff_to_wb_days": 2,
+                    "safety_days_mp": 3,
+                    "safety_days_ff": 2,
+                    "cycle_order_days": 14,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "sales_avg_period_days": 14,
+                },
+            )
+            cycle_long_status, cycle_long_payload = _post_json(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
+                {
+                    "prod_lead_time_days": 10,
+                    "lead_time_factory_to_ff_days": 5,
+                    "lead_time_ff_to_wb_days": 2,
+                    "safety_days_mp": 3,
+                    "safety_days_ff": 2,
+                    "cycle_order_days": 28,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "sales_avg_period_days": 14,
+                },
+            )
+            if cycle_short_status != 200 or cycle_long_status != 200:
+                raise AssertionError("HTTP calc must succeed for both cycle_order_days comparison scenarios")
+            if int(cycle_long_payload.get("summary", {}).get("total_qty", 0)) <= int(cycle_short_payload.get("summary", {}).get("total_qty", 0)):
+                raise AssertionError("larger cycle_order_days must materially increase the factory total_qty")
 
             calc_out_of_range_status, calc_out_of_range_payload = _post_json(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
@@ -401,6 +457,7 @@ def main() -> None:
                     "lead_time_ff_to_wb_days": 2,
                     "safety_days_mp": 3,
                     "safety_days_ff": 2,
+                    "cycle_order_days": 14,
                     "order_batch_qty": 50,
                     "report_date_override": "2026-04-18",
                     "sales_avg_period_days": 60,
@@ -417,6 +474,10 @@ def main() -> None:
             )
             print("scenario_covered_windows_http: ok -> periods=10,14,21")
             print(f"scenario_default_sales_avg_http: ok -> daily_demand={round(float(default_sku.get('daily_demand_total', 0.0)), 2)}")
+            print(
+                "scenario_cycle_order_days_http: ok -> "
+                f"{cycle_short_payload.get('summary', {}).get('total_qty')} -> {cycle_long_payload.get('summary', {}).get('total_qty')}"
+            )
             print("scenario_out_of_range_http: ok -> blocker exposes needed range 2026-02-17..2026-04-17 and available 2026-03-28..2026-04-17")
         finally:
             server.shutdown()
