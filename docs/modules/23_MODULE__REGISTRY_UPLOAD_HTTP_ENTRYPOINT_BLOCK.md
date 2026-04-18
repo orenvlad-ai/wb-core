@@ -151,11 +151,15 @@ update_note: "Обновлён под current factory-order historical seam: HTT
 - Operator page не invent-ит новый heavy route: UI запускает existing heavy `POST /v1/sheet-vitrina-v1/refresh` отдельно от narrow `POST /v1/sheet-vitrina-v1/load`, а live progress читает только через cheap poll surface `GET /v1/sheet-vitrina-v1/job`.
 - Во второй tab `Расчёт поставок` current bounded scope materialize-ит два sibling block внутри одного narrow operator page:
   - shared block `Остатки ФФ` остаётся один для обоих расчётов и хранится в одном server-owned dataset state;
-  - block `Заказ на фабрике` сохраняет existing behavior;
-  - block `Поставка на Wildberries по федеральным округам` использует тот же shared `stock_ff`, свои settings (`sales_avg_period_days`, `supply_horizon_days`, `lead_time_to_region_days`, `safety_days`, `order_batch_qty`, `report_date_override`) и отдельный result/download surface;
+  - block `Заказ на фабрике` сохраняет existing behavior, но vocabulary/settings now include explicit `cycle_order_days` (`Цикл заказов`) as an additive day tail in `target_qty`;
+  - sibling selector/button label для второго блока сокращён до `Поставка на Wildberries`, while the block itself still publishes district-level outputs;
+  - block `Поставка на Wildberries` использует тот же shared `stock_ff`, свои settings (`sales_avg_period_days`, `cycle_supply_days`, `lead_time_to_region_days`, `safety_days`, `order_batch_qty`, `report_date_override`) и отдельный result/download surface;
   - regional block не materialize-ит upload contract `Товары в пути от ФФ на Wildberries`: этот input остаётся вне текущего bounded scope;
   - settings fields остаются server-owned и валидируются на backend;
-  - operator-facing label `Размер партии` заменён на `Кратность штук в коробке`;
+  - operator-facing vocabulary around supply inputs is unified as `Период усреднения продаж` / lead times / safety / `Кратность штук в коробке` / `Цикл`;
+  - current operator defaults on page load:
+    - factory = `30 / 30 / 15 / 15 / 15 / 14 / 250 / 14` for `prod / factory->ff / ff->wb / safety_mp / safety_ff / cycle_order / batch / sales_avg`
+    - regional = `14 / 7 / 15 / 15 / 250` for `sales_avg / cycle_supply / lead_time_to_region / safety / batch`
   - authoritative `orderCount` history для расчёта живёт только server-side в `temporal_source_snapshots[source_key=sales_funnel_history]`;
   - UI больше не hard-cap'ит `sales_avg_period_days`; operator может ввести любой положительный период, а backend считает любой полностью покрытый window и truthfully возвращает blocker только если exact runtime coverage недостаточно;
   - live `DATA_VITRINA` может использоваться лишь как one-time migration input для bounded historical reconcile/replacement window `2026-03-01..2026-04-18`; после этого sheet не становится новым permanent source of truth;
@@ -166,11 +170,13 @@ update_note: "Обновлён под current factory-order historical seam: HTT
   - `Товары в пути от фабрики` и `Товары в пути от ФФ на Wildberries` трактуют одну строку как один отдельный inbound event;
   - duplicate `nmId` в inbound templates допустимы и expected, если это разные ожидаемые поставки;
   - inbound datasets optional: если `Товары в пути от фабрики` и/или `Товары в пути от ФФ на Wildberries` не загружены либо удалены, расчёт не блокируется, а соответствующие coverage terms truthfully считаются как `0`;
+  - upload UX simplified: после выбора XLSX upload starts immediately, separate `Загрузить ...` buttons are removed, а текущий uploaded file по-прежнему surface-ится как download link + subtle delete icon;
   - status surface для каждого upload block показывает current uploaded filename, download link и delete action, если файл действительно хранится в current server-owned state;
+  - upper `sheet_vitrina_v1` label в operator panels is a truthful clickable link to the current bound live spreadsheet target resolved from the current Apps Script bridge config;
   - planning horizon coverage суммирует только inbound events, чья `planned_arrival_date` попадает внутрь текущего расчётного горизонта;
   - итоговые summary/result values (`Общее количество`, `Расчётный вес`, `Расчётный объём`, recommendation XLSX) остаются server-driven и не вычисляются в browser или sheet.
 - Для regional supply block result contract теперь также server-driven:
-  - top summary surface = `Статус`, `Дата отчёта`, `Горизонт, дней`, `Активных SKU`, `Общее количество`, `Расчётный вес`, `Расчётный объём`;
+  - top summary surface = `Статус`, `Дата отчёта`, `Цикл поставок, дней`, `Активных SKU`, `Общее количество`, `Расчётный вес`, `Расчётный объём`;
   - compact district table = `Федеральный округ / Общее количество в поставке / Дефицит`;
   - server хранит и публикует отдельный XLSX на каждый округ, а не один общий recommendation workbook;
   - district XLSX содержит district identification + compact operator rows `nmId / SKU / Количество к поставке` именно по фактически аллоцированному количеству после ограничения `stock_ff`.

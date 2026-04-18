@@ -137,7 +137,7 @@ def main() -> None:
             if (
                 "Расчёт поставок" not in operator_ui_html
                 or "Заказ на фабрике" not in operator_ui_html
-                or "Поставка на Wildberries по федеральным округам" not in operator_ui_html
+                or "Поставка на Wildberries" not in operator_ui_html
             ):
                 raise AssertionError("operator UI must expose both bounded supply sections inside the top-level tab")
             if (
@@ -146,10 +146,30 @@ def main() -> None:
                 or "Скачать шаблон товаров в пути от ФФ на Wildberries" not in operator_ui_html
                 or "Рассчитать заказ на фабрике" not in operator_ui_html
                 or "Скачать рекомендацию" not in operator_ui_html
-                or "Рассчитать поставки по округам" not in operator_ui_html
+                or "Рассчитать поставку на Wildberries" not in operator_ui_html
                 or "Общий вход для двух расчётов" not in operator_ui_html
             ):
                 raise AssertionError("operator UI must expose shared stock_ff and both supply action surfaces")
+            if (
+                "Цикл заказов, дней" not in operator_ui_html
+                or "Цикл поставок, дней" not in operator_ui_html
+                or "https://docs.google.com/spreadsheets/d/" not in operator_ui_html
+            ):
+                raise AssertionError("operator UI must expose unified cycle vocabulary and a live sheet link")
+            if (
+                "value=\"30\"" not in operator_ui_html
+                or "value=\"15\"" not in operator_ui_html
+                or "value=\"14\"" not in operator_ui_html
+                or "value=\"250\"" not in operator_ui_html
+            ):
+                raise AssertionError("operator UI must prefill operator defaults directly in the form fields")
+            if (
+                "Загрузить остатки ФФ" in operator_ui_html
+                or "Загрузить товары в пути от фабрики" in operator_ui_html
+                or "Загрузить товары в пути от ФФ на Wildberries" in operator_ui_html
+                or ".addEventListener(\"change\", () => uploadDataset(" not in operator_ui_html
+            ):
+                raise AssertionError("operator UI must use auto-upload after file selection without separate upload buttons")
             if "Строки DATA_VITRINA" not in operator_ui_html or "Строки STATUS" not in operator_ui_html:
                 raise AssertionError("operator UI must surface row-count fields with Russian labels")
             if "Сервер и расписание" not in operator_ui_html or "Часовой пояс" not in operator_ui_html:

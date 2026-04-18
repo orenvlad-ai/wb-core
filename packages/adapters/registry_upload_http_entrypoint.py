@@ -15,6 +15,7 @@ from typing import Any, Mapping
 from urllib import parse as urllib_parse
 
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.application.sheet_vitrina_v1_load_bridge import resolve_sheet_vitrina_live_spreadsheet_url
 from packages.contracts.factory_order_supply import (
     DATASET_INBOUND_FACTORY_TO_FF,
     DATASET_INBOUND_FF_TO_WB,
@@ -1151,6 +1152,7 @@ def _render_sheet_vitrina_operator_ui(
     status_path: str,
     job_path: str,
 ) -> str:
+    spreadsheet_url = resolve_sheet_vitrina_live_spreadsheet_url()
     config_payload = {
         "page_title": "Обновление данных витрины",
         "refresh_path": refresh_path,
@@ -1172,5 +1174,6 @@ def _render_sheet_vitrina_operator_ui(
     template = OPERATOR_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     return (
         template.replace("__SHEET_VITRINA_V1_OPERATOR_PAGE_TITLE__", config_payload["page_title"])
+        .replace("__SHEET_VITRINA_V1_SPREADSHEET_URL__", spreadsheet_url)
         .replace("__SHEET_VITRINA_V1_OPERATOR_CONFIG_JSON__", json.dumps(config_payload, ensure_ascii=False))
     )

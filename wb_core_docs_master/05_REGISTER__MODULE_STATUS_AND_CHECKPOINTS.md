@@ -85,7 +85,9 @@ Current repo-owned operator refresh surface:
 - live daily auto-refresh = `wb-core-sheet-vitrina-refresh.timer` -> existing `POST /v1/sheet-vitrina-v1/refresh` at `11:00 Asia/Yekaterinburg` (`06:00 UTC` on current host) with `auto_load=true`, so the daily path now finishes as `refresh + load to live sheet`
 
 Current additional operator supply flow on the same page:
-- top-level tab `Расчёт поставок` keeps the existing page pattern and now materializes two bounded sibling blocks: `Заказ на фабрике` and `Поставка на Wildberries по федеральным округам`
+- top-level tab `Расчёт поставок` keeps the existing page pattern and now materializes two bounded sibling blocks: `Заказ на фабрике` and `Поставка на Wildberries`
+- operator vocabulary inside these sibling blocks is unified around `period average / lead times / safety / batch / cycle`; factory now materializes `cycle_order_days`, while WB regional keeps the same math under `cycle_supply_days`
+- current operator UX uses auto-upload after file selection, subtle delete icons for current uploaded files and a clickable `sheet_vitrina_v1` link to the bound live spreadsheet
 - `Остатки ФФ` is a shared server-owned dataset block for both calculations; the same uploaded workbook/state is reused, not duplicated
 - all operator XLSX templates in this block use Russian headers; backend keeps the machine mapping server-side
 - `Остатки ФФ` is prefilled from current active SKU truth and requires exactly one row per active SKU

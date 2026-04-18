@@ -100,6 +100,19 @@
       color: var(--muted);
     }
 
+    .eyebrow-link {
+      display: inline-flex;
+      align-items: center;
+      text-decoration: none;
+      border-bottom: 1px solid rgba(11, 99, 246, 0.22);
+      transition: border-color 120ms ease, color 120ms ease;
+    }
+
+    .eyebrow-link:hover {
+      color: var(--accent);
+      border-color: rgba(11, 99, 246, 0.46);
+    }
+
     h1 {
       margin: 0;
       font-size: clamp(28px, 4vw, 36px);
@@ -335,32 +348,37 @@
       gap: 10px;
       margin-top: 28px;
       flex-wrap: wrap;
+      padding: 8px;
+      border-radius: 18px;
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      background: linear-gradient(180deg, #f3f6fb 0%, #eef2f7 100%);
     }
 
     .subsection-button {
       appearance: none;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      background: #f7f9fc;
-      color: var(--muted);
+      border: 1px solid transparent;
+      border-radius: 14px;
+      background: transparent;
+      color: #435166;
       font: inherit;
       font-size: 14px;
       font-weight: 700;
-      padding: 11px 18px;
+      padding: 12px 18px;
       cursor: pointer;
-      transition: background-color 120ms ease, color 120ms ease, transform 120ms ease;
+      transition: background-color 120ms ease, color 120ms ease, transform 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
     }
 
     .subsection-button:hover {
-      background: #eef4ff;
+      background: rgba(255, 255, 255, 0.72);
       color: var(--text);
       transform: translateY(-1px);
     }
 
     .subsection-button.is-active {
-      background: rgba(11, 99, 246, 0.1);
-      border-color: rgba(11, 99, 246, 0.28);
+      background: #ffffff;
+      border-color: rgba(11, 99, 246, 0.2);
       color: #0b4fd0;
+      box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
     }
 
     .supply-panel {
@@ -494,25 +512,36 @@
     .dataset-delete-button {
       appearance: none;
       border: 1px solid var(--border);
-      background: #ffffff;
-      color: var(--muted);
+      background: #f3f5f8;
+      color: #5b6676;
       border-radius: 999px;
-      padding: 6px 10px;
+      width: 28px;
+      height: 28px;
+      padding: 0;
       font: inherit;
-      font-size: 12px;
+      font-size: 18px;
       font-weight: 700;
+      line-height: 1;
       cursor: pointer;
-      transition: background-color 120ms ease, color 120ms ease;
+      transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
     }
 
     .dataset-delete-button:hover:not(:disabled) {
-      background: #f4f6f8;
+      background: #e8edf3;
       color: var(--text);
+      border-color: rgba(15, 23, 42, 0.16);
     }
 
     .dataset-delete-button:disabled {
       cursor: wait;
       opacity: 0.6;
+    }
+
+    .dataset-upload-hint {
+      margin: -4px 0 0;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--muted);
     }
 
     .factory-actions {
@@ -667,7 +696,7 @@
 
     <section class="panel">
       <section class="operator-panel" data-tab-panel="vitrina">
-        <p class="eyebrow">sheet_vitrina_v1</p>
+        <a class="eyebrow eyebrow-link" href="__SHEET_VITRINA_V1_SPREADSHEET_URL__" target="_blank" rel="noreferrer">sheet_vitrina_v1</a>
         <h1>__SHEET_VITRINA_V1_OPERATOR_PAGE_TITLE__</h1>
         <div class="actions">
           <button id="refreshButton" class="action-button primary-button" type="button">Загрузить данные</button>
@@ -754,11 +783,12 @@
       </section>
 
       <section class="operator-panel" data-tab-panel="factory-order" hidden>
-        <p class="eyebrow">sheet_vitrina_v1</p>
+        <a class="eyebrow eyebrow-link" href="__SHEET_VITRINA_V1_SPREADSHEET_URL__" target="_blank" rel="noreferrer">sheet_vitrina_v1</a>
         <h1>Расчёт поставок</h1>
         <p class="section-lead">
           Во вкладке materialized два sibling-раздела: <strong>Заказ на фабрике</strong> и
-          <strong>Поставка на Wildberries по федеральным округам</strong>. Оба расчёта идут server-side и используют
+          <strong>Поставка на Wildberries</strong>. Оба расчёта идут server-side; блок поставки на Wildberries считает
+          рекомендации по федеральным округам и использует
           общий операторский файл <strong>«Остатки ФФ»</strong> без дублирования state.
         </p>
 
@@ -768,7 +798,7 @@
           </div>
           <p class="field-note">
             Файл <strong>«Остатки ФФ»</strong> используется одновременно в расчёте заказа на фабрике и в расчёте поставок по федеральным округам.
-            Здесь хранится один shared server-side state без второй отдельной сущности.
+            Здесь хранится один shared server-side state без второй отдельной сущности. Загрузка стартует сразу после выбора XLSX-файла.
           </p>
           <div class="dataset-grid">
             <article class="dataset-card">
@@ -776,13 +806,13 @@
               <p class="dataset-status" id="stockFfStatus">Читаем состояние...</p>
               <div class="dataset-current-file" id="stockFfCurrentFile" hidden>
                 <a id="stockFfCurrentFileLink" class="dataset-file-link" href="#">Скачать загруженный файл</a>
-                <button id="deleteStockFfButton" class="dataset-delete-button" type="button">Удалить этот файл</button>
+                <button id="deleteStockFfButton" class="dataset-delete-button" type="button" aria-label="Удалить текущий файл остатков ФФ" title="Удалить текущий файл">&times;</button>
               </div>
               <div class="dataset-actions">
                 <button id="downloadStockFfTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон остатков ФФ</button>
                 <input id="stockFfFileInput" type="file" accept=".xlsx">
-                <button id="uploadStockFfButton" class="action-button secondary-button" type="button">Загрузить остатки ФФ</button>
               </div>
+              <p class="dataset-upload-hint">После выбора файла загрузка запускается автоматически.</p>
               <p id="sharedStockMessage" class="section-message"></p>
             </article>
           </div>
@@ -790,7 +820,7 @@
 
         <div class="subsection-strip" role="tablist" aria-label="Внутренние разделы расчёта поставок">
           <button class="subsection-button is-active" type="button" data-supply-section-button="factory" aria-selected="true">Заказ на фабрике</button>
-          <button class="subsection-button" type="button" data-supply-section-button="regional" aria-selected="false">Поставка на Wildberries по федеральным округам</button>
+          <button class="subsection-button" type="button" data-supply-section-button="regional" aria-selected="false">Поставка на Wildberries</button>
         </div>
 
         <section class="supply-panel" data-supply-section-panel="factory">
@@ -800,35 +830,39 @@
               <div class="field-grid">
                 <div class="field">
                   <label for="prodLeadTimeDays">Срок производства, дней</label>
-                  <input id="prodLeadTimeDays" type="number" min="1" step="1">
+                  <input id="prodLeadTimeDays" type="number" min="1" step="1" value="30">
                 </div>
                 <div class="field">
-                  <label for="leadTimeFactoryToFfDays">Срок фабрика → ФФ, дней</label>
-                  <input id="leadTimeFactoryToFfDays" type="number" min="1" step="1">
+                  <label for="leadTimeFactoryToFfDays">Доставка фабрики → ФФ, дней</label>
+                  <input id="leadTimeFactoryToFfDays" type="number" min="1" step="1" value="30">
                 </div>
                 <div class="field">
-                  <label for="leadTimeFfToWbDays">Срок ФФ → Wildberries, дней</label>
-                  <input id="leadTimeFfToWbDays" type="number" min="1" step="1">
+                  <label for="leadTimeFfToWbDays">Доставка ФФ → Wildberries, дней</label>
+                  <input id="leadTimeFfToWbDays" type="number" min="1" step="1" value="15">
                 </div>
                 <div class="field">
                   <label for="safetyDaysMp">Страховой запас MP, дней</label>
-                  <input id="safetyDaysMp" type="number" min="0" step="1">
+                  <input id="safetyDaysMp" type="number" min="0" step="1" value="15">
                 </div>
                 <div class="field">
                   <label for="safetyDaysFf">Страховой запас ФФ, дней</label>
-                  <input id="safetyDaysFf" type="number" min="0" step="1">
+                  <input id="safetyDaysFf" type="number" min="0" step="1" value="15">
+                </div>
+                <div class="field">
+                  <label for="cycleOrderDays">Цикл заказов, дней</label>
+                  <input id="cycleOrderDays" type="number" min="1" step="1" value="14">
                 </div>
                 <div class="field">
                   <label for="orderBatchQty">Кратность штук в коробке</label>
-                  <input id="orderBatchQty" type="number" min="1" step="1">
+                  <input id="orderBatchQty" type="number" min="1" step="1" value="250">
                 </div>
                 <div class="field">
-                  <label for="reportDateOverride">Дата отчёта</label>
+                  <label for="reportDateOverride">Ручная дата расчёта</label>
                   <input id="reportDateOverride" type="date">
                 </div>
                 <div class="field">
                   <label for="salesAvgPeriodDays">Период усреднения продаж, дней</label>
-                  <input id="salesAvgPeriodDays" type="number" min="1" step="1" value="21">
+                  <input id="salesAvgPeriodDays" type="number" min="1" step="1" value="14">
                 </div>
               </div>
               <p class="field-note">
@@ -896,13 +930,13 @@
                 <p class="dataset-status" id="inboundFactoryStatus">Читаем состояние...</p>
                 <div class="dataset-current-file" id="inboundFactoryCurrentFile" hidden>
                   <a id="inboundFactoryCurrentFileLink" class="dataset-file-link" href="#">Скачать загруженный файл</a>
-                  <button id="deleteInboundFactoryButton" class="dataset-delete-button" type="button">Удалить этот файл</button>
+                  <button id="deleteInboundFactoryButton" class="dataset-delete-button" type="button" aria-label="Удалить текущий файл товаров в пути от фабрики" title="Удалить текущий файл">&times;</button>
                 </div>
                 <div class="dataset-actions">
                   <button id="downloadInboundFactoryTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон товаров в пути от фабрики</button>
                   <input id="inboundFactoryFileInput" type="file" accept=".xlsx">
-                  <button id="uploadInboundFactoryButton" class="action-button secondary-button" type="button">Загрузить товары в пути от фабрики</button>
                 </div>
+                <p class="dataset-upload-hint">После выбора файла загрузка запускается автоматически.</p>
               </article>
 
               <article class="dataset-card">
@@ -910,13 +944,13 @@
                 <p class="dataset-status" id="inboundFfToWbStatus">Читаем состояние...</p>
                 <div class="dataset-current-file" id="inboundFfToWbCurrentFile" hidden>
                   <a id="inboundFfToWbCurrentFileLink" class="dataset-file-link" href="#">Скачать загруженный файл</a>
-                  <button id="deleteInboundFfToWbButton" class="dataset-delete-button" type="button">Удалить этот файл</button>
+                  <button id="deleteInboundFfToWbButton" class="dataset-delete-button" type="button" aria-label="Удалить текущий файл товаров в пути от ФФ на Wildberries" title="Удалить текущий файл">&times;</button>
                 </div>
                 <div class="dataset-actions">
                   <button id="downloadInboundFfToWbTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон товаров в пути от ФФ на Wildberries</button>
                   <input id="inboundFfToWbFileInput" type="file" accept=".xlsx">
-                  <button id="uploadInboundFfToWbButton" class="action-button secondary-button" type="button">Загрузить товары в пути от ФФ на Wildberries</button>
                 </div>
+                <p class="dataset-upload-hint">После выбора файла загрузка запускается автоматически.</p>
               </article>
             </div>
           </section>
@@ -929,19 +963,19 @@
               <div class="field-grid">
                 <div class="field">
                   <label for="regionalSalesAvgPeriodDays">Период усреднения продаж, дней</label>
-                  <input id="regionalSalesAvgPeriodDays" type="number" min="1" step="1" value="7">
+                  <input id="regionalSalesAvgPeriodDays" type="number" min="1" step="1" value="14">
                 </div>
                 <div class="field">
-                  <label for="supplyHorizonDays">Период поставки, дней</label>
-                  <input id="supplyHorizonDays" type="number" min="1" step="1" value="7">
+                  <label for="cycleSupplyDays">Цикл поставок, дней</label>
+                  <input id="cycleSupplyDays" type="number" min="1" step="1" value="7">
                 </div>
                 <div class="field">
-                  <label for="leadTimeToRegionDays">Срок доставки до склада Wildberries, дней</label>
-                  <input id="leadTimeToRegionDays" type="number" min="1" step="1" value="3">
+                  <label for="leadTimeToRegionDays">Доставка до склада Wildberries, дней</label>
+                  <input id="leadTimeToRegionDays" type="number" min="1" step="1" value="15">
                 </div>
                 <div class="field">
                   <label for="regionalSafetyDays">Страховой запас, дней</label>
-                  <input id="regionalSafetyDays" type="number" min="0" step="1" value="2">
+                  <input id="regionalSafetyDays" type="number" min="0" step="1" value="15">
                 </div>
                 <div class="field">
                   <label for="regionalOrderBatchQty">Кратность штук в коробке</label>
@@ -970,7 +1004,7 @@
                   <dd id="regionalResultReportDate">-</dd>
                 </div>
                 <div>
-                  <dt>Горизонт, дней</dt>
+                  <dt>Цикл поставок, дней</dt>
                   <dd id="regionalResultHorizon">-</dd>
                 </div>
                 <div>
@@ -998,7 +1032,7 @@
               </dl>
               <p id="regionalMessage" class="section-message"></p>
               <div class="factory-actions">
-                <button id="calculateRegionalSupplyButton" class="action-button primary-button" type="button">Рассчитать поставки по округам</button>
+                <button id="calculateRegionalSupplyButton" class="action-button primary-button" type="button">Рассчитать поставку на Wildberries</button>
               </div>
             </section>
           </div>
@@ -1075,6 +1109,7 @@
         lead_time_ff_to_wb_days: document.getElementById("leadTimeFfToWbDays"),
         safety_days_mp: document.getElementById("safetyDaysMp"),
         safety_days_ff: document.getElementById("safetyDaysFf"),
+        cycle_order_days: document.getElementById("cycleOrderDays"),
         order_batch_qty: document.getElementById("orderBatchQty"),
         report_date_override: document.getElementById("reportDateOverride"),
         sales_avg_period_days: document.getElementById("salesAvgPeriodDays")
@@ -1107,15 +1142,12 @@
       const downloadStockFfTemplateButton = document.getElementById("downloadStockFfTemplateButton");
       const downloadInboundFactoryTemplateButton = document.getElementById("downloadInboundFactoryTemplateButton");
       const downloadInboundFfToWbTemplateButton = document.getElementById("downloadInboundFfToWbTemplateButton");
-      const uploadStockFfButton = document.getElementById("uploadStockFfButton");
-      const uploadInboundFactoryButton = document.getElementById("uploadInboundFactoryButton");
-      const uploadInboundFfToWbButton = document.getElementById("uploadInboundFfToWbButton");
       const deleteStockFfButton = document.getElementById("deleteStockFfButton");
       const deleteInboundFactoryButton = document.getElementById("deleteInboundFactoryButton");
       const deleteInboundFfToWbButton = document.getElementById("deleteInboundFfToWbButton");
       const regionalFields = {
         sales_avg_period_days: document.getElementById("regionalSalesAvgPeriodDays"),
-        supply_horizon_days: document.getElementById("supplyHorizonDays"),
+        cycle_supply_days: document.getElementById("cycleSupplyDays"),
         lead_time_to_region_days: document.getElementById("leadTimeToRegionDays"),
         safety_days: document.getElementById("regionalSafetyDays"),
         order_batch_qty: document.getElementById("regionalOrderBatchQty"),
@@ -1720,16 +1752,14 @@
         }
       }
 
-      async function uploadDataset(path, fileInput, busyButton, busyLabel, setMessage, reloaders) {
+      async function uploadDataset(path, fileInput, setMessage, reloaders) {
         const file = fileInput.files && fileInput.files[0];
         if (!file) {
           setMessage("Сначала выберите XLSX-файл для загрузки.", "error");
           return;
         }
-        const idleLabel = busyButton.textContent;
-        busyButton.disabled = true;
-        busyButton.textContent = busyLabel;
-        setMessage("Загружаем файл на сервер...", "");
+        fileInput.disabled = true;
+        setMessage("Файл выбран. Загружаем на сервер...", "");
         try {
           const formData = new FormData();
           formData.append("file", file, file.name);
@@ -1750,8 +1780,7 @@
             "error"
           );
         } finally {
-          busyButton.disabled = false;
-          busyButton.textContent = idleLabel;
+          fileInput.disabled = false;
         }
       }
 
@@ -1877,7 +1906,7 @@
           );
         } finally {
           calculateRegionalSupplyButton.disabled = false;
-          calculateRegionalSupplyButton.textContent = "Рассчитать поставки по округам";
+          calculateRegionalSupplyButton.textContent = "Рассчитать поставку на Wildberries";
         }
       }
 
@@ -1917,27 +1946,21 @@
         setFactoryMessage
       ));
 
-      uploadStockFfButton.addEventListener("click", () => uploadDataset(
+      stockFfFileInput.addEventListener("change", () => uploadDataset(
         config.factory_order_upload_stock_ff_path,
         stockFfFileInput,
-        uploadStockFfButton,
-        "Загружаем...",
         setSharedStockMessage,
         [loadFactoryStatus, loadRegionalStatus]
       ));
-      uploadInboundFactoryButton.addEventListener("click", () => uploadDataset(
+      inboundFactoryFileInput.addEventListener("change", () => uploadDataset(
         config.factory_order_upload_inbound_factory_path,
         inboundFactoryFileInput,
-        uploadInboundFactoryButton,
-        "Загружаем...",
         setFactoryMessage,
         [loadFactoryStatus]
       ));
-      uploadInboundFfToWbButton.addEventListener("click", () => uploadDataset(
+      inboundFfToWbFileInput.addEventListener("change", () => uploadDataset(
         config.factory_order_upload_inbound_ff_to_wb_path,
         inboundFfToWbFileInput,
-        uploadInboundFfToWbButton,
-        "Загружаем...",
         setFactoryMessage,
         [loadFactoryStatus]
       ));

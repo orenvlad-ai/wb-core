@@ -74,6 +74,17 @@ def load_sheet_vitrina_ready_snapshot_via_clasp(
     }
 
 
+def resolve_sheet_vitrina_live_spreadsheet_url() -> str:
+    config = _load_clasp_config()
+    parent_id = str(config.get("parentId", "") or "").strip()
+    root_dir = str(config.get("rootDir", "") or "").strip()
+    if not parent_id:
+        raise ValueError("missing parentId in .clasp.json")
+    if root_dir != EXPECTED_CLASP_ROOT_DIR:
+        raise ValueError(f"unexpected rootDir in .clasp.json: {root_dir!r}")
+    return f"https://docs.google.com/spreadsheets/d/{parent_id}/edit"
+
+
 def _load_clasp_config() -> dict[str, Any]:
     if not CLASP_CONFIG_PATH.exists():
         raise ValueError(f"missing clasp config: {CLASP_CONFIG_PATH}")
