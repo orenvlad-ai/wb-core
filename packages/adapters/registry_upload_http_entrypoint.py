@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from email.parser import BytesParser
+from email.policy import default as default_email_policy
 import json
 import os
 from http import HTTPStatus
@@ -13,6 +15,11 @@ from typing import Any, Mapping
 from urllib import parse as urllib_parse
 
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.contracts.factory_order_supply import (
+    DATASET_INBOUND_FACTORY_TO_FF,
+    DATASET_INBOUND_FF_TO_WB,
+    DATASET_STOCK_FF,
+)
 from packages.contracts.cost_price_upload import CostPriceUploadResult
 from packages.contracts.registry_upload_file_backed_service import RegistryUploadResult
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
@@ -28,6 +35,23 @@ DEFAULT_SHEET_LOAD_PATH = "/v1/sheet-vitrina-v1/load"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
 DEFAULT_SHEET_JOB_PATH = "/v1/sheet-vitrina-v1/job"
 DEFAULT_SHEET_OPERATOR_UI_PATH = "/sheet-vitrina-v1/operator"
+DEFAULT_FACTORY_ORDER_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/status"
+DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"
+DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH = (
+    "/v1/sheet-vitrina-v1/supply/factory-order/template/inbound-factory.xlsx"
+)
+DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH = (
+    "/v1/sheet-vitrina-v1/supply/factory-order/template/inbound-ff-to-wb.xlsx"
+)
+DEFAULT_FACTORY_ORDER_UPLOAD_STOCK_FF_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/upload/stock-ff"
+DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FACTORY_PATH = (
+    "/v1/sheet-vitrina-v1/supply/factory-order/upload/inbound-factory"
+)
+DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FF_TO_WB_PATH = (
+    "/v1/sheet-vitrina-v1/supply/factory-order/upload/inbound-ff-to-wb"
+)
+DEFAULT_FACTORY_ORDER_CALCULATE_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/calculate"
+DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
 DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
 OPERATOR_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_operator.html"
 
@@ -302,6 +326,53 @@ def _build_handler(
                 )
                 return
 
+            if parsed.path in {
+                DEFAULT_FACTORY_ORDER_UPLOAD_STOCK_FF_PATH,
+                DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FACTORY_PATH,
+                DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FF_TO_WB_PATH,
+            }:
+                try:
+                    workbook_bytes = _load_uploaded_file_bytes(self)
+                    dataset_type = _resolve_factory_order_dataset_type_from_upload_path(parsed.path)
+                    payload = entrypoint.handle_factory_order_upload_request(dataset_type, workbook_bytes)
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_FACTORY_ORDER_CALCULATE_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_factory_order_calculate_request(payload)
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"factory order runtime failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
             _write_json_response(
                 self,
                 HTTPStatus.NOT_FOUND,
@@ -321,6 +392,73 @@ def _build_handler(
                         status_path=sheet_status_path,
                         job_path=sheet_job_path,
                     ),
+                )
+                return
+
+            if parsed.path == DEFAULT_FACTORY_ORDER_STATUS_PATH:
+                try:
+                    payload = entrypoint.handle_factory_order_status_request()
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"factory order status runtime failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path in {
+                DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
+                DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
+                DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH,
+            }:
+                try:
+                    dataset_type = _resolve_factory_order_dataset_type_from_template_path(parsed.path)
+                    workbook_bytes, filename = entrypoint.handle_factory_order_template_request(dataset_type)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"factory order template runtime failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    workbook_bytes,
+                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    filename=filename,
+                    as_attachment=True,
+                )
+                return
+
+            if parsed.path == DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH:
+                try:
+                    workbook_bytes, filename = entrypoint.handle_factory_order_recommendation_request()
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"factory order recommendation runtime failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    workbook_bytes,
+                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    filename=filename,
+                    as_attachment=True,
                 )
                 return
 
@@ -494,6 +632,43 @@ def _load_optional_request_payload(handler: BaseHTTPRequestHandler) -> Mapping[s
     return payload
 
 
+def _load_uploaded_file_bytes(handler: BaseHTTPRequestHandler) -> bytes:
+    content_type = str(handler.headers.get("Content-Type", "") or "")
+    if "multipart/form-data" not in content_type.lower():
+        raise ValueError("file upload must use multipart/form-data")
+    raw_length = handler.headers.get("Content-Length", "").strip()
+    if not raw_length:
+        raise ValueError("uploaded file request body is required")
+    try:
+        content_length = int(raw_length)
+    except ValueError as exc:
+        raise ValueError(f"Content-Length must be integer, got {raw_length!r}") from exc
+    if content_length <= 0:
+        raise ValueError("uploaded file request body must not be empty")
+    raw_body = handler.rfile.read(content_length)
+    message = BytesParser(policy=default_email_policy).parsebytes(
+        (
+            f"Content-Type: {content_type}\r\n"
+            "MIME-Version: 1.0\r\n"
+            "\r\n"
+        ).encode("utf-8")
+        + raw_body
+    )
+    workbook_bytes = b""
+    for part in message.iter_parts():
+        if part.get_content_disposition() != "form-data":
+            continue
+        if part.get_param("name", header="Content-Disposition") != "file":
+            continue
+        payload = part.get_payload(decode=True)
+        if payload:
+            workbook_bytes = payload
+            break
+    if not workbook_bytes:
+        raise ValueError("multipart/form-data must contain non-empty file field")
+    return workbook_bytes
+
+
 def _resolve_as_of_date(query_string: str, payload: Mapping[str, Any]) -> str:
     query_value = _resolve_as_of_date_from_query(query_string)
     body_value = str(payload.get("as_of_date", "") or "").strip()
@@ -552,6 +727,30 @@ def _resolve_auto_load_requested(payload: Mapping[str, Any]) -> bool:
     if not isinstance(raw, bool):
         raise ValueError("auto_load must be boolean when provided")
     return raw
+
+
+def _resolve_factory_order_dataset_type_from_template_path(path: str) -> str:
+    mapping = {
+        DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH: DATASET_STOCK_FF,
+        DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH: DATASET_INBOUND_FACTORY_TO_FF,
+        DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH: DATASET_INBOUND_FF_TO_WB,
+    }
+    dataset_type = mapping.get(path, "")
+    if not dataset_type:
+        raise ValueError(f"unsupported factory-order template path: {path}")
+    return dataset_type
+
+
+def _resolve_factory_order_dataset_type_from_upload_path(path: str) -> str:
+    mapping = {
+        DEFAULT_FACTORY_ORDER_UPLOAD_STOCK_FF_PATH: DATASET_STOCK_FF,
+        DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FACTORY_PATH: DATASET_INBOUND_FACTORY_TO_FF,
+        DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FF_TO_WB_PATH: DATASET_INBOUND_FF_TO_WB,
+    }
+    dataset_type = mapping.get(path, "")
+    if not dataset_type:
+        raise ValueError(f"unsupported factory-order upload path: {path}")
+    return dataset_type
 
 
 def _http_status_for_result(result: RegistryUploadResult) -> HTTPStatus:
@@ -622,6 +821,25 @@ def _write_text_response(
     handler.wfile.write(body)
 
 
+def _write_binary_response(
+    handler: BaseHTTPRequestHandler,
+    status: HTTPStatus,
+    body: bytes,
+    *,
+    content_type: str,
+    filename: str | None = None,
+    as_attachment: bool = False,
+) -> None:
+    handler.send_response(status.value)
+    handler.send_header("Content-Type", content_type)
+    if filename:
+        disposition = "attachment" if as_attachment else "inline"
+        handler.send_header("Content-Disposition", f'{disposition}; filename="{filename}"')
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
 def _build_sheet_job_url(job_path: str, job_id: str) -> str:
     return f"{job_path}?{urllib_parse.urlencode({'job_id': job_id})}"
 
@@ -658,6 +876,15 @@ def _render_sheet_vitrina_operator_ui(
         "load_path": load_path,
         "status_path": status_path,
         "job_path": job_path,
+        "factory_order_status_path": DEFAULT_FACTORY_ORDER_STATUS_PATH,
+        "factory_order_template_stock_ff_path": DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
+        "factory_order_template_inbound_factory_path": DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
+        "factory_order_template_inbound_ff_to_wb_path": DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH,
+        "factory_order_upload_stock_ff_path": DEFAULT_FACTORY_ORDER_UPLOAD_STOCK_FF_PATH,
+        "factory_order_upload_inbound_factory_path": DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FACTORY_PATH,
+        "factory_order_upload_inbound_ff_to_wb_path": DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FF_TO_WB_PATH,
+        "factory_order_calculate_path": DEFAULT_FACTORY_ORDER_CALCULATE_PATH,
+        "factory_order_recommendation_path": DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
     }
     template = OPERATOR_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     return (

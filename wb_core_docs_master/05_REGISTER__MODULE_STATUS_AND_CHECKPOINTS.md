@@ -84,6 +84,15 @@ Current repo-owned operator refresh surface:
 - server-side business timezone = `Asia/Yekaterinburg` for default `as_of_date`, `today_current` and operator-facing freshness dates
 - live daily auto-refresh = `wb-core-sheet-vitrina-refresh.timer` -> existing `POST /v1/sheet-vitrina-v1/refresh` at `11:00 Asia/Yekaterinburg` (`06:00 UTC` on current host) with `auto_load=true`, so the daily path now finishes as `refresh + load to live sheet`
 
+Current additional operator supply flow on the same page:
+- top-level tab `Расчёт поставок` keeps the existing page pattern and adds only the first bounded block `Заказ на фабрике`
+- all operator XLSX templates in this block use Russian headers; backend keeps the machine mapping server-side
+- `Остатки ФФ` is prefilled from current active SKU truth and requires exactly one row per active SKU
+- `Товары в пути от фабрики` and `Товары в пути от ФФ на Wildberries` are compact event-based templates: one row = one expected inbound, duplicate `nmId` is allowed there and summed only when the planned arrival date falls within the planning horizon
+- current repo had no other authoritative source for legacy parity term `FF -> WB inbound`, so the bounded flow uses a separate operator upload contract instead of silently dropping that coverage component
+- current live authoritative sales-history seam truthfully bounds `sales_avg_period_days` to `<= 7`; larger values are rejected server-side because the upstream source does not serve a deeper lookback window
+- calculation, result XLSX and `Общее количество / Расчётный вес / Расчётный объём` summary stay fully server-driven
+
 Current main-confirmed counts для этого flow:
 - prepare/upload package = `33 / 102 / 7`
 - current truth / ready snapshot displayed metrics = `95`

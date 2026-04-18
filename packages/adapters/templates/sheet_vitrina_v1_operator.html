@@ -10,6 +10,7 @@
       --page-bg: #f3f5f7;
       --panel-bg: #ffffff;
       --border: #d7dee7;
+      --border-strong: #c6d3e4;
       --text: #18212b;
       --muted: #637182;
       --accent: #0b63f6;
@@ -41,9 +42,45 @@
     }
 
     .page {
-      max-width: 760px;
+      max-width: 980px;
       margin: 0 auto;
       padding: 72px 24px;
+    }
+
+    .tab-strip {
+      display: flex;
+      gap: 12px;
+      margin-left: 8px;
+      margin-bottom: -2px;
+      flex-wrap: wrap;
+    }
+
+    .tab-button {
+      appearance: none;
+      border: 1px solid var(--border-strong);
+      border-bottom: 0;
+      border-radius: 18px 18px 0 0;
+      background: #f8fbff;
+      color: var(--muted);
+      font: inherit;
+      font-size: 15px;
+      font-weight: 700;
+      padding: 16px 22px;
+      cursor: pointer;
+      transition: background-color 120ms ease, color 120ms ease, transform 120ms ease;
+    }
+
+    .tab-button:hover {
+      background: #eef4ff;
+      color: var(--text);
+      transform: translateY(-1px);
+    }
+
+    .tab-button.is-active {
+      background: var(--panel-bg);
+      color: var(--text);
+      border-color: rgba(215, 222, 231, 0.9);
+      box-shadow: 0 -10px 24px rgba(17, 24, 39, 0.05);
     }
 
     .panel {
@@ -68,6 +105,14 @@
       font-size: clamp(28px, 4vw, 36px);
       line-height: 1.15;
       font-weight: 650;
+    }
+
+    .section-lead {
+      margin: 14px 0 0;
+      max-width: 720px;
+      font-size: 15px;
+      line-height: 1.6;
+      color: var(--muted);
     }
 
     code {
@@ -149,46 +194,7 @@
       justify-content: space-between;
       gap: 12px;
       margin-bottom: 16px;
-    }
-
-    .log-actions {
-      display: flex;
-      gap: 8px;
       flex-wrap: wrap;
-    }
-
-    .log-download-button {
-      appearance: none;
-      border: 1px solid var(--border);
-      background: #ffffff;
-      color: var(--text);
-      border-radius: 10px;
-      padding: 8px 12px;
-      font: inherit;
-      font-size: 13px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background-color 120ms ease, transform 120ms ease;
-    }
-
-    .log-download-button:hover:not(:disabled) {
-      background: #eef2f6;
-      transform: translateY(-1px);
-    }
-
-    .log-download-button:disabled {
-      cursor: not-allowed;
-      opacity: 0.55;
-      transform: none;
-    }
-
-    .log-viewport {
-      max-height: 420px;
-      overflow: auto;
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      background: #f7f9fc;
-      padding: 16px;
     }
 
     .status-row {
@@ -243,11 +249,13 @@
       margin: 0;
     }
 
-    .meta-grid div {
+    .meta-grid div,
+    .summary-grid div {
       min-width: 0;
     }
 
-    .meta-grid dt {
+    .meta-grid dt,
+    .summary-grid dt {
       margin: 0;
       font-size: 12px;
       text-transform: uppercase;
@@ -255,11 +263,59 @@
       color: var(--muted);
     }
 
-    .meta-grid dd {
+    .meta-grid dd,
+    .summary-grid dd {
       margin: 8px 0 0;
       font-size: 15px;
       font-weight: 600;
       word-break: break-word;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px;
+      margin: 0;
+    }
+
+    .log-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .log-download-button {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: #ffffff;
+      color: var(--text);
+      border-radius: 10px;
+      padding: 8px 12px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background-color 120ms ease, transform 120ms ease;
+    }
+
+    .log-download-button:hover:not(:disabled) {
+      background: #eef2f6;
+      transform: translateY(-1px);
+    }
+
+    .log-download-button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+      transform: none;
+    }
+
+    .log-viewport {
+      max-height: 420px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #f7f9fc;
+      padding: 16px;
     }
 
     .log-block {
@@ -270,7 +326,143 @@
       color: var(--text);
     }
 
-    @media (max-width: 640px) {
+    .operator-panel[hidden] {
+      display: none;
+    }
+
+    .factory-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 28px;
+    }
+
+    .factory-subgrid {
+      display: grid;
+      gap: 14px;
+    }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .field {
+      display: grid;
+      gap: 8px;
+    }
+
+    .field label {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      color: var(--muted);
+    }
+
+    .field input {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px 14px;
+      font: inherit;
+      font-size: 15px;
+      color: var(--text);
+      background: #ffffff;
+    }
+
+    .field input:focus {
+      outline: 2px solid rgba(11, 99, 246, 0.18);
+      outline-offset: 1px;
+      border-color: rgba(11, 99, 246, 0.38);
+    }
+
+    .field-note {
+      margin: 0;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+
+    .dataset-grid {
+      display: grid;
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .dataset-card {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: #ffffff;
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .dataset-card h3 {
+      margin: 0;
+      font-size: 17px;
+      font-weight: 650;
+    }
+
+    .dataset-actions {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .dataset-actions input[type="file"] {
+      max-width: 100%;
+      font: inherit;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .dataset-status {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+
+    .factory-actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 18px;
+    }
+
+    .factory-message {
+      margin: 0;
+      min-height: 22px;
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+
+    .factory-message.is-error {
+      color: var(--error-text);
+    }
+
+    .factory-message.is-success {
+      color: var(--success-text);
+    }
+
+    .summary-card {
+      display: grid;
+      gap: 16px;
+    }
+
+    .summary-card p {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.7;
+      color: var(--muted);
+    }
+
+    @media (max-width: 760px) {
       .page {
         padding: 28px 16px;
       }
@@ -279,11 +471,15 @@
         padding: 24px;
       }
 
-      .meta-grid {
+      .meta-grid,
+      .summary-grid,
+      .field-grid,
+      .factory-grid {
         grid-template-columns: 1fr;
       }
 
-      .action-button {
+      .action-button,
+      .tab-button {
         width: 100%;
       }
     }
@@ -291,91 +487,235 @@
 </head>
 <body>
   <main class="page">
+    <div class="tab-strip" role="tablist" aria-label="Операторские вкладки">
+      <button class="tab-button is-active" type="button" data-tab-button="vitrina" role="tab" aria-selected="true">Обновление данных витрины</button>
+      <button class="tab-button" type="button" data-tab-button="factory-order" role="tab" aria-selected="false">Расчёт поставок</button>
+    </div>
+
     <section class="panel">
-      <p class="eyebrow">sheet_vitrina_v1</p>
-      <h1>__SHEET_VITRINA_V1_OPERATOR_PAGE_TITLE__</h1>
-      <div class="actions">
-        <button id="refreshButton" class="action-button primary-button" type="button">Загрузить данные</button>
-        <button id="loadButton" class="action-button secondary-button" type="button">Отправить данные</button>
-      </div>
+      <section class="operator-panel" data-tab-panel="vitrina">
+        <p class="eyebrow">sheet_vitrina_v1</p>
+        <h1>__SHEET_VITRINA_V1_OPERATOR_PAGE_TITLE__</h1>
+        <div class="actions">
+          <button id="refreshButton" class="action-button primary-button" type="button">Загрузить данные</button>
+          <button id="loadButton" class="action-button secondary-button" type="button">Отправить данные</button>
+        </div>
 
-      <div class="grid">
-        <section class="block" aria-labelledby="status-title">
-          <h2 id="status-title" class="block-title">Статус</h2>
-          <div class="status-row">
-            <span class="status-label">Состояние</span>
-            <span id="stateBadge" class="badge is-idle">ожидание</span>
-          </div>
-          <dl class="meta-grid">
-            <div>
-              <dt>Дата среза</dt>
-              <dd id="asOfDate">-</dd>
+        <div class="grid">
+          <section class="block" aria-labelledby="status-title">
+            <h2 id="status-title" class="block-title">Статус</h2>
+            <div class="status-row">
+              <span class="status-label">Состояние</span>
+              <span id="stateBadge" class="badge is-idle">ожидание</span>
             </div>
-            <div>
-              <dt>Колонки дат</dt>
-              <dd id="dateColumns">-</dd>
-            </div>
-            <div>
-              <dt>Обновлено</dt>
-              <dd id="refreshedAt">-</dd>
-            </div>
-            <div>
-              <dt>Строки DATA_VITRINA</dt>
-              <dd id="dataRows">-</dd>
-            </div>
-            <div>
-              <dt>Строки STATUS</dt>
-              <dd id="statusRows">-</dd>
-            </div>
-          </dl>
-        </section>
+            <dl class="meta-grid">
+              <div>
+                <dt>Дата среза</dt>
+                <dd id="asOfDate">-</dd>
+              </div>
+              <div>
+                <dt>Колонки дат</dt>
+                <dd id="dateColumns">-</dd>
+              </div>
+              <div>
+                <dt>Обновлено</dt>
+                <dd id="refreshedAt">-</dd>
+              </div>
+              <div>
+                <dt>Строки DATA_VITRINA</dt>
+                <dd id="dataRows">-</dd>
+              </div>
+              <div>
+                <dt>Строки STATUS</dt>
+                <dd id="statusRows">-</dd>
+              </div>
+            </dl>
+          </section>
 
-        <section class="block" aria-labelledby="server-title">
-          <h2 id="server-title" class="block-title">Сервер и расписание</h2>
-          <dl class="meta-grid">
-            <div>
-              <dt>Часовой пояс</dt>
-              <dd id="serverTimezone">-</dd>
-            </div>
-            <div>
-              <dt>Текущее время сервера</dt>
-              <dd id="serverNow">-</dd>
-            </div>
-            <div>
-              <dt>Автообновление</dt>
-              <dd id="serverAutoDescription">-</dd>
-            </div>
-            <div>
-              <dt>Последний автозапуск</dt>
-              <dd id="serverLastAutoRun">-</dd>
-            </div>
-            <div>
-              <dt>Статус последнего автозапуска</dt>
-              <dd id="serverLastAutoStatus">-</dd>
-            </div>
-            <div>
-              <dt>Последнее успешное автообновление</dt>
-              <dd id="serverLastAutoSuccess">-</dd>
-            </div>
-            <div>
-              <dt>Технический триггер</dt>
-              <dd id="serverTrigger">-</dd>
-            </div>
-          </dl>
-        </section>
+          <section class="block" aria-labelledby="server-title">
+            <h2 id="server-title" class="block-title">Сервер и расписание</h2>
+            <dl class="meta-grid">
+              <div>
+                <dt>Часовой пояс</dt>
+                <dd id="serverTimezone">-</dd>
+              </div>
+              <div>
+                <dt>Текущее время сервера</dt>
+                <dd id="serverNow">-</dd>
+              </div>
+              <div>
+                <dt>Автообновление</dt>
+                <dd id="serverAutoDescription">-</dd>
+              </div>
+              <div>
+                <dt>Последний автозапуск</dt>
+                <dd id="serverLastAutoRun">-</dd>
+              </div>
+              <div>
+                <dt>Статус последнего автозапуска</dt>
+                <dd id="serverLastAutoStatus">-</dd>
+              </div>
+              <div>
+                <dt>Последнее успешное автообновление</dt>
+                <dd id="serverLastAutoSuccess">-</dd>
+              </div>
+              <div>
+                <dt>Технический триггер</dt>
+                <dd id="serverTrigger">-</dd>
+              </div>
+            </dl>
+          </section>
 
-        <section class="block" aria-labelledby="log-title">
+          <section class="block" aria-labelledby="log-title">
+            <div class="block-header">
+              <h2 id="log-title" class="block-title">Лог</h2>
+              <div class="log-actions">
+                <button id="downloadButton" class="log-download-button" type="button" disabled>Скачать лог</button>
+              </div>
+            </div>
+            <div id="logViewport" class="log-viewport">
+              <pre id="logBlock" class="log-block">Читаем последний статус...</pre>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="operator-panel" data-tab-panel="factory-order" hidden>
+        <p class="eyebrow">sheet_vitrina_v1</p>
+        <h1>Расчёт поставок</h1>
+        <p class="section-lead">
+          Блок <strong>Заказ на фабрике</strong> считает рекомендацию server-side, использует текущий active SKU source,
+          актуальный <code>stock_total</code>, усреднение <code>orderCount</code> по закрытым дням и отдельные operator-managed XLSX-шаблоны с русскими заголовками.
+        </p>
+
+        <div class="factory-grid">
+          <section class="block summary-card" aria-labelledby="factory-settings-title">
+            <h2 id="factory-settings-title" class="block-title">Параметры расчёта</h2>
+            <div class="field-grid">
+              <div class="field">
+                <label for="prodLeadTimeDays">Срок производства, дней</label>
+                <input id="prodLeadTimeDays" type="number" min="1" step="1">
+              </div>
+              <div class="field">
+                <label for="leadTimeFactoryToFfDays">Срок фабрика → ФФ, дней</label>
+                <input id="leadTimeFactoryToFfDays" type="number" min="1" step="1">
+              </div>
+              <div class="field">
+                <label for="leadTimeFfToWbDays">Срок ФФ → Wildberries, дней</label>
+                <input id="leadTimeFfToWbDays" type="number" min="1" step="1">
+              </div>
+              <div class="field">
+                <label for="safetyDaysMp">Страховой запас MP, дней</label>
+                <input id="safetyDaysMp" type="number" min="0" step="1">
+              </div>
+              <div class="field">
+                <label for="safetyDaysFf">Страховой запас ФФ, дней</label>
+                <input id="safetyDaysFf" type="number" min="0" step="1">
+              </div>
+              <div class="field">
+                <label for="orderBatchQty">Размер партии, шт.</label>
+                <input id="orderBatchQty" type="number" min="1" step="1">
+              </div>
+              <div class="field">
+                <label for="reportDateOverride">Дата отчёта</label>
+                <input id="reportDateOverride" type="date">
+              </div>
+              <div class="field">
+                <label for="salesAvgPeriodDays">Период усреднения продаж, дней</label>
+                <input id="salesAvgPeriodDays" type="number" min="1" max="7" step="1" value="7">
+              </div>
+            </div>
+            <p class="field-note">
+              Если дата отчёта не указана, используется текущая business-date сервера. Для parity учитывается отдельный шаблон
+              <strong>«Товары в пути от ФФ на Wildberries»</strong>, потому что в текущем wb-core нет другого authoritative source для этого члена формулы.
+              Период усреднения продаж сейчас ограничен <strong>7</strong> закрытыми днями из-за live authoritative sales history source.
+            </p>
+          </section>
+
+          <section class="block summary-card" aria-labelledby="factory-summary-title">
+            <h2 id="factory-summary-title" class="block-title">Результат</h2>
+            <dl class="summary-grid">
+              <div>
+                <dt>Статус</dt>
+                <dd id="factoryResultStatus">-</dd>
+              </div>
+              <div>
+                <dt>Дата отчёта</dt>
+                <dd id="factoryResultReportDate">-</dd>
+              </div>
+              <div>
+                <dt>Горизонт, дней</dt>
+                <dd id="factoryResultHorizon">-</dd>
+              </div>
+              <div>
+                <dt>Результат обновлён</dt>
+                <dd id="factoryResultCalculatedAt">-</dd>
+              </div>
+            </dl>
+            <dl class="summary-grid">
+              <div>
+                <dt>Общее количество</dt>
+                <dd id="factoryTotalQty">-</dd>
+              </div>
+              <div>
+                <dt>Расчётный вес</dt>
+                <dd id="factoryTotalWeight">-</dd>
+              </div>
+              <div>
+                <dt>Расчётный объём</dt>
+                <dd id="factoryTotalVolume">-</dd>
+              </div>
+              <div>
+                <dt>Активных SKU</dt>
+                <dd id="factoryActiveSkuCount">-</dd>
+              </div>
+            </dl>
+            <p id="factoryCoverageNote" class="field-note">-</p>
+            <p id="factoryMessage" class="factory-message"></p>
+            <div class="factory-actions">
+              <button id="calculateFactoryOrderButton" class="action-button primary-button" type="button">Рассчитать заказ на фабрике</button>
+              <button id="downloadRecommendationButton" class="action-button secondary-button" type="button" disabled>Скачать рекомендацию</button>
+            </div>
+          </section>
+        </div>
+
+        <section class="block" aria-labelledby="dataset-title" style="margin-top: 28px;">
           <div class="block-header">
-            <h2 id="log-title" class="block-title">Лог</h2>
-            <div class="log-actions">
-              <button id="downloadButton" class="log-download-button" type="button" disabled>Скачать лог</button>
-            </div>
+            <h2 id="dataset-title" class="block-title">Операторские XLSX-шаблоны</h2>
           </div>
-          <div id="logViewport" class="log-viewport">
-            <pre id="logBlock" class="log-block">Читаем последний статус...</pre>
+          <div class="dataset-grid">
+            <article class="dataset-card">
+              <h3>Остатки ФФ</h3>
+              <p class="dataset-status" id="stockFfStatus">Читаем состояние...</p>
+              <div class="dataset-actions">
+                <button id="downloadStockFfTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон остатков ФФ</button>
+                <input id="stockFfFileInput" type="file" accept=".xlsx">
+                <button id="uploadStockFfButton" class="action-button secondary-button" type="button">Загрузить остатки ФФ</button>
+              </div>
+            </article>
+
+            <article class="dataset-card">
+              <h3>Товары в пути от фабрики</h3>
+              <p class="dataset-status" id="inboundFactoryStatus">Читаем состояние...</p>
+              <div class="dataset-actions">
+                <button id="downloadInboundFactoryTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон товаров в пути от фабрики</button>
+                <input id="inboundFactoryFileInput" type="file" accept=".xlsx">
+                <button id="uploadInboundFactoryButton" class="action-button secondary-button" type="button">Загрузить товары в пути от фабрики</button>
+              </div>
+            </article>
+
+            <article class="dataset-card">
+              <h3>Товары в пути от ФФ на Wildberries</h3>
+              <p class="dataset-status" id="inboundFfToWbStatus">Читаем состояние...</p>
+              <div class="dataset-actions">
+                <button id="downloadInboundFfToWbTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон товаров в пути от ФФ на Wildberries</button>
+                <input id="inboundFfToWbFileInput" type="file" accept=".xlsx">
+                <button id="uploadInboundFfToWbButton" class="action-button secondary-button" type="button">Загрузить товары в пути от ФФ на Wildberries</button>
+              </div>
+            </article>
           </div>
         </section>
-      </div>
+      </section>
     </section>
   </main>
 
@@ -383,6 +723,9 @@
   <script>
     (() => {
       const config = JSON.parse(document.getElementById("sheet-vitrina-v1-operator-config").textContent);
+      const tabButtons = Array.from(document.querySelectorAll("[data-tab-button]"));
+      const tabPanels = Array.from(document.querySelectorAll("[data-tab-panel]"));
+
       const refreshButton = document.getElementById("refreshButton");
       const loadButton = document.getElementById("loadButton");
       const stateBadge = document.getElementById("stateBadge");
@@ -401,6 +744,42 @@
       const downloadButton = document.getElementById("downloadButton");
       const logViewport = document.getElementById("logViewport");
       const logBlock = document.getElementById("logBlock");
+
+      const factoryFields = {
+        prod_lead_time_days: document.getElementById("prodLeadTimeDays"),
+        lead_time_factory_to_ff_days: document.getElementById("leadTimeFactoryToFfDays"),
+        lead_time_ff_to_wb_days: document.getElementById("leadTimeFfToWbDays"),
+        safety_days_mp: document.getElementById("safetyDaysMp"),
+        safety_days_ff: document.getElementById("safetyDaysFf"),
+        order_batch_qty: document.getElementById("orderBatchQty"),
+        report_date_override: document.getElementById("reportDateOverride"),
+        sales_avg_period_days: document.getElementById("salesAvgPeriodDays")
+      };
+      const factoryResultStatus = document.getElementById("factoryResultStatus");
+      const factoryResultReportDate = document.getElementById("factoryResultReportDate");
+      const factoryResultHorizon = document.getElementById("factoryResultHorizon");
+      const factoryResultCalculatedAt = document.getElementById("factoryResultCalculatedAt");
+      const factoryTotalQty = document.getElementById("factoryTotalQty");
+      const factoryTotalWeight = document.getElementById("factoryTotalWeight");
+      const factoryTotalVolume = document.getElementById("factoryTotalVolume");
+      const factoryActiveSkuCount = document.getElementById("factoryActiveSkuCount");
+      const factoryCoverageNote = document.getElementById("factoryCoverageNote");
+      const factoryMessage = document.getElementById("factoryMessage");
+      const calculateFactoryOrderButton = document.getElementById("calculateFactoryOrderButton");
+      const downloadRecommendationButton = document.getElementById("downloadRecommendationButton");
+      const stockFfStatus = document.getElementById("stockFfStatus");
+      const inboundFactoryStatus = document.getElementById("inboundFactoryStatus");
+      const inboundFfToWbStatus = document.getElementById("inboundFfToWbStatus");
+      const stockFfFileInput = document.getElementById("stockFfFileInput");
+      const inboundFactoryFileInput = document.getElementById("inboundFactoryFileInput");
+      const inboundFfToWbFileInput = document.getElementById("inboundFfToWbFileInput");
+      const downloadStockFfTemplateButton = document.getElementById("downloadStockFfTemplateButton");
+      const downloadInboundFactoryTemplateButton = document.getElementById("downloadInboundFactoryTemplateButton");
+      const downloadInboundFfToWbTemplateButton = document.getElementById("downloadInboundFfToWbTemplateButton");
+      const uploadStockFfButton = document.getElementById("uploadStockFfButton");
+      const uploadInboundFactoryButton = document.getElementById("uploadInboundFactoryButton");
+      const uploadInboundFfToWbButton = document.getElementById("uploadInboundFfToWbButton");
+
       const stateLabels = {
         idle: "ожидание",
         loading: "загрузка",
@@ -419,6 +798,22 @@
       };
       let activeJobId = null;
       let completedJob = null;
+      let recommendationDownloadPath = config.factory_order_recommendation_path || "";
+
+      function activateTab(tabName) {
+        tabButtons.forEach((button) => {
+          const selected = button.dataset.tabButton === tabName;
+          button.classList.toggle("is-active", selected);
+          button.setAttribute("aria-selected", selected ? "true" : "false");
+        });
+        tabPanels.forEach((panel) => {
+          panel.hidden = panel.dataset.tabPanel !== tabName;
+        });
+      }
+
+      tabButtons.forEach((button) => {
+        button.addEventListener("click", () => activateTab(button.dataset.tabButton));
+      });
 
       function setState(nextState) {
         stateBadge.textContent = stateLabels[nextState] || nextState;
@@ -435,7 +830,7 @@
       }
 
       function valueOrDash(value) {
-        return value ? String(value) : "-";
+        return value || value === 0 ? String(value) : "-";
       }
 
       function normalizeState(value, fallback) {
@@ -576,6 +971,62 @@
         downloadButton.disabled = !completedJob;
       }
 
+      function setFactoryMessage(text, stateClass) {
+        factoryMessage.textContent = text || "";
+        factoryMessage.className = "factory-message" + (stateClass ? " is-" + stateClass : "");
+      }
+
+      function readFieldValues() {
+        const payload = {};
+        Object.keys(factoryFields).forEach((key) => {
+          payload[key] = factoryFields[key].value;
+        });
+        return payload;
+      }
+
+      function renderFactoryDatasetStatus(target, state) {
+        if (!state || state.status !== "uploaded") {
+          target.textContent = "Не загружено.";
+          return;
+        }
+        const uploadedAt = valueOrDash(state.uploaded_at).replace("T", " ");
+        target.textContent = "Загружено: " + uploadedAt + " · строк: " + valueOrDash(state.row_count);
+      }
+
+      function renderFactoryResult(result) {
+        if (!result) {
+          factoryResultStatus.textContent = "ещё не рассчитывался";
+          factoryResultReportDate.textContent = "-";
+          factoryResultHorizon.textContent = "-";
+          factoryResultCalculatedAt.textContent = "-";
+          factoryTotalQty.textContent = "-";
+          factoryTotalWeight.textContent = "-";
+          factoryTotalVolume.textContent = "-";
+          downloadRecommendationButton.disabled = true;
+          return;
+        }
+        factoryResultStatus.textContent = valueOrDash(result.status);
+        factoryResultReportDate.textContent = valueOrDash(result.report_date);
+        factoryResultHorizon.textContent = valueOrDash(result.horizon_days);
+        factoryResultCalculatedAt.textContent = valueOrDash(result.calculated_at).replace("T", " ");
+        const summary = result.summary || {};
+        factoryTotalQty.textContent = valueOrDash(summary.total_qty);
+        factoryTotalWeight.textContent = valueOrDash(summary.estimated_weight);
+        factoryTotalVolume.textContent = valueOrDash(summary.estimated_volume);
+        recommendationDownloadPath = result.recommendation_download_path || config.factory_order_recommendation_path;
+        downloadRecommendationButton.disabled = !recommendationDownloadPath;
+      }
+
+      function renderFactoryStatus(payload) {
+        const datasets = payload && payload.datasets ? payload.datasets : {};
+        factoryActiveSkuCount.textContent = valueOrDash(payload && payload.active_sku_count);
+        factoryCoverageNote.textContent = valueOrDash(payload && payload.coverage_contract_note);
+        renderFactoryDatasetStatus(stockFfStatus, datasets.stock_ff);
+        renderFactoryDatasetStatus(inboundFactoryStatus, datasets.inbound_factory_to_ff);
+        renderFactoryDatasetStatus(inboundFfToWbStatus, datasets.inbound_ff_to_wb);
+        renderFactoryResult(payload ? payload.last_result : null);
+      }
+
       async function readJson(response) {
         const raw = await response.text();
         if (!raw) {
@@ -625,6 +1076,25 @@
         }
       }
 
+      async function loadFactoryStatus() {
+        try {
+          const response = await fetch(config.factory_order_status_path, {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          renderFactoryStatus(payload);
+        } catch (error) {
+          setFactoryMessage(
+            "Не удалось прочитать состояние расчёта поставок: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        }
+      }
+
       async function pollJob(jobId) {
         while (true) {
           const response = await fetch(config.job_path + "?job_id=" + encodeURIComponent(jobId), {
@@ -670,11 +1140,7 @@
           const finalJob = await pollJob(payload.job_id);
           setCompletedJob(finalJob);
           if (finalJob.result) {
-            if (actionName === "refresh") {
-              renderSnapshotFields(finalJob.result);
-            } else if (actionName === "load") {
-              renderSnapshotFields(finalJob.result);
-            }
+            renderSnapshotFields(finalJob.result);
           }
         } catch (error) {
           renderError(
@@ -732,12 +1198,163 @@
         }
       }
 
+      async function uploadFactoryDataset(path, fileInput, busyButton, busyLabel) {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) {
+          setFactoryMessage("Сначала выберите XLSX-файл для загрузки.", "error");
+          return;
+        }
+        const idleLabel = busyButton.textContent;
+        busyButton.disabled = true;
+        busyButton.textContent = busyLabel;
+        setFactoryMessage("Загружаем файл на сервер...", "");
+        try {
+          const formData = new FormData();
+          formData.append("file", file, file.name);
+          const response = await fetch(path, {
+            method: "POST",
+            body: formData
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          setFactoryMessage(valueOrDash(payload.message), "success");
+          fileInput.value = "";
+          await loadFactoryStatus();
+        } catch (error) {
+          setFactoryMessage(
+            "Загрузка файла завершилась с ошибкой: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          busyButton.disabled = false;
+          busyButton.textContent = idleLabel;
+        }
+      }
+
+      async function downloadBinary(url, fallbackName, successMessage) {
+        setFactoryMessage("Готовим файл...", "");
+        try {
+          const response = await fetch(url, {
+            method: "GET"
+          });
+          if (!response.ok) {
+            const payload = await readJson(response);
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          const blob = await response.blob();
+          const disposition = response.headers.get("Content-Disposition");
+          const downloadName = filenameFromDisposition(disposition) || fallbackName;
+          const objectUrl = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = objectUrl;
+          link.download = downloadName;
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          URL.revokeObjectURL(objectUrl);
+          setFactoryMessage(successMessage, "success");
+        } catch (error) {
+          setFactoryMessage(
+            "Не удалось скачать XLSX: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        }
+      }
+
+      async function calculateFactoryOrder() {
+        calculateFactoryOrderButton.disabled = true;
+        calculateFactoryOrderButton.textContent = "Считаем...";
+        downloadRecommendationButton.disabled = true;
+        setFactoryMessage("Выполняем расчёт на сервере...", "");
+        try {
+          const response = await fetch(config.factory_order_calculate_path, {
+            method: "POST",
+            headers: {
+              "Accept": "application/json",
+              "Content-Type": "application/json; charset=utf-8"
+            },
+            body: JSON.stringify(readFieldValues())
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          recommendationDownloadPath = payload.recommendation_download_path || config.factory_order_recommendation_path;
+          renderFactoryResult(payload);
+          setFactoryMessage("Расчёт завершён. Рекомендация готова к скачиванию.", "success");
+          await loadFactoryStatus();
+        } catch (error) {
+          setFactoryMessage(
+            "Расчёт завершился с ошибкой: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          calculateFactoryOrderButton.disabled = false;
+          calculateFactoryOrderButton.textContent = "Рассчитать заказ на фабрике";
+        }
+      }
+
+      async function downloadRecommendation() {
+        if (!recommendationDownloadPath) {
+          setFactoryMessage("Рекомендация ещё не подготовлена.", "error");
+          return;
+        }
+        await downloadBinary(
+          recommendationDownloadPath,
+          "sheet-vitrina-v1-factory-order-recommendation.xlsx",
+          "Рекомендация скачана."
+        );
+      }
+
       refreshButton.addEventListener("click", () => runAction("refresh"));
       loadButton.addEventListener("click", () => runAction("load"));
       downloadButton.addEventListener("click", downloadCurrentLog);
+
+      downloadStockFfTemplateButton.addEventListener("click", () => downloadBinary(
+        config.factory_order_template_stock_ff_path,
+        "sheet-vitrina-v1-factory-order-stock-ff-template.xlsx",
+        "Шаблон остатков ФФ скачан."
+      ));
+      downloadInboundFactoryTemplateButton.addEventListener("click", () => downloadBinary(
+        config.factory_order_template_inbound_factory_path,
+        "sheet-vitrina-v1-factory-order-inbound-factory-template.xlsx",
+        "Шаблон товаров в пути от фабрики скачан."
+      ));
+      downloadInboundFfToWbTemplateButton.addEventListener("click", () => downloadBinary(
+        config.factory_order_template_inbound_ff_to_wb_path,
+        "sheet-vitrina-v1-factory-order-inbound-ff-to-wb-template.xlsx",
+        "Шаблон товаров в пути от ФФ на Wildberries скачан."
+      ));
+
+      uploadStockFfButton.addEventListener("click", () => uploadFactoryDataset(
+        config.factory_order_upload_stock_ff_path,
+        stockFfFileInput,
+        uploadStockFfButton,
+        "Загружаем..."
+      ));
+      uploadInboundFactoryButton.addEventListener("click", () => uploadFactoryDataset(
+        config.factory_order_upload_inbound_factory_path,
+        inboundFactoryFileInput,
+        uploadInboundFactoryButton,
+        "Загружаем..."
+      ));
+      uploadInboundFfToWbButton.addEventListener("click", () => uploadFactoryDataset(
+        config.factory_order_upload_inbound_ff_to_wb_path,
+        inboundFfToWbFileInput,
+        uploadInboundFfToWbButton,
+        "Загружаем..."
+      ));
+
+      calculateFactoryOrderButton.addEventListener("click", calculateFactoryOrder);
+      downloadRecommendationButton.addEventListener("click", downloadRecommendation);
+
+      activateTab("vitrina");
       setActionState(null);
       setCompletedJob(null);
       loadStatus();
+      loadFactoryStatus();
     })();
   </script>
 </body>
