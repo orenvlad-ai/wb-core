@@ -66,6 +66,9 @@ DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FF_TO_WB_PATH = (
 )
 DEFAULT_FACTORY_ORDER_CALCULATE_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/calculate"
 DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
+DEFAULT_WB_REGIONAL_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/status"
+DEFAULT_WB_REGIONAL_CALCULATE_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/calculate"
+DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX = "/v1/sheet-vitrina-v1/supply/wb-regional/district"
 DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
 OPERATOR_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_operator.html"
 
@@ -392,6 +395,27 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, result)
                 return
 
+            if parsed.path == DEFAULT_WB_REGIONAL_CALCULATE_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_wb_regional_calculate_request(payload)
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"wb regional supply runtime failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, _with_wb_regional_urls(result))
+                return
+
             _write_json_response(
                 self,
                 HTTPStatus.NOT_FOUND,
@@ -428,6 +452,22 @@ def _build_handler(
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, _with_factory_order_dataset_urls(payload))
+                return
+
+            if parsed.path == DEFAULT_WB_REGIONAL_STATUS_PATH:
+                try:
+                    payload = entrypoint.handle_wb_regional_status_request()
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"wb regional supply status runtime failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, _with_wb_regional_urls(payload))
                 return
 
             if parsed.path in {
@@ -469,6 +509,35 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"factory order recommendation runtime failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    workbook_bytes,
+                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    filename=filename,
+                    as_attachment=True,
+                )
+                return
+
+            if (
+                parsed.path.startswith(DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX + "/")
+                and parsed.path.endswith(".xlsx")
+            ):
+                try:
+                    district_key = _resolve_wb_regional_district_from_download_path(parsed.path)
+                    workbook_bytes, filename = entrypoint.handle_wb_regional_district_recommendation_request(
+                        district_key
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"wb regional supply district runtime failed: {exc}"},
                     )
                     return
                 _write_binary_response(
@@ -865,6 +934,16 @@ def _resolve_factory_order_dataset_type_from_delete_path(path: str) -> str:
     return dataset_type
 
 
+def _resolve_wb_regional_district_from_download_path(path: str) -> str:
+    prefix = DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX + "/"
+    if not path.startswith(prefix) or not path.endswith(".xlsx"):
+        raise ValueError(f"unsupported wb-regional district path: {path}")
+    district_key = path[len(prefix):-5].strip().lower()
+    if not district_key:
+        raise ValueError(f"unsupported wb-regional district path: {path}")
+    return district_key
+
+
 def _http_status_for_result(result: RegistryUploadResult) -> HTTPStatus:
     if result.status == "accepted":
         return HTTPStatus.OK
@@ -923,11 +1002,10 @@ def _write_text_response(
     handler.send_response(status.value)
     handler.send_header("Content-Type", "text/plain; charset=utf-8")
     if filename:
-        disposition = "attachment" if as_attachment else "inline"
-        handler.send_header(
-            "Content-Disposition",
-            f'{disposition}; filename="{filename}"',
-        )
+        handler.send_header("Content-Disposition", _build_content_disposition(
+            "attachment" if as_attachment else "inline",
+            filename,
+        ))
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
@@ -945,11 +1023,21 @@ def _write_binary_response(
     handler.send_response(status.value)
     handler.send_header("Content-Type", content_type)
     if filename:
-        disposition = "attachment" if as_attachment else "inline"
-        handler.send_header("Content-Disposition", f'{disposition}; filename="{filename}"')
+        handler.send_header("Content-Disposition", _build_content_disposition(
+            "attachment" if as_attachment else "inline",
+            filename,
+        ))
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def _build_content_disposition(disposition: str, filename: str) -> str:
+    raw_filename = str(filename or "").strip() or "download.bin"
+    ascii_fallback = "".join(char if ord(char) < 128 and char not in {'"', "\\"} else "_" for char in raw_filename)
+    ascii_fallback = ascii_fallback or "download.bin"
+    encoded = urllib_parse.quote(raw_filename, safe="")
+    return f"{disposition}; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
 
 
 def _build_sheet_job_url(job_path: str, job_id: str) -> str:
@@ -977,9 +1065,28 @@ def _with_sheet_job_urls(payload: Mapping[str, Any], job_path: str) -> dict[str,
 
 def _with_factory_order_dataset_urls(payload: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
-    datasets = normalized.get("datasets")
+    normalized["datasets"] = _map_dataset_urls(normalized.get("datasets"))
+    return normalized
+
+
+def _with_wb_regional_urls(payload: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    normalized["shared_datasets"] = _map_dataset_urls(normalized.get("shared_datasets"))
+    if isinstance(normalized.get("districts"), list):
+        normalized["districts"] = _map_wb_regional_districts(normalized.get("districts"))
+    last_result = normalized.get("last_result")
+    if isinstance(last_result, Mapping):
+        nested = dict(last_result)
+        nested["shared_datasets"] = _map_dataset_urls(nested.get("shared_datasets"))
+        if isinstance(nested.get("districts"), list):
+            nested["districts"] = _map_wb_regional_districts(nested.get("districts"))
+        normalized["last_result"] = nested
+    return normalized
+
+
+def _map_dataset_urls(datasets: Any) -> Any:
     if not isinstance(datasets, Mapping):
-        return normalized
+        return datasets
     mapped: dict[str, Any] = {}
     for dataset_type, raw_value in datasets.items():
         if not isinstance(raw_value, Mapping):
@@ -987,17 +1094,29 @@ def _with_factory_order_dataset_urls(payload: Mapping[str, Any]) -> dict[str, An
             continue
         value = dict(raw_value)
         delete_path = _factory_order_delete_path_for_dataset(str(dataset_type))
-        if delete_path and str(value.get("status", "") or "") == "uploaded":
-            value["delete_path"] = delete_path
-        if delete_path and str(value.get("status", "") or "") != "uploaded":
-            value["delete_path"] = ""
-        if bool(value.get("file_available")):
-            value["download_path"] = _factory_order_uploaded_path_for_dataset(str(dataset_type))
-        else:
-            value["download_path"] = ""
+        value["delete_path"] = delete_path if delete_path and str(value.get("status", "") or "") == "uploaded" else ""
+        value["download_path"] = (
+            _factory_order_uploaded_path_for_dataset(str(dataset_type))
+            if bool(value.get("file_available"))
+            else ""
+        )
         mapped[str(dataset_type)] = value
-    normalized["datasets"] = mapped
-    return normalized
+    return mapped
+
+
+def _map_wb_regional_districts(items: Any) -> Any:
+    if not isinstance(items, list):
+        return items
+    mapped: list[Any] = []
+    for raw_value in items:
+        if not isinstance(raw_value, Mapping):
+            mapped.append(raw_value)
+            continue
+        value = dict(raw_value)
+        district_key = str(value.get("district_key", "") or "").strip().lower()
+        value["download_path"] = _wb_regional_district_download_path_for_key(district_key)
+        mapped.append(value)
+    return mapped
 
 
 def _factory_order_uploaded_path_for_dataset(dataset_type: str) -> str:
@@ -1016,6 +1135,13 @@ def _factory_order_delete_path_for_dataset(dataset_type: str) -> str:
         DATASET_INBOUND_FF_TO_WB: DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FF_TO_WB_PATH,
     }
     return mapping.get(dataset_type, "")
+
+
+def _wb_regional_district_download_path_for_key(district_key: str) -> str:
+    normalized = str(district_key or "").strip().lower()
+    if not normalized:
+        return ""
+    return f"{DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX}/{normalized}.xlsx"
 
 
 def _render_sheet_vitrina_operator_ui(
@@ -1040,6 +1166,8 @@ def _render_sheet_vitrina_operator_ui(
         "factory_order_upload_inbound_ff_to_wb_path": DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FF_TO_WB_PATH,
         "factory_order_calculate_path": DEFAULT_FACTORY_ORDER_CALCULATE_PATH,
         "factory_order_recommendation_path": DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
+        "wb_regional_status_path": DEFAULT_WB_REGIONAL_STATUS_PATH,
+        "wb_regional_calculate_path": DEFAULT_WB_REGIONAL_CALCULATE_PATH,
     }
     template = OPERATOR_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     return (

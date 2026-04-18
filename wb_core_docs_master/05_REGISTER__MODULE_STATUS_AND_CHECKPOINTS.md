@@ -85,7 +85,8 @@ Current repo-owned operator refresh surface:
 - live daily auto-refresh = `wb-core-sheet-vitrina-refresh.timer` -> existing `POST /v1/sheet-vitrina-v1/refresh` at `11:00 Asia/Yekaterinburg` (`06:00 UTC` on current host) with `auto_load=true`, so the daily path now finishes as `refresh + load to live sheet`
 
 Current additional operator supply flow on the same page:
-- top-level tab `Расчёт поставок` keeps the existing page pattern and adds only the first bounded block `Заказ на фабрике`
+- top-level tab `Расчёт поставок` keeps the existing page pattern and now materializes two bounded sibling blocks: `Заказ на фабрике` and `Поставка на Wildberries по федеральным округам`
+- `Остатки ФФ` is a shared server-owned dataset block for both calculations; the same uploaded workbook/state is reused, not duplicated
 - all operator XLSX templates in this block use Russian headers; backend keeps the machine mapping server-side
 - `Остатки ФФ` is prefilled from current active SKU truth and requires exactly one row per active SKU
 - `Товары в пути от фабрики` and `Товары в пути от ФФ на Wildberries` are compact event-based templates: one row = one expected inbound, duplicate `nmId` is allowed there and summed only when the planned arrival date falls within the planning horizon
@@ -98,6 +99,8 @@ Current additional operator supply flow on the same page:
 - future exact-date sales history continues to materialize through existing refresh/runtime flow, so the historical bootstrap is bounded and not a recurring operator step
 - XLSX generation is hardened so operator templates and recommendation files open as standard XLSX workbooks without a repair path
 - calculation, result XLSX and `Общее количество / Расчётный вес / Расчётный объём` summary stay fully server-driven
+- regional block adds server-side district allocation with truthful `deficit = full_recommendation - allocated_qty`, a compact per-district summary table and one separate XLSX file per canonical district key
+- current bounded regional methodology uses total SKU `orderCount` plus current district stocks and then applies legacy box allocation against shared `stock_ff`; inbound `ФФ -> WB` is intentionally not materialized for this block in the current checkpoint
 
 Current main-confirmed counts для этого flow:
 - prepare/upload package = `33 / 102 / 7`

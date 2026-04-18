@@ -330,6 +330,47 @@
       display: none;
     }
 
+    .subsection-strip {
+      display: flex;
+      gap: 10px;
+      margin-top: 28px;
+      flex-wrap: wrap;
+    }
+
+    .subsection-button {
+      appearance: none;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: #f7f9fc;
+      color: var(--muted);
+      font: inherit;
+      font-size: 14px;
+      font-weight: 700;
+      padding: 11px 18px;
+      cursor: pointer;
+      transition: background-color 120ms ease, color 120ms ease, transform 120ms ease;
+    }
+
+    .subsection-button:hover {
+      background: #eef4ff;
+      color: var(--text);
+      transform: translateY(-1px);
+    }
+
+    .subsection-button.is-active {
+      background: rgba(11, 99, 246, 0.1);
+      border-color: rgba(11, 99, 246, 0.28);
+      color: #0b4fd0;
+    }
+
+    .supply-panel {
+      margin-top: 28px;
+    }
+
+    .supply-panel[hidden] {
+      display: none;
+    }
+
     .factory-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -497,6 +538,22 @@
       color: var(--success-text);
     }
 
+    .section-message {
+      margin: 0;
+      min-height: 22px;
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+
+    .section-message.is-error {
+      color: var(--error-text);
+    }
+
+    .section-message.is-success {
+      color: var(--success-text);
+    }
+
     .summary-card {
       display: grid;
       gap: 16px;
@@ -506,6 +563,70 @@
       margin: 0;
       font-size: 14px;
       line-height: 1.7;
+      color: var(--muted);
+    }
+
+    .district-table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: #ffffff;
+    }
+
+    .district-table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 520px;
+    }
+
+    .district-table th,
+    .district-table td {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      font-size: 14px;
+    }
+
+    .district-table th {
+      font-size: 12px;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--muted);
+      background: #f7f9fc;
+    }
+
+    .district-table tbody tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .district-downloads {
+      display: grid;
+      gap: 10px;
+    }
+
+    .district-download-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .district-download-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: #ffffff;
+      padding: 14px 16px;
+    }
+
+    .district-download-item strong {
+      font-size: 14px;
+    }
+
+    .district-download-item span {
+      font-size: 13px;
       color: var(--muted);
     }
 
@@ -525,8 +646,13 @@
         grid-template-columns: 1fr;
       }
 
+      .district-table {
+        min-width: 0;
+      }
+
       .action-button,
-      .tab-button {
+      .tab-button,
+      .subsection-button {
         width: 100%;
       }
     }
@@ -631,106 +757,19 @@
         <p class="eyebrow">sheet_vitrina_v1</p>
         <h1>Расчёт поставок</h1>
         <p class="section-lead">
-          Блок <strong>Заказ на фабрике</strong> считает рекомендацию server-side, использует текущий active SKU source,
-          актуальный <code>stock_total</code>, усреднение <code>orderCount</code> по закрытым дням и отдельные operator-managed XLSX-шаблоны с русскими заголовками.
+          Во вкладке materialized два sibling-раздела: <strong>Заказ на фабрике</strong> и
+          <strong>Поставка на Wildberries по федеральным округам</strong>. Оба расчёта идут server-side и используют
+          общий операторский файл <strong>«Остатки ФФ»</strong> без дублирования state.
         </p>
 
-        <div class="factory-grid">
-          <section class="block summary-card" aria-labelledby="factory-settings-title">
-            <h2 id="factory-settings-title" class="block-title">Параметры расчёта</h2>
-            <div class="field-grid">
-              <div class="field">
-                <label for="prodLeadTimeDays">Срок производства, дней</label>
-                <input id="prodLeadTimeDays" type="number" min="1" step="1">
-              </div>
-              <div class="field">
-                <label for="leadTimeFactoryToFfDays">Срок фабрика → ФФ, дней</label>
-                <input id="leadTimeFactoryToFfDays" type="number" min="1" step="1">
-              </div>
-              <div class="field">
-                <label for="leadTimeFfToWbDays">Срок ФФ → Wildberries, дней</label>
-                <input id="leadTimeFfToWbDays" type="number" min="1" step="1">
-              </div>
-              <div class="field">
-                <label for="safetyDaysMp">Страховой запас MP, дней</label>
-                <input id="safetyDaysMp" type="number" min="0" step="1">
-              </div>
-              <div class="field">
-                <label for="safetyDaysFf">Страховой запас ФФ, дней</label>
-                <input id="safetyDaysFf" type="number" min="0" step="1">
-              </div>
-              <div class="field">
-                <label for="orderBatchQty">Кратность штук в коробке</label>
-                <input id="orderBatchQty" type="number" min="1" step="1">
-              </div>
-              <div class="field">
-                <label for="reportDateOverride">Дата отчёта</label>
-                <input id="reportDateOverride" type="date">
-              </div>
-              <div class="field">
-                <label for="salesAvgPeriodDays">Период усреднения продаж, дней</label>
-                <input id="salesAvgPeriodDays" type="number" min="1" step="1" value="7">
-              </div>
-            </div>
-            <p class="field-note">
-              Если дата отчёта не указана, используется текущая business-date сервера. Для parity учитывается отдельный шаблон
-              <strong>«Товары в пути от ФФ на Wildberries»</strong>, потому что в текущем wb-core нет другого authoritative source для этого члена формулы.
-              Inbound-файлы необязательны: если они не загружены, соответствующий inbound будет учтён как <strong>0</strong>.
-              Если requested период продаж выходит за current authoritative history boundary, сервер вернёт явную ошибку с точным диапазоном.
-            </p>
-          </section>
-
-          <section class="block summary-card" aria-labelledby="factory-summary-title">
-            <h2 id="factory-summary-title" class="block-title">Результат</h2>
-            <dl class="summary-grid">
-              <div>
-                <dt>Статус</dt>
-                <dd id="factoryResultStatus">-</dd>
-              </div>
-              <div>
-                <dt>Дата отчёта</dt>
-                <dd id="factoryResultReportDate">-</dd>
-              </div>
-              <div>
-                <dt>Горизонт, дней</dt>
-                <dd id="factoryResultHorizon">-</dd>
-              </div>
-              <div>
-                <dt>Результат обновлён</dt>
-                <dd id="factoryResultCalculatedAt">-</dd>
-              </div>
-            </dl>
-            <dl class="summary-grid">
-              <div>
-                <dt>Общее количество</dt>
-                <dd id="factoryTotalQty">-</dd>
-              </div>
-              <div>
-                <dt>Расчётный вес</dt>
-                <dd id="factoryTotalWeight">-</dd>
-              </div>
-              <div>
-                <dt>Расчётный объём</dt>
-                <dd id="factoryTotalVolume">-</dd>
-              </div>
-              <div>
-                <dt>Активных SKU</dt>
-                <dd id="factoryActiveSkuCount">-</dd>
-              </div>
-            </dl>
-            <p id="factoryCoverageNote" class="field-note">-</p>
-            <p id="factoryMessage" class="factory-message"></p>
-            <div class="factory-actions">
-              <button id="calculateFactoryOrderButton" class="action-button primary-button" type="button">Рассчитать заказ на фабрике</button>
-              <button id="downloadRecommendationButton" class="action-button secondary-button" type="button" disabled>Скачать рекомендацию</button>
-            </div>
-          </section>
-        </div>
-
-        <section class="block" aria-labelledby="dataset-title" style="margin-top: 28px;">
+        <section class="block" aria-labelledby="shared-stock-title" style="margin-top: 28px;">
           <div class="block-header">
-            <h2 id="dataset-title" class="block-title">Операторские XLSX-шаблоны</h2>
+            <h2 id="shared-stock-title" class="block-title">Общий вход для двух расчётов</h2>
           </div>
+          <p class="field-note">
+            Файл <strong>«Остатки ФФ»</strong> используется одновременно в расчёте заказа на фабрике и в расчёте поставок по федеральным округам.
+            Здесь хранится один shared server-side state без второй отдельной сущности.
+          </p>
           <div class="dataset-grid">
             <article class="dataset-card">
               <h3>Остатки ФФ</h3>
@@ -744,36 +783,259 @@
                 <input id="stockFfFileInput" type="file" accept=".xlsx">
                 <button id="uploadStockFfButton" class="action-button secondary-button" type="button">Загрузить остатки ФФ</button>
               </div>
-            </article>
-
-            <article class="dataset-card">
-              <h3>Товары в пути от фабрики</h3>
-              <p class="dataset-status" id="inboundFactoryStatus">Читаем состояние...</p>
-              <div class="dataset-current-file" id="inboundFactoryCurrentFile" hidden>
-                <a id="inboundFactoryCurrentFileLink" class="dataset-file-link" href="#">Скачать загруженный файл</a>
-                <button id="deleteInboundFactoryButton" class="dataset-delete-button" type="button">Удалить этот файл</button>
-              </div>
-              <div class="dataset-actions">
-                <button id="downloadInboundFactoryTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон товаров в пути от фабрики</button>
-                <input id="inboundFactoryFileInput" type="file" accept=".xlsx">
-                <button id="uploadInboundFactoryButton" class="action-button secondary-button" type="button">Загрузить товары в пути от фабрики</button>
-              </div>
-            </article>
-
-            <article class="dataset-card">
-              <h3>Товары в пути от ФФ на Wildberries</h3>
-              <p class="dataset-status" id="inboundFfToWbStatus">Читаем состояние...</p>
-              <div class="dataset-current-file" id="inboundFfToWbCurrentFile" hidden>
-                <a id="inboundFfToWbCurrentFileLink" class="dataset-file-link" href="#">Скачать загруженный файл</a>
-                <button id="deleteInboundFfToWbButton" class="dataset-delete-button" type="button">Удалить этот файл</button>
-              </div>
-              <div class="dataset-actions">
-                <button id="downloadInboundFfToWbTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон товаров в пути от ФФ на Wildberries</button>
-                <input id="inboundFfToWbFileInput" type="file" accept=".xlsx">
-                <button id="uploadInboundFfToWbButton" class="action-button secondary-button" type="button">Загрузить товары в пути от ФФ на Wildberries</button>
-              </div>
+              <p id="sharedStockMessage" class="section-message"></p>
             </article>
           </div>
+        </section>
+
+        <div class="subsection-strip" role="tablist" aria-label="Внутренние разделы расчёта поставок">
+          <button class="subsection-button is-active" type="button" data-supply-section-button="factory" aria-selected="true">Заказ на фабрике</button>
+          <button class="subsection-button" type="button" data-supply-section-button="regional" aria-selected="false">Поставка на Wildberries по федеральным округам</button>
+        </div>
+
+        <section class="supply-panel" data-supply-section-panel="factory">
+          <div class="factory-grid">
+            <section class="block summary-card" aria-labelledby="factory-settings-title">
+              <h2 id="factory-settings-title" class="block-title">Параметры расчёта</h2>
+              <div class="field-grid">
+                <div class="field">
+                  <label for="prodLeadTimeDays">Срок производства, дней</label>
+                  <input id="prodLeadTimeDays" type="number" min="1" step="1">
+                </div>
+                <div class="field">
+                  <label for="leadTimeFactoryToFfDays">Срок фабрика → ФФ, дней</label>
+                  <input id="leadTimeFactoryToFfDays" type="number" min="1" step="1">
+                </div>
+                <div class="field">
+                  <label for="leadTimeFfToWbDays">Срок ФФ → Wildberries, дней</label>
+                  <input id="leadTimeFfToWbDays" type="number" min="1" step="1">
+                </div>
+                <div class="field">
+                  <label for="safetyDaysMp">Страховой запас MP, дней</label>
+                  <input id="safetyDaysMp" type="number" min="0" step="1">
+                </div>
+                <div class="field">
+                  <label for="safetyDaysFf">Страховой запас ФФ, дней</label>
+                  <input id="safetyDaysFf" type="number" min="0" step="1">
+                </div>
+                <div class="field">
+                  <label for="orderBatchQty">Кратность штук в коробке</label>
+                  <input id="orderBatchQty" type="number" min="1" step="1">
+                </div>
+                <div class="field">
+                  <label for="reportDateOverride">Дата отчёта</label>
+                  <input id="reportDateOverride" type="date">
+                </div>
+                <div class="field">
+                  <label for="salesAvgPeriodDays">Период усреднения продаж, дней</label>
+                  <input id="salesAvgPeriodDays" type="number" min="1" step="1" value="7">
+                </div>
+              </div>
+              <p class="field-note">
+                Если дата отчёта не указана, используется текущая business-date сервера. Для parity учитывается отдельный шаблон
+                <strong>«Товары в пути от ФФ на Wildberries»</strong>, потому что в текущем wb-core нет другого authoritative source для этого члена формулы.
+                Inbound-файлы необязательны: если они не загружены, соответствующий inbound будет учтён как <strong>0</strong>.
+                Если requested период продаж выходит за current authoritative history boundary, сервер вернёт явную ошибку с точным диапазоном.
+              </p>
+            </section>
+
+            <section class="block summary-card" aria-labelledby="factory-summary-title">
+              <h2 id="factory-summary-title" class="block-title">Результат</h2>
+              <dl class="summary-grid">
+                <div>
+                  <dt>Статус</dt>
+                  <dd id="factoryResultStatus">-</dd>
+                </div>
+                <div>
+                  <dt>Дата отчёта</dt>
+                  <dd id="factoryResultReportDate">-</dd>
+                </div>
+                <div>
+                  <dt>Горизонт, дней</dt>
+                  <dd id="factoryResultHorizon">-</dd>
+                </div>
+                <div>
+                  <dt>Результат обновлён</dt>
+                  <dd id="factoryResultCalculatedAt">-</dd>
+                </div>
+              </dl>
+              <dl class="summary-grid">
+                <div>
+                  <dt>Общее количество</dt>
+                  <dd id="factoryTotalQty">-</dd>
+                </div>
+                <div>
+                  <dt>Расчётный вес</dt>
+                  <dd id="factoryTotalWeight">-</dd>
+                </div>
+                <div>
+                  <dt>Расчётный объём</dt>
+                  <dd id="factoryTotalVolume">-</dd>
+                </div>
+                <div>
+                  <dt>Активных SKU</dt>
+                  <dd id="factoryActiveSkuCount">-</dd>
+                </div>
+              </dl>
+              <p id="factoryCoverageNote" class="field-note">-</p>
+              <p id="factoryMessage" class="factory-message"></p>
+              <div class="factory-actions">
+                <button id="calculateFactoryOrderButton" class="action-button primary-button" type="button">Рассчитать заказ на фабрике</button>
+                <button id="downloadRecommendationButton" class="action-button secondary-button" type="button" disabled>Скачать рекомендацию</button>
+              </div>
+            </section>
+          </div>
+
+          <section class="block" aria-labelledby="dataset-title" style="margin-top: 28px;">
+            <div class="block-header">
+              <h2 id="dataset-title" class="block-title">Операторские XLSX-шаблоны фабричного расчёта</h2>
+            </div>
+            <div class="dataset-grid">
+              <article class="dataset-card">
+                <h3>Товары в пути от фабрики</h3>
+                <p class="dataset-status" id="inboundFactoryStatus">Читаем состояние...</p>
+                <div class="dataset-current-file" id="inboundFactoryCurrentFile" hidden>
+                  <a id="inboundFactoryCurrentFileLink" class="dataset-file-link" href="#">Скачать загруженный файл</a>
+                  <button id="deleteInboundFactoryButton" class="dataset-delete-button" type="button">Удалить этот файл</button>
+                </div>
+                <div class="dataset-actions">
+                  <button id="downloadInboundFactoryTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон товаров в пути от фабрики</button>
+                  <input id="inboundFactoryFileInput" type="file" accept=".xlsx">
+                  <button id="uploadInboundFactoryButton" class="action-button secondary-button" type="button">Загрузить товары в пути от фабрики</button>
+                </div>
+              </article>
+
+              <article class="dataset-card">
+                <h3>Товары в пути от ФФ на Wildberries</h3>
+                <p class="dataset-status" id="inboundFfToWbStatus">Читаем состояние...</p>
+                <div class="dataset-current-file" id="inboundFfToWbCurrentFile" hidden>
+                  <a id="inboundFfToWbCurrentFileLink" class="dataset-file-link" href="#">Скачать загруженный файл</a>
+                  <button id="deleteInboundFfToWbButton" class="dataset-delete-button" type="button">Удалить этот файл</button>
+                </div>
+                <div class="dataset-actions">
+                  <button id="downloadInboundFfToWbTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон товаров в пути от ФФ на Wildberries</button>
+                  <input id="inboundFfToWbFileInput" type="file" accept=".xlsx">
+                  <button id="uploadInboundFfToWbButton" class="action-button secondary-button" type="button">Загрузить товары в пути от ФФ на Wildberries</button>
+                </div>
+              </article>
+            </div>
+          </section>
+        </section>
+
+        <section class="supply-panel" data-supply-section-panel="regional" hidden>
+          <div class="factory-grid">
+            <section class="block summary-card" aria-labelledby="regional-settings-title">
+              <h2 id="regional-settings-title" class="block-title">Параметры расчёта</h2>
+              <div class="field-grid">
+                <div class="field">
+                  <label for="regionalSalesAvgPeriodDays">Период усреднения продаж, дней</label>
+                  <input id="regionalSalesAvgPeriodDays" type="number" min="1" step="1" value="7">
+                </div>
+                <div class="field">
+                  <label for="supplyHorizonDays">Период поставки, дней</label>
+                  <input id="supplyHorizonDays" type="number" min="1" step="1" value="7">
+                </div>
+                <div class="field">
+                  <label for="leadTimeToRegionDays">Срок доставки до склада Wildberries, дней</label>
+                  <input id="leadTimeToRegionDays" type="number" min="1" step="1" value="3">
+                </div>
+                <div class="field">
+                  <label for="regionalSafetyDays">Страховой запас, дней</label>
+                  <input id="regionalSafetyDays" type="number" min="0" step="1" value="2">
+                </div>
+                <div class="field">
+                  <label for="regionalOrderBatchQty">Кратность штук в коробке</label>
+                  <input id="regionalOrderBatchQty" type="number" min="1" step="1" value="250">
+                </div>
+                <div class="field">
+                  <label for="regionalReportDateOverride">Ручная дата расчёта</label>
+                  <input id="regionalReportDateOverride" type="date">
+                </div>
+              </div>
+              <p class="field-note" id="regionalMethodologyNote">
+                Сервер использует общий файл <strong>«Остатки ФФ»</strong>, продажи по SKU и текущие региональные остатки.
+                При дефиците доступного <code>stock_ff</code> применяется legacy allocation по коробам с truthfully рассчитанным дефицитом.
+              </p>
+            </section>
+
+            <section class="block summary-card" aria-labelledby="regional-summary-title">
+              <h2 id="regional-summary-title" class="block-title">Результат</h2>
+              <dl class="summary-grid">
+                <div>
+                  <dt>Статус</dt>
+                  <dd id="regionalResultStatus">-</dd>
+                </div>
+                <div>
+                  <dt>Дата отчёта</dt>
+                  <dd id="regionalResultReportDate">-</dd>
+                </div>
+                <div>
+                  <dt>Горизонт, дней</dt>
+                  <dd id="regionalResultHorizon">-</dd>
+                </div>
+                <div>
+                  <dt>Результат обновлён</dt>
+                  <dd id="regionalResultCalculatedAt">-</dd>
+                </div>
+              </dl>
+              <dl class="summary-grid">
+                <div>
+                  <dt>Общее количество</dt>
+                  <dd id="regionalTotalQty">-</dd>
+                </div>
+                <div>
+                  <dt>Расчётный вес</dt>
+                  <dd id="regionalTotalWeight">-</dd>
+                </div>
+                <div>
+                  <dt>Расчётный объём</dt>
+                  <dd id="regionalTotalVolume">-</dd>
+                </div>
+                <div>
+                  <dt>Активных SKU</dt>
+                  <dd id="regionalActiveSkuCount">-</dd>
+                </div>
+              </dl>
+              <p id="regionalMessage" class="section-message"></p>
+              <div class="factory-actions">
+                <button id="calculateRegionalSupplyButton" class="action-button primary-button" type="button">Рассчитать поставки по округам</button>
+              </div>
+            </section>
+          </div>
+
+          <section class="block" aria-labelledby="regional-districts-title" style="margin-top: 28px;">
+            <div class="block-header">
+              <h2 id="regional-districts-title" class="block-title">Сводка по федеральным округам</h2>
+            </div>
+            <div class="district-table-wrap">
+              <table class="district-table">
+                <thead>
+                  <tr>
+                    <th>Федеральный округ</th>
+                    <th>Общее количество в поставке</th>
+                    <th>Дефицит</th>
+                  </tr>
+                </thead>
+                <tbody id="regionalDistrictTableBody">
+                  <tr>
+                    <td colspan="3">Результат ещё не подготовлен.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="block" aria-labelledby="regional-downloads-title" style="margin-top: 28px;">
+            <div class="block-header">
+              <h2 id="regional-downloads-title" class="block-title">XLSX по округам</h2>
+            </div>
+            <div id="regionalDistrictDownloads" class="district-download-list">
+              <div class="district-download-item">
+                <strong>Файлы будут доступны после расчёта</strong>
+                <span>Сервер подготовит отдельный XLSX для каждого федерального округа.</span>
+              </div>
+            </div>
+          </section>
         </section>
       </section>
     </section>
@@ -785,6 +1047,8 @@
       const config = JSON.parse(document.getElementById("sheet-vitrina-v1-operator-config").textContent);
       const tabButtons = Array.from(document.querySelectorAll("[data-tab-button]"));
       const tabPanels = Array.from(document.querySelectorAll("[data-tab-panel]"));
+      const supplySectionButtons = Array.from(document.querySelectorAll("[data-supply-section-button]"));
+      const supplySectionPanels = Array.from(document.querySelectorAll("[data-supply-section-panel]"));
 
       const refreshButton = document.getElementById("refreshButton");
       const loadButton = document.getElementById("loadButton");
@@ -825,6 +1089,7 @@
       const factoryActiveSkuCount = document.getElementById("factoryActiveSkuCount");
       const factoryCoverageNote = document.getElementById("factoryCoverageNote");
       const factoryMessage = document.getElementById("factoryMessage");
+      const sharedStockMessage = document.getElementById("sharedStockMessage");
       const calculateFactoryOrderButton = document.getElementById("calculateFactoryOrderButton");
       const downloadRecommendationButton = document.getElementById("downloadRecommendationButton");
       const stockFfStatus = document.getElementById("stockFfStatus");
@@ -848,6 +1113,27 @@
       const deleteStockFfButton = document.getElementById("deleteStockFfButton");
       const deleteInboundFactoryButton = document.getElementById("deleteInboundFactoryButton");
       const deleteInboundFfToWbButton = document.getElementById("deleteInboundFfToWbButton");
+      const regionalFields = {
+        sales_avg_period_days: document.getElementById("regionalSalesAvgPeriodDays"),
+        supply_horizon_days: document.getElementById("supplyHorizonDays"),
+        lead_time_to_region_days: document.getElementById("leadTimeToRegionDays"),
+        safety_days: document.getElementById("regionalSafetyDays"),
+        order_batch_qty: document.getElementById("regionalOrderBatchQty"),
+        report_date_override: document.getElementById("regionalReportDateOverride")
+      };
+      const regionalMethodologyNote = document.getElementById("regionalMethodologyNote");
+      const regionalResultStatus = document.getElementById("regionalResultStatus");
+      const regionalResultReportDate = document.getElementById("regionalResultReportDate");
+      const regionalResultHorizon = document.getElementById("regionalResultHorizon");
+      const regionalResultCalculatedAt = document.getElementById("regionalResultCalculatedAt");
+      const regionalTotalQty = document.getElementById("regionalTotalQty");
+      const regionalTotalWeight = document.getElementById("regionalTotalWeight");
+      const regionalTotalVolume = document.getElementById("regionalTotalVolume");
+      const regionalActiveSkuCount = document.getElementById("regionalActiveSkuCount");
+      const regionalMessage = document.getElementById("regionalMessage");
+      const regionalDistrictTableBody = document.getElementById("regionalDistrictTableBody");
+      const regionalDistrictDownloads = document.getElementById("regionalDistrictDownloads");
+      const calculateRegionalSupplyButton = document.getElementById("calculateRegionalSupplyButton");
 
       const stateLabels = {
         idle: "ожидание",
@@ -880,8 +1166,23 @@
         });
       }
 
+      function activateSupplySection(sectionName) {
+        supplySectionButtons.forEach((button) => {
+          const selected = button.dataset.supplySectionButton === sectionName;
+          button.classList.toggle("is-active", selected);
+          button.setAttribute("aria-selected", selected ? "true" : "false");
+        });
+        supplySectionPanels.forEach((panel) => {
+          panel.hidden = panel.dataset.supplySectionPanel !== sectionName;
+        });
+      }
+
       tabButtons.forEach((button) => {
         button.addEventListener("click", () => activateTab(button.dataset.tabButton));
+      });
+
+      supplySectionButtons.forEach((button) => {
+        button.addEventListener("click", () => activateSupplySection(button.dataset.supplySectionButton));
       });
 
       function setState(nextState) {
@@ -1045,10 +1346,28 @@
         factoryMessage.className = "factory-message" + (stateClass ? " is-" + stateClass : "");
       }
 
+      function setSharedStockMessage(text, stateClass) {
+        sharedStockMessage.textContent = text || "";
+        sharedStockMessage.className = "section-message" + (stateClass ? " is-" + stateClass : "");
+      }
+
+      function setRegionalMessage(text, stateClass) {
+        regionalMessage.textContent = text || "";
+        regionalMessage.className = "section-message" + (stateClass ? " is-" + stateClass : "");
+      }
+
       function readFieldValues() {
         const payload = {};
         Object.keys(factoryFields).forEach((key) => {
           payload[key] = factoryFields[key].value;
+        });
+        return payload;
+      }
+
+      function readRegionalFieldValues() {
+        const payload = {};
+        Object.keys(regionalFields).forEach((key) => {
+          payload[key] = regionalFields[key].value;
         });
         return payload;
       }
@@ -1082,6 +1401,17 @@
         currentFileRow.hidden = false;
       }
 
+      function renderSharedStockState(state) {
+        renderFactoryDatasetStatus(
+          stockFfStatus,
+          stockFfCurrentFile,
+          stockFfCurrentFileLink,
+          deleteStockFfButton,
+          state,
+          { optional: false }
+        );
+      }
+
       function renderFactoryResult(result) {
         if (!result) {
           factoryResultStatus.textContent = "ещё не рассчитывался";
@@ -1110,10 +1440,94 @@
         const datasets = payload && payload.datasets ? payload.datasets : {};
         factoryActiveSkuCount.textContent = valueOrDash(payload && payload.active_sku_count);
         factoryCoverageNote.textContent = valueOrDash(payload && payload.coverage_contract_note);
-        renderFactoryDatasetStatus(stockFfStatus, stockFfCurrentFile, stockFfCurrentFileLink, deleteStockFfButton, datasets.stock_ff, { optional: false });
+        renderSharedStockState(datasets.stock_ff);
         renderFactoryDatasetStatus(inboundFactoryStatus, inboundFactoryCurrentFile, inboundFactoryCurrentFileLink, deleteInboundFactoryButton, datasets.inbound_factory_to_ff, { optional: true });
         renderFactoryDatasetStatus(inboundFfToWbStatus, inboundFfToWbCurrentFile, inboundFfToWbCurrentFileLink, deleteInboundFfToWbButton, datasets.inbound_ff_to_wb, { optional: true });
         renderFactoryResult(payload ? payload.last_result : null);
+      }
+
+      function renderRegionalDistricts(districts) {
+        const items = Array.isArray(districts) ? districts : [];
+        if (!items.length) {
+          regionalDistrictTableBody.innerHTML = "<tr><td colspan=\"3\">Результат ещё не подготовлен.</td></tr>";
+          regionalDistrictDownloads.innerHTML = [
+            "<div class=\"district-download-item\">",
+            "<strong>Файлы будут доступны после расчёта</strong>",
+            "<span>Сервер подготовит отдельный XLSX для каждого федерального округа.</span>",
+            "</div>"
+          ].join("");
+          return;
+        }
+        regionalDistrictTableBody.innerHTML = items.map((item) => [
+          "<tr>",
+          "<td>" + valueOrDash(item.district_name_ru) + "</td>",
+          "<td>" + valueOrDash(item.total_qty) + "</td>",
+          "<td>" + valueOrDash(item.deficit_qty) + "</td>",
+          "</tr>"
+        ].join("")).join("");
+        regionalDistrictDownloads.innerHTML = items.map((item) => {
+          const downloadPath = valueOrDash(item.download_path) === "-" ? "" : String(item.download_path || "");
+          const disabled = downloadPath ? "" : " disabled";
+          const filename = valueOrDash(item.filename);
+          return [
+            "<div class=\"district-download-item\">",
+            "<div>",
+            "<strong>" + valueOrDash(item.district_name_ru) + "</strong>",
+            "<span>" + filename + "</span>",
+            "</div>",
+            "<button class=\"action-button secondary-button regional-download-button\" type=\"button\" data-download-path=\"" + downloadPath + "\"" + disabled + ">Скачать XLSX</button>",
+            "</div>"
+          ].join("");
+        }).join("");
+        Array.from(regionalDistrictDownloads.querySelectorAll(".regional-download-button")).forEach((button) => {
+          button.addEventListener("click", async () => {
+            const downloadPath = button.dataset.downloadPath || "";
+            if (!downloadPath) {
+              return;
+            }
+            await downloadBinary(
+              downloadPath,
+              "regional-supply-district.xlsx",
+              "Файл округа скачан.",
+              setRegionalMessage
+            );
+          });
+        });
+      }
+
+      function renderRegionalResult(result, fallbackActiveSkuCount) {
+        if (!result) {
+          regionalResultStatus.textContent = "ещё не рассчитывался";
+          regionalResultReportDate.textContent = "-";
+          regionalResultHorizon.textContent = "-";
+          regionalResultCalculatedAt.textContent = "-";
+          regionalTotalQty.textContent = "-";
+          regionalTotalWeight.textContent = "-";
+          regionalTotalVolume.textContent = "-";
+          regionalActiveSkuCount.textContent = valueOrDash(fallbackActiveSkuCount);
+          renderRegionalDistricts([]);
+          return;
+        }
+        regionalResultStatus.textContent = valueOrDash(result.status);
+        regionalResultReportDate.textContent = valueOrDash(result.report_date);
+        regionalResultHorizon.textContent = valueOrDash(result.horizon_days);
+        regionalResultCalculatedAt.textContent = valueOrDash(result.calculated_at).replace("T", " ");
+        regionalActiveSkuCount.textContent = valueOrDash(result.active_sku_count || fallbackActiveSkuCount);
+        const summary = result.summary || {};
+        regionalTotalQty.textContent = valueOrDash(summary.total_qty);
+        regionalTotalWeight.textContent = valueOrDash(summary.estimated_weight);
+        regionalTotalVolume.textContent = valueOrDash(summary.estimated_volume);
+        renderRegionalDistricts(result.districts || []);
+      }
+
+      function renderRegionalStatus(payload) {
+        const sharedDatasets = payload && payload.shared_datasets ? payload.shared_datasets : {};
+        regionalMethodologyNote.textContent = valueOrDash(payload && payload.methodology_note);
+        regionalActiveSkuCount.textContent = valueOrDash(payload && payload.active_sku_count);
+        if (sharedDatasets.stock_ff) {
+          renderSharedStockState(sharedDatasets.stock_ff);
+        }
+        renderRegionalResult(payload ? payload.last_result : null, payload && payload.active_sku_count);
       }
 
       async function readJson(response) {
@@ -1179,6 +1593,25 @@
         } catch (error) {
           setFactoryMessage(
             "Не удалось прочитать состояние расчёта поставок: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        }
+      }
+
+      async function loadRegionalStatus() {
+        try {
+          const response = await fetch(config.wb_regional_status_path, {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          renderRegionalStatus(payload);
+        } catch (error) {
+          setRegionalMessage(
+            "Не удалось прочитать состояние расчёта по округам: " + (error instanceof Error ? error.message : String(error)),
             "error"
           );
         }
@@ -1287,16 +1720,16 @@
         }
       }
 
-      async function uploadFactoryDataset(path, fileInput, busyButton, busyLabel) {
+      async function uploadDataset(path, fileInput, busyButton, busyLabel, setMessage, reloaders) {
         const file = fileInput.files && fileInput.files[0];
         if (!file) {
-          setFactoryMessage("Сначала выберите XLSX-файл для загрузки.", "error");
+          setMessage("Сначала выберите XLSX-файл для загрузки.", "error");
           return;
         }
         const idleLabel = busyButton.textContent;
         busyButton.disabled = true;
         busyButton.textContent = busyLabel;
-        setFactoryMessage("Загружаем файл на сервер...", "");
+        setMessage("Загружаем файл на сервер...", "");
         try {
           const formData = new FormData();
           formData.append("file", file, file.name);
@@ -1308,11 +1741,11 @@
           if (!response.ok) {
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
-          setFactoryMessage(valueOrDash(payload.message), "success");
+          setMessage(valueOrDash(payload.message), "success");
           fileInput.value = "";
-          await loadFactoryStatus();
+          await Promise.all((Array.isArray(reloaders) ? reloaders : []).map((loader) => loader()));
         } catch (error) {
-          setFactoryMessage(
+          setMessage(
             "Загрузка файла завершилась с ошибкой: " + (error instanceof Error ? error.message : String(error)),
             "error"
           );
@@ -1322,14 +1755,14 @@
         }
       }
 
-      async function deleteFactoryDataset(deletePath, busyButton) {
+      async function deleteDataset(deletePath, busyButton, setMessage, reloaders) {
         if (!deletePath) {
           return;
         }
         const idleLabel = busyButton.textContent;
         busyButton.disabled = true;
         busyButton.textContent = "Удаляем...";
-        setFactoryMessage("Удаляем файл из текущего server-side состояния...", "");
+        setMessage("Удаляем файл из текущего server-side состояния...", "");
         try {
           const response = await fetch(deletePath, {
             method: "DELETE",
@@ -1339,10 +1772,10 @@
           if (!response.ok) {
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
-          setFactoryMessage(valueOrDash(payload.message), "success");
-          await loadFactoryStatus();
+          setMessage(valueOrDash(payload.message), "success");
+          await Promise.all((Array.isArray(reloaders) ? reloaders : []).map((loader) => loader()));
         } catch (error) {
-          setFactoryMessage(
+          setMessage(
             "Удаление файла завершилось с ошибкой: " + (error instanceof Error ? error.message : String(error)),
             "error"
           );
@@ -1352,8 +1785,9 @@
         }
       }
 
-      async function downloadBinary(url, fallbackName, successMessage) {
-        setFactoryMessage("Готовим файл...", "");
+      async function downloadBinary(url, fallbackName, successMessage, setMessage) {
+        const reportMessage = typeof setMessage === "function" ? setMessage : setFactoryMessage;
+        reportMessage("Готовим файл...", "");
         try {
           const response = await fetch(url, {
             method: "GET"
@@ -1373,9 +1807,9 @@
           link.click();
           link.remove();
           URL.revokeObjectURL(objectUrl);
-          setFactoryMessage(successMessage, "success");
+          reportMessage(successMessage, "success");
         } catch (error) {
-          setFactoryMessage(
+          reportMessage(
             "Не удалось скачать XLSX: " + (error instanceof Error ? error.message : String(error)),
             "error"
           );
@@ -1415,6 +1849,38 @@
         }
       }
 
+      async function calculateRegionalSupply() {
+        calculateRegionalSupplyButton.disabled = true;
+        calculateRegionalSupplyButton.textContent = "Считаем...";
+        setRegionalMessage("Выполняем расчёт по федеральным округам на сервере...", "");
+        try {
+          const response = await fetch(config.wb_regional_calculate_path, {
+            method: "POST",
+            headers: {
+              "Accept": "application/json",
+              "Content-Type": "application/json; charset=utf-8"
+            },
+            body: JSON.stringify(readRegionalFieldValues())
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          renderRegionalResult(payload, payload.active_sku_count);
+          regionalMethodologyNote.textContent = valueOrDash(payload.methodology_note);
+          setRegionalMessage("Расчёт завершён. XLSX по федеральным округам готовы к скачиванию.", "success");
+          await loadRegionalStatus();
+        } catch (error) {
+          setRegionalMessage(
+            "Расчёт завершился с ошибкой: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          calculateRegionalSupplyButton.disabled = false;
+          calculateRegionalSupplyButton.textContent = "Рассчитать поставки по округам";
+        }
+      }
+
       async function downloadRecommendation() {
         if (!recommendationDownloadPath) {
           setFactoryMessage("Рекомендация ещё не подготовлена.", "error");
@@ -1423,7 +1889,8 @@
         await downloadBinary(
           recommendationDownloadPath,
           "sheet-vitrina-v1-factory-order-recommendation.xlsx",
-          "Рекомендация скачана."
+          "Рекомендация скачана.",
+          setFactoryMessage
         );
       }
 
@@ -1434,49 +1901,76 @@
       downloadStockFfTemplateButton.addEventListener("click", () => downloadBinary(
         config.factory_order_template_stock_ff_path,
         "sheet-vitrina-v1-factory-order-stock-ff-template.xlsx",
-        "Шаблон остатков ФФ скачан."
+        "Шаблон остатков ФФ скачан.",
+        setSharedStockMessage
       ));
       downloadInboundFactoryTemplateButton.addEventListener("click", () => downloadBinary(
         config.factory_order_template_inbound_factory_path,
         "sheet-vitrina-v1-factory-order-inbound-factory-template.xlsx",
-        "Шаблон товаров в пути от фабрики скачан."
+        "Шаблон товаров в пути от фабрики скачан.",
+        setFactoryMessage
       ));
       downloadInboundFfToWbTemplateButton.addEventListener("click", () => downloadBinary(
         config.factory_order_template_inbound_ff_to_wb_path,
         "sheet-vitrina-v1-factory-order-inbound-ff-to-wb-template.xlsx",
-        "Шаблон товаров в пути от ФФ на Wildberries скачан."
+        "Шаблон товаров в пути от ФФ на Wildberries скачан.",
+        setFactoryMessage
       ));
 
-      uploadStockFfButton.addEventListener("click", () => uploadFactoryDataset(
+      uploadStockFfButton.addEventListener("click", () => uploadDataset(
         config.factory_order_upload_stock_ff_path,
         stockFfFileInput,
         uploadStockFfButton,
-        "Загружаем..."
+        "Загружаем...",
+        setSharedStockMessage,
+        [loadFactoryStatus, loadRegionalStatus]
       ));
-      uploadInboundFactoryButton.addEventListener("click", () => uploadFactoryDataset(
+      uploadInboundFactoryButton.addEventListener("click", () => uploadDataset(
         config.factory_order_upload_inbound_factory_path,
         inboundFactoryFileInput,
         uploadInboundFactoryButton,
-        "Загружаем..."
+        "Загружаем...",
+        setFactoryMessage,
+        [loadFactoryStatus]
       ));
-      uploadInboundFfToWbButton.addEventListener("click", () => uploadFactoryDataset(
+      uploadInboundFfToWbButton.addEventListener("click", () => uploadDataset(
         config.factory_order_upload_inbound_ff_to_wb_path,
         inboundFfToWbFileInput,
         uploadInboundFfToWbButton,
-        "Загружаем..."
+        "Загружаем...",
+        setFactoryMessage,
+        [loadFactoryStatus]
       ));
-      deleteStockFfButton.addEventListener("click", () => deleteFactoryDataset(deleteStockFfButton.dataset.deletePath, deleteStockFfButton));
-      deleteInboundFactoryButton.addEventListener("click", () => deleteFactoryDataset(deleteInboundFactoryButton.dataset.deletePath, deleteInboundFactoryButton));
-      deleteInboundFfToWbButton.addEventListener("click", () => deleteFactoryDataset(deleteInboundFfToWbButton.dataset.deletePath, deleteInboundFfToWbButton));
+      deleteStockFfButton.addEventListener("click", () => deleteDataset(
+        deleteStockFfButton.dataset.deletePath,
+        deleteStockFfButton,
+        setSharedStockMessage,
+        [loadFactoryStatus, loadRegionalStatus]
+      ));
+      deleteInboundFactoryButton.addEventListener("click", () => deleteDataset(
+        deleteInboundFactoryButton.dataset.deletePath,
+        deleteInboundFactoryButton,
+        setFactoryMessage,
+        [loadFactoryStatus]
+      ));
+      deleteInboundFfToWbButton.addEventListener("click", () => deleteDataset(
+        deleteInboundFfToWbButton.dataset.deletePath,
+        deleteInboundFfToWbButton,
+        setFactoryMessage,
+        [loadFactoryStatus]
+      ));
 
       calculateFactoryOrderButton.addEventListener("click", calculateFactoryOrder);
+      calculateRegionalSupplyButton.addEventListener("click", calculateRegionalSupply);
       downloadRecommendationButton.addEventListener("click", downloadRecommendation);
 
       activateTab("vitrina");
+      activateSupplySection("factory");
       setActionState(null);
       setCompletedJob(null);
       loadStatus();
       loadFactoryStatus();
+      loadRegionalStatus();
     })();
   </script>
 </body>
