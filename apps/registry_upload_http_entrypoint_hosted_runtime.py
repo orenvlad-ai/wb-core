@@ -36,6 +36,8 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_REFRESH_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_UPLOAD_PATH,
+    DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX,
+    DEFAULT_WB_REGIONAL_STATUS_PATH,
 )
 
 
@@ -256,6 +258,18 @@ def collect_public_surface(
             name="factory_order_recommendation",
             method="GET",
             url=f"{base_url}{DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH}",
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
+            name="wb_regional_status",
+            method="GET",
+            url=f"{base_url}{DEFAULT_WB_REGIONAL_STATUS_PATH}",
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
+            name="wb_regional_district_central",
+            method="GET",
+            url=f"{base_url}{DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX}/central.xlsx",
             timeout_seconds=timeout_seconds,
         ),
     ]
@@ -599,12 +613,17 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Отправить данные",
             "Скачать лог",
             "Расчёт поставок",
+            "Общий вход для двух расчётов",
             "Заказ на фабрике",
+            "Поставка на Wildberries по федеральным округам",
             "Скачать шаблон остатков ФФ",
             "Скачать шаблон товаров в пути от фабрики",
             "Скачать шаблон товаров в пути от ФФ на Wildberries",
             "Рассчитать заказ на фабрике",
             "Скачать рекомендацию",
+            "Рассчитать поставки по округам",
+            "Сводка по федеральным округам",
+            "XLSX по округам",
             "Сервер и расписание",
             "Часовой пояс",
             "Автообновление",
@@ -710,6 +729,19 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         )
         return evaluation
 
+    if route == "wb_regional_status":
+        evaluation["ok"], evaluation["detail"] = _validate_json_result(
+            status,
+            payload,
+            success_keys=[
+                "status",
+                "active_sku_count",
+                "methodology_note",
+                "shared_datasets",
+            ],
+        )
+        return evaluation
+
     if route == "load_route":
         error_text = str(payload.get("error", "") or "")
         evaluation["ok"] = status == 404 and "unsupported path" in error_text
@@ -737,6 +769,16 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "factory-order recommendation route published with truthful 422 before calculation"
             if evaluation["ok"]
             else "expected 200 XLSX or 422 JSON error for recommendation route"
+        )
+        return evaluation
+
+    if route == "wb_regional_district_central":
+        error_text = str(payload.get("error", "") or "")
+        evaluation["ok"] = status == 422 and bool(error_text)
+        evaluation["detail"] = (
+            "wb-regional district route published with truthful 422 before calculation"
+            if evaluation["ok"]
+            else "expected 200 XLSX or 422 JSON error for district route"
         )
         return evaluation
 
@@ -935,6 +977,8 @@ results = [
     _collect("factory_order_template_inbound_factory", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/template/inbound-factory.xlsx"),
     _collect("factory_order_template_inbound_ff_to_wb", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/template/inbound-ff-to-wb.xlsx"),
     _collect("factory_order_recommendation", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"),
+    _collect("wb_regional_status", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/wb-regional/status"),
+    _collect("wb_regional_district_central", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/wb-regional/district/central.xlsx"),
 ]
 if PAYLOAD["include_refresh"]:
     results.append(

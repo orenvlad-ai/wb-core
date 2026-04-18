@@ -139,6 +139,10 @@ def main() -> None:
                 raise AssertionError("inbound_ff_to_wb template route must be publicly readable")
             if route_map["factory_order_recommendation"]["http_status"] != 422:
                 raise AssertionError("recommendation route without calculation must stay truthful 422")
+            if route_map["wb_regional_status"]["http_status"] != 200:
+                raise AssertionError("wb-regional status route must be publicly readable")
+            if route_map["wb_regional_district_central"]["http_status"] != 422:
+                raise AssertionError("district route without calculation must stay truthful 422")
             if route_map["refresh"]["http_status"] != 200:
                 raise AssertionError("refresh must succeed during public probe")
 
@@ -166,6 +170,7 @@ def main() -> None:
             print(f"deploy_dry_run: ok -> {deploy_dry_run['commands']['restart'][-1]}")
             print(f"public_probe_refresh: ok -> {route_map['refresh']['http_status']}")
             print(f"factory_order_status: ok -> {route_map['factory_order_status']['http_status']}")
+            print(f"wb_regional_status: ok -> {route_map['wb_regional_status']['http_status']}")
             print(f"loopback_probe_status: ok -> {loopback_routes['status']['http_status']}")
         finally:
             process.terminate()

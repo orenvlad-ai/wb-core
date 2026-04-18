@@ -227,6 +227,7 @@ Operational rule:
   - daily timer target = `POST /v1/sheet-vitrina-v1/refresh` with payload flag `auto_load=true`, so the automatic cycle truthfully finishes as `refresh + load to live sheet`
 - current bounded `factory-order` supply contour is server/operator-only:
   - live closure still requires deploy + loopback/public probe + one controlled download/upload/calculate/download scenario if those routes changed;
+  - the same closure rule now covers the sibling regional block under `Расчёт поставок`: shared `stock_ff` upload lifecycle, regional calculate, summary table and per-district XLSX routes are part of the same operator/public contour;
   - sheet/GAS verify stays `not in scope`, пока change не затрагивает bound Apps Script или live sheet write path.
   - if the task changes upload state handling, closure additionally verifies `upload -> current uploaded file download -> delete -> absent state`;
   - current UI may accept any positive `sales_avg_period_days`; backend now uses persisted runtime coverage instead of fixed `<= 7`, so covered windows such as `10 / 14 / 21` must succeed after truthful reconcile/backfill.
@@ -234,6 +235,11 @@ Operational rule:
   - out-of-range windows must fail with the exact requested range plus earliest/latest available runtime coverage, not with a fake upstream-depth surrogate.
   - XLSX fixes are not considered complete until generated/publicly downloaded files pass bounded integrity checks and open as standard XLSX workbooks without a recovery path.
 - route change не считается complete, пока public probe не подтвердил expected content type / response shape.
+- для regional supply verify минимум включает:
+  - shared `Остатки ФФ` status/download/delete reuse between factory and district block;
+  - truthfully blocked `422`, если shared `stock_ff` отсутствует;
+  - district summary totals = sum of generated district XLSX rows;
+  - public `GET /v1/sheet-vitrina-v1/supply/wb-regional/status` и `GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district}.xlsx` surface expected JSON/XLSX shape.
 - если change затрагивает operator `load` или live sheet write path, closure дополнительно требует `clasp push` и sheet verify по `POST /v1/sheet-vitrina-v1/load` или equivalent existing Apps Script menu flow.
 - если runner уже materialized, но `ssh_destination / target_dir / service_name / restart_command / environment_file` или access отсутствуют, это фиксируется как точный blocker, а не как vague ops-gap.
 

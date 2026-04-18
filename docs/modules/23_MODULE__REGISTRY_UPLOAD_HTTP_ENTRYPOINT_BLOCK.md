@@ -140,13 +140,20 @@ update_note: "Обновлён под current factory-order historical seam: HTT
   - `DELETE /v1/sheet-vitrina-v1/supply/factory-order/upload/*` = delete the current uploaded dataset/file for the selected dataset
   - `POST /v1/sheet-vitrina-v1/supply/factory-order/calculate` = server-side factory-order calculation
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx` = operator-facing recommendation download
+  - `GET /v1/sheet-vitrina-v1/supply/wb-regional/status` = cheap JSON status surface для bounded WB regional supply flow
+  - `POST /v1/sheet-vitrina-v1/supply/wb-regional/calculate` = server-side district allocation calculation
+  - `GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx` = отдельный operator-facing XLSX download по федеральному округу
 - Внутри existing `POST /v1/sheet-vitrina-v1/refresh` live contour теперь допускает bounded server-local sync для `seller_funnel_snapshot` и `web_source_snapshot`:
   - сначала refresh проверяет, materialized ли exact-date `today_current` snapshot в local `wb-ai` read-side;
   - если exact-date snapshot отсутствует, refresh может вызвать server-local owner path `/opt/wb-web-bot` (`bot.runner_day`, `bot.runner_sales_funnel_day`) и затем `/opt/wb-ai/run_web_source_handoff.py`;
   - после этого refresh повторно валидирует exact-date local API availability и только потом читает live sources;
   - contour не открывает новый public producer route, не backfill-ит yesterday в today и остаётся bounded orchestration boundary поверх existing owner path.
 - Operator page не invent-ит новый heavy route: UI запускает existing heavy `POST /v1/sheet-vitrina-v1/refresh` отдельно от narrow `POST /v1/sheet-vitrina-v1/load`, а live progress читает только через cheap poll surface `GET /v1/sheet-vitrina-v1/job`.
-- Во второй tab `Расчёт поставок` current bounded scope materialize-ит только block `Заказ на фабрике`:
+- Во второй tab `Расчёт поставок` current bounded scope materialize-ит два sibling block внутри одного narrow operator page:
+  - shared block `Остатки ФФ` остаётся один для обоих расчётов и хранится в одном server-owned dataset state;
+  - block `Заказ на фабрике` сохраняет existing behavior;
+  - block `Поставка на Wildberries по федеральным округам` использует тот же shared `stock_ff`, свои settings (`sales_avg_period_days`, `supply_horizon_days`, `lead_time_to_region_days`, `safety_days`, `order_batch_qty`, `report_date_override`) и отдельный result/download surface;
+  - regional block не materialize-ит upload contract `Товары в пути от ФФ на Wildberries`: этот input остаётся вне текущего bounded scope;
   - settings fields остаются server-owned и валидируются на backend;
   - operator-facing label `Размер партии` заменён на `Кратность штук в коробке`;
   - authoritative `orderCount` history для расчёта живёт только server-side в `temporal_source_snapshots[source_key=sales_funnel_history]`;
@@ -162,6 +169,11 @@ update_note: "Обновлён под current factory-order historical seam: HTT
   - status surface для каждого upload block показывает current uploaded filename, download link и delete action, если файл действительно хранится в current server-owned state;
   - planning horizon coverage суммирует только inbound events, чья `planned_arrival_date` попадает внутрь текущего расчётного горизонта;
   - итоговые summary/result values (`Общее количество`, `Расчётный вес`, `Расчётный объём`, recommendation XLSX) остаются server-driven и не вычисляются в browser или sheet.
+- Для regional supply block result contract теперь также server-driven:
+  - top summary surface = `Статус`, `Дата отчёта`, `Горизонт, дней`, `Активных SKU`, `Общее количество`, `Расчётный вес`, `Расчётный объём`;
+  - compact district table = `Федеральный округ / Общее количество в поставке / Дефицит`;
+  - server хранит и публикует отдельный XLSX на каждый округ, а не один общий recommendation workbook;
+  - district XLSX содержит district identification + compact operator rows `nmId / SKU / Количество к поставке` именно по фактически аллоцированному количеству после ограничения `stock_ff`.
 - Current repo state не имел другого authoritative source для legacy parity term `FO_INBOUND_FF_TO_WB`, поэтому entrypoint получил narrow explicit upload contract `Товары в пути от ФФ на Wildberries`; silent drop этого члена формулы считается некорректным.
 - Operator page keeps narrow Russian chrome for operator-visible labels (`Загрузить данные`, `Отправить данные`, compact `Статус` / `Лог`, row-count labels, `Скачать лог`) without explanatory subtitle/subcopy про refresh/date defaults/temporal slots под заголовком или кнопкой.
 - Operator page добавляет один compact server-driven info block `Сервер и расписание`:

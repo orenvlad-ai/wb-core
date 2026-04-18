@@ -766,6 +766,52 @@ class RegistryUploadDbBackedRuntime:
                 payload.setdefault("calculated_at", row["calculated_at"])
             return payload
 
+    def save_wb_regional_supply_result_state(
+        self,
+        *,
+        calculated_at: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        _validate_timestamp(calculated_at, field_name="calculated_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_regional_supply_result_state(
+                    slot,
+                    calculated_at,
+                    result_json
+                )
+                VALUES(1, ?, ?)
+                ON CONFLICT(slot) DO UPDATE SET
+                    calculated_at = excluded.calculated_at,
+                    result_json = excluded.result_json
+                """,
+                (
+                    calculated_at,
+                    json.dumps(dict(payload), ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+
+    def load_wb_regional_supply_result_state(self) -> dict[str, Any] | None:
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT calculated_at, result_json
+                FROM sheet_vitrina_v1_wb_regional_supply_result_state
+                WHERE slot = 1
+                """
+            ).fetchone()
+            if row is None:
+                return None
+            payload = json.loads(row["result_json"])
+            if isinstance(payload, dict):
+                payload.setdefault("calculated_at", row["calculated_at"])
+            return payload
+
     def _collect_validation_errors(self, bundle: RegistryUploadBundleV1, activated_at: str) -> list[str]:
         errors: list[str] = []
         try:
@@ -1383,6 +1429,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         );
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_factory_order_result_state (
+            slot INTEGER PRIMARY KEY CHECK (slot = 1),
+            calculated_at TEXT NOT NULL,
+            result_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_regional_supply_result_state (
             slot INTEGER PRIMARY KEY CHECK (slot = 1),
             calculated_at TEXT NOT NULL,
             result_json TEXT NOT NULL

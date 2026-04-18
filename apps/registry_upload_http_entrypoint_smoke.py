@@ -42,6 +42,8 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_UPLOAD_PATH,
+    DEFAULT_WB_REGIONAL_CALCULATE_PATH,
+    DEFAULT_WB_REGIONAL_STATUS_PATH,
     build_registry_upload_http_server,
 )
 from packages.application.registry_upload_bundle_v1 import RegistryUploadBundleV1Block
@@ -132,16 +134,22 @@ def main() -> None:
                 raise AssertionError("operator UI must keep the compact Russian chrome")
             if "Скачать лог" not in operator_ui_html or "max-height: 420px" not in operator_ui_html:
                 raise AssertionError("operator UI must expose log download control and fixed-height log viewport")
-            if "Расчёт поставок" not in operator_ui_html or "Заказ на фабрике" not in operator_ui_html:
-                raise AssertionError("operator UI must expose the new top-level factory-order tab")
+            if (
+                "Расчёт поставок" not in operator_ui_html
+                or "Заказ на фабрике" not in operator_ui_html
+                or "Поставка на Wildberries по федеральным округам" not in operator_ui_html
+            ):
+                raise AssertionError("operator UI must expose both bounded supply sections inside the top-level tab")
             if (
                 "Скачать шаблон остатков ФФ" not in operator_ui_html
                 or "Скачать шаблон товаров в пути от фабрики" not in operator_ui_html
                 or "Скачать шаблон товаров в пути от ФФ на Wildberries" not in operator_ui_html
                 or "Рассчитать заказ на фабрике" not in operator_ui_html
                 or "Скачать рекомендацию" not in operator_ui_html
+                or "Рассчитать поставки по округам" not in operator_ui_html
+                or "Общий вход для двух расчётов" not in operator_ui_html
             ):
-                raise AssertionError("operator UI must expose the compact factory-order action surface")
+                raise AssertionError("operator UI must expose shared stock_ff and both supply action surfaces")
             if "Строки DATA_VITRINA" not in operator_ui_html or "Строки STATUS" not in operator_ui_html:
                 raise AssertionError("operator UI must surface row-count fields with Russian labels")
             if "Сервер и расписание" not in operator_ui_html or "Часовой пояс" not in operator_ui_html:
@@ -178,8 +186,10 @@ def main() -> None:
                 "factory_order_upload_inbound_ff_to_wb_path": DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FF_TO_WB_PATH,
                 "factory_order_calculate_path": DEFAULT_FACTORY_ORDER_CALCULATE_PATH,
                 "factory_order_recommendation_path": DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
+                "wb_regional_status_path": DEFAULT_WB_REGIONAL_STATUS_PATH,
+                "wb_regional_calculate_path": DEFAULT_WB_REGIONAL_CALCULATE_PATH,
             }:
-                raise AssertionError("operator UI config must expose existing refresh/status paths")
+                raise AssertionError("operator UI config must expose refresh/status paths plus both supply blocks")
 
             missing_plan_status, missing_plan_payload = _get_json(plan_url)
             if missing_plan_status != 422:

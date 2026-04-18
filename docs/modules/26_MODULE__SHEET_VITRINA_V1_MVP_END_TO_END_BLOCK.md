@@ -131,9 +131,12 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - log block остаётся fixed-height scrollable viewport с title `Лог` и одной bounded action `Скачать лог`
 - Канонический operator-facing supply surface в том же repo-owned page:
   - top-level tab `Расчёт поставок`
-  - current bounded block `Заказ на фабрике`
-  - explicit actions `Скачать шаблон остатков ФФ`, `Загрузить остатки ФФ`, `Скачать шаблон товаров в пути от фабрики`, `Загрузить товары в пути от фабрики`, `Скачать шаблон товаров в пути от ФФ на Wildberries`, `Загрузить товары в пути от ФФ на Wildberries`, `Рассчитать заказ на фабрике`, `Скачать рекомендацию`
+  - shared block `Остатки ФФ` reused by both supply calculations
+  - bounded subsection `Заказ на фабрике`
+  - bounded subsection `Поставка на Wildberries по федеральным округам`
+  - explicit actions `Скачать шаблон остатков ФФ`, `Загрузить остатки ФФ`, `Скачать шаблон товаров в пути от фабрики`, `Загрузить товары в пути от фабрики`, `Скачать шаблон товаров в пути от ФФ на Wildberries`, `Загрузить товары в пути от ФФ на Wildberries`, `Рассчитать заказ на фабрике`, `Скачать рекомендацию`, `Рассчитать поставки по округам`
   - server-side settings validation for `prod_lead_time_days`, `lead_time_factory_to_ff_days`, `lead_time_ff_to_wb_days`, `safety_days_mp`, `safety_days_ff`, `order_batch_qty`, `report_date_override`, `sales_avg_period_days`
+  - server-side settings validation for regional block `sales_avg_period_days`, `supply_horizon_days`, `lead_time_to_region_days`, `safety_days`, `order_batch_qty`, `report_date_override`
   - operator-facing label for `order_batch_qty` = `Кратность штук в коробке`
   - authoritative `orderCount` history for this contour lives only server-side in `temporal_source_snapshots[source_key=sales_funnel_history]`
   - UI accepts any positive `sales_avg_period_days`; backend calculates any fully covered lookback window and returns an exact coverage blocker only when requested history reaches outside the persisted authoritative window
@@ -141,11 +144,14 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - operator XLSX templates stay compact and Russian-headed; backend keeps stable internal mapping
   - generated XLSX files must stay readable without repair prompt in standard XLSX readers/Excel
   - `Остатки ФФ` require one row per active SKU and reject duplicate `nmId`
+  - the same exact uploaded `Остатки ФФ` dataset/state is reused by the regional block; there is no second `stock_ff` upload contract/entity
   - inbound templates allow duplicate `nmId`; one row = one separate planned delivery
   - inbound datasets are optional for calculation; when a file is absent or deleted, its coverage term is treated as `0`
   - each upload block exposes the current uploaded file as a downloadable link and a bounded delete action for the stored dataset
   - factory-order coverage includes `stock_total`, uploaded `stock_ff`, inbound from factory to FF inside horizon and the parity-critical uploaded inbound `ФФ -> Wildberries`
   - result surface gives both downloadable XLSX recommendation and the same `Общее количество` / `Расчётный вес` / `Расчётный объём` summary directly in UI
+  - regional block does not materialize inbound `ФФ -> Wildberries`; this input stays outside the current bounded scope
+  - regional result surface gives server-driven summary, a compact district deficit table and separate district XLSX files keyed by the six canonical federal districts
 - Канонический prepare output:
   - `CONFIG` с uploaded compact rows
   - `METRICS` с uploaded compact rows

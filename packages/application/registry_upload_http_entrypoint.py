@@ -13,6 +13,7 @@ from uuid import uuid4
 from packages.application.factory_order_supply import FactoryOrderSupplyBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_load_bridge import load_sheet_vitrina_ready_snapshot_via_clasp
+from packages.application.wb_regional_supply import WbRegionalSupplyBlock
 from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE_NAME,
     DAILY_REFRESH_BUSINESS_HOUR,
@@ -67,6 +68,11 @@ class RegistryUploadHttpEntrypoint:
         self.sheet_load_runner = sheet_load_runner or load_sheet_vitrina_ready_snapshot_via_clasp
         self.operator_jobs = SheetVitrinaV1OperatorJobStore(timestamp_factory=self.activated_at_factory)
         self.factory_order_supply_block = FactoryOrderSupplyBlock(
+            runtime=self.runtime,
+            now_factory=self.now_factory,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.wb_regional_supply_block = WbRegionalSupplyBlock(
             runtime=self.runtime,
             now_factory=self.now_factory,
             timestamp_factory=self.activated_at_factory,
@@ -170,6 +176,15 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_factory_order_recommendation_request(self) -> tuple[bytes, str]:
         return self.factory_order_supply_block.download_recommendation()
+
+    def handle_wb_regional_status_request(self) -> dict[str, Any]:
+        return asdict(self.wb_regional_supply_block.build_status())
+
+    def handle_wb_regional_calculate_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return asdict(self.wb_regional_supply_block.calculate(payload))
+
+    def handle_wb_regional_district_recommendation_request(self, district_key: str) -> tuple[bytes, str]:
+        return self.wb_regional_supply_block.download_district_recommendation(district_key)
 
     def _run_sheet_auto_update(
         self,
