@@ -236,6 +236,7 @@ function runLoadOnlyMode({ context, spreadsheet, options }) {
 function runServerDrivenMaterializationMode({ context, spreadsheet }) {
   const dayOnePlan = buildSyntheticSheetVitrinaPlan('2026-04-12', 0);
   const dayOneOverwritePlan = buildSyntheticSheetVitrinaPlan('2026-04-12', 500);
+  const dayOneBlankOverwritePlan = buildSyntheticSheetVitrinaBlankOverwritePlan('2026-04-12', 500);
   const dayTwoPlan = buildSyntheticSheetVitrinaPlan('2026-04-13', 1000);
 
   const firstLoad = parseJsonString(context.writeSheetVitrinaV1Plan(JSON.stringify(dayOnePlan)));
@@ -248,6 +249,11 @@ function runServerDrivenMaterializationMode({ context, spreadsheet }) {
   const sameDayPresentation = parseJsonString(context.getSheetVitrinaV1PresentationSnapshot());
   const sameDaySnapshot = snapshotSheet(spreadsheet.getSheetByName('DATA_VITRINA'));
 
+  const sameDayBlankOverwrite = parseJsonString(context.writeSheetVitrinaV1Plan(JSON.stringify(dayOneBlankOverwritePlan)));
+  const sameDayBlankState = parseJsonString(context.getSheetVitrinaV1State());
+  const sameDayBlankPresentation = parseJsonString(context.getSheetVitrinaV1PresentationSnapshot());
+  const sameDayBlankSnapshot = snapshotSheet(spreadsheet.getSheetByName('DATA_VITRINA'));
+
   const nextDayOverwrite = parseJsonString(context.writeSheetVitrinaV1Plan(JSON.stringify(dayTwoPlan)));
   const nextDayState = parseJsonString(context.getSheetVitrinaV1State());
   const nextDayPresentation = parseJsonString(context.getSheetVitrinaV1PresentationSnapshot());
@@ -256,20 +262,24 @@ function runServerDrivenMaterializationMode({ context, spreadsheet }) {
   return {
     first_load: firstLoad,
     same_day_overwrite: sameDayOverwrite,
+    same_day_blank_overwrite: sameDayBlankOverwrite,
     next_day_overwrite: nextDayOverwrite,
     snapshots: {
       after_first_load: firstSnapshot,
       after_same_day_overwrite: sameDaySnapshot,
+      after_same_day_blank_overwrite: sameDayBlankSnapshot,
       after_next_day_overwrite: nextDaySnapshot,
     },
     states: {
       first_load: firstState,
       same_day_overwrite: sameDayState,
+      same_day_blank_overwrite: sameDayBlankState,
       next_day_overwrite: nextDayState,
     },
     presentations: {
       first_load: firstPresentation,
       same_day_overwrite: sameDayPresentation,
+      same_day_blank_overwrite: sameDayBlankPresentation,
       next_day_overwrite: nextDayPresentation,
     },
   };
@@ -417,6 +427,25 @@ function buildSyntheticSheetVitrinaPlan(asOfDate, offset) {
       },
     ],
   };
+}
+
+function buildSyntheticSheetVitrinaBlankOverwritePlan(asOfDate, offset) {
+  const plan = buildSyntheticSheetVitrinaPlan(asOfDate, offset);
+  const blankKeys = {
+    'TOTAL|total_view_count': true,
+    'TOTAL|total_open_card_count': true,
+    'GROUP:Clean|view_count': true,
+    'GROUP:Clean|open_card_count': true,
+    'SKU:210183919|view_count': true,
+    'SKU:210183919|open_card_count': true,
+  };
+  const dataSheet = plan.sheets[0];
+  dataSheet.rows.forEach((row) => {
+    if (blankKeys[String(row[1] || '').trim()]) {
+      row[2] = '';
+    }
+  });
+  return plan;
 }
 
 function syntheticMetricValue(metricKey, base) {

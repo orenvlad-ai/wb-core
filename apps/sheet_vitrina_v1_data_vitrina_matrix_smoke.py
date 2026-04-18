@@ -10,6 +10,13 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _row_by_key(sheet: list[list[object]], key: str) -> list[object]:
+    for row in sheet:
+        if len(row) > 1 and row[1] == key:
+            return row
+    raise AssertionError(f"missing row for key={key}")
+
+
 def main() -> None:
     harness_result = json.loads(
         subprocess.check_output(
@@ -96,6 +103,23 @@ def main() -> None:
     if overwrite_state["layout_mode"] != "date_matrix" or overwrite_state["data_row_count"] != len(overwrite_sheet) - 1:
         raise AssertionError("same-day overwrite must preserve date_matrix shape")
 
+    blank_overwrite_sheet = harness_result["snapshots"]["after_same_day_blank_overwrite"]["values"]
+    blank_overwrite_state = harness_result["states"]["same_day_blank_overwrite"]["sheets"][0]
+    if blank_overwrite_sheet[0] != ["дата", "key", "2026-04-12"]:
+        raise AssertionError("same-day blank overwrite must keep matrix header")
+    if _row_by_key(blank_overwrite_sheet, "total_view_count")[2] != "":
+        raise AssertionError("same-day blank overwrite must clear TOTAL total_view_count")
+    if _row_by_key(blank_overwrite_sheet, "total_open_card_count")[2] != "":
+        raise AssertionError("same-day blank overwrite must clear TOTAL total_open_card_count")
+    if _row_by_key(blank_overwrite_sheet, "view_count")[2] != "":
+        raise AssertionError("same-day blank overwrite must clear the targeted SKU/group view_count row")
+    if _row_by_key(blank_overwrite_sheet, "open_card_count")[2] != "":
+        raise AssertionError("same-day blank overwrite must clear the targeted SKU/group open_card_count row")
+    if _row_by_key(blank_overwrite_sheet, "total_proxy_profit_rub")[2] != 10500:
+        raise AssertionError("same-day blank overwrite must not erase unrelated metrics")
+    if blank_overwrite_state["layout_mode"] != "date_matrix":
+        raise AssertionError("same-day blank overwrite must preserve date_matrix shape")
+
     next_day_sheet = harness_result["snapshots"]["after_next_day_overwrite"]["values"]
     next_day_state = harness_result["states"]["next_day_overwrite"]["sheets"][0]
     if next_day_sheet[0] != ["дата", "key", "2026-04-12", "2026-04-13"]:
@@ -104,6 +128,10 @@ def main() -> None:
         raise AssertionError("next day load must preserve history and append new values")
     if next_day_sheet[3][2] != 10500 or next_day_sheet[3][3] != 11000:
         raise AssertionError("next day overwrite must append refreshed money-like values")
+    if _row_by_key(next_day_sheet, "total_view_count")[2] != "" or _row_by_key(next_day_sheet, "total_view_count")[3] != 2000:
+        raise AssertionError("next day overwrite must preserve the blank-cleared day and append the new total")
+    if _row_by_key(next_day_sheet, "total_open_card_count")[2] != "" or _row_by_key(next_day_sheet, "total_open_card_count")[3] != 1250:
+        raise AssertionError("next day overwrite must preserve the blank-cleared open_card_count day")
     if next_day_state["layout_mode"] != "date_matrix" or next_day_state["metric_key_count"] != first_state["metric_key_count"]:
         raise AssertionError("next day overwrite must preserve the full metric set")
     if next_day_state["date_column_count"] != 2:
@@ -111,6 +139,7 @@ def main() -> None:
 
     print(f"first_load: ok -> blocks={first_state['block_key_count']} metric_keys={first_state['metric_key_count']}")
     print("same_day_overwrite: ok -> 2026-04-12")
+    print("same_day_blank_overwrite: ok -> blank clears stale same-day cells")
     print("next_day_overwrite: ok -> 2026-04-12 + 2026-04-13")
     print("presentation_formats: ok -> integer/percent/decimal")
     print("smoke-check passed")

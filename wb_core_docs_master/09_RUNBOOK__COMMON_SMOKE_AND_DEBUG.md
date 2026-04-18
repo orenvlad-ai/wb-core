@@ -76,6 +76,9 @@ python3 apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py
 git diff --check
 ```
 
+Targeted expectation for `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`:
+- same-day incoming blank cell in server-owned `DATA_VITRINA` plan must clear the live-sheet cell instead of preserving a stale historical value or stale zero.
+
 ## Factory-order historical reconcile helpers
 
 ```bash
