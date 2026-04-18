@@ -56,8 +56,24 @@ class FakeStocksBlock:
 
 class FakeSalesHistoryBlock:
     def execute(self, request_obj: object) -> SimpleNamespace:
-        del request_obj
-        return SimpleNamespace(result=SimpleNamespace(kind="success", items=[]))
+        items = []
+        for nm_id in request_obj.nm_ids:
+            items.append(
+                SimpleNamespace(
+                    date=str(request_obj.date_from),
+                    nm_id=int(nm_id),
+                    metric="orderCount",
+                    value=0.0,
+                )
+            )
+        return SimpleNamespace(
+            result=SimpleNamespace(
+                kind="success",
+                date_from=str(request_obj.date_from),
+                date_to=str(request_obj.date_to),
+                items=items,
+            )
+        )
 
 
 def main() -> None:

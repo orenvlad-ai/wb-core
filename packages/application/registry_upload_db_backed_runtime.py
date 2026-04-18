@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 import json
 from pathlib import Path
 import sqlite3
@@ -579,6 +579,46 @@ class RegistryUploadDbBackedRuntime:
                 return None, None
             return _deserialize_temporal_source_payload(row["payload_json"]), row["captured_at"]
 
+    def list_temporal_source_snapshot_dates(self, *, source_key: str) -> list[str]:
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT snapshot_date
+                FROM temporal_source_snapshots
+                WHERE source_key = ?
+                ORDER BY snapshot_date
+                """,
+                (source_key,),
+            ).fetchall()
+            return [str(row["snapshot_date"]) for row in rows]
+
+    def delete_temporal_source_snapshots(
+        self,
+        *,
+        source_key: str,
+        date_from: str,
+        date_to: str,
+    ) -> int:
+        _validate_iso_date(date_from, field_name="date_from")
+        _validate_iso_date(date_to, field_name="date_to")
+        if date_to < date_from:
+            raise ValueError("date_to must be >= date_from")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            cursor = conn.execute(
+                """
+                DELETE FROM temporal_source_snapshots
+                WHERE source_key = ?
+                  AND snapshot_date >= ?
+                  AND snapshot_date <= ?
+                """,
+                (source_key, date_from, date_to),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+
     def save_factory_order_dataset_state(
         self,
         *,
@@ -1087,6 +1127,13 @@ def _validate_timestamp(value: str, field_name: str) -> None:
         datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(f"{field_name} must be a valid ISO 8601 timestamp") from exc
+
+
+def _validate_iso_date(value: str, field_name: str) -> None:
+    try:
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be a valid ISO 8601 date") from exc
 
 
 def _sheet_row_counts_from_plan(plan: SheetVitrinaV1Envelope) -> dict[str, int]:

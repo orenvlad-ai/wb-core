@@ -576,7 +576,7 @@ class SheetVitrinaV1LivePlanBlock:
                     statuses.append(gap_status)
                     _emit_source_status_log(emit, gap_status)
                     continue
-                if source_key in {"seller_funnel_snapshot", "web_source_snapshot"}:
+                if source_key in {"seller_funnel_snapshot", "sales_funnel_history", "web_source_snapshot"}:
                     status, payload = self._capture_temporal_web_source(
                         source_key=source_key,
                         temporal_slot=slot.slot_key,

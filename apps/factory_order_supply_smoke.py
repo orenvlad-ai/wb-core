@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.factory_order_supply import FactoryOrderSupplyBlock
+from packages.application.factory_order_sales_history import persist_sales_history_result_exact_dates
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
 from packages.contracts.factory_order_supply import (
@@ -21,6 +22,7 @@ from packages.contracts.factory_order_supply import (
     DATASET_INBOUND_FF_TO_WB,
     DATASET_STOCK_FF,
 )
+from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryItem, SalesFunnelHistorySuccess
 
 INPUT_BUNDLE_FIXTURE = (
     ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
@@ -29,6 +31,17 @@ NOW = datetime(2026, 4, 18, 9, 0, tzinfo=timezone.utc)
 ACTIVATED_AT = "2026-04-18T09:00:00Z"
 
 SALES_BY_DATE = {
+    "2026-03-28": {210183919: 10.0, 210184534: 1.0},
+    "2026-03-29": {210183919: 20.0, 210184534: 2.0},
+    "2026-03-30": {210183919: 30.0, 210184534: 3.0},
+    "2026-03-31": {210183919: 40.0, 210184534: 4.0},
+    "2026-04-01": {210183919: 50.0, 210184534: 5.0},
+    "2026-04-02": {210183919: 60.0, 210184534: 6.0},
+    "2026-04-03": {210183919: 70.0, 210184534: 7.0},
+    "2026-04-04": {210183919: 72.0, 210184534: 11.0},
+    "2026-04-05": {210183919: 74.0, 210184534: 12.0},
+    "2026-04-06": {210183919: 76.0, 210184534: 13.0},
+    "2026-04-07": {210183919: 78.0, 210184534: 14.0},
     "2026-04-08": {210183919: 80.0, 210184534: 15.0},
     "2026-04-09": {210183919: 90.0, 210184534: 18.0},
     "2026-04-10": {210183919: 100.0, 210184534: 21.0},
@@ -59,7 +72,11 @@ class FakeStocksBlock:
 
 
 class FakeSalesHistoryBlock:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
     def execute(self, request_obj: object) -> SimpleNamespace:
+        self.calls.append((str(request_obj.date_from), str(request_obj.date_to)))
         start = date.fromisoformat(request_obj.date_from)
         end = date.fromisoformat(request_obj.date_to)
         items = []
@@ -67,15 +84,14 @@ class FakeSalesHistoryBlock:
         while current <= end:
             lookup = SALES_BY_DATE.get(current.isoformat(), {})
             for nm_id in request_obj.nm_ids:
-                if nm_id in lookup:
-                    items.append(
-                        SimpleNamespace(
-                            date=current.isoformat(),
-                            nm_id=nm_id,
-                            metric="orderCount",
-                            value=float(lookup[nm_id]),
-                        )
+                items.append(
+                    SimpleNamespace(
+                        date=current.isoformat(),
+                        nm_id=nm_id,
+                        metric="orderCount",
+                        value=float(lookup.get(int(nm_id), 0.0)),
                     )
+                )
             current += timedelta(days=1)
         return SimpleNamespace(result=SimpleNamespace(kind="success", items=items))
 
@@ -87,10 +103,12 @@ def main() -> None:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
         runtime.ingest_bundle(bundle, activated_at=ACTIVATED_AT)
         active_nm_ids = [item.nm_id for item in runtime.load_current_state().config_v2 if item.enabled]
+        _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids, missing_dates=set())
+        history_block = FakeSalesHistoryBlock()
         block = FactoryOrderSupplyBlock(
             runtime=runtime,
             stocks_block=FakeStocksBlock(active_nm_ids),
-            sales_funnel_history_block=FakeSalesHistoryBlock(),
+            sales_funnel_history_block=history_block,
             now_factory=lambda: NOW,
             timestamp_factory=lambda: ACTIVATED_AT,
         )
@@ -178,7 +196,7 @@ def main() -> None:
         by_nm_id = {item.nm_id: item for item in result_without_inbound.rows}
         sku_one = by_nm_id[210183919]
         sku_two = by_nm_id[210184534]
-        if round(sku_one.daily_demand_total, 2) != 160.0:
+        if round(sku_one.daily_demand_total, 2) != _expected_average(210183919, report_date="2026-04-18", period_days=3):
             raise AssertionError("3-day lookback must average only the last 3 closed days")
         if round(sku_one.coverage_qty, 2) != 130.0:
             raise AssertionError("coverage without inbound files must include only stock_total_mp + stock_ff")
@@ -233,7 +251,7 @@ def main() -> None:
         by_nm_id = {item.nm_id: item for item in result_with_inbound.rows}
         sku_one = by_nm_id[210183919]
         sku_two = by_nm_id[210184534]
-        if round(sku_one.daily_demand_total, 2) != 140.0:
+        if round(sku_one.daily_demand_total, 2) != _expected_average(210183919, report_date="2026-04-18", period_days=7):
             raise AssertionError("7-day lookback must change the average demand relative to 3-day lookback")
         if round(sku_one.inbound_factory_to_ff, 2) != 40.0:
             raise AssertionError("only the inbound_factory event inside horizon must be counted")
@@ -297,14 +315,35 @@ def main() -> None:
         shifted_rows = {item.nm_id: item for item in shifted_result.rows}
         shifted_sku_one = shifted_rows[210183919]
         shifted_sku_two = shifted_rows[210184534]
-        if round(shifted_sku_one.daily_demand_total, 2) != 145.0:
+        if round(shifted_sku_one.daily_demand_total, 2) != _expected_average(210183919, report_date="2026-04-16", period_days=2):
             raise AssertionError("shifted report date must recalculate the average demand on the selected closed-day window")
         if shifted_sku_one.recommended_order_qty != 1175:
             raise AssertionError("shifted scenario must keep the exact 25-piece box multiple for SKU 1")
         if shifted_sku_two.recommended_order_qty != 300:
             raise AssertionError("shifted scenario must round SKU 2 up to the next 25-piece box multiple")
 
-        # Scenario 5: longer lookback still hits the truthful authoritative boundary.
+        # Scenario 5: any positive lookback is allowed when the authoritative runtime history covers the window.
+        for period_days in (10, 14, 21):
+            covered_result = block.calculate(
+                {
+                    "prod_lead_time_days": 10,
+                    "lead_time_factory_to_ff_days": 5,
+                    "lead_time_ff_to_wb_days": 2,
+                    "safety_days_mp": 3,
+                    "safety_days_ff": 2,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "sales_avg_period_days": period_days,
+                }
+            )
+            covered_sku = {item.nm_id: item for item in covered_result.rows}[210183919]
+            if round(covered_sku.daily_demand_total, 2) != _expected_average(
+                210183919,
+                report_date="2026-04-18",
+                period_days=period_days,
+            ):
+                raise AssertionError(f"{period_days}-day lookback must use the exact covered runtime window")
+
         try:
             block.calculate(
                 {
@@ -315,28 +354,111 @@ def main() -> None:
                     "safety_days_ff": 2,
                     "order_batch_qty": 50,
                     "report_date_override": "2026-04-18",
-                    "sales_avg_period_days": 10,
+                    "sales_avg_period_days": 60,
                 }
             )
         except ValueError as exc:
-            if "current live source сейчас принимает start day не раньше 2026-04-11" not in str(exc):
+            message = str(exc)
+            if "нужен диапазон 2026-02-17..2026-04-17" not in message or "2026-03-28..2026-04-17" not in message:
                 raise
         else:
-            raise AssertionError("lookback beyond the authoritative history boundary must fail truthfully")
+            raise AssertionError("lookback outside the authoritative runtime coverage must fail truthfully")
+
+        with TemporaryDirectory(prefix="factory-order-recent-fill-") as second_tmp:
+            runtime_dir = Path(second_tmp) / "runtime"
+            runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+            runtime.ingest_bundle(bundle, activated_at=ACTIVATED_AT)
+            active_nm_ids = [item.nm_id for item in runtime.load_current_state().config_v2 if item.enabled]
+            _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids, missing_dates={"2026-04-17"})
+            recent_history_block = FakeSalesHistoryBlock()
+            recent_block = FactoryOrderSupplyBlock(
+                runtime=runtime,
+                stocks_block=FakeStocksBlock(active_nm_ids),
+                sales_funnel_history_block=recent_history_block,
+                now_factory=lambda: NOW,
+                timestamp_factory=lambda: ACTIVATED_AT,
+            )
+            recent_block.upload_dataset(
+                DATASET_STOCK_FF,
+                build_single_sheet_workbook_bytes("Остатки ФФ", stock_upload_rows),
+            )
+            recent_fill_result = recent_block.calculate(
+                {
+                    "prod_lead_time_days": 10,
+                    "lead_time_factory_to_ff_days": 5,
+                    "lead_time_ff_to_wb_days": 2,
+                    "safety_days_mp": 3,
+                    "safety_days_ff": 2,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "sales_avg_period_days": 3,
+                }
+            )
+            if recent_history_block.calls != [("2026-04-17", "2026-04-17")]:
+                raise AssertionError(f"missing recent date must be refetched as one exact-date batch, got {recent_history_block.calls}")
+            recent_sku = {item.nm_id: item for item in recent_fill_result.rows}[210183919]
+            if round(recent_sku.daily_demand_total, 2) != _expected_average(210183919, report_date="2026-04-18", period_days=3):
+                raise AssertionError("recent authoritative fill must preserve the covered averaging semantics")
 
         status = block.build_status()
+        if "2026-03-28..2026-04-17" not in status.coverage_contract_note:
+            raise AssertionError("status must expose the current authoritative runtime coverage window")
         if status.datasets[DATASET_STOCK_FF].uploaded_filename != "factory-stock-input.xlsx":
             raise AssertionError("status must expose the current uploaded filename")
         if status.datasets[DATASET_INBOUND_FACTORY_TO_FF].status != "missing":
             raise AssertionError("status must reflect deleted inbound_factory state")
-        if status.last_result is None or status.last_result.summary.total_qty != shifted_result.summary.total_qty:
+        if status.last_result is None or status.last_result.settings.sales_avg_period_days != 21:
             raise AssertionError("status must persist the last successful calculation result")
 
         print(f"scenario_without_inbound: ok -> total_qty={result_without_inbound.summary.total_qty}")
         print(f"scenario_multi_inbound: ok -> sku_one_inbound_factory={sku_one.inbound_factory_to_ff}")
         print(f"scenario_delete_then_zero: ok -> sku_one_coverage={sku_one_after_delete.coverage_qty}")
         print(f"scenario_shifted_report_date: ok -> sku_one_qty={shifted_sku_one.recommended_order_qty}, sku_two_qty={shifted_sku_two.recommended_order_qty}")
-        print("scenario_period_gt_7: ok -> truthful blocker current live source сейчас принимает start day не раньше 2026-04-11")
+        print("scenario_covered_windows: ok -> periods=10,14,21")
+        print("scenario_out_of_range: ok -> blocker exposes needed range 2026-02-17..2026-04-17 and available 2026-03-28..2026-04-17")
+        print("scenario_recent_authoritative_fill: ok -> fetched missing recent date 2026-04-17")
+
+def _seed_runtime_sales_history(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    active_nm_ids: list[int],
+    missing_dates: set[str],
+) -> None:
+    items: list[SalesFunnelHistoryItem] = []
+    for snapshot_date, values in sorted(SALES_BY_DATE.items()):
+        if snapshot_date in missing_dates:
+            continue
+        for nm_id in sorted(active_nm_ids):
+            items.append(
+                SalesFunnelHistoryItem(
+                    date=snapshot_date,
+                    nm_id=nm_id,
+                    metric="orderCount",
+                    value=float(values.get(nm_id, 0.0)),
+                )
+            )
+    persist_sales_history_result_exact_dates(
+        runtime=runtime,
+        payload=SalesFunnelHistorySuccess(
+            kind="success",
+            date_from=min(date for date in SALES_BY_DATE if date not in missing_dates),
+            date_to=max(date for date in SALES_BY_DATE if date not in missing_dates),
+            count=len(items),
+            items=items,
+        ),
+        captured_at=ACTIVATED_AT,
+    )
+
+
+def _expected_average(nm_id: int, *, report_date: str, period_days: int) -> float:
+    end = date.fromisoformat(report_date) - timedelta(days=1)
+    start = end - timedelta(days=period_days - 1)
+    current = start
+    values: list[float] = []
+    while current <= end:
+        values.append(float(SALES_BY_DATE[current.isoformat()][nm_id]))
+        current += timedelta(days=1)
+    return round(sum(values) / len(values), 2)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from packages.adapters.sales_funnel_history_block import HttpBackedSalesFunnelHistorySource
 from packages.adapters.stocks_block import HttpBackedStocksSource
+from packages.application.factory_order_sales_history import FactoryOrderAuthoritativeSalesHistory
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sales_funnel_history_block import SalesFunnelHistoryBlock
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
@@ -30,7 +31,6 @@ from packages.contracts.factory_order_supply import (
     FactoryOrderSummary,
     FactoryOrderUploadResult,
 )
-from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryRequest
 from packages.contracts.stocks_block import StocksRequest
 
 
@@ -100,6 +100,12 @@ class FactoryOrderSupplyBlock:
         )
         self.now_factory = now_factory or _default_now_factory
         self.timestamp_factory = timestamp_factory or _default_timestamp_factory
+        self.sales_history = FactoryOrderAuthoritativeSalesHistory(
+            runtime=self.runtime,
+            sales_funnel_history_block=self.sales_funnel_history_block,
+            now_factory=self.now_factory,
+            timestamp_factory=self.timestamp_factory,
+        )
 
     def build_status(self) -> FactoryOrderStatus:
         active_skus = self._load_active_skus()
@@ -108,7 +114,7 @@ class FactoryOrderSupplyBlock:
         return FactoryOrderStatus(
             status="ready" if last_result is not None else "idle",
             active_sku_count=len(active_skus),
-            coverage_contract_note=_COVERAGE_CONTRACT_NOTE,
+            coverage_contract_note=self.sales_history.build_operator_note(_COVERAGE_CONTRACT_NOTE),
             datasets=datasets,
             last_result=last_result,
         )
@@ -263,23 +269,11 @@ class FactoryOrderSupplyBlock:
 
         history_from = report_date_obj - timedelta(days=settings.sales_avg_period_days)
         history_to = report_date_obj - timedelta(days=1)
-        current_business_date = date.fromisoformat(current_business_date_iso(self.now_factory()))
-        min_supported_history_start = current_business_date - timedelta(days=7)
-        if history_from < min_supported_history_start:
-            raise ValueError(
-                "Запрошенный период усреднения продаж не покрывается текущим authoritative sales history source: "
-                f"нужен диапазон {history_from.isoformat()}..{history_to.isoformat()}, "
-                f"а current live source сейчас принимает start day не раньше {min_supported_history_start.isoformat()}."
-            )
-        history_response = self.sales_funnel_history_block.execute(
-            SalesFunnelHistoryRequest(
-                snapshot_type="sales_funnel_history",
-                date_from=history_from.isoformat(),
-                date_to=history_to.isoformat(),
-                nm_ids=nm_ids,
-            )
-        ).result
-        order_counts_by_nm = _collect_order_count_history(history_response)
+        order_counts_by_nm = self.sales_history.load_order_count_samples(
+            date_from=history_from.isoformat(),
+            date_to=history_to.isoformat(),
+            nm_ids=nm_ids,
+        )
 
         stock_ff_by_nm = {row.nm_id: float(row.stock_ff) for row in stock_ff_rows}
         inbound_factory_by_nm = _sum_inbound_rows_within_horizon(inbound_factory_rows, horizon_end)
@@ -332,7 +326,7 @@ class FactoryOrderSupplyBlock:
             calculated_at=self.timestamp_factory(),
             report_date=report_date,
             horizon_days=horizon_days,
-            coverage_contract_note=_COVERAGE_CONTRACT_NOTE,
+            coverage_contract_note=self.sales_history.build_operator_note(_COVERAGE_CONTRACT_NOTE),
             settings=settings,
             datasets=datasets,
             summary=summary,
@@ -755,18 +749,6 @@ def _normalize_uploaded_filename(value: str | None, *, dataset_type: str) -> str
         return _DATASET_FILENAMES[dataset_type]
     normalized = raw.replace("\\", "/").rsplit("/", 1)[-1].strip()
     return normalized or _DATASET_FILENAMES[dataset_type]
-
-
-def _collect_order_count_history(history_response: Any) -> dict[int, list[float]]:
-    items = getattr(history_response, "items", []) or []
-    values: dict[int, list[float]] = {}
-    for item in items:
-        metric = str(getattr(item, "metric", "") or "")
-        if metric != "orderCount":
-            continue
-        nm_id = int(getattr(item, "nm_id"))
-        values.setdefault(nm_id, []).append(float(getattr(item, "value", 0.0)))
-    return values
 
 
 def _sum_inbound_rows_within_horizon(rows: list[FactoryOrderInboundRow], horizon_end: date) -> dict[int, float]:
