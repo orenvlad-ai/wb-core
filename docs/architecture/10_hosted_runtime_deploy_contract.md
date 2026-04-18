@@ -114,7 +114,8 @@ For live/public tasks affecting this contour `repo-only` does not count as compl
 3. `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py deploy`;
 4. `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py loopback-probe`;
 5. `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py public-probe`;
-6. if the task changes bound Apps Script or live sheet behavior, finish the corresponding `clasp`/sheet verify path.
+6. if the task changes `sheet_vitrina_v1` temporal closure semantics, install/update the corresponding bounded retry timer or equivalent existing host wiring;
+7. if the task changes bound Apps Script or live sheet behavior, finish the corresponding `clasp`/sheet verify path.
 
 `deploy-and-verify` may be used as one combined step when access is already safe and available.
 
@@ -129,6 +130,7 @@ Public probe validates:
 - `GET /sheet-vitrina-v1/operator` returns `200` + `text/html` and still contains the compact operator tokens for separated refresh/load plus server/time block and both bounded supply subsections (`Загрузить данные`, `Отправить данные`, `Скачать лог`, `Лог`, `Сервер и расписание`, `Часовой пояс`, `Автообновление`, `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление`, `Общий вход для двух расчётов`, `Заказ на фабрике`, `Поставка на Wildberries`, `Цикл заказов`, `Цикл поставок`)
 - `GET /v1/sheet-vitrina-v1/status` returns JSON with either success shape including `server_context` or truthful `422 {"error": ..., "server_context": ...}`
 - `GET /v1/sheet-vitrina-v1/plan` returns JSON with either success shape or truthful `422 {"error": ...}`
+- when strict bot/web-source closed-day acceptance is active, `STATUS` / `plan` / job surfaces must disclose truthful closure states (`closure_pending`, `closure_retrying`, `closure_rate_limited`, `closure_exhausted`, `success`) instead of silently reusing provisional same-day values in `yesterday_closed`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/status` returns JSON with dataset states, active SKU count and recommendation path
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/status` returns JSON with active SKU count, methodology note, shared dataset state and optional last result
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/*.xlsx` returns `200` + XLSX content type for all operator templates with Russian headers
@@ -147,6 +149,11 @@ If the task changes operator upload/calculate write paths inside this contour, l
 - verify the published result surface (`status`, operator HTML, downloadable XLSX, summary JSON) without inventing sheet/GAS steps that are outside the actual change scope.
 
 Timeout, non-JSON body, wrong content type, `404`, stale HTML error surface or missing operator route tokens are treated as stale deploy/publish symptoms.
+
+If the task introduces or changes temporal closed-day retry behavior for `sheet_vitrina_v1`, live closure additionally requires:
+- verify the repo-owned retry runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py` on the hosted target;
+- verify the host timer/service wiring if that runner is expected to self-heal delayed closed-day acceptance (`wb-core-sheet-vitrina-closure-retry.service` / `.timer` on the current host contract);
+- verify at least one affected `as_of_date` where a strict closed-day-capable source either transitions to `success` after retry or stays in a truthful retry/exhausted/blocker state without fake closed values in the visible slot.
 
 If the local machine cannot validate the current selleros certificate chain, public probe may reuse the existing bounded diagnostic fallback:
 - `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py public-probe ...`

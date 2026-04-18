@@ -1,4 +1,4 @@
-"""Targeted smoke-check for retrying zero-filled seller funnel current-day snapshots."""
+"""Targeted smoke-check for retrying zero-filled current-day search + seller snapshots."""
 
 from __future__ import annotations
 
@@ -31,7 +31,8 @@ def main() -> None:
         _write_state(
             state_path,
             {
-                "search_valid_dates": [TARGET_DATE],
+                "search_valid_dates": [],
+                "search_zero_dates": [TARGET_DATE],
                 "seller_valid_dates": [],
                 "seller_zero_dates": [TARGET_DATE],
                 "calls": [],
@@ -54,11 +55,21 @@ def main() -> None:
             sync.ensure_snapshot(TARGET_DATE)
             state = _read_state(state_path)
             if state["calls"] != [
+                {"kind": "bot.runner_day", "date": TARGET_DATE},
+                {"kind": "run_web_source_handoff.py", "dataset": "search-analytics", "date": TARGET_DATE},
                 {"kind": "bot.runner_sales_funnel_day", "date": TARGET_DATE},
                 {"kind": "run_web_source_handoff.py", "dataset": "sales-funnel", "date": TARGET_DATE},
             ]:
-                raise AssertionError(f"seller current sync must retry zero snapshot, got calls={state['calls']}")
+                raise AssertionError(f"current sync must retry zero-filled search + seller snapshots, got calls={state['calls']}")
 
+            search_payload = _get_json(f"{api.base_url}/v1/search-analytics/snapshot?date_to={TARGET_DATE}")
+            first_search_item = search_payload["items"][0]
+            if (
+                first_search_item["views_current"] <= 0
+                and first_search_item["ctr_current"] <= 0
+                and first_search_item["orders_current"] <= 0
+            ):
+                raise AssertionError("search_analytics payload must be repaired to non-zero values after retry")
             seller_payload = _get_json(f"{api.base_url}/v1/sales-funnel/daily?date={TARGET_DATE}")
             first_item = seller_payload["items"][0]
             if first_item["view_count"] <= 0 or first_item["open_card_count"] <= 0:
@@ -67,9 +78,10 @@ def main() -> None:
             sync.ensure_snapshot(TARGET_DATE)
             second_state = _read_state(state_path)
             if second_state["calls"] != state["calls"]:
-                raise AssertionError("usable seller_funnel snapshot must not trigger duplicate retries")
+                raise AssertionError("usable search/seller snapshots must not trigger duplicate retries")
 
-            print(f"seller_retry: ok -> {state['calls']}")
+            print(f"current_retry: ok -> {state['calls']}")
+            print(f"search_payload: ok -> {first_search_item['views_current']} / {first_search_item['orders_current']}")
             print(f"seller_payload: ok -> {first_item['view_count']} / {first_item['open_card_count']}")
             print("smoke-check passed")
 
@@ -90,7 +102,11 @@ from pathlib import Path
 STATE_PATH = Path({json.dumps(str(state_path))})
 
 state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-state.setdefault("calls", []).append({{"kind": "bot.runner_day", "date": sys.argv[1]}})
+target_date = sys.argv[1]
+state.setdefault("calls", []).append({{"kind": "bot.runner_day", "date": target_date}})
+state["search_zero_dates"] = [value for value in state.get("search_zero_dates", []) if value != target_date]
+if target_date not in state.get("search_valid_dates", []):
+    state.setdefault("search_valid_dates", []).append(target_date)
 STATE_PATH.write_text(json.dumps(state), encoding="utf-8")
 """.strip()
         + "\n",
@@ -201,10 +217,19 @@ class _MockSellerosApi:
 
             def _write_search(self, snapshot_date: str | None) -> None:
                 state = _read_state(parent.state_path)
-                if not snapshot_date or snapshot_date not in state.get("search_valid_dates", []):
+                if not snapshot_date:
                     self._write_json(404, {"detail": "search analytics not found"})
                     return
-                self._write_json(200, _build_search_payload(snapshot_date, parent.requested_nm_ids))
+                if snapshot_date in state.get("search_valid_dates", []):
+                    self._write_json(200, _build_search_payload(snapshot_date, parent.requested_nm_ids, zero=False))
+                    return
+                if snapshot_date in state.get("search_zero_dates", []):
+                    self._write_json(200, _build_search_payload(snapshot_date, parent.requested_nm_ids, zero=True))
+                    return
+                if snapshot_date not in state.get("search_valid_dates", []):
+                    self._write_json(404, {"detail": "search analytics not found"})
+                    return
+                self._write_json(200, _build_search_payload(snapshot_date, parent.requested_nm_ids, zero=False))
 
             def _write_seller(self, snapshot_date: str | None) -> None:
                 state = _read_state(parent.state_path)
@@ -230,7 +255,7 @@ class _MockSellerosApi:
         return Handler
 
 
-def _build_search_payload(snapshot_date: str, requested_nm_ids: list[int]) -> dict[str, object]:
+def _build_search_payload(snapshot_date: str, requested_nm_ids: list[int], *, zero: bool) -> dict[str, object]:
     return {
         "date_from": snapshot_date,
         "date_to": snapshot_date,
@@ -238,10 +263,10 @@ def _build_search_payload(snapshot_date: str, requested_nm_ids: list[int]) -> di
         "items": [
             {
                 "nm_id": nm_id,
-                "views_current": 100 + index,
-                "ctr_current": 20 + index,
-                "orders_current": 5 + index,
-                "position_avg": 1 + index,
+                "views_current": 0 if zero else 100 + index,
+                "ctr_current": 0 if zero else 20 + index,
+                "orders_current": 0 if zero else 5 + index,
+                "position_avg": 0 if zero else 1 + index,
             }
             for index, nm_id in enumerate(requested_nm_ids)
         ],

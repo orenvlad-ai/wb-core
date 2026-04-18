@@ -129,6 +129,7 @@ def _build_live_plan(
             HttpBackedSellerFunnelSnapshotSource(base_url=upstream.base_url)
         ),
         current_web_source_sync=_SyntheticCurrentWebSourceSync(upstream),
+        closed_day_web_source_sync=_NoopClosedDayWebSourceSync(),
         now_factory=lambda current_date=current_date: datetime.fromisoformat(f"{current_date}T08:00:00+00:00"),
         **_build_synthetic_blocks(),
     )
@@ -153,6 +154,11 @@ class _SyntheticCurrentWebSourceSync:
 
     def ensure_snapshot(self, snapshot_date: str) -> None:
         self.upstream.add_snapshot(snapshot_date)
+
+
+class _NoopClosedDayWebSourceSync:
+    def ensure_closed_day_snapshot(self, *, source_key: str, snapshot_date: str) -> None:
+        return
 
 
 class _SyntheticSuccessBlock:

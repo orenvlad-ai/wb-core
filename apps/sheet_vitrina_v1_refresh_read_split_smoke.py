@@ -54,7 +54,7 @@ class CountingBlock:
         self.request_dates.append(request_date)
         payload = SimpleNamespace(
             kind="success",
-            items=[],
+            items=_build_items(self.source_key),
             snapshot_date=request_date,
             date=request_date,
             date_from=request_date,
@@ -63,6 +63,23 @@ class CountingBlock:
             storage_total=None,
         )
         return SimpleNamespace(result=payload)
+
+
+class _NoopClosedDayWebSourceSync:
+    def ensure_closed_day_snapshot(self, *, source_key: str, snapshot_date: str) -> None:
+        return
+
+
+def _build_items(source_key: str) -> list[SimpleNamespace]:
+    if source_key == "seller_funnel_snapshot":
+        return [SimpleNamespace(nm_id=100000001, view_count=11, open_card_count=3)]
+    if source_key == "web_source_snapshot":
+        return [SimpleNamespace(nm_id=100000001, views_current=7, ctr_current=0.21, orders_current=2)]
+    if source_key == "sales_funnel_history":
+        return [SimpleNamespace(nm_id=100000001, add_to_cart_count=5, orders_count=2)]
+    if source_key in {"prices_snapshot", "sf_period", "spp", "ads_bids", "stocks", "ads_compact", "fin_report_daily"}:
+        return [SimpleNamespace(nm_id=100000001)]
+    return []
 
 
 def main() -> None:
@@ -81,6 +98,7 @@ def main() -> None:
         entrypoint.sheet_plan_block = SheetVitrinaV1LivePlanBlock(
             runtime=runtime,
             now_factory=lambda: SERVER_NOW,
+            closed_day_web_source_sync=_NoopClosedDayWebSourceSync(),
             **counters,
         )
 
