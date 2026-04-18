@@ -127,7 +127,13 @@ def main() -> None:
                 raise AssertionError("operator UI must surface row-count fields with Russian labels")
             if "Сервер и расписание" not in operator_ui_html or "Часовой пояс" not in operator_ui_html:
                 raise AssertionError("operator UI must expose the compact server context block")
-            if "Автообновление" not in operator_ui_html or "Технический триггер" not in operator_ui_html:
+            if (
+                "Автообновление" not in operator_ui_html
+                or "Последний автозапуск" not in operator_ui_html
+                or "Статус последнего автозапуска" not in operator_ui_html
+                or "Последнее успешное автообновление" not in operator_ui_html
+                or "Технический триггер" not in operator_ui_html
+            ):
                 raise AssertionError("operator UI must expose scheduler labels in Russian")
             if "Снимок пока не подготовлен." not in operator_ui_html:
                 raise AssertionError("operator UI must keep the Russian empty-state helper text")
@@ -169,6 +175,12 @@ def main() -> None:
                 raise AssertionError("status read before refresh must expose the current host UTC trigger time")
             if server_context.get("daily_refresh_systemd_oncalendar") != "*-*-* 06:00:00 UTC":
                 raise AssertionError("status read before refresh must expose the configured OnCalendar trigger")
+            if server_context.get("daily_auto_description") != (
+                "Ежедневно в 11:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу"
+            ):
+                raise AssertionError("status read before refresh must expose the truthful auto-update description")
+            if server_context.get("last_auto_run_status") != "never":
+                raise AssertionError("status read before refresh must surface the empty auto-run state")
 
             duplicate_status, duplicate_payload = _post_json(base_url, _load_json(INPUT_BUNDLE_FIXTURE))
             if duplicate_status != 409:

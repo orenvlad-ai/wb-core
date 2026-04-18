@@ -127,8 +127,14 @@ update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned
   - `Часовой пояс`
   - `Текущее время сервера`
   - `Автообновление`
+  - `Последний автозапуск`
+  - `Статус последнего автозапуска`
+  - `Последнее успешное автообновление`
   - `Технический триггер`
 - Этот block не hardcode-ится в UI: page читает его только из existing `GET /v1/sheet-vitrina-v1/status` / `POST /v1/sheet-vitrina-v1/refresh` response field `server_context`.
+- `Автообновление` в этом block обязано быть truthful server-driven описанием полного daily auto path, а не только временем:
+  - canonical current wording = `Ежедневно в 11:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
+  - manual operator semantics при этом не меняются: explicit UI buttons всё ещё разделяют `refresh` и `load`
 - Operator log surface обязан показывать построчный start / key steps / finish / error для обеих operator actions:
   - `refresh` = build/persist ready snapshot only
   - `load` = write already prepared snapshot only
@@ -154,6 +160,16 @@ update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned
   - `daily_refresh_business_time`
   - `daily_refresh_systemd_time`
   - `daily_refresh_systemd_oncalendar`
+  - `daily_auto_action`
+  - `daily_auto_description`
+  - `daily_auto_trigger_name`
+  - `daily_auto_trigger_description`
+  - `last_auto_run_status`
+  - `last_auto_run_status_label`
+  - `last_auto_run_time`
+  - `last_auto_run_finished_at`
+  - `last_successful_auto_update_at`
+  - `last_auto_run_error`
 - Если ready snapshot ещё не materialized, `GET /v1/sheet-vitrina-v1/status` сохраняет truthful `422`, но error payload всё равно обязан нести `server_context`, чтобы operator page могла показать актуальные server/timezone/scheduler facts уже на empty state.
 - Это нужно, чтобы public/runtime/operator contour не маскировал `today_current` values под surrogate `as_of_date`.
 - Canonical business timezone для server-side default-date semantics = `Asia/Yekaterinburg`:
@@ -262,7 +278,10 @@ update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned
 - Repo-owned operator page для explicit refresh теперь живёт на том же thin HTTP entrypoint и убирает ручной `curl` из нормального operator path.
 - Existing operator page/status surface теперь server-driven показывает текущую EKT business-time truth и current timer trigger metadata без отдельного meta route и без hardcoded UI copy.
 - Live service остаётся тонкой loopback HTTP boundary (`wb-core-registry-http.service` -> `127.0.0.1:8765`) и не переносит heavy truth в Apps Script.
-- Existing live daily refresh scheduler materialize-ится как external systemd timer `wb-core-sheet-vitrina-refresh.timer`, который вызывает тот же existing `POST /v1/sheet-vitrina-v1/refresh` ежедневно в `11:00 Asia/Yekaterinburg` (`06:00 UTC` на current host).
+- Existing live daily refresh scheduler materialize-ится как external systemd timer `wb-core-sheet-vitrina-refresh.timer`, который вызывает тот же existing `POST /v1/sheet-vitrina-v1/refresh` ежедневно в `11:00 Asia/Yekaterinburg` (`06:00 UTC` на current host), но теперь делает это в `auto_load=true` режиме:
+  - server contour сначала materialize-ит ready snapshot тем же heavy refresh path;
+  - затем в том же auto cycle вызывает existing load bridge и доводит результат до live sheet;
+  - итоговый auto result persist-ится в runtime/status surface как last auto run status / timestamps, чтобы operator page не маскировала refresh-only под sheet-complete.
 - Если bot/web-source family не успела materialize-ить current-day snapshot по daily cron/handoff policy, same refresh route теперь может bounded-trigger'ить server-local same-day capture + handoff и закрыть `today_current` без возврата heavy producer logic в Apps Script.
 - HTTP boundary выровнен с current upload semantics: валидируется содержимое registry rows, а не их заранее зашитое количество.
 - Live closure для этого блока теперь тоже имеет repo-owned contract: Codex больше не должна угадывать target route/service steps руками, а должна идти через canonical hosted runner.

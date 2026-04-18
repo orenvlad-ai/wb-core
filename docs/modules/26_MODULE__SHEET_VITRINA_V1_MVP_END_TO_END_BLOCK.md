@@ -112,6 +112,8 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - page читает `GET /v1/sheet-vitrina-v1/job` для detailed построчного operator log без отдельного audit subsystem
   - тот же `job` route поддерживает text-export конкретного completed run через `format=text&download=1`
   - page дополнительно показывает compact block `Сервер и расписание`, который заполняется только из server-driven `server_context`
+  - `Автообновление` в этом block должно описывать полный daily auto cycle, а не только schedule time: current truthful wording = `Ежедневно в 11:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
+  - тот же block additionally показывает `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление` из backend/status surface
   - log block остаётся fixed-height scrollable viewport с title `Лог` и одной bounded action `Скачать лог`
 - Канонический prepare output:
   - `CONFIG` с uploaded compact rows
@@ -209,7 +211,7 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
 ## 3.1.2 Daily live refresh scheduling
 
 - Daily auto-refresh materialize-ится поверх existing heavy route, а не через новый scheduler contour:
-  - timer target = `POST /v1/sheet-vitrina-v1/refresh`
+  - timer target = `POST /v1/sheet-vitrina-v1/refresh` with payload flag `auto_load=true`
   - schedule = `11:00 Asia/Yekaterinburg`
   - current live host keeps `Etc/UTC`, поэтому systemd timer stores `OnCalendar=*-*-* 06:00:00 UTC`
 - Schedule storage lives in live-owned systemd units:
@@ -218,6 +220,8 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
 - Repo-owned truth при этом остаётся в current code:
   - default `as_of_date` / `today_current` semantics live in `packages/business_time.py`
   - heavy refresh logic stays in existing `POST /v1/sheet-vitrina-v1/refresh`
+  - auto path сначала делает refresh/persist ready snapshot, затем в том же server-owned cycle вызывает existing load bridge и доводит обновление до live sheet
+  - runtime/status surface хранит last auto run status / timestamps separately from manual operator jobs, чтобы block `Сервер и расписание` truthfully показывал именно результат daily auto chain
   - Apps Script remains thin shell and does not own scheduling or date math
 - `Прокси маржинальность всего, %` фиксируется на canonical row `proxy_margin_pct_total`.
 - Расчёт остаётся server-side:

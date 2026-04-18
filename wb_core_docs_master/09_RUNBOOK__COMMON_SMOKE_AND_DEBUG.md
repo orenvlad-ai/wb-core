@@ -174,6 +174,7 @@ Operational rule:
   - service = `wb-core-registry-http.service`
   - timer = `wb-core-sheet-vitrina-refresh.timer`
   - schedule = `11:00 Asia/Yekaterinburg` = `06:00 UTC` in current systemd host timezone
+  - daily timer target = `POST /v1/sheet-vitrina-v1/refresh` with payload flag `auto_load=true`, so the automatic cycle truthfully finishes as `refresh + load to live sheet`
 - route change не считается complete, пока public probe не подтвердил expected content type / response shape.
 - если change затрагивает operator `load` или live sheet write path, closure дополнительно требует `clasp push` и sheet verify по `POST /v1/sheet-vitrina-v1/load` или equivalent existing Apps Script menu flow.
 - если runner уже materialized, но `ssh_destination / target_dir / service_name / restart_command / environment_file` или access отсутствуют, это фиксируется как точный blocker, а не как vague ops-gap.
@@ -210,6 +211,8 @@ Operational rule:
 - operator-facing derived rows используют canonical keys `total_proxy_profit_rub` и `proxy_margin_pct_total`;
 - `GET /sheet-vitrina-v1/operator` поднимает simple operator page без SPA/build pipeline;
 - operator page показывает только narrow status/log surface: separate actions `Загрузить данные` / `Отправить данные`, compact Russian chrome для status/`Лог` и row-count labels плюс один compact server-driven block `Сервер и расписание`; log viewport при этом fixed-height scrollable, completed run можно скачать через `Скачать лог`, а raw log/error text и technical values остаются canonical;
+- в block `Сервер и расписание` `Автообновление` должно быть backend-driven description full daily chain, а не только `11:00 Asia/Yekaterinburg`; current truthful wording = `Ежедневно в 11:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`;
+- тот же block должен surface-ить `Последний автозапуск`, `Статус последнего автозапуска` и `Последнее успешное автообновление` из backend/status contract;
 - `POST /v1/sheet-vitrina-v1/refresh` обновляет date-aware ready snapshot в repo-owned SQLite runtime contour;
 - `POST /v1/sheet-vitrina-v1/load` пишет в live sheet только already prepared snapshot и truthfully падает при missing ready snapshot / bridge blocker;
 - empty/default refresh request must resolve `as_of_date` by `Asia/Yekaterinburg`, not by UTC/host-local clock;

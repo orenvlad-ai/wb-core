@@ -55,3 +55,15 @@ class SheetVitrinaV1RefreshResult:
     snapshot_id: str
     plan_version: str
     sheet_row_counts: dict[str, int]
+
+
+@dataclass(frozen=True)
+class SheetVitrinaV1AutoUpdateState:
+    last_run_started_at: str | None = None
+    last_run_finished_at: str | None = None
+    last_run_status: str | None = None
+    last_run_error: str | None = None
+    last_run_snapshot_id: str | None = None
+    last_run_as_of_date: str | None = None
+    last_run_refreshed_at: str | None = None
+    last_successful_auto_update_at: str | None = None

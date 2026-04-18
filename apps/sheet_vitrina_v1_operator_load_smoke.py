@@ -149,7 +149,16 @@ def main() -> None:
             operator_status, operator_html = _get_text(operator_url)
             if operator_status != 200:
                 raise AssertionError(f"operator UI must return 200, got {operator_status}")
-            for expected in ("Отправить данные", "Скачать лог", "Лог", "max-height: 420px", DEFAULT_SHEET_JOB_PATH):
+            for expected in (
+                "Отправить данные",
+                "Скачать лог",
+                "Лог",
+                "Последний автозапуск",
+                "Статус последнего автозапуска",
+                "Последнее успешное автообновление",
+                "max-height: 420px",
+                DEFAULT_SHEET_JOB_PATH,
+            ):
                 if expected not in operator_html:
                     raise AssertionError(f"operator UI must expose {expected!r}")
 
