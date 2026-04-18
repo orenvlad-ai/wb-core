@@ -67,6 +67,8 @@ python3 apps/sheet_vitrina_v1_refresh_read_split_smoke.py
 python3 apps/sheet_vitrina_v1_operator_load_smoke.py
 python3 apps/factory_order_supply_smoke.py
 python3 apps/sheet_vitrina_v1_factory_order_http_smoke.py
+python3 apps/web_source_current_sync_zero_snapshot_smoke.py
+python3 apps/sheet_vitrina_v1_seller_funnel_zero_payload_smoke.py
 python3 apps/sheet_vitrina_v1_web_source_current_sync_smoke.py
 python3 apps/sheet_vitrina_v1_stocks_refresh_smoke.py
 python3 apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py
@@ -293,6 +295,7 @@ Operational rule:
 - current-only sources (`stocks`, `prices_snapshot`, `ads_bids`) are expected to show `not_available` for `yesterday_closed` instead of copying `today_current` into a closed-day column;
 - `seller_funnel_snapshot` and `web_source_snapshot` use bounded `explicit-date -> latest-if-date-matches`; if requested yesterday date is no longer available upstream but was captured earlier as exact-date current snapshot, `STATUS.*[yesterday_closed].note` may show `resolution_rule=exact_date_runtime_cache`;
 - if exact-date `today_current` snapshot is still missing for `seller_funnel_snapshot` / `web_source_snapshot`, refresh may bounded-trigger server-local `/opt/wb-web-bot` same-day runners plus `/opt/wb-ai/run_web_source_handoff.py` before final read-side fetch;
+- zero-filled exact-date `seller_funnel_snapshot` is not treated as truthful success anymore: refresh retries current-day capture/handoff, and if the payload still stays all-zero it surfaces as source error/blank instead of `view_count=0` / `open_card_count=0` rows;
 - blank values для promo-backed metrics и unmatched/missing `COST_PRICE` coverage трактуются как truthful current-truth/status signal, а не как повод переносить heavy fallback logic в Apps Script.
 
 ## Common failure signatures
@@ -316,6 +319,7 @@ Operational rule:
 | `STATUS.web_source_snapshot[yesterday_closed] = not_found` or `STATUS.seller_funnel_snapshot[yesterday_closed] = not_found` with `resolution_rule=explicit_or_latest_date_match` | upstream latest payload no longer matches requested day and exact-date runtime cache for that date is still missing |
 | `STATUS.web_source_snapshot[yesterday_closed].note` or `STATUS.seller_funnel_snapshot[yesterday_closed].note` contains `resolution_rule=exact_date_runtime_cache` | expected bounded semantics: previous exact-date current snapshot was truthfully reused server-side for the matching closed-day slot |
 | `STATUS.web_source_snapshot[today_current].note` or `STATUS.seller_funnel_snapshot[today_current].note` starts with `current_day_web_source_sync_failed=` | bounded refresh tried server-local same-day capture/handoff and failed before exact-date local snapshot became available; investigate `/opt/wb-web-bot` runners, `/opt/wb-ai/run_web_source_handoff.py`, env and host-local owner paths |
+| `STATUS.seller_funnel_snapshot[*] = error` with `invalid_exact_snapshot=zero_filled_seller_funnel_snapshot` | exact-date seller-funnel payload existed but every `view_count/open_card_count` was zero; runtime rejected it as invalid instead of materializing false zero metrics, so inspect `/opt/wb-web-bot` capture freshness and rerun handoff |
 | `STATUS.stocks[today_current].note` starts with `unmapped stocks quantity outside configured district map=` | raw payload contains quantity outside the current RU district mapping; `stock_total` keeps it, district rows stay source-backed, and the residual is surfaced explicitly instead of being dropped |
 | `ReferenceError: URL is not defined` | Apps Script runtime bug in sheet-side URL derivation |
 | `registry upload bundle must contain 5-64 metrics_v2 entries` | live runtime still serves stale validator / stale deploy and is not aligned with current repo semantics |

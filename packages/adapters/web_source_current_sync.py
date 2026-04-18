@@ -167,7 +167,7 @@ class ShellBackedWebSourceCurrentSync:
             f"{self.config.api_base_url.rstrip('/')}/v1/sales-funnel/daily"
             f"?{parse.urlencode({'date': snapshot_date})}"
         )
-        return isinstance(payload, dict) and str(payload.get("date", "") or "") == snapshot_date
+        return _is_usable_sales_funnel_payload(payload, snapshot_date)
 
     def _run(
         self,
@@ -232,3 +232,30 @@ def _fetch_json(url: str) -> dict[str, object] | None:
         raise RuntimeError(f"current-day web-source probe failed with status {exc.code}: {body}") from exc
     except error.URLError as exc:
         raise RuntimeError(f"current-day web-source probe failed: {exc}") from exc
+
+
+def _is_usable_sales_funnel_payload(
+    payload: dict[str, object] | None,
+    snapshot_date: str,
+) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if str(payload.get("date", "") or "") != snapshot_date:
+        return False
+    items = payload.get("items")
+    if not isinstance(items, list) or not items:
+        return False
+    return any(
+        _item_metric_value(item, "view_count") > 0 or _item_metric_value(item, "open_card_count") > 0
+        for item in items
+        if isinstance(item, dict)
+    )
+
+
+def _item_metric_value(item: dict[str, object], key: str) -> float:
+    value = item.get(key)
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    return 0.0
