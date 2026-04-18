@@ -213,7 +213,7 @@ def main() -> None:
                 [
                     inbound_rows[0],
                     [210183919, "SKU 1", 40, "2026-04-25", ""],
-                    [210183919, "SKU 1", 15, "2026-08-20", ""],
+                    [210183919, "SKU 1", 12, "2026-05-05", ""],
                 ],
             ),
             uploaded_filename="factory-inbound.xlsx",
@@ -254,7 +254,7 @@ def main() -> None:
         if round(sku_one.daily_demand_total, 2) != _expected_average(210183919, report_date="2026-04-18", period_days=7):
             raise AssertionError("7-day lookback must change the average demand relative to 3-day lookback")
         if round(sku_one.inbound_factory_to_ff, 2) != 40.0:
-            raise AssertionError("only the inbound_factory event inside horizon must be counted")
+            raise AssertionError("only the inbound_factory event that can still reach WB inside horizon must be counted")
         if round(sku_one.inbound_ff_to_wb, 2) != 10.0:
             raise AssertionError("ff_to_wb parity term must be kept when file is uploaded")
         if round(sku_two.inbound_ff_to_wb, 2) != 25.0:
@@ -344,6 +344,27 @@ def main() -> None:
             ):
                 raise AssertionError(f"{period_days}-day lookback must use the exact covered runtime window")
 
+        default_period_result = block.calculate(
+            {
+                "prod_lead_time_days": 10,
+                "lead_time_factory_to_ff_days": 5,
+                "lead_time_ff_to_wb_days": 2,
+                "safety_days_mp": 3,
+                "safety_days_ff": 2,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+            }
+        )
+        default_sku = {item.nm_id: item for item in default_period_result.rows}[210183919]
+        if round(default_sku.daily_demand_total, 2) != _expected_average(
+            210183919,
+            report_date="2026-04-18",
+            period_days=21,
+        ):
+            raise AssertionError("missing sales_avg_period_days must fall back to the legacy 21-day window")
+        if default_period_result.settings.sales_avg_period_days != 21:
+            raise AssertionError("last successful calc must persist the legacy 21-day default window")
+
         try:
             block.calculate(
                 {
@@ -415,6 +436,7 @@ def main() -> None:
         print(f"scenario_delete_then_zero: ok -> sku_one_coverage={sku_one_after_delete.coverage_qty}")
         print(f"scenario_shifted_report_date: ok -> sku_one_qty={shifted_sku_one.recommended_order_qty}, sku_two_qty={shifted_sku_two.recommended_order_qty}")
         print("scenario_covered_windows: ok -> periods=10,14,21")
+        print(f"scenario_default_sales_avg: ok -> daily_demand={round(default_sku.daily_demand_total, 2)}")
         print("scenario_out_of_range: ok -> blocker exposes needed range 2026-02-17..2026-04-17 and available 2026-03-28..2026-04-17")
         print("scenario_recent_authoritative_fill: ok -> fetched missing recent date 2026-04-17")
 

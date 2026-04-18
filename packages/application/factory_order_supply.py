@@ -74,7 +74,7 @@ _TEMPLATE_HEADERS = {
 _RESULT_HEADERS = ["nmId", "Комментарий SKU", "Рекомендовано к заказу"]
 _WEIGHT_COEFFICIENT = 0.08593
 _VOLUME_DIVISOR = 204.38
-_DEFAULT_SALES_AVG_PERIOD_DAYS = 7
+_DEFAULT_SALES_AVG_PERIOD_DAYS = 21
 _COVERAGE_CONTRACT_NOTE = (
     "Файлы «Товары в пути от фабрики» и «Товары в пути от ФФ на Wildberries» необязательны: "
     "если файл не загружен, соответствующий inbound считается как 0. "
@@ -276,7 +276,11 @@ class FactoryOrderSupplyBlock:
         )
 
         stock_ff_by_nm = {row.nm_id: float(row.stock_ff) for row in stock_ff_rows}
-        inbound_factory_by_nm = _sum_inbound_rows_within_horizon(inbound_factory_rows, horizon_end)
+        inbound_factory_by_nm = _sum_inbound_rows_within_horizon(
+            inbound_factory_rows,
+            horizon_end,
+            projected_days=settings.lead_time_ff_to_wb_days,
+        )
         inbound_ff_to_wb_by_nm = _sum_inbound_rows_within_horizon(inbound_ff_to_wb_rows, horizon_end)
 
         result_rows: list[FactoryOrderRecommendationRow] = []
@@ -751,11 +755,16 @@ def _normalize_uploaded_filename(value: str | None, *, dataset_type: str) -> str
     return normalized or _DATASET_FILENAMES[dataset_type]
 
 
-def _sum_inbound_rows_within_horizon(rows: list[FactoryOrderInboundRow], horizon_end: date) -> dict[int, float]:
+def _sum_inbound_rows_within_horizon(
+    rows: list[FactoryOrderInboundRow],
+    horizon_end: date,
+    *,
+    projected_days: int = 0,
+) -> dict[int, float]:
     totals: dict[int, float] = {}
     for row in rows:
-        arrival_date = date.fromisoformat(row.planned_arrival_date)
-        if arrival_date > horizon_end:
+        effective_arrival_date = date.fromisoformat(row.planned_arrival_date) + timedelta(days=projected_days)
+        if effective_arrival_date > horizon_end:
             continue
         totals[row.nm_id] = totals.get(row.nm_id, 0.0) + float(row.quantity)
     return totals

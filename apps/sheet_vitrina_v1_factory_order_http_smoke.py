@@ -232,7 +232,7 @@ def main() -> None:
             inbound_factory_rows = [
                 inbound_factory_rows[0],
                 [210183919, "SKU 1", 40, "2026-04-25", ""],
-                [210183919, "SKU 1", 15, "2026-08-20", ""],
+                [210183919, "SKU 1", 12, "2026-05-05", ""],
             ]
             inbound_factory_upload_status, inbound_factory_upload_payload = _post_multipart(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FACTORY_PATH}",
@@ -298,7 +298,7 @@ def main() -> None:
             if first_sku_with_inbound.get("daily_demand_total") != _expected_average(210183919, report_date="2026-04-18", period_days=7):
                 raise AssertionError("7-day lookback must change the HTTP average demand")
             if first_sku_with_inbound.get("inbound_factory_to_ff") != 40.0 or first_sku_with_inbound.get("inbound_ff_to_wb") != 10.0:
-                raise AssertionError("HTTP calc must keep only the inbound events inside the planning horizon")
+                raise AssertionError("HTTP calc must keep only the inbound events that can still reach WB inside the planning horizon")
 
             recommendation_status, recommendation_bytes, recommendation_headers = _get_bytes(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH}"
@@ -369,6 +369,30 @@ def main() -> None:
                 ):
                     raise AssertionError(f"HTTP calc must average exact covered runtime history for {period_days}-day lookback")
 
+            default_period_status, default_period_payload = _post_json(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
+                {
+                    "prod_lead_time_days": 10,
+                    "lead_time_factory_to_ff_days": 5,
+                    "lead_time_ff_to_wb_days": 2,
+                    "safety_days_mp": 3,
+                    "safety_days_ff": 2,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                },
+            )
+            if default_period_status != 200:
+                raise AssertionError(f"HTTP calc must keep legacy default sales_avg_period_days, got {default_period_status} {default_period_payload}")
+            default_sku = next(item for item in default_period_payload.get("rows", []) if item.get("nm_id") == 210183919)
+            if round(float(default_sku.get("daily_demand_total", 0.0)), 2) != _expected_average(
+                210183919,
+                report_date="2026-04-18",
+                period_days=21,
+            ):
+                raise AssertionError("missing sales_avg_period_days must fall back to the legacy 21-day window in HTTP calc")
+            if int(default_period_payload.get("settings", {}).get("sales_avg_period_days", 0)) != 21:
+                raise AssertionError("HTTP calc payload must persist the legacy 21-day default window")
+
             calc_out_of_range_status, calc_out_of_range_payload = _post_json(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
                 {
@@ -392,6 +416,7 @@ def main() -> None:
                 f"scenario_multi_inbound_http: ok -> inbound_factory={first_sku_with_inbound.get('inbound_factory_to_ff', 0.0)}"
             )
             print("scenario_covered_windows_http: ok -> periods=10,14,21")
+            print(f"scenario_default_sales_avg_http: ok -> daily_demand={round(float(default_sku.get('daily_demand_total', 0.0)), 2)}")
             print("scenario_out_of_range_http: ok -> blocker exposes needed range 2026-02-17..2026-04-17 and available 2026-03-28..2026-04-17")
         finally:
             server.shutdown()
