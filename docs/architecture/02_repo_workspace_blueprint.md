@@ -91,6 +91,10 @@ Domain-логика отсюда начинаться не должна.
 - здесь разрешены только compact summary, glossary, registers, runbook и manifest;
 - source of truth для норм и контрактов всё равно остаётся в primary repo docs.
 
+Для внешнего Project canonical local source определяется отдельно:
+- final upload-ready source = `~/Projects/wb-core/wb_core_docs_master`;
+- readiness этого source проверяется по manifest, а не по временной clean worktree или Finder timestamps.
+
 ### `migration/`
 
 Здесь живут migration backlog, contract inventory, parity rules и staged module notes.
@@ -127,6 +131,30 @@ Domain-логика отсюда начинаться не должна.
 - `wb-web-bot` использует локальный `storage_state.json`;
 - `wb-ai-research` ожидает `/opt/wb-ai/.env` и `/opt/wb-ai/gcp-sa.json`;
 - reconcile summary в reference-репозиториях показывают, почему runtime-only state нельзя считать source truth для core.
+
+## Local Sync And Upload-Ready Source
+
+Нужно различать два разных состояния workspace:
+- temporary clean worktree для merge/sync/validation;
+- final canonical upload-ready source `~/Projects/wb-core/wb_core_docs_master` после того, как `~/Projects/wb-core` приведён к current `origin/main`.
+
+Temporary clean worktree сама по себе не доказывает readiness внешнего upload source.
+Upload readiness фиксируется только текущим repo state плюс manifest внутри `~/Projects/wb-core/wb_core_docs_master`.
+
+## Safe Dirty-State Handling
+
+Перед sync `~/Projects/wb-core` к current `origin/main` нельзя разрушать локальное пользовательское состояние.
+
+Допустимы только bounded safe methods:
+- `git stash push` с понятным описанием;
+- отдельная backup-копия/patch;
+- отдельная временная branch/worktree;
+- другой эквивалентный недеструктивный способ сохранить локальные изменения.
+
+Недопустимо:
+- делать destructive reset поверх чужого dirty state;
+- объявлять temporary clean worktree final canonical upload source без возврата к current `origin/main`;
+- терять несвязанные локальные изменения ради post-merge sync.
 
 ## Как Будет Сохраняться Модульность
 

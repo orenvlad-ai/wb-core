@@ -55,7 +55,7 @@ Codex должна остановиться и вынести задачу на 
 | Diff hygiene | Нет случайных правок в reference-репозиториях |
 | Documentation sync | При значимом техническом изменении обновлена каноническая документация в той же задаче |
 | Project-pack sync | Если изменение влияет на project-oriented pack, обновлены затронутые файлы `wb_core_docs_master/` и manifest |
-| Git capture | Канонический source-of-truth артефакт не остаётся только в рабочем дереве и доведён до commit/push/PR или paused-ветки |
+| Git capture | Если requested outcome по смыслу включает Git fixation или GitHub closure и пользователь явно не запретил Git/GitHub actions, канонический source-of-truth артефакт доведён до commit/push/PR/merge/delete-branch либо execution возвращён как incomplete с exact blocker |
 | Completion state | Для live/public/GAS задач явно зафиксировано, достигнуты ли `repo-complete`, `live-complete`, `sheet-complete`, `pack-complete`, либо где именно блокер |
 | Local validation | Базовые структурные проверки проходят |
 | Reviewability | Результат понятен ручному reviewer без runtime-археологии |
@@ -81,12 +81,12 @@ Execution handoff должен явно различать четыре сост
 - `pack-complete`:
   - если задача меняет policy/contract/checkpoint/runbook/status wording, обновлены и primary canonical docs, и затронутый `wb_core_docs_master`;
   - manifest обновлён;
-  - если задача меняла primary docs или `wb_core_docs_master/`, финальный handoff явно напоминает про один human-only шаг: после merge загрузить актуальный pack во внешний ChatGPT Project.
+  - если задача меняла primary docs или `wb_core_docs_master/`, после successful merge локальный `~/Projects/wb-core` приведён к current `origin/main`, `~/Projects/wb-core/wb_core_docs_master` проверен как upload-ready source по manifest, а в финальном handoff оставлен ровно один human-only шаг: загрузить актуальный pack во внешний ChatGPT Project.
 
 Важно:
 - `repo-complete` не означает, что задача полностью завершена.
 - Если задача меняет public HTTP route, runtime/service/nginx publish, bound Apps Script, operator UI или live sheet behavior, execution handoff не считается complete на этапе "код готов в repo".
-- Для таких задач Codex по умолчанию должна пытаться закрыть `repo-complete + live-complete + sheet-complete + verify` в одном bounded execution, если это безопасно и требуемые доступы уже доступны.
+- Для таких задач Codex обязана довести `repo-complete + live-complete + sheet-complete + verify` в одном bounded execution, если это безопасно и требуемые доступы уже доступны; иначе execution возвращается как incomplete с exact blocker.
 - Human-only step допускается только там, где действительно нужны логин, права, branch-protection approval / явный GitHub write blocker, ручная UI-проверка или решение по риску.
 - Если `live-complete` или `sheet-complete` не достигнуты, финальный отчёт обязан явно назвать это состояние и точный blocker, а не маскировать задачу как "готово".
 - Если hosted runtime уже имеет repo-owned deploy/probe contract, отсутствие deploy access или target values больше не считается "неизвестным operational контекстом": в blocker нужно точно назвать, каких именно values/rights не хватает.
@@ -109,23 +109,27 @@ Assistant ведёт bounded работу по шагам.
 - Пользователя подключают только там, где действительно нужен human-only step: логин, права, branch-protection approval / blocker-driven manual merge fallback, ручная UI-проверка, решение по риску.
 - Техническую рутину, которую Codex может безопасно выполнить сама, просить у пользователя нельзя.
 - Если manual step неизбежен, он формулируется как один минимальный следующий шаг.
-- Если задача по смыслу требует live/runtime/GAS closure и безопасные доступы уже есть, Codex не должна по умолчанию останавливаться на `repo-complete`; она должна пытаться дотянуть deploy / `clasp push` / public verify до полного bounded completion.
+- Если задача по смыслу требует live/runtime/GAS closure и безопасные доступы уже есть, Codex не должна останавливаться на `repo-complete`; она обязана дотянуть deploy / `clasp push` / public verify до полного bounded completion либо вернуть incomplete с exact blocker.
 - Для hosted runtime family вокруг `registry_upload_http_entrypoint_block` canonical repo-owned path теперь живёт в `apps/registry_upload_http_entrypoint_hosted_runtime.py`; если задача затрагивает этот contour, сначала используется этот runner, а не ручное угадывание host/service steps.
 
-## GitHub Merge Ownership
+## Git Fixation And GitHub Closure Ownership
 
-Если задача включает GitHub closure в текущем Codex CLI / локальном execution context, обычный PR merge больше не считается default human-only step.
+Если requested outcome задачи по смыслу включает Git fixation или GitHub closure и пользователь явно не запретил Git/GitHub actions, commit / push / PR update / ready / retarget / merge / delete-branch входят в тот же bounded execution и больше не считаются default human-only step.
 
 - Сначала проверяется `gh auth status -h github.com`.
 - Если `gh` доступен, active auth валиден и у текущего execution context есть repo write/merge access, обычные GitHub operations считаются Codex-owned technical routine:
+  - `git commit`
+  - `git push`
+  - `gh pr create` или equivalent PR update
   - `gh pr ready`
   - retarget через `gh pr edit --base ...`
   - `gh pr merge --delete-branch`
 - Эта норма одинаково действует и для stacked PR sequence: merge в промежуточную base branch так же Codex-owned, как и merge в `main`.
 - Auto-merge остаётся optional enhancement и не заменяет обычный merge для stacked/base-branch sequence.
+- Если `gh` работает, write/merge access есть и нет blocker-ов, Codex обязана довести ordinary GitHub closure до merge + delete-branch, а не останавливаться на PR-ready/review-ready.
 - Manual merge допустим только как fallback-blocker case: `gh` отсутствует, auth неактивен, scopes/permissions недостаточны, GitHub возвращает явный write blocker, или branch protection требует human approval.
-- Если обычный merge из текущего execution context невозможен, финальный handoff обязан назвать точный blocker и вернуть один минимальный human-only следующий шаг.
-- Это правило не отменяет task-scope discipline: commit/push/open PR по-прежнему должны быть явно запрошены задачей, но внутри уже запрошенного GitHub closure routine merge ownership остаётся у Codex, а не у пользователя.
+- Если ordinary GitHub closure из текущего execution context невозможен, финальный handoff обязан назвать точный blocker и вернуть один минимальный human-only следующий шаг.
+- Это правило не отменяет task-scope discipline: если requested outcome не включает Git fixation / GitHub closure или пользователь явно запретил Git/GitHub actions, Codex не должна самовольно выполнять commit/push/PR routine.
 
 ## Mandatory Codex Prompt Footer
 
@@ -148,18 +152,20 @@ Assistant ведёт bounded работу по шагам.
 - `Что НЕ тронуто / что осталось вне scope`
 - `Следующий шаг`
 - `Если есть блокер — точная причина`
+- `Repo state`
+- `Live deploy state`
+- `Public verify result`
+- `Sheet verify result`
+- `Upload-ready source state`
+- `Manual-only remainder`
+
+Для полей вне текущего scope указывается truthful значение `not in scope`, а не пустой пропуск.
 
 Если в задаче есть Git-изменения, в блок `=== ДЛЯ КУРАТОРА ===` дополнительно обязательно включаются:
 - `Commit hash`
 - `Push`
 - `PR`
 - `Ссылка на PR`
-
-Если задача меняет live/public/GAS behavior, в блоке `=== ДЛЯ КУРАТОРА ===` дополнительно обязательно отдельно фиксируются:
-- `Repo state`
-- `Live deploy state`
-- `Public verify result`
-- `Sheet verify result`
 
 В блоке `=== СЖАТАЯ ПРОВЕРКА ===` обязательны:
 - `3-5 коротких пунктов по сути`
@@ -219,7 +225,7 @@ Assistant ведёт bounded работу по шагам.
   - обновить primary repo docs;
   - обновить затронутые файлы в `wb_core_docs_master/`;
   - обновить `wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`;
-  - если в этой задаче менялись primary docs или `wb_core_docs_master/`, в финальном handoff явно напомнить один human-only следующий шаг: после merge загрузить актуальный pack во внешний ChatGPT Project;
+  - если в этой задаче менялись primary docs или `wb_core_docs_master/`, после merge привести `~/Projects/wb-core` к current `origin/main`, проверить `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md` как признак upload-ready source и в финальном handoff оставить ровно один human-only следующий шаг: загрузить актуальный pack во внешний ChatGPT Project;
 - manifest для `wb_core_docs_master` остаётся build-metadata файлом и не ведёт operational state внешней загрузки;
 - legacy knowledge в `wb_core_docs_master` разрешён только в register-слое (`LEGACY_TO_WEBCORE_MAP`, `DO_NOT_LOSE_CONSTRAINTS`), а не как перенос полного legacy-корпуса;
 - создание или изменение `wb_core_docs_master` без Git-фиксации так же считается незавершённой задачей.
@@ -249,6 +255,6 @@ Codex не должна без явного разрешения:
 - создавать миграции БД;
 - создавать ad-hoc deploy scripts вне already fixed repo-owned deploy contract;
 - создавать или заменять operator table;
-- делать commit, push или открывать PR;
+- делать commit, push или открывать PR, если requested outcome задачи по смыслу не включает Git fixation / GitHub closure или пользователь явно запретил Git/GitHub actions;
 - перекладывать на пользователя bounded безопасную техническую рутину, которую может выполнить сама, кроме human-only steps;
 - считать runtime snapshots authoritative без зафиксированного reconcile evidence.

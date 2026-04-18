@@ -43,7 +43,7 @@ built_from_commit: "2e6bfd43a88e693a30b130516f5f8ce66889b801"
 | `C-06` | `wb_core_docs_master` не может становиться dump-копией repo docs или полным legacy mirror. |
 | `C-07` | Legacy knowledge разрешён только как thin register/map/constraint layer. |
 | `C-08` | При изменении contract/status/checkpoint/smoke/glossary/runbook нужно обновлять и primary docs, и затронутый project-pack, и manifest. |
-| `C-09` | Если в задаче менялись primary docs или `wb_core_docs_master/`, финальный handoff обязан напомнить один human-only post-merge шаг: загрузить актуальный pack во внешний ChatGPT Project. Отдельный post-upload manifest sync не нужен. |
+| `C-09` | Если в задаче менялись primary docs или `wb_core_docs_master/`, после merge `~/Projects/wb-core` должен быть приведён к current `origin/main`, `~/Projects/wb-core/wb_core_docs_master` должен быть проверен как upload-ready source по manifest, и только после этого пользователю остаётся один human-only post-merge шаг: загрузить актуальный pack во внешний ChatGPT Project. |
 | `C-10` | Bounded steps не должны тихо превращаться в deploy/platform redesign, full parity campaign или новый parallel contour. |
 | `C-11` | Для новых WebCore chat prompts prompt к Codex обязан явно содержать `Класс задачи`, `Причина классификации`, `Режим выполнения` и заканчиваться блоками `=== ДЛЯ КУРАТОРА ===` и `=== СЖАТАЯ ПРОВЕРКА ===`; без этого execution handoff считается неполным. |
 | `C-12` | Bounded и безопасная техническая работа должна сначала идти через Codex; пользователю можно отдавать только human-only step: логин, права, branch-protection approval / blocker-driven manual merge fallback, ручная UI-проверка или решение по риску. |
@@ -53,7 +53,11 @@ built_from_commit: "2e6bfd43a88e693a30b130516f5f8ce66889b801"
 | `C-16` | Для задач с live/public/GAS эффектом `repo-complete` недостаточно: execution handoff не считается complete, пока не достигнуты требуемые `live-complete` и/или `sheet-complete`, либо пока точный blocker явно не назван. |
 | `C-17` | Если `clasp push`, live deploy/restart или public probe безопасны и доступны, они должны входить в тот же bounded execution по умолчанию, а не откладываться без явной причины. |
 | `C-18` | Если задача добавляет или меняет public route, обязательна внешняя public probe-проверка; `404`/`Not Found` на ожидаемом route трактуется как stale deploy или incomplete publish wiring, пока не доказано обратное. |
-| `C-19` | Для GitHub closure Codex сначала проверяет `gh auth status -h github.com`; при working auth и repo write/merge access обычные `gh pr ready`, retarget через `gh pr edit --base ...`, `gh pr merge --delete-branch` являются Codex-owned routine, включая stacked/base-branch merge sequence. Manual merge допустим только как fallback-blocker case. |
+| `C-19` | Если requested outcome по смыслу включает Git fixation или GitHub closure и пользователь явно не запретил Git/GitHub actions, Codex сначала проверяет `gh auth status -h github.com`; при working auth и repo write/merge access обычные `git commit`, `git push`, `gh pr create/update`, `gh pr ready`, retarget через `gh pr edit --base ...`, `gh pr merge --delete-branch` являются Codex-owned routine, включая stacked/base-branch merge sequence. При working auth/access Codex обязана довести ordinary GitHub closure до merge + delete-branch; manual merge допустим только как fallback-blocker case. |
+| `C-20` | Единственный допустимый локальный source для внешнего ChatGPT Project upload = `~/Projects/wb-core/wb_core_docs_master`; временные копии, zip-архивы и произвольные папки не считаются canonical source. |
+| `C-21` | Перед sync `~/Projects/wb-core` к current `origin/main` несвязанный dirty state нужно сохранять только bounded safe method (`stash`, backup, отдельная branch/worktree или эквивалент), без destructive reset поверх пользовательских изменений. |
+| `C-22` | Готовность pack к upload определяется по `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`, а не по Finder timestamps, имени архива или памяти исполнителя. |
+| `C-23` | После того как upload-ready source подготовлен, в handoff должен оставаться ровно один human-only remainder: внешний upload актуального `wb_core_docs_master`; manifest при этом не превращается в upload state machine. |
 
 # Known gaps
 
