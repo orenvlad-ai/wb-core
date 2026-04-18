@@ -44,7 +44,6 @@ FIRST_AS_OF_DATE = "2026-04-12"
 SECOND_AS_OF_DATE = "2026-04-13"
 FIRST_CURRENT_DATE = "2026-04-13"
 SECOND_CURRENT_DATE = "2026-04-14"
-CURRENT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "stocks"}
 
 
 def main() -> None:
@@ -63,7 +62,14 @@ def main() -> None:
         )
 
         with _MockSellerosServer(requested_nm_ids) as upstream:
-            entrypoint.sheet_plan_block = _build_live_plan(runtime, upstream.base_url, FIRST_CURRENT_DATE)
+            closure_sync = _FakeClosedDayWebSourceSync(upstream)
+            entrypoint.sheet_plan_block = _build_live_plan(
+                runtime,
+                upstream.base_url,
+                FIRST_CURRENT_DATE,
+                closure_sync=closure_sync,
+                current_hour=8,
+            )
             port = _reserve_free_port()
             config = RegistryUploadHttpEntrypointConfig(
                 host="127.0.0.1",
@@ -93,16 +99,22 @@ def main() -> None:
                     raise AssertionError("first refresh must succeed")
                 first_status_rows = _fetch_status_rows(status_url, FIRST_AS_OF_DATE)
                 for source_key in ("web_source_snapshot", "seller_funnel_snapshot"):
-                    if first_status_rows[f"{source_key}[yesterday_closed]"][1] != "not_found":
-                        raise AssertionError(f"{source_key} first refresh yesterday slot must stay truthful not_found")
+                    if first_status_rows[f"{source_key}[yesterday_closed]"][1] != "closure_retrying":
+                        raise AssertionError(f"{source_key} first refresh yesterday slot must enter closure retry state")
                     note = str(first_status_rows[f"{source_key}[yesterday_closed]"][10])
-                    if "resolution_rule=explicit_or_latest_date_match" not in note:
-                        raise AssertionError(f"{source_key} first refresh must explain latest mismatch in STATUS note")
+                    if "closure_state=closure_retrying" not in note:
+                        raise AssertionError(f"{source_key} first refresh must disclose closure retry state in STATUS note")
                     if first_status_rows[f"{source_key}[today_current]"][1] != "success":
                         raise AssertionError(f"{source_key} first refresh today slot must materialize current latest")
 
                 upstream.set_latest_date(SECOND_CURRENT_DATE)
-                entrypoint.sheet_plan_block = _build_live_plan(runtime, upstream.base_url, SECOND_CURRENT_DATE)
+                entrypoint.sheet_plan_block = _build_live_plan(
+                    runtime,
+                    upstream.base_url,
+                    SECOND_CURRENT_DATE,
+                    closure_sync=closure_sync,
+                    current_hour=8,
+                )
                 second_refresh_status, second_refresh_payload = _post_json(refresh_url, {"as_of_date": SECOND_AS_OF_DATE})
                 if second_refresh_status != 200 or second_refresh_payload["status"] != "success":
                     raise AssertionError("second refresh must succeed")
@@ -111,19 +123,51 @@ def main() -> None:
 
                 second_status_rows = _fetch_status_rows(status_url, SECOND_AS_OF_DATE)
                 for source_key in ("web_source_snapshot", "seller_funnel_snapshot"):
-                    if second_status_rows[f"{source_key}[yesterday_closed]"][1] != "success":
-                        raise AssertionError(f"{source_key} cached yesterday slot must materialize as success")
+                    if second_status_rows[f"{source_key}[yesterday_closed]"][1] != "closure_retrying":
+                        raise AssertionError(f"{source_key} yesterday slot must wait for accepted closed-day snapshot")
                     if second_status_rows[f"{source_key}[today_current]"][1] != "success":
                         raise AssertionError(f"{source_key} today slot must materialize as success")
-                    cache_note = str(second_status_rows[f"{source_key}[yesterday_closed]"][10])
-                    if "resolution_rule=exact_date_runtime_cache" not in cache_note:
-                        raise AssertionError(f"{source_key} yesterday slot must disclose runtime cache reuse")
+                    retry_note = str(second_status_rows[f"{source_key}[yesterday_closed]"][10])
+                    if "closure_state=closure_retrying" not in retry_note:
+                        raise AssertionError(f"{source_key} yesterday slot must disclose closure retry state")
 
                 plan_status, plan_payload = _get_json(
                     f"{plan_url}?{urllib_parse.urlencode({'as_of_date': SECOND_AS_OF_DATE})}"
                 )
                 if plan_status != 200:
                     raise AssertionError("plan endpoint must return persisted ready snapshot after second refresh")
+                data_sheet = next(sheet for sheet in plan_payload["sheets"] if sheet["sheet_name"] == "DATA_VITRINA")
+                data_rows = {row[1]: row for row in data_sheet["rows"]}
+                if data_rows[f"SKU:{probe_nm_id}|views_current"][2:] != ["", float(_web_views_value(SECOND_CURRENT_DATE, 0))]:
+                    raise AssertionError("web_source closed slot must stay blank while closure is retrying")
+                if data_rows[f"SKU:{probe_nm_id}|view_count"][2:] != ["", float(_seller_view_count(SECOND_CURRENT_DATE, 0))]:
+                    raise AssertionError("seller_funnel closed slot must stay blank while closure is retrying")
+
+                closure_sync.enable_acceptance(FIRST_CURRENT_DATE)
+                entrypoint.sheet_plan_block = _build_live_plan(
+                    runtime,
+                    upstream.base_url,
+                    SECOND_CURRENT_DATE,
+                    closure_sync=closure_sync,
+                    current_hour=10,
+                )
+                third_refresh_status, third_refresh_payload = _post_json(refresh_url, {"as_of_date": SECOND_AS_OF_DATE})
+                if third_refresh_status != 200 or third_refresh_payload["status"] != "success":
+                    raise AssertionError("third refresh must succeed")
+
+                third_status_rows = _fetch_status_rows(status_url, SECOND_AS_OF_DATE)
+                for source_key in ("web_source_snapshot", "seller_funnel_snapshot"):
+                    if third_status_rows[f"{source_key}[yesterday_closed]"][1] != "success":
+                        raise AssertionError(f"{source_key} accepted closed-day slot must materialize as success")
+                    accepted_note = str(third_status_rows[f"{source_key}[yesterday_closed]"][10])
+                    if "accepted_closed" not in accepted_note:
+                        raise AssertionError(f"{source_key} yesterday slot must disclose accepted closed-day resolution")
+
+                plan_status, plan_payload = _get_json(
+                    f"{plan_url}?{urllib_parse.urlencode({'as_of_date': SECOND_AS_OF_DATE})}"
+                )
+                if plan_status != 200:
+                    raise AssertionError("plan endpoint must return persisted ready snapshot after third refresh")
                 data_sheet = next(sheet for sheet in plan_payload["sheets"] if sheet["sheet_name"] == "DATA_VITRINA")
                 data_rows = {row[1]: row for row in data_sheet["rows"]}
                 expected_first_day_web = _web_views_value(FIRST_CURRENT_DATE, 0)
@@ -134,12 +178,12 @@ def main() -> None:
                     float(expected_first_day_web),
                     float(expected_second_day_web),
                 ]:
-                    raise AssertionError("web_source metric row must expose cached yesterday + current today values")
+                    raise AssertionError("web_source metric row must expose accepted yesterday + current today values")
                 if data_rows[f"SKU:{probe_nm_id}|view_count"][2:] != [
                     float(expected_first_day_seller),
                     float(expected_second_day_seller),
                 ]:
-                    raise AssertionError("seller_funnel metric row must expose cached yesterday + current today values")
+                    raise AssertionError("seller_funnel metric row must expose accepted yesterday + current today values")
 
                 ready_load = _run_load_harness(upload_url, as_of_date=SECOND_AS_OF_DATE)
                 if ready_load["load_error"]:
@@ -150,12 +194,17 @@ def main() -> None:
                     raise AssertionError("sheet load must keep the two-slot date header")
 
                 print(f"first_refresh: ok -> {first_refresh_payload['snapshot_id']}")
-                print(f"second_refresh: ok -> {second_refresh_payload['snapshot_id']}")
+                print(f"second_refresh_retrying: ok -> {second_refresh_payload['snapshot_id']}")
+                print(f"third_refresh_accepted: ok -> {third_refresh_payload['snapshot_id']}")
                 print(
-                    "status_cache_surface: ok -> "
+                    "status_retry_surface: ok -> "
                     f"{second_status_rows['web_source_snapshot[yesterday_closed]'][10]}"
                 )
-                print("sheet_load: ok -> ready snapshot carries cached yesterday + current today")
+                print(
+                    "status_accepted_surface: ok -> "
+                    f"{third_status_rows['web_source_snapshot[yesterday_closed]'][10]}"
+                )
+                print("sheet_load: ok -> ready snapshot carries accepted yesterday + current today")
                 print("smoke-check passed")
             finally:
                 server.shutdown()
@@ -167,6 +216,9 @@ def _build_live_plan(
     runtime: RegistryUploadDbBackedRuntime,
     upstream_base_url: str,
     current_date: str,
+    *,
+    closure_sync: object,
+    current_hour: int,
 ) -> SheetVitrinaV1LivePlanBlock:
     return SheetVitrinaV1LivePlanBlock(
         runtime=runtime,
@@ -174,7 +226,10 @@ def _build_live_plan(
         seller_funnel_block=SellerFunnelSnapshotBlock(
             HttpBackedSellerFunnelSnapshotSource(base_url=upstream_base_url)
         ),
-        now_factory=lambda current_date=current_date: datetime.fromisoformat(f"{current_date}T08:00:00+00:00"),
+        closed_day_web_source_sync=closure_sync,
+        now_factory=lambda current_date=current_date, current_hour=current_hour: datetime.fromisoformat(
+            f"{current_date}T{current_hour:02d}:00:00+00:00"
+        ),
         **_build_synthetic_blocks(),
     )
 
@@ -284,6 +339,7 @@ class _MockSellerosServer:
     def __init__(self, requested_nm_ids: list[int]) -> None:
         self.requested_nm_ids = requested_nm_ids
         self.latest_date = FIRST_CURRENT_DATE
+        self.accepted_closed_dates: set[str] = set()
         self._server = HTTPServer(("127.0.0.1", _reserve_free_port()), self._build_handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
@@ -294,6 +350,9 @@ class _MockSellerosServer:
 
     def set_latest_date(self, snapshot_date: str) -> None:
         self.latest_date = snapshot_date
+
+    def accept_closed_date(self, snapshot_date: str) -> None:
+        self.accepted_closed_dates.add(snapshot_date)
 
     def __enter__(self) -> "_MockSellerosServer":
         self._thread.start()
@@ -322,13 +381,23 @@ class _MockSellerosServer:
                 return
 
             def _write_web(self, query: str) -> None:
+                parsed = urllib_parse.parse_qs(query)
                 if query:
+                    requested = (parsed.get("date_to") or [""])[0]
+                    if requested and requested in parent.accepted_closed_dates:
+                        self._write_json(200, _build_web_payload(requested, parent.requested_nm_ids))
+                        return
                     self._write_json(404, {"detail": "explicit not found"})
                     return
                 self._write_json(200, _build_web_payload(parent.latest_date, parent.requested_nm_ids))
 
             def _write_seller(self, query: str) -> None:
+                parsed = urllib_parse.parse_qs(query)
                 if query:
+                    requested = (parsed.get("date") or [""])[0]
+                    if requested and requested in parent.accepted_closed_dates:
+                        self._write_json(200, _build_seller_payload(requested, parent.requested_nm_ids))
+                        return
                     self._write_json(404, {"detail": "explicit not found"})
                     return
                 self._write_json(200, _build_seller_payload(parent.latest_date, parent.requested_nm_ids))
@@ -386,6 +455,19 @@ def _web_views_value(snapshot_date: str, index: int) -> int:
 
 def _seller_view_count(snapshot_date: str, index: int) -> int:
     return (300 if snapshot_date == FIRST_CURRENT_DATE else 400) + index
+
+
+class _FakeClosedDayWebSourceSync:
+    def __init__(self, upstream: _MockSellerosServer) -> None:
+        self.upstream = upstream
+        self.allowed_dates: set[str] = set()
+
+    def enable_acceptance(self, snapshot_date: str) -> None:
+        self.allowed_dates.add(snapshot_date)
+
+    def ensure_closed_day_snapshot(self, *, source_key: str, snapshot_date: str) -> None:
+        if snapshot_date in self.allowed_dates:
+            self.upstream.accept_closed_date(snapshot_date)
 
 
 def _reserve_free_port() -> int:

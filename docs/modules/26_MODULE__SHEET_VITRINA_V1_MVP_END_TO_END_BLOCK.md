@@ -218,10 +218,21 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - при miss он вызывает server-local owner path `/opt/wb-web-bot` same-day runners и затем `/opt/wb-ai/run_web_source_handoff.py`;
   - после successful handoff refresh читает уже materialized exact-date local snapshot;
   - если sync path падает, `STATUS.web_source_snapshot[today_current].note` / `STATUS.seller_funnel_snapshot[today_current].note` получают `current_day_web_source_sync_failed=...`, а values остаются truthful blank вместо invented fill.
-- Для тех же bot/web-source sources ready-snapshot runtime дополнительно хранит exact-date successful payloads server-side:
-  - previous `today_current` snapshot может быть переиспользован только как exact same date для следующего `yesterday_closed`;
-  - reuse surface-ится в `STATUS.*[yesterday_closed].note` как `resolution_rule=exact_date_runtime_cache`;
-  - contour не копирует `today_current` в `yesterday_closed` и не invent-ит missing date values без exact-date source-backed payload.
+- Для тех же bot/web-source sources current checkpoint теперь запрещает silent provisional inheritance в closed slot:
+  - `today_current` хранится как `provisional_current_snapshot`;
+  - explicit closure attempt для завершённого дня может временно сохранить `closed_day_candidate_snapshot`;
+  - `yesterday_closed` читает только `accepted_closed_day_snapshot`;
+  - invalid closed-day candidate не может silently оставить прошлое provisional same-day значение как будто это final truth.
+- Persisted closure state materialize-ится server-side и surface-ится narrow status semantics:
+  - `closure_pending`
+  - `closure_retrying`
+  - `closure_rate_limited`
+  - `closure_exhausted`
+  - `success`
+- Для strict closed-day acceptance current checkpoint применяет source-aware invalid signatures only to closed-day-capable bot/web-source families:
+  - `seller_funnel_snapshot`: zero-filled payload или `source_fetched_at < next business day start in Asia/Yekaterinburg`
+  - `web_source_snapshot`: zero-filled payload или `search_analytics_raw.fetched_at < next business day start in Asia/Yekaterinburg`
+  - `prices_snapshot`, `ads_bids`, `stocks` остаются current-only и truthfully surface-ят `not_available` для `yesterday_closed`.
 - Current-only sources не backfill-ятся в closed-day column:
   - `stocks[yesterday_closed]`, `prices_snapshot[yesterday_closed]`, `ads_bids[yesterday_closed]` materialize-ятся как `not_available`
   - `today_current` values остаются в своей фактической колонке и не маскируются под yesterday EOD
@@ -263,6 +274,11 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
 - Schedule storage lives in live-owned systemd units:
   - `/etc/systemd/system/wb-core-sheet-vitrina-refresh.service`
   - `/etc/systemd/system/wb-core-sheet-vitrina-refresh.timer`
+- Closed-day retry completion for strict bot/web-source family materialize-ится отдельным bounded timer/service pair:
+  - `/etc/systemd/system/wb-core-sheet-vitrina-closure-retry.service`
+  - `/etc/systemd/system/wb-core-sheet-vitrina-closure-retry.timer`
+  - service runs repo-owned runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py`
+  - actual retry cadence remains runtime-owned via `next_retry_at`; timer may poll more frequently without turning into a tight loop.
 - Repo-owned truth при этом остаётся в current code:
   - default `as_of_date` / `today_current` semantics live in `packages/business_time.py`
   - heavy refresh logic stays in existing `POST /v1/sheet-vitrina-v1/refresh`
@@ -395,6 +411,9 @@ Bounded допущение:
 - Подтверждён split refresh/read smoke через `apps/sheet_vitrina_v1_refresh_read_split_smoke.py`.
 - Подтверждён operator async refresh/load smoke через `apps/sheet_vitrina_v1_operator_load_smoke.py`.
 - Подтверждён targeted current-day web-source sync smoke через `apps/sheet_vitrina_v1_web_source_current_sync_smoke.py`.
+- Подтверждён targeted closed-day source freshness smoke через `apps/web_source_current_sync_closed_day_freshness_smoke.py`.
+- Подтверждён targeted temporal closure retry smoke через `apps/sheet_vitrina_v1_temporal_closure_retry_smoke.py`.
+- Подтверждён integration smoke для retry/acceptance cycle через `apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py`.
 - Подтверждён targeted server-driven smoke через `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`, включая same-day blank overwrite, который обязан затирать stale sheet cell вместо сохранения старого значения.
 - Smoke проверяет:
   - что `prepare` поднимает operator seed `33 / 102 / 7`;

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -26,7 +26,10 @@ from packages.application.ads_bids_block import AdsBidsBlock
 from packages.application.ads_compact_block import AdsCompactBlock
 from packages.application.fin_report_daily_block import FinReportDailyBlock
 from packages.application.prices_snapshot_block import PricesSnapshotBlock
-from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.registry_upload_db_backed_runtime import (
+    RegistryUploadDbBackedRuntime,
+    TemporalSourceClosureState,
+)
 from packages.application.sales_funnel_history_block import SalesFunnelHistoryBlock
 from packages.application.seller_funnel_snapshot_block import SellerFunnelSnapshotBlock
 from packages.application.sf_period_block import SfPeriodBlock
@@ -77,6 +80,22 @@ AGGREGATE_AVG_PREFIX = "avg_"
 DELIVERY_CONTRACT_VERSION = "sheet_vitrina_v1_temporal_live_v1"
 TEMPORAL_SLOT_YESTERDAY_CLOSED = "yesterday_closed"
 TEMPORAL_SLOT_TODAY_CURRENT = "today_current"
+STRICT_CLOSED_DAY_SOURCE_KEYS = {"seller_funnel_snapshot", "web_source_snapshot"}
+TEMPORAL_ROLE_PROVISIONAL_CURRENT = "provisional_current_snapshot"
+TEMPORAL_ROLE_CLOSED_DAY_CANDIDATE = "closed_day_candidate_snapshot"
+TEMPORAL_ROLE_ACCEPTED_CLOSED = "accepted_closed_day_snapshot"
+CLOSURE_STATE_PENDING = "closure_pending"
+CLOSURE_STATE_RETRYING = "closure_retrying"
+CLOSURE_STATE_RATE_LIMITED = "closure_rate_limited"
+CLOSURE_STATE_EXHAUSTED = "closure_exhausted"
+CLOSURE_STATE_SUCCESS = "success"
+CLOSURE_TERMINAL_STATES = {CLOSURE_STATE_SUCCESS, CLOSURE_STATE_EXHAUSTED}
+CLOSURE_RETRY_BACKOFF_MINUTES = [15, 30, 60, 120, 240, 480]
+CLOSURE_PENDING_STATES = {
+    CLOSURE_STATE_PENDING,
+    CLOSURE_STATE_RETRYING,
+    CLOSURE_STATE_RATE_LIMITED,
+}
 BLOCKED_SOURCE_STATUSES = {
     "promo_by_price": "live HTTP adapter is not implemented; rows stay materialized with blank values",
 }
@@ -231,6 +250,11 @@ class CurrentWebSourceSync(Protocol):
         raise NotImplementedError
 
 
+class ClosedDayWebSourceSync(Protocol):
+    def ensure_closed_day_snapshot(self, *, source_key: str, snapshot_date: str) -> None:
+        raise NotImplementedError
+
+
 class SheetVitrinaV1LivePlanBlock:
     def __init__(
         self,
@@ -246,6 +270,7 @@ class SheetVitrinaV1LivePlanBlock:
         ads_compact_block: AdsCompactBlock | None = None,
         fin_report_daily_block: FinReportDailyBlock | None = None,
         current_web_source_sync: CurrentWebSourceSync | None = None,
+        closed_day_web_source_sync: ClosedDayWebSourceSync | None = None,
         now_factory: Callable[[], datetime] | None = None,
     ) -> None:
         self.runtime = runtime
@@ -260,6 +285,7 @@ class SheetVitrinaV1LivePlanBlock:
         self.ads_compact_block = ads_compact_block or AdsCompactBlock(HttpBackedAdsCompactSource())
         self.fin_report_daily_block = fin_report_daily_block or FinReportDailyBlock(HttpBackedFinReportDailySource())
         self.current_web_source_sync = current_web_source_sync or ShellBackedWebSourceCurrentSync()
+        self.closed_day_web_source_sync = closed_day_web_source_sync or self.current_web_source_sync
         self.now_factory = now_factory or _default_now_factory
 
     def build_plan(
@@ -269,7 +295,7 @@ class SheetVitrinaV1LivePlanBlock:
     ) -> SheetVitrinaV1Envelope:
         emit = log or _noop_live_plan_log
         current_state = self.runtime.load_current_state()
-        effective_date = _resolve_as_of_date(as_of_date)
+        effective_date = _resolve_as_of_date(as_of_date, now=self.now_factory())
         current_date = current_business_date_iso(self.now_factory())
         temporal_slots = _build_temporal_slots(
             as_of_date=effective_date,
@@ -414,6 +440,15 @@ class SheetVitrinaV1LivePlanBlock:
             data_layout=_load_json(DATA_LAYOUT_PATH),
             status_layout=_load_json(STATUS_LAYOUT_PATH),
         )
+
+    def list_due_closed_day_retries(self) -> list[TemporalSourceClosureState]:
+        now = self.now_factory()
+        states = self.runtime.list_temporal_source_closure_states(
+            source_keys=sorted(STRICT_CLOSED_DAY_SOURCE_KEYS),
+            slot_kind=TEMPORAL_SLOT_YESTERDAY_CLOSED,
+            states=sorted(CLOSURE_PENDING_STATES),
+        )
+        return [state for state in states if _closure_attempt_is_due(state, now)]
 
     def _sync_current_web_source_snapshot(self, current_date: str) -> str | None:
         try:
@@ -576,8 +611,17 @@ class SheetVitrinaV1LivePlanBlock:
                     statuses.append(gap_status)
                     _emit_source_status_log(emit, gap_status)
                     continue
-                if source_key in {"seller_funnel_snapshot", "sales_funnel_history", "web_source_snapshot"}:
-                    status, payload = self._capture_temporal_web_source(
+                if source_key in STRICT_CLOSED_DAY_SOURCE_KEYS and slot.slot_key == TEMPORAL_SLOT_YESTERDAY_CLOSED:
+                    status, payload = self._capture_closed_day_web_source(
+                        source_key=source_key,
+                        temporal_slot=slot.slot_key,
+                        temporal_policy=temporal_policy,
+                        column_date=slot.column_date,
+                        requested_nm_ids=requested_nm_ids,
+                        loader=loader,
+                    )
+                elif source_key in STRICT_CLOSED_DAY_SOURCE_KEYS:
+                    status, payload = self._capture_provisional_current_web_source(
                         source_key=source_key,
                         temporal_slot=slot.slot_key,
                         temporal_policy=temporal_policy,
@@ -589,6 +633,15 @@ class SheetVitrinaV1LivePlanBlock:
                             if slot.slot_key == TEMPORAL_SLOT_TODAY_CURRENT
                             else None
                         ),
+                    )
+                elif source_key in {"sales_funnel_history"}:
+                    status, payload = self._capture_cached_temporal_source(
+                        source_key=source_key,
+                        temporal_slot=slot.slot_key,
+                        temporal_policy=temporal_policy,
+                        column_date=slot.column_date,
+                        requested_nm_ids=requested_nm_ids,
+                        loader=loader,
                     )
                 else:
                     status, payload = _capture_live_source(
@@ -683,7 +736,60 @@ class SheetVitrinaV1LivePlanBlock:
             source_temporal_policies=dict(SOURCE_TEMPORAL_POLICIES),
         )
 
-    def _capture_temporal_web_source(
+    def _capture_cached_temporal_source(
+        self,
+        *,
+        source_key: str,
+        temporal_slot: str,
+        temporal_policy: str,
+        column_date: str,
+        requested_nm_ids: list[int],
+        loader: Callable[[], Any],
+    ) -> tuple[LiveSourceStatus, Any | None]:
+        status, payload = _capture_live_source(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            loader=loader,
+        )
+        if payload is not None and _is_exact_snapshot_payload(payload, column_date):
+            self.runtime.save_temporal_source_snapshot(
+                source_key=source_key,
+                snapshot_date=column_date,
+                captured_at=_format_runtime_timestamp(self.now_factory()),
+                payload=payload,
+            )
+            return status, payload
+
+        if status.kind != "not_found":
+            return status, payload
+
+        cached_payload, cached_at = self.runtime.load_temporal_source_snapshot(
+            source_key=source_key,
+            snapshot_date=column_date,
+        )
+        if cached_payload is None or not _is_exact_snapshot_payload(cached_payload, column_date):
+            return status, payload
+
+        cached_status, _ = _capture_live_source(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            loader=lambda: cached_payload,
+        )
+        cache_note = "resolution_rule=exact_date_runtime_cache"
+        if cached_at:
+            cache_note = f"{cache_note}; cache_captured_at={cached_at}"
+        return (
+            _append_status_note(cached_status, cache_note),
+            cached_payload,
+        )
+
+    def _capture_provisional_current_web_source(
         self,
         *,
         source_key: str,
@@ -702,7 +808,12 @@ class SheetVitrinaV1LivePlanBlock:
             requested_nm_ids=requested_nm_ids,
             loader=loader,
         )
-        if _is_invalid_temporal_web_source_payload(source_key, payload, column_date):
+        if _is_invalid_temporal_web_source_payload(
+            source_key=source_key,
+            payload=payload,
+            column_date=column_date,
+            closed_day_required=False,
+        ):
             return (
                 _append_current_web_source_sync_note(
                     _build_invalid_temporal_web_source_status(
@@ -712,15 +823,17 @@ class SheetVitrinaV1LivePlanBlock:
                         column_date=column_date,
                         requested_nm_ids=requested_nm_ids,
                         payload=payload,
+                        note_suffix=_invalid_temporal_web_source_note(source_key),
                     ),
                     current_web_source_sync_note,
                 ),
                 None,
             )
         if payload is not None and _is_exact_snapshot_payload(payload, column_date):
-            self.runtime.save_temporal_source_snapshot(
+            self.runtime.save_temporal_source_slot_snapshot(
                 source_key=source_key,
                 snapshot_date=column_date,
+                snapshot_role=TEMPORAL_ROLE_PROVISIONAL_CURRENT,
                 captured_at=_format_runtime_timestamp(self.now_factory()),
                 payload=payload,
             )
@@ -729,9 +842,10 @@ class SheetVitrinaV1LivePlanBlock:
         if status.kind != "not_found":
             return _append_current_web_source_sync_note(status, current_web_source_sync_note), payload
 
-        cached_payload, cached_at = self.runtime.load_temporal_source_snapshot(
+        cached_payload, cached_at = self.runtime.load_temporal_source_slot_snapshot(
             source_key=source_key,
             snapshot_date=column_date,
+            snapshot_role=TEMPORAL_ROLE_PROVISIONAL_CURRENT,
         )
         if cached_payload is None or not _is_exact_snapshot_payload(cached_payload, column_date):
             return _append_current_web_source_sync_note(status, current_web_source_sync_note), payload
@@ -744,7 +858,7 @@ class SheetVitrinaV1LivePlanBlock:
             requested_nm_ids=requested_nm_ids,
             loader=lambda: cached_payload,
         )
-        cache_note = "resolution_rule=exact_date_runtime_cache"
+        cache_note = "resolution_rule=exact_date_provisional_runtime_cache"
         if cached_at:
             cache_note = f"{cache_note}; cache_captured_at={cached_at}"
         return (
@@ -754,6 +868,151 @@ class SheetVitrinaV1LivePlanBlock:
             ),
             cached_payload,
         )
+
+    def _capture_closed_day_web_source(
+        self,
+        *,
+        source_key: str,
+        temporal_slot: str,
+        temporal_policy: str,
+        column_date: str,
+        requested_nm_ids: list[int],
+        loader: Callable[[], Any],
+    ) -> tuple[LiveSourceStatus, Any | None]:
+        accepted_payload, accepted_at = self.runtime.load_temporal_source_slot_snapshot(
+            source_key=source_key,
+            snapshot_date=column_date,
+            snapshot_role=TEMPORAL_ROLE_ACCEPTED_CLOSED,
+        )
+        if accepted_payload is not None and _is_exact_snapshot_payload(accepted_payload, column_date):
+            accepted_status, _ = _capture_live_source(
+                source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
+                requested_nm_ids=requested_nm_ids,
+                loader=lambda: accepted_payload,
+            )
+            cache_note = "resolution_rule=accepted_closed_runtime_snapshot"
+            if accepted_at:
+                cache_note = f"{cache_note}; accepted_at={accepted_at}"
+            return _append_status_note(accepted_status, cache_note), accepted_payload
+
+        closure_state = self.runtime.load_temporal_source_closure_state(
+            source_key=source_key,
+            target_date=column_date,
+            slot_kind=temporal_slot,
+        )
+        now = self.now_factory()
+        now_iso = _format_runtime_timestamp(now)
+        if not _closure_attempt_is_due(closure_state, now):
+            return _build_closure_retry_status(
+                source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
+                requested_nm_ids=requested_nm_ids,
+                closure_state=closure_state,
+            ), None
+
+        attempt_count = (closure_state.attempt_count if closure_state is not None else 0) + 1
+        attempt_error: str | None = None
+        try:
+            self.closed_day_web_source_sync.ensure_closed_day_snapshot(
+                source_key=source_key,
+                snapshot_date=column_date,
+            )
+        except Exception as exc:  # pragma: no cover - live sync fallback
+            attempt_error = str(exc)
+
+        status, payload = _capture_live_source(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            loader=loader,
+        )
+        if payload is not None and _is_exact_snapshot_payload(payload, column_date):
+            self.runtime.save_temporal_source_slot_snapshot(
+                source_key=source_key,
+                snapshot_date=column_date,
+                snapshot_role=TEMPORAL_ROLE_CLOSED_DAY_CANDIDATE,
+                captured_at=now_iso,
+                payload=payload,
+            )
+
+        if attempt_error is None and not _is_invalid_temporal_web_source_payload(
+            source_key=source_key,
+            payload=payload,
+            column_date=column_date,
+            closed_day_required=True,
+        ) and payload is not None and _is_exact_snapshot_payload(payload, column_date):
+            self.runtime.save_temporal_source_slot_snapshot(
+                source_key=source_key,
+                snapshot_date=column_date,
+                snapshot_role=TEMPORAL_ROLE_ACCEPTED_CLOSED,
+                captured_at=now_iso,
+                payload=payload,
+            )
+            self.runtime.save_temporal_source_closure_state(
+                source_key=source_key,
+                target_date=column_date,
+                slot_kind=temporal_slot,
+                state=CLOSURE_STATE_SUCCESS,
+                attempt_count=attempt_count,
+                next_retry_at=None,
+                last_reason="accepted_closed_day_snapshot",
+                last_attempt_at=now_iso,
+                last_success_at=now_iso,
+                accepted_at=now_iso,
+            )
+            accepted_status, _ = _capture_live_source(
+                source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
+                requested_nm_ids=requested_nm_ids,
+                loader=lambda: payload,
+            )
+            return _append_status_note(
+                accepted_status,
+                f"resolution_rule=accepted_closed_current_attempt; accepted_at={now_iso}",
+            ), payload
+
+        reason = attempt_error or status.note or _invalid_temporal_web_source_note(source_key)
+        next_retry_at, retry_state = _next_closure_retry(now, attempt_count, reason)
+        self.runtime.save_temporal_source_closure_state(
+            source_key=source_key,
+            target_date=column_date,
+            slot_kind=temporal_slot,
+            state=retry_state,
+            attempt_count=attempt_count,
+            next_retry_at=next_retry_at,
+            last_reason=reason,
+            last_attempt_at=now_iso,
+            last_success_at=closure_state.last_success_at if closure_state is not None else None,
+            accepted_at=closure_state.accepted_at if closure_state is not None else None,
+        )
+        return _build_closure_retry_status(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            closure_state=TemporalSourceClosureState(
+                source_key=source_key,
+                target_date=column_date,
+                slot_kind=temporal_slot,
+                state=retry_state,
+                attempt_count=attempt_count,
+                next_retry_at=next_retry_at,
+                last_reason=reason,
+                last_attempt_at=now_iso,
+                last_success_at=closure_state.last_success_at if closure_state is not None else None,
+                accepted_at=closure_state.accepted_at if closure_state is not None else None,
+            ),
+        ), None
 
 
 class _MetricEvaluator:
@@ -1315,6 +1574,7 @@ def _build_invalid_temporal_web_source_status(
     column_date: str,
     requested_nm_ids: list[int],
     payload: Any,
+    note_suffix: str,
 ) -> LiveSourceStatus:
     return LiveSourceStatus(
         source_key=source_key,
@@ -1332,8 +1592,50 @@ def _build_invalid_temporal_web_source_status(
         missing_nm_ids=sorted(set(requested_nm_ids)),
         note=_append_invalid_payload_note(
             _status_note_from_payload(payload),
-            "invalid_exact_snapshot=zero_filled_seller_funnel_snapshot",
+            note_suffix,
         ),
+    )
+
+
+def _build_closure_retry_status(
+    *,
+    source_key: str,
+    temporal_slot: str,
+    temporal_policy: str,
+    column_date: str,
+    requested_nm_ids: list[int],
+    closure_state: TemporalSourceClosureState | None,
+) -> LiveSourceStatus:
+    state = closure_state.state if closure_state is not None else CLOSURE_STATE_PENDING
+    note_parts = [
+        f"closure_state={state}",
+        (
+            f"attempt_count={closure_state.attempt_count}"
+            if closure_state is not None
+            else "attempt_count=0"
+        ),
+    ]
+    if closure_state is not None and closure_state.next_retry_at:
+        note_parts.append(f"next_retry_at={closure_state.next_retry_at}")
+    if closure_state is not None and closure_state.last_attempt_at:
+        note_parts.append(f"last_attempt_at={closure_state.last_attempt_at}")
+    if closure_state is not None and closure_state.last_reason:
+        note_parts.append(f"last_reason={closure_state.last_reason}")
+    return LiveSourceStatus(
+        source_key=source_key,
+        temporal_slot=temporal_slot,
+        temporal_policy=temporal_policy,
+        column_date=column_date,
+        kind=state,
+        freshness="",
+        snapshot_date="",
+        date=column_date if source_key == "seller_funnel_snapshot" else "",
+        date_from=column_date if source_key == "web_source_snapshot" else "",
+        date_to=column_date if source_key == "web_source_snapshot" else "",
+        requested_count=len(requested_nm_ids),
+        covered_count=0,
+        missing_nm_ids=sorted(set(requested_nm_ids)),
+        note="; ".join(note_parts),
     )
 
 
@@ -1460,19 +1762,69 @@ def _is_invalid_temporal_web_source_payload(
     source_key: str,
     payload: Any | None,
     column_date: str,
+    *,
+    closed_day_required: bool,
 ) -> bool:
-    if source_key != "seller_funnel_snapshot" or payload is None:
+    if payload is None:
         return False
     if not _is_exact_snapshot_payload(payload, column_date):
         return False
     items = getattr(payload, "items", None)
     if not isinstance(items, list) or not items:
         return True
-    return not any(
-        _numeric_payload_value(getattr(item, "view_count", None)) > 0
-        or _numeric_payload_value(getattr(item, "open_card_count", None)) > 0
-        for item in items
-    )
+    if source_key == "seller_funnel_snapshot":
+        return not any(
+            _numeric_payload_value(getattr(item, "view_count", None)) > 0
+            or _numeric_payload_value(getattr(item, "open_card_count", None)) > 0
+            for item in items
+        )
+    if source_key == "web_source_snapshot":
+        if not any(
+            _numeric_payload_value(getattr(item, "views_current", None)) > 0
+            or _numeric_payload_value(getattr(item, "ctr_current", None)) > 0
+            or _numeric_payload_value(getattr(item, "orders_current", None)) > 0
+            for item in items
+        ):
+            return True
+        return False if not closed_day_required else False
+    return False
+
+
+def _invalid_temporal_web_source_note(source_key: str) -> str:
+    if source_key == "seller_funnel_snapshot":
+        return "invalid_exact_snapshot=zero_filled_seller_funnel_snapshot"
+    if source_key == "web_source_snapshot":
+        return "invalid_exact_snapshot=zero_filled_web_source_snapshot"
+    return "invalid_exact_snapshot"
+
+
+def _closure_attempt_is_due(
+    closure_state: TemporalSourceClosureState | None,
+    now: datetime,
+) -> bool:
+    if closure_state is None:
+        return True
+    if closure_state.state == CLOSURE_STATE_SUCCESS:
+        return False
+    if closure_state.state == CLOSURE_STATE_EXHAUSTED:
+        return False
+    if not closure_state.next_retry_at:
+        return True
+    return _parse_runtime_timestamp(closure_state.next_retry_at) <= now.astimezone(timezone.utc)
+
+
+def _next_closure_retry(now: datetime, attempt_count: int, reason: str) -> tuple[str | None, str]:
+    if attempt_count >= len(CLOSURE_RETRY_BACKOFF_MINUTES):
+        return None, CLOSURE_STATE_EXHAUSTED
+    retry_after_minutes = CLOSURE_RETRY_BACKOFF_MINUTES[max(attempt_count - 1, 0)]
+    state = CLOSURE_STATE_RATE_LIMITED if _looks_like_rate_limit_reason(reason) else CLOSURE_STATE_RETRYING
+    next_retry_at = _format_runtime_timestamp(now.astimezone(timezone.utc) + timedelta(minutes=retry_after_minutes))
+    return next_retry_at, state
+
+
+def _looks_like_rate_limit_reason(reason: str) -> bool:
+    lowered = str(reason or "").lower()
+    return "429" in lowered or "retry-after" in lowered or "rate limit" in lowered
 
 
 def _append_status_note(status: LiveSourceStatus, suffix: str) -> LiveSourceStatus:
@@ -1495,6 +1847,13 @@ def _append_current_web_source_sync_note(
 
 def _format_runtime_timestamp(value: datetime) -> str:
     return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _parse_runtime_timestamp(value: str) -> datetime:
+    normalized = str(value or "")
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    return datetime.fromisoformat(normalized).astimezone(timezone.utc)
 
 
 def _numeric_payload_value(value: Any) -> float:
@@ -1594,11 +1953,11 @@ def _default_now_factory() -> datetime:
     return _utc_now()
 
 
-def _resolve_as_of_date(value: str | None) -> str:
+def _resolve_as_of_date(value: str | None, *, now: datetime | None = None) -> str:
     if value:
         datetime.strptime(value, "%Y-%m-%d")
         return value
-    return default_business_as_of_date()
+    return default_business_as_of_date(now)
 
 
 def _group_config(config_items: list[ConfigV2Item]) -> dict[str, list[ConfigV2Item]]:

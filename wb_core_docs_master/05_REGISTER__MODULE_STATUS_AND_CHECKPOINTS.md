@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "0b9cd8078fca3f3f4ad7325768fef4b31cb87c7e"
+built_from_commit: "b76bd8145a18d0da45bc6018aea31ce373116173"
 ---
 
 # Summary
@@ -83,6 +83,9 @@ Current repo-owned operator refresh surface:
 - job/log surface is detailed and machine-useful: source/module/adapter/endpoint steps, source result kinds/counts, metric batch summaries and bridge/write results stay server-driven and can be exported per completed run through `GET /v1/sheet-vitrina-v1/job?job_id=...&format=text&download=1`
 - server-side business timezone = `Asia/Yekaterinburg` for default `as_of_date`, `today_current` and operator-facing freshness dates
 - live daily auto-refresh = `wb-core-sheet-vitrina-refresh.timer` -> existing `POST /v1/sheet-vitrina-v1/refresh` at `11:00 Asia/Yekaterinburg` (`06:00 UTC` on current host) with `auto_load=true`, so the daily path now finishes as `refresh + load to live sheet`
+- strict closed-day policy applies only to closed-day-capable bot/web-source families `seller_funnel_snapshot` and `web_source_snapshot`; current-only families `prices_snapshot`, `ads_bids`, `stocks` keep truthful `not_available` for `yesterday_closed`
+- `today_current` for bot/web-source may stay provisional/incomplete, but `yesterday_closed` now accepts only `accepted_closed_day_snapshot`; invalid candidate goes to persisted `closure_retrying / closure_rate_limited / closure_exhausted` instead of silently inheriting same-day provisional values
+- live retry completion is bounded by repo-owned runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py` plus host timer `wb-core-sheet-vitrina-closure-retry.timer`
 
 Current additional operator supply flow on the same page:
 - top-level tab `Расчёт поставок` keeps the existing page pattern and now materializes two bounded sibling blocks: `Заказ на фабрике` and `Поставка на Wildberries`

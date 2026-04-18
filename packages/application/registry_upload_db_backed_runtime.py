@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime
 import json
 from pathlib import Path
@@ -44,6 +45,20 @@ ROOT = Path(__file__).resolve().parents[2]
 ARTIFACTS_DIR = ROOT / "artifacts" / "registry_upload_db_backed_runtime"
 INPUT_BUNDLE_FIXTURE = ARTIFACTS_DIR / "input" / "registry_upload_bundle__fixture.json"
 DB_FILENAME = "registry_upload_runtime.sqlite3"
+
+
+@dataclass(frozen=True)
+class TemporalSourceClosureState:
+    source_key: str
+    target_date: str
+    slot_kind: str
+    state: str
+    attempt_count: int
+    next_retry_at: str | None
+    last_reason: str | None
+    last_attempt_at: str | None
+    last_success_at: str | None
+    accepted_at: str | None
 
 
 class RegistryUploadDbBackedRuntime:
@@ -619,6 +634,283 @@ class RegistryUploadDbBackedRuntime:
             conn.commit()
             return int(cursor.rowcount or 0)
 
+    def save_temporal_source_slot_snapshot(
+        self,
+        *,
+        source_key: str,
+        snapshot_date: str,
+        snapshot_role: str,
+        captured_at: str,
+        payload: Any,
+    ) -> None:
+        _validate_timestamp(captured_at, field_name="captured_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO temporal_source_slot_snapshots(
+                    source_key,
+                    snapshot_date,
+                    snapshot_role,
+                    captured_at,
+                    payload_json
+                )
+                VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(source_key, snapshot_date, snapshot_role) DO UPDATE SET
+                    captured_at = excluded.captured_at,
+                    payload_json = excluded.payload_json
+                """,
+                (
+                    source_key,
+                    snapshot_date,
+                    snapshot_role,
+                    captured_at,
+                    _serialize_temporal_source_payload(payload),
+                ),
+            )
+            conn.commit()
+
+    def load_temporal_source_slot_snapshot(
+        self,
+        *,
+        source_key: str,
+        snapshot_date: str,
+        snapshot_role: str,
+    ) -> tuple[Any | None, str | None]:
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT captured_at, payload_json
+                FROM temporal_source_slot_snapshots
+                WHERE source_key = ? AND snapshot_date = ? AND snapshot_role = ?
+                """,
+                (source_key, snapshot_date, snapshot_role),
+            ).fetchone()
+            if row is None:
+                return None, None
+            return _deserialize_temporal_source_payload(row["payload_json"]), row["captured_at"]
+
+    def delete_temporal_source_slot_snapshots(
+        self,
+        *,
+        source_key: str,
+        date_from: str,
+        date_to: str,
+        snapshot_roles: list[str] | None = None,
+    ) -> int:
+        _validate_iso_date(date_from, field_name="date_from")
+        _validate_iso_date(date_to, field_name="date_to")
+        if date_to < date_from:
+            raise ValueError("date_to must be >= date_from")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            params: list[Any] = [source_key, date_from, date_to]
+            where_roles = ""
+            if snapshot_roles:
+                placeholders = ",".join("?" for _ in snapshot_roles)
+                where_roles = f" AND snapshot_role IN ({placeholders})"
+                params.extend(snapshot_roles)
+            cursor = conn.execute(
+                f"""
+                DELETE FROM temporal_source_slot_snapshots
+                WHERE source_key = ?
+                  AND snapshot_date >= ?
+                  AND snapshot_date <= ?
+                  {where_roles}
+                """,
+                tuple(params),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+
+    def save_temporal_source_closure_state(
+        self,
+        *,
+        source_key: str,
+        target_date: str,
+        slot_kind: str,
+        state: str,
+        attempt_count: int,
+        next_retry_at: str | None,
+        last_reason: str | None,
+        last_attempt_at: str | None,
+        last_success_at: str | None,
+        accepted_at: str | None,
+    ) -> None:
+        _validate_iso_date(target_date, field_name="target_date")
+        _validate_optional_timestamp(next_retry_at, field_name="next_retry_at")
+        _validate_optional_timestamp(last_attempt_at, field_name="last_attempt_at")
+        _validate_optional_timestamp(last_success_at, field_name="last_success_at")
+        _validate_optional_timestamp(accepted_at, field_name="accepted_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO temporal_source_closure_state(
+                    source_key,
+                    target_date,
+                    slot_kind,
+                    state,
+                    attempt_count,
+                    next_retry_at,
+                    last_reason,
+                    last_attempt_at,
+                    last_success_at,
+                    accepted_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_key, target_date, slot_kind) DO UPDATE SET
+                    state = excluded.state,
+                    attempt_count = excluded.attempt_count,
+                    next_retry_at = excluded.next_retry_at,
+                    last_reason = excluded.last_reason,
+                    last_attempt_at = excluded.last_attempt_at,
+                    last_success_at = excluded.last_success_at,
+                    accepted_at = excluded.accepted_at
+                """,
+                (
+                    source_key,
+                    target_date,
+                    slot_kind,
+                    state,
+                    attempt_count,
+                    next_retry_at,
+                    last_reason,
+                    last_attempt_at,
+                    last_success_at,
+                    accepted_at,
+                ),
+            )
+            conn.commit()
+
+    def load_temporal_source_closure_state(
+        self,
+        *,
+        source_key: str,
+        target_date: str,
+        slot_kind: str,
+    ) -> TemporalSourceClosureState | None:
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT
+                    source_key,
+                    target_date,
+                    slot_kind,
+                    state,
+                    attempt_count,
+                    next_retry_at,
+                    last_reason,
+                    last_attempt_at,
+                    last_success_at,
+                    accepted_at
+                FROM temporal_source_closure_state
+                WHERE source_key = ? AND target_date = ? AND slot_kind = ?
+                """,
+                (source_key, target_date, slot_kind),
+            ).fetchone()
+            if row is None:
+                return None
+            return TemporalSourceClosureState(
+                source_key=row["source_key"],
+                target_date=row["target_date"],
+                slot_kind=row["slot_kind"],
+                state=row["state"],
+                attempt_count=int(row["attempt_count"]),
+                next_retry_at=row["next_retry_at"],
+                last_reason=row["last_reason"],
+                last_attempt_at=row["last_attempt_at"],
+                last_success_at=row["last_success_at"],
+                accepted_at=row["accepted_at"],
+            )
+
+    def list_temporal_source_closure_states(
+        self,
+        *,
+        source_keys: list[str] | None = None,
+        slot_kind: str | None = None,
+        states: list[str] | None = None,
+    ) -> list[TemporalSourceClosureState]:
+        query = [
+            """
+            SELECT
+                source_key,
+                target_date,
+                slot_kind,
+                state,
+                attempt_count,
+                next_retry_at,
+                last_reason,
+                last_attempt_at,
+                last_success_at,
+                accepted_at
+            FROM temporal_source_closure_state
+            WHERE 1 = 1
+            """
+        ]
+        params: list[Any] = []
+        if source_keys:
+            placeholders = ",".join("?" for _ in source_keys)
+            query.append(f"AND source_key IN ({placeholders})")
+            params.extend(source_keys)
+        if slot_kind:
+            query.append("AND slot_kind = ?")
+            params.append(slot_kind)
+        if states:
+            placeholders = ",".join("?" for _ in states)
+            query.append(f"AND state IN ({placeholders})")
+            params.extend(states)
+        query.append("ORDER BY target_date, source_key, slot_kind")
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute("\n".join(query), tuple(params)).fetchall()
+            return [
+                TemporalSourceClosureState(
+                    source_key=row["source_key"],
+                    target_date=row["target_date"],
+                    slot_kind=row["slot_kind"],
+                    state=row["state"],
+                    attempt_count=int(row["attempt_count"]),
+                    next_retry_at=row["next_retry_at"],
+                    last_reason=row["last_reason"],
+                    last_attempt_at=row["last_attempt_at"],
+                    last_success_at=row["last_success_at"],
+                    accepted_at=row["accepted_at"],
+                )
+                for row in rows
+            ]
+
+    def delete_temporal_source_closure_states(
+        self,
+        *,
+        source_key: str,
+        date_from: str,
+        date_to: str,
+    ) -> int:
+        _validate_iso_date(date_from, field_name="date_from")
+        _validate_iso_date(date_to, field_name="date_to")
+        if date_to < date_from:
+            raise ValueError("date_to must be >= date_from")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            cursor = conn.execute(
+                """
+                DELETE FROM temporal_source_closure_state
+                WHERE source_key = ?
+                  AND target_date >= ?
+                  AND target_date <= ?
+                """,
+                (source_key, date_from, date_to),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+
     def save_factory_order_dataset_state(
         self,
         *,
@@ -1175,6 +1467,12 @@ def _validate_timestamp(value: str, field_name: str) -> None:
         raise ValueError(f"{field_name} must be a valid ISO 8601 timestamp") from exc
 
 
+def _validate_optional_timestamp(value: str | None, field_name: str) -> None:
+    if value is None:
+        return
+    _validate_timestamp(value, field_name=field_name)
+
+
 def _validate_iso_date(value: str, field_name: str) -> None:
     try:
         date.fromisoformat(value)
@@ -1417,6 +1715,35 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS temporal_source_snapshots_by_source_date
         ON temporal_source_snapshots(source_key, snapshot_date);
+
+        CREATE TABLE IF NOT EXISTS temporal_source_slot_snapshots (
+            source_key TEXT NOT NULL,
+            snapshot_date TEXT NOT NULL,
+            snapshot_role TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (source_key, snapshot_date, snapshot_role)
+        );
+
+        CREATE INDEX IF NOT EXISTS temporal_source_slot_snapshots_by_source_date_role
+        ON temporal_source_slot_snapshots(source_key, snapshot_date, snapshot_role);
+
+        CREATE TABLE IF NOT EXISTS temporal_source_closure_state (
+            source_key TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            slot_kind TEXT NOT NULL,
+            state TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL,
+            next_retry_at TEXT,
+            last_reason TEXT,
+            last_attempt_at TEXT,
+            last_success_at TEXT,
+            accepted_at TEXT,
+            PRIMARY KEY (source_key, target_date, slot_kind)
+        );
+
+        CREATE INDEX IF NOT EXISTS temporal_source_closure_state_by_state_retry
+        ON temporal_source_closure_state(state, next_retry_at, target_date, source_key);
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_factory_order_dataset_state (
             dataset_type TEXT PRIMARY KEY,

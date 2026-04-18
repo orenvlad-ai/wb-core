@@ -29,7 +29,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "2e6bfd43a88e693a30b130516f5f8ce66889b801"
+built_from_commit: "b76bd8145a18d0da45bc6018aea31ce373116173"
 ---
 
 # Summary
@@ -68,8 +68,11 @@ python3 apps/sheet_vitrina_v1_operator_load_smoke.py
 python3 apps/factory_order_supply_smoke.py
 python3 apps/sheet_vitrina_v1_factory_order_http_smoke.py
 python3 apps/web_source_current_sync_zero_snapshot_smoke.py
+python3 apps/web_source_current_sync_closed_day_freshness_smoke.py
 python3 apps/sheet_vitrina_v1_seller_funnel_zero_payload_smoke.py
 python3 apps/sheet_vitrina_v1_web_source_current_sync_smoke.py
+python3 apps/sheet_vitrina_v1_temporal_closure_retry_smoke.py
+python3 apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py
 python3 apps/sheet_vitrina_v1_stocks_refresh_smoke.py
 python3 apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py
 python3 apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py
@@ -155,6 +158,18 @@ Expected routes:
 - `POST /v1/sheet-vitrina-v1/supply/factory-order/upload/inbound-ff-to-wb`
 - `POST /v1/sheet-vitrina-v1/supply/factory-order/calculate`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx`
+
+Temporal closure retry runner:
+
+```bash
+python3 apps/sheet_vitrina_v1_temporal_closure_retry_live.py --date 2026-04-17 --date 2026-04-18
+```
+
+Norm:
+- use the retry runner for due `seller_funnel_snapshot` / `web_source_snapshot` closure states or one-off corrective re-closure of already damaged dates;
+- `today_current` may remain incomplete and blank, but `yesterday_closed` must not silently inherit provisional same-day values;
+- closed-day-capable bot/web-source families accept closed truth only after exact-date sync + source freshness validation (`source_fetched_at` / `fetched_at` after next business-day start in `Asia/Yekaterinburg`);
+- `prices_snapshot`, `ads_bids`, `stocks` remain current-only and truthfully stay `not_available` for `yesterday_closed`.
 
 ## Live GAS checks
 
@@ -296,7 +311,7 @@ Operational rule:
 - `DATA_VITRINA` keeps the same server-driven truth as operator-facing two-day `date_matrix`: `1631` source rows, `34` blocks, `33` separators, `1698` rendered rows и `95` unique metric keys при `yesterday_closed + today_current`;
 - `STATUS` names live sources per temporal slot, such as `seller_funnel_snapshot[yesterday_closed]`, `seller_funnel_snapshot[today_current]`, `stocks[today_current]`, `cost_price[yesterday_closed]`, `cost_price[today_current]`, plus blocked `promo_by_price`;
 - current-only sources (`stocks`, `prices_snapshot`, `ads_bids`) are expected to show `not_available` for `yesterday_closed` instead of copying `today_current` into a closed-day column;
-- `seller_funnel_snapshot` and `web_source_snapshot` use bounded `explicit-date -> latest-if-date-matches`; if requested yesterday date is no longer available upstream but was captured earlier as exact-date current snapshot, `STATUS.*[yesterday_closed].note` may show `resolution_rule=exact_date_runtime_cache`;
+- `seller_funnel_snapshot` and `web_source_snapshot` use bounded `explicit-date -> latest-if-date-matches` only for current-day read resolution; `yesterday_closed` accepts only an explicit accepted closed-day snapshot and must not silently reuse provisional same-day values;
 - if exact-date `today_current` snapshot is still missing for `seller_funnel_snapshot` / `web_source_snapshot`, refresh may bounded-trigger server-local `/opt/wb-web-bot` same-day runners plus `/opt/wb-ai/run_web_source_handoff.py` before final read-side fetch;
 - zero-filled exact-date `seller_funnel_snapshot` is not treated as truthful success anymore: refresh retries current-day capture/handoff, and if the payload still stays all-zero it surfaces as source error/blank instead of `view_count=0` / `open_card_count=0` rows;
 - blank values для promo-backed metrics и unmatched/missing `COST_PRICE` coverage трактуются как truthful current-truth/status signal, а не как повод переносить heavy fallback logic в Apps Script.
@@ -320,9 +335,10 @@ Operational rule:
 | `STATUS.stocks[today_current] = error` with blank stock rows after refresh | bounded refresh stayed honest about stocks failure; investigate upstream inventory rate-limit / token scope instead of treating blanks as fresh stock values |
 | `STATUS.stocks[yesterday_closed] = not_available` | expected bounded semantics: current-only stocks are not backfilled into yesterday EOD without dedicated historical path |
 | `STATUS.web_source_snapshot[yesterday_closed] = not_found` or `STATUS.seller_funnel_snapshot[yesterday_closed] = not_found` with `resolution_rule=explicit_or_latest_date_match` | upstream latest payload no longer matches requested day and exact-date runtime cache for that date is still missing |
-| `STATUS.web_source_snapshot[yesterday_closed].note` or `STATUS.seller_funnel_snapshot[yesterday_closed].note` contains `resolution_rule=exact_date_runtime_cache` | expected bounded semantics: previous exact-date current snapshot was truthfully reused server-side for the matching closed-day slot |
+| `STATUS.web_source_snapshot[yesterday_closed]` or `STATUS.seller_funnel_snapshot[yesterday_closed]` is `closure_retrying` / `closure_rate_limited` / `closure_exhausted` | strict closed-day acceptance has not confirmed final truth yet; closed slot must stay blank/error instead of silently inheriting provisional same-day values |
 | `STATUS.web_source_snapshot[today_current].note` or `STATUS.seller_funnel_snapshot[today_current].note` starts with `current_day_web_source_sync_failed=` | bounded refresh tried server-local same-day capture/handoff and failed before exact-date local snapshot became available; investigate `/opt/wb-web-bot` runners, `/opt/wb-ai/run_web_source_handoff.py`, env and host-local owner paths |
 | `STATUS.seller_funnel_snapshot[*] = error` with `invalid_exact_snapshot=zero_filled_seller_funnel_snapshot` | exact-date seller-funnel payload existed but every `view_count/open_card_count` was zero; runtime rejected it as invalid instead of materializing false zero metrics, so inspect `/opt/wb-web-bot` capture freshness and rerun handoff |
+| `STATUS.web_source_snapshot[yesterday_closed].note` contains `closed_day_source_freshness_not_accepted` | exact-date search snapshot was fetched before the business day was actually closed; rerun authoritative closure path instead of accepting a provisional payload as final truth |
 | `STATUS.stocks[today_current].note` starts with `unmapped stocks quantity outside configured district map=` | raw payload contains quantity outside the current RU district mapping; `stock_total` keeps it, district rows stay source-backed, and the residual is surfaced explicitly instead of being dropped |
 | `ReferenceError: URL is not defined` | Apps Script runtime bug in sheet-side URL derivation |
 | `registry upload bundle must contain 5-64 metrics_v2 entries` | live runtime still serves stale validator / stale deploy and is not aligned with current repo semantics |

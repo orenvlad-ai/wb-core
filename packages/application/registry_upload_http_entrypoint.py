@@ -25,9 +25,12 @@ from packages.business_time import (
 )
 from packages.application.sheet_vitrina_v1_live_plan import (
     BLOCKED_SOURCE_METRIC_KEYS,
+    CLOSURE_PENDING_STATES,
     DELIVERY_CONTRACT_VERSION,
     SOURCE_DIAGNOSTIC_SPECS,
     SheetVitrinaV1LivePlanBlock,
+    STRICT_CLOSED_DAY_SOURCE_KEYS,
+    TEMPORAL_SLOT_YESTERDAY_CLOSED,
 )
 from packages.contracts.cost_price_upload import CostPriceUploadResult
 from packages.contracts.registry_upload_file_backed_service import RegistryUploadResult
@@ -137,6 +140,97 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_sheet_operator_job_text_request(self, job_id: str) -> tuple[str, str]:
         return self.operator_jobs.get_text(job_id)
+
+    def run_sheet_temporal_closure_retry_cycle(
+        self,
+        *,
+        target_dates: list[str] | None = None,
+        auto_load_visible: bool = True,
+        log: OperatorLogEmitter | None = None,
+    ) -> dict[str, Any]:
+        emit = log or _noop_log
+        requested_dates = sorted({value for value in (target_dates or []) if value})
+        due_states = self.sheet_plan_block.list_due_closed_day_retries()
+        due_dates = sorted({state.target_date for state in due_states})
+        scheduled_dates = sorted(set(requested_dates) | set(due_dates))
+        default_visible_as_of_date = default_business_as_of_date(self.now_factory())
+
+        emit(
+            _format_log_event(
+                "closure_retry_cycle_start",
+                requested_dates=",".join(requested_dates),
+                due_dates=",".join(due_dates),
+                scheduled_dates=",".join(scheduled_dates),
+                strict_sources=",".join(sorted(STRICT_CLOSED_DAY_SOURCE_KEYS)),
+                slot_kind=TEMPORAL_SLOT_YESTERDAY_CLOSED,
+            )
+        )
+
+        refresh_results: list[dict[str, Any]] = []
+        for as_of_date in scheduled_dates:
+            emit(
+                _format_log_event(
+                    "closure_retry_refresh_start",
+                    as_of_date=as_of_date,
+                )
+            )
+            refresh_payload = self._run_sheet_refresh(as_of_date=as_of_date, log=emit)
+            refresh_results.append(
+                {
+                    "as_of_date": as_of_date,
+                    "snapshot_id": refresh_payload["snapshot_id"],
+                    "refreshed_at": refresh_payload["refreshed_at"],
+                }
+            )
+
+        load_result: dict[str, Any] | None = None
+        if auto_load_visible and default_visible_as_of_date in scheduled_dates:
+            emit(
+                _format_log_event(
+                    "closure_retry_load_start",
+                    as_of_date=default_visible_as_of_date,
+                )
+            )
+            load_result = self._run_sheet_load(as_of_date=default_visible_as_of_date, log=emit)
+
+        closure_states = self.runtime.list_temporal_source_closure_states(
+            source_keys=sorted(STRICT_CLOSED_DAY_SOURCE_KEYS),
+            slot_kind=TEMPORAL_SLOT_YESTERDAY_CLOSED,
+            states=sorted(CLOSURE_PENDING_STATES),
+        )
+        payload = {
+            "status": "success",
+            "operation": "temporal_closure_retry_cycle",
+            "requested_dates": requested_dates,
+            "due_dates": due_dates,
+            "scheduled_dates": scheduled_dates,
+            "refreshed_dates": refresh_results,
+            "visible_load_result": load_result,
+            "pending_closure_states": [
+                {
+                    "source_key": state.source_key,
+                    "target_date": state.target_date,
+                    "slot_kind": state.slot_kind,
+                    "state": state.state,
+                    "attempt_count": state.attempt_count,
+                    "next_retry_at": state.next_retry_at,
+                    "last_reason": state.last_reason,
+                    "accepted_at": state.accepted_at,
+                }
+                for state in closure_states
+            ],
+            "server_context": self.build_sheet_server_context(),
+        }
+        emit(
+            _format_log_event(
+                "closure_retry_cycle_finish",
+                scheduled_dates=",".join(scheduled_dates),
+                refreshed=len(refresh_results),
+                loaded_visible=str(bool(load_result)).lower(),
+                pending_states=len(closure_states),
+            )
+        )
+        return payload
 
     def handle_factory_order_status_request(self) -> dict[str, Any]:
         payload = asdict(self.factory_order_supply_block.build_status())

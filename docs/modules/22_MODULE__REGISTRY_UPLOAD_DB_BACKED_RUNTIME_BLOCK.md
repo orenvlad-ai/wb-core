@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-22-REGISTRY-UPLOAD-DB-BACKED-RUNTIME-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `registry_upload_db_backed_runtime_block`."
-scope: "Локальный SQLite-backed runtime ingest для V2-реестров: persistent current state, version history, upload result, temporal exact-date source snapshots и smoke полного runtime flow без Apps Script UI и внешнего API."
+scope: "Локальный SQLite-backed runtime ingest для V2-реестров: persistent current state, version history, upload result, exact-date temporal source snapshots, role-aware temporal slot truth (`provisional_current / closed_day_candidate / accepted_closed`) и persisted closure-retry state без Apps Script UI и внешнего API."
 source_basis:
   - "migration/86_registry_upload_contract.md"
   - "migration/88_registry_upload_file_backed_service.md"
@@ -24,6 +24,8 @@ related_tables:
   - "METRICS_V2"
   - "FORMULAS_V2"
   - "temporal_source_snapshots"
+  - "temporal_source_slot_snapshots"
+  - "temporal_source_closure_state"
   - "sheet_vitrina_v1_factory_order_dataset_state"
   - "sheet_vitrina_v1_factory_order_result_state"
 related_endpoints: []
@@ -38,7 +40,7 @@ related_docs:
   - "migration/89_registry_upload_db_backed_runtime.md"
   - "docs/modules/21_MODULE__REGISTRY_UPLOAD_FILE_BACKED_SERVICE_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current temporal snapshot/runtime seam: SQLite-backed runtime теперь materialize-ит не только current registry state и version history, но и exact-date `temporal_source_snapshots` плюс operator-side factory-order dataset/result state; для bounded historical reconcile runtime exposes enough primitives (`save/load/list/delete temporal snapshots`) to replace polluted windows truthfully."
+update_note: "Обновлён под current temporal closure seam: SQLite-backed runtime теперь materialize-ит не только current registry state и version history, но и role-aware temporal slot snapshots plus persisted closure retry state для strict `yesterday_closed + today_current` truth, alongside operator-side factory-order dataset/result state."
 ---
 
 # 1. Идентификатор и статус
@@ -80,6 +82,11 @@ update_note: "Обновлён под current temporal snapshot/runtime seam: SQ
   - versioned rows `config_v2`, `metrics_v2`, `formulas_v2`.
 - Runtime DB также materialize-ит:
   - exact-date temporal source cache в `temporal_source_snapshots`;
+  - role-aware temporal slot cache в `temporal_source_slot_snapshots`:
+    - `provisional_current_snapshot`
+    - `closed_day_candidate_snapshot`
+    - `accepted_closed_day_snapshot`
+  - persisted closure retry state в `temporal_source_closure_state` с `source_key / target_date / slot_kind / attempt_count / next_retry_at / state / last_reason / accepted_at`;
   - operator-side uploaded workbook state для factory-order datasets;
   - last successful factory-order result state.
 - Для current factory-order seam `temporal_source_snapshots[source_key=sales_funnel_history]` является authoritative server-side storage contract для persisted `orderCount` history:
@@ -119,6 +126,7 @@ update_note: "Обновлён под current temporal snapshot/runtime seam: SQ
 - smoke:
   - `apps/registry_upload_db_backed_runtime_smoke.py`
   - `apps/factory_order_sales_history_smoke.py`
+  - `apps/sheet_vitrina_v1_temporal_closure_retry_smoke.py`
 
 # 6. Какой smoke подтверждён
 
@@ -143,6 +151,11 @@ update_note: "Обновлён под current temporal snapshot/runtime seam: SQ
   - `sales_funnel_history` exact-date slices живут server-side;
   - bounded historical replacement не требует append-only merge с polluted rows;
   - one-time migration input из live `DATA_VITRINA` не превращает sheet в постоянный source of truth.
+- Тот же runtime слой теперь достаточно выразителен и для strict temporal truth в `sheet_vitrina_v1`:
+  - `today_current` может жить как provisional slot snapshot;
+  - `yesterday_closed` не обязан reuse-ить provisional current payload;
+  - accepted closed-day truth materialize-ится только после отдельного acceptance step и сохраняется отдельно от provisional/candidate state;
+  - retry/backoff lifecycle живёт server-side и не переносится в Apps Script.
 
 # 8. Что пока не является частью финальной production-сборки
 

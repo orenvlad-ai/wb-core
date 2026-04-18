@@ -137,6 +137,7 @@ def _build_live_plan(runtime: RegistryUploadDbBackedRuntime) -> SheetVitrinaV1Li
         stocks_block=_SyntheticSuccessBlock("stocks"),
         ads_compact_block=_SyntheticSuccessBlock("ads_compact"),
         fin_report_daily_block=_SyntheticSuccessBlock("fin_report_daily"),
+        closed_day_web_source_sync=_NoopClosedDayWebSourceSync(),
         now_factory=lambda: BOUNDARY_NOW,
     )
 
@@ -167,6 +168,11 @@ class _SyntheticSuccessBlock:
             storage_total=None,
         )
         return SimpleNamespace(result=payload)
+
+
+class _NoopClosedDayWebSourceSync:
+    def ensure_closed_day_snapshot(self, *, source_key: str, snapshot_date: str) -> None:
+        return
 
 
 def _request_date(request: object) -> str:
