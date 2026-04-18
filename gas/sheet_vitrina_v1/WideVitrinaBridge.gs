@@ -554,7 +554,7 @@ function readExistingDataVitrinaMatrixState_(sheet) {
   const values = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
   const header = values[0];
   if (isDataVitrinaMatrixHeader_(header)) {
-    return parseMatrixDataVitrinaState_(values, resolveSpreadsheetTimeZone_(sheet.getParent()));
+    return parseMatrixDataVitrinaState_(values, resolveSpreadsheetTimeZone_(resolveSheetParentSpreadsheet_(sheet)));
   }
   if (isDataVitrinaFlatHeader_(header)) {
     return buildIncomingDataVitrinaMatrixState_(header, values.slice(1));
@@ -594,7 +594,7 @@ function buildIncomingDataVitrinaMatrixState_(header, rows) {
     pushUnique_(state.block_metric_order[parsed.block_key], parsed.metric_key);
     pushUnique_(state.metric_keys, parsed.metric_key);
     state.metric_titles[logicalKey] = derivedTitles.metric_title;
-    state.values[logicalKey] = mapRowValuesToDates_(dateColumns, row.slice(2));
+    state.values[logicalKey] = mapIncomingRowValuesToDates_(dateColumns, row.slice(2));
     state.source_row_count += 1;
   });
   state.block_order = composeDataVitrinaBlockOrder_(state.block_scope_order);
@@ -673,14 +673,12 @@ function mergeDataVitrinaMatrixStates_(existingState, incomingState) {
       merged.dates.forEach((date) => {
         if (Object.prototype.hasOwnProperty.call(incomingValues, date)) {
           const value = incomingValues[date];
-          if (value !== '' && value !== null) {
-            merged.values[logicalKey][date] = value;
-          }
+          merged.values[logicalKey][date] = value === null || value === undefined ? '' : value;
           return;
         }
         if (Object.prototype.hasOwnProperty.call(existingValues, date)) {
           const value = existingValues[date];
-          if (value !== '' && value !== null) {
+          if (value !== '' && value !== null && value !== undefined) {
             merged.values[logicalKey][date] = value;
           }
         }
@@ -770,6 +768,16 @@ function resolveSpreadsheetTimeZone_(spreadsheet) {
   return 'UTC';
 }
 
+function resolveSheetParentSpreadsheet_(sheet) {
+  if (sheet && typeof sheet.getParent === 'function') {
+    return sheet.getParent();
+  }
+  if (sheet && typeof sheet.getSheetParent === 'function') {
+    return sheet.getSheetParent();
+  }
+  return null;
+}
+
 function parseFlatDataVitrinaKey_(key) {
   const parts = String(key || '').split('|');
   if (parts.length !== 2) {
@@ -851,6 +859,18 @@ function mapRowValuesToDates_(dates, rowValues) {
     if (value !== '' && value !== null) {
       mapped[date] = value;
     }
+  });
+  return mapped;
+}
+
+function mapIncomingRowValuesToDates_(dates, rowValues) {
+  const mapped = {};
+  dates.forEach((date, index) => {
+    if (index >= rowValues.length) {
+      return;
+    }
+    const value = rowValues[index];
+    mapped[date] = value === null || value === undefined ? '' : value;
   });
   return mapped;
 }

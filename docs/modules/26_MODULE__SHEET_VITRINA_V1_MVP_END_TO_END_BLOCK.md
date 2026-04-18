@@ -241,6 +241,7 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
 - `POST /v1/sheet-vitrina-v1/load` тоже остаётся thin bridge:
   - сначала server contour читает уже persisted ready snapshot;
   - затем передаёт его в existing bound Apps Script bridge;
+  - same-day `date_matrix` merge treats an explicit blank incoming cell as authoritative clear, so stale live-sheet values and stale zeros are overwritten instead of being silently preserved;
   - route не rebuild-ит truth и не подмешивает implicit refresh.
 
 ## 3.1.1 Cost overlay и новые operator-facing metrics
@@ -394,7 +395,7 @@ Bounded допущение:
 - Подтверждён split refresh/read smoke через `apps/sheet_vitrina_v1_refresh_read_split_smoke.py`.
 - Подтверждён operator async refresh/load smoke через `apps/sheet_vitrina_v1_operator_load_smoke.py`.
 - Подтверждён targeted current-day web-source sync smoke через `apps/sheet_vitrina_v1_web_source_current_sync_smoke.py`.
-- Подтверждён targeted server-driven smoke через `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`.
+- Подтверждён targeted server-driven smoke через `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`, включая same-day blank overwrite, который обязан затирать stale sheet cell вместо сохранения старого значения.
 - Smoke проверяет:
   - что `prepare` поднимает operator seed `33 / 102 / 7`;
   - что upload из sheet-side trigger сохраняет current truth в existing runtime без усечения `metrics_v2`;
