@@ -427,6 +427,53 @@
       color: var(--muted);
     }
 
+    .dataset-current-file {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .dataset-current-file[hidden] {
+      display: none;
+    }
+
+    .dataset-file-link {
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 600;
+    }
+
+    .dataset-file-link:hover {
+      text-decoration: underline;
+    }
+
+    .dataset-delete-button {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: #ffffff;
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 6px 10px;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background-color 120ms ease, color 120ms ease;
+    }
+
+    .dataset-delete-button:hover:not(:disabled) {
+      background: #f4f6f8;
+      color: var(--text);
+    }
+
+    .dataset-delete-button:disabled {
+      cursor: wait;
+      opacity: 0.6;
+    }
+
     .factory-actions {
       display: flex;
       gap: 12px;
@@ -613,7 +660,7 @@
                 <input id="safetyDaysFf" type="number" min="0" step="1">
               </div>
               <div class="field">
-                <label for="orderBatchQty">Размер партии, шт.</label>
+                <label for="orderBatchQty">Кратность штук в коробке</label>
                 <input id="orderBatchQty" type="number" min="1" step="1">
               </div>
               <div class="field">
@@ -622,13 +669,14 @@
               </div>
               <div class="field">
                 <label for="salesAvgPeriodDays">Период усреднения продаж, дней</label>
-                <input id="salesAvgPeriodDays" type="number" min="1" max="7" step="1" value="7">
+                <input id="salesAvgPeriodDays" type="number" min="1" step="1" value="7">
               </div>
             </div>
             <p class="field-note">
               Если дата отчёта не указана, используется текущая business-date сервера. Для parity учитывается отдельный шаблон
               <strong>«Товары в пути от ФФ на Wildberries»</strong>, потому что в текущем wb-core нет другого authoritative source для этого члена формулы.
-              Период усреднения продаж сейчас ограничен <strong>7</strong> закрытыми днями из-за live authoritative sales history source.
+              Inbound-файлы необязательны: если они не загружены, соответствующий inbound будет учтён как <strong>0</strong>.
+              Если requested период продаж выходит за current authoritative history boundary, сервер вернёт явную ошибку с точным диапазоном.
             </p>
           </section>
 
@@ -687,6 +735,10 @@
             <article class="dataset-card">
               <h3>Остатки ФФ</h3>
               <p class="dataset-status" id="stockFfStatus">Читаем состояние...</p>
+              <div class="dataset-current-file" id="stockFfCurrentFile" hidden>
+                <a id="stockFfCurrentFileLink" class="dataset-file-link" href="#">Скачать загруженный файл</a>
+                <button id="deleteStockFfButton" class="dataset-delete-button" type="button">Удалить этот файл</button>
+              </div>
               <div class="dataset-actions">
                 <button id="downloadStockFfTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон остатков ФФ</button>
                 <input id="stockFfFileInput" type="file" accept=".xlsx">
@@ -697,6 +749,10 @@
             <article class="dataset-card">
               <h3>Товары в пути от фабрики</h3>
               <p class="dataset-status" id="inboundFactoryStatus">Читаем состояние...</p>
+              <div class="dataset-current-file" id="inboundFactoryCurrentFile" hidden>
+                <a id="inboundFactoryCurrentFileLink" class="dataset-file-link" href="#">Скачать загруженный файл</a>
+                <button id="deleteInboundFactoryButton" class="dataset-delete-button" type="button">Удалить этот файл</button>
+              </div>
               <div class="dataset-actions">
                 <button id="downloadInboundFactoryTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон товаров в пути от фабрики</button>
                 <input id="inboundFactoryFileInput" type="file" accept=".xlsx">
@@ -707,6 +763,10 @@
             <article class="dataset-card">
               <h3>Товары в пути от ФФ на Wildberries</h3>
               <p class="dataset-status" id="inboundFfToWbStatus">Читаем состояние...</p>
+              <div class="dataset-current-file" id="inboundFfToWbCurrentFile" hidden>
+                <a id="inboundFfToWbCurrentFileLink" class="dataset-file-link" href="#">Скачать загруженный файл</a>
+                <button id="deleteInboundFfToWbButton" class="dataset-delete-button" type="button">Удалить этот файл</button>
+              </div>
               <div class="dataset-actions">
                 <button id="downloadInboundFfToWbTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон товаров в пути от ФФ на Wildberries</button>
                 <input id="inboundFfToWbFileInput" type="file" accept=".xlsx">
@@ -770,6 +830,12 @@
       const stockFfStatus = document.getElementById("stockFfStatus");
       const inboundFactoryStatus = document.getElementById("inboundFactoryStatus");
       const inboundFfToWbStatus = document.getElementById("inboundFfToWbStatus");
+      const stockFfCurrentFile = document.getElementById("stockFfCurrentFile");
+      const inboundFactoryCurrentFile = document.getElementById("inboundFactoryCurrentFile");
+      const inboundFfToWbCurrentFile = document.getElementById("inboundFfToWbCurrentFile");
+      const stockFfCurrentFileLink = document.getElementById("stockFfCurrentFileLink");
+      const inboundFactoryCurrentFileLink = document.getElementById("inboundFactoryCurrentFileLink");
+      const inboundFfToWbCurrentFileLink = document.getElementById("inboundFfToWbCurrentFileLink");
       const stockFfFileInput = document.getElementById("stockFfFileInput");
       const inboundFactoryFileInput = document.getElementById("inboundFactoryFileInput");
       const inboundFfToWbFileInput = document.getElementById("inboundFfToWbFileInput");
@@ -779,6 +845,9 @@
       const uploadStockFfButton = document.getElementById("uploadStockFfButton");
       const uploadInboundFactoryButton = document.getElementById("uploadInboundFactoryButton");
       const uploadInboundFfToWbButton = document.getElementById("uploadInboundFfToWbButton");
+      const deleteStockFfButton = document.getElementById("deleteStockFfButton");
+      const deleteInboundFactoryButton = document.getElementById("deleteInboundFactoryButton");
+      const deleteInboundFfToWbButton = document.getElementById("deleteInboundFfToWbButton");
 
       const stateLabels = {
         idle: "ожидание",
@@ -984,13 +1053,33 @@
         return payload;
       }
 
-      function renderFactoryDatasetStatus(target, state) {
+      function renderFactoryDatasetStatus(target, currentFileRow, currentFileLink, deleteButton, state, options) {
+        const optional = Boolean(options && options.optional);
         if (!state || state.status !== "uploaded") {
-          target.textContent = "Не загружено.";
+          target.textContent = optional
+            ? "Файл не загружен. Это допустимо: в расчёте будет учтено 0."
+            : "Файл не загружен.";
+          currentFileRow.hidden = true;
+          currentFileLink.removeAttribute("href");
+          deleteButton.dataset.deletePath = "";
+          deleteButton.disabled = true;
           return;
         }
         const uploadedAt = valueOrDash(state.uploaded_at).replace("T", " ");
         target.textContent = "Загружено: " + uploadedAt + " · строк: " + valueOrDash(state.row_count);
+        const downloadPath = valueOrDash(state.download_path) === "-" ? "" : String(state.download_path || "");
+        const filename = valueOrDash(state.uploaded_filename) === "-" ? "Скачать загруженный файл" : String(state.uploaded_filename || "Скачать загруженный файл");
+        if (downloadPath) {
+          currentFileLink.href = downloadPath;
+          currentFileLink.textContent = filename;
+        } else {
+          currentFileLink.removeAttribute("href");
+          currentFileLink.textContent = "Исходный файл недоступен для скачивания";
+        }
+        const deletePath = valueOrDash(state.delete_path) === "-" ? "" : String(state.delete_path || "");
+        deleteButton.dataset.deletePath = deletePath;
+        deleteButton.disabled = !deletePath;
+        currentFileRow.hidden = false;
       }
 
       function renderFactoryResult(result) {
@@ -1021,9 +1110,9 @@
         const datasets = payload && payload.datasets ? payload.datasets : {};
         factoryActiveSkuCount.textContent = valueOrDash(payload && payload.active_sku_count);
         factoryCoverageNote.textContent = valueOrDash(payload && payload.coverage_contract_note);
-        renderFactoryDatasetStatus(stockFfStatus, datasets.stock_ff);
-        renderFactoryDatasetStatus(inboundFactoryStatus, datasets.inbound_factory_to_ff);
-        renderFactoryDatasetStatus(inboundFfToWbStatus, datasets.inbound_ff_to_wb);
+        renderFactoryDatasetStatus(stockFfStatus, stockFfCurrentFile, stockFfCurrentFileLink, deleteStockFfButton, datasets.stock_ff, { optional: false });
+        renderFactoryDatasetStatus(inboundFactoryStatus, inboundFactoryCurrentFile, inboundFactoryCurrentFileLink, deleteInboundFactoryButton, datasets.inbound_factory_to_ff, { optional: true });
+        renderFactoryDatasetStatus(inboundFfToWbStatus, inboundFfToWbCurrentFile, inboundFfToWbCurrentFileLink, deleteInboundFfToWbButton, datasets.inbound_ff_to_wb, { optional: true });
         renderFactoryResult(payload ? payload.last_result : null);
       }
 
@@ -1233,6 +1322,36 @@
         }
       }
 
+      async function deleteFactoryDataset(deletePath, busyButton) {
+        if (!deletePath) {
+          return;
+        }
+        const idleLabel = busyButton.textContent;
+        busyButton.disabled = true;
+        busyButton.textContent = "Удаляем...";
+        setFactoryMessage("Удаляем файл из текущего server-side состояния...", "");
+        try {
+          const response = await fetch(deletePath, {
+            method: "DELETE",
+            headers: { "Accept": "application/json" }
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          setFactoryMessage(valueOrDash(payload.message), "success");
+          await loadFactoryStatus();
+        } catch (error) {
+          setFactoryMessage(
+            "Удаление файла завершилось с ошибкой: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          busyButton.disabled = false;
+          busyButton.textContent = idleLabel;
+        }
+      }
+
       async function downloadBinary(url, fallbackName, successMessage) {
         setFactoryMessage("Готовим файл...", "");
         try {
@@ -1346,6 +1465,9 @@
         uploadInboundFfToWbButton,
         "Загружаем..."
       ));
+      deleteStockFfButton.addEventListener("click", () => deleteFactoryDataset(deleteStockFfButton.dataset.deletePath, deleteStockFfButton));
+      deleteInboundFactoryButton.addEventListener("click", () => deleteFactoryDataset(deleteInboundFactoryButton.dataset.deletePath, deleteInboundFactoryButton));
+      deleteInboundFfToWbButton.addEventListener("click", () => deleteFactoryDataset(deleteInboundFfToWbButton.dataset.deletePath, deleteInboundFfToWbButton));
 
       calculateFactoryOrderButton.addEventListener("click", calculateFactoryOrder);
       downloadRecommendationButton.addEventListener("click", downloadRecommendation);

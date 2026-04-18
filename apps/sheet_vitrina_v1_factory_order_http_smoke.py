@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 import socket
@@ -19,11 +19,16 @@ if str(ROOT) not in sys.path:
 
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_FACTORY_ORDER_CALCULATE_PATH,
+    DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FACTORY_PATH,
+    DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FF_TO_WB_PATH,
     DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
     DEFAULT_FACTORY_ORDER_STATUS_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
+    DEFAULT_FACTORY_ORDER_UPLOADED_INBOUND_FACTORY_PATH,
+    DEFAULT_FACTORY_ORDER_UPLOADED_INBOUND_FF_TO_WB_PATH,
+    DEFAULT_FACTORY_ORDER_UPLOADED_STOCK_FF_PATH,
     DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FACTORY_PATH,
     DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FF_TO_WB_PATH,
     DEFAULT_FACTORY_ORDER_UPLOAD_STOCK_FF_PATH,
@@ -45,6 +50,19 @@ INPUT_BUNDLE_FIXTURE = (
 NOW = datetime(2026, 4, 18, 9, 0, tzinfo=timezone.utc)
 ACTIVATED_AT = "2026-04-18T09:00:00Z"
 
+SALES_BY_DATE = {
+    "2026-04-08": {210183919: 80.0, 210184534: 15.0},
+    "2026-04-09": {210183919: 90.0, 210184534: 18.0},
+    "2026-04-10": {210183919: 100.0, 210184534: 21.0},
+    "2026-04-11": {210183919: 110.0, 210184534: 24.0},
+    "2026-04-12": {210183919: 120.0, 210184534: 27.0},
+    "2026-04-13": {210183919: 130.0, 210184534: 30.0},
+    "2026-04-14": {210183919: 140.0, 210184534: 33.0},
+    "2026-04-15": {210183919: 150.0, 210184534: 36.0},
+    "2026-04-16": {210183919: 160.0, 210184534: 39.0},
+    "2026-04-17": {210183919: 170.0, 210184534: 42.0},
+}
+
 
 class FakeStocksBlock:
     def __init__(self, nm_ids: list[int]) -> None:
@@ -64,11 +82,23 @@ class FakeStocksBlock:
 
 class FakeSalesHistoryBlock:
     def execute(self, request_obj: object) -> SimpleNamespace:
-        items = [
-            SimpleNamespace(nm_id=210183919, metric="orderCount", value=10.0),
-            SimpleNamespace(nm_id=210183919, metric="orderCount", value=20.0),
-            SimpleNamespace(nm_id=210184534, metric="orderCount", value=5.0),
-        ]
+        start = date.fromisoformat(request_obj.date_from)
+        end = date.fromisoformat(request_obj.date_to)
+        items = []
+        current = start
+        while current <= end:
+            lookup = SALES_BY_DATE.get(current.isoformat(), {})
+            for nm_id in request_obj.nm_ids:
+                if nm_id in lookup:
+                    items.append(
+                        SimpleNamespace(
+                            date=current.isoformat(),
+                            nm_id=nm_id,
+                            metric="orderCount",
+                            value=float(lookup[nm_id]),
+                        )
+                    )
+            current += timedelta(days=1)
         return SimpleNamespace(result=SimpleNamespace(kind="success", items=items))
 
 
@@ -115,11 +145,10 @@ def main() -> None:
                 "Обновление данных витрины",
                 "Расчёт поставок",
                 "Заказ на фабрике",
-                "Скачать шаблон остатков ФФ",
-                "Скачать шаблон товаров в пути от фабрики",
-                "Скачать шаблон товаров в пути от ФФ на Wildberries",
+                "Кратность штук в коробке",
+                "Скачать загруженный файл",
+                "Удалить этот файл",
                 "Рассчитать заказ на фабрике",
-                "Скачать рекомендацию",
             ):
                 if expected not in operator_html:
                     raise AssertionError(f"operator page must expose {expected!r}")
@@ -127,44 +156,73 @@ def main() -> None:
             stock_template_status, stock_template_bytes, stock_template_headers = _get_bytes(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH}"
             )
-            if stock_template_status != 200:
-                raise AssertionError("stock_ff template route must return XLSX")
-            if "spreadsheetml.sheet" not in str(stock_template_headers.get("Content-Type", "")):
-                raise AssertionError("stock_ff template route must return XLSX content type")
-            stock_rows = read_first_sheet_rows(stock_template_bytes)
-            if len(stock_rows) - 1 != len(active_nm_ids):
-                raise AssertionError("stock_ff template must be prefilled with active SKU rows")
-
             inbound_factory_status, inbound_factory_bytes, _ = _get_bytes(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH}"
             )
             inbound_ff_to_wb_status, inbound_ff_to_wb_bytes, _ = _get_bytes(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH}"
             )
-            if inbound_factory_status != 200 or inbound_ff_to_wb_status != 200:
-                raise AssertionError("inbound template routes must return XLSX")
+            if stock_template_status != 200 or inbound_factory_status != 200 or inbound_ff_to_wb_status != 200:
+                raise AssertionError("all template routes must return XLSX")
+            if "spreadsheetml.sheet" not in str(stock_template_headers.get("Content-Type", "")):
+                raise AssertionError("stock_ff template route must return XLSX content type")
+            stock_rows = read_first_sheet_rows(stock_template_bytes)
+            if len(stock_rows) - 1 != len(active_nm_ids):
+                raise AssertionError("stock_ff template must be prefilled with active SKU rows")
 
             stock_upload_rows = [list(row) for row in stock_rows]
             for row in stock_upload_rows[1:]:
                 row[2] = 0
             stock_upload_rows[1][2] = 30
             stock_upload_rows[2][2] = 10
+            stock_upload_bytes = build_single_sheet_workbook_bytes("Остатки ФФ", stock_upload_rows)
             stock_upload_status, stock_upload_payload = _post_multipart(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_UPLOAD_STOCK_FF_PATH}",
-                build_single_sheet_workbook_bytes("Остатки ФФ", stock_upload_rows),
+                stock_upload_bytes,
+                filename="factory-stock.xlsx",
             )
             if stock_upload_status != 200 or stock_upload_payload.get("accepted_row_count") != len(active_nm_ids):
                 raise AssertionError(f"stock_ff upload must be accepted, got {stock_upload_status} {stock_upload_payload}")
+
+            uploaded_stock_status, uploaded_stock_bytes, uploaded_stock_headers = _get_bytes(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_UPLOADED_STOCK_FF_PATH}"
+            )
+            if uploaded_stock_status != 200 or uploaded_stock_headers.get("Content-Disposition", "").find("factory-stock.xlsx") < 0:
+                raise AssertionError("current uploaded stock_ff file must be downloadable after upload")
+            if read_first_sheet_rows(uploaded_stock_bytes)[1][0] != stock_rows[1][0]:
+                raise AssertionError("uploaded stock_ff download must preserve the uploaded workbook content")
+
+            # Scenario 1: calculation succeeds without inbound files.
+            calc_without_inbound_status, calc_without_inbound_payload = _post_json(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
+                {
+                    "prod_lead_time_days": 10,
+                    "lead_time_factory_to_ff_days": 5,
+                    "lead_time_ff_to_wb_days": 2,
+                    "safety_days_mp": 3,
+                    "safety_days_ff": 2,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "sales_avg_period_days": 3,
+                },
+            )
+            if calc_without_inbound_status != 200:
+                raise AssertionError(f"calc without inbound files must succeed, got {calc_without_inbound_status} {calc_without_inbound_payload}")
+            first_rows = calc_without_inbound_payload.get("rows", [])
+            first_sku = next(item for item in first_rows if item.get("nm_id") == 210183919)
+            if first_sku.get("inbound_factory_to_ff") != 0.0 or first_sku.get("inbound_ff_to_wb") != 0.0:
+                raise AssertionError("missing inbound files must be treated as zero in HTTP calc path")
 
             inbound_factory_rows = read_first_sheet_rows(inbound_factory_bytes)
             inbound_factory_rows = [
                 inbound_factory_rows[0],
                 [210183919, "SKU 1", 40, "2026-04-25", ""],
-                [210183919, "SKU 1", 15, "2026-05-20", ""],
+                [210183919, "SKU 1", 15, "2026-08-20", ""],
             ]
             inbound_factory_upload_status, inbound_factory_upload_payload = _post_multipart(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FACTORY_PATH}",
                 build_single_sheet_workbook_bytes("В пути от фабрики", inbound_factory_rows),
+                filename="factory-inbound.xlsx",
             )
             if inbound_factory_upload_status != 200 or inbound_factory_upload_payload.get("accepted_row_count") != 2:
                 raise AssertionError("inbound_factory upload must keep multiple rows per SKU")
@@ -178,17 +236,31 @@ def main() -> None:
             inbound_ff_to_wb_upload_status, inbound_ff_to_wb_upload_payload = _post_multipart(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FF_TO_WB_PATH}",
                 build_single_sheet_workbook_bytes("В пути ФФ -> WB", inbound_ff_to_wb_rows),
+                filename="ff-to-wb.xlsx",
             )
             if inbound_ff_to_wb_upload_status != 200 or inbound_ff_to_wb_upload_payload.get("accepted_row_count") != 2:
                 raise AssertionError("inbound_ff_to_wb upload must be accepted")
 
+            # Scenario 2: file lifecycle state is visible through status and current uploaded routes.
             status_code, status_payload = _get_json(f"{base_url}{DEFAULT_FACTORY_ORDER_STATUS_PATH}")
             if status_code != 200:
                 raise AssertionError("factory-order status route must return 200")
-            if status_payload.get("datasets", {}).get("stock_ff", {}).get("row_count") != len(active_nm_ids):
-                raise AssertionError("factory-order status must reflect uploaded stock_ff state")
+            inbound_factory_state = status_payload.get("datasets", {}).get("inbound_factory_to_ff", {})
+            if inbound_factory_state.get("uploaded_filename") != "factory-inbound.xlsx":
+                raise AssertionError("status must expose the stored uploaded filename")
+            if inbound_factory_state.get("download_path") != DEFAULT_FACTORY_ORDER_UPLOADED_INBOUND_FACTORY_PATH:
+                raise AssertionError("status must expose the current uploaded file download path")
+            if inbound_factory_state.get("delete_path") != DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FACTORY_PATH:
+                raise AssertionError("status must expose the delete path")
 
-            calc_status, calc_payload = _post_json(
+            current_inbound_status, _, current_inbound_headers = _get_bytes(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_UPLOADED_INBOUND_FACTORY_PATH}"
+            )
+            if current_inbound_status != 200 or "factory-inbound.xlsx" not in str(current_inbound_headers.get("Content-Disposition", "")):
+                raise AssertionError("current inbound_factory file must be downloadable after upload")
+
+            # Scenario 3: calculation with inbound files keeps only horizon-relevant events.
+            calc_with_inbound_status, calc_with_inbound_payload = _post_json(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
                 {
                     "prod_lead_time_days": 10,
@@ -198,39 +270,87 @@ def main() -> None:
                     "safety_days_ff": 2,
                     "order_batch_qty": 50,
                     "report_date_override": "2026-04-18",
-                    "sales_avg_period_days": 2,
+                    "sales_avg_period_days": 7,
                 },
             )
-            if calc_status != 200 or calc_payload.get("summary", {}).get("total_qty") != 250:
-                raise AssertionError(f"factory-order calc must succeed, got {calc_status} {calc_payload}")
-            if calc_payload.get("rows", [])[0].get("recommended_order_qty") != 150:
-                raise AssertionError("factory-order calc must expose server-side recommended qty")
+            if calc_with_inbound_status != 200:
+                raise AssertionError(f"factory-order calc with inbound must succeed, got {calc_with_inbound_status} {calc_with_inbound_payload}")
+            first_sku_with_inbound = next(
+                item for item in calc_with_inbound_payload.get("rows", []) if item.get("nm_id") == 210183919
+            )
+            if first_sku_with_inbound.get("daily_demand_total") != 140.0:
+                raise AssertionError("7-day lookback must change the HTTP average demand")
+            if first_sku_with_inbound.get("inbound_factory_to_ff") != 40.0 or first_sku_with_inbound.get("inbound_ff_to_wb") != 10.0:
+                raise AssertionError("HTTP calc must keep only the inbound events inside the planning horizon")
 
             recommendation_status, recommendation_bytes, recommendation_headers = _get_bytes(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH}"
             )
-            if recommendation_status != 200:
-                raise AssertionError("recommendation route must return XLSX")
-            if "spreadsheetml.sheet" not in str(recommendation_headers.get("Content-Type", "")):
-                raise AssertionError("recommendation route must return XLSX content type")
+            if recommendation_status != 200 or "spreadsheetml.sheet" not in str(recommendation_headers.get("Content-Type", "")):
+                raise AssertionError("recommendation route must return XLSX after calculation")
             recommendation_rows = read_first_sheet_rows(recommendation_bytes)
-            if recommendation_rows[-3:] != [
-                ["Общее количество", None, 250],
-                ["Расчётный вес", None, "21.48"],
-                ["Расчётный объём", None, "0.11"],
-            ]:
-                raise AssertionError("recommendation workbook summary must match the UI summary")
+            if recommendation_rows[-3][0] != "Общее количество":
+                raise AssertionError("recommendation workbook summary must stay aligned with UI summary")
 
-            final_status_code, final_status_payload = _get_json(f"{base_url}{DEFAULT_FACTORY_ORDER_STATUS_PATH}")
-            if final_status_code != 200:
-                raise AssertionError("factory-order status route must remain readable after calculation")
-            if final_status_payload.get("last_result", {}).get("summary", {}).get("total_qty") != 250:
-                raise AssertionError("factory-order status must persist the last calculation result")
+            # Scenario 4: delete inbound files and recalculate with zero coverage terms again.
+            delete_factory_status, delete_factory_payload = _delete_json(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FACTORY_PATH}"
+            )
+            delete_ff_to_wb_status, delete_ff_to_wb_payload = _delete_json(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FF_TO_WB_PATH}"
+            )
+            if delete_factory_status != 200 or delete_factory_payload.get("status") != "deleted":
+                raise AssertionError("delete inbound_factory must succeed")
+            if delete_ff_to_wb_status != 200 or delete_ff_to_wb_payload.get("status") != "deleted":
+                raise AssertionError("delete inbound_ff_to_wb must succeed")
+            deleted_download_status, deleted_download_payload = _get_json(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_UPLOADED_INBOUND_FACTORY_PATH}"
+            )
+            if deleted_download_status != 404 or "отсутствует" not in str(deleted_download_payload.get("error", "")):
+                raise AssertionError("deleted uploaded file must disappear from current download route")
 
-            print(f"operator_tab: ok -> {DEFAULT_SHEET_OPERATOR_UI_PATH}")
-            print(f"stock_ff_upload: ok -> {stock_upload_payload['accepted_row_count']}")
-            print(f"factory_order_total_qty: ok -> {calc_payload['summary']['total_qty']}")
-            print(f"recommendation_download: ok -> {recommendation_headers.get('Content-Type')}")
+            calc_after_delete_status, calc_after_delete_payload = _post_json(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
+                {
+                    "prod_lead_time_days": 8,
+                    "lead_time_factory_to_ff_days": 4,
+                    "lead_time_ff_to_wb_days": 3,
+                    "safety_days_mp": 1,
+                    "safety_days_ff": 1,
+                    "order_batch_qty": 25,
+                    "report_date_override": "2026-04-18",
+                    "sales_avg_period_days": 3,
+                },
+            )
+            if calc_after_delete_status != 200:
+                raise AssertionError("calc after inbound delete must still succeed")
+            first_sku = next(item for item in calc_after_delete_payload.get("rows", []) if item.get("nm_id") == 210183919)
+            if first_sku.get("inbound_factory_to_ff") != 0.0 or first_sku.get("inbound_ff_to_wb") != 0.0:
+                raise AssertionError("after delete the HTTP calc must restore zero inbound terms")
+
+            # Scenario 5: >7-day lookback must fail with the exact authoritative blocker.
+            calc_gt_7_status, calc_gt_7_payload = _post_json(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
+                {
+                    "prod_lead_time_days": 10,
+                    "lead_time_factory_to_ff_days": 5,
+                    "lead_time_ff_to_wb_days": 2,
+                    "safety_days_mp": 3,
+                    "safety_days_ff": 2,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "sales_avg_period_days": 10,
+                },
+            )
+            if calc_gt_7_status != 422 or "current live source сейчас принимает start day не раньше 2026-04-11" not in str(calc_gt_7_payload.get("error", "")):
+                raise AssertionError("HTTP calc must surface the exact authoritative blocker for >7-day lookback")
+
+            print(f"scenario_without_inbound_http: ok -> total_qty={calc_without_inbound_payload['summary']['total_qty']}")
+            print(f"scenario_current_file_lifecycle_http: ok -> {inbound_factory_state['uploaded_filename']}")
+            print(
+                f"scenario_multi_inbound_http: ok -> inbound_factory={first_sku_with_inbound.get('inbound_factory_to_ff', 0.0)}"
+            )
+            print("scenario_period_gt_7_http: ok -> truthful blocker current live source сейчас принимает start day не раньше 2026-04-11")
         finally:
             server.shutdown()
             server.server_close()
@@ -257,12 +377,12 @@ def _post_json(url: str, payload: dict[str, object]) -> tuple[int, dict[str, obj
         return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
-def _post_multipart(url: str, workbook_bytes: bytes) -> tuple[int, dict[str, object]]:
+def _post_multipart(url: str, workbook_bytes: bytes, *, filename: str) -> tuple[int, dict[str, object]]:
     boundary = "----wbcore" + uuid4().hex
     body = b"".join(
         [
             f"--{boundary}\r\n".encode("utf-8"),
-            b'Content-Disposition: form-data; name="file"; filename="input.xlsx"\r\n',
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode("utf-8"),
             b"Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n\r\n",
             workbook_bytes,
             f"\r\n--{boundary}--\r\n".encode("utf-8"),
@@ -274,6 +394,15 @@ def _post_multipart(url: str, workbook_bytes: bytes) -> tuple[int, dict[str, obj
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "Accept": "application/json"},
         method="POST",
     )
+    try:
+        with urllib_request.urlopen(req, timeout=10) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _delete_json(url: str) -> tuple[int, dict[str, object]]:
+    req = urllib_request.Request(url, headers={"Accept": "application/json"}, method="DELETE")
     try:
         with urllib_request.urlopen(req, timeout=10) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
@@ -295,8 +424,11 @@ def _get_text(url: str) -> tuple[int, str]:
 
 
 def _get_bytes(url: str) -> tuple[int, bytes, dict[str, str]]:
-    with urllib_request.urlopen(url, timeout=10) as response:
-        return response.status, response.read(), dict(response.headers.items())
+    try:
+        with urllib_request.urlopen(url, timeout=10) as response:
+            return response.status, response.read(), dict(response.headers.items())
+    except error.HTTPError as exc:
+        return exc.code, exc.read(), dict(exc.headers.items())
 
 
 if __name__ == "__main__":

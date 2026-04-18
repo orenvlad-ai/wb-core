@@ -90,7 +90,11 @@ Current additional operator supply flow on the same page:
 - `Остатки ФФ` is prefilled from current active SKU truth and requires exactly one row per active SKU
 - `Товары в пути от фабрики` and `Товары в пути от ФФ на Wildberries` are compact event-based templates: one row = one expected inbound, duplicate `nmId` is allowed there and summed only when the planned arrival date falls within the planning horizon
 - current repo had no other authoritative source for legacy parity term `FF -> WB inbound`, so the bounded flow uses a separate operator upload contract instead of silently dropping that coverage component
-- current live authoritative sales-history seam truthfully bounds `sales_avg_period_days` to `<= 7`; larger values are rejected server-side because the upstream source does not serve a deeper lookback window
+- operator-facing label for batch size = `Кратность штук в коробке`
+- inbound files are optional for calculation; when absent or deleted, both inbound coverage terms truthfully become `0`
+- each upload block now surfaces the current uploaded filename plus download/delete actions from backend state
+- current UI no longer hard-caps `sales_avg_period_days`, but current live authoritative sales-history seam still returns an exact blocker when the requested lookback starts earlier than the upstream source allows
+- XLSX generation is hardened so operator templates and recommendation files open as standard XLSX workbooks without a repair path
 - calculation, result XLSX and `Общее количество / Расчётный вес / Расчётный объём` summary stay fully server-driven
 
 Current main-confirmed counts для этого flow:

@@ -134,10 +134,14 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - current bounded block `Заказ на фабрике`
   - explicit actions `Скачать шаблон остатков ФФ`, `Загрузить остатки ФФ`, `Скачать шаблон товаров в пути от фабрики`, `Загрузить товары в пути от фабрики`, `Скачать шаблон товаров в пути от ФФ на Wildberries`, `Загрузить товары в пути от ФФ на Wildberries`, `Рассчитать заказ на фабрике`, `Скачать рекомендацию`
   - server-side settings validation for `prod_lead_time_days`, `lead_time_factory_to_ff_days`, `lead_time_ff_to_wb_days`, `safety_days_mp`, `safety_days_ff`, `order_batch_qty`, `report_date_override`, `sales_avg_period_days`
-  - current live authoritative bound for `sales_avg_period_days` = `<= 7`; larger values are truthfully rejected instead of producing a fake recommendation
+  - operator-facing label for `order_batch_qty` = `Кратность штук в коробке`
+  - UI accepts any positive `sales_avg_period_days`, but current live backend still returns an exact blocker when the requested averaging window falls outside the current authoritative sales-history depth
   - operator XLSX templates stay compact and Russian-headed; backend keeps stable internal mapping
+  - generated XLSX files must stay readable without repair prompt in standard XLSX readers/Excel
   - `Остатки ФФ` require one row per active SKU and reject duplicate `nmId`
   - inbound templates allow duplicate `nmId`; one row = one separate planned delivery
+  - inbound datasets are optional for calculation; when a file is absent or deleted, its coverage term is treated as `0`
+  - each upload block exposes the current uploaded file as a downloadable link and a bounded delete action for the stored dataset
   - factory-order coverage includes `stock_total`, uploaded `stock_ff`, inbound from factory to FF inside horizon and the parity-critical uploaded inbound `ФФ -> Wildberries`
   - result surface gives both downloadable XLSX recommendation and the same `Общее количество` / `Расчётный вес` / `Расчётный объём` summary directly in UI
 - Канонический prepare output:

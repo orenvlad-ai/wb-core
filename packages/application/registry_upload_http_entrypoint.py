@@ -140,8 +140,28 @@ class RegistryUploadHttpEntrypoint:
     def handle_factory_order_template_request(self, dataset_type: str) -> tuple[bytes, str]:
         return self.factory_order_supply_block.build_template(dataset_type)
 
-    def handle_factory_order_upload_request(self, dataset_type: str, workbook_bytes: bytes) -> dict[str, Any]:
-        return asdict(self.factory_order_supply_block.upload_dataset(dataset_type, workbook_bytes))
+    def handle_factory_order_upload_request(
+        self,
+        dataset_type: str,
+        workbook_bytes: bytes,
+        *,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+    ) -> dict[str, Any]:
+        return asdict(
+            self.factory_order_supply_block.upload_dataset(
+                dataset_type,
+                workbook_bytes,
+                uploaded_filename=uploaded_filename,
+                uploaded_content_type=uploaded_content_type,
+            )
+        )
+
+    def handle_factory_order_uploaded_file_request(self, dataset_type: str) -> tuple[bytes, str, str]:
+        return self.factory_order_supply_block.download_uploaded_dataset(dataset_type)
+
+    def handle_factory_order_delete_request(self, dataset_type: str) -> dict[str, Any]:
+        return asdict(self.factory_order_supply_block.delete_dataset(dataset_type))
 
     def handle_factory_order_calculate_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         result = asdict(self.factory_order_supply_block.calculate(payload))

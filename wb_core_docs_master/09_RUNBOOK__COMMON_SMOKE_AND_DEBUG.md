@@ -204,7 +204,9 @@ Operational rule:
 - current bounded `factory-order` supply contour is server/operator-only:
   - live closure still requires deploy + loopback/public probe + one controlled download/upload/calculate/download scenario if those routes changed;
   - sheet/GAS verify stays `not in scope`, пока change не затрагивает bound Apps Script или live sheet write path.
-  - current live authoritative sales-history seam bounds `sales_avg_period_days` to `<= 7`; values above that must truthfully fail validation instead of being silently approximated.
+  - if the task changes upload state handling, closure additionally verifies `upload -> current uploaded file download -> delete -> absent state`;
+  - current UI may accept any positive `sales_avg_period_days`, but current live authoritative sales-history seam still returns an exact blocker when the requested lookback starts before the upstream boundary; values above the covered depth must fail truthfully instead of being silently approximated.
+  - XLSX fixes are not considered complete until generated/publicly downloaded files pass bounded integrity checks and open as standard XLSX workbooks without a recovery path.
 - route change не считается complete, пока public probe не подтвердил expected content type / response shape.
 - если change затрагивает operator `load` или live sheet write path, closure дополнительно требует `clasp push` и sheet verify по `POST /v1/sheet-vitrina-v1/load` или equivalent existing Apps Script menu flow.
 - если runner уже materialized, но `ssh_destination / target_dir / service_name / restart_command / environment_file` или access отсутствуют, это фиксируется как точный blocker, а не как vague ops-gap.

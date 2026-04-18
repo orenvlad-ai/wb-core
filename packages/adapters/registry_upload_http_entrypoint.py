@@ -50,6 +50,20 @@ DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FACTORY_PATH = (
 DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FF_TO_WB_PATH = (
     "/v1/sheet-vitrina-v1/supply/factory-order/upload/inbound-ff-to-wb"
 )
+DEFAULT_FACTORY_ORDER_UPLOADED_STOCK_FF_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/uploaded/stock-ff.xlsx"
+DEFAULT_FACTORY_ORDER_UPLOADED_INBOUND_FACTORY_PATH = (
+    "/v1/sheet-vitrina-v1/supply/factory-order/uploaded/inbound-factory.xlsx"
+)
+DEFAULT_FACTORY_ORDER_UPLOADED_INBOUND_FF_TO_WB_PATH = (
+    "/v1/sheet-vitrina-v1/supply/factory-order/uploaded/inbound-ff-to-wb.xlsx"
+)
+DEFAULT_FACTORY_ORDER_DELETE_STOCK_FF_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/uploaded/stock-ff"
+DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FACTORY_PATH = (
+    "/v1/sheet-vitrina-v1/supply/factory-order/uploaded/inbound-factory"
+)
+DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FF_TO_WB_PATH = (
+    "/v1/sheet-vitrina-v1/supply/factory-order/uploaded/inbound-ff-to-wb"
+)
 DEFAULT_FACTORY_ORDER_CALCULATE_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/calculate"
 DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
 DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
@@ -332,9 +346,14 @@ def _build_handler(
                 DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FF_TO_WB_PATH,
             }:
                 try:
-                    workbook_bytes = _load_uploaded_file_bytes(self)
+                    upload_payload = _load_uploaded_file_payload(self)
                     dataset_type = _resolve_factory_order_dataset_type_from_upload_path(parsed.path)
-                    payload = entrypoint.handle_factory_order_upload_request(dataset_type, workbook_bytes)
+                    payload = entrypoint.handle_factory_order_upload_request(
+                        dataset_type,
+                        upload_payload["workbook_bytes"],
+                        uploaded_filename=str(upload_payload.get("filename") or ""),
+                        uploaded_content_type=str(upload_payload.get("content_type") or ""),
+                    )
                 except ValueError as exc:
                     _write_json_response(
                         self,
@@ -408,7 +427,7 @@ def _build_handler(
                         {"error": f"factory order status runtime failed: {exc}"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, payload)
+                _write_json_response(self, HTTPStatus.OK, _with_factory_order_dataset_urls(payload))
                 return
 
             if parsed.path in {
@@ -457,6 +476,36 @@ def _build_handler(
                     HTTPStatus.OK,
                     workbook_bytes,
                     content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    filename=filename,
+                    as_attachment=True,
+                )
+                return
+
+            if parsed.path in {
+                DEFAULT_FACTORY_ORDER_UPLOADED_STOCK_FF_PATH,
+                DEFAULT_FACTORY_ORDER_UPLOADED_INBOUND_FACTORY_PATH,
+                DEFAULT_FACTORY_ORDER_UPLOADED_INBOUND_FF_TO_WB_PATH,
+            }:
+                try:
+                    dataset_type = _resolve_factory_order_dataset_type_from_uploaded_path(parsed.path)
+                    workbook_bytes, filename, content_type = entrypoint.handle_factory_order_uploaded_file_request(
+                        dataset_type
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"factory order uploaded file runtime failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    workbook_bytes,
+                    content_type=content_type,
                     filename=filename,
                     as_attachment=True,
                 )
@@ -568,6 +617,37 @@ def _build_handler(
                 HTTPStatus.OK,
                 payload,
             )
+            return
+
+        def do_DELETE(self) -> None:  # noqa: N802
+            parsed = urllib_parse.urlparse(self.path)
+            if parsed.path in {
+                DEFAULT_FACTORY_ORDER_DELETE_STOCK_FF_PATH,
+                DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FACTORY_PATH,
+                DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FF_TO_WB_PATH,
+            }:
+                try:
+                    dataset_type = _resolve_factory_order_dataset_type_from_delete_path(parsed.path)
+                    payload = entrypoint.handle_factory_order_delete_request(dataset_type)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"factory order delete runtime failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            _write_json_response(
+                self,
+                HTTPStatus.NOT_FOUND,
+                {"error": f"unsupported path: {parsed.path}"},
+            )
+            return
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
             return
@@ -632,7 +712,7 @@ def _load_optional_request_payload(handler: BaseHTTPRequestHandler) -> Mapping[s
     return payload
 
 
-def _load_uploaded_file_bytes(handler: BaseHTTPRequestHandler) -> bytes:
+def _load_uploaded_file_payload(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     content_type = str(handler.headers.get("Content-Type", "") or "")
     if "multipart/form-data" not in content_type.lower():
         raise ValueError("file upload must use multipart/form-data")
@@ -655,6 +735,8 @@ def _load_uploaded_file_bytes(handler: BaseHTTPRequestHandler) -> bytes:
         + raw_body
     )
     workbook_bytes = b""
+    filename = ""
+    part_content_type = ""
     for part in message.iter_parts():
         if part.get_content_disposition() != "form-data":
             continue
@@ -663,10 +745,16 @@ def _load_uploaded_file_bytes(handler: BaseHTTPRequestHandler) -> bytes:
         payload = part.get_payload(decode=True)
         if payload:
             workbook_bytes = payload
+            filename = str(part.get_filename() or "").strip()
+            part_content_type = str(part.get_content_type() or "").strip()
             break
     if not workbook_bytes:
         raise ValueError("multipart/form-data must contain non-empty file field")
-    return workbook_bytes
+    return {
+        "workbook_bytes": workbook_bytes,
+        "filename": filename,
+        "content_type": part_content_type,
+    }
 
 
 def _resolve_as_of_date(query_string: str, payload: Mapping[str, Any]) -> str:
@@ -750,6 +838,30 @@ def _resolve_factory_order_dataset_type_from_upload_path(path: str) -> str:
     dataset_type = mapping.get(path, "")
     if not dataset_type:
         raise ValueError(f"unsupported factory-order upload path: {path}")
+    return dataset_type
+
+
+def _resolve_factory_order_dataset_type_from_uploaded_path(path: str) -> str:
+    mapping = {
+        DEFAULT_FACTORY_ORDER_UPLOADED_STOCK_FF_PATH: DATASET_STOCK_FF,
+        DEFAULT_FACTORY_ORDER_UPLOADED_INBOUND_FACTORY_PATH: DATASET_INBOUND_FACTORY_TO_FF,
+        DEFAULT_FACTORY_ORDER_UPLOADED_INBOUND_FF_TO_WB_PATH: DATASET_INBOUND_FF_TO_WB,
+    }
+    dataset_type = mapping.get(path, "")
+    if not dataset_type:
+        raise ValueError(f"unsupported factory-order uploaded-file path: {path}")
+    return dataset_type
+
+
+def _resolve_factory_order_dataset_type_from_delete_path(path: str) -> str:
+    mapping = {
+        DEFAULT_FACTORY_ORDER_DELETE_STOCK_FF_PATH: DATASET_STOCK_FF,
+        DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FACTORY_PATH: DATASET_INBOUND_FACTORY_TO_FF,
+        DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FF_TO_WB_PATH: DATASET_INBOUND_FF_TO_WB,
+    }
+    dataset_type = mapping.get(path, "")
+    if not dataset_type:
+        raise ValueError(f"unsupported factory-order delete path: {path}")
     return dataset_type
 
 
@@ -861,6 +973,49 @@ def _with_sheet_job_urls(payload: Mapping[str, Any], job_path: str) -> dict[str,
     normalized["download_path"] = _build_sheet_job_download_url(job_path, job_id)
     normalized["log_filename"] = f"sheet-vitrina-v1-{operation}-{job_id}.txt"
     return normalized
+
+
+def _with_factory_order_dataset_urls(payload: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    datasets = normalized.get("datasets")
+    if not isinstance(datasets, Mapping):
+        return normalized
+    mapped: dict[str, Any] = {}
+    for dataset_type, raw_value in datasets.items():
+        if not isinstance(raw_value, Mapping):
+            mapped[str(dataset_type)] = raw_value
+            continue
+        value = dict(raw_value)
+        delete_path = _factory_order_delete_path_for_dataset(str(dataset_type))
+        if delete_path and str(value.get("status", "") or "") == "uploaded":
+            value["delete_path"] = delete_path
+        if delete_path and str(value.get("status", "") or "") != "uploaded":
+            value["delete_path"] = ""
+        if bool(value.get("file_available")):
+            value["download_path"] = _factory_order_uploaded_path_for_dataset(str(dataset_type))
+        else:
+            value["download_path"] = ""
+        mapped[str(dataset_type)] = value
+    normalized["datasets"] = mapped
+    return normalized
+
+
+def _factory_order_uploaded_path_for_dataset(dataset_type: str) -> str:
+    mapping = {
+        DATASET_STOCK_FF: DEFAULT_FACTORY_ORDER_UPLOADED_STOCK_FF_PATH,
+        DATASET_INBOUND_FACTORY_TO_FF: DEFAULT_FACTORY_ORDER_UPLOADED_INBOUND_FACTORY_PATH,
+        DATASET_INBOUND_FF_TO_WB: DEFAULT_FACTORY_ORDER_UPLOADED_INBOUND_FF_TO_WB_PATH,
+    }
+    return mapping.get(dataset_type, "")
+
+
+def _factory_order_delete_path_for_dataset(dataset_type: str) -> str:
+    mapping = {
+        DATASET_STOCK_FF: DEFAULT_FACTORY_ORDER_DELETE_STOCK_FF_PATH,
+        DATASET_INBOUND_FACTORY_TO_FF: DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FACTORY_PATH,
+        DATASET_INBOUND_FF_TO_WB: DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FF_TO_WB_PATH,
+    }
+    return mapping.get(dataset_type, "")
 
 
 def _render_sheet_vitrina_operator_ui(

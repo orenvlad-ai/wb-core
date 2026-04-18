@@ -20,6 +20,7 @@ from packages.contracts.factory_order_supply import (
     DATASET_INBOUND_FF_TO_WB,
     DATASET_STOCK_FF,
     FactoryOrderCalculationResult,
+    FactoryOrderDatasetDeleteResult,
     FactoryOrderDatasetState,
     FactoryOrderInboundRow,
     FactoryOrderRecommendationRow,
@@ -40,8 +41,8 @@ _DATASET_LABELS = {
 }
 _DATASET_REQUIRED = {
     DATASET_STOCK_FF: True,
-    DATASET_INBOUND_FACTORY_TO_FF: True,
-    DATASET_INBOUND_FF_TO_WB: True,
+    DATASET_INBOUND_FACTORY_TO_FF: False,
+    DATASET_INBOUND_FF_TO_WB: False,
 }
 _DATASET_FILENAMES = {
     DATASET_STOCK_FF: "sheet-vitrina-v1-factory-order-stock-ff-template.xlsx",
@@ -74,8 +75,9 @@ _RESULT_HEADERS = ["nmId", "Комментарий SKU", "Рекомендова
 _WEIGHT_COEFFICIENT = 0.08593
 _VOLUME_DIVISOR = 204.38
 _DEFAULT_SALES_AVG_PERIOD_DAYS = 7
-_MAX_SALES_AVG_PERIOD_DAYS = 7
 _COVERAGE_CONTRACT_NOTE = (
+    "Файлы «Товары в пути от фабрики» и «Товары в пути от ФФ на Wildberries» необязательны: "
+    "если файл не загружен, соответствующий inbound считается как 0. "
     "В пути ФФ -> Wildberries учитываются только из отдельного загруженного шаблона, "
     "потому что в текущем wb-core нет другого authoritative source для этого члена формулы."
 )
@@ -128,7 +130,14 @@ class FactoryOrderSupplyBlock:
             _DATASET_FILENAMES[dataset_type],
         )
 
-    def upload_dataset(self, dataset_type: str, workbook_bytes: bytes) -> FactoryOrderUploadResult:
+    def upload_dataset(
+        self,
+        dataset_type: str,
+        workbook_bytes: bytes,
+        *,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+    ) -> FactoryOrderUploadResult:
         active_skus = dict(self._load_active_skus())
         workbook_rows = read_first_sheet_rows(workbook_bytes)
         parsed_rows, ignored_row_count = self._parse_dataset_rows(
@@ -137,10 +146,18 @@ class FactoryOrderSupplyBlock:
             active_skus=active_skus,
         )
         uploaded_at = self.timestamp_factory()
+        normalized_filename = _normalize_uploaded_filename(uploaded_filename, dataset_type=dataset_type)
+        normalized_content_type = (
+            str(uploaded_content_type or "").strip()
+            or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
         self.runtime.save_factory_order_dataset_state(
             dataset_type=dataset_type,
             uploaded_at=uploaded_at,
             rows=[asdict(item) for item in parsed_rows],
+            uploaded_filename=normalized_filename,
+            uploaded_content_type=normalized_content_type,
+            workbook_bytes=workbook_bytes,
         )
         dataset_state = FactoryOrderDatasetState(
             dataset_type=dataset_type,
@@ -149,6 +166,8 @@ class FactoryOrderSupplyBlock:
             uploaded_at=uploaded_at,
             row_count=len(parsed_rows),
             required=_DATASET_REQUIRED[dataset_type],
+            uploaded_filename=normalized_filename,
+            file_available=True,
         )
         return FactoryOrderUploadResult(
             status="accepted",
@@ -156,6 +175,37 @@ class FactoryOrderSupplyBlock:
             accepted_row_count=len(parsed_rows),
             ignored_row_count=ignored_row_count,
             message=f"Файл принят: {_DATASET_LABELS[dataset_type].lower()}",
+        )
+
+    def delete_dataset(self, dataset_type: str) -> FactoryOrderDatasetDeleteResult:
+        deleted = self.runtime.delete_factory_order_dataset_state(dataset_type)
+        dataset_state = self._load_dataset_state(dataset_type)
+        if not deleted:
+            return FactoryOrderDatasetDeleteResult(
+                status="missing",
+                dataset=dataset_state,
+                message=f"Файл уже отсутствует: {_DATASET_LABELS[dataset_type].lower()}",
+            )
+        return FactoryOrderDatasetDeleteResult(
+            status="deleted",
+            dataset=dataset_state,
+            message=f"Файл удалён: {_DATASET_LABELS[dataset_type].lower()}",
+        )
+
+    def download_uploaded_dataset(self, dataset_type: str) -> tuple[bytes, str, str]:
+        payload = self.runtime.load_factory_order_dataset_state(dataset_type, include_file_blob=True)
+        if payload is None:
+            raise ValueError(f"Текущий загруженный файл отсутствует: {_DATASET_LABELS[dataset_type].lower()}")
+        workbook_bytes = bytes(payload.get("workbook_bytes") or b"")
+        if not workbook_bytes:
+            raise ValueError(
+                "Исходный загруженный XLSX ещё не сохранён в текущем runtime. "
+                "Загрузите файл повторно, чтобы он стал доступен для скачивания."
+            )
+        return (
+            workbook_bytes,
+            str(payload.get("uploaded_filename") or _DATASET_FILENAMES[dataset_type]),
+            str(payload.get("uploaded_content_type") or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
         )
 
     def calculate(self, settings_input: Mapping[str, Any]) -> FactoryOrderCalculationResult:
@@ -213,6 +263,14 @@ class FactoryOrderSupplyBlock:
 
         history_from = report_date_obj - timedelta(days=settings.sales_avg_period_days)
         history_to = report_date_obj - timedelta(days=1)
+        current_business_date = date.fromisoformat(current_business_date_iso(self.now_factory()))
+        min_supported_history_start = current_business_date - timedelta(days=7)
+        if history_from < min_supported_history_start:
+            raise ValueError(
+                "Запрошенный период усреднения продаж не покрывается текущим authoritative sales history source: "
+                f"нужен диапазон {history_from.isoformat()}..{history_to.isoformat()}, "
+                f"а current live source сейчас принимает start day не раньше {min_supported_history_start.isoformat()}."
+            )
         history_response = self.sales_funnel_history_block.execute(
             SalesFunnelHistoryRequest(
                 snapshot_type="sales_funnel_history",
@@ -334,6 +392,8 @@ class FactoryOrderSupplyBlock:
             uploaded_at=str(payload["uploaded_at"]),
             row_count=int(payload["row_count"]),
             required=_DATASET_REQUIRED[dataset_type],
+            uploaded_filename=str(payload.get("uploaded_filename") or "") or None,
+            file_available=bool(payload.get("file_available")),
         )
 
     def _load_stock_ff_rows(self) -> list[FactoryOrderStockFfRow]:
@@ -403,6 +463,8 @@ class FactoryOrderSupplyBlock:
                     uploaded_at=str(value.get("uploaded_at")) if value.get("uploaded_at") else None,
                     row_count=int(value.get("row_count", 0)),
                     required=bool(value.get("required", _DATASET_REQUIRED.get(key, True))),
+                    uploaded_filename=str(value.get("uploaded_filename")) if value.get("uploaded_filename") else None,
+                    file_available=bool(value.get("file_available", False)),
                 )
                 for key, value in datasets_payload.items()
                 if isinstance(value, Mapping)
@@ -551,7 +613,7 @@ def _parse_settings(payload: Mapping[str, Any]) -> FactoryOrderSettings:
         ),
         safety_days_mp=_parse_nonnegative_int(payload.get("safety_days_mp"), "Страховой запас MP"),
         safety_days_ff=_parse_nonnegative_int(payload.get("safety_days_ff"), "Страховой запас ФФ"),
-        order_batch_qty=_parse_positive_int(payload.get("order_batch_qty"), "Размер партии"),
+        order_batch_qty=_parse_positive_int(payload.get("order_batch_qty"), "Кратность штук в коробке"),
         report_date_override=_parse_optional_date(payload.get("report_date_override"), row_index=None, field_label="Дата отчёта"),
         sales_avg_period_days=_parse_sales_avg_period_days(payload.get("sales_avg_period_days")),
     )
@@ -566,11 +628,6 @@ def _parse_sales_avg_period_days(value: Any) -> int:
         raise ValueError("Период усреднения продаж должен быть целым числом") from exc
     if numeric <= 0:
         return _DEFAULT_SALES_AVG_PERIOD_DAYS
-    if numeric > _MAX_SALES_AVG_PERIOD_DAYS:
-        raise ValueError(
-            f"Период усреднения продаж сейчас ограничен {_MAX_SALES_AVG_PERIOD_DAYS} днями "
-            "из-за authoritative sales history source"
-        )
     return numeric
 
 
@@ -690,6 +747,14 @@ def _cell_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _normalize_uploaded_filename(value: str | None, *, dataset_type: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return _DATASET_FILENAMES[dataset_type]
+    normalized = raw.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    return normalized or _DATASET_FILENAMES[dataset_type]
 
 
 def _collect_order_count_history(history_response: Any) -> dict[int, list[float]]:
