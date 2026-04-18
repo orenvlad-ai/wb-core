@@ -190,6 +190,7 @@ def _build_handler(
                     payload = _load_optional_request_payload(self)
                     as_of_date = _resolve_as_of_date(parsed.query, payload)
                     async_requested = _resolve_async_requested(payload)
+                    auto_load_requested = _resolve_auto_load_requested(payload)
                 except ValueError as exc:
                     _write_json_response(
                         self,
@@ -200,7 +201,10 @@ def _build_handler(
 
                 if async_requested:
                     try:
-                        job_payload = entrypoint.start_sheet_refresh_job(as_of_date=as_of_date or None)
+                        job_payload = entrypoint.start_sheet_refresh_job(
+                            as_of_date=as_of_date or None,
+                            auto_load=auto_load_requested,
+                        )
                     except Exception as exc:  # pragma: no cover - bounded fallback
                         _write_json_response(
                             self,
@@ -217,7 +221,10 @@ def _build_handler(
                     return
 
                 try:
-                    refresh_result = entrypoint.handle_sheet_refresh_request(as_of_date=as_of_date or None)
+                    refresh_result = entrypoint.handle_sheet_refresh_request(
+                        as_of_date=as_of_date or None,
+                        auto_load=auto_load_requested,
+                    )
                 except ValueError as exc:
                     _write_json_response(
                         self,
@@ -536,6 +543,15 @@ def _resolve_async_requested(payload: Mapping[str, Any]) -> bool:
         return not raw
 
     return False
+
+
+def _resolve_auto_load_requested(payload: Mapping[str, Any]) -> bool:
+    if "auto_load" not in payload:
+        return False
+    raw = payload["auto_load"]
+    if not isinstance(raw, bool):
+        raise ValueError("auto_load must be boolean when provided")
+    return raw
 
 
 def _http_status_for_result(result: RegistryUploadResult) -> HTTPStatus:

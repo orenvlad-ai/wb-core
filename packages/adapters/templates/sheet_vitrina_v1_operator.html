@@ -343,7 +343,19 @@
             </div>
             <div>
               <dt>Автообновление</dt>
-              <dd id="serverRefreshTime">-</dd>
+              <dd id="serverAutoDescription">-</dd>
+            </div>
+            <div>
+              <dt>Последний автозапуск</dt>
+              <dd id="serverLastAutoRun">-</dd>
+            </div>
+            <div>
+              <dt>Статус последнего автозапуска</dt>
+              <dd id="serverLastAutoStatus">-</dd>
+            </div>
+            <div>
+              <dt>Последнее успешное автообновление</dt>
+              <dd id="serverLastAutoSuccess">-</dd>
             </div>
             <div>
               <dt>Технический триггер</dt>
@@ -381,7 +393,10 @@
       const statusRows = document.getElementById("statusRows");
       const serverTimezone = document.getElementById("serverTimezone");
       const serverNow = document.getElementById("serverNow");
-      const serverRefreshTime = document.getElementById("serverRefreshTime");
+      const serverAutoDescription = document.getElementById("serverAutoDescription");
+      const serverLastAutoRun = document.getElementById("serverLastAutoRun");
+      const serverLastAutoStatus = document.getElementById("serverLastAutoStatus");
+      const serverLastAutoSuccess = document.getElementById("serverLastAutoSuccess");
       const serverTrigger = document.getElementById("serverTrigger");
       const downloadButton = document.getElementById("downloadButton");
       const logViewport = document.getElementById("logViewport");
@@ -484,8 +499,15 @@
         const context = payload && payload.server_context ? payload.server_context : {};
         serverTimezone.textContent = valueOrDash(context.business_timezone);
         serverNow.textContent = formatBusinessNow(context.business_now);
-        serverRefreshTime.textContent = valueOrDash(context.daily_refresh_business_time);
-        serverTrigger.textContent = formatServerTrigger(context);
+        serverAutoDescription.textContent = valueOrDash(
+          context.daily_auto_description || context.daily_refresh_business_time
+        );
+        serverLastAutoRun.textContent = formatBusinessNow(context.last_auto_run_time);
+        serverLastAutoStatus.textContent = valueOrDash(context.last_auto_run_status_label);
+        serverLastAutoSuccess.textContent = formatBusinessNow(context.last_successful_auto_update_at);
+        serverTrigger.textContent = valueOrDash(
+          context.daily_auto_trigger_description || formatServerTrigger(context)
+        );
       }
 
       function renderSnapshotFields(payload) {

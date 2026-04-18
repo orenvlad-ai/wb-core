@@ -34,7 +34,11 @@ from packages.contracts.registry_upload_file_backed_service import (
     RegistryUploadAcceptedCounts,
     RegistryUploadResult,
 )
-from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope, SheetVitrinaV1RefreshResult
+from packages.contracts.sheet_vitrina_v1 import (
+    SheetVitrinaV1AutoUpdateState,
+    SheetVitrinaV1Envelope,
+    SheetVitrinaV1RefreshResult,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 ARTIFACTS_DIR = ROOT / "artifacts" / "registry_upload_db_backed_runtime"
@@ -328,6 +332,159 @@ class RegistryUploadDbBackedRuntime:
                 snapshot_id=row["snapshot_id"],
                 plan_version=row["plan_version"],
                 sheet_row_counts=_sheet_row_counts_from_plan(plan),
+            )
+
+    def mark_sheet_vitrina_auto_update_started(
+        self,
+        *,
+        started_at: str,
+        as_of_date: str | None,
+    ) -> None:
+        _validate_timestamp(started_at, field_name="started_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            previous = conn.execute(
+                """
+                SELECT last_successful_auto_update_at
+                FROM sheet_vitrina_v1_auto_update_state
+                WHERE slot = 1
+                """
+            ).fetchone()
+            last_successful_auto_update_at = (
+                previous["last_successful_auto_update_at"] if previous is not None else None
+            )
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_auto_update_state(
+                    slot,
+                    last_run_started_at,
+                    last_run_finished_at,
+                    last_run_status,
+                    last_run_error,
+                    last_run_snapshot_id,
+                    last_run_as_of_date,
+                    last_run_refreshed_at,
+                    last_successful_auto_update_at
+                )
+                VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(slot) DO UPDATE SET
+                    last_run_started_at = excluded.last_run_started_at,
+                    last_run_finished_at = excluded.last_run_finished_at,
+                    last_run_status = excluded.last_run_status,
+                    last_run_error = excluded.last_run_error,
+                    last_run_snapshot_id = excluded.last_run_snapshot_id,
+                    last_run_as_of_date = excluded.last_run_as_of_date,
+                    last_run_refreshed_at = excluded.last_run_refreshed_at,
+                    last_successful_auto_update_at = excluded.last_successful_auto_update_at
+                """,
+                (
+                    started_at,
+                    None,
+                    "running",
+                    None,
+                    None,
+                    as_of_date,
+                    None,
+                    last_successful_auto_update_at,
+                ),
+            )
+            conn.commit()
+
+    def save_sheet_vitrina_auto_update_result(
+        self,
+        *,
+        started_at: str,
+        finished_at: str,
+        status: str,
+        as_of_date: str | None,
+        snapshot_id: str | None,
+        refreshed_at: str | None,
+        error: str | None,
+    ) -> None:
+        _validate_timestamp(started_at, field_name="started_at")
+        _validate_timestamp(finished_at, field_name="finished_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            previous = conn.execute(
+                """
+                SELECT last_successful_auto_update_at
+                FROM sheet_vitrina_v1_auto_update_state
+                WHERE slot = 1
+                """
+            ).fetchone()
+            last_successful_auto_update_at = (
+                finished_at
+                if status == "success"
+                else (previous["last_successful_auto_update_at"] if previous is not None else None)
+            )
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_auto_update_state(
+                    slot,
+                    last_run_started_at,
+                    last_run_finished_at,
+                    last_run_status,
+                    last_run_error,
+                    last_run_snapshot_id,
+                    last_run_as_of_date,
+                    last_run_refreshed_at,
+                    last_successful_auto_update_at
+                )
+                VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(slot) DO UPDATE SET
+                    last_run_started_at = excluded.last_run_started_at,
+                    last_run_finished_at = excluded.last_run_finished_at,
+                    last_run_status = excluded.last_run_status,
+                    last_run_error = excluded.last_run_error,
+                    last_run_snapshot_id = excluded.last_run_snapshot_id,
+                    last_run_as_of_date = excluded.last_run_as_of_date,
+                    last_run_refreshed_at = excluded.last_run_refreshed_at,
+                    last_successful_auto_update_at = excluded.last_successful_auto_update_at
+                """,
+                (
+                    started_at,
+                    finished_at,
+                    status,
+                    error,
+                    snapshot_id,
+                    as_of_date,
+                    refreshed_at,
+                    last_successful_auto_update_at,
+                ),
+            )
+            conn.commit()
+
+    def load_sheet_vitrina_auto_update_state(self) -> SheetVitrinaV1AutoUpdateState:
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT
+                    last_run_started_at,
+                    last_run_finished_at,
+                    last_run_status,
+                    last_run_error,
+                    last_run_snapshot_id,
+                    last_run_as_of_date,
+                    last_run_refreshed_at,
+                    last_successful_auto_update_at
+                FROM sheet_vitrina_v1_auto_update_state
+                WHERE slot = 1
+                """
+            ).fetchone()
+            if row is None:
+                return SheetVitrinaV1AutoUpdateState()
+            return SheetVitrinaV1AutoUpdateState(
+                last_run_started_at=row["last_run_started_at"],
+                last_run_finished_at=row["last_run_finished_at"],
+                last_run_status=row["last_run_status"],
+                last_run_error=row["last_run_error"],
+                last_run_snapshot_id=row["last_run_snapshot_id"],
+                last_run_as_of_date=row["last_run_as_of_date"],
+                last_run_refreshed_at=row["last_run_refreshed_at"],
+                last_successful_auto_update_at=row["last_successful_auto_update_at"],
             )
 
     def load_persisted_upload_result(self, bundle_version: str) -> RegistryUploadResult:
@@ -965,6 +1122,18 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_ready_snapshots_by_bundle_refresh
         ON sheet_vitrina_v1_ready_snapshots(bundle_version, refreshed_at DESC, as_of_date DESC);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_auto_update_state (
+            slot INTEGER PRIMARY KEY CHECK (slot = 1),
+            last_run_started_at TEXT,
+            last_run_finished_at TEXT,
+            last_run_status TEXT,
+            last_run_error TEXT,
+            last_run_snapshot_id TEXT,
+            last_run_as_of_date TEXT,
+            last_run_refreshed_at TEXT,
+            last_successful_auto_update_at TEXT
+        );
 
         CREATE TABLE IF NOT EXISTS cost_price_upload_versions (
             dataset_version TEXT PRIMARY KEY,

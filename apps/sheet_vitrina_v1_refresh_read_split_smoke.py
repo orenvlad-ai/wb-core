@@ -120,7 +120,13 @@ def main() -> None:
                 raise AssertionError("operator UI must expose row-count fields with Russian labels")
             if "Сервер и расписание" not in operator_ui_html or "Часовой пояс" not in operator_ui_html:
                 raise AssertionError("operator UI must expose the compact server context block")
-            if "Автообновление" not in operator_ui_html or "Технический триггер" not in operator_ui_html:
+            if (
+                "Автообновление" not in operator_ui_html
+                or "Последний автозапуск" not in operator_ui_html
+                or "Статус последнего автозапуска" not in operator_ui_html
+                or "Последнее успешное автообновление" not in operator_ui_html
+                or "Технический триггер" not in operator_ui_html
+            ):
                 raise AssertionError("operator UI must expose scheduler labels in Russian")
             if "Снимок пока не подготовлен." not in operator_ui_html:
                 raise AssertionError("operator UI must keep the Russian empty-state helper text")
@@ -162,15 +168,7 @@ def main() -> None:
             pre_refresh_status, pre_refresh_payload = _get_json(status_url)
             if pre_refresh_status != 422 or "ready snapshot missing" not in str(pre_refresh_payload.get("error", "")):
                 raise AssertionError("cheap status endpoint must report missing ready snapshot before refresh")
-            if pre_refresh_payload.get("server_context") != {
-                "business_timezone": "Asia/Yekaterinburg",
-                "business_now": "2026-04-13T13:00:00+05:00",
-                "default_as_of_date": AS_OF_DATE,
-                "today_current_date": TODAY_CURRENT_DATE,
-                "daily_refresh_business_time": "11:00 Asia/Yekaterinburg",
-                "daily_refresh_systemd_time": "06:00:00 UTC",
-                "daily_refresh_systemd_oncalendar": "*-*-* 06:00:00 UTC",
-            }:
+            if pre_refresh_payload.get("server_context") != _expected_server_context():
                 raise AssertionError("cheap status endpoint must expose server_context even before refresh")
 
             refresh_status, refresh_payload = _post_json(refresh_url, {"as_of_date": AS_OF_DATE})
@@ -184,15 +182,7 @@ def main() -> None:
                 raise AssertionError("refresh_result as_of_date mismatch")
             if refresh_payload["date_columns"] != [AS_OF_DATE, TODAY_CURRENT_DATE]:
                 raise AssertionError("refresh_result date_columns mismatch")
-            if refresh_payload["server_context"] != {
-                "business_timezone": "Asia/Yekaterinburg",
-                "business_now": "2026-04-13T13:00:00+05:00",
-                "default_as_of_date": AS_OF_DATE,
-                "today_current_date": TODAY_CURRENT_DATE,
-                "daily_refresh_business_time": "11:00 Asia/Yekaterinburg",
-                "daily_refresh_systemd_time": "06:00:00 UTC",
-                "daily_refresh_systemd_oncalendar": "*-*-* 06:00:00 UTC",
-            }:
+            if refresh_payload["server_context"] != _expected_server_context():
                 raise AssertionError("refresh_result must expose the same server_context block")
             if [slot["slot_key"] for slot in refresh_payload["temporal_slots"]] != [
                 "yesterday_closed",
@@ -380,6 +370,28 @@ def _extract_operator_ui_config(html: str) -> dict[str, object]:
     if match is None:
         raise AssertionError("operator UI config script is missing")
     return json.loads(match.group(1))
+
+
+def _expected_server_context() -> dict[str, str]:
+    return {
+        "business_timezone": "Asia/Yekaterinburg",
+        "business_now": "2026-04-13T13:00:00+05:00",
+        "default_as_of_date": AS_OF_DATE,
+        "today_current_date": TODAY_CURRENT_DATE,
+        "daily_refresh_business_time": "11:00 Asia/Yekaterinburg",
+        "daily_refresh_systemd_time": "06:00:00 UTC",
+        "daily_refresh_systemd_oncalendar": "*-*-* 06:00:00 UTC",
+        "daily_auto_action": "загрузка данных + отправка данных в таблицу",
+        "daily_auto_description": "Ежедневно в 11:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу",
+        "daily_auto_trigger_name": "wb-core-sheet-vitrina-refresh.timer",
+        "daily_auto_trigger_description": "wb-core-sheet-vitrina-refresh.timer -> POST /v1/sheet-vitrina-v1/refresh (auto_load=true)",
+        "last_auto_run_status": "never",
+        "last_auto_run_status_label": "ещё не выполнялся",
+        "last_auto_run_time": "",
+        "last_auto_run_finished_at": "",
+        "last_successful_auto_update_at": "",
+        "last_auto_run_error": "",
+    }
 
 
 def _reserve_free_port() -> int:

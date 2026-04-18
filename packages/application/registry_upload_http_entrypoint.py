@@ -35,6 +35,15 @@ OperatorLogEmitter = Callable[[str], None]
 SheetLoadRunner = Callable[[SheetVitrinaV1Envelope, OperatorLogEmitter], dict[str, Any]]
 SHEET_VITRINA_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/refresh"
 SHEET_VITRINA_LOAD_ROUTE = "/v1/sheet-vitrina-v1/load"
+SHEET_VITRINA_DAILY_TIMER_NAME = "wb-core-sheet-vitrina-refresh.timer"
+SHEET_VITRINA_DAILY_AUTO_ACTION = "загрузка данных + отправка данных в таблицу"
+SHEET_VITRINA_DAILY_AUTO_DESCRIPTION = (
+    f"Ежедневно в {DAILY_REFRESH_BUSINESS_HOUR:02d}:00 {CANONICAL_BUSINESS_TIMEZONE_NAME}: "
+    f"{SHEET_VITRINA_DAILY_AUTO_ACTION}"
+)
+SHEET_VITRINA_DAILY_TRIGGER_DESCRIPTION = (
+    f"{SHEET_VITRINA_DAILY_TIMER_NAME} -> POST {SHEET_VITRINA_REFRESH_ROUTE} (auto_load=true)"
+)
 
 
 class RegistryUploadHttpEntrypoint:
@@ -77,16 +86,32 @@ class RegistryUploadHttpEntrypoint:
         payload["server_context"] = self.build_sheet_server_context()
         return payload
 
-    def handle_sheet_refresh_request(self, as_of_date: str | None = None) -> dict[str, Any]:
+    def handle_sheet_refresh_request(
+        self,
+        as_of_date: str | None = None,
+        *,
+        auto_load: bool = False,
+    ) -> dict[str, Any]:
+        if auto_load:
+            return self._run_sheet_auto_update(as_of_date=as_of_date, log=None)
         return self._run_sheet_refresh(as_of_date=as_of_date, log=None)
 
     def handle_sheet_load_request(self, as_of_date: str | None = None) -> dict[str, Any]:
         return self._run_sheet_load(as_of_date=as_of_date, log=None)
 
-    def start_sheet_refresh_job(self, as_of_date: str | None = None) -> dict[str, Any]:
+    def start_sheet_refresh_job(
+        self,
+        as_of_date: str | None = None,
+        *,
+        auto_load: bool = False,
+    ) -> dict[str, Any]:
         return self.operator_jobs.start(
-            operation="refresh",
-            runner=lambda log: self._run_sheet_refresh(as_of_date=as_of_date, log=log),
+            operation="auto_update" if auto_load else "refresh",
+            runner=(
+                (lambda log: self._run_sheet_auto_update(as_of_date=as_of_date, log=log))
+                if auto_load
+                else (lambda log: self._run_sheet_refresh(as_of_date=as_of_date, log=log))
+            ),
         )
 
     def start_sheet_load_job(self, as_of_date: str | None = None) -> dict[str, Any]:
@@ -100,6 +125,96 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_sheet_operator_job_text_request(self, job_id: str) -> tuple[str, str]:
         return self.operator_jobs.get_text(job_id)
+
+    def _run_sheet_auto_update(
+        self,
+        *,
+        as_of_date: str | None,
+        log: OperatorLogEmitter | None,
+    ) -> dict[str, Any]:
+        emit = log or _noop_log
+        started_at = self.activated_at_factory()
+        requested_as_of_date = as_of_date or default_business_as_of_date(self.now_factory())
+        self.runtime.mark_sheet_vitrina_auto_update_started(
+            started_at=started_at,
+            as_of_date=requested_as_of_date,
+        )
+        emit(
+            _format_log_event(
+                "cycle_start",
+                cycle="auto_update",
+                route=SHEET_VITRINA_REFRESH_ROUTE,
+                requested_as_of_date=requested_as_of_date,
+                action="build_ready_snapshot_and_write_sheet",
+                trigger=SHEET_VITRINA_DAILY_TIMER_NAME,
+            )
+        )
+        refresh_payload: dict[str, Any] | None = None
+        try:
+            refresh_payload = self._run_sheet_refresh(as_of_date=as_of_date, log=emit)
+            load_payload = self._run_sheet_load(
+                as_of_date=str(refresh_payload["as_of_date"]),
+                log=emit,
+            )
+        except Exception as exc:
+            finished_at = self.activated_at_factory()
+            self.runtime.save_sheet_vitrina_auto_update_result(
+                started_at=started_at,
+                finished_at=finished_at,
+                status="error",
+                as_of_date=(
+                    str(refresh_payload["as_of_date"])
+                    if refresh_payload is not None
+                    else requested_as_of_date
+                ),
+                snapshot_id=(
+                    str(refresh_payload["snapshot_id"])
+                    if refresh_payload is not None
+                    else None
+                ),
+                refreshed_at=(
+                    str(refresh_payload["refreshed_at"])
+                    if refresh_payload is not None
+                    else None
+                ),
+                error=str(exc),
+            )
+            emit(
+                _format_log_event(
+                    "cycle_finish",
+                    cycle="auto_update",
+                    status="error",
+                    route=SHEET_VITRINA_REFRESH_ROUTE,
+                    error=str(exc),
+                )
+            )
+            raise
+
+        finished_at = self.activated_at_factory()
+        self.runtime.save_sheet_vitrina_auto_update_result(
+            started_at=started_at,
+            finished_at=finished_at,
+            status="success",
+            as_of_date=str(load_payload["as_of_date"]),
+            snapshot_id=str(load_payload["snapshot_id"]),
+            refreshed_at=str(load_payload["refreshed_at"]),
+            error=None,
+        )
+        emit(
+            _format_log_event(
+                "cycle_finish",
+                cycle="auto_update",
+                status="success",
+                route=SHEET_VITRINA_REFRESH_ROUTE,
+                snapshot_id=load_payload["snapshot_id"],
+            )
+        )
+        payload = dict(load_payload)
+        payload["operation"] = "auto_update"
+        payload["auto_update_started_at"] = started_at
+        payload["auto_update_finished_at"] = finished_at
+        payload["server_context"] = self.build_sheet_server_context()
+        return payload
 
     def _run_sheet_refresh(
         self,
@@ -276,6 +391,7 @@ class RegistryUploadHttpEntrypoint:
     def build_sheet_server_context(self) -> dict[str, str]:
         now = self.now_factory()
         business_now = to_business_datetime(now).replace(microsecond=0).isoformat()
+        auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()
         return {
             "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
             "business_now": business_now,
@@ -284,6 +400,18 @@ class RegistryUploadHttpEntrypoint:
             "daily_refresh_business_time": f"{DAILY_REFRESH_BUSINESS_HOUR:02d}:00 {CANONICAL_BUSINESS_TIMEZONE_NAME}",
             "daily_refresh_systemd_time": DAILY_REFRESH_SYSTEMD_UTC_TIME,
             "daily_refresh_systemd_oncalendar": DAILY_REFRESH_SYSTEMD_UTC_ONCALENDAR,
+            "daily_auto_action": SHEET_VITRINA_DAILY_AUTO_ACTION,
+            "daily_auto_description": SHEET_VITRINA_DAILY_AUTO_DESCRIPTION,
+            "daily_auto_trigger_name": SHEET_VITRINA_DAILY_TIMER_NAME,
+            "daily_auto_trigger_description": SHEET_VITRINA_DAILY_TRIGGER_DESCRIPTION,
+            "last_auto_run_status": auto_update_state.last_run_status or "never",
+            "last_auto_run_status_label": _auto_update_status_label(auto_update_state.last_run_status),
+            "last_auto_run_time": _format_optional_business_timestamp(auto_update_state.last_run_started_at),
+            "last_auto_run_finished_at": _format_optional_business_timestamp(auto_update_state.last_run_finished_at),
+            "last_successful_auto_update_at": _format_optional_business_timestamp(
+                auto_update_state.last_successful_auto_update_at
+            ),
+            "last_auto_run_error": auto_update_state.last_run_error or "",
         }
 
 
@@ -298,6 +426,27 @@ def _default_activated_at_factory() -> str:
 
 def _default_now_factory() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _format_optional_business_timestamp(value: str | None) -> str:
+    if not value:
+        return ""
+    try:
+        instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    return to_business_datetime(instant).replace(microsecond=0).isoformat()
+
+
+def _auto_update_status_label(value: str | None) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized == "success":
+        return "успех"
+    if normalized == "error":
+        return "ошибка"
+    if normalized == "running":
+        return "выполняется"
+    return "ещё не выполнялся"
 
 
 @dataclass
