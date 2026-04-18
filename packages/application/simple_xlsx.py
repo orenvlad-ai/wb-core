@@ -21,6 +21,7 @@ _DCTERMS_NS = "http://purl.org/dc/terms/"
 _XSI_NS = "http://www.w3.org/2001/XMLSchema-instance"
 _APP_NS = "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"
 _VT_NS = "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"
+_DRAWING_MAIN_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 
 _BUILTIN_DATE_NUMFMT_IDS = {
     14,
@@ -56,6 +57,83 @@ _BUILTIN_DATE_NUMFMT_IDS = {
     58,
 }
 
+ET.register_namespace("r", _REL_NS)
+ET.register_namespace("cp", _CORE_PROPS_NS)
+ET.register_namespace("dc", _DC_NS)
+ET.register_namespace("dcterms", _DCTERMS_NS)
+ET.register_namespace("xsi", _XSI_NS)
+ET.register_namespace("vt", _VT_NS)
+ET.register_namespace("a", _DRAWING_MAIN_NS)
+
+_THEME_XML = """<?xml version="1.0"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office Theme">
+  <a:themeElements>
+    <a:clrScheme name="Office">
+      <a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>
+      <a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>
+      <a:dk2><a:srgbClr val="1F497D"/></a:dk2>
+      <a:lt2><a:srgbClr val="EEECE1"/></a:lt2>
+      <a:accent1><a:srgbClr val="4F81BD"/></a:accent1>
+      <a:accent2><a:srgbClr val="C0504D"/></a:accent2>
+      <a:accent3><a:srgbClr val="9BBB59"/></a:accent3>
+      <a:accent4><a:srgbClr val="8064A2"/></a:accent4>
+      <a:accent5><a:srgbClr val="4BACC6"/></a:accent5>
+      <a:accent6><a:srgbClr val="F79646"/></a:accent6>
+      <a:hlink><a:srgbClr val="0000FF"/></a:hlink>
+      <a:folHlink><a:srgbClr val="800080"/></a:folHlink>
+    </a:clrScheme>
+    <a:fontScheme name="Office">
+      <a:majorFont>
+        <a:latin typeface="Cambria"/>
+        <a:ea typeface=""/>
+        <a:cs typeface=""/>
+      </a:majorFont>
+      <a:minorFont>
+        <a:latin typeface="Calibri"/>
+        <a:ea typeface=""/>
+        <a:cs typeface=""/>
+      </a:minorFont>
+    </a:fontScheme>
+    <a:fmtScheme name="Office">
+      <a:fillStyleLst>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:gradFill rotWithShape="1">
+          <a:gsLst>
+            <a:gs pos="0"><a:schemeClr val="phClr"><a:tint val="50000"/><a:satMod val="300000"/></a:schemeClr></a:gs>
+            <a:gs pos="35000"><a:schemeClr val="phClr"><a:tint val="37000"/><a:satMod val="300000"/></a:schemeClr></a:gs>
+            <a:gs pos="100000"><a:schemeClr val="phClr"><a:tint val="15000"/><a:satMod val="350000"/></a:schemeClr></a:gs>
+          </a:gsLst>
+          <a:lin ang="16200000" scaled="1"/>
+        </a:gradFill>
+      </a:fillStyleLst>
+      <a:lnStyleLst>
+        <a:ln w="9525" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln>
+        <a:ln w="25400" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln>
+        <a:ln w="38100" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln>
+      </a:lnStyleLst>
+      <a:effectStyleLst>
+        <a:effectStyle><a:effectLst/></a:effectStyle>
+        <a:effectStyle><a:effectLst/></a:effectStyle>
+        <a:effectStyle><a:effectLst/></a:effectStyle>
+      </a:effectStyleLst>
+      <a:bgFillStyleLst>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:gradFill rotWithShape="1">
+          <a:gsLst>
+            <a:gs pos="0"><a:schemeClr val="phClr"><a:tint val="40000"/><a:satMod val="350000"/></a:schemeClr></a:gs>
+            <a:gs pos="40000"><a:schemeClr val="phClr"><a:tint val="45000"/><a:shade val="99000"/><a:satMod val="350000"/></a:schemeClr></a:gs>
+            <a:gs pos="100000"><a:schemeClr val="phClr"><a:shade val="20000"/><a:satMod val="255000"/></a:schemeClr></a:gs>
+          </a:gsLst>
+          <a:path path="circle"><a:fillToRect l="50000" t="-80000" r="50000" b="180000"/></a:path>
+        </a:gradFill>
+      </a:bgFillStyleLst>
+    </a:fmtScheme>
+  </a:themeElements>
+  <a:objectDefaults/>
+  <a:extraClrSchemeLst/>
+</a:theme>
+"""
+
 
 def build_single_sheet_workbook_bytes(sheet_name: str, rows: list[list[CellValue]]) -> bytes:
     normalized_sheet_name = _normalize_sheet_name(sheet_name)
@@ -68,6 +146,7 @@ def build_single_sheet_workbook_bytes(sheet_name: str, rows: list[list[CellValue
         archive.writestr("docProps/core.xml", _build_core_props_xml(created_at))
         archive.writestr("xl/workbook.xml", _build_workbook_xml(normalized_sheet_name))
         archive.writestr("xl/_rels/workbook.xml.rels", _build_workbook_rels_xml())
+        archive.writestr("xl/theme/theme1.xml", _THEME_XML.encode("utf-8"))
         archive.writestr("xl/styles.xml", _build_styles_xml())
         archive.writestr("xl/worksheets/sheet1.xml", _build_sheet_xml(rows))
     return buffer.getvalue()
@@ -104,11 +183,12 @@ def _build_content_types_xml() -> bytes:
         ContentType="application/xml",
     )
     overrides = [
+        ("/docProps/app.xml", "application/vnd.openxmlformats-officedocument.extended-properties+xml"),
+        ("/docProps/core.xml", "application/vnd.openxmlformats-package.core-properties+xml"),
+        ("/xl/styles.xml", "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"),
+        ("/xl/theme/theme1.xml", "application/vnd.openxmlformats-officedocument.theme+xml"),
         ("/xl/workbook.xml", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"),
         ("/xl/worksheets/sheet1.xml", "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"),
-        ("/xl/styles.xml", "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"),
-        ("/docProps/core.xml", "application/vnd.openxmlformats-package.core-properties+xml"),
-        ("/docProps/app.xml", "application/vnd.openxmlformats-officedocument.extended-properties+xml"),
     ]
     for part_name, content_type in overrides:
         ET.SubElement(
@@ -174,8 +254,22 @@ def _build_core_props_xml(created_at: str) -> bytes:
 
 def _build_workbook_xml(sheet_name: str) -> bytes:
     root = ET.Element(f"{{{_MAIN_NS}}}workbook")
+    ET.SubElement(root, f"{{{_MAIN_NS}}}workbookPr")
+    ET.SubElement(root, f"{{{_MAIN_NS}}}workbookProtection")
     book_views = ET.SubElement(root, f"{{{_MAIN_NS}}}bookViews")
-    ET.SubElement(book_views, f"{{{_MAIN_NS}}}workbookView", activeTab="0")
+    ET.SubElement(
+        book_views,
+        f"{{{_MAIN_NS}}}workbookView",
+        visibility="visible",
+        minimized="0",
+        showHorizontalScroll="1",
+        showVerticalScroll="1",
+        showSheetTabs="1",
+        tabRatio="600",
+        firstSheet="0",
+        activeTab="0",
+        autoFilterDateGrouping="1",
+    )
     sheets = ET.SubElement(root, f"{{{_MAIN_NS}}}sheets")
     ET.SubElement(
         sheets,
@@ -183,9 +277,12 @@ def _build_workbook_xml(sheet_name: str) -> bytes:
         {
             "name": sheet_name,
             "sheetId": "1",
+            "state": "visible",
             f"{{{_REL_NS}}}id": "rId1",
         },
     )
+    ET.SubElement(root, f"{{{_MAIN_NS}}}definedNames")
+    ET.SubElement(root, f"{{{_MAIN_NS}}}calcPr", calcId="124519", fullCalcOnLoad="1")
     return _xml_bytes(root)
 
 
@@ -205,21 +302,29 @@ def _build_workbook_rels_xml() -> bytes:
         Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles",
         Target="styles.xml",
     )
+    ET.SubElement(
+        root,
+        f"{{{_PKG_REL_NS}}}Relationship",
+        Id="rId3",
+        Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme",
+        Target="theme/theme1.xml",
+    )
     return _xml_bytes(root)
 
 
 def _build_styles_xml() -> bytes:
     root = ET.Element(f"{{{_MAIN_NS}}}styleSheet")
+    ET.SubElement(root, f"{{{_MAIN_NS}}}numFmts", count="0")
     fonts = ET.SubElement(root, f"{{{_MAIN_NS}}}fonts", count="1")
     font = ET.SubElement(fonts, f"{{{_MAIN_NS}}}font")
-    ET.SubElement(font, f"{{{_MAIN_NS}}}sz", val="11")
-    ET.SubElement(font, f"{{{_MAIN_NS}}}color", theme="1")
     ET.SubElement(font, f"{{{_MAIN_NS}}}name", val="Calibri")
     ET.SubElement(font, f"{{{_MAIN_NS}}}family", val="2")
+    ET.SubElement(font, f"{{{_MAIN_NS}}}color", theme="1")
+    ET.SubElement(font, f"{{{_MAIN_NS}}}sz", val="11")
     ET.SubElement(font, f"{{{_MAIN_NS}}}scheme", val="minor")
     fills = ET.SubElement(root, f"{{{_MAIN_NS}}}fills", count="2")
     fill_none = ET.SubElement(fills, f"{{{_MAIN_NS}}}fill")
-    ET.SubElement(fill_none, f"{{{_MAIN_NS}}}patternFill", patternType="none")
+    ET.SubElement(fill_none, f"{{{_MAIN_NS}}}patternFill")
     fill_gray = ET.SubElement(fills, f"{{{_MAIN_NS}}}fill")
     ET.SubElement(fill_gray, f"{{{_MAIN_NS}}}patternFill", patternType="gray125")
     borders = ET.SubElement(root, f"{{{_MAIN_NS}}}borders", count="1")
@@ -251,13 +356,27 @@ def _build_styles_xml() -> bytes:
         quotePrefix="0",
     )
     cell_styles = ET.SubElement(root, f"{{{_MAIN_NS}}}cellStyles", count="1")
-    ET.SubElement(cell_styles, f"{{{_MAIN_NS}}}cellStyle", name="Normal", xfId="0", builtinId="0")
+    ET.SubElement(cell_styles, f"{{{_MAIN_NS}}}cellStyle", name="Normal", xfId="0", builtinId="0", hidden="0")
+    ET.SubElement(
+        root,
+        f"{{{_MAIN_NS}}}tableStyles",
+        count="0",
+        defaultTableStyle="TableStyleMedium9",
+        defaultPivotStyle="PivotStyleLight16",
+    )
     return _xml_bytes(root)
 
 
 def _build_sheet_xml(rows: list[list[CellValue]]) -> bytes:
     root = ET.Element(f"{{{_MAIN_NS}}}worksheet")
+    sheet_pr = ET.SubElement(root, f"{{{_MAIN_NS}}}sheetPr")
+    ET.SubElement(sheet_pr, f"{{{_MAIN_NS}}}outlinePr", summaryBelow="1", summaryRight="1")
+    ET.SubElement(sheet_pr, f"{{{_MAIN_NS}}}pageSetUpPr")
     ET.SubElement(root, f"{{{_MAIN_NS}}}dimension", ref=_sheet_dimension(rows))
+    sheet_views = ET.SubElement(root, f"{{{_MAIN_NS}}}sheetViews")
+    sheet_view = ET.SubElement(sheet_views, f"{{{_MAIN_NS}}}sheetView", workbookViewId="0")
+    ET.SubElement(sheet_view, f"{{{_MAIN_NS}}}selection", activeCell="A1", sqref="A1")
+    ET.SubElement(root, f"{{{_MAIN_NS}}}sheetFormatPr", baseColWidth="8", defaultRowHeight="15")
     sheet_data = ET.SubElement(root, f"{{{_MAIN_NS}}}sheetData")
     for row_index, row in enumerate(rows, start=1):
         row_el = ET.SubElement(sheet_data, f"{{{_MAIN_NS}}}row", r=str(row_index))
@@ -271,7 +390,7 @@ def _build_sheet_xml(rows: list[list[CellValue]]) -> bytes:
                 ET.SubElement(is_el, f"{{{_MAIN_NS}}}t").text = "TRUE" if value else "FALSE"
                 continue
             if isinstance(value, (int, float)):
-                cell = ET.SubElement(row_el, f"{{{_MAIN_NS}}}c", r=cell_ref)
+                cell = ET.SubElement(row_el, f"{{{_MAIN_NS}}}c", r=cell_ref, t="n")
                 ET.SubElement(cell, f"{{{_MAIN_NS}}}v").text = _format_number(value)
                 continue
             cell = ET.SubElement(row_el, f"{{{_MAIN_NS}}}c", r=cell_ref, t="inlineStr")
@@ -280,6 +399,16 @@ def _build_sheet_xml(rows: list[list[CellValue]]) -> bytes:
             text.text = str(value)
             if str(value).strip() != str(value):
                 text.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    ET.SubElement(
+        root,
+        f"{{{_MAIN_NS}}}pageMargins",
+        left="0.75",
+        right="0.75",
+        top="1",
+        bottom="1",
+        header="0.5",
+        footer="0.5",
+    )
     return _xml_bytes(root)
 
 
@@ -519,6 +648,10 @@ def _read_xml(archive: zipfile.ZipFile, path: str) -> ET.Element:
 
 
 def _xml_bytes(root: ET.Element) -> bytes:
+    if root.tag.startswith("{"):
+        namespace = root.tag[1:].split("}", 1)[0]
+        if namespace in {_MAIN_NS, _PKG_REL_NS, _CONTENT_NS, _APP_NS, _CORE_PROPS_NS}:
+            ET.register_namespace("", namespace)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 

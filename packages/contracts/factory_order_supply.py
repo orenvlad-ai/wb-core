@@ -48,6 +48,8 @@ class FactoryOrderDatasetState:
     uploaded_at: str | None
     row_count: int
     required: bool
+    uploaded_filename: str | None = None
+    file_available: bool = False
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,13 @@ class FactoryOrderUploadResult:
     dataset: FactoryOrderDatasetState
     accepted_row_count: int
     ignored_row_count: int
+    message: str
+
+
+@dataclass(frozen=True)
+class FactoryOrderDatasetDeleteResult:
+    status: str
+    dataset: FactoryOrderDatasetState
     message: str
 
 

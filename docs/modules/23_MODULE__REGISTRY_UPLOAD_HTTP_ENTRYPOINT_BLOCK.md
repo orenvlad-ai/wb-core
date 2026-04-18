@@ -133,6 +133,8 @@ update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/status` = cheap JSON status surface для bounded factory-order flow
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/*.xlsx` = operator template downloads с русскими headers
   - `POST /v1/sheet-vitrina-v1/supply/factory-order/upload/*` = server-side XLSX parse/validation/upload
+  - `GET /v1/sheet-vitrina-v1/supply/factory-order/uploaded/*` = download exactly the current uploaded operator workbook for the selected dataset
+  - `DELETE /v1/sheet-vitrina-v1/supply/factory-order/upload/*` = delete the current uploaded dataset/file for the selected dataset
   - `POST /v1/sheet-vitrina-v1/supply/factory-order/calculate` = server-side factory-order calculation
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx` = operator-facing recommendation download
 - Внутри existing `POST /v1/sheet-vitrina-v1/refresh` live contour теперь допускает bounded server-local sync для `seller_funnel_snapshot` и `web_source_snapshot`:
@@ -143,11 +145,15 @@ update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned
 - Operator page не invent-ит новый heavy route: UI запускает existing heavy `POST /v1/sheet-vitrina-v1/refresh` отдельно от narrow `POST /v1/sheet-vitrina-v1/load`, а live progress читает только через cheap poll surface `GET /v1/sheet-vitrina-v1/job`.
 - Во второй tab `Расчёт поставок` current bounded scope materialize-ит только block `Заказ на фабрике`:
   - settings fields остаются server-owned и валидируются на backend;
-  - `sales_avg_period_days` в current live contour truthfully bounded to `<= 7`, потому что authoritative `sales_funnel_history` source отвергает более глубокий lookback;
+  - operator-facing label `Размер партии` заменён на `Кратность штук в коробке`;
+  - UI больше не hard-cap'ит `sales_avg_period_days`; operator может ввести любой положительный период, но backend truthfully вернёт exact blocker, если current live authoritative `sales_funnel_history` source не покрывает нужную глубину lookback;
   - все operator XLSX templates используют русские headers, а backend держит stable mapping `operator label -> internal field id`;
+  - XLSX generation hardening обязана отдавать файлы, которые нормально открываются стандартными XLSX readers/Excel без recovery prompt;
   - `Остатки ФФ` требуют ровно одну строку на активный SKU и truthfully reject duplicate `nmId`;
   - `Товары в пути от фабрики` и `Товары в пути от ФФ на Wildberries` трактуют одну строку как один отдельный inbound event;
   - duplicate `nmId` в inbound templates допустимы и expected, если это разные ожидаемые поставки;
+  - inbound datasets optional: если `Товары в пути от фабрики` и/или `Товары в пути от ФФ на Wildberries` не загружены либо удалены, расчёт не блокируется, а соответствующие coverage terms truthfully считаются как `0`;
+  - status surface для каждого upload block показывает current uploaded filename, download link и delete action, если файл действительно хранится в current server-owned state;
   - planning horizon coverage суммирует только inbound events, чья `planned_arrival_date` попадает внутрь текущего расчётного горизонта;
   - итоговые summary/result values (`Общее количество`, `Расчётный вес`, `Расчётный объём`, recommendation XLSX) остаются server-driven и не вычисляются в browser или sheet.
 - Current repo state не имел другого authoritative source для legacy parity term `FO_INBOUND_FF_TO_WB`, поэтому entrypoint получил narrow explicit upload contract `Товары в пути от ФФ на Wildberries`; silent drop этого члена формулы считается некорректным.

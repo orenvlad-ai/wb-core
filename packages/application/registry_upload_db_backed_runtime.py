@@ -585,6 +585,9 @@ class RegistryUploadDbBackedRuntime:
         dataset_type: str,
         uploaded_at: str,
         rows: list[Mapping[str, Any]],
+        uploaded_filename: str,
+        uploaded_content_type: str,
+        workbook_bytes: bytes,
     ) -> None:
         _validate_timestamp(uploaded_at, field_name="uploaded_at")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -596,29 +599,53 @@ class RegistryUploadDbBackedRuntime:
                     dataset_type,
                     uploaded_at,
                     row_count,
-                    rows_json
+                    rows_json,
+                    uploaded_filename,
+                    uploaded_content_type,
+                    workbook_blob
                 )
-                VALUES(?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(dataset_type) DO UPDATE SET
                     uploaded_at = excluded.uploaded_at,
                     row_count = excluded.row_count,
-                    rows_json = excluded.rows_json
+                    rows_json = excluded.rows_json,
+                    uploaded_filename = excluded.uploaded_filename,
+                    uploaded_content_type = excluded.uploaded_content_type,
+                    workbook_blob = excluded.workbook_blob
                 """,
                 (
                     dataset_type,
                     uploaded_at,
                     len(rows),
                     json.dumps(list(rows), ensure_ascii=False),
+                    uploaded_filename,
+                    uploaded_content_type,
+                    sqlite3.Binary(workbook_bytes),
                 ),
             )
             conn.commit()
 
-    def load_factory_order_dataset_state(self, dataset_type: str) -> dict[str, Any] | None:
+    def load_factory_order_dataset_state(
+        self,
+        dataset_type: str,
+        *,
+        include_file_blob: bool = False,
+    ) -> dict[str, Any] | None:
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            select_columns = [
+                "uploaded_at",
+                "row_count",
+                "rows_json",
+                "uploaded_filename",
+                "uploaded_content_type",
+                "workbook_blob IS NOT NULL AS file_available",
+            ]
+            if include_file_blob:
+                select_columns.append("workbook_blob")
             row = conn.execute(
-                """
-                SELECT uploaded_at, row_count, rows_json
+                f"""
+                SELECT {", ".join(select_columns)}
                 FROM sheet_vitrina_v1_factory_order_dataset_state
                 WHERE dataset_type = ?
                 """,
@@ -626,12 +653,32 @@ class RegistryUploadDbBackedRuntime:
             ).fetchone()
             if row is None:
                 return None
-            return {
+            payload = {
                 "dataset_type": dataset_type,
                 "uploaded_at": row["uploaded_at"],
                 "row_count": int(row["row_count"]),
                 "rows": json.loads(row["rows_json"]),
+                "uploaded_filename": str(row["uploaded_filename"] or "") or None,
+                "uploaded_content_type": str(row["uploaded_content_type"] or "") or None,
+                "file_available": bool(row["file_available"]),
             }
+            if include_file_blob:
+                payload["workbook_bytes"] = bytes(row["workbook_blob"] or b"")
+            return payload
+
+    def delete_factory_order_dataset_state(self, dataset_type: str) -> bool:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            cursor = conn.execute(
+                """
+                DELETE FROM sheet_vitrina_v1_factory_order_dataset_state
+                WHERE dataset_type = ?
+                """,
+                (dataset_type,),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
     def save_factory_order_result_state(
         self,
@@ -1282,7 +1329,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             dataset_type TEXT PRIMARY KEY,
             uploaded_at TEXT NOT NULL,
             row_count INTEGER NOT NULL,
-            rows_json TEXT NOT NULL
+            rows_json TEXT NOT NULL,
+            uploaded_filename TEXT,
+            uploaded_content_type TEXT,
+            workbook_blob BLOB
         );
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_factory_order_result_state (
@@ -1292,3 +1342,34 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_factory_order_dataset_state",
+        column_name="uploaded_filename",
+        column_sql="TEXT",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_factory_order_dataset_state",
+        column_name="uploaded_content_type",
+        column_sql="TEXT",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_factory_order_dataset_state",
+        column_name="workbook_blob",
+        column_sql="BLOB",
+    )
+
+
+def _ensure_column(
+    conn: sqlite3.Connection,
+    *,
+    table_name: str,
+    column_name: str,
+    column_sql: str,
+) -> None:
+    existing = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    if any(str(row["name"]) == column_name for row in existing):
+        return
+    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
