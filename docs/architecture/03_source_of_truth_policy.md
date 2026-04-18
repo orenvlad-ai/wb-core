@@ -18,6 +18,21 @@ Documentation truth в `wb-core` двухслойный:
 - он должен хранить только retrieval-oriented summary, glossary, register, runbook и manifest;
 - legacy knowledge допускается только в тонком register-слое, а не как перенос полного legacy-корпуса.
 
+## Local Project Upload Source
+
+Для внешнего ChatGPT Project единственным допустимым локальным upload source считается:
+- `~/Projects/wb-core/wb_core_docs_master`
+
+Нельзя подменять этот source:
+- временной копией на Desktop/Downloads;
+- zip-архивом без сверки с repo;
+- произвольной локальной папкой, не связанной с current `origin/main`.
+
+Готовность pack к upload определяется только по:
+- `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`
+
+Finder timestamps, имя архива, локальные заметки или память исполнителя не считаются признаками readiness.
+
 Если меняется:
 - contract;
 - status/checkpoint;
@@ -30,6 +45,16 @@ Documentation truth в `wb-core` двухслойный:
 
 Если изменение затронуло primary docs или `wb_core_docs_master/`, внешний ChatGPT Project обновляется уже после merge как один human-only step по загрузке актуального pack.
 Этот upload reminder живёт в governance/handoff rules, а не во внутреннем upload-state самого pack.
+
+## Post-Merge Upload-Ready Source Rule
+
+Если изменение затронуло primary docs или `wb_core_docs_master/`, после successful merge Codex обязана:
+- безопасно сохранить несвязанный dirty state по правилам workspace policy, если он есть;
+- привести `~/Projects/wb-core` к current `origin/main`;
+- проверить readiness по `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`;
+- оставить пользователю ровно один human-only remainder: загрузить актуальный `~/Projects/wb-core/wb_core_docs_master` во внешний ChatGPT Project.
+
+Manifest при этом остаётся build-metadata артефактом и не хранит operational state внешней загрузки.
 
 Факты из reference:
 - `wb-ai-research/RECONCILE_SUMMARY.md` фиксирует drift между runtime и Git для `wb-ai/analyze.py`;
@@ -99,7 +124,8 @@ Anti-drift rules:
 - никакой runtime snapshot не принимается как truth без reconcile evidence;
 - никакое contract change не проходит без обновления docs/tests/inventory;
 - никакое изменение project-pack не проходит без синхронизации с primary repo docs и manifest как build-metadata файла;
-- если в задаче менялись primary docs или `wb_core_docs_master/`, финальный handoff обязан явно напомнить про один human-only шаг: после merge загрузить актуальный pack во внешний ChatGPT Project;
+- если в задаче менялись primary docs или `wb_core_docs_master/`, после merge `~/Projects/wb-core` должен быть приведён к current `origin/main`, а `~/Projects/wb-core/wb_core_docs_master` должен быть подготовлен как upload-ready source;
+- readiness pack определяется по `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`, а не по Finder timestamps или внешним заметкам;
 - manifest внутри pack не должен становиться operational tracker-ом внешней загрузки и не должен требовать post-upload repo-sync loop;
 - никакой cutover по принципу "на сервере вроде работает";
 - каждый migrated module должен давать reviewable evidence версии кода, версии конфига и snapshot/version semantics.

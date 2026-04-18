@@ -81,16 +81,15 @@ Legacy-репозитории остаются рабочими, но счита
 - granted deploy access + live publish wiring для already materialized hosted runtime contract;
 - материализованные слои `packages/domain`, `infra/`, `tests/`, `api/`, `jobs/`, `db/`.
 
-## Двухслойная Схема Docs
+## Governance Pointers
 
-В `wb-core` действует двухслойная схема документации:
-- primary canonical docs живут в `README.md`, `docs/architecture/*`, `docs/modules/*` и `migration/*`;
-- secondary project-oriented pack живёт в `wb_core_docs_master/` и предназначен для retrieval/upload в отдельный ChatGPT Project.
+Канонические governance/source-of-truth правила живут не в `README.md`, а в:
+- [docs/architecture/03_source_of_truth_policy.md](docs/architecture/03_source_of_truth_policy.md)
+- [docs/architecture/07_codex_execution_protocol.md](docs/architecture/07_codex_execution_protocol.md)
+- [docs/architecture/02_repo_workspace_blueprint.md](docs/architecture/02_repo_workspace_blueprint.md)
+- [docs/architecture/10_hosted_runtime_deploy_contract.md](docs/architecture/10_hosted_runtime_deploy_contract.md)
 
-`wb_core_docs_master` не является копией всего `docs/`. Это компактный curated-pack, который:
-- пересобирается из primary source of truth;
-- хранит только project-facing summary, registers, glossary и runbook;
-- не должен становиться местом, где появляются новые нормы раньше primary repo docs.
+`README.md` остаётся summary/navigation entrypoint и не должен использоваться как самостоятельный carrier operational governance.
 
 ## Где смотреть детали
 

@@ -29,6 +29,10 @@ built_from_commit: "0b9cd8078fca3f3f4ad7325768fef4b31cb87c7e"
 
 `wb_core_docs_master` — это secondary compact project-pack для retrieval/use вне repo, а не замена primary canonical docs.
 
+Canonical local upload-ready source для внешнего Project governed primary policy:
+- `~/Projects/wb-core/wb_core_docs_master`
+- readiness этого source определяется по manifest, а не самим index
+
 Использовать pack нужно так:
 1. начать с этого индекса;
 2. затем читать passport и policy;
@@ -60,6 +64,7 @@ Primary canonical docs остаются в:
 - Pack не покрывает весь текст module docs и не заменяет их.
 - Pack не включает полный legacy-корпус.
 - Upload в внешний ChatGPT Project остаётся отдельным human-only шагом после merge, если менялись primary docs или pack.
+- Этот index даёт только navigation pointer и не должен сам становиться carrier operational upload rules.
 - Hosted runtime deploy/probe contract теперь materialized в primary docs и отражается в pack как compact navigation/runbook knowledge, а не как hidden operational memory.
 
 # Not in scope

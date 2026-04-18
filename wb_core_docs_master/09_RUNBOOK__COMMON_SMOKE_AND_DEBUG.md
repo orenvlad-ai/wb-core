@@ -148,18 +148,32 @@ gh pr merge <pr_number> --merge --delete-branch
 
 Operational rule:
 - сначала проверять `gh auth status -h github.com`;
-- если auth валиден, `gh` доступен и execution context имеет repo write/merge access, обычные `ready`, `retarget`, `merge`, `delete branch` являются Codex-owned routine;
+- если requested outcome по смыслу включает Git fixation или GitHub closure и пользователь явно не запретил Git/GitHub actions, эти шаги входят в тот же bounded execution;
+- если auth валиден, `gh` доступен и execution context имеет repo write/merge access, обычные `commit`, `push`, `ready`, `retarget`, `merge`, `delete branch` являются Codex-owned routine;
 - это одинаково относится и к stacked PR sequence, где merge идёт не в `main`, а в промежуточную base branch;
 - auto-merge optional и не заменяет обычный merge для такого sequence;
+- при working auth/access Codex обязана довести ordinary GitHub closure до merge + delete-branch;
 - manual merge допустим только как fallback-blocker case: нет `gh`, нет auth, недостаточные scopes/permissions, GitHub вернул write blocker или branch protection требует human approval.
 
 ## Post-change closure
 
-### Repo-only closure
+### Repo-only closure for repo-only scope
 
 - проверить scope diff и `git diff --check`;
 - прогнать targeted local smoke / integration smoke по затронутому bounded path;
+- использовать этот closure только там, где scope реально repo-only;
 - не объявлять задачу complete, если для неё по смыслу нужен live/public/GAS closure.
+
+### Docs-governance closure
+
+- если change ограничен governance/docs/pack rules, не придумывать fake deploy / `clasp` / sheet verify steps;
+- обновить primary docs;
+- обновить затронутый `wb_core_docs_master`;
+- обновить manifest;
+- проверить scope diff и `git diff --check`;
+- закрыть GitHub closure до merge + delete-branch, если access работает;
+- после merge привести `~/Projects/wb-core` к current `origin/main` и проверить `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md` как upload-ready source;
+- оставить один human-only remainder: внешний upload актуального pack.
 
 ### Live route/runtime closure
 
@@ -196,7 +210,9 @@ Operational rule:
   - обновить primary docs;
   - обновить затронутый `wb_core_docs_master`;
   - обновить manifest;
-  - в финальном handoff напомнить один human-only шаг: после merge загрузить актуальный pack во внешний Project.
+  - после merge привести `~/Projects/wb-core` к current `origin/main`;
+  - проверить readiness по `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`;
+  - в финальном handoff оставить один human-only шаг: после merge загрузить актуальный pack во внешний Project.
 
 ## What to verify in sheet
 

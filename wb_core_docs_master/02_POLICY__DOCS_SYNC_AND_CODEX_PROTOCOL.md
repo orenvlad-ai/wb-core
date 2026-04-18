@@ -4,7 +4,7 @@ doc_id: "WB-CORE-PROJECT-02-POLICY"
 doc_type: "project_policy"
 status: "active"
 purpose: "Кратко зафиксировать двухслойную схему документации, execution contract, task classification matrix и обязательный sync-протокол для Codex."
-scope: "Primary vs secondary docs, update order, manifest discipline как build metadata, post-merge external upload reminder, L1/L2/L3 execution matrix, Codex-first execution contract, GitHub merge ownership и запреты на dump-copy."
+scope: "Primary vs secondary docs, update order, manifest discipline как build metadata, local upload-ready source, post-merge external upload reminder, L1/L2/L3 execution matrix, Codex-first execution contract, Git fixation / GitHub closure ownership и запреты на dump-copy."
 source_basis:
   - "docs/architecture/03_source_of_truth_policy.md"
   - "docs/architecture/07_codex_execution_protocol.md"
@@ -61,8 +61,11 @@ built_from_commit: "2e6bfd43a88e693a30b130516f5f8ce66889b801"
 3. обновить `99_MANIFEST__DOCSET_VERSION.md`;
 4. зафиксировать результат в Git.
 
-Если в задаче менялись primary docs или `wb_core_docs_master/`, после merge пользователь делает один human-only шаг: загружает актуальный pack во внешний ChatGPT Project.
-Assistant обязана явно напомнить про этот шаг в финальном handoff.
+Если в задаче менялись primary docs или `wb_core_docs_master/`, порядок closure такой:
+1. successful merge;
+2. `~/Projects/wb-core` приведён к current `origin/main`;
+3. `~/Projects/wb-core/wb_core_docs_master` проверен как upload-ready source по manifest;
+4. пользователю остаётся ровно один human-only шаг: загрузить актуальный pack во внешний ChatGPT Project.
 
 ## Manifest rule
 
@@ -78,11 +81,13 @@ Manifest не должен хранить:
 - `project_upload_note`
 
 Manifest остаётся build/pack metadata файлом и не ведёт operational state внешней загрузки.
+Readiness pack определяется по `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`, а не по Finder timestamps.
 
 ## External Project upload closure
 
 - Внешний upload в ChatGPT Project остаётся manual/human-only step.
 - Если менялись primary docs или `wb_core_docs_master/`, этот шаг делается после merge.
+- Единственный допустимый локальный source для этого upload = `~/Projects/wb-core/wb_core_docs_master`.
 - Отдельный post-upload manifest sync больше не нужен.
 - Напоминание об upload живёт в governance/handoff rules, а не как recursive state machine внутри pack.
 
@@ -98,13 +103,17 @@ Manifest остаётся build/pack metadata файлом и не ведёт op
 - Для bounded и безопасной технической работы действует Codex-first rule: сначала выбирается путь через Codex.
 - Пользователя подключают только для human-only step: логин, права, branch-protection approval / blocker-driven manual merge fallback, ручная UI-проверка, решение по риску.
 - Техническую рутину, которую Codex может безопасно выполнить сама, нельзя перекладывать на пользователя.
+- Если requested outcome по смыслу включает Git fixation или GitHub closure и пользователь явно не запретил Git/GitHub actions, эти шаги входят в тот же bounded execution.
 - Для GitHub closure сначала проверяется `gh auth status -h github.com`.
-- Если `gh` доступен, auth валиден и execution context имеет repo write/merge access, обычные `gh pr ready`, `gh pr edit --base ...`, `gh pr merge --delete-branch` являются Codex-owned routine, включая stacked/base-branch merge sequence.
+- Если `gh` доступен, auth валиден и execution context имеет repo write/merge access, обычные `git commit`, `git push`, `gh pr create/update`, `gh pr ready`, `gh pr edit --base ...`, `gh pr merge --delete-branch` являются Codex-owned routine, включая stacked/base-branch merge sequence.
 - Auto-merge остаётся optional enhancement и не заменяет обычный merge для stacked/base-branch sequence.
 - Manual merge допустим только как fallback-blocker case: нет `gh`, нет auth, недостаточные scopes/permissions, GitHub вернул write blocker или branch protection требует human approval.
-- Это правило не отменяет task-scope discipline: commit/push/open PR по-прежнему должны быть явно запрошены задачей, но внутри уже запрошенного GitHub closure routine merge ownership остаётся у Codex.
+- При working auth/access Codex обязана довести ordinary GitHub closure до merge + delete-branch, а не останавливаться на PR-ready/review-ready.
+- Если ordinary GitHub closure невозможен, execution возвращается incomplete с exact blocker.
+- Если requested outcome не включает Git fixation / GitHub closure или пользователь явно запретил Git/GitHub actions, Codex не делает эти шаги самовольно.
 - Любой prompt для Codex обязан начинаться с classification header (`Класс задачи`, `Причина классификации`, `Режим выполнения`) и заканчиваться блоками `=== ДЛЯ КУРАТОРА ===` и `=== СЖАТАЯ ПРОВЕРКА ===`.
-- В `=== ДЛЯ КУРАТОРА ===` обязательны поля `Статус`, `Что сделано`, `Изменённые/созданные файлы`, `Ключевой результат`, `Что НЕ тронуто / что осталось вне scope`, `Следующий шаг`, `Если есть блокер — точная причина`; при наличии Git-изменений дополнительно обязательны `Commit hash`, `Push`, `PR`, `Ссылка на PR`.
+- В `=== ДЛЯ КУРАТОРА ===` обязательны поля `Статус`, `Что сделано`, `Изменённые/созданные файлы`, `Ключевой результат`, `Что НЕ тронуто / что осталось вне scope`, `Следующий шаг`, `Если есть блокер — точная причина`, `Repo state`, `Live deploy state`, `Public verify result`, `Sheet verify result`, `Upload-ready source state`, `Manual-only remainder`; при наличии Git-изменений дополнительно обязательны `Commit hash`, `Push`, `PR`, `Ссылка на PR`.
+- Для полей вне текущего scope указывается truthful `not in scope`.
 - В `=== СЖАТАЯ ПРОВЕРКА ===` обязательны `3-5 коротких пунктов по сути` и `одна строка с главным выводом`.
 
 ## Completion states
@@ -112,13 +121,14 @@ Manifest остаётся build/pack metadata файлом и не ведёт op
 - `repo-complete` = repo update + local validation + canonical result не остаётся только в рабочем дереве.
 - `live-complete` = live runtime/service/publish contour обновлён и public probe подтверждён.
 - `sheet-complete` = bound Apps Script/sheet publish step выполнен и минимальный live sheet verify подтверждён.
-- `pack-complete` = primary docs, `wb_core_docs_master` и manifest синхронизированы в repo; если docs/pack менялись, финальный handoff напоминает про post-merge upload актуального pack во внешний Project.
+- `pack-complete` = primary docs, `wb_core_docs_master` и manifest синхронизированы в repo; если docs/pack менялись, после merge локальный `~/Projects/wb-core` приведён к current `origin/main`, а `~/Projects/wb-core/wb_core_docs_master` проверен как upload-ready source.
 
 Правило completion такое:
 - если задача меняет public route, runtime/service/nginx publish, bound Apps Script, operator UI или live sheet behavior, `repo-complete` недостаточно;
-- Codex по умолчанию должна пытаться закрыть repo + deploy + `clasp` + verify в одном bounded execution, если это безопасно и доступно;
+- Codex обязана довести repo + deploy + `clasp` + verify в одном bounded execution, если это безопасно и доступно, либо вернуть incomplete с exact blocker;
 - human-only step остаётся только для логина, прав, branch-protection approval / blocker-driven manual merge fallback, ручной UI-проверки или решения по риску;
 - для live/public/GAS задачи в финальном отчёте отдельно фиксируются `repo state`, `live deploy state`, `public verify result`, `sheet verify result`.
+- Для docs-governance-only scope fake live/public/sheet steps не нужны; вместо них нужно честно зафиксировать `not in scope` и довести upload-ready source state.
 - Если hosted contour уже имеет repo-owned deploy runner, blocker должен называть конкретный missing access/value, а не ссылаться на неопределённое “внешнее operational знание”.
 
 ## Legacy rule

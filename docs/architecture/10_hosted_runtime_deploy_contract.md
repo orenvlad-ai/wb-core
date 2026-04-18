@@ -96,7 +96,7 @@ Secrets stay outside Git. Repo stores only env names and target shape.
 
 ## Canonical Completion Sequence
 
-For live/public tasks affecting this contour the canonical sequence is:
+For live/public tasks affecting this contour `repo-only` does not count as complete. The canonical sequence is:
 1. repo fix and local validation;
 2. `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py print-plan`;
 3. `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py deploy`;
@@ -105,6 +105,9 @@ For live/public tasks affecting this contour the canonical sequence is:
 6. if the task changes bound Apps Script or live sheet behavior, finish the corresponding `clasp`/sheet verify path.
 
 `deploy-and-verify` may be used as one combined step when access is already safe and available.
+
+If deploy / publish / restart / probe / `clasp` / verify steps are safe and available, Codex обязана выполнить их в том же bounded execution.
+If any of these steps are unavailable or unsafe, execution must return incomplete with an exact blocker instead of a vague ops-gap.
 
 ## Probe Norm
 
@@ -129,4 +132,5 @@ This fallback is only for local diagnostic reachability. It is not a statement t
 One minimal human-only step remains allowed only when repo-owned contract still cannot execute due missing access:
 - fill actual hosted target values and grant deploy access for `api.selleros.pro`
 
-Without that step Codex may still finish `repo-complete` and `pack-complete`, but must report `live-complete = blocked`.
+Without that step a live/public/GAS task stays `live-complete = blocked`; reporting only `repo-complete` is insufficient.
+The blocker must name the concrete missing access/value and must not be phrased as unspecified operational uncertainty.
