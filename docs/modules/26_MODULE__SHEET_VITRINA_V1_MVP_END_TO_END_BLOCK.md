@@ -135,7 +135,9 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - explicit actions `Скачать шаблон остатков ФФ`, `Загрузить остатки ФФ`, `Скачать шаблон товаров в пути от фабрики`, `Загрузить товары в пути от фабрики`, `Скачать шаблон товаров в пути от ФФ на Wildberries`, `Загрузить товары в пути от ФФ на Wildberries`, `Рассчитать заказ на фабрике`, `Скачать рекомендацию`
   - server-side settings validation for `prod_lead_time_days`, `lead_time_factory_to_ff_days`, `lead_time_ff_to_wb_days`, `safety_days_mp`, `safety_days_ff`, `order_batch_qty`, `report_date_override`, `sales_avg_period_days`
   - operator-facing label for `order_batch_qty` = `Кратность штук в коробке`
-  - UI accepts any positive `sales_avg_period_days`, but current live backend still returns an exact blocker when the requested averaging window falls outside the current authoritative sales-history depth
+  - authoritative `orderCount` history for this contour lives only server-side in `temporal_source_snapshots[source_key=sales_funnel_history]`
+  - UI accepts any positive `sales_avg_period_days`; backend calculates any fully covered lookback window and returns an exact coverage blocker only when requested history reaches outside the persisted authoritative window
+  - live `DATA_VITRINA` may seed a one-time bounded historical reconcile window `2026-03-01..2026-04-18`, but this is migration input only; ongoing source of truth stays server-side and future exact-date days continue through existing refresh/runtime flow
   - operator XLSX templates stay compact and Russian-headed; backend keeps stable internal mapping
   - generated XLSX files must stay readable without repair prompt in standard XLSX readers/Excel
   - `Остатки ФФ` require one row per active SKU and reject duplicate `nmId`

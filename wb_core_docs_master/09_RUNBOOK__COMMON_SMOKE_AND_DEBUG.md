@@ -53,6 +53,7 @@ python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py
 python3 apps/cost_price_upload_http_entrypoint_smoke.py
 python3 apps/official_api_token_path_smoke.py
 python3 apps/sales_funnel_history_block_batching_smoke.py
+python3 apps/factory_order_sales_history_smoke.py
 python3 apps/sheet_vitrina_v1_business_time_smoke.py
 python3 apps/stocks_block_smoke.py
 python3 apps/stocks_block_region_mapping_smoke.py
@@ -72,6 +73,29 @@ python3 apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py
 python3 apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py
 git diff --check
 ```
+
+## Factory-order historical reconcile helpers
+
+```bash
+python3 apps/factory_order_sales_history_reconcile.py \
+  extract-live-data-vitrina-window \
+  --output /tmp/factory_order_sales_history_window.json
+
+python3 apps/factory_order_sales_history_reconcile.py \
+  diff-runtime-window \
+  --runtime-dir <runtime_dir> \
+  --input /tmp/factory_order_sales_history_window.json
+
+python3 apps/factory_order_sales_history_reconcile.py \
+  reconcile-runtime-window \
+  --runtime-dir <runtime_dir> \
+  --input /tmp/factory_order_sales_history_window.json
+```
+
+Norm:
+- `DATA_VITRINA` is only a one-time migration input for the bounded history window, not a new permanent source of truth.
+- authoritative target seam for factory-order history = `temporal_source_snapshots[source_key=sales_funnel_history]`.
+- use `diff-runtime-window` before a live replacement when runtime access is available; use `reconcile-runtime-window` only after divergence is understood.
 
 ## Live local runner
 
@@ -205,7 +229,9 @@ Operational rule:
   - live closure still requires deploy + loopback/public probe + one controlled download/upload/calculate/download scenario if those routes changed;
   - sheet/GAS verify stays `not in scope`, пока change не затрагивает bound Apps Script или live sheet write path.
   - if the task changes upload state handling, closure additionally verifies `upload -> current uploaded file download -> delete -> absent state`;
-  - current UI may accept any positive `sales_avg_period_days`, but current live authoritative sales-history seam still returns an exact blocker when the requested lookback starts before the upstream boundary; values above the covered depth must fail truthfully instead of being silently approximated.
+  - current UI may accept any positive `sales_avg_period_days`; backend now uses persisted runtime coverage instead of fixed `<= 7`, so covered windows such as `10 / 14 / 21` must succeed after truthful reconcile/backfill.
+  - bounded historical reconcile may use live `DATA_VITRINA` only as migration input for window `2026-03-01..2026-04-18`; ongoing truth remains server-side in `temporal_source_snapshots[source_key=sales_funnel_history]`.
+  - out-of-range windows must fail with the exact requested range plus earliest/latest available runtime coverage, not with a fake upstream-depth surrogate.
   - XLSX fixes are not considered complete until generated/publicly downloaded files pass bounded integrity checks and open as standard XLSX workbooks without a recovery path.
 - route change не считается complete, пока public probe не подтвердил expected content type / response shape.
 - если change затрагивает operator `load` или live sheet write path, closure дополнительно требует `clasp push` и sheet verify по `POST /v1/sheet-vitrina-v1/load` или equivalent existing Apps Script menu flow.

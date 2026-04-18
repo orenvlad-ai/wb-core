@@ -39,10 +39,12 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_UPLOAD_PATH,
     build_registry_upload_http_server,
 )
+from packages.application.factory_order_sales_history import persist_sales_history_result_exact_dates
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
+from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryItem, SalesFunnelHistorySuccess
 
 INPUT_BUNDLE_FIXTURE = (
     ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
@@ -51,6 +53,17 @@ NOW = datetime(2026, 4, 18, 9, 0, tzinfo=timezone.utc)
 ACTIVATED_AT = "2026-04-18T09:00:00Z"
 
 SALES_BY_DATE = {
+    "2026-03-28": {210183919: 10.0, 210184534: 1.0},
+    "2026-03-29": {210183919: 20.0, 210184534: 2.0},
+    "2026-03-30": {210183919: 30.0, 210184534: 3.0},
+    "2026-03-31": {210183919: 40.0, 210184534: 4.0},
+    "2026-04-01": {210183919: 50.0, 210184534: 5.0},
+    "2026-04-02": {210183919: 60.0, 210184534: 6.0},
+    "2026-04-03": {210183919: 70.0, 210184534: 7.0},
+    "2026-04-04": {210183919: 72.0, 210184534: 11.0},
+    "2026-04-05": {210183919: 74.0, 210184534: 12.0},
+    "2026-04-06": {210183919: 76.0, 210184534: 13.0},
+    "2026-04-07": {210183919: 78.0, 210184534: 14.0},
     "2026-04-08": {210183919: 80.0, 210184534: 15.0},
     "2026-04-09": {210183919: 90.0, 210184534: 18.0},
     "2026-04-10": {210183919: 100.0, 210184534: 21.0},
@@ -89,15 +102,14 @@ class FakeSalesHistoryBlock:
         while current <= end:
             lookup = SALES_BY_DATE.get(current.isoformat(), {})
             for nm_id in request_obj.nm_ids:
-                if nm_id in lookup:
-                    items.append(
-                        SimpleNamespace(
-                            date=current.isoformat(),
-                            nm_id=nm_id,
-                            metric="orderCount",
-                            value=float(lookup[nm_id]),
-                        )
+                items.append(
+                    SimpleNamespace(
+                        date=current.isoformat(),
+                        nm_id=nm_id,
+                        metric="orderCount",
+                        value=float(lookup.get(int(nm_id), 0.0)),
                     )
+                )
             current += timedelta(days=1)
         return SimpleNamespace(result=SimpleNamespace(kind="success", items=items))
 
@@ -135,8 +147,11 @@ def main() -> None:
                 raise AssertionError(f"bundle upload must be accepted, got {upload_status} {upload_payload}")
 
             active_nm_ids = [item.nm_id for item in runtime.load_current_state().config_v2 if item.enabled]
+            _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids)
             entrypoint.factory_order_supply_block.stocks_block = FakeStocksBlock(active_nm_ids)
-            entrypoint.factory_order_supply_block.sales_funnel_history_block = FakeSalesHistoryBlock()
+            fake_history_block = FakeSalesHistoryBlock()
+            entrypoint.factory_order_supply_block.sales_funnel_history_block = fake_history_block
+            entrypoint.factory_order_supply_block.sales_history.sales_funnel_history_block = fake_history_block
 
             operator_status, operator_html = _get_text(f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}")
             if operator_status != 200:
@@ -245,6 +260,8 @@ def main() -> None:
             status_code, status_payload = _get_json(f"{base_url}{DEFAULT_FACTORY_ORDER_STATUS_PATH}")
             if status_code != 200:
                 raise AssertionError("factory-order status route must return 200")
+            if "2026-03-28..2026-04-17" not in str(status_payload.get("coverage_contract_note", "")):
+                raise AssertionError("status route must expose the authoritative runtime coverage window")
             inbound_factory_state = status_payload.get("datasets", {}).get("inbound_factory_to_ff", {})
             if inbound_factory_state.get("uploaded_filename") != "factory-inbound.xlsx":
                 raise AssertionError("status must expose the stored uploaded filename")
@@ -278,7 +295,7 @@ def main() -> None:
             first_sku_with_inbound = next(
                 item for item in calc_with_inbound_payload.get("rows", []) if item.get("nm_id") == 210183919
             )
-            if first_sku_with_inbound.get("daily_demand_total") != 140.0:
+            if first_sku_with_inbound.get("daily_demand_total") != _expected_average(210183919, report_date="2026-04-18", period_days=7):
                 raise AssertionError("7-day lookback must change the HTTP average demand")
             if first_sku_with_inbound.get("inbound_factory_to_ff") != 40.0 or first_sku_with_inbound.get("inbound_ff_to_wb") != 10.0:
                 raise AssertionError("HTTP calc must keep only the inbound events inside the planning horizon")
@@ -328,8 +345,31 @@ def main() -> None:
             if first_sku.get("inbound_factory_to_ff") != 0.0 or first_sku.get("inbound_ff_to_wb") != 0.0:
                 raise AssertionError("after delete the HTTP calc must restore zero inbound terms")
 
-            # Scenario 5: >7-day lookback must fail with the exact authoritative blocker.
-            calc_gt_7_status, calc_gt_7_payload = _post_json(
+            for period_days in (10, 14, 21):
+                covered_status, covered_payload = _post_json(
+                    f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
+                    {
+                        "prod_lead_time_days": 10,
+                        "lead_time_factory_to_ff_days": 5,
+                        "lead_time_ff_to_wb_days": 2,
+                        "safety_days_mp": 3,
+                        "safety_days_ff": 2,
+                        "order_batch_qty": 50,
+                        "report_date_override": "2026-04-18",
+                        "sales_avg_period_days": period_days,
+                    },
+                )
+                if covered_status != 200:
+                    raise AssertionError(f"HTTP calc must succeed for covered window {period_days}, got {covered_status} {covered_payload}")
+                covered_sku = next(item for item in covered_payload.get("rows", []) if item.get("nm_id") == 210183919)
+                if round(float(covered_sku.get("daily_demand_total", 0.0)), 2) != _expected_average(
+                    210183919,
+                    report_date="2026-04-18",
+                    period_days=period_days,
+                ):
+                    raise AssertionError(f"HTTP calc must average exact covered runtime history for {period_days}-day lookback")
+
+            calc_out_of_range_status, calc_out_of_range_payload = _post_json(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
                 {
                     "prod_lead_time_days": 10,
@@ -339,18 +379,20 @@ def main() -> None:
                     "safety_days_ff": 2,
                     "order_batch_qty": 50,
                     "report_date_override": "2026-04-18",
-                    "sales_avg_period_days": 10,
+                    "sales_avg_period_days": 60,
                 },
             )
-            if calc_gt_7_status != 422 or "current live source сейчас принимает start day не раньше 2026-04-11" not in str(calc_gt_7_payload.get("error", "")):
-                raise AssertionError("HTTP calc must surface the exact authoritative blocker for >7-day lookback")
+            error_text = str(calc_out_of_range_payload.get("error", ""))
+            if calc_out_of_range_status != 422 or "нужен диапазон 2026-02-17..2026-04-17" not in error_text or "2026-03-28..2026-04-17" not in error_text:
+                raise AssertionError("HTTP calc must surface the exact coverage blocker outside the persisted runtime window")
 
             print(f"scenario_without_inbound_http: ok -> total_qty={calc_without_inbound_payload['summary']['total_qty']}")
             print(f"scenario_current_file_lifecycle_http: ok -> {inbound_factory_state['uploaded_filename']}")
             print(
                 f"scenario_multi_inbound_http: ok -> inbound_factory={first_sku_with_inbound.get('inbound_factory_to_ff', 0.0)}"
             )
-            print("scenario_period_gt_7_http: ok -> truthful blocker current live source сейчас принимает start day не раньше 2026-04-11")
+            print("scenario_covered_windows_http: ok -> periods=10,14,21")
+            print("scenario_out_of_range_http: ok -> blocker exposes needed range 2026-02-17..2026-04-17 and available 2026-03-28..2026-04-17")
         finally:
             server.shutdown()
             server.server_close()
@@ -416,6 +458,42 @@ def _get_json(url: str) -> tuple[int, dict[str, object]]:
             return response.status, json.loads(response.read().decode("utf-8"))
     except error.HTTPError as exc:
         return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _seed_runtime_sales_history(runtime: RegistryUploadDbBackedRuntime, *, active_nm_ids: list[int]) -> None:
+    items: list[SalesFunnelHistoryItem] = []
+    for snapshot_date, values in sorted(SALES_BY_DATE.items()):
+        for nm_id in sorted(active_nm_ids):
+            items.append(
+                SalesFunnelHistoryItem(
+                    date=snapshot_date,
+                    nm_id=nm_id,
+                    metric="orderCount",
+                    value=float(values.get(nm_id, 0.0)),
+                )
+            )
+    persist_sales_history_result_exact_dates(
+        runtime=runtime,
+        payload=SalesFunnelHistorySuccess(
+            kind="success",
+            date_from=min(SALES_BY_DATE),
+            date_to=max(SALES_BY_DATE),
+            count=len(items),
+            items=items,
+        ),
+        captured_at=ACTIVATED_AT,
+    )
+
+
+def _expected_average(nm_id: int, *, report_date: str, period_days: int) -> float:
+    end = date.fromisoformat(report_date) - timedelta(days=1)
+    start = end - timedelta(days=period_days - 1)
+    current = start
+    values: list[float] = []
+    while current <= end:
+        values.append(float(SALES_BY_DATE[current.isoformat()][nm_id]))
+        current += timedelta(days=1)
+    return round(sum(values) / len(values), 2)
 
 
 def _get_text(url: str) -> tuple[int, str]:

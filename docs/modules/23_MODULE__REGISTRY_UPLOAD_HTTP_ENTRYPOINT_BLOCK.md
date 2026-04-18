@@ -19,6 +19,7 @@ related_modules:
   - "packages/contracts/registry_upload_db_backed_runtime.py"
   - "packages/contracts/registry_upload_http_entrypoint.py"
   - "packages/application/cost_price_upload.py"
+  - "packages/application/factory_order_sales_history.py"
   - "packages/application/factory_order_supply.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
@@ -52,6 +53,8 @@ related_runners:
   - "apps/registry_upload_http_entrypoint_hosted_runtime.py"
   - "apps/registry_upload_http_entrypoint_smoke.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"
+  - "apps/factory_order_sales_history_smoke.py"
+  - "apps/factory_order_sales_history_reconcile.py"
   - "apps/factory_order_supply_smoke.py"
   - "apps/sheet_vitrina_v1_factory_order_http_smoke.py"
   - "apps/sheet_vitrina_v1_operator_load_smoke.py"
@@ -66,7 +69,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned date-aware `sheet_vitrina_v1` read model, bounded current-day web-source sync, live daily refresh timer, separate operator `refresh`/`load` actions, repo-owned hosted deploy contract и первую bounded supply capability `Заказ на фабрике`: HTTP entrypoint принимает фактические registry list lengths, держит sibling cost-price dataset отдельно от compact bundle, использует его в existing refresh/plan/status read-side через server-side effective-date overlay без нового business route, считает default `as_of_date` / `today_current` по `Asia/Yekaterinburg`, а refresh contour при missing `today_current` web-source snapshot может bounded-trigger'ить server-local producer/handoff seam; repo-owned operator page при этом остаётся narrow, но получает вторую top-level tab `Расчёт поставок`, server-side XLSX template/upload/calculate/download routes с русскими operator headers и multi-row inbound semantics, а FF -> WB parity term закрывается отдельным upload contract вместо silent drop."
+update_note: "Обновлён под current factory-order historical seam: HTTP/operator contour по-прежнему остаётся server-owned и narrow, но authoritative `orderCount` history теперь читается не прямо из live API, а из exact-date runtime cache `temporal_source_snapshots[source_key=sales_funnel_history]`; bounded historical window `2026-03-01..2026-04-18` может truthfully reconcile-иться из live `DATA_VITRINA` только как one-time migration input, без объявления sheet постоянным source of truth, а future days продолжают materialize-иться existing refresh/current flow."
 ---
 
 # 1. Идентификатор и статус
@@ -146,7 +149,10 @@ update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned
 - Во второй tab `Расчёт поставок` current bounded scope materialize-ит только block `Заказ на фабрике`:
   - settings fields остаются server-owned и валидируются на backend;
   - operator-facing label `Размер партии` заменён на `Кратность штук в коробке`;
-  - UI больше не hard-cap'ит `sales_avg_period_days`; operator может ввести любой положительный период, но backend truthfully вернёт exact blocker, если current live authoritative `sales_funnel_history` source не покрывает нужную глубину lookback;
+  - authoritative `orderCount` history для расчёта живёт только server-side в `temporal_source_snapshots[source_key=sales_funnel_history]`;
+  - UI больше не hard-cap'ит `sales_avg_period_days`; operator может ввести любой положительный период, а backend считает любой полностью покрытый window и truthfully возвращает blocker только если exact runtime coverage недостаточно;
+  - live `DATA_VITRINA` может использоваться лишь как one-time migration input для bounded historical reconcile/replacement window `2026-03-01..2026-04-18`; после этого sheet не становится новым permanent source of truth;
+  - existing `POST /v1/sheet-vitrina-v1/refresh` current flow продолжает materialize-ить future exact-date `sales_funnel_history` snapshots в тот же runtime seam, поэтому historical bootstrap не должен повторяться вручную для следующих дней;
   - все operator XLSX templates используют русские headers, а backend держит stable mapping `operator label -> internal field id`;
   - XLSX generation hardening обязана отдавать файлы, которые нормально открываются стандартными XLSX readers/Excel без recovery prompt;
   - `Остатки ФФ` требуют ровно одну строку на активный SKU и truthfully reject duplicate `nmId`;
@@ -271,6 +277,7 @@ update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned
 - application:
   - `packages/application/registry_upload_http_entrypoint.py`
   - `packages/business_time.py`
+  - `packages/application/factory_order_sales_history.py`
 - reused runtime:
   - `packages/application/registry_upload_db_backed_runtime.py`
 - adapter:
@@ -282,6 +289,8 @@ update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned
 - smoke:
   - `apps/registry_upload_http_entrypoint_smoke.py`
   - `apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py`
+  - `apps/factory_order_sales_history_smoke.py`
+  - `apps/factory_order_sales_history_reconcile.py`
   - `apps/sheet_vitrina_v1_business_time_smoke.py`
   - `apps/sheet_vitrina_v1_web_source_current_sync_smoke.py`
 

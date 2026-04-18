@@ -93,7 +93,9 @@ Current additional operator supply flow on the same page:
 - operator-facing label for batch size = `Кратность штук в коробке`
 - inbound files are optional for calculation; when absent or deleted, both inbound coverage terms truthfully become `0`
 - each upload block now surfaces the current uploaded filename plus download/delete actions from backend state
-- current UI no longer hard-caps `sales_avg_period_days`, but current live authoritative sales-history seam still returns an exact blocker when the requested lookback starts earlier than the upstream source allows
+- current UI no longer hard-caps `sales_avg_period_days`; authoritative `orderCount` history now lives server-side in `temporal_source_snapshots[source_key=sales_funnel_history]`, so any positive covered window is allowed and blocker appears only when requested range falls outside runtime coverage
+- live `DATA_VITRINA` may be used only as one-time migration input for bounded historical reconcile window `2026-03-01..2026-04-18`; sheet does not become a permanent source of truth
+- future exact-date sales history continues to materialize through existing refresh/runtime flow, so the historical bootstrap is bounded and not a recurring operator step
 - XLSX generation is hardened so operator templates and recommendation files open as standard XLSX workbooks without a repair path
 - calculation, result XLSX and `Общее количество / Расчётный вес / Расчётный объём` summary stay fully server-driven
 
