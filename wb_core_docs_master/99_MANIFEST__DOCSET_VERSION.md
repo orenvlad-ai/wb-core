@@ -20,9 +20,9 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "изменение build metadata pack"
-built_from_commit: "11cff0256da99f4155b4c0ab2501c49145d10b43"
-docset_version: "wb_core_docs_master_v9"
-built_at: "2026-04-18T11:25:10Z"
+built_from_commit: "1f8f96e47fbd13a44f3c17fd252ad1711cac09ec"
+docset_version: "wb_core_docs_master_v10"
+built_at: "2026-04-18T12:48:12Z"
 core_docs_changed:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/08_MODULE__SALES_FUNNEL_HISTORY_BLOCK.md"
