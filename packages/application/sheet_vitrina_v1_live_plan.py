@@ -702,6 +702,21 @@ class SheetVitrinaV1LivePlanBlock:
             requested_nm_ids=requested_nm_ids,
             loader=loader,
         )
+        if _is_invalid_temporal_web_source_payload(source_key, payload, column_date):
+            return (
+                _append_current_web_source_sync_note(
+                    _build_invalid_temporal_web_source_status(
+                        source_key=source_key,
+                        temporal_slot=temporal_slot,
+                        temporal_policy=temporal_policy,
+                        column_date=column_date,
+                        requested_nm_ids=requested_nm_ids,
+                        payload=payload,
+                    ),
+                    current_web_source_sync_note,
+                ),
+                None,
+            )
         if payload is not None and _is_exact_snapshot_payload(payload, column_date):
             self.runtime.save_temporal_source_snapshot(
                 source_key=source_key,
@@ -1292,6 +1307,36 @@ def _build_temporal_gap_status(
     )
 
 
+def _build_invalid_temporal_web_source_status(
+    *,
+    source_key: str,
+    temporal_slot: str,
+    temporal_policy: str,
+    column_date: str,
+    requested_nm_ids: list[int],
+    payload: Any,
+) -> LiveSourceStatus:
+    return LiveSourceStatus(
+        source_key=source_key,
+        temporal_slot=temporal_slot,
+        temporal_policy=temporal_policy,
+        column_date=column_date,
+        kind="error",
+        freshness=_resolve_freshness(payload),
+        snapshot_date=str(getattr(payload, "snapshot_date", "") or ""),
+        date=str(getattr(payload, "date", "") or ""),
+        date_from=str(getattr(payload, "date_from", "") or ""),
+        date_to=str(getattr(payload, "date_to", "") or ""),
+        requested_count=len(requested_nm_ids),
+        covered_count=0,
+        missing_nm_ids=sorted(set(requested_nm_ids)),
+        note=_append_invalid_payload_note(
+            _status_note_from_payload(payload),
+            "invalid_exact_snapshot=zero_filled_seller_funnel_snapshot",
+        ),
+    )
+
+
 def _build_cost_price_status(
     *,
     current_state: CostPriceCurrentState | None,
@@ -1411,9 +1456,32 @@ def _is_exact_snapshot_payload(payload: Any, column_date: str) -> bool:
     return str(getattr(payload, "kind", "")) == "success" and _resolve_freshness(payload) == column_date
 
 
+def _is_invalid_temporal_web_source_payload(
+    source_key: str,
+    payload: Any | None,
+    column_date: str,
+) -> bool:
+    if source_key != "seller_funnel_snapshot" or payload is None:
+        return False
+    if not _is_exact_snapshot_payload(payload, column_date):
+        return False
+    items = getattr(payload, "items", None)
+    if not isinstance(items, list) or not items:
+        return True
+    return not any(
+        _numeric_payload_value(getattr(item, "view_count", None)) > 0
+        or _numeric_payload_value(getattr(item, "open_card_count", None)) > 0
+        for item in items
+    )
+
+
 def _append_status_note(status: LiveSourceStatus, suffix: str) -> LiveSourceStatus:
     merged = "; ".join(part for part in [status.note, suffix] if part)
     return replace(status, note=merged)
+
+
+def _append_invalid_payload_note(note: str, suffix: str) -> str:
+    return "; ".join(part for part in [note, suffix] if part)
 
 
 def _append_current_web_source_sync_note(
@@ -1427,6 +1495,14 @@ def _append_current_web_source_sync_note(
 
 def _format_runtime_timestamp(value: datetime) -> str:
     return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _numeric_payload_value(value: Any) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    return 0.0
 
 
 def _index_items_by_nm_id(payload: Any | None) -> dict[int, Any]:

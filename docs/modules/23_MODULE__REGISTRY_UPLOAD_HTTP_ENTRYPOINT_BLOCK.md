@@ -69,7 +69,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current factory-order historical seam: HTTP/operator contour по-прежнему остаётся server-owned и narrow, но authoritative `orderCount` history теперь читается не прямо из live API, а из exact-date runtime cache `temporal_source_snapshots[source_key=sales_funnel_history]`; bounded historical window `2026-03-01..2026-04-18` может truthfully reconcile-иться из live `DATA_VITRINA` только как one-time migration input, без объявления sheet постоянным source of truth, а future days продолжают materialize-иться existing refresh/current flow."
+update_note: "Обновлён под current factory-order historical seam и current-day seller-funnel repair semantics: HTTP/operator contour по-прежнему остаётся server-owned и narrow, authoritative `orderCount` history читается из exact-date runtime cache `temporal_source_snapshots[source_key=sales_funnel_history]`, а zero-filled exact-date `seller_funnel_snapshot` больше не считается готовым current-day snapshot и не materialize-ится как truthful zero rows в `DATA_VITRINA`."
 ---
 
 # 1. Идентификатор и статус
@@ -146,6 +146,7 @@ update_note: "Обновлён под current factory-order historical seam: HTT
 - Внутри existing `POST /v1/sheet-vitrina-v1/refresh` live contour теперь допускает bounded server-local sync для `seller_funnel_snapshot` и `web_source_snapshot`:
   - сначала refresh проверяет, materialized ли exact-date `today_current` snapshot в local `wb-ai` read-side;
   - если exact-date snapshot отсутствует, refresh может вызвать server-local owner path `/opt/wb-web-bot` (`bot.runner_day`, `bot.runner_sales_funnel_day`) и затем `/opt/wb-ai/run_web_source_handoff.py`;
+  - для `seller_funnel_snapshot` refresh additionally rejects zero-filled exact-date snapshots (`view_count=0` и `open_card_count=0` по всем items): такой payload не считается готовым current-day state и bounded-trigger'ит retry вместо залипания ложных нулей;
   - после этого refresh повторно валидирует exact-date local API availability и только потом читает live sources;
   - contour не открывает новый public producer route, не backfill-ит yesterday в today и остаётся bounded orchestration boundary поверх existing owner path.
 - Operator page не invent-ит новый heavy route: UI запускает existing heavy `POST /v1/sheet-vitrina-v1/refresh` отдельно от narrow `POST /v1/sheet-vitrina-v1/load`, а live progress читает только через cheap poll surface `GET /v1/sheet-vitrina-v1/job`.
@@ -317,6 +318,8 @@ update_note: "Обновлён под current factory-order historical seam: HTT
 - Подтверждён локальный integration smoke через `apps/registry_upload_http_entrypoint_smoke.py`.
 - Подтверждён targeted boundary/default-date smoke через `apps/sheet_vitrina_v1_business_time_smoke.py`.
 - Подтверждён targeted current-day web-source sync smoke через `apps/sheet_vitrina_v1_web_source_current_sync_smoke.py`.
+- Подтверждён targeted zero-filled seller-funnel retry smoke через `apps/web_source_current_sync_zero_snapshot_smoke.py`.
+- Подтверждён targeted truthful zero-filled seller-funnel rejection smoke через `apps/sheet_vitrina_v1_seller_funnel_zero_payload_smoke.py`.
 - Smoke проверяет:
   - что HTTP entrypoint реально поднимается и принимает `POST`;
   - что request body попадает в существующий DB-backed runtime, а не в дублирующую ingest-логику;
