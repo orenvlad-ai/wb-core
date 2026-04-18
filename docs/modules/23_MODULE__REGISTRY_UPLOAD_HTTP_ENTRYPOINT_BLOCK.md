@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-23-REGISTRY-UPLOAD-HTTP-ENTRYPOINT-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `registry_upload_http_entrypoint_block`."
-scope: "Первый live inbound HTTP entrypoint для V2-реестров, separate `COST_PRICE` upload contour и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, sibling cost-price request, thin request -> runtime -> response wiring, server-side `activated_at`, separated refresh/load actions, date-aware plan/status read и simple repo-owned HTML page без SPA/build pipeline."
+scope: "Первый live inbound HTTP entrypoint для V2-реестров, separate `COST_PRICE` upload contour и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, sibling cost-price request, thin request -> runtime -> response wiring, server-side `activated_at`, separated refresh/load actions, date-aware plan/status read, repo-owned operator page с двумя top-level tabs и bounded server-side factory-order supply contour без SPA/build pipeline."
 source_basis:
   - "migration/86_registry_upload_contract.md"
   - "migration/89_registry_upload_db_backed_runtime.md"
@@ -13,13 +13,16 @@ source_basis:
   - "artifacts/registry_upload_http_entrypoint/evidence/initial__registry-upload-http-entrypoint__evidence.md"
 related_modules:
   - "packages/contracts/cost_price_upload.py"
+  - "packages/contracts/factory_order_supply.py"
   - "packages/contracts/registry_upload_bundle_v1.py"
   - "packages/contracts/registry_upload_file_backed_service.py"
   - "packages/contracts/registry_upload_db_backed_runtime.py"
   - "packages/contracts/registry_upload_http_entrypoint.py"
   - "packages/application/cost_price_upload.py"
+  - "packages/application/factory_order_supply.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
+  - "packages/application/simple_xlsx.py"
   - "packages/application/sheet_vitrina_v1_load_bridge.py"
   - "packages/adapters/registry_upload_http_entrypoint.py"
 related_tables:
@@ -35,11 +38,22 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/status"
   - "GET /v1/sheet-vitrina-v1/job"
   - "GET /sheet-vitrina-v1/operator"
+  - "GET /v1/sheet-vitrina-v1/supply/factory-order/status"
+  - "GET /v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"
+  - "GET /v1/sheet-vitrina-v1/supply/factory-order/template/inbound-factory.xlsx"
+  - "GET /v1/sheet-vitrina-v1/supply/factory-order/template/inbound-ff-to-wb.xlsx"
+  - "POST /v1/sheet-vitrina-v1/supply/factory-order/upload/stock-ff"
+  - "POST /v1/sheet-vitrina-v1/supply/factory-order/upload/inbound-factory"
+  - "POST /v1/sheet-vitrina-v1/supply/factory-order/upload/inbound-ff-to-wb"
+  - "POST /v1/sheet-vitrina-v1/supply/factory-order/calculate"
+  - "GET /v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
 related_runners:
   - "apps/registry_upload_http_entrypoint_live.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime.py"
   - "apps/registry_upload_http_entrypoint_smoke.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"
+  - "apps/factory_order_supply_smoke.py"
+  - "apps/sheet_vitrina_v1_factory_order_http_smoke.py"
   - "apps/sheet_vitrina_v1_operator_load_smoke.py"
   - "apps/cost_price_upload_http_entrypoint_smoke.py"
   - "apps/sheet_vitrina_v1_cost_price_read_side_smoke.py"
@@ -52,7 +66,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned date-aware `sheet_vitrina_v1` read model, bounded current-day web-source sync, live daily refresh timer, separate operator `refresh`/`load` actions и repo-owned hosted deploy contract: HTTP entrypoint принимает фактические registry list lengths, держит sibling cost-price dataset отдельно от compact bundle, использует его в existing refresh/plan/status read-side через server-side effective-date overlay без нового business route, считает default `as_of_date` / `today_current` по `Asia/Yekaterinburg`, а refresh contour при missing `today_current` web-source snapshot может bounded-trigger'ить server-local producer/handoff seam; repo-owned operator page при этом остаётся narrow, получает вторую action `Отправить данные`, читает live построчный log через narrow async job route, а load path передаёт уже готовый snapshot в existing bound Apps Script bridge без возврата heavy logic в browser или GAS."
+update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned date-aware `sheet_vitrina_v1` read model, bounded current-day web-source sync, live daily refresh timer, separate operator `refresh`/`load` actions, repo-owned hosted deploy contract и первую bounded supply capability `Заказ на фабрике`: HTTP entrypoint принимает фактические registry list lengths, держит sibling cost-price dataset отдельно от compact bundle, использует его в existing refresh/plan/status read-side через server-side effective-date overlay без нового business route, считает default `as_of_date` / `today_current` по `Asia/Yekaterinburg`, а refresh contour при missing `today_current` web-source snapshot может bounded-trigger'ить server-local producer/handoff seam; repo-owned operator page при этом остаётся narrow, но получает вторую top-level tab `Расчёт поставок`, server-side XLSX template/upload/calculate/download routes с русскими operator headers и multi-row inbound semantics, а FF -> WB parity term закрывается отдельным upload contract вместо silent drop."
 ---
 
 # 1. Идентификатор и статус
@@ -109,19 +123,34 @@ update_note: "Обновлён под separate `COST_PRICE` contour, EKT-aligned
   - `200` для `accepted`
   - `409` для duplicate `dataset_version`
   - `422` для contract-level rejection после parse/validation
-- Для `sheet_vitrina_v1` тот же entrypoint обслуживает ещё шесть узких surface:
+- Для `sheet_vitrina_v1` тот же entrypoint обслуживает narrow operator surface в двух блоках:
   - `POST /v1/sheet-vitrina-v1/refresh` = existing heavy server-side action
   - `POST /v1/sheet-vitrina-v1/load` = thin operator action, который пишет уже готовый snapshot в live sheet через existing bound Apps Script bridge
   - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
   - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result
   - `GET /v1/sheet-vitrina-v1/job` = cheap poll/read surface для live operator log и async action state
-  - `GET /sheet-vitrina-v1/operator` = simple repo-owned page с двумя explicit actions `Загрузить данные` / `Отправить данные`
+  - `GET /sheet-vitrina-v1/operator` = simple repo-owned page с top-level tabs `Обновление данных витрины` / `Расчёт поставок`
+  - `GET /v1/sheet-vitrina-v1/supply/factory-order/status` = cheap JSON status surface для bounded factory-order flow
+  - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/*.xlsx` = operator template downloads с русскими headers
+  - `POST /v1/sheet-vitrina-v1/supply/factory-order/upload/*` = server-side XLSX parse/validation/upload
+  - `POST /v1/sheet-vitrina-v1/supply/factory-order/calculate` = server-side factory-order calculation
+  - `GET /v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx` = operator-facing recommendation download
 - Внутри existing `POST /v1/sheet-vitrina-v1/refresh` live contour теперь допускает bounded server-local sync для `seller_funnel_snapshot` и `web_source_snapshot`:
   - сначала refresh проверяет, materialized ли exact-date `today_current` snapshot в local `wb-ai` read-side;
   - если exact-date snapshot отсутствует, refresh может вызвать server-local owner path `/opt/wb-web-bot` (`bot.runner_day`, `bot.runner_sales_funnel_day`) и затем `/opt/wb-ai/run_web_source_handoff.py`;
   - после этого refresh повторно валидирует exact-date local API availability и только потом читает live sources;
   - contour не открывает новый public producer route, не backfill-ит yesterday в today и остаётся bounded orchestration boundary поверх existing owner path.
 - Operator page не invent-ит новый heavy route: UI запускает existing heavy `POST /v1/sheet-vitrina-v1/refresh` отдельно от narrow `POST /v1/sheet-vitrina-v1/load`, а live progress читает только через cheap poll surface `GET /v1/sheet-vitrina-v1/job`.
+- Во второй tab `Расчёт поставок` current bounded scope materialize-ит только block `Заказ на фабрике`:
+  - settings fields остаются server-owned и валидируются на backend;
+  - `sales_avg_period_days` в current live contour truthfully bounded to `<= 7`, потому что authoritative `sales_funnel_history` source отвергает более глубокий lookback;
+  - все operator XLSX templates используют русские headers, а backend держит stable mapping `operator label -> internal field id`;
+  - `Остатки ФФ` требуют ровно одну строку на активный SKU и truthfully reject duplicate `nmId`;
+  - `Товары в пути от фабрики` и `Товары в пути от ФФ на Wildberries` трактуют одну строку как один отдельный inbound event;
+  - duplicate `nmId` в inbound templates допустимы и expected, если это разные ожидаемые поставки;
+  - planning horizon coverage суммирует только inbound events, чья `planned_arrival_date` попадает внутрь текущего расчётного горизонта;
+  - итоговые summary/result values (`Общее количество`, `Расчётный вес`, `Расчётный объём`, recommendation XLSX) остаются server-driven и не вычисляются в browser или sheet.
+- Current repo state не имел другого authoritative source для legacy parity term `FO_INBOUND_FF_TO_WB`, поэтому entrypoint получил narrow explicit upload contract `Товары в пути от ФФ на Wildberries`; silent drop этого члена формулы считается некорректным.
 - Operator page keeps narrow Russian chrome for operator-visible labels (`Загрузить данные`, `Отправить данные`, compact `Статус` / `Лог`, row-count labels, `Скачать лог`) without explanatory subtitle/subcopy про refresh/date defaults/temporal slots под заголовком или кнопкой.
 - Operator page добавляет один compact server-driven info block `Сервер и расписание`:
   - `Часовой пояс`

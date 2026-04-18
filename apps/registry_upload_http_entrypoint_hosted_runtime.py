@@ -24,6 +24,11 @@ if str(ROOT) not in sys.path:
 
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_COST_PRICE_UPLOAD_PATH,
+    DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
+    DEFAULT_FACTORY_ORDER_STATUS_PATH,
+    DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
+    DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH,
+    DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
     DEFAULT_SHEET_JOB_PATH,
     DEFAULT_SHEET_LOAD_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
@@ -221,6 +226,36 @@ def collect_public_surface(
                 f"{base_url}{route_paths['SHEET_VITRINA_HTTP_PATH']}",
                 as_of_date,
             ),
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
+            name="factory_order_status",
+            method="GET",
+            url=f"{base_url}{DEFAULT_FACTORY_ORDER_STATUS_PATH}",
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
+            name="factory_order_template_stock_ff",
+            method="GET",
+            url=f"{base_url}{DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH}",
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
+            name="factory_order_template_inbound_factory",
+            method="GET",
+            url=f"{base_url}{DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH}",
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
+            name="factory_order_template_inbound_ff_to_wb",
+            method="GET",
+            url=f"{base_url}{DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH}",
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
+            name="factory_order_recommendation",
+            method="GET",
+            url=f"{base_url}{DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH}",
             timeout_seconds=timeout_seconds,
         ),
     ]
@@ -563,6 +598,13 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Загрузить данные",
             "Отправить данные",
             "Скачать лог",
+            "Расчёт поставок",
+            "Заказ на фабрике",
+            "Скачать шаблон остатков ФФ",
+            "Скачать шаблон товаров в пути от фабрики",
+            "Скачать шаблон товаров в пути от ФФ на Wildberries",
+            "Рассчитать заказ на фабрике",
+            "Скачать рекомендацию",
             "Сервер и расписание",
             "Часовой пояс",
             "Автообновление",
@@ -581,6 +623,28 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "operator page shape ok"
             if evaluation["ok"]
             else f"expected 200 text/html with operator tokens, missing={missing_tokens}"
+        )
+        return evaluation
+
+    if route in {
+        "factory_order_template_stock_ff",
+        "factory_order_template_inbound_factory",
+        "factory_order_template_inbound_ff_to_wb",
+    }:
+        evaluation["ok"] = status == 200 and "spreadsheetml.sheet" in content_type
+        evaluation["detail"] = (
+            "factory-order template download route ok"
+            if evaluation["ok"]
+            else "expected 200 XLSX response for factory-order template route"
+        )
+        return evaluation
+
+    if route == "factory_order_recommendation" and status == 200:
+        evaluation["ok"] = "spreadsheetml.sheet" in content_type
+        evaluation["detail"] = (
+            "factory-order recommendation route returned XLSX"
+            if evaluation["ok"]
+            else "expected XLSX content-type for successful recommendation route"
         )
         return evaluation
 
@@ -632,6 +696,20 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         )
         return evaluation
 
+    if route == "factory_order_status":
+        evaluation["ok"], evaluation["detail"] = _validate_json_result(
+            status,
+            payload,
+            success_keys=[
+                "status",
+                "active_sku_count",
+                "coverage_contract_note",
+                "datasets",
+                "recommendation_download_path",
+            ],
+        )
+        return evaluation
+
     if route == "load_route":
         error_text = str(payload.get("error", "") or "")
         evaluation["ok"] = status == 404 and "unsupported path" in error_text
@@ -649,6 +727,16 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "job route is publicly published"
             if evaluation["ok"]
             else "expected JSON 404 operator job not found for job route probe"
+        )
+        return evaluation
+
+    if route == "factory_order_recommendation":
+        error_text = str(payload.get("error", "") or "")
+        evaluation["ok"] = status == 422 and bool(error_text)
+        evaluation["detail"] = (
+            "factory-order recommendation route published with truthful 422 before calculation"
+            if evaluation["ok"]
+            else "expected 200 XLSX or 422 JSON error for recommendation route"
         )
         return evaluation
 
@@ -838,8 +926,15 @@ def _collect(name, method, url, json_payload=None):
 
 results = [
     _collect("operator", "GET", PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_OPERATOR_UI_PATH"]),
+    _collect("load_route", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/load"),
+    _collect("job", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/job?job_id=hosted_runtime_probe"),
     _collect("status", "GET", _append_as_of_date(PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_STATUS_HTTP_PATH"], PAYLOAD["as_of_date"])),
     _collect("plan", "GET", _append_as_of_date(PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_HTTP_PATH"], PAYLOAD["as_of_date"])),
+    _collect("factory_order_status", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/status"),
+    _collect("factory_order_template_stock_ff", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"),
+    _collect("factory_order_template_inbound_factory", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/template/inbound-factory.xlsx"),
+    _collect("factory_order_template_inbound_ff_to_wb", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/template/inbound-ff-to-wb.xlsx"),
+    _collect("factory_order_recommendation", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"),
 ]
 if PAYLOAD["include_refresh"]:
     results.append(

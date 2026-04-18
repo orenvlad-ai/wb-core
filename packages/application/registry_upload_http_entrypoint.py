@@ -10,6 +10,7 @@ import threading
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
+from packages.application.factory_order_supply import FactoryOrderSupplyBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_load_bridge import load_sheet_vitrina_ready_snapshot_via_clasp
 from packages.business_time import (
@@ -65,6 +66,11 @@ class RegistryUploadHttpEntrypoint:
         self.sheet_plan_block = SheetVitrinaV1LivePlanBlock(runtime=self.runtime)
         self.sheet_load_runner = sheet_load_runner or load_sheet_vitrina_ready_snapshot_via_clasp
         self.operator_jobs = SheetVitrinaV1OperatorJobStore(timestamp_factory=self.activated_at_factory)
+        self.factory_order_supply_block = FactoryOrderSupplyBlock(
+            runtime=self.runtime,
+            now_factory=self.now_factory,
+            timestamp_factory=self.activated_at_factory,
+        )
 
     def handle_bundle_payload(self, payload: Mapping[str, Any]) -> RegistryUploadResult:
         return self.runtime.ingest_bundle(
@@ -125,6 +131,25 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_sheet_operator_job_text_request(self, job_id: str) -> tuple[str, str]:
         return self.operator_jobs.get_text(job_id)
+
+    def handle_factory_order_status_request(self) -> dict[str, Any]:
+        payload = asdict(self.factory_order_supply_block.build_status())
+        payload["recommendation_download_path"] = "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
+        return payload
+
+    def handle_factory_order_template_request(self, dataset_type: str) -> tuple[bytes, str]:
+        return self.factory_order_supply_block.build_template(dataset_type)
+
+    def handle_factory_order_upload_request(self, dataset_type: str, workbook_bytes: bytes) -> dict[str, Any]:
+        return asdict(self.factory_order_supply_block.upload_dataset(dataset_type, workbook_bytes))
+
+    def handle_factory_order_calculate_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        result = asdict(self.factory_order_supply_block.calculate(payload))
+        result["recommendation_download_path"] = "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
+        return result
+
+    def handle_factory_order_recommendation_request(self) -> tuple[bytes, str]:
+        return self.factory_order_supply_block.download_recommendation()
 
     def _run_sheet_auto_update(
         self,

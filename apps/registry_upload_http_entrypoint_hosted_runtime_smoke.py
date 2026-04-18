@@ -129,6 +129,16 @@ def main() -> None:
                 raise AssertionError("status before refresh must stay 422 ready snapshot missing")
             if route_map["plan"]["http_status"] != 422:
                 raise AssertionError("plan before refresh must stay 422 ready snapshot missing")
+            if route_map["factory_order_status"]["http_status"] != 200:
+                raise AssertionError("factory-order status route must be publicly readable")
+            if route_map["factory_order_template_stock_ff"]["http_status"] != 200:
+                raise AssertionError("stock_ff template route must be publicly readable")
+            if route_map["factory_order_template_inbound_factory"]["http_status"] != 200:
+                raise AssertionError("inbound_factory template route must be publicly readable")
+            if route_map["factory_order_template_inbound_ff_to_wb"]["http_status"] != 200:
+                raise AssertionError("inbound_ff_to_wb template route must be publicly readable")
+            if route_map["factory_order_recommendation"]["http_status"] != 422:
+                raise AssertionError("recommendation route without calculation must stay truthful 422")
             if route_map["refresh"]["http_status"] != 200:
                 raise AssertionError("refresh must succeed during public probe")
 
@@ -155,6 +165,7 @@ def main() -> None:
             print(f"print_plan: ok -> {print_plan['deploy_plan']['target_id']}")
             print(f"deploy_dry_run: ok -> {deploy_dry_run['commands']['restart'][-1]}")
             print(f"public_probe_refresh: ok -> {route_map['refresh']['http_status']}")
+            print(f"factory_order_status: ok -> {route_map['factory_order_status']['http_status']}")
             print(f"loopback_probe_status: ok -> {loopback_routes['status']['http_status']}")
         finally:
             process.terminate()

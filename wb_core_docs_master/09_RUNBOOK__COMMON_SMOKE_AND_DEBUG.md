@@ -52,6 +52,7 @@ python3 apps/registry_upload_http_entrypoint_smoke.py
 python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py
 python3 apps/cost_price_upload_http_entrypoint_smoke.py
 python3 apps/official_api_token_path_smoke.py
+python3 apps/sales_funnel_history_block_batching_smoke.py
 python3 apps/sheet_vitrina_v1_business_time_smoke.py
 python3 apps/stocks_block_smoke.py
 python3 apps/stocks_block_region_mapping_smoke.py
@@ -63,6 +64,8 @@ python3 apps/sheet_vitrina_v1_registry_seed_v3_bootstrap_smoke.py
 python3 apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py
 python3 apps/sheet_vitrina_v1_refresh_read_split_smoke.py
 python3 apps/sheet_vitrina_v1_operator_load_smoke.py
+python3 apps/factory_order_supply_smoke.py
+python3 apps/sheet_vitrina_v1_factory_order_http_smoke.py
 python3 apps/sheet_vitrina_v1_web_source_current_sync_smoke.py
 python3 apps/sheet_vitrina_v1_stocks_refresh_smoke.py
 python3 apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py
@@ -114,6 +117,15 @@ Expected routes:
 - `GET /v1/sheet-vitrina-v1/status`
 - `GET /v1/sheet-vitrina-v1/job`
 - `GET /sheet-vitrina-v1/operator`
+- `GET /v1/sheet-vitrina-v1/supply/factory-order/status`
+- `GET /v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx`
+- `GET /v1/sheet-vitrina-v1/supply/factory-order/template/inbound-factory.xlsx`
+- `GET /v1/sheet-vitrina-v1/supply/factory-order/template/inbound-ff-to-wb.xlsx`
+- `POST /v1/sheet-vitrina-v1/supply/factory-order/upload/stock-ff`
+- `POST /v1/sheet-vitrina-v1/supply/factory-order/upload/inbound-factory`
+- `POST /v1/sheet-vitrina-v1/supply/factory-order/upload/inbound-ff-to-wb`
+- `POST /v1/sheet-vitrina-v1/supply/factory-order/calculate`
+- `GET /v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx`
 
 ## Live GAS checks
 
@@ -189,6 +201,10 @@ Operational rule:
   - timer = `wb-core-sheet-vitrina-refresh.timer`
   - schedule = `11:00 Asia/Yekaterinburg` = `06:00 UTC` in current systemd host timezone
   - daily timer target = `POST /v1/sheet-vitrina-v1/refresh` with payload flag `auto_load=true`, so the automatic cycle truthfully finishes as `refresh + load to live sheet`
+- current bounded `factory-order` supply contour is server/operator-only:
+  - live closure still requires deploy + loopback/public probe + one controlled download/upload/calculate/download scenario if those routes changed;
+  - sheet/GAS verify stays `not in scope`, пока change не затрагивает bound Apps Script или live sheet write path.
+  - current live authoritative sales-history seam bounds `sales_avg_period_days` to `<= 7`; values above that must truthfully fail validation instead of being silently approximated.
 - route change не считается complete, пока public probe не подтвердил expected content type / response shape.
 - если change затрагивает operator `load` или live sheet write path, closure дополнительно требует `clasp push` и sheet verify по `POST /v1/sheet-vitrina-v1/load` или equivalent existing Apps Script menu flow.
 - если runner уже materialized, но `ssh_destination / target_dir / service_name / restart_command / environment_file` или access отсутствуют, это фиксируется как точный blocker, а не как vague ops-gap.

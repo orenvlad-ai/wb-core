@@ -579,6 +579,106 @@ class RegistryUploadDbBackedRuntime:
                 return None, None
             return _deserialize_temporal_source_payload(row["payload_json"]), row["captured_at"]
 
+    def save_factory_order_dataset_state(
+        self,
+        *,
+        dataset_type: str,
+        uploaded_at: str,
+        rows: list[Mapping[str, Any]],
+    ) -> None:
+        _validate_timestamp(uploaded_at, field_name="uploaded_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_factory_order_dataset_state(
+                    dataset_type,
+                    uploaded_at,
+                    row_count,
+                    rows_json
+                )
+                VALUES(?, ?, ?, ?)
+                ON CONFLICT(dataset_type) DO UPDATE SET
+                    uploaded_at = excluded.uploaded_at,
+                    row_count = excluded.row_count,
+                    rows_json = excluded.rows_json
+                """,
+                (
+                    dataset_type,
+                    uploaded_at,
+                    len(rows),
+                    json.dumps(list(rows), ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+
+    def load_factory_order_dataset_state(self, dataset_type: str) -> dict[str, Any] | None:
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT uploaded_at, row_count, rows_json
+                FROM sheet_vitrina_v1_factory_order_dataset_state
+                WHERE dataset_type = ?
+                """,
+                (dataset_type,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "dataset_type": dataset_type,
+                "uploaded_at": row["uploaded_at"],
+                "row_count": int(row["row_count"]),
+                "rows": json.loads(row["rows_json"]),
+            }
+
+    def save_factory_order_result_state(
+        self,
+        *,
+        calculated_at: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        _validate_timestamp(calculated_at, field_name="calculated_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_factory_order_result_state(
+                    slot,
+                    calculated_at,
+                    result_json
+                )
+                VALUES(1, ?, ?)
+                ON CONFLICT(slot) DO UPDATE SET
+                    calculated_at = excluded.calculated_at,
+                    result_json = excluded.result_json
+                """,
+                (
+                    calculated_at,
+                    json.dumps(dict(payload), ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+
+    def load_factory_order_result_state(self) -> dict[str, Any] | None:
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT calculated_at, result_json
+                FROM sheet_vitrina_v1_factory_order_result_state
+                WHERE slot = 1
+                """
+            ).fetchone()
+            if row is None:
+                return None
+            payload = json.loads(row["result_json"])
+            if isinstance(payload, dict):
+                payload.setdefault("calculated_at", row["calculated_at"])
+            return payload
+
     def _collect_validation_errors(self, bundle: RegistryUploadBundleV1, activated_at: str) -> list[str]:
         errors: list[str] = []
         try:
@@ -1177,5 +1277,18 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS temporal_source_snapshots_by_source_date
         ON temporal_source_snapshots(source_key, snapshot_date);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_factory_order_dataset_state (
+            dataset_type TEXT PRIMARY KEY,
+            uploaded_at TEXT NOT NULL,
+            row_count INTEGER NOT NULL,
+            rows_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_factory_order_result_state (
+            slot INTEGER PRIMARY KEY CHECK (slot = 1),
+            calculated_at TEXT NOT NULL,
+            result_json TEXT NOT NULL
+        );
         """
     )

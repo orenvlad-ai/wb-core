@@ -1,5 +1,6 @@
 """Адаптерная граница блока sales funnel history."""
 
+from datetime import date, timedelta
 import json
 import time
 from pathlib import Path
@@ -39,6 +40,7 @@ class HttpBackedSalesFunnelHistorySource:
         base_url_env_var: str = "WB_SELLER_ANALYTICS_API_BASE_URL",
         timeout_seconds: float = 30.0,
         max_nm_ids_per_request: int = 20,
+        max_days_per_request: int = 7,
         max_requests_per_window: int = 3,
         rate_limit_window_seconds: float = 60.0,
         max_retries_on_429: int = 2,
@@ -49,6 +51,7 @@ class HttpBackedSalesFunnelHistorySource:
         self._base_url_env_var = base_url_env_var
         self._default_timeout_seconds = timeout_seconds
         self._max_nm_ids_per_request = max_nm_ids_per_request
+        self._max_days_per_request = max_days_per_request
         self._max_requests_per_window = max_requests_per_window
         self._rate_limit_window_seconds = rate_limit_window_seconds
         self._max_retries_on_429 = max_retries_on_429
@@ -109,18 +112,19 @@ class HttpBackedSalesFunnelHistorySource:
     ) -> Any:
         merged_payload: list[Any] = []
         request_timestamps: list[float] = []
-        for batch_nm_ids in self._iter_nm_id_batches(nm_ids):
-            payload = self._post_history_batch_with_retry(
-                base_url=base_url,
-                token=token,
-                date_from=date_from,
-                date_to=date_to,
-                nm_ids=batch_nm_ids,
-                timeout_seconds=timeout_seconds,
-                request_timestamps=request_timestamps,
-            )
-            if isinstance(payload, list):
-                merged_payload.extend(payload)
+        for batch_date_from, batch_date_to in self._iter_date_batches(date_from, date_to):
+            for batch_nm_ids in self._iter_nm_id_batches(nm_ids):
+                payload = self._post_history_batch_with_retry(
+                    base_url=base_url,
+                    token=token,
+                    date_from=batch_date_from,
+                    date_to=batch_date_to,
+                    nm_ids=batch_nm_ids,
+                    timeout_seconds=timeout_seconds,
+                    request_timestamps=request_timestamps,
+                )
+                if isinstance(payload, list):
+                    merged_payload.extend(payload)
         return merged_payload
 
     def _post_history_batch_with_retry(
@@ -197,6 +201,21 @@ class HttpBackedSalesFunnelHistorySource:
             list(nm_ids[index : index + self._max_nm_ids_per_request])
             for index in range(0, len(nm_ids), self._max_nm_ids_per_request)
         ]
+
+    def _iter_date_batches(self, date_from: str, date_to: str) -> list[tuple[str, str]]:
+        start = date.fromisoformat(date_from)
+        end = date.fromisoformat(date_to)
+        if end < start:
+            raise ValueError("date_to must be >= date_from")
+        if self._max_days_per_request <= 0:
+            return [(date_from, date_to)]
+        batches: list[tuple[str, str]] = []
+        current = start
+        while current <= end:
+            batch_end = min(current + timedelta(days=self._max_days_per_request - 1), end)
+            batches.append((current.isoformat(), batch_end.isoformat()))
+            current = batch_end + timedelta(days=1)
+        return batches
 
     def _wait_for_request_slot(self, request_timestamps: list[float]) -> None:
         if self._max_requests_per_window <= 0 or self._rate_limit_window_seconds <= 0:

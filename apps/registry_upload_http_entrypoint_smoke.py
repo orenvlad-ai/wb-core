@@ -26,6 +26,15 @@ from apps.registry_upload_smoke_support import (
     write_runtime_registry_fixture,
 )
 from packages.adapters.registry_upload_http_entrypoint import (
+    DEFAULT_FACTORY_ORDER_CALCULATE_PATH,
+    DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
+    DEFAULT_FACTORY_ORDER_STATUS_PATH,
+    DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
+    DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH,
+    DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
+    DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FACTORY_PATH,
+    DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FF_TO_WB_PATH,
+    DEFAULT_FACTORY_ORDER_UPLOAD_STOCK_FF_PATH,
     DEFAULT_SHEET_JOB_PATH,
     DEFAULT_SHEET_LOAD_PATH,
     DEFAULT_SHEET_PLAN_PATH,
@@ -123,6 +132,16 @@ def main() -> None:
                 raise AssertionError("operator UI must keep the compact Russian chrome")
             if "Скачать лог" not in operator_ui_html or "max-height: 420px" not in operator_ui_html:
                 raise AssertionError("operator UI must expose log download control and fixed-height log viewport")
+            if "Расчёт поставок" not in operator_ui_html or "Заказ на фабрике" not in operator_ui_html:
+                raise AssertionError("operator UI must expose the new top-level factory-order tab")
+            if (
+                "Скачать шаблон остатков ФФ" not in operator_ui_html
+                or "Скачать шаблон товаров в пути от фабрики" not in operator_ui_html
+                or "Скачать шаблон товаров в пути от ФФ на Wildberries" not in operator_ui_html
+                or "Рассчитать заказ на фабрике" not in operator_ui_html
+                or "Скачать рекомендацию" not in operator_ui_html
+            ):
+                raise AssertionError("operator UI must expose the compact factory-order action surface")
             if "Строки DATA_VITRINA" not in operator_ui_html or "Строки STATUS" not in operator_ui_html:
                 raise AssertionError("operator UI must surface row-count fields with Russian labels")
             if "Сервер и расписание" not in operator_ui_html or "Часовой пояс" not in operator_ui_html:
@@ -150,6 +169,15 @@ def main() -> None:
                 "load_path": DEFAULT_SHEET_LOAD_PATH,
                 "status_path": config.sheet_status_path,
                 "job_path": DEFAULT_SHEET_JOB_PATH,
+                "factory_order_status_path": DEFAULT_FACTORY_ORDER_STATUS_PATH,
+                "factory_order_template_stock_ff_path": DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
+                "factory_order_template_inbound_factory_path": DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
+                "factory_order_template_inbound_ff_to_wb_path": DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH,
+                "factory_order_upload_stock_ff_path": DEFAULT_FACTORY_ORDER_UPLOAD_STOCK_FF_PATH,
+                "factory_order_upload_inbound_factory_path": DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FACTORY_PATH,
+                "factory_order_upload_inbound_ff_to_wb_path": DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FF_TO_WB_PATH,
+                "factory_order_calculate_path": DEFAULT_FACTORY_ORDER_CALCULATE_PATH,
+                "factory_order_recommendation_path": DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
             }:
                 raise AssertionError("operator UI config must expose existing refresh/status paths")
 

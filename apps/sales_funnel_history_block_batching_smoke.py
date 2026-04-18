@@ -126,6 +126,41 @@ def _check_chunking_and_merge() -> None:
     print("chunking-33: ok -> 2 serial POST, 20/13, merged result preserved")
 
 
+def _check_date_window_chunking_and_merge() -> None:
+    clock = FakeClock()
+    source = RecordingSalesFunnelHistorySource(
+        responses=[
+            _build_payload([210183919], date="2026-04-01"),
+            _build_payload([210183919], date="2026-04-08"),
+            _build_payload([210183919], date="2026-04-15"),
+        ],
+        clock=clock,
+        max_days_per_request=7,
+    )
+    block = SalesFunnelHistoryBlock(source)
+    result = asdict(
+        block.execute(
+            SalesFunnelHistoryRequest(
+                snapshot_type="sales_funnel_history",
+                date_from="2026-04-01",
+                date_to="2026-04-15",
+                nm_ids=[210183919],
+            )
+        )
+    )
+    expected_windows = [
+        ("2026-04-01", "2026-04-07"),
+        ("2026-04-08", "2026-04-14"),
+        ("2026-04-15", "2026-04-15"),
+    ]
+    actual_windows = [(str(call["date_from"]), str(call["date_to"])) for call in source.calls]
+    if actual_windows != expected_windows:
+        raise AssertionError(f"unexpected date chunk windows: {actual_windows}")
+    if result["result"]["count"] != 3:
+        raise AssertionError(f"unexpected merged count after date chunking: {result['result']['count']}")
+    print("date-window-15: ok -> 3 serial POST, 7/7/1 day windows, merged result preserved")
+
+
 def _check_rate_limit_pacing() -> None:
     clock = FakeClock()
     nm_ids = list(range(210184000, 210184061))
@@ -226,6 +261,7 @@ def _check_retry_exhaustion() -> None:
 def main() -> None:
     os.environ.setdefault(DEFAULT_WB_API_TOKEN_ENV, "stub-token")
     _check_chunking_and_merge()
+    _check_date_window_chunking_and_merge()
     _check_rate_limit_pacing()
     _check_retry_after_429()
     _check_retry_exhaustion()

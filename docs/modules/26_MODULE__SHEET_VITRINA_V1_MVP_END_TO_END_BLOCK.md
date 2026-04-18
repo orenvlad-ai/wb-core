@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-26-SHEET-VITRINA-V1-MVP-END-TO-END-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `sheet_vitrina_v1_mvp_end_to_end_block`."
-scope: "Первый bounded end-to-end alignment для `sheet_vitrina_v1`: uploaded compact bootstrap `CONFIG / METRICS / FORMULAS`, sibling `COST_PRICE` upload contour, сохранённый upload trigger, explicit refresh в repo-owned date-aware ready snapshot, separate load этого snapshot в live sheet, server-side cost overlay в operator-facing rows, cheap read этого snapshot в `DATA_VITRINA` и narrow server-side operator page без возврата heavy logic в Google Sheets."
+scope: "Первый bounded end-to-end alignment для `sheet_vitrina_v1`: uploaded compact bootstrap `CONFIG / METRICS / FORMULAS`, sibling `COST_PRICE` upload contour, сохранённый upload trigger, explicit refresh в repo-owned date-aware ready snapshot, separate load этого snapshot в live sheet, server-side cost overlay в operator-facing rows, cheap read этого snapshot в `DATA_VITRINA` и narrow server-side operator page без возврата heavy logic в Google Sheets, дополненная bounded factory-order supply tab без переноса расчётной логики в Apps Script."
 source_basis:
   - "migration/90_registry_upload_http_entrypoint.md"
   - "migration/91_sheet_vitrina_v1_registry_upload_trigger.md"
@@ -17,7 +17,10 @@ related_modules:
   - "gas/sheet_vitrina_v1/RegistryUploadTrigger.gs"
   - "gas/sheet_vitrina_v1/PresentationPass.gs"
   - "packages/contracts/cost_price_upload.py"
+  - "packages/contracts/factory_order_supply.py"
   - "packages/application/cost_price_upload.py"
+  - "packages/application/factory_order_supply.py"
+  - "packages/application/simple_xlsx.py"
   - "packages/application/sheet_vitrina_v1_live_plan.py"
   - "packages/application/sheet_vitrina_v1.py"
   - "packages/application/sheet_vitrina_v1_load_bridge.py"
@@ -42,6 +45,15 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/status"
   - "GET /v1/sheet-vitrina-v1/job"
   - "GET /sheet-vitrina-v1/operator"
+  - "GET /v1/sheet-vitrina-v1/supply/factory-order/status"
+  - "GET /v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"
+  - "GET /v1/sheet-vitrina-v1/supply/factory-order/template/inbound-factory.xlsx"
+  - "GET /v1/sheet-vitrina-v1/supply/factory-order/template/inbound-ff-to-wb.xlsx"
+  - "POST /v1/sheet-vitrina-v1/supply/factory-order/upload/stock-ff"
+  - "POST /v1/sheet-vitrina-v1/supply/factory-order/upload/inbound-factory"
+  - "POST /v1/sheet-vitrina-v1/supply/factory-order/upload/inbound-ff-to-wb"
+  - "POST /v1/sheet-vitrina-v1/supply/factory-order/calculate"
+  - "GET /v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
 related_runners:
   - "apps/cost_price_upload_http_entrypoint_smoke.py"
   - "apps/sheet_vitrina_v1_cost_price_upload_smoke.py"
@@ -52,6 +64,8 @@ related_runners:
   - "apps/sheet_vitrina_v1_web_source_current_sync_smoke.py"
   - "apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py"
   - "apps/sheet_vitrina_v1_operator_load_smoke.py"
+  - "apps/factory_order_supply_smoke.py"
+  - "apps/sheet_vitrina_v1_factory_order_http_smoke.py"
   - "apps/web_source_temporal_adapter_smoke.py"
   - "apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py"
   - "apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py"
@@ -67,7 +81,7 @@ related_docs:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под EKT-aligned date-aware ready snapshot, authoritative `COST_PRICE` overlay, bounded current-day web-source sync, daily live refresh timer, separate operator `refresh`/`load` actions и repo-owned hosted deploy contract: heavy build остаётся в `POST /v1/sheet-vitrina-v1/refresh`, persisted plan materialize-ит `yesterday_closed + today_current` по `Asia/Yekaterinburg`, `GET /v1/sheet-vitrina-v1/plan`, `POST /v1/sheet-vitrina-v1/load` и existing Apps Script `loadSheetVitrinaTable` читают только этот persisted plan, proxy-profit rows / cost diagnostics resolve server-side from uploaded `COST_PRICE` by `group + max(effective_from <= slot_date)`, operator page читает timezone/scheduler facts через `server_context`, а live progress/log идёт через narrow async job poll без нового orchestration platform."
+update_note: "Обновлён под EKT-aligned date-aware ready snapshot, authoritative `COST_PRICE` overlay, bounded current-day web-source sync, daily live refresh timer, separate operator `refresh`/`load` actions, repo-owned hosted deploy contract и первую bounded supply capability `Заказ на фабрике`: heavy build остаётся в `POST /v1/sheet-vitrina-v1/refresh`, persisted plan materialize-ит `yesterday_closed + today_current` по `Asia/Yekaterinburg`, `GET /v1/sheet-vitrina-v1/plan`, `POST /v1/sheet-vitrina-v1/load` и existing Apps Script `loadSheetVitrinaTable` читают только этот persisted plan, proxy-profit rows / cost diagnostics resolve server-side from uploaded `COST_PRICE` by `group + max(effective_from <= slot_date)`, а factory-order tab на той же operator page даёт server-owned XLSX template/upload/calculate/download flow с русскими headers и multi-shipment inbound events без возврата heavy logic в GAS."
 ---
 
 # 1. Идентификатор и статус
@@ -115,6 +129,17 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - `Автообновление` в этом block должно описывать полный daily auto cycle, а не только schedule time: current truthful wording = `Ежедневно в 11:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
   - тот же block additionally показывает `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление` из backend/status surface
   - log block остаётся fixed-height scrollable viewport с title `Лог` и одной bounded action `Скачать лог`
+- Канонический operator-facing supply surface в том же repo-owned page:
+  - top-level tab `Расчёт поставок`
+  - current bounded block `Заказ на фабрике`
+  - explicit actions `Скачать шаблон остатков ФФ`, `Загрузить остатки ФФ`, `Скачать шаблон товаров в пути от фабрики`, `Загрузить товары в пути от фабрики`, `Скачать шаблон товаров в пути от ФФ на Wildberries`, `Загрузить товары в пути от ФФ на Wildberries`, `Рассчитать заказ на фабрике`, `Скачать рекомендацию`
+  - server-side settings validation for `prod_lead_time_days`, `lead_time_factory_to_ff_days`, `lead_time_ff_to_wb_days`, `safety_days_mp`, `safety_days_ff`, `order_batch_qty`, `report_date_override`, `sales_avg_period_days`
+  - current live authoritative bound for `sales_avg_period_days` = `<= 7`; larger values are truthfully rejected instead of producing a fake recommendation
+  - operator XLSX templates stay compact and Russian-headed; backend keeps stable internal mapping
+  - `Остатки ФФ` require one row per active SKU and reject duplicate `nmId`
+  - inbound templates allow duplicate `nmId`; one row = one separate planned delivery
+  - factory-order coverage includes `stock_total`, uploaded `stock_ff`, inbound from factory to FF inside horizon and the parity-critical uploaded inbound `ФФ -> Wildberries`
+  - result surface gives both downloadable XLSX recommendation and the same `Общее количество` / `Расчётный вес` / `Расчётный объём` summary directly in UI
 - Канонический prepare output:
   - `CONFIG` с uploaded compact rows
   - `METRICS` с uploaded compact rows
@@ -193,6 +218,10 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - выбирать latest `effective_from <= slot_date`;
   - не рисовать fake values при empty/missing/unmatched dataset и честно surface-ить coverage в `STATUS.cost_price[*]`.
 - Таблица остаётся thin shell: ни `load`, ни bound Apps Script не пытаются локально угадывать, какая дата у source values.
+- Новый factory-order contour тоже остаётся thin shell:
+  - operator page only orchestrates download/upload/calculate/download actions;
+  - XLSX files carry only operator-facing Russian columns, not hidden technical truth;
+  - all validation, active-SKU expansion, demand averaging and recommendation math live server-side.
 - `POST /v1/sheet-vitrina-v1/load` тоже остаётся thin bridge:
   - сначала server contour читает уже persisted ready snapshot;
   - затем передаёт его в existing bound Apps Script bridge;
