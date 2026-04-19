@@ -118,8 +118,13 @@ def main() -> None:
             if operator_status != 200:
                 raise AssertionError(f"operator page must return 200, got {operator_status}")
             for expected in (
+                "Обновление данных витрины",
+                "Расчёт поставок",
+                "Отчёты",
                 "Ежедневные отчёты",
                 "Total Order Sum",
+                "Негативные факторы",
+                "Позитивные факторы",
                 "Загрузить данные",
                 "Отправить данные",
                 "Сервер и расписание",

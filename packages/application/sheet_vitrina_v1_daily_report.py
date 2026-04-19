@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from statistics import median
 from typing import Any, Callable
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
@@ -63,6 +64,17 @@ class SnapshotSlotView:
     closed_date: str
     total_values: dict[str, float | None]
     sku_values: dict[int, dict[str, float | None]]
+
+
+@dataclass(frozen=True)
+class FactorObservation:
+    factor_key: str
+    label: str
+    direction: str
+    aggregate_kind: str
+    pct_change: float | None = None
+    delta_value: float | None = None
+    current_value: float | None = None
 
 
 class SheetVitrinaV1DailyReportBlock:
@@ -139,16 +151,11 @@ class SheetVitrinaV1DailyReportBlock:
             if item.enabled
         }
 
-        comparable_metrics = [
-            _build_numeric_change_item(
-                metric_key=metric_key,
-                label=metric_labels.get(metric_key, metric_key),
-                newer_value=newer_view.total_values.get(metric_key),
-                older_value=older_view.total_values.get(metric_key),
-            )
-            for metric_key in TOTAL_METRIC_POOL_KEYS
-        ]
-        comparable_metrics = [item for item in comparable_metrics if item is not None]
+        metric_ranking = _build_metric_ranking_summary(
+            newer_view=newer_view,
+            older_view=older_view,
+            metric_labels=metric_labels,
+        )
 
         sku_changes = []
         for nm_id, config_item in sorted(config_by_nm_id.items(), key=lambda item: item[1].display_order):
@@ -179,8 +186,9 @@ class SheetVitrinaV1DailyReportBlock:
                 older_value=older_view.total_values.get(TOTAL_ORDER_SUM_KEY),
                 allow_zero_baseline=True,
             ),
-            "top_metric_declines": _top_negative_items(comparable_metrics, limit=5),
-            "top_metric_growth": _top_positive_items(comparable_metrics, limit=5),
+            "top_metric_declines": metric_ranking["top_metric_declines"],
+            "top_metric_growth": metric_ranking["top_metric_growth"],
+            "metric_ranking_diagnostics": metric_ranking["diagnostics"],
             "top_sku_order_sum_declines": top_decline_skus,
             "top_sku_order_sum_growth": top_growth_skus,
             "top_negative_factors": _summarize_factors(
@@ -197,7 +205,7 @@ class SheetVitrinaV1DailyReportBlock:
                 metric_labels=metric_labels,
                 direction="positive",
             ),
-            "comparable_metric_count": len(comparable_metrics),
+            "comparable_metric_count": metric_ranking["diagnostics"]["present_after_none_filter_count"],
             "comparable_sku_count": len(sku_changes),
         }
         return payload
@@ -337,6 +345,106 @@ def _top_positive_items(items: list[dict[str, Any]], *, limit: int) -> list[dict
     return comparable[:limit]
 
 
+def _build_metric_ranking_summary(
+    *,
+    newer_view: SnapshotSlotView,
+    older_view: SnapshotSlotView,
+    metric_labels: dict[str, str],
+) -> dict[str, Any]:
+    raw_candidates: list[dict[str, Any]] = []
+    comparable_metrics: list[dict[str, Any]] = []
+    diagnostics_excluded_from_declines: list[dict[str, Any]] = []
+    flat_or_unknown_count = 0
+    positive_count = 0
+    negative_count = 0
+
+    for metric_key in TOTAL_METRIC_POOL_KEYS:
+        label = metric_labels.get(metric_key, metric_key)
+        item = _build_numeric_change_item(
+            metric_key=metric_key,
+            label=label,
+            newer_value=newer_view.total_values.get(metric_key),
+            older_value=older_view.total_values.get(metric_key),
+        )
+        raw_candidates.append(
+            {
+                "metric_key": metric_key,
+                "label": label,
+                "item": item,
+                "newer_value": newer_view.total_values.get(metric_key),
+                "older_value": older_view.total_values.get(metric_key),
+            }
+        )
+        if item is None:
+            diagnostics_excluded_from_declines.append(
+                {
+                    "metric_key": metric_key,
+                    "label": label,
+                    "reason": "missing_both_closed_day_values",
+                    "newer_value": None,
+                    "older_value": None,
+                    "pct_change": None,
+                }
+            )
+            continue
+        comparable_metrics.append(item)
+        pct_change = item.get("pct_change")
+        if isinstance(pct_change, (int, float)):
+            if pct_change < -EPS:
+                negative_count += 1
+                continue
+            if pct_change > EPS:
+                positive_count += 1
+                diagnostics_excluded_from_declines.append(
+                    {
+                        "metric_key": metric_key,
+                        "label": label,
+                        "reason": "positive_pct_change",
+                        "newer_value": item.get("newer_value"),
+                        "older_value": item.get("older_value"),
+                        "pct_change": pct_change,
+                    }
+                )
+                continue
+            flat_or_unknown_count += 1
+            diagnostics_excluded_from_declines.append(
+                {
+                    "metric_key": metric_key,
+                    "label": label,
+                    "reason": "flat_pct_change",
+                    "newer_value": item.get("newer_value"),
+                    "older_value": item.get("older_value"),
+                    "pct_change": pct_change,
+                }
+            )
+            continue
+
+        flat_or_unknown_count += 1
+        diagnostics_excluded_from_declines.append(
+            {
+                "metric_key": metric_key,
+                "label": label,
+                "reason": "missing_valid_day_over_day_pct",
+                "newer_value": item.get("newer_value"),
+                "older_value": item.get("older_value"),
+                "pct_change": None,
+            }
+        )
+
+    return {
+        "top_metric_declines": _top_negative_items(comparable_metrics, limit=5),
+        "top_metric_growth": _top_positive_items(comparable_metrics, limit=5),
+        "diagnostics": {
+            "raw_candidate_count": len(raw_candidates),
+            "present_after_none_filter_count": len(comparable_metrics),
+            "negative_count": negative_count,
+            "positive_count": positive_count,
+            "flat_or_unknown_count": flat_or_unknown_count,
+            "excluded_from_declines": diagnostics_excluded_from_declines,
+        },
+    }
+
+
 def _summarize_factors(
     *,
     sku_items: list[dict[str, Any]],
@@ -345,42 +453,47 @@ def _summarize_factors(
     metric_labels: dict[str, str],
     direction: str,
 ) -> list[dict[str, Any]]:
-    counts: dict[str, int] = {}
+    grouped: dict[str, list[FactorObservation]] = {}
     sample_size = len(sku_items)
     for item in sku_items:
         nm_id = int(item["nm_id"])
-        factor_labels = _collect_factor_labels(
+        observations = _collect_factor_observations(
             nm_id=nm_id,
             newer_view=newer_view,
             older_view=older_view,
             metric_labels=metric_labels,
             direction=direction,
         )
-        for label in factor_labels:
-            counts[label] = counts.get(label, 0) + 1
-    ranked = sorted(
-        counts.items(),
-        key=lambda item: (-item[1], _factor_priority(item[0], direction=direction), item[0]),
-    )
-    return [
-        {
-            "label": label,
-            "count": count,
-            "sample_size": sample_size,
-        }
-        for label, count in ranked[:5]
+        for observation in observations:
+            grouped.setdefault(observation.factor_key, []).append(observation)
+
+    ranked = [
+        _build_factor_summary(
+            observations=observations,
+            sample_size=sample_size,
+        )
+        for observations in grouped.values()
     ]
+    ranked.sort(
+        key=lambda item: (
+            -int(item["matched_sku_count"]),
+            -float(item["aggregate_sort_value"]),
+            _factor_priority(str(item["label"]), direction=str(item["direction"])),
+            str(item["label"]),
+        )
+    )
+    return ranked
 
 
-def _collect_factor_labels(
+def _collect_factor_observations(
     *,
     nm_id: int,
     newer_view: SnapshotSlotView,
     older_view: SnapshotSlotView,
     metric_labels: dict[str, str],
     direction: str,
-) -> list[str]:
-    labels: list[str] = []
+) -> list[FactorObservation]:
+    observations: list[FactorObservation] = []
     newer_sku = newer_view.sku_values.get(nm_id, {})
     older_sku = older_view.sku_values.get(nm_id, {})
     for metric_key in FACTOR_DIRECTIONAL_METRIC_KEYS:
@@ -388,29 +501,162 @@ def _collect_factor_labels(
         older_value = older_sku.get(metric_key)
         if newer_value is None or older_value is None:
             continue
+        pct_change = _pct_change(newer=newer_value, older=older_value, allow_zero_baseline=False)
+        if pct_change is None:
+            continue
         if direction == "negative" and newer_value < older_value - EPS:
-            labels.append(f"{metric_labels.get(metric_key, metric_key)} вниз")
+            observations.append(
+                FactorObservation(
+                    factor_key=f"metric:{metric_key}:down",
+                    label=metric_labels.get(metric_key, metric_key),
+                    direction="down",
+                    aggregate_kind="pct_change",
+                    pct_change=pct_change,
+                    delta_value=newer_value - older_value,
+                    current_value=newer_value,
+                )
+            )
         elif direction == "positive" and newer_value > older_value + EPS:
-            labels.append(f"{metric_labels.get(metric_key, metric_key)} вверх")
+            observations.append(
+                FactorObservation(
+                    factor_key=f"metric:{metric_key}:up",
+                    label=metric_labels.get(metric_key, metric_key),
+                    direction="up",
+                    aggregate_kind="pct_change",
+                    pct_change=pct_change,
+                    delta_value=newer_value - older_value,
+                    current_value=newer_value,
+                )
+            )
 
     newer_price = newer_sku.get("price_seller_discounted")
     older_price = older_sku.get("price_seller_discounted")
     if newer_price is not None and older_price is not None:
+        price_pct_change = _pct_change(newer=newer_price, older=older_price, allow_zero_baseline=False)
         if direction == "negative" and newer_price > older_price + EPS:
-            labels.append("Цена вверх")
+            observations.append(
+                FactorObservation(
+                    factor_key="price_seller_discounted:up",
+                    label="Цена",
+                    direction="up",
+                    aggregate_kind="price_change",
+                    pct_change=price_pct_change,
+                    delta_value=newer_price - older_price,
+                    current_value=newer_price,
+                )
+            )
         elif direction == "positive" and newer_price < older_price - EPS:
-            labels.append("Цена вниз")
+            observations.append(
+                FactorObservation(
+                    factor_key="price_seller_discounted:down",
+                    label="Цена",
+                    direction="down",
+                    aggregate_kind="price_change",
+                    pct_change=price_pct_change,
+                    delta_value=newer_price - older_price,
+                    current_value=newer_price,
+                )
+            )
 
     if direction == "negative":
         newer_stock_total = newer_sku.get("stock_total")
         if newer_stock_total is not None and newer_stock_total <= EPS:
-            labels.append("Нет остатков")
-            return labels
+            observations.append(
+                FactorObservation(
+                    factor_key="stock_total:out_of_stock",
+                    label="Нет остатков",
+                    direction="down",
+                    aggregate_kind="stock_level",
+                    current_value=newer_stock_total,
+                )
+            )
+            return observations
         for metric_key, district_label in LOW_STOCK_DISTRICTS:
             district_stock = newer_sku.get(metric_key)
             if district_stock is not None and district_stock < LOW_STOCK_THRESHOLD:
-                labels.append(f"Низкий остаток: {district_label} (<20)")
-    return labels
+                observations.append(
+                    FactorObservation(
+                        factor_key=f"district_stock:{metric_key}:low",
+                        label=f"Низкий остаток: {district_label} (<20)",
+                        direction="down",
+                        aggregate_kind="district_stock_level",
+                        current_value=district_stock,
+                    )
+                )
+    return observations
+
+
+def _build_factor_summary(
+    *,
+    observations: list[FactorObservation],
+    sample_size: int,
+) -> dict[str, Any]:
+    first = observations[0]
+    aggregate_summary = "без числового summary"
+    aggregate_sort_value = 0.0
+
+    if first.aggregate_kind == "pct_change":
+        median_pct = _median_or_none([value.pct_change for value in observations])
+        if median_pct is not None:
+            aggregate_summary = f"медиана {_format_signed_percent(median_pct)}"
+            aggregate_sort_value = abs(median_pct)
+    elif first.aggregate_kind == "price_change":
+        median_delta = _median_or_none([value.delta_value for value in observations])
+        median_pct = _median_or_none([value.pct_change for value in observations])
+        if median_delta is not None:
+            aggregate_summary = f"медиана {_format_signed_rub(median_delta)}"
+            if median_pct is not None:
+                aggregate_summary = f"{aggregate_summary} ({_format_signed_percent(median_pct)})"
+            aggregate_sort_value = abs(median_pct) if median_pct is not None else abs(median_delta)
+    elif first.aggregate_kind in {"stock_level", "district_stock_level"}:
+        median_stock = _median_or_none([value.current_value for value in observations])
+        if median_stock is not None:
+            aggregate_summary = f"медиана остатка {_format_quantity(median_stock)}"
+            aggregate_sort_value = max(0.0, LOW_STOCK_THRESHOLD - median_stock)
+
+    return {
+        "factor_key": first.factor_key,
+        "label": first.label,
+        "direction": first.direction,
+        "count": len(observations),
+        "matched_sku_count": len(observations),
+        "sample_size": sample_size,
+        "aggregate_kind": first.aggregate_kind,
+        "aggregate_summary": aggregate_summary,
+        "aggregate_sort_value": aggregate_sort_value,
+    }
+
+
+def _median_or_none(values: list[float | None]) -> float | None:
+    filtered = [float(value) for value in values if isinstance(value, (int, float))]
+    if not filtered:
+        return None
+    return float(median(filtered))
+
+
+def _format_signed_percent(value: float) -> str:
+    sign = "+" if value > EPS else ""
+    return f"{sign}{value:.1f}%"
+
+
+def _format_signed_rub(value: float) -> str:
+    rounded = round(value, 1)
+    if abs(rounded - round(rounded)) <= EPS:
+        number = f"{int(round(rounded)):,}".replace(",", " ")
+    else:
+        number = f"{rounded:,.1f}".replace(",", " ").replace(".", ",")
+    if not number.startswith("-") and not number.startswith("+"):
+        number = f"+{number}" if value > EPS else number
+    return f"{number} ₽"
+
+
+def _format_quantity(value: float) -> str:
+    rounded = round(value, 1)
+    if abs(rounded - round(rounded)) <= EPS:
+        number = f"{int(round(rounded)):,}".replace(",", " ")
+    else:
+        number = f"{rounded:,.1f}".replace(",", " ").replace(".", ",")
+    return f"{number} шт."
 
 
 def _factor_priority(label: str, *, direction: str) -> int:

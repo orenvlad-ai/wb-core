@@ -415,11 +415,48 @@
       word-break: break-word;
     }
 
+    .report-title-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .factor-direction {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    .factor-direction.is-up {
+      color: var(--success-text);
+    }
+
+    .factor-direction.is-down {
+      color: var(--error-text);
+    }
+
     .report-list-meta {
       font-size: 12px;
       line-height: 1.5;
       color: var(--muted);
       word-break: break-word;
+    }
+
+    .report-count {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      white-space: nowrap;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      background: var(--idle-bg);
+      color: var(--idle-text);
     }
 
     .report-delta {
@@ -872,6 +909,7 @@
     <div class="tab-strip" role="tablist" aria-label="Операторские вкладки">
       <button class="tab-button is-active" type="button" data-tab-button="vitrina" role="tab" aria-selected="true">Обновление данных витрины</button>
       <button class="tab-button" type="button" data-tab-button="factory-order" role="tab" aria-selected="false">Расчёт поставок</button>
+      <button class="tab-button" type="button" data-tab-button="reports" role="tab" aria-selected="false">Отчёты</button>
     </div>
 
     <section class="panel">
@@ -948,6 +986,29 @@
             </dl>
           </section>
 
+          <section class="block" aria-labelledby="log-title">
+            <div class="block-header">
+              <h2 id="log-title" class="block-title">Лог</h2>
+              <div class="log-actions">
+                <button id="downloadButton" class="log-download-button" type="button" disabled>Скачать лог</button>
+              </div>
+            </div>
+            <div id="logViewport" class="log-viewport">
+              <pre id="logBlock" class="log-block">Читаем последний статус...</pre>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="operator-panel" data-tab-panel="reports" hidden>
+        <a class="eyebrow eyebrow-link" href="__SHEET_VITRINA_V1_SPREADSHEET_URL__" target="_blank" rel="noreferrer">sheet_vitrina_v1</a>
+        <h1>Отчёты</h1>
+        <p class="section-lead">
+          Компактный ежедневный аналитический срез остаётся полностью server-driven: сравниваем только два последних
+          closed business day через persisted ready snapshots и не используем <code>today_current</code> как baseline.
+        </p>
+
+        <div class="grid">
           <section class="block" aria-labelledby="daily-report-title">
             <div class="block-header">
               <h2 id="daily-report-title" class="block-title">Ежедневные отчёты</h2>
@@ -981,29 +1042,17 @@
                   <div id="dailySkuGrowth"></div>
                 </section>
                 <section class="report-card">
-                  <h3>Топ-5 частых негативных факторов</h3>
-                  <p>Heuristic summary: считаем только прозрачные directional signals без fake-causality.</p>
+                  <h3>Негативные факторы</h3>
+                  <p>Показываем весь valid factor set: частота остаётся primary sort, numeric aggregate показывает силу изменения.</p>
                   <div id="dailyNegativeFactors"></div>
                 </section>
                 <section class="report-card">
-                  <h3>Топ-5 частых позитивных факторов</h3>
-                  <p>Frequency-based summary по тем же deterministic rules, без ML и без выдуманных причин.</p>
+                  <h3>Позитивные факторы</h3>
+                  <p>Тот же deterministic ranking: matched SKU count сначала, затем strongest truthful aggregate.</p>
                   <div id="dailyPositiveFactors"></div>
                 </section>
               </div>
               <div id="dailyReportNotes" class="report-notes"></div>
-            </div>
-          </section>
-
-          <section class="block" aria-labelledby="log-title">
-            <div class="block-header">
-              <h2 id="log-title" class="block-title">Лог</h2>
-              <div class="log-actions">
-                <button id="downloadButton" class="log-download-button" type="button" disabled>Скачать лог</button>
-              </div>
-            </div>
-            <div id="logViewport" class="log-viewport">
-              <pre id="logBlock" class="log-block">Читаем последний статус...</pre>
             </div>
           </section>
         </div>
@@ -1554,15 +1603,40 @@
           container.innerHTML = "<p class=\"report-empty\">" + escapeHtml(emptyMessage) + "</p>";
           return;
         }
+        const factorDirectionSymbol = (direction) => {
+          if (direction === "up") {
+            return "↑";
+          }
+          if (direction === "down") {
+            return "↓";
+          }
+          return "";
+        };
+        const factorDirectionClass = (direction) => {
+          if (direction === "up") {
+            return "factor-direction is-up";
+          }
+          if (direction === "down") {
+            return "factor-direction is-down";
+          }
+          return "factor-direction";
+        };
         container.innerHTML = [
           "<ol class=\"report-list\">",
           items.map((item) => [
             "<li class=\"report-list-item\">",
             "<div class=\"report-list-main\">",
-            "<div class=\"report-list-title\">" + escapeHtml(item.label || "-") + "</div>",
-            "<div class=\"report-list-meta\">" + escapeHtml(String(item.count || 0) + " из " + String(item.sample_size || 0) + " SKU") + "</div>",
+            "<div class=\"report-list-title\">",
+            "<span class=\"report-title-row\">",
+            "<span>" + escapeHtml(item.label || "-") + "</span>",
+            factorDirectionSymbol(item.direction)
+              ? "<span class=\"" + factorDirectionClass(item.direction) + "\" aria-hidden=\"true\">" + escapeHtml(factorDirectionSymbol(item.direction)) + "</span>"
+              : "",
+            "</span>",
             "</div>",
-            "<span class=\"report-delta is-flat\">" + escapeHtml(String(item.count || 0)) + "</span>",
+            "<div class=\"report-list-meta\">" + escapeHtml(item.aggregate_summary || "без числового summary") + "</div>",
+            "</div>",
+            "<span class=\"report-count\">" + escapeHtml(String(item.matched_sku_count || item.count || 0) + " SKU") + "</span>",
             "</li>"
           ].join("")).join(""),
           "</ol>"

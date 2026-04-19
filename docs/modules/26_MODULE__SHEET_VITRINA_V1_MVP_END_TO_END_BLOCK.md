@@ -122,10 +122,11 @@ update_note: "Обновлён под final temporal classifier и execution mod
   - existing refresh/read contour затем подключает этот dataset server-side в `DATA_VITRINA` и `STATUS`
 - Канонический operator-facing refresh surface:
   - `GET /sheet-vitrina-v1/operator`
+  - top-level tabs = `Обновление данных витрины`, `Расчёт поставок`, `Отчёты`
   - две explicit actions `Загрузить данные` и `Отправить данные`
   - `Загрузить данные` вызывает existing `POST /v1/sheet-vitrina-v1/refresh` и materialize-ит ready snapshot only
   - `Отправить данные` вызывает `POST /v1/sheet-vitrina-v1/load` и пишет в live sheet только already prepared snapshot
-  - page additionally читает `GET /v1/sheet-vitrina-v1/daily-report` для compact блока `Ежедневные отчёты`
+  - page additionally читает `GET /v1/sheet-vitrina-v1/daily-report` для compact блока `Ежедневные отчёты` внутри отдельного top-level tab `Отчёты`
   - page читает `GET /v1/sheet-vitrina-v1/status` для compact status block
   - page читает `GET /v1/sheet-vitrina-v1/job` для detailed построчного operator log без отдельного audit subsystem
   - тот же `job` route поддерживает text-export конкретного completed run через `format=text&download=1`
@@ -138,6 +139,13 @@ update_note: "Обновлён под final temporal classifier и execution mod
     - seller-funnel `ctr` не входит в total ranking, потому что current truth не materialize-ит отдельную total-level row для двух closed days
     - SKU identity в этом block truthfully остаётся `display_name + nmId`
     - ranked explanation factors используют только deterministic sign-safe signals (`views/search views/card opens/CTR/conversions`, `price_seller_discounted`, `Нет остатков`, district low-stock `< 20` except `stock_ru_far_siberia`)
+    - negative/positive factor sections are no longer capped at top-5; they render the full valid factor set
+    - factor rows stay compact but now include factor label, restrained direction arrow, matched SKU count and a type-aware aggregate summary
+    - aggregate summary stays truthful per factor type:
+      - directional continuous/ratio factors = median percent change across matched SKU
+      - price factor = median rub delta and, when available, median percent delta
+      - stock/distribution flags = median stock context in pieces
+    - route now surfaces `metric_ranking_diagnostics` so operator/debug tooling can explain why a ranked metric list contains fewer than five items
     - `SPP`, `ads_bid_search` и `localizationPercent` не входят в ranked explanation factors, потому что current repo norm не фиксирует для них однозначный good/bad sign
   - page дополнительно показывает compact block `Сервер и расписание`, который заполняется только из server-driven `server_context`
   - `Автообновление` в этом block должно описывать полный daily auto cycle, а не только schedule time: current truthful wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`

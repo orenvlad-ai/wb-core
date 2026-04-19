@@ -279,13 +279,29 @@ def main() -> None:
         if not top_growth or int(top_growth[0].get("nm_id") or 0) != nm_ids[2]:
             raise AssertionError(f"strongest growing SKU must be {nm_ids[2]}, got {top_growth}")
 
-        negative_labels = {item.get("label") for item in payload.get("top_negative_factors") or []}
-        if "Цена вверх" not in negative_labels or "Нет остатков" not in negative_labels:
-            raise AssertionError(f"negative factors must include price-up and out-of-stock, got {negative_labels}")
+        negative_factors = payload.get("top_negative_factors") or []
+        negative_labels = {item.get("label") for item in negative_factors}
+        if "Цена" not in negative_labels or "Нет остатков" not in negative_labels:
+            raise AssertionError(f"negative factors must include price and out-of-stock, got {negative_labels}")
+        if len(negative_factors) <= 5:
+            raise AssertionError(f"negative factors must expose the full valid list, got {negative_factors}")
 
-        positive_labels = {item.get("label") for item in payload.get("top_positive_factors") or []}
-        if "Цена вниз" not in positive_labels:
-            raise AssertionError(f"positive factors must include price-down, got {positive_labels}")
+        positive_factors = payload.get("top_positive_factors") or []
+        positive_labels = {item.get("label") for item in positive_factors}
+        if "Цена" not in positive_labels:
+            raise AssertionError(f"positive factors must include price, got {positive_labels}")
+        if len(positive_factors) <= 5:
+            raise AssertionError(f"positive factors must expose the full valid list, got {positive_factors}")
+
+        negative_price = next(item for item in negative_factors if item.get("label") == "Цена")
+        if negative_price.get("direction") != "up" or "₽" not in str(negative_price.get("aggregate_summary")):
+            raise AssertionError(f"negative price factor must expose direction+aggregate, got {negative_price}")
+        positive_price = next(item for item in positive_factors if item.get("label") == "Цена")
+        if positive_price.get("direction") != "down" or "₽" not in str(positive_price.get("aggregate_summary")):
+            raise AssertionError(f"positive price factor must expose direction+aggregate, got {positive_price}")
+
+        _assert_factor_ranking_sorted(negative_factors)
+        _assert_factor_ranking_sorted(positive_factors)
 
         metric_declines = {item.get("metric_key") for item in payload.get("top_metric_declines") or []}
         if "avg_ads_bid_search" not in metric_declines and "total_view_count" not in metric_declines:
@@ -296,6 +312,24 @@ def main() -> None:
         print("daily_report_top_decline_sku: ok ->", top_declines[0]["identity_label"])
         print("daily_report_top_growth_sku: ok ->", top_growth[0]["identity_label"])
         print("daily_report_negative_factors: ok ->", ", ".join(sorted(negative_labels)))
+        print("daily_report_positive_factors: ok ->", ", ".join(sorted(positive_labels)))
+        print("daily_report_factor_summary: ok ->", negative_price["aggregate_summary"])
+
+
+def _assert_factor_ranking_sorted(items: list[dict[str, Any]]) -> None:
+    previous = None
+    for item in items:
+        current = (
+            int(item.get("matched_sku_count") or 0),
+            float(item.get("aggregate_sort_value") or 0.0),
+            str(item.get("label") or ""),
+        )
+        if previous is not None:
+            if current[0] > previous[0]:
+                raise AssertionError(f"factor ranking must be non-increasing by count, got {items}")
+            if current[0] == previous[0] and current[1] > previous[1] + 1e-9:
+                raise AssertionError(f"factor ranking must use aggregate strength as secondary sort, got {items}")
+        previous = current
 
 
 def _build_plan(

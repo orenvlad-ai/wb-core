@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-23-REGISTRY-UPLOAD-HTTP-ENTRYPOINT-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `registry_upload_http_entrypoint_block`."
-scope: "Первый live inbound HTTP entrypoint для V2-реестров, separate `COST_PRICE` upload contour и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, sibling cost-price request, thin request -> runtime -> response wiring, server-side `activated_at`, separated refresh/load actions, date-aware plan/status read, compact read-only daily-report surface for two latest closed business days, repo-owned operator page с двумя top-level tabs и bounded server-side factory-order supply contour без SPA/build pipeline."
+scope: "Первый live inbound HTTP entrypoint для V2-реестров, separate `COST_PRICE` upload contour и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, sibling cost-price request, thin request -> runtime -> response wiring, server-side `activated_at`, separated refresh/load actions, date-aware plan/status read, compact read-only daily-report surface for two latest closed business days, repo-owned operator page с тремя top-level tabs и bounded server-side factory-order supply contour без SPA/build pipeline."
 source_basis:
   - "migration/86_registry_upload_contract.md"
   - "migration/89_registry_upload_db_backed_runtime.md"
@@ -136,7 +136,7 @@ update_note: "Обновлён под current factory-order historical seam и c
   - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
   - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result
   - `GET /v1/sheet-vitrina-v1/job` = cheap poll/read surface для live operator log и async action state
-  - `GET /sheet-vitrina-v1/operator` = simple repo-owned page с top-level tabs `Обновление данных витрины` / `Расчёт поставок`
+  - `GET /sheet-vitrina-v1/operator` = simple repo-owned page с top-level tabs `Обновление данных витрины` / `Расчёт поставок` / `Отчёты`
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/status` = cheap JSON status surface для bounded factory-order flow
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/*.xlsx` = operator template downloads с русскими headers
   - `POST /v1/sheet-vitrina-v1/supply/factory-order/upload/*` = server-side XLSX parse/validation/upload
@@ -219,7 +219,7 @@ update_note: "Обновлён под current factory-order historical seam и c
   - district XLSX содержит district identification + compact operator rows `nmId / SKU / Количество к поставке` именно по фактически аллоцированному количеству после ограничения `stock_ff`.
 - Current repo state не имел другого authoritative source для legacy parity term `FO_INBOUND_FF_TO_WB`, поэтому entrypoint получил narrow explicit upload contract `Товары в пути от ФФ на Wildberries`; silent drop этого члена формулы считается некорректным.
 - Operator page keeps narrow Russian chrome for operator-visible labels (`Загрузить данные`, `Отправить данные`, compact `Статус` / `Лог`, row-count labels, `Скачать лог`) without explanatory subtitle/subcopy про refresh/date defaults/temporal slots под заголовком или кнопкой.
-- Operator page добавляет один compact server-driven analytical block `Ежедневные отчёты`:
+- Operator page добавляет отдельный top-level tab `Отчёты` с compact server-driven block `Ежедневные отчёты`:
   - block сравнивает только два последних closed business day в `Asia/Yekaterinburg`;
   - current rule = `current business date -> compare yesterday_closed(default_business_as_of_date(now)) vs yesterday_closed(default_business_as_of_date(now)-1 day)`;
   - block не использует `today_current` как baseline и не trigger-ит новых upstream fetch;
@@ -228,7 +228,7 @@ update_note: "Обновлён под current factory-order historical seam и c
     - `Общая динамика Total Order Sum`
     - `Топ-5` выросших/снизившихся total-level metrics по `% change`
     - `Топ-10 SKU` по росту/падению `orderSum`
-    - `Топ-5` common negative/positive factors по deterministic frequency heuristic;
+    - full valid list common negative/positive factors по deterministic frequency heuristic;
   - ranked metric pool intentionally остаётся узким и canonical:
     - `total_view_count`
     - `total_views_current`
@@ -248,6 +248,25 @@ update_note: "Обновлён под current factory-order historical seam и c
     - `price_seller_discounted` up/down
     - `Нет остатков`
     - district low-stock warnings `< 20` excluding `stock_ru_far_siberia`;
+  - factor rows render compact type-aware summaries server-side:
+    - continuous/ratio-friendly factors = `matched_sku_count` плюс `медиана ±X.X%`
+    - price factor = `matched_sku_count` плюс `медиана ±N ₽ (±X.X%)`, если `%` существует для текущего factor set
+    - stock/distribution flags = `matched_sku_count` плюс truthful stock-context aggregate (`медиана остатка N шт.`)
+    - UI shows only the factor label plus a restrained direction arrow and does not spell `вверх/вниз` textually
+  - daily-report JSON now additionally carries `metric_ranking_diagnostics`:
+    - `raw_candidate_count`
+    - `present_after_none_filter_count`
+    - `negative_count`
+    - `positive_count`
+    - `flat_or_unknown_count`
+    - `excluded_from_declines[]` with per-metric `metric_key`, `label`, `reason`, `newer_value`, `older_value`
+  - current truthful diagnostic for the observed `Топ-5 самых снизившихся метрик` case is:
+    - `raw_candidate_count=11`
+    - `present_after_none_filter_count=10`
+    - `negative_count=3`
+    - `positive_count=7`
+    - excluded metric = `avg_ads_bid_search` with `reason=missing_both_closed_day_values`
+    - this is a data-shape result for the current closed-day pair, not a hardcoded top-cap bug
   - `SPP`, `ads_bid_search` и `localizationPercent` не входят в ranked explanation factors, because current repo norm does not fix one unambiguous good/bad sign for them.
 - Operator page добавляет один compact server-driven info block `Сервер и расписание`:
   - `Часовой пояс`
