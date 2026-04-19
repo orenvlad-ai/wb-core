@@ -20,9 +20,9 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "изменение build metadata pack"
-built_from_commit: "078201a7131674e4fd7c9c272ef98baa17d959bf"
-docset_version: "wb_core_docs_master_v26"
-built_at: "2026-04-19T21:19:48Z"
+built_from_commit: "847121253d61497cba0f1541121ed35f060705ed"
+docset_version: "wb_core_docs_master_v27"
+built_at: "2026-04-19T21:24:47Z"
 core_docs_changed:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/28_MODULE__PROMO_LIVE_SOURCE_WIRING_BLOCK.md"
