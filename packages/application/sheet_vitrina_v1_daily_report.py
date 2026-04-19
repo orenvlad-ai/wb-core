@@ -18,13 +18,12 @@ from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope
 
 TEMPORAL_SLOT_YESTERDAY_CLOSED = "yesterday_closed"
 EPS = 1e-9
-LOW_STOCK_THRESHOLD = 20.0
+FACTOR_LOW_STOCK_THRESHOLD = 20.0
 TOTAL_ORDER_SUM_KEY = "total_orderSum"
 SKU_ORDER_SUM_KEY = "orderSum"
 TOTAL_METRIC_POOL_KEYS = (
     "total_view_count",
     "total_views_current",
-    "total_open_card_count",
     "avg_ctr_current",
     "avg_addToCartConversion",
     "avg_cartToOrderConversion",
@@ -37,11 +36,10 @@ TOTAL_METRIC_POOL_KEYS = (
 FACTOR_DIRECTIONAL_METRIC_KEYS = (
     "view_count",
     "views_current",
-    "open_card_count",
-    "ctr",
     "ctr_current",
     "addToCartConversion",
     "cartToOrderConversion",
+    "ads_sum",
 )
 LOW_STOCK_DISTRICTS = (
     ("stock_ru_central", "Центральный ФО"),
@@ -52,7 +50,8 @@ LOW_STOCK_DISTRICTS = (
 )
 REPORT_NOTES = (
     "Сравнение строится только по двум последним closed business day через persisted yesterday_closed ready snapshots.",
-    "В ранжировании метрик не участвует CTR открытия карточки: в canonical current truth нет отдельной total-level строки для двух closed days.",
+    "В daily-report участвует только CTR в поиске: CTR открытия карточки и метрика открытий карточки исключены из current pool, чтобы не дублировать верх воронки.",
+    "В ranked common factors участвуют только deterministic sign-safe signals: показы, просмотры в поиске, CTR в поиске, конверсии, AdSum, цена и stock warnings.",
     "В ranked common factors не участвуют SPP, рекламная ставка и локализация: current repo не фиксирует для них однозначный good/bad sign.",
     "В списках SKU показываются display_name и nmId из current registry config; article/vendor code в этом read path не стабилизирован.",
 )
@@ -573,7 +572,7 @@ def _collect_factor_observations(
             return observations
         for metric_key, district_label in LOW_STOCK_DISTRICTS:
             district_stock = newer_sku.get(metric_key)
-            if district_stock is not None and district_stock < LOW_STOCK_THRESHOLD:
+            if district_stock is not None and district_stock < FACTOR_LOW_STOCK_THRESHOLD:
                 observations.append(
                     FactorObservation(
                         factor_key=f"district_stock:{metric_key}:low",
@@ -612,7 +611,7 @@ def _build_factor_summary(
         median_stock = _median_or_none([value.current_value for value in observations])
         if median_stock is not None:
             aggregate_summary = f"медиана остатка {_format_quantity(median_stock)}"
-            aggregate_sort_value = max(0.0, LOW_STOCK_THRESHOLD - median_stock)
+            aggregate_sort_value = max(0.0, FACTOR_LOW_STOCK_THRESHOLD - median_stock)
 
     return {
         "factor_key": first.factor_key,
@@ -664,8 +663,6 @@ def _factor_priority(label: str, *, direction: str) -> int:
         return 0
     if label.startswith("Низкий остаток: "):
         return 1
-    if direction == "negative" and label == "Цена вверх":
-        return 2
-    if direction == "positive" and label == "Цена вниз":
+    if label == "Цена":
         return 2
     return 10
