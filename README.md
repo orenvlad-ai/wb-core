@@ -27,12 +27,14 @@ Legacy-репозитории остаются рабочими, но счита
 - presentation pass для `DATA_VITRINA` и `STATUS`;
 - compact v3 bootstrap для `CONFIG / METRICS / FORMULAS`, который поднимает уже заполненные operator sheets и сохраняет service/status block;
 - отдельный bounded `COST_PRICE` contour: лист `COST_PRICE`, separate menu actions, sibling HTTP upload path, server-side authoritative storage seam вне compact registry bundle и read-side overlay в refresh/load contour для `cost_price_rub`, `total_proxy_profit_rub`, `proxy_margin_pct_total`;
+- отдельный bounded repo-owned `promo_xlsx_collector_block`: local runner для promo XLSX + metadata sidecar с thin browser adapter boundary поверх existing seller session reuse path, без live scheduler/public route wiring на этом checkpoint;
 - первый bounded end-to-end MVP `prepare -> upload -> refresh -> load`, где operator seed `33 / 102 / 7`, full current `metrics_v2` dictionary для upload path и controlled reverse-load в `DATA_VITRINA` уже материализованы в коде и артефактах;
 - evidence и module docs по этим шагам.
 
 Главные незакрытые gaps на текущем `main`:
 - full legacy parity по всем историческим registry rows и metric sections;
 - full legacy parity beyond current `102`-row uploaded metric dictionary и beyond current server-driven two-day read-side без поломки текущего contour;
+- bounded promo collector contour теперь уже repo-owned, но его output ещё не включён в current `sheet_vitrina_v1` refresh/load/operator line;
 - repo-owned hosted runtime deploy/probe contract теперь materialized в repo, но actual deploy access, publish wiring hardening и production storage binding вокруг уже materialized upload/load линии ещё не закрыты;
 - окончательное решение по судьбе `AI_EXPORT` как compatibility contract или прямой замене server-side contract.
 
@@ -72,7 +74,8 @@ Legacy-репозитории остаются рабочими, но счита
 13. Появление `wb_core_docs_master` как secondary compact project-pack поверх primary canonical repo docs.
 14. Отдельный bounded contour для `COST_PRICE`: `COST_PRICE` sheet-side prepare/upload, sibling `POST /v1/cost-price/upload` и separate authoritative dataset в том же runtime/app boundary.
 15. Server-side read-side integration `COST_PRICE` в `sheet_vitrina_v1`: authoritative resolution по `group + max(effective_from <= slot_date)`, truthful `STATUS.cost_price[*]` и operator-facing derived metrics `total_proxy_profit_rub` / `proxy_margin_pct_total`.
-16. После этого остаются full parity, actual hosted deploy access/publish wiring hardening и production/runtime hardening вокруг уже materialized contour.
+16. Первый repo-owned bounded `promo_xlsx_collector_block`: canonical hydration/modal/drawer seams, truthful metadata sidecar, workbook inspection и bounded live integration smoke поверх existing seller session reuse path.
+17. После этого остаются full parity, actual hosted deploy access/publish wiring hardening и production/runtime hardening вокруг уже materialized contour, plus wiring promo collector output обратно в current live refresh/load line.
 
 ## Что не следует считать частью текущего `main`
 

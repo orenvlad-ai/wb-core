@@ -20,6 +20,8 @@ source_basis:
   - "apps/sheet_vitrina_v1_refresh_read_split_smoke.py"
   - "apps/sheet_vitrina_v1_operator_load_smoke.py"
   - "apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py"
+  - "apps/promo_xlsx_collector_contract_smoke.py"
+  - "apps/promo_xlsx_collector_integration_smoke.py"
 source_of_truth_level: "secondary_project_pack"
 related_paths:
   - "apps/"
@@ -29,7 +31,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "4f738f1ea652dc21c85f1977dd35997eb4591401"
+built_from_commit: "eec625379bdb00d632971577611b357cc88266e5"
 ---
 
 # Summary
@@ -80,6 +82,8 @@ python3 apps/sheet_vitrina_v1_daily_report_smoke.py
 python3 apps/sheet_vitrina_v1_daily_report_http_smoke.py
 python3 apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py
 python3 apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py
+python3 apps/promo_xlsx_collector_contract_smoke.py
+python3 apps/promo_xlsx_collector_integration_smoke.py
 git diff --check
 ```
 
@@ -113,7 +117,14 @@ Norm:
 
 ```bash
 python3 apps/registry_upload_http_entrypoint_live.py
+python3 apps/promo_xlsx_collector_live.py --max-candidates 5
 ```
+
+Current promo collector norm:
+- use the local runner only as bounded local contour against existing session reuse path;
+- canonical hydration entry = direct open `dp-promo-calendar` -> wait/click `Принимаю` -> wait hydrated DOM -> optional auto-promo modal close;
+- canonical inter-promo reset = click `#Portal-drawer [data-testid="pages/main-page/promo-action-wizard/drawer-close-button-button-ghost"]` -> wait until `#Portal-drawer [data-testid="pages/main-page/promo-action-wizard/drawer-drawer-overlay"]` disappears -> only then next promo click;
+- `metadata.json` is mandatory for all promo because workbook alone does not carry promo-level truth.
 
 ## Hosted runtime contract
 
