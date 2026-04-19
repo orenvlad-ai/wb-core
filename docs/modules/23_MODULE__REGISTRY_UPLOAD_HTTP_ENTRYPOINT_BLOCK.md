@@ -167,7 +167,7 @@ update_note: "Обновлён под current factory-order historical seam и c
   - A. bot/web-source historical / closed-day-capable = `seller_funnel_snapshot`, `web_source_snapshot`
   - B. WB API historical/date-period capable = `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`
   - C. WB API current-snapshot-only = `prices_snapshot`, `ads_bids`
-  - D. other/non-WB or blocked = `cost_price`, `promo_by_price`
+  - D. other/non-WB/manual/browser-collector = `cost_price`, `promo_by_price`
 - Group A + B используют one-way accepted closed-day contract для `yesterday_closed`:
   - closed slot сначала читает уже сохранённый accepted snapshot/runtime cache;
   - если valid exact-date truth ещё не принят, auto/retry contour создаёт или продолжает persisted retry state `closure_pending / closure_retrying / closure_rate_limited / closure_exhausted`;
@@ -178,6 +178,11 @@ update_note: "Обновлён под current factory-order historical seam и c
   - `today_current` может long-retry-иться только в пределах текущего business day / current capture window;
   - later invalid/blank/zero candidate сохраняет earlier accepted current snapshot того же дня;
   - только новый valid current snapshot может заменить уже accepted same-day snapshot.
+- `promo_by_price` в current checkpoint больше не остаётся blocked gap:
+  - `today_current` trigger-ит bounded repo-owned promo collector run поверх existing seller session reuse contour;
+  - success surface-ит numeric promo rows через existing runtime/read-side path;
+  - `yesterday_closed` читается только из accepted/runtime-cached promo truth и не recompute-ится live из текущего seller portal state;
+  - invalid later promo attempt не может destructively overwrite accepted current/closed truth.
 - Source-aware invalid signatures для accepted-state policy:
   - `seller_funnel_snapshot`: zero-filled payload plus freshness gate `source_fetched_at >= next business day start in Asia/Yekaterinburg`;
   - `web_source_snapshot`: zero-filled payload plus freshness gate `search_analytics_raw.fetched_at >= next business day start in Asia/Yekaterinburg`;

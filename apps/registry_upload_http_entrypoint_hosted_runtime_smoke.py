@@ -104,6 +104,8 @@ def main() -> None:
                 raise AssertionError("print-plan must confirm applicability to current checkout")
             if "WB_API_TOKEN" not in print_plan["required_secret_contract"]:
                 raise AssertionError("print-plan must expose canonical secret contract")
+            if "PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH" not in print_plan["optional_runtime_contract"]:
+                raise AssertionError("print-plan must expose promo collector storage-state override contract")
             if len(print_plan["deploy_plan"]["managed_systemd_units"]) != 2:
                 raise AssertionError("print-plan must expose managed systemd units when configured")
 

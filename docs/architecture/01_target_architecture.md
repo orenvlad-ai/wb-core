@@ -24,7 +24,8 @@
 - sibling `COST_PRICE` contour внутри того же app/runtime boundary: отдельный лист `COST_PRICE`, отдельные menu actions и `POST /v1/cost-price/upload` без подмешивания в compact registry bundle.
 - `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` как compact v3 bootstrap для operator sheets `CONFIG / METRICS / FORMULAS`.
 - `sheet_vitrina_v1_mvp_end_to_end_block` как первый bounded end-to-end MVP `prepare -> upload -> refresh -> load DATA_VITRINA`.
-- `promo_xlsx_collector_block` как первый repo-owned bounded browser-capture contour для promo XLSX + metadata sidecar через local runner без scheduler/public route wiring.
+- `promo_xlsx_collector_block` как первый repo-owned bounded browser-capture precursor для promo XLSX + metadata sidecar.
+- `promo_live_source_wiring_block` как bounded wiring этого precursor обратно в current `sheet_vitrina_v1` refresh/runtime/read-side contour без отдельного shadow contour.
 
 Главный незакрытый gap текущего `main`:
 - registry upload и bounded reverse-load уже присутствуют в текущей линии;
@@ -32,7 +33,6 @@
 
 После этого незакрытым хвостом остаются:
 - full legacy parity по всем metric sections;
-- wiring promo collector output обратно в current refresh/load/operator line;
 - actual granted deploy access и production-bound operator runtime;
 - final auth-hardening и production storage binding.
 

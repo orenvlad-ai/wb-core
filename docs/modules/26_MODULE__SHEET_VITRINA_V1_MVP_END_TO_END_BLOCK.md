@@ -243,10 +243,10 @@ update_note: "Обновлён под final temporal classifier и execution mod
   - group A `bot/web-source historical / closed-day-capable`: `seller_funnel_snapshot`, `web_source_snapshot`; allowed slots = `yesterday_closed + today_current`
   - group B `WB API historical/date-period capable`: `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`; allowed slots = `yesterday_closed + today_current`
   - group C `WB API current-snapshot-only`: `prices_snapshot`, `ads_bids`; allowed slots = `today_current`, bounded same-day capture/retry only
-  - group D `other/non-WB or blocked`: `cost_price`, `promo_by_price`; `cost_price` resolves `yesterday_closed + today_current` by `effective_from <= slot_date`, `promo_by_price` stays blocked
+  - group D `other/non-WB/manual/browser-collector`: `cost_price`, `promo_by_price`; `cost_price` resolves `yesterday_closed + today_current` by `effective_from <= slot_date`, `promo_by_price` now reads bounded live/current truth from repo-owned promo collector sidecar + workbook seam
   - `dual_day_capable`: `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`, `cost_price`
   - `today_current`: `prices_snapshot`, `ads_bids`
-  - `blocked`: `promo_by_price`
+  - `dual_day_capable`: `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`, `cost_price`, `promo_by_price`
 - Для bot/web-source family (`seller_funnel_snapshot`, `web_source_snapshot`) current server-side read rule теперь bounded и truthful:
   - сначала source adapter пробует explicit requested date/window;
   - при `404` source adapter пробует latest payload без query params;
@@ -393,7 +393,10 @@ Bounded допущение:
 
 ## 3.4 Явный live blocker
 
-- `promo_by_price` не имеет live HTTP adapter в текущем contour.
+- `promo_by_price` больше не является blocked source в текущем contour:
+  - `today_current` materialize-ится через repo-owned promo collector run;
+  - `yesterday_closed` читается только из accepted/runtime-cached promo truth;
+  - low-confidence cross-year labels не invent-ят exact dates и остаются truthful `promo_start_at/end_at = null`.
 - `stocks[yesterday_closed]` больше не является declared gap: official historical Seller Analytics CSV path materialized и authoritative runtime cache `temporal_source_snapshots[source_key=stocks]` now owns the closed-day truth for this source family.
 - Legacy `cogs_by_group` rule module не используется как live fallback для `sheet_vitrina_v1`: текущий contour опирается только на authoritative `COST_PRICE` dataset.
 - Поэтому full current truth / `STATUS` остаются шире чисто sheet-side presentation pass.
@@ -500,7 +503,7 @@ Bounded допущение:
   - что current-only sources не попадают в yesterday-column и materialize-ятся как `not_available` в `STATUS`;
   - что later invalid auto/manual current-only attempt не перетирает already accepted same-day snapshot;
   - что manual refresh не создаёт persisted long-retry tail;
-  - что `STATUS` фиксирует live sources per temporal slot, `cost_price[*]` coverage и blocked source `promo_by_price`;
+  - что `STATUS` фиксирует live sources per temporal slot, `cost_price[*]` coverage и current/closed promo source facts `promo_by_price[*]` with collector trace/debug note;
   - что service/status block `CONFIG!H:I` сохраняется и не перезаписывается при load.
 
 # 7. Что уже доказано по модулю

@@ -25,6 +25,7 @@ from packages.adapters.web_source_snapshot_block import HttpBackedWebSourceSnaps
 from packages.application.ads_bids_block import AdsBidsBlock
 from packages.application.ads_compact_block import AdsCompactBlock
 from packages.application.fin_report_daily_block import FinReportDailyBlock
+from packages.application.promo_live_source import PromoLiveSourceBlock
 from packages.application.prices_snapshot_block import PricesSnapshotBlock
 from packages.application.registry_upload_db_backed_runtime import (
     RegistryUploadDbBackedRuntime,
@@ -47,6 +48,12 @@ from packages.contracts.cost_price_upload import CostPriceCurrentState, CostPric
 from packages.contracts.ads_bids_block import AdsBidsRequest
 from packages.contracts.ads_compact_block import AdsCompactRequest
 from packages.contracts.fin_report_daily_block import FinReportDailyRequest
+from packages.contracts.promo_live_source import PromoLiveSourceRequest
+from packages.contracts.promo_live_source import (
+    PromoLiveSourceEnvelope,
+    PromoLiveSourceItem,
+    PromoLiveSourceSuccess,
+)
 from packages.contracts.prices_snapshot_block import PricesSnapshotRequest
 from packages.contracts.registry_upload_bundle_v1 import ConfigV2Item, FormulaV2Item, MetricV2Item
 from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryRequest
@@ -92,9 +99,9 @@ HISTORICAL_CLOSED_DAY_SOURCE_KEYS = STRICT_CLOSED_DAY_SOURCE_KEYS | {
     "ads_compact",
     "fin_report_daily",
 }
-CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids"}
+CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "promo_by_price"}
 ACCEPTED_CURRENT_SOURCE_KEYS = HISTORICAL_CLOSED_DAY_SOURCE_KEYS | CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS
-EXACT_DATE_RUNTIME_CACHE_SOURCE_KEYS = {"sales_funnel_history", "stocks"}
+EXACT_DATE_RUNTIME_CACHE_SOURCE_KEYS = {"sales_funnel_history", "stocks", "promo_by_price"}
 TEMPORAL_ROLE_PROVISIONAL_CURRENT = "provisional_current_snapshot"
 TEMPORAL_ROLE_CLOSED_DAY_CANDIDATE = "closed_day_candidate_snapshot"
 TEMPORAL_ROLE_ACCEPTED_CLOSED = "accepted_closed_day_snapshot"
@@ -111,9 +118,7 @@ CLOSURE_PENDING_STATES = {
     CLOSURE_STATE_RETRYING,
     CLOSURE_STATE_RATE_LIMITED,
 }
-BLOCKED_SOURCE_STATUSES = {
-    "promo_by_price": "live HTTP adapter is not implemented; rows stay materialized with blank values",
-}
+BLOCKED_SOURCE_STATUSES = {}
 SOURCE_TEMPORAL_POLICIES = {
     "seller_funnel_snapshot": "dual_day_capable",
     "sales_funnel_history": "dual_day_capable",
@@ -126,7 +131,7 @@ SOURCE_TEMPORAL_POLICIES = {
     "ads_compact": "dual_day_capable",
     "fin_report_daily": "dual_day_capable",
     "cost_price": "dual_day_capable",
-    "promo_by_price": "blocked",
+    "promo_by_price": "dual_day_capable",
 }
 SOURCE_CLASSIFICATION_GROUPS = {
     "seller_funnel_snapshot": "A_bot_web_source_historical_closed_day_capable",
@@ -140,7 +145,7 @@ SOURCE_CLASSIFICATION_GROUPS = {
     "prices_snapshot": "C_wb_api_current_snapshot_only",
     "ads_bids": "C_wb_api_current_snapshot_only",
     "cost_price": "D_other_non_wb_or_blocked",
-    "promo_by_price": "D_other_non_wb_or_blocked",
+    "promo_by_price": "D_other_non_wb_or_browser_collector",
 }
 PERCENT_SOURCE_KEYS = {"ctr", "ctr_current", "localizationPercent"}
 DECISION_SUMMARY = {
@@ -222,10 +227,10 @@ SOURCE_DIAGNOSTIC_SPECS = {
         "endpoint": "sqlite://cost_price_current_state",
     },
     "promo_by_price": {
-        "module": "packages.application.sheet_vitrina_v1_live_plan",
-        "block": "promo_by_price_placeholder",
-        "adapter": "blocked_source",
-        "endpoint": "blocked:no_live_http_adapter",
+        "module": "packages.application.promo_live_source",
+        "block": "PromoLiveSourceBlock",
+        "adapter": "PlaywrightPromoCollectorDriver",
+        "endpoint": "seller portal dp-promo-calendar -> metadata/workbook sidecar collector",
     },
 }
 LivePlanLogEmitter = Callable[[str], None]
@@ -262,6 +267,7 @@ class SlotLookups:
     fin_lookup: dict[int, Any]
     fin_storage_fee_total: float | None
     cost_price_lookup: dict[str, "ResolvedCostPrice"]
+    promo_lookup: dict[int, dict[str, float]]
 
 
 @dataclass(frozen=True)
@@ -289,6 +295,45 @@ class ClosedDayWebSourceSync(Protocol):
         raise NotImplementedError
 
 
+class PromoLiveSourceProtocol(Protocol):
+    def execute(self, request: PromoLiveSourceRequest) -> PromoLiveSourceEnvelope:
+        raise NotImplementedError
+
+
+class _SyntheticNoPromoLiveSourceBlock:
+    def execute(self, request: PromoLiveSourceRequest) -> PromoLiveSourceEnvelope:
+        items = [
+            PromoLiveSourceItem(
+                snapshot_date=request.snapshot_date,
+                nm_id=nm_id,
+                promo_count_by_price=0.0,
+                promo_entry_price_best=0.0,
+                promo_participation=0.0,
+            )
+            for nm_id in sorted(request.nm_ids)
+        ]
+        return PromoLiveSourceEnvelope(
+            result=PromoLiveSourceSuccess(
+                kind="success",
+                snapshot_date=request.snapshot_date,
+                date_from=request.snapshot_date,
+                date_to=request.snapshot_date,
+                requested_count=len(request.nm_ids),
+                covered_count=len(request.nm_ids),
+                items=items,
+                detail="synthetic_no_promo_live_source",
+                trace_run_dir="",
+                current_promos=0,
+                current_promos_downloaded=0,
+                current_promos_blocked=0,
+                future_promos=0,
+                skipped_past_promos=0,
+                ambiguous_promos=0,
+                current_download_export_kinds=[],
+            )
+        )
+
+
 class SheetVitrinaV1LivePlanBlock:
     def __init__(
         self,
@@ -303,6 +348,7 @@ class SheetVitrinaV1LivePlanBlock:
         stocks_block: StocksBlock | None = None,
         ads_compact_block: AdsCompactBlock | None = None,
         fin_report_daily_block: FinReportDailyBlock | None = None,
+        promo_live_source_block: PromoLiveSourceProtocol | None = None,
         current_web_source_sync: CurrentWebSourceSync | None = None,
         closed_day_web_source_sync: ClosedDayWebSourceSync | None = None,
         now_factory: Callable[[], datetime] | None = None,
@@ -318,6 +364,7 @@ class SheetVitrinaV1LivePlanBlock:
         self.stocks_block = stocks_block or StocksBlock(HistoricalCsvBackedStocksSource())
         self.ads_compact_block = ads_compact_block or AdsCompactBlock(HttpBackedAdsCompactSource())
         self.fin_report_daily_block = fin_report_daily_block or FinReportDailyBlock(HttpBackedFinReportDailySource())
+        self.promo_live_source_block = promo_live_source_block or _SyntheticNoPromoLiveSourceBlock()
         self.current_web_source_sync = current_web_source_sync or ShellBackedWebSourceCurrentSync()
         self.closed_day_web_source_sync = closed_day_web_source_sync or self.current_web_source_sync
         self.now_factory = now_factory or _default_now_factory
@@ -542,6 +589,7 @@ class SheetVitrinaV1LivePlanBlock:
                 fin_lookup={},
                 fin_storage_fee_total=None,
                 cost_price_lookup={},
+                promo_lookup={},
             )
             for slot in temporal_slots
         }
@@ -649,6 +697,15 @@ class SheetVitrinaV1LivePlanBlock:
                         )
                     ).result,
                 ),
+                (
+                    "promo_by_price",
+                    lambda slot=slot: self.promo_live_source_block.execute(
+                        PromoLiveSourceRequest(
+                            snapshot_date=slot.column_date,
+                            nm_ids=requested_nm_ids,
+                        )
+                    ).result,
+                ),
             ]:
                 temporal_policy = SOURCE_TEMPORAL_POLICIES[source_key]
                 _emit_source_request_log(
@@ -711,6 +768,8 @@ class SheetVitrinaV1LivePlanBlock:
                         current_lookups.fin_storage_fee_total = float(
                             getattr(storage_total, "fin_storage_fee_total", 0.0)
                         )
+                elif source_key == "promo_by_price":
+                    current_lookups.promo_lookup = _index_promo_items(payload)
 
         for slot in temporal_slots:
             _emit_source_request_log(
@@ -780,6 +839,14 @@ class SheetVitrinaV1LivePlanBlock:
         execution_mode: str,
         current_web_source_sync_note: str | None,
     ) -> tuple[LiveSourceStatus, Any | None]:
+        if source_key == "promo_by_price" and temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED:
+            return self._capture_promo_closed_day_from_cache(
+                source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
+                requested_nm_ids=requested_nm_ids,
+            )
         if temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED and source_key in HISTORICAL_CLOSED_DAY_SOURCE_KEYS:
             return self._capture_temporal_source_with_acceptance(
                 source_key=source_key,
@@ -816,6 +883,79 @@ class SheetVitrinaV1LivePlanBlock:
             column_date=column_date,
             requested_nm_ids=requested_nm_ids,
             loader=loader,
+        )
+
+    def _capture_promo_closed_day_from_cache(
+        self,
+        *,
+        source_key: str,
+        temporal_slot: str,
+        temporal_policy: str,
+        column_date: str,
+        requested_nm_ids: list[int],
+    ) -> tuple[LiveSourceStatus, Any | None]:
+        accepted_snapshot = self._load_slot_snapshot_status(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            snapshot_role=TEMPORAL_ROLE_ACCEPTED_CLOSED,
+        )
+        if accepted_snapshot is not None:
+            accepted_status, accepted_payload, accepted_at = accepted_snapshot
+            note = "resolution_rule=accepted_closed_runtime_snapshot"
+            if accepted_at:
+                note = f"{note}; accepted_at={accepted_at}"
+            return _append_status_note(accepted_status, note), accepted_payload
+
+        cached_snapshot = self._load_cached_temporal_source(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            runtime_cache_note="resolution_rule=accepted_prior_current_runtime_cache",
+        )
+        if cached_snapshot is not None:
+            cached_status, cached_payload = cached_snapshot
+            accepted_at = _format_runtime_timestamp(self.now_factory())
+            self.runtime.save_temporal_source_slot_snapshot(
+                source_key=source_key,
+                snapshot_date=column_date,
+                snapshot_role=TEMPORAL_ROLE_ACCEPTED_CLOSED,
+                captured_at=accepted_at,
+                payload=cached_payload,
+            )
+            return (
+                _append_status_note(
+                    cached_status,
+                    f"resolution_rule=accepted_closed_from_prior_current_cache; accepted_at={accepted_at}",
+                ),
+                cached_payload,
+            )
+
+        return (
+            LiveSourceStatus(
+                source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
+                kind="missing",
+                freshness="",
+                snapshot_date="",
+                date="",
+                date_from=column_date,
+                date_to=column_date,
+                requested_count=len(requested_nm_ids),
+                covered_count=0,
+                missing_nm_ids=sorted(set(requested_nm_ids)),
+                note=(
+                    "promo yesterday_closed requires accepted prior current snapshot; "
+                    "runtime cache missing for requested closed day"
+                ),
+            ),
+            None,
         )
 
     def _capture_temporal_source_with_acceptance(
@@ -1642,6 +1782,10 @@ class _MetricEvaluator:
             return _lookup_attr(slot_lookups, "sf_period_lookup", nm_id, "localization_percent", 0.01)
         if metric_key == "feedbackRating":
             return _lookup_attr(slot_lookups, "sf_period_lookup", nm_id, "feedback_rating", 1.0)
+        if metric_key in {"promo_participation", "promo_count_by_price", "promo_entry_price_best"}:
+            promo_values = slot_lookups.promo_lookup.get(nm_id, {})
+            value = promo_values.get(metric_key)
+            return float(value) if value is not None else None
         if metric_key in BLOCKED_SOURCE_METRIC_KEYS:
             return None
         raise ValueError(f"unsupported direct metric_key: {metric_key}")
@@ -1653,11 +1797,7 @@ class _MetricEvaluator:
         return lookups
 
 
-BLOCKED_SOURCE_METRIC_KEYS = {
-    "promo_participation",
-    "promo_count_by_price",
-    "promo_entry_price_best",
-}
+BLOCKED_SOURCE_METRIC_KEYS: set[str] = set()
 
 
 def _build_metric_rows(
@@ -2137,12 +2277,16 @@ def _accepted_resolution_note(temporal_slot: str) -> str:
 def _runtime_cache_note(source_key: str) -> str:
     if source_key == "stocks":
         return "resolution_rule=exact_date_stocks_history_runtime_cache"
+    if source_key == "promo_by_price":
+        return "resolution_rule=exact_date_promo_current_runtime_cache"
     return "resolution_rule=exact_date_runtime_cache"
 
 
 def _invalid_temporal_candidate_note(source_key: str, temporal_slot: str) -> str:
     if source_key in STRICT_CLOSED_DAY_SOURCE_KEYS:
         return _invalid_temporal_web_source_note(source_key)
+    if source_key == "promo_by_price":
+        return "invalid_exact_snapshot=promo_live_source_incomplete"
     if temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT and source_key == "prices_snapshot":
         return "invalid_exact_snapshot=zero_filled_prices_snapshot"
     if temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT and source_key == "ads_bids":
@@ -2380,6 +2524,25 @@ def _index_items_by_nm_id(payload: Any | None) -> dict[int, Any]:
     if not isinstance(items, list):
         return {}
     return {int(item.nm_id): item for item in items if isinstance(getattr(item, "nm_id", None), int)}
+
+
+def _index_promo_items(payload: Any | None) -> dict[int, dict[str, float]]:
+    if payload is None:
+        return {}
+    items = getattr(payload, "items", None)
+    if not isinstance(items, list):
+        return {}
+    out: dict[int, dict[str, float]] = {}
+    for item in items:
+        nm_id = getattr(item, "nm_id", None)
+        if not isinstance(nm_id, int):
+            continue
+        out[nm_id] = {
+            "promo_count_by_price": float(getattr(item, "promo_count_by_price", 0.0) or 0.0),
+            "promo_entry_price_best": float(getattr(item, "promo_entry_price_best", 0.0) or 0.0),
+            "promo_participation": float(getattr(item, "promo_participation", 0.0) or 0.0),
+        }
+    return out
 
 
 def _index_cost_price_rows(cost_price_rows: list[CostPriceRow]) -> dict[str, list[CostPriceRow]]:

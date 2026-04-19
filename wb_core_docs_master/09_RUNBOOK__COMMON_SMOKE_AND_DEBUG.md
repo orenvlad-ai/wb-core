@@ -22,6 +22,8 @@ source_basis:
   - "apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py"
   - "apps/promo_xlsx_collector_contract_smoke.py"
   - "apps/promo_xlsx_collector_integration_smoke.py"
+  - "apps/sheet_vitrina_v1_promo_live_source_smoke.py"
+  - "apps/sheet_vitrina_v1_promo_live_source_integration_smoke.py"
 source_of_truth_level: "secondary_project_pack"
 related_paths:
   - "apps/"
@@ -84,6 +86,8 @@ python3 apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py
 python3 apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py
 python3 apps/promo_xlsx_collector_contract_smoke.py
 python3 apps/promo_xlsx_collector_integration_smoke.py
+python3 apps/sheet_vitrina_v1_promo_live_source_smoke.py
+python3 apps/sheet_vitrina_v1_promo_live_source_integration_smoke.py
 git diff --check
 ```
 
@@ -126,6 +130,12 @@ Current promo collector norm:
 - canonical inter-promo reset = click `#Portal-drawer [data-testid="pages/main-page/promo-action-wizard/drawer-close-button-button-ghost"]` -> wait until `#Portal-drawer [data-testid="pages/main-page/promo-action-wizard/drawer-drawer-overlay"]` disappears -> only then next promo click;
 - `metadata.json` is mandatory for all promo because workbook alone does not carry promo-level truth.
 
+Current promo live-source wiring norm:
+- authoritative live source key = `promo_by_price`
+- `today_current` runs bounded repo-owned promo collector server-side inside refresh contour
+- `yesterday_closed` reads only accepted/runtime-cached promo truth
+- invalid later attempt must not overwrite accepted current/closed promo truth
+
 ## Hosted runtime contract
 
 ```bash
@@ -156,6 +166,10 @@ Canonical target template:
 Current canonical WB secret path for official adapters:
 - `WB_API_TOKEN`
 - keep live service/env aligned to one canonical WB token path before calling a live task complete
+
+Current promo runtime env override when hosted runtime needs explicit seller session path:
+- `PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH`
+- canonical selleros value = `/opt/wb-web-bot/storage_state.json`
 
 Current canonical business timezone for server-side `sheet_vitrina_v1` date math:
 - `Asia/Yekaterinburg`
@@ -346,7 +360,7 @@ Operational rule:
 - `CONFIG!H:I` preserves `endpoint_url`, `last_bundle_version`, `last_status`, `last_http_status`;
 - current truth / ready snapshot keep `95` enabled+show_in_data metrics;
 - `DATA_VITRINA` keeps the same server-driven truth as operator-facing two-day `date_matrix`: `1631` source rows, `34` blocks, `33` separators, `1698` rendered rows и `95` unique metric keys при `yesterday_closed + today_current`;
-- `STATUS` names live sources per temporal slot, such as `seller_funnel_snapshot[yesterday_closed]`, `seller_funnel_snapshot[today_current]`, `stocks[yesterday_closed]`, `stocks[today_current]`, `cost_price[yesterday_closed]`, `cost_price[today_current]`, plus blocked `promo_by_price`;
+- `STATUS` names live sources per temporal slot, such as `seller_funnel_snapshot[yesterday_closed]`, `seller_funnel_snapshot[today_current]`, `stocks[yesterday_closed]`, `stocks[today_current]`, `cost_price[yesterday_closed]`, `cost_price[today_current]`, `promo_by_price[yesterday_closed]`, `promo_by_price[today_current]`;
 - current-only sources (`prices_snapshot`, `ads_bids`) are expected to show `not_available` for `yesterday_closed` instead of copying `today_current` into a closed-day column;
 - `stocks[yesterday_closed]` and `stocks[today_current]` are expected to materialize as success from exact-date runtime cache / historical CSV after the classifier switch;
 - `seller_funnel_snapshot` and `web_source_snapshot` use bounded `explicit-date -> latest-if-date-matches` only for current-day read resolution; `yesterday_closed` accepts only an explicit accepted closed-day snapshot and must not silently reuse provisional same-day values;

@@ -117,6 +117,11 @@ Optional runtime overrides remain the same as in current official-api boundary:
 - `WB_ADVERT_API_BASE_URL`
 - `WB_SELLER_ANALYTICS_API_BASE_URL`
 - `WB_STATISTICS_API_BASE_URL`
+- `PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH`
+
+Current promo live-wiring note:
+- if hosted runtime uses the repo-owned `promo_by_price` live seam, service env must expose a valid seller session state path for the bounded browser collector;
+- canonical selleros host default = `/opt/wb-web-bot/storage_state.json`, but runtime may override it explicitly via `PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH`.
 
 Secrets stay outside Git. Repo stores only env names and target shape.
 
@@ -154,6 +159,7 @@ Public probe validates:
 - `GET /v1/sheet-vitrina-v1/plan` returns JSON with either success shape or truthful `422 {"error": ...}`
 - after the historical stocks checkpoint switch, both `stocks[yesterday_closed]` and `stocks[today_current]` must resolve through exact-date runtime snapshots sourced from Seller Analytics CSV `STOCK_HISTORY_DAILY_CSV`
 - when strict bot/web-source closed-day acceptance is active, `STATUS` / `plan` / job surfaces must disclose truthful closure states (`closure_pending`, `closure_retrying`, `closure_rate_limited`, `closure_exhausted`, `success`) instead of silently reusing provisional same-day values in `yesterday_closed`
+- when promo live wiring is active, `STATUS` / `plan` surfaces must disclose truthful `promo_by_price[*]` source facts, including `success/incomplete/missing`, collector trace note and accepted-current preservation instead of keeping promo rows as a permanent blocked gap
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/status` returns JSON with dataset states, active SKU count and recommendation path
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/status` returns JSON with active SKU count, methodology note, shared dataset state and optional last result
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/*.xlsx` returns `200` + XLSX content type for all operator templates with Russian headers
