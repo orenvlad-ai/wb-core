@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-23-REGISTRY-UPLOAD-HTTP-ENTRYPOINT-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `registry_upload_http_entrypoint_block`."
-scope: "Первый live inbound HTTP entrypoint для V2-реестров, separate `COST_PRICE` upload contour и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, sibling cost-price request, thin request -> runtime -> response wiring, server-side `activated_at`, separated refresh/load actions, date-aware plan/status read, repo-owned operator page с двумя top-level tabs и bounded server-side factory-order supply contour без SPA/build pipeline."
+scope: "Первый live inbound HTTP entrypoint для V2-реестров, separate `COST_PRICE` upload contour и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, sibling cost-price request, thin request -> runtime -> response wiring, server-side `activated_at`, separated refresh/load actions, date-aware plan/status read, compact read-only daily-report surface for two latest closed business days, repo-owned operator page с двумя top-level tabs и bounded server-side factory-order supply contour без SPA/build pipeline."
 source_basis:
   - "migration/86_registry_upload_contract.md"
   - "migration/89_registry_upload_db_backed_runtime.md"
@@ -35,6 +35,7 @@ related_endpoints:
   - "POST /v1/cost-price/upload"
   - "POST /v1/sheet-vitrina-v1/refresh"
   - "POST /v1/sheet-vitrina-v1/load"
+  - "GET /v1/sheet-vitrina-v1/daily-report"
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
   - "GET /v1/sheet-vitrina-v1/job"
@@ -57,6 +58,8 @@ related_runners:
   - "apps/factory_order_sales_history_reconcile.py"
   - "apps/factory_order_supply_smoke.py"
   - "apps/sheet_vitrina_v1_factory_order_http_smoke.py"
+  - "apps/sheet_vitrina_v1_daily_report_smoke.py"
+  - "apps/sheet_vitrina_v1_daily_report_http_smoke.py"
   - "apps/sheet_vitrina_v1_operator_load_smoke.py"
   - "apps/cost_price_upload_http_entrypoint_smoke.py"
   - "apps/sheet_vitrina_v1_cost_price_read_side_smoke.py"
@@ -129,6 +132,7 @@ update_note: "Обновлён под current factory-order historical seam и c
 - Для `sheet_vitrina_v1` тот же entrypoint обслуживает narrow operator surface в двух блоках:
   - `POST /v1/sheet-vitrina-v1/refresh` = existing heavy server-side action
   - `POST /v1/sheet-vitrina-v1/load` = thin operator action, который пишет уже готовый snapshot в live sheet через existing bound Apps Script bridge
+  - `GET /v1/sheet-vitrina-v1/daily-report` = cheap read-only JSON summary для compact блока `Ежедневные отчёты`
   - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
   - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result
   - `GET /v1/sheet-vitrina-v1/job` = cheap poll/read surface для live operator log и async action state
@@ -143,6 +147,11 @@ update_note: "Обновлён под current factory-order historical seam и c
   - `GET /v1/sheet-vitrina-v1/supply/wb-regional/status` = cheap JSON status surface для bounded WB regional supply flow
   - `POST /v1/sheet-vitrina-v1/supply/wb-regional/calculate` = server-side district allocation calculation
   - `GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx` = отдельный operator-facing XLSX download по федеральному округу
+- Для compact daily-report compare basis current live rule остаётся fully server-side:
+  - `current_business_date` = now in `Asia/Yekaterinburg`
+  - `newer_closed_day` читается как `yesterday_closed` из ready snapshot `as_of_date=default_business_as_of_date(now)`
+  - `older_closed_day` читается как `yesterday_closed` из ready snapshot `as_of_date=default_business_as_of_date(now)-1 day`
+  - route не требует отдельный ready snapshot на текущую business date и не использует `today_current` как comparison baseline
 - Внутри existing `POST /v1/sheet-vitrina-v1/refresh` live contour теперь допускает bounded server-local sync для `seller_funnel_snapshot` и `web_source_snapshot`:
   - сначала refresh проверяет, materialized ли exact-date `today_current` snapshot в local `wb-ai` read-side;
   - если exact-date snapshot отсутствует, refresh может вызвать server-local owner path `/opt/wb-web-bot` (`bot.runner_day`, `bot.runner_sales_funnel_day`) и затем `/opt/wb-ai/run_web_source_handoff.py`;
@@ -210,6 +219,36 @@ update_note: "Обновлён под current factory-order historical seam и c
   - district XLSX содержит district identification + compact operator rows `nmId / SKU / Количество к поставке` именно по фактически аллоцированному количеству после ограничения `stock_ff`.
 - Current repo state не имел другого authoritative source для legacy parity term `FO_INBOUND_FF_TO_WB`, поэтому entrypoint получил narrow explicit upload contract `Товары в пути от ФФ на Wildberries`; silent drop этого члена формулы считается некорректным.
 - Operator page keeps narrow Russian chrome for operator-visible labels (`Загрузить данные`, `Отправить данные`, compact `Статус` / `Лог`, row-count labels, `Скачать лог`) without explanatory subtitle/subcopy про refresh/date defaults/temporal slots под заголовком или кнопкой.
+- Operator page добавляет один compact server-driven analytical block `Ежедневные отчёты`:
+  - block сравнивает только два последних closed business day в `Asia/Yekaterinburg`;
+  - current rule = `current business date -> compare yesterday_closed(default_business_as_of_date(now)) vs yesterday_closed(default_business_as_of_date(now)-1 day)`;
+  - block не использует `today_current` как baseline и не trigger-ит новых upstream fetch;
+  - source seam = только persisted ready snapshots плюс current registry config/metrics labels;
+  - current checkpoint surface:
+    - `Общая динамика Total Order Sum`
+    - `Топ-5` выросших/снизившихся total-level metrics по `% change`
+    - `Топ-10 SKU` по росту/падению `orderSum`
+    - `Топ-5` common negative/positive factors по deterministic frequency heuristic;
+  - ranked metric pool intentionally остаётся узким и canonical:
+    - `total_view_count`
+    - `total_views_current`
+    - `total_open_card_count`
+    - `avg_ctr_current`
+    - `avg_addToCartConversion`
+    - `avg_cartToOrderConversion`
+    - `avg_spp`
+    - `avg_ads_bid_search`
+    - `total_ads_views`
+    - `total_ads_sum`
+    - `avg_localizationPercent`;
+  - seller-funnel `ctr` не попадает в ranked total metric pool, потому что current truth не materialize-ит отдельную total-level row для двух closed days;
+  - SKU lists truthfully surface only `display_name + nmId`, because this is the stable operator-facing identity in current repo-owned truth;
+  - explanatory factor ranking uses only deterministic sign-safe signals:
+    - views/search views/card opens/CTR/conversions up-or-down
+    - `price_seller_discounted` up/down
+    - `Нет остатков`
+    - district low-stock warnings `< 20` excluding `stock_ru_far_siberia`;
+  - `SPP`, `ads_bid_search` и `localizationPercent` не входят в ranked explanation factors, because current repo norm does not fix one unambiguous good/bad sign for them.
 - Operator page добавляет один compact server-driven info block `Сервер и расписание`:
   - `Часовой пояс`
   - `Текущее время сервера`

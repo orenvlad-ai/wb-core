@@ -127,6 +127,8 @@ def main() -> None:
                 raise AssertionError("job-route probe must reach app-level 404 for fake job id")
             if route_map["status"]["http_status"] != 422:
                 raise AssertionError("status before refresh must stay 422 ready snapshot missing")
+            if route_map["daily_report"]["http_status"] != 200:
+                raise AssertionError("daily-report route must be publicly readable before refresh")
             if route_map["plan"]["http_status"] != 422:
                 raise AssertionError("plan before refresh must stay 422 ready snapshot missing")
             if route_map["factory_order_status"]["http_status"] != 200:
@@ -163,6 +165,8 @@ def main() -> None:
             loopback_routes = {item["route"]: item for item in loopback_probe["routes"]}
             if loopback_routes["status"]["http_status"] != 200:
                 raise AssertionError("status after refresh must become 200")
+            if loopback_routes["daily_report"]["http_status"] != 200:
+                raise AssertionError("daily-report route must stay 200 after refresh")
             if loopback_routes["plan"]["http_status"] != 200:
                 raise AssertionError("plan after refresh must become 200")
 

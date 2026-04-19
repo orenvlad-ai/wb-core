@@ -31,6 +31,7 @@ DEFAULT_PORT = 8765
 DEFAULT_UPLOAD_PATH = "/v1/registry-upload/bundle"
 DEFAULT_COST_PRICE_UPLOAD_PATH = "/v1/cost-price/upload"
 DEFAULT_SHEET_PLAN_PATH = "/v1/sheet-vitrina-v1/plan"
+DEFAULT_SHEET_DAILY_REPORT_PATH = "/v1/sheet-vitrina-v1/daily-report"
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_SHEET_LOAD_PATH = "/v1/sheet-vitrina-v1/load"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
@@ -431,11 +432,30 @@ def _build_handler(
                     self,
                     HTTPStatus.OK,
                     _render_sheet_vitrina_operator_ui(
+                        daily_report_path=DEFAULT_SHEET_DAILY_REPORT_PATH,
                         refresh_path=sheet_refresh_path,
                         load_path=sheet_load_path,
                         status_path=sheet_status_path,
                         job_path=sheet_job_path,
                     ),
+                )
+                return
+
+            if parsed.path == DEFAULT_SHEET_DAILY_REPORT_PATH:
+                try:
+                    payload = entrypoint.handle_sheet_daily_report_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina daily report runtime failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(
+                    self,
+                    HTTPStatus.OK,
+                    payload,
                 )
                 return
 
@@ -1147,6 +1167,7 @@ def _wb_regional_district_download_path_for_key(district_key: str) -> str:
 
 def _render_sheet_vitrina_operator_ui(
     *,
+    daily_report_path: str,
     refresh_path: str,
     load_path: str,
     status_path: str,
@@ -1155,6 +1176,7 @@ def _render_sheet_vitrina_operator_ui(
     spreadsheet_url = resolve_sheet_vitrina_live_spreadsheet_url()
     config_payload = {
         "page_title": "Обновление данных витрины",
+        "daily_report_path": daily_report_path,
         "refresh_path": refresh_path,
         "load_path": load_path,
         "status_path": status_path,

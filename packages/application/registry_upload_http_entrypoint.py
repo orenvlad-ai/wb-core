@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from packages.application.factory_order_supply import FactoryOrderSupplyBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.sheet_vitrina_v1_daily_report import SheetVitrinaV1DailyReportBlock
 from packages.application.sheet_vitrina_v1_load_bridge import load_sheet_vitrina_ready_snapshot_via_clasp
 from packages.application.wb_regional_supply import WbRegionalSupplyBlock
 from packages.business_time import (
@@ -82,6 +83,10 @@ class RegistryUploadHttpEntrypoint:
         self.now_factory = now_factory or _default_now_factory
         self._sheet_cycle_lock = threading.RLock()
         self.sheet_plan_block = SheetVitrinaV1LivePlanBlock(runtime=self.runtime)
+        self.daily_report_block = SheetVitrinaV1DailyReportBlock(
+            runtime=self.runtime,
+            now_factory=self.now_factory,
+        )
         self.sheet_load_runner = sheet_load_runner or load_sheet_vitrina_ready_snapshot_via_clasp
         self.operator_jobs = SheetVitrinaV1OperatorJobStore(timestamp_factory=self.activated_at_factory)
         self.factory_order_supply_block = FactoryOrderSupplyBlock(
@@ -114,6 +119,9 @@ class RegistryUploadHttpEntrypoint:
         payload = asdict(self.runtime.load_sheet_vitrina_refresh_status(as_of_date=as_of_date))
         payload["server_context"] = self.build_sheet_server_context()
         return payload
+
+    def handle_sheet_daily_report_request(self) -> dict[str, Any]:
+        return self.daily_report_block.build()
 
     def handle_sheet_refresh_request(
         self,

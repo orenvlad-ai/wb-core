@@ -291,6 +291,184 @@
       margin: 0;
     }
 
+    .daily-report {
+      display: grid;
+      gap: 18px;
+    }
+
+    .report-period {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    .report-hero-card,
+    .report-card {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: #ffffff;
+      padding: 18px;
+    }
+
+    .report-hero-card {
+      display: grid;
+      gap: 14px;
+      background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+    }
+
+    .report-hero-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .report-hero-title {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .report-hero-title h3,
+    .report-card h3 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 650;
+    }
+
+    .report-card {
+      display: grid;
+      gap: 14px;
+    }
+
+    .report-card p {
+      margin: 0;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+
+    .report-kpis,
+    .report-card-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .report-kpis {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .report-kpis div,
+    .report-card-grid > section {
+      min-width: 0;
+    }
+
+    .report-kpis dt {
+      margin: 0;
+      font-size: 11px;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .report-kpis dd {
+      margin: 8px 0 0;
+      font-size: 16px;
+      font-weight: 650;
+      word-break: break-word;
+    }
+
+    .report-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: grid;
+      gap: 10px;
+    }
+
+    .report-list-item {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(15, 23, 42, 0.08);
+    }
+
+    .report-list-item:first-child {
+      padding-top: 0;
+      border-top: 0;
+    }
+
+    .report-list-main {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .report-list-title {
+      font-size: 14px;
+      line-height: 1.5;
+      font-weight: 600;
+      word-break: break-word;
+    }
+
+    .report-list-meta {
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--muted);
+      word-break: break-word;
+    }
+
+    .report-delta {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      white-space: nowrap;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 700;
+      background: var(--idle-bg);
+      color: var(--idle-text);
+    }
+
+    .report-delta.is-up {
+      background: var(--success-bg);
+      color: var(--success-text);
+    }
+
+    .report-delta.is-down {
+      background: var(--error-bg);
+      color: var(--error-text);
+    }
+
+    .report-delta.is-flat {
+      background: var(--idle-bg);
+      color: var(--idle-text);
+    }
+
+    .report-empty {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+
+    .report-notes {
+      display: grid;
+      gap: 8px;
+    }
+
+    .report-note {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+
     .log-actions {
       display: flex;
       gap: 8px;
@@ -670,6 +848,8 @@
 
       .meta-grid,
       .summary-grid,
+      .report-kpis,
+      .report-card-grid,
       .field-grid,
       .factory-grid {
         grid-template-columns: 1fr;
@@ -766,6 +946,53 @@
                 <dd id="serverTrigger">-</dd>
               </div>
             </dl>
+          </section>
+
+          <section class="block" aria-labelledby="daily-report-title">
+            <div class="block-header">
+              <h2 id="daily-report-title" class="block-title">Ежедневные отчёты</h2>
+              <span id="dailyReportPeriod" class="report-period">-</span>
+            </div>
+            <p id="dailyReportLead" class="field-note">
+              Сравниваем два последних closed business day по persisted ready snapshots.
+            </p>
+            <p id="dailyReportStatus" class="section-message">Читаем ежедневный отчёт...</p>
+            <div id="dailyReportBody" class="daily-report" hidden>
+              <section id="dailyReportHero"></section>
+              <div class="report-card-grid">
+                <section class="report-card">
+                  <h3>Топ-5 самых снизившихся метрик</h3>
+                  <p>Primary ranking basis: процентное day-over-day изменение между двумя closed days.</p>
+                  <div id="dailyMetricDeclines"></div>
+                </section>
+                <section class="report-card">
+                  <h3>Топ-5 самых выросших метрик</h3>
+                  <p>Показываем только canonical total-level метрики из разрешённого numeric pool.</p>
+                  <div id="dailyMetricGrowth"></div>
+                </section>
+                <section class="report-card">
+                  <h3>Топ-10 SKU с самым сильным падением order sum</h3>
+                  <p>SKU ранжируются по процентному изменению order sum между closed days.</p>
+                  <div id="dailySkuDeclines"></div>
+                </section>
+                <section class="report-card">
+                  <h3>Топ-10 SKU с самым сильным ростом order sum</h3>
+                  <p>Показываем только current registry identity: display_name и nmId.</p>
+                  <div id="dailySkuGrowth"></div>
+                </section>
+                <section class="report-card">
+                  <h3>Топ-5 частых негативных факторов</h3>
+                  <p>Heuristic summary: считаем только прозрачные directional signals без fake-causality.</p>
+                  <div id="dailyNegativeFactors"></div>
+                </section>
+                <section class="report-card">
+                  <h3>Топ-5 частых позитивных факторов</h3>
+                  <p>Frequency-based summary по тем же deterministic rules, без ML и без выдуманных причин.</p>
+                  <div id="dailyPositiveFactors"></div>
+                </section>
+              </div>
+              <div id="dailyReportNotes" class="report-notes"></div>
+            </div>
           </section>
 
           <section class="block" aria-labelledby="log-title">
@@ -1099,6 +1326,18 @@
       const serverLastAutoStatus = document.getElementById("serverLastAutoStatus");
       const serverLastAutoSuccess = document.getElementById("serverLastAutoSuccess");
       const serverTrigger = document.getElementById("serverTrigger");
+      const dailyReportPeriod = document.getElementById("dailyReportPeriod");
+      const dailyReportLead = document.getElementById("dailyReportLead");
+      const dailyReportStatus = document.getElementById("dailyReportStatus");
+      const dailyReportBody = document.getElementById("dailyReportBody");
+      const dailyReportHero = document.getElementById("dailyReportHero");
+      const dailyMetricDeclines = document.getElementById("dailyMetricDeclines");
+      const dailyMetricGrowth = document.getElementById("dailyMetricGrowth");
+      const dailySkuDeclines = document.getElementById("dailySkuDeclines");
+      const dailySkuGrowth = document.getElementById("dailySkuGrowth");
+      const dailyNegativeFactors = document.getElementById("dailyNegativeFactors");
+      const dailyPositiveFactors = document.getElementById("dailyPositiveFactors");
+      const dailyReportNotes = document.getElementById("dailyReportNotes");
       const downloadButton = document.getElementById("downloadButton");
       const logViewport = document.getElementById("logViewport");
       const logBlock = document.getElementById("logBlock");
@@ -1183,6 +1422,8 @@
           loading: "Отправляем..."
         }
       };
+      const numberFormatter = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 });
+      const integerFormatter = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 });
       let activeJobId = null;
       let completedJob = null;
       let recommendationDownloadPath = config.factory_order_recommendation_path || "";
@@ -1233,6 +1474,193 @@
 
       function valueOrDash(value) {
         return value || value === 0 ? String(value) : "-";
+      }
+
+      function escapeHtml(value) {
+        return String(value || "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/\"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      function isFiniteNumber(value) {
+        return typeof value === "number" && Number.isFinite(value);
+      }
+
+      function formatNumber(value) {
+        if (!isFiniteNumber(value)) {
+          return "н/д";
+        }
+        const rounded = Math.round(value);
+        if (Math.abs(value - rounded) < 0.005) {
+          return integerFormatter.format(rounded);
+        }
+        return numberFormatter.format(value);
+      }
+
+      function formatSignedNumber(value) {
+        if (!isFiniteNumber(value)) {
+          return "н/д";
+        }
+        if (Math.abs(value) < 0.005) {
+          return "0";
+        }
+        const prefix = value > 0 ? "+" : "";
+        return prefix + formatNumber(value);
+      }
+
+      function formatPctChange(value) {
+        if (!isFiniteNumber(value)) {
+          return "н/д";
+        }
+        const prefix = value > 0 ? "+" : "";
+        return prefix + numberFormatter.format(value) + "%";
+      }
+
+      function deltaClass(direction) {
+        if (direction === "up" || direction === "down" || direction === "flat") {
+          return "report-delta is-" + direction;
+        }
+        return "report-delta";
+      }
+
+      function renderSimpleList(container, items, emptyMessage, buildMeta) {
+        if (!Array.isArray(items) || !items.length) {
+          container.innerHTML = "<p class=\"report-empty\">" + escapeHtml(emptyMessage) + "</p>";
+          return;
+        }
+        container.innerHTML = [
+          "<ol class=\"report-list\">",
+          items.map((item) => {
+            const meta = typeof buildMeta === "function" ? buildMeta(item) : "";
+            return [
+              "<li class=\"report-list-item\">",
+              "<div class=\"report-list-main\">",
+              "<div class=\"report-list-title\">" + escapeHtml(item.identity_label || item.label || "-") + "</div>",
+              meta ? "<div class=\"report-list-meta\">" + escapeHtml(meta) + "</div>" : "",
+              "</div>",
+              "<span class=\"" + deltaClass(item.direction) + "\">" + escapeHtml(formatPctChange(item.pct_change)) + "</span>",
+              "</li>"
+            ].join("");
+          }).join(""),
+          "</ol>"
+        ].join("");
+      }
+
+      function renderFactorList(container, items, emptyMessage) {
+        if (!Array.isArray(items) || !items.length) {
+          container.innerHTML = "<p class=\"report-empty\">" + escapeHtml(emptyMessage) + "</p>";
+          return;
+        }
+        container.innerHTML = [
+          "<ol class=\"report-list\">",
+          items.map((item) => [
+            "<li class=\"report-list-item\">",
+            "<div class=\"report-list-main\">",
+            "<div class=\"report-list-title\">" + escapeHtml(item.label || "-") + "</div>",
+            "<div class=\"report-list-meta\">" + escapeHtml(String(item.count || 0) + " из " + String(item.sample_size || 0) + " SKU") + "</div>",
+            "</div>",
+            "<span class=\"report-delta is-flat\">" + escapeHtml(String(item.count || 0)) + "</span>",
+            "</li>"
+          ].join("")).join(""),
+          "</ol>"
+        ].join("");
+      }
+
+      function renderDailyReportNotes(notes) {
+        if (!Array.isArray(notes) || !notes.length) {
+          dailyReportNotes.innerHTML = "";
+          return;
+        }
+        dailyReportNotes.innerHTML = notes
+          .map((note) => "<p class=\"report-note\">" + escapeHtml(note) + "</p>")
+          .join("");
+      }
+
+      function renderDailyReportUnavailable(payload, fallbackMessage) {
+        dailyReportPeriod.textContent = valueOrDash(payload && payload.newer_closed_date) + " vs " + valueOrDash(payload && payload.older_closed_date);
+        dailyReportLead.textContent = "Сравниваем два последних closed business day по persisted yesterday_closed ready snapshots.";
+        dailyReportStatus.textContent = valueOrDash((payload && payload.reason) || fallbackMessage || "Ежедневный отчёт пока недоступен.");
+        dailyReportStatus.className = "section-message";
+        dailyReportBody.hidden = true;
+        dailyReportHero.innerHTML = "";
+        dailyMetricDeclines.innerHTML = "";
+        dailyMetricGrowth.innerHTML = "";
+        dailySkuDeclines.innerHTML = "";
+        dailySkuGrowth.innerHTML = "";
+        dailyNegativeFactors.innerHTML = "";
+        dailyPositiveFactors.innerHTML = "";
+        renderDailyReportNotes(payload && payload.notes);
+      }
+
+      function renderDailyReport(payload) {
+        if (!payload || payload.status !== "available") {
+          renderDailyReportUnavailable(payload, "Ежедневный отчёт пока недоступен.");
+          return;
+        }
+        const total = payload.total_order_sum || {};
+        dailyReportPeriod.textContent = valueOrDash(payload.newer_closed_date) + " vs " + valueOrDash(payload.older_closed_date);
+        dailyReportLead.textContent = "Сравнение двух последних closed business day: " + valueOrDash(payload.newer_closed_date) + " против " + valueOrDash(payload.older_closed_date) + ".";
+        dailyReportStatus.textContent = "Ранжирование: по % change. Absolute delta показан только как secondary detail.";
+        dailyReportStatus.className = "section-message";
+        dailyReportBody.hidden = false;
+        dailyReportHero.innerHTML = [
+          "<article class=\"report-hero-card\">",
+          "<div class=\"report-hero-top\">",
+          "<div class=\"report-hero-title\">",
+          "<h3>Общая динамика Total Order Sum</h3>",
+          "<p class=\"report-list-meta\">Берём только два последних closed business day, а не today_current.</p>",
+          "</div>",
+          "<span class=\"" + deltaClass(total.direction) + "\">" + escapeHtml(formatPctChange(total.pct_change)) + "</span>",
+          "</div>",
+          "<dl class=\"report-kpis\">",
+          "<div><dt>" + escapeHtml(valueOrDash(payload.newer_closed_date)) + "</dt><dd>" + escapeHtml(formatNumber(total.newer_value)) + "</dd></div>",
+          "<div><dt>" + escapeHtml(valueOrDash(payload.older_closed_date)) + "</dt><dd>" + escapeHtml(formatNumber(total.older_value)) + "</dd></div>",
+          "<div><dt>Δ абсолютная</dt><dd>" + escapeHtml(formatSignedNumber(total.delta)) + "</dd></div>",
+          "</dl>",
+          "</article>"
+        ].join("");
+        renderSimpleList(
+          dailyMetricDeclines,
+          payload.top_metric_declines,
+          "Недостаточно сравнимых total-level метрик для ранжирования.",
+          null
+        );
+        renderSimpleList(
+          dailyMetricGrowth,
+          payload.top_metric_growth,
+          "Недостаточно сравнимых total-level метрик для ранжирования.",
+          null
+        );
+        renderSimpleList(
+          dailySkuDeclines,
+          payload.top_sku_order_sum_declines,
+          "Недостаточно SKU с корректной closed-day базой для сравнения.",
+          (item) => valueOrDash(payload.newer_closed_date) + ": " + formatNumber(item.newer_value)
+            + " · " + valueOrDash(payload.older_closed_date) + ": " + formatNumber(item.older_value)
+            + " · Δ " + formatSignedNumber(item.delta)
+        );
+        renderSimpleList(
+          dailySkuGrowth,
+          payload.top_sku_order_sum_growth,
+          "Недостаточно SKU с корректной closed-day базой для сравнения.",
+          (item) => valueOrDash(payload.newer_closed_date) + ": " + formatNumber(item.newer_value)
+            + " · " + valueOrDash(payload.older_closed_date) + ": " + formatNumber(item.older_value)
+            + " · Δ " + formatSignedNumber(item.delta)
+        );
+        renderFactorList(
+          dailyNegativeFactors,
+          payload.top_negative_factors,
+          "Частые негативные факторы пока не выделяются на текущем comparable pool."
+        );
+        renderFactorList(
+          dailyPositiveFactors,
+          payload.top_positive_factors,
+          "Частые позитивные факторы пока не выделяются на текущем comparable pool."
+        );
+        renderDailyReportNotes(payload.notes);
       }
 
       function normalizeState(value, fallback) {
@@ -1649,6 +2077,28 @@
         }
       }
 
+      async function loadDailyReport() {
+        try {
+          const response = await fetch(config.daily_report_path, {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          renderDailyReport(payload);
+        } catch (error) {
+          renderDailyReportUnavailable(
+            {
+              reason: "Не удалось прочитать ежедневный отчёт: " + (error instanceof Error ? error.message : String(error)),
+              notes: []
+            },
+            "Ежедневный отчёт пока недоступен."
+          );
+        }
+      }
+
       async function pollJob(jobId) {
         while (true) {
           const response = await fetch(config.job_path + "?job_id=" + encodeURIComponent(jobId), {
@@ -1696,6 +2146,7 @@
           if (finalJob.result) {
             renderSnapshotFields(finalJob.result);
           }
+          await loadDailyReport();
         } catch (error) {
           renderError(
             actionName === "refresh" ? "Refresh завершился с ошибкой." : "Отправка завершилась с ошибкой.",
@@ -1992,6 +2443,7 @@
       setActionState(null);
       setCompletedJob(null);
       loadStatus();
+      loadDailyReport();
       loadFactoryStatus();
       loadRegionalStatus();
     })();
