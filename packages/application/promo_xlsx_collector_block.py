@@ -644,14 +644,9 @@ def inspect_workbook(path: Path) -> WorkbookInspection:
     try:
         sheet_names = workbook.sheetnames
         hidden_sheets = any(workbook[sheet_name].sheet_state != "visible" for sheet_name in sheet_names)
-        first_sheet = workbook[sheet_names[0]]
-        header_summary = [
-            str(value).strip()
-            for value in next(first_sheet.iter_rows(min_row=1, max_row=1, values_only=True))
-            if value not in (None, "")
-        ]
-        row_count = first_sheet.max_row
-        col_count = first_sheet.max_column
+        target_sheet, header_row_index, header_summary = _find_workbook_data_sheet(workbook)
+        row_count = target_sheet.max_row
+        col_count = target_sheet.max_column
         formulas_present = False
         distinct_statuses: set[str] = set()
         status_column = None
@@ -660,17 +655,19 @@ def inspect_workbook(path: Path) -> WorkbookInspection:
                 status_column = idx
                 break
         non_empty_rows = 0
-        for row in first_sheet.iter_rows():
+        for row_index, row in enumerate(target_sheet.iter_rows(), start=1):
             values = [cell.value for cell in row]
             if any(value not in (None, "") for value in values):
                 non_empty_rows += 1
             if any(getattr(cell, "data_type", None) == "f" for cell in row):
                 formulas_present = True
+            if row_index <= header_row_index:
+                continue
             if status_column is not None and len(row) >= status_column:
                 value = row[status_column - 1].value
                 if isinstance(value, str) and value.strip():
                     distinct_statuses.add(value.strip())
-        merged_cells_present = bool(first_sheet.merged_cells.ranges)
+        merged_cells_present = bool(target_sheet.merged_cells.ranges)
         workbook_has_date_fields = any(
             any(token in header.lower() for token in ("дата", "date", "period", "период"))
             for header in header_summary
@@ -692,6 +689,27 @@ def inspect_workbook(path: Path) -> WorkbookInspection:
         )
     finally:
         workbook.close()
+
+
+def _find_workbook_data_sheet(workbook: Any) -> tuple[Any, int, list[str]]:
+    for sheet_name in workbook.sheetnames:
+        sheet = workbook[sheet_name]
+        row_index, header_summary = _find_workbook_header_row(sheet)
+        if header_summary and _COMMON_EXPORT_HEADERS.issubset(set(header_summary)):
+            return sheet, row_index, header_summary
+    first_sheet = workbook[workbook.sheetnames[0]]
+    row_index, header_summary = _find_workbook_header_row(first_sheet)
+    return first_sheet, row_index, header_summary
+
+
+def _find_workbook_header_row(sheet: Any) -> tuple[int, list[str]]:
+    for row_index, row in enumerate(sheet.iter_rows(min_row=1, max_row=min(sheet.max_row, 10), values_only=True), start=1):
+        header_summary = [str(value).strip() for value in row if value not in (None, "")]
+        header_set = set(header_summary)
+        if _COMMON_EXPORT_HEADERS.issubset(header_set):
+            return row_index, header_summary
+    fallback = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True))
+    return 1, [str(value).strip() for value in fallback if value not in (None, "")]
 
 
 def build_metadata(

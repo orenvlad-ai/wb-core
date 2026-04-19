@@ -4,7 +4,7 @@ doc_id: "WB-CORE-PROJECT-05-MODULE-STATUS"
 doc_type: "register"
 status: "active"
 purpose: "Дать compact register смёрженных модулей и current checkpoints без чтения всех module docs подряд."
-scope: "Семейства модулей, диапазоны `01–27`, текущий статус `main`, главный current checkpoint и открытые хвосты."
+scope: "Семейства модулей, диапазоны `01–28`, текущий статус `main`, главный current checkpoint и открытые хвосты."
 source_basis:
   - "docs/modules/00_INDEX__MODULES.md"
   - "README.md"
@@ -20,12 +20,12 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "eec625379bdb00d632971577611b357cc88266e5"
+built_from_commit: "967edcc2059b36db36a3846d9f773c0b90e20f90"
 ---
 
 # Summary
 
-На текущем `main` main-confirmed module set уже доходит до `27`.
+На текущем `main` main-confirmed module set уже доходит до `28`.
 
 Практически это значит:
 - source/data foundation уже materialized;
@@ -42,6 +42,7 @@ built_from_commit: "eec625379bdb00d632971577611b357cc88266e5"
 | `20–23` | `registry upload line` | смёржены в `main` до live HTTP entrypoint |
 | `24–26` | `sheet-side operator line` | смёржены в `main` до первого bounded MVP |
 | `27` | `browser-capture collector` | смёржен в `main` как bounded local promo XLSX collector contour |
+| `28` | `browser-capture live wiring` | смёржен в `main` как promo live source seam inside refresh/runtime/read-side |
 
 ## Current checkpoint ladder
 
@@ -61,6 +62,7 @@ built_from_commit: "eec625379bdb00d632971577611b357cc88266e5"
 14. `sheet_vitrina_v1_registry_seed_v3_bootstrap_block`
 15. `sheet_vitrina_v1_mvp_end_to_end_block`
 16. `promo_xlsx_collector_block`
+17. `promo_live_source_wiring_block`
 
 ## Operator-facing checkpoint
 
@@ -75,10 +77,16 @@ Current sibling operator input flow:
 - `Отправить себестоимости`
 - flow обновляет separate `COST_PRICE` authoritative dataset, а existing refresh/read contour затем использует его server-side в current `DATA_VITRINA` / `STATUS`
 
-Current sibling local promo collector flow:
+Current sibling local promo collector precursor flow:
 - `python3 apps/promo_xlsx_collector_live.py`
 - flow делает bounded seller-portal capture только вне repo tree и materialize-ит `metadata.json` для каждого promo plus `workbook.xlsx` для downloaded current/future promo
-- contour intentionally stays outside current public HTTP/operator page and does not yet wire into `refresh/load`
+- contour remains the thin browser-capture precursor under the live-wired promo source seam
+
+Current live promo source flow:
+- `POST /v1/sheet-vitrina-v1/refresh`
+- contour now invokes repo-owned promo collector server-side for `promo_by_price[today_current]`
+- `promo_by_price[yesterday_closed]` reads only accepted/runtime-cached promo truth
+- `STATUS` and ready snapshot now expose truthful promo source facts instead of a permanent blocked gap
 
 Current repo-owned operator refresh surface:
 - `GET /sheet-vitrina-v1/operator`
@@ -97,11 +105,15 @@ Current repo-owned operator refresh surface:
 - job/log surface is detailed and machine-useful: source/module/adapter/endpoint steps, source result kinds/counts, metric batch summaries and bridge/write results stay server-driven and can be exported per completed run through `GET /v1/sheet-vitrina-v1/job?job_id=...&format=text&download=1`
 - server-side business timezone = `Asia/Yekaterinburg` for default `as_of_date`, `today_current` and operator-facing freshness dates
 - live daily auto-refresh = repo-owned artifacts `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.{service,timer}` -> installed on host as `wb-core-sheet-vitrina-refresh.timer` -> existing `POST /v1/sheet-vitrina-v1/refresh` at `11:00, 20:00 Asia/Yekaterinburg` (`06:00 UTC` and `15:00 UTC` on current host) with `auto_load=true`, so the daily path now finishes as `refresh + load to live sheet`
-- source matrix is now explicit: group A bot/web-source historical, group B WB API historical/date-period capable, group C WB API current-snapshot-only, group D other/manual overlays
+- source matrix is now explicit: group A bot/web-source historical, group B WB API historical/date-period capable, group C WB API current-snapshot-only, group D other/manual/browser-collector overlays
 - historical/date-period families (`seller_funnel_snapshot`, `web_source_snapshot`, `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`) now use persisted accepted closed-day semantics for `yesterday_closed`
 - current-only families (`prices_snapshot`, `ads_bids`) keep truthful `not_available` for `yesterday_closed`, use same-day accepted snapshot semantics for `today_current` and must not be destructively overwritten by later invalid auto/manual attempts
 - `stocks` is now fully in the date/period-capable group inside `sheet_vitrina_v1`: both `yesterday_closed` and `today_current` read authoritative exact-date Seller Analytics CSV snapshots from `temporal_source_snapshots[source_key=stocks]`
 - manual operator refresh keeps short retries inside the run but does not create persisted long-retry tails and does not overwrite accepted truth on invalid candidates
+- promo source follows the same accepted-truth norm:
+  - invalid current attempt must not overwrite already accepted same-day promo truth
+  - `yesterday_closed` must read only accepted/runtime-cached promo truth
+  - low-confidence cross-year labels keep null exact dates instead of invented dates
 - live retry completion is bounded by repo-owned runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py` plus repo-owned artifacts `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.{service,timer}` installed on host as `wb-core-sheet-vitrina-closure-retry.timer`; the runner covers due `yesterday_closed` for the full historical/date-period matrix and same-day current-only capture retries only within the current business day
 
 Current additional operator supply flow on the same page:
@@ -132,6 +144,7 @@ Current main-confirmed counts для этого flow:
 - operator-facing `STATUS` = per-source/per-slot freshness surface; current-only sources (`prices_snapshot`, `ads_bids`) показывают `not_available` для `yesterday_closed`, `stocks[yesterday_closed]` и `stocks[today_current]` now resolve through historical exact-date runtime snapshots, а failed later attempts preserve the last accepted truth instead of blank/zero overwrite
 - bot/web-source family (`seller_funnel_snapshot`, `web_source_snapshot`) uses bounded `explicit-date -> latest-if-date-matches` reads for `today_current`; exact-date runtime cache may truthfully surface previous captured day as next `yesterday_closed`, with explicit `STATUS` note instead of slot-copying
 - if exact-date `today_current` snapshot is still missing for bot/web-source family, refresh may bounded-trigger server-local same-day capture in `/opt/wb-web-bot` plus `/opt/wb-ai/run_web_source_handoff.py` before final read-side fetch
+- promo browser-capture family now uses bounded sidecar/workbook mapping server-side: workbook alone is insufficient, and `STATUS.promo_by_price[*].note` exposes collector trace plus current/future/past/ambiguous counts
 - sibling `COST_PRICE` contour = отдельный sheet/menu/upload path и separate runtime current-state seam вне compact bundle
 - current operator-facing cost overlay = server-side `cost_price_rub`, `avg_cost_price_rub`, `total_proxy_profit_rub`, `proxy_margin_pct_total` с resolution `group + latest effective_from <= slot_date`
 
@@ -140,8 +153,7 @@ This is the first bounded MVP checkpoint, not final production parity.
 # Known gaps
 
 - full legacy parity beyond current main-confirmed sheet/upload dictionary;
-- repo-owned promo collector contour уже materialized, но его output ещё не включён в current live `sheet_vitrina_v1` refresh/load/operator line;
-- final live numeric fill для promo-backed metrics и других bounded long-tail rows beyond current `COST_PRICE` overlay;
+- promo source seam itself больше не является gap; remaining tail = broader live numeric parity beyond the currently wired promo-backed metric subset and beyond current `COST_PRICE` overlay;
 - отдельный bounded fix по любому remaining non-district / foreign stocks residual, если одной truthful `STATUS` note окажется недостаточно для operator flow;
 - production hardening around runtime/deploy/auth;
 - generic orchestration platform beyond current bounded auto + retry timers;

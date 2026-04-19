@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import re
 import time
@@ -26,6 +27,7 @@ from packages.contracts.promo_xlsx_collector_block import (
 
 
 DEFAULT_SESSION_STATE_PATH = "/Users/ovlmacbook/Projects/wb-web-bot/storage_state.json"
+SERVER_DEFAULT_SESSION_STATE_PATH = "/opt/wb-web-bot/storage_state.json"
 TIMELINE_ACTION_SELECTOR = '[data-testid="timeline-action"]'
 COOKIE_ACCEPT_TEXT = "Принимаю"
 AUTO_PROMO_MODAL_OVERLAY_SELECTOR = '[data-testid="components/auto-promo-modal-overlay"]'
@@ -107,7 +109,7 @@ class PlaywrightPromoCollectorDriver:
         self._playwright = sync_playwright().start()
         self._browser = self._playwright.chromium.launch(headless=request.headless)
         self._context = self._browser.new_context(
-            storage_state=request.storage_state_path or DEFAULT_SESSION_STATE_PATH,
+            storage_state=resolve_storage_state_path(request.storage_state_path),
             locale="ru-RU",
             timezone_id="Asia/Yekaterinburg",
             viewport={"width": 1600, "height": 1200},
@@ -488,6 +490,18 @@ def _parse_period_id(url: str) -> int | None:
 
 def is_hydrated_state(state: CollectorStateSnapshot) -> bool:
     return state.title == "Акции WB" and (state.timeline_count > 0 or state.overlay_count > 0)
+
+
+def resolve_storage_state_path(explicit_path: str | None) -> str:
+    if explicit_path and explicit_path.strip():
+        return explicit_path.strip()
+    env_path = str(os.environ.get("PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH", "")).strip()
+    if env_path:
+        return env_path
+    for candidate in (DEFAULT_SESSION_STATE_PATH, SERVER_DEFAULT_SESSION_STATE_PATH):
+        if Path(candidate).exists():
+            return candidate
+    return DEFAULT_SESSION_STATE_PATH
 
 
 def _slug(value: str) -> str:

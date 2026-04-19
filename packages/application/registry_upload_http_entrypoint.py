@@ -11,6 +11,7 @@ from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from packages.application.factory_order_supply import FactoryOrderSupplyBlock
+from packages.application.promo_live_source import PromoLiveSourceBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_daily_report import SheetVitrinaV1DailyReportBlock
 from packages.application.sheet_vitrina_v1_load_bridge import load_sheet_vitrina_ready_snapshot_via_clasp
@@ -83,7 +84,10 @@ class RegistryUploadHttpEntrypoint:
         self.refreshed_at_factory = refreshed_at_factory or _default_activated_at_factory
         self.now_factory = now_factory or _default_now_factory
         self._sheet_cycle_lock = threading.RLock()
-        self.sheet_plan_block = SheetVitrinaV1LivePlanBlock(runtime=self.runtime)
+        self.sheet_plan_block = SheetVitrinaV1LivePlanBlock(
+            runtime=self.runtime,
+            promo_live_source_block=PromoLiveSourceBlock(runtime_dir=self.runtime.runtime_dir),
+        )
         self.daily_report_block = SheetVitrinaV1DailyReportBlock(
             runtime=self.runtime,
             now_factory=self.now_factory,

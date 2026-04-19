@@ -69,6 +69,7 @@ OPTIONAL_RUNTIME_CONTRACT = [
     "WB_ADVERT_API_BASE_URL",
     "WB_SELLER_ANALYTICS_API_BASE_URL",
     "WB_STATISTICS_API_BASE_URL",
+    "PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH",
 ]
 ROUTE_ENV_DEFAULTS = {
     "REGISTRY_UPLOAD_HTTP_PATH": DEFAULT_UPLOAD_PATH,
@@ -605,7 +606,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def _add_probe_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--as-of-date", default=None, help="Optional as_of_date for plan/status/refresh probes.")
     parser.add_argument("--skip-refresh", action="store_true", help="Skip POST /v1/sheet-vitrina-v1/refresh.")
-    parser.add_argument("--timeout-seconds", type=float, default=20.0, help="HTTP probe timeout in seconds.")
+    parser.add_argument("--timeout-seconds", type=float, default=180.0, help="HTTP probe timeout in seconds.")
 
 
 def _collect_http_probe(

@@ -28,7 +28,7 @@ related_docs:
   - "docs/architecture/01_target_architecture.md"
   - "docs/modules/00_INDEX__MODULES.md"
 source_of_truth_level: "module_canonical"
-update_note: "Создан как канонический модульный документ для первого repo-owned bounded promo XLSX collector contour: wb-core materialize-ит local runner, truthful metadata sidecar и workbook inspection, но не wire-ит этот block в live scheduler/HTTP/operator load path."
+update_note: "Создан как канонический модульный документ для первого repo-owned bounded promo XLSX collector contour: wb-core materialize-ит local runner, truthful metadata sidecar и workbook inspection; дальнейшее live wiring этого precursor описывается уже в `28_MODULE__PROMO_LIVE_SOURCE_WIRING_BLOCK.md`."
 ---
 
 # 1. Идентификатор и статус
@@ -149,8 +149,8 @@ update_note: "Создан как канонический модульный д
 
 # 8. Что пока не является частью финальной production-сборки
 
-- live scheduler/timer wiring этого collector contour;
+- live scheduler/timer wiring именно как отдельного promo-only contour;
 - public HTTP route для promo collector;
 - operator UI redesign или bulk operator wiring;
-- sheet-side refresh/load integration promo collector output в current `DATA_VITRINA`/`STATUS`;
+- sheet-side/browser-side heavy logic вместо server-owned live wiring через module `28`;
 - перенос всего seller-site browser runtime внутрь `wb-core`.
