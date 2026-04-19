@@ -1,4 +1,4 @@
-"""Repo-owned live runner for sheet_vitrina_v1 closed-day retry / corrective re-closure."""
+"""Repo-owned live runner for sheet_vitrina_v1 persisted retry / corrective temporal refresh."""
 
 from __future__ import annotations
 
@@ -19,7 +19,10 @@ from packages.application.registry_upload_http_entrypoint import RegistryUploadH
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Retry pending closed-day bot/web-source closures and optionally corrective re-close explicit dates.",
+        description=(
+            "Retry pending yesterday_closed historical/date-period families plus same-day current-only "
+            "captures, and optionally corrective refresh explicit as_of_date values."
+        ),
     )
     parser.add_argument(
         "--date",

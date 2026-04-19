@@ -16,7 +16,7 @@ from packages.application.sheet_vitrina_v1_load_bridge import load_sheet_vitrina
 from packages.application.wb_regional_supply import WbRegionalSupplyBlock
 from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE_NAME,
-    DAILY_REFRESH_BUSINESS_HOUR,
+    DAILY_REFRESH_BUSINESS_HOURS,
     DAILY_REFRESH_SYSTEMD_UTC_ONCALENDAR,
     DAILY_REFRESH_SYSTEMD_UTC_TIME,
     current_business_date_iso,
@@ -27,10 +27,15 @@ from packages.application.sheet_vitrina_v1_live_plan import (
     BLOCKED_SOURCE_METRIC_KEYS,
     CLOSURE_PENDING_STATES,
     DELIVERY_CONTRACT_VERSION,
+    EXECUTION_MODE_AUTO_DAILY,
+    EXECUTION_MODE_MANUAL_OPERATOR,
+    EXECUTION_MODE_PERSISTED_RETRY,
+    HISTORICAL_CLOSED_DAY_SOURCE_KEYS,
     SOURCE_DIAGNOSTIC_SPECS,
     SheetVitrinaV1LivePlanBlock,
-    STRICT_CLOSED_DAY_SOURCE_KEYS,
+    CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS,
     TEMPORAL_SLOT_YESTERDAY_CLOSED,
+    TEMPORAL_SLOT_TODAY_CURRENT,
 )
 from packages.contracts.cost_price_upload import CostPriceUploadResult
 from packages.contracts.registry_upload_file_backed_service import RegistryUploadResult
@@ -42,12 +47,20 @@ SHEET_VITRINA_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/refresh"
 SHEET_VITRINA_LOAD_ROUTE = "/v1/sheet-vitrina-v1/load"
 SHEET_VITRINA_DAILY_TIMER_NAME = "wb-core-sheet-vitrina-refresh.timer"
 SHEET_VITRINA_DAILY_AUTO_ACTION = "загрузка данных + отправка данных в таблицу"
+SHEET_VITRINA_DAILY_BUSINESS_TIMES = ", ".join(
+    f"{hour:02d}:00" for hour in DAILY_REFRESH_BUSINESS_HOURS
+)
 SHEET_VITRINA_DAILY_AUTO_DESCRIPTION = (
-    f"Ежедневно в {DAILY_REFRESH_BUSINESS_HOUR:02d}:00 {CANONICAL_BUSINESS_TIMEZONE_NAME}: "
+    f"Ежедневно в {SHEET_VITRINA_DAILY_BUSINESS_TIMES} {CANONICAL_BUSINESS_TIMEZONE_NAME}: "
     f"{SHEET_VITRINA_DAILY_AUTO_ACTION}"
 )
 SHEET_VITRINA_DAILY_TRIGGER_DESCRIPTION = (
-    f"{SHEET_VITRINA_DAILY_TIMER_NAME} -> POST {SHEET_VITRINA_REFRESH_ROUTE} (auto_load=true)"
+    f"{SHEET_VITRINA_DAILY_TIMER_NAME} -> POST {SHEET_VITRINA_REFRESH_ROUTE} (auto_load=true) "
+    f"в {SHEET_VITRINA_DAILY_BUSINESS_TIMES} {CANONICAL_BUSINESS_TIMEZONE_NAME}"
+)
+SHEET_VITRINA_RETRY_RUNNER_DESCRIPTION = (
+    "Persisted retry runner: дожимает due yesterday_closed для historical/date-period families "
+    "и same-day today_current только для WB API current-snapshot-only families; manual refresh такие хвосты не создаёт."
 )
 
 
@@ -67,6 +80,7 @@ class RegistryUploadHttpEntrypoint:
         self.activated_at_factory = activated_at_factory or _default_activated_at_factory
         self.refreshed_at_factory = refreshed_at_factory or _default_activated_at_factory
         self.now_factory = now_factory or _default_now_factory
+        self._sheet_cycle_lock = threading.RLock()
         self.sheet_plan_block = SheetVitrinaV1LivePlanBlock(runtime=self.runtime)
         self.sheet_load_runner = sheet_load_runner or load_sheet_vitrina_ready_snapshot_via_clasp
         self.operator_jobs = SheetVitrinaV1OperatorJobStore(timestamp_factory=self.activated_at_factory)
@@ -150,84 +164,104 @@ class RegistryUploadHttpEntrypoint:
     ) -> dict[str, Any]:
         emit = log or _noop_log
         requested_dates = sorted({value for value in (target_dates or []) if value})
-        due_states = self.sheet_plan_block.list_due_closed_day_retries()
-        due_dates = sorted({state.target_date for state in due_states})
-        scheduled_dates = sorted(set(requested_dates) | set(due_dates))
         default_visible_as_of_date = default_business_as_of_date(self.now_factory())
+        current_business_date = current_business_date_iso(self.now_factory())
+        due_closed_states = self.sheet_plan_block.list_due_closed_day_retries()
+        due_current_states = self.sheet_plan_block.list_due_current_capture_retries(
+            current_date=current_business_date
+        )
+        due_closed_dates = sorted({state.target_date for state in due_closed_states})
+        scheduled_dates = sorted(set(requested_dates) | set(due_closed_dates))
+        if due_current_states:
+            scheduled_dates = sorted(set(scheduled_dates) | {default_visible_as_of_date})
 
         emit(
             _format_log_event(
                 "closure_retry_cycle_start",
                 requested_dates=",".join(requested_dates),
-                due_dates=",".join(due_dates),
+                due_closed_dates=",".join(due_closed_dates),
+                due_current_capture_sources=",".join(sorted({state.source_key for state in due_current_states})),
+                due_current_capture_date=current_business_date if due_current_states else "",
                 scheduled_dates=",".join(scheduled_dates),
-                strict_sources=",".join(sorted(STRICT_CLOSED_DAY_SOURCE_KEYS)),
-                slot_kind=TEMPORAL_SLOT_YESTERDAY_CLOSED,
+                historical_sources=",".join(sorted(HISTORICAL_CLOSED_DAY_SOURCE_KEYS)),
+                current_capture_sources=",".join(sorted(CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS)),
             )
         )
 
         refresh_results: list[dict[str, Any]] = []
-        for as_of_date in scheduled_dates:
-            emit(
-                _format_log_event(
-                    "closure_retry_refresh_start",
+        with self._sheet_cycle_lock:
+            for as_of_date in scheduled_dates:
+                emit(
+                    _format_log_event(
+                        "closure_retry_refresh_start",
+                        as_of_date=as_of_date,
+                    )
+                )
+                refresh_payload = self._run_sheet_refresh(
                     as_of_date=as_of_date,
+                    log=emit,
+                    execution_mode=EXECUTION_MODE_PERSISTED_RETRY,
                 )
-            )
-            refresh_payload = self._run_sheet_refresh(as_of_date=as_of_date, log=emit)
-            refresh_results.append(
-                {
-                    "as_of_date": as_of_date,
-                    "snapshot_id": refresh_payload["snapshot_id"],
-                    "refreshed_at": refresh_payload["refreshed_at"],
-                }
-            )
-
-        load_result: dict[str, Any] | None = None
-        if auto_load_visible and default_visible_as_of_date in scheduled_dates:
-            emit(
-                _format_log_event(
-                    "closure_retry_load_start",
-                    as_of_date=default_visible_as_of_date,
+                refresh_results.append(
+                    {
+                        "as_of_date": as_of_date,
+                        "snapshot_id": refresh_payload["snapshot_id"],
+                        "refreshed_at": refresh_payload["refreshed_at"],
+                    }
                 )
-            )
-            load_result = self._run_sheet_load(as_of_date=default_visible_as_of_date, log=emit)
 
-        closure_states = self.runtime.list_temporal_source_closure_states(
-            source_keys=sorted(STRICT_CLOSED_DAY_SOURCE_KEYS),
-            slot_kind=TEMPORAL_SLOT_YESTERDAY_CLOSED,
-            states=sorted(CLOSURE_PENDING_STATES),
-        )
-        payload = {
-            "status": "success",
-            "operation": "temporal_closure_retry_cycle",
-            "requested_dates": requested_dates,
-            "due_dates": due_dates,
-            "scheduled_dates": scheduled_dates,
-            "refreshed_dates": refresh_results,
-            "visible_load_result": load_result,
-            "pending_closure_states": [
-                {
-                    "source_key": state.source_key,
-                    "target_date": state.target_date,
-                    "slot_kind": state.slot_kind,
-                    "state": state.state,
-                    "attempt_count": state.attempt_count,
-                    "next_retry_at": state.next_retry_at,
-                    "last_reason": state.last_reason,
-                    "accepted_at": state.accepted_at,
-                }
-                for state in closure_states
-            ],
-            "server_context": self.build_sheet_server_context(),
-        }
+            load_result: dict[str, Any] | None = None
+            if auto_load_visible and default_visible_as_of_date in scheduled_dates:
+                emit(
+                    _format_log_event(
+                        "closure_retry_load_start",
+                        as_of_date=default_visible_as_of_date,
+                    )
+                )
+                load_result = self._run_sheet_load(as_of_date=default_visible_as_of_date, log=emit)
+
+            closure_states = self.runtime.list_temporal_source_closure_states(
+                source_keys=sorted(HISTORICAL_CLOSED_DAY_SOURCE_KEYS | CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS),
+                states=sorted(CLOSURE_PENDING_STATES),
+            )
+            payload = {
+                "status": "success",
+                "operation": "temporal_closure_retry_cycle",
+                "requested_dates": requested_dates,
+                "due_closed_dates": due_closed_dates,
+                "due_current_capture_date": current_business_date if due_current_states else "",
+                "scheduled_dates": scheduled_dates,
+                "refreshed_dates": refresh_results,
+                "visible_load_result": load_result,
+                "pending_closure_states": [
+                    {
+                        "source_key": state.source_key,
+                        "target_date": state.target_date,
+                        "slot_kind": state.slot_kind,
+                        "state": state.state,
+                        "attempt_count": state.attempt_count,
+                        "next_retry_at": state.next_retry_at,
+                        "last_reason": state.last_reason,
+                        "accepted_at": state.accepted_at,
+                    }
+                    for state in closure_states
+                    if (
+                        state.slot_kind == TEMPORAL_SLOT_YESTERDAY_CLOSED
+                        or (
+                            state.slot_kind == TEMPORAL_SLOT_TODAY_CURRENT
+                            and state.target_date == current_business_date
+                        )
+                    )
+                ],
+                "server_context": self.build_sheet_server_context(),
+            }
         emit(
             _format_log_event(
                 "closure_retry_cycle_finish",
                 scheduled_dates=",".join(scheduled_dates),
                 refreshed=len(refresh_results),
                 loaded_visible=str(bool(load_result)).lower(),
-                pending_states=len(closure_states),
+                pending_states=len(payload["pending_closure_states"]),
             )
         )
         return payload
@@ -287,171 +321,184 @@ class RegistryUploadHttpEntrypoint:
         log: OperatorLogEmitter | None,
     ) -> dict[str, Any]:
         emit = log or _noop_log
-        started_at = self.activated_at_factory()
-        requested_as_of_date = as_of_date or default_business_as_of_date(self.now_factory())
-        self.runtime.mark_sheet_vitrina_auto_update_started(
-            started_at=started_at,
-            as_of_date=requested_as_of_date,
-        )
-        emit(
-            _format_log_event(
-                "cycle_start",
-                cycle="auto_update",
-                route=SHEET_VITRINA_REFRESH_ROUTE,
-                requested_as_of_date=requested_as_of_date,
-                action="build_ready_snapshot_and_write_sheet",
-                trigger=SHEET_VITRINA_DAILY_TIMER_NAME,
+        with self._sheet_cycle_lock:
+            started_at = self.activated_at_factory()
+            requested_as_of_date = as_of_date or default_business_as_of_date(self.now_factory())
+            self.runtime.mark_sheet_vitrina_auto_update_started(
+                started_at=started_at,
+                as_of_date=requested_as_of_date,
             )
-        )
-        refresh_payload: dict[str, Any] | None = None
-        try:
-            refresh_payload = self._run_sheet_refresh(as_of_date=as_of_date, log=emit)
-            load_payload = self._run_sheet_load(
-                as_of_date=str(refresh_payload["as_of_date"]),
-                log=emit,
+            emit(
+                _format_log_event(
+                    "cycle_start",
+                    cycle="auto_update",
+                    route=SHEET_VITRINA_REFRESH_ROUTE,
+                    requested_as_of_date=requested_as_of_date,
+                    action="build_ready_snapshot_and_write_sheet",
+                    trigger=SHEET_VITRINA_DAILY_TIMER_NAME,
+                    execution_mode=EXECUTION_MODE_AUTO_DAILY,
+                )
             )
-        except Exception as exc:
+            refresh_payload: dict[str, Any] | None = None
+            try:
+                refresh_payload = self._run_sheet_refresh(
+                    as_of_date=as_of_date,
+                    log=emit,
+                    execution_mode=EXECUTION_MODE_AUTO_DAILY,
+                )
+                load_payload = self._run_sheet_load(
+                    as_of_date=str(refresh_payload["as_of_date"]),
+                    log=emit,
+                )
+            except Exception as exc:
+                finished_at = self.activated_at_factory()
+                self.runtime.save_sheet_vitrina_auto_update_result(
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    status="error",
+                    as_of_date=(
+                        str(refresh_payload["as_of_date"])
+                        if refresh_payload is not None
+                        else requested_as_of_date
+                    ),
+                    snapshot_id=(
+                        str(refresh_payload["snapshot_id"])
+                        if refresh_payload is not None
+                        else None
+                    ),
+                    refreshed_at=(
+                        str(refresh_payload["refreshed_at"])
+                        if refresh_payload is not None
+                        else None
+                    ),
+                    error=str(exc),
+                )
+                emit(
+                    _format_log_event(
+                        "cycle_finish",
+                        cycle="auto_update",
+                        status="error",
+                        route=SHEET_VITRINA_REFRESH_ROUTE,
+                        error=str(exc),
+                    )
+                )
+                raise
+
             finished_at = self.activated_at_factory()
             self.runtime.save_sheet_vitrina_auto_update_result(
                 started_at=started_at,
                 finished_at=finished_at,
-                status="error",
-                as_of_date=(
-                    str(refresh_payload["as_of_date"])
-                    if refresh_payload is not None
-                    else requested_as_of_date
-                ),
-                snapshot_id=(
-                    str(refresh_payload["snapshot_id"])
-                    if refresh_payload is not None
-                    else None
-                ),
-                refreshed_at=(
-                    str(refresh_payload["refreshed_at"])
-                    if refresh_payload is not None
-                    else None
-                ),
-                error=str(exc),
+                status="success",
+                as_of_date=str(load_payload["as_of_date"]),
+                snapshot_id=str(load_payload["snapshot_id"]),
+                refreshed_at=str(load_payload["refreshed_at"]),
+                error=None,
             )
             emit(
                 _format_log_event(
                     "cycle_finish",
                     cycle="auto_update",
-                    status="error",
+                    status="success",
                     route=SHEET_VITRINA_REFRESH_ROUTE,
-                    error=str(exc),
+                    snapshot_id=load_payload["snapshot_id"],
                 )
             )
-            raise
-
-        finished_at = self.activated_at_factory()
-        self.runtime.save_sheet_vitrina_auto_update_result(
-            started_at=started_at,
-            finished_at=finished_at,
-            status="success",
-            as_of_date=str(load_payload["as_of_date"]),
-            snapshot_id=str(load_payload["snapshot_id"]),
-            refreshed_at=str(load_payload["refreshed_at"]),
-            error=None,
-        )
-        emit(
-            _format_log_event(
-                "cycle_finish",
-                cycle="auto_update",
-                status="success",
-                route=SHEET_VITRINA_REFRESH_ROUTE,
-                snapshot_id=load_payload["snapshot_id"],
-            )
-        )
-        payload = dict(load_payload)
-        payload["operation"] = "auto_update"
-        payload["auto_update_started_at"] = started_at
-        payload["auto_update_finished_at"] = finished_at
-        payload["server_context"] = self.build_sheet_server_context()
-        return payload
+            payload = dict(load_payload)
+            payload["operation"] = "auto_update"
+            payload["auto_update_started_at"] = started_at
+            payload["auto_update_finished_at"] = finished_at
+            payload["server_context"] = self.build_sheet_server_context()
+            return payload
 
     def _run_sheet_refresh(
         self,
         *,
         as_of_date: str | None,
         log: OperatorLogEmitter | None,
+        execution_mode: str = EXECUTION_MODE_MANUAL_OPERATOR,
     ) -> dict[str, Any]:
         emit = log or _noop_log
-        current_state = self.runtime.load_current_state()
-        emit(
-            _format_log_event(
-                "cycle_start",
-                cycle="refresh",
-                route=SHEET_VITRINA_REFRESH_ROUTE,
-                requested_as_of_date=as_of_date or "default",
-                action="build_ready_snapshot_only",
+        with self._sheet_cycle_lock:
+            current_state = self.runtime.load_current_state()
+            emit(
+                _format_log_event(
+                    "cycle_start",
+                    cycle="refresh",
+                    route=SHEET_VITRINA_REFRESH_ROUTE,
+                    requested_as_of_date=as_of_date or "default",
+                    action="build_ready_snapshot_only",
+                    execution_mode=execution_mode,
+                )
             )
-        )
-        emit(
-            _format_log_event(
-                "bundle_selected",
-                cycle="refresh",
-                bundle_version=current_state.bundle_version,
-                activated_at=current_state.activated_at,
+            emit(
+                _format_log_event(
+                    "bundle_selected",
+                    cycle="refresh",
+                    bundle_version=current_state.bundle_version,
+                    activated_at=current_state.activated_at,
+                )
             )
-        )
-        emit(
-            _format_log_event(
-                "refresh_build_start",
-                cycle="refresh",
-                route=SHEET_VITRINA_REFRESH_ROUTE,
-                step="server_build_plan",
+            emit(
+                _format_log_event(
+                    "refresh_build_start",
+                    cycle="refresh",
+                    route=SHEET_VITRINA_REFRESH_ROUTE,
+                    step="server_build_plan",
+                )
             )
-        )
-        plan = self.sheet_plan_block.build_plan(as_of_date=as_of_date, log=emit)
-        row_counts = _sheet_row_counts(plan)
-        emit(
-            _format_log_event(
-                "refresh_snapshot_ready",
-                cycle="refresh",
-                snapshot_id=plan.snapshot_id,
-                plan_version=plan.plan_version,
-                as_of_date=plan.as_of_date,
-                date_columns=",".join(plan.date_columns),
-                data_rows=row_counts.get("DATA_VITRINA"),
-                status_rows=row_counts.get("STATUS"),
+            plan = self.sheet_plan_block.build_plan(
+                as_of_date=as_of_date,
+                log=emit,
+                execution_mode=execution_mode,
             )
-        )
-        emit(
-            _format_log_event(
-                "refresh_runtime_save_start",
-                cycle="refresh",
-                runtime_store="sheet_vitrina_ready_snapshot",
-                snapshot_id=plan.snapshot_id,
+            row_counts = _sheet_row_counts(plan)
+            emit(
+                _format_log_event(
+                    "refresh_snapshot_ready",
+                    cycle="refresh",
+                    snapshot_id=plan.snapshot_id,
+                    plan_version=plan.plan_version,
+                    as_of_date=plan.as_of_date,
+                    date_columns=",".join(plan.date_columns),
+                    data_rows=row_counts.get("DATA_VITRINA"),
+                    status_rows=row_counts.get("STATUS"),
+                )
             )
-        )
-        refresh_result = self.runtime.save_sheet_vitrina_ready_snapshot(
-            current_state=current_state,
-            refreshed_at=self.refreshed_at_factory(),
-            plan=plan,
-        )
-        payload = asdict(refresh_result)
-        payload["server_context"] = self.build_sheet_server_context()
-        emit(
-            _format_log_event(
-                "refresh_runtime_save_finish",
-                cycle="refresh",
-                snapshot_id=refresh_result.snapshot_id,
-                refreshed_at=refresh_result.refreshed_at,
-                data_rows=refresh_result.sheet_row_counts.get("DATA_VITRINA"),
-                status_rows=refresh_result.sheet_row_counts.get("STATUS"),
+            emit(
+                _format_log_event(
+                    "refresh_runtime_save_start",
+                    cycle="refresh",
+                    runtime_store="sheet_vitrina_ready_snapshot",
+                    snapshot_id=plan.snapshot_id,
+                )
             )
-        )
-        emit(
-            _format_log_event(
-                "cycle_finish",
-                cycle="refresh",
-                status="success",
-                route=SHEET_VITRINA_REFRESH_ROUTE,
-                snapshot_id=refresh_result.snapshot_id,
+            refresh_result = self.runtime.save_sheet_vitrina_ready_snapshot(
+                current_state=current_state,
+                refreshed_at=self.refreshed_at_factory(),
+                plan=plan,
             )
-        )
-        return payload
+            payload = asdict(refresh_result)
+            payload["server_context"] = self.build_sheet_server_context()
+            emit(
+                _format_log_event(
+                    "refresh_runtime_save_finish",
+                    cycle="refresh",
+                    snapshot_id=refresh_result.snapshot_id,
+                    refreshed_at=refresh_result.refreshed_at,
+                    data_rows=refresh_result.sheet_row_counts.get("DATA_VITRINA"),
+                    status_rows=refresh_result.sheet_row_counts.get("STATUS"),
+                )
+            )
+            emit(
+                _format_log_event(
+                    "cycle_finish",
+                    cycle="refresh",
+                    status="success",
+                    route=SHEET_VITRINA_REFRESH_ROUTE,
+                    snapshot_id=refresh_result.snapshot_id,
+                )
+            )
+            return payload
 
     def _run_sheet_load(
         self,
@@ -460,87 +507,88 @@ class RegistryUploadHttpEntrypoint:
         log: OperatorLogEmitter | None,
     ) -> dict[str, Any]:
         emit = log or _noop_log
-        current_state = self.runtime.load_current_state()
-        emit(
-            _format_log_event(
-                "cycle_start",
-                cycle="load",
-                route=SHEET_VITRINA_LOAD_ROUTE,
-                requested_as_of_date=as_of_date or "latest_bundle_snapshot",
-                action="write_prepared_snapshot_only",
+        with self._sheet_cycle_lock:
+            current_state = self.runtime.load_current_state()
+            emit(
+                _format_log_event(
+                    "cycle_start",
+                    cycle="load",
+                    route=SHEET_VITRINA_LOAD_ROUTE,
+                    requested_as_of_date=as_of_date or "latest_bundle_snapshot",
+                    action="write_prepared_snapshot_only",
+                )
             )
-        )
-        emit(
-            _format_log_event(
-                "bundle_selected",
-                cycle="load",
-                bundle_version=current_state.bundle_version,
-                activated_at=current_state.activated_at,
+            emit(
+                _format_log_event(
+                    "bundle_selected",
+                    cycle="load",
+                    bundle_version=current_state.bundle_version,
+                    activated_at=current_state.activated_at,
+                )
             )
-        )
-        emit(
-            _format_log_event(
-                "snapshot_lookup_start",
-                cycle="load",
-                route=SHEET_VITRINA_LOAD_ROUTE,
-                requested_as_of_date=as_of_date or "latest",
+            emit(
+                _format_log_event(
+                    "snapshot_lookup_start",
+                    cycle="load",
+                    route=SHEET_VITRINA_LOAD_ROUTE,
+                    requested_as_of_date=as_of_date or "latest",
+                )
             )
-        )
-        plan = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=as_of_date)
-        refresh_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=plan.as_of_date)
-        row_counts = _sheet_row_counts(plan)
-        emit(
-            _format_log_event(
-                "snapshot_lookup_finish",
-                cycle="load",
-                snapshot_id=plan.snapshot_id,
-                plan_version=plan.plan_version,
-                as_of_date=plan.as_of_date,
-                date_columns=",".join(plan.date_columns),
-                refreshed_at=refresh_status.refreshed_at,
-                data_rows=row_counts.get("DATA_VITRINA"),
-                status_rows=row_counts.get("STATUS"),
+            plan = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=as_of_date)
+            refresh_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=plan.as_of_date)
+            row_counts = _sheet_row_counts(plan)
+            emit(
+                _format_log_event(
+                    "snapshot_lookup_finish",
+                    cycle="load",
+                    snapshot_id=plan.snapshot_id,
+                    plan_version=plan.plan_version,
+                    as_of_date=plan.as_of_date,
+                    date_columns=",".join(plan.date_columns),
+                    refreshed_at=refresh_status.refreshed_at,
+                    data_rows=row_counts.get("DATA_VITRINA"),
+                    status_rows=row_counts.get("STATUS"),
+                )
             )
-        )
-        _emit_plan_status_sheet_log(plan, emit, cycle="load")
-        _emit_plan_metric_sheet_log(plan, emit, cycle="load")
-        emit(
-            _format_log_event(
-                "bridge_start",
-                cycle="load",
-                snapshot_id=plan.snapshot_id,
-                bridge_runner=getattr(self.sheet_load_runner, "__name__", self.sheet_load_runner.__class__.__name__),
+            _emit_plan_status_sheet_log(plan, emit, cycle="load")
+            _emit_plan_metric_sheet_log(plan, emit, cycle="load")
+            emit(
+                _format_log_event(
+                    "bridge_start",
+                    cycle="load",
+                    snapshot_id=plan.snapshot_id,
+                    bridge_runner=getattr(self.sheet_load_runner, "__name__", self.sheet_load_runner.__class__.__name__),
+                )
             )
-        )
-        bridge_result = self.sheet_load_runner(plan, emit)
-        _emit_bridge_result_log(bridge_result, emit, cycle="load")
-        emit(
-            _format_log_event(
-                "cycle_finish",
-                cycle="load",
-                status="success",
-                route=SHEET_VITRINA_LOAD_ROUTE,
-                snapshot_id=plan.snapshot_id,
-                data_rows=row_counts.get("DATA_VITRINA"),
-                status_rows=row_counts.get("STATUS"),
+            bridge_result = self.sheet_load_runner(plan, emit)
+            _emit_bridge_result_log(bridge_result, emit, cycle="load")
+            emit(
+                _format_log_event(
+                    "cycle_finish",
+                    cycle="load",
+                    status="success",
+                    route=SHEET_VITRINA_LOAD_ROUTE,
+                    snapshot_id=plan.snapshot_id,
+                    data_rows=row_counts.get("DATA_VITRINA"),
+                    status_rows=row_counts.get("STATUS"),
+                )
             )
-        )
-        payload = {
-            "status": "success",
-            "operation": "load",
-            "bundle_version": current_state.bundle_version,
-            "activated_at": current_state.activated_at,
-            "refreshed_at": refresh_status.refreshed_at,
-            "as_of_date": plan.as_of_date,
-            "date_columns": plan.date_columns,
-            "temporal_slots": [asdict(item) for item in plan.temporal_slots],
-            "snapshot_id": plan.snapshot_id,
-            "plan_version": plan.plan_version,
-            "sheet_row_counts": row_counts,
-            "bridge_result": bridge_result,
-        }
-        payload["server_context"] = self.build_sheet_server_context()
-        return payload
+            payload = {
+                "status": "success",
+                "operation": "load",
+                "bundle_version": current_state.bundle_version,
+                "activated_at": current_state.activated_at,
+                "refreshed_at": refresh_status.refreshed_at,
+                "as_of_date": plan.as_of_date,
+                "date_columns": plan.date_columns,
+                "temporal_slots": [asdict(item) for item in plan.temporal_slots],
+                "snapshot_id": plan.snapshot_id,
+                "plan_version": plan.plan_version,
+                "sheet_row_counts": row_counts,
+                "bridge_result": bridge_result,
+            }
+            payload["server_context"] = self.build_sheet_server_context()
+            return payload
 
     def build_sheet_server_context(self) -> dict[str, str]:
         now = self.now_factory()
@@ -551,13 +599,14 @@ class RegistryUploadHttpEntrypoint:
             "business_now": business_now,
             "default_as_of_date": default_business_as_of_date(now),
             "today_current_date": current_business_date_iso(now),
-            "daily_refresh_business_time": f"{DAILY_REFRESH_BUSINESS_HOUR:02d}:00 {CANONICAL_BUSINESS_TIMEZONE_NAME}",
+            "daily_refresh_business_time": f"{SHEET_VITRINA_DAILY_BUSINESS_TIMES} {CANONICAL_BUSINESS_TIMEZONE_NAME}",
             "daily_refresh_systemd_time": DAILY_REFRESH_SYSTEMD_UTC_TIME,
             "daily_refresh_systemd_oncalendar": DAILY_REFRESH_SYSTEMD_UTC_ONCALENDAR,
             "daily_auto_action": SHEET_VITRINA_DAILY_AUTO_ACTION,
             "daily_auto_description": SHEET_VITRINA_DAILY_AUTO_DESCRIPTION,
             "daily_auto_trigger_name": SHEET_VITRINA_DAILY_TIMER_NAME,
             "daily_auto_trigger_description": SHEET_VITRINA_DAILY_TRIGGER_DESCRIPTION,
+            "retry_runner_description": SHEET_VITRINA_RETRY_RUNNER_DESCRIPTION,
             "last_auto_run_status": auto_update_state.last_run_status or "never",
             "last_auto_run_status_label": _auto_update_status_label(auto_update_state.last_run_status),
             "last_auto_run_time": _format_optional_business_timestamp(auto_update_state.last_run_started_at),

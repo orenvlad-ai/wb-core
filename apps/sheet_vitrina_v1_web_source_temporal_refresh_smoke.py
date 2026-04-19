@@ -31,7 +31,10 @@ from packages.adapters.web_source_snapshot_block import HttpBackedWebSourceSnaps
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.application.seller_funnel_snapshot_block import SellerFunnelSnapshotBlock
-from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock
+from packages.application.sheet_vitrina_v1_live_plan import (
+    EXECUTION_MODE_AUTO_DAILY,
+    SheetVitrinaV1LivePlanBlock,
+)
 from packages.application.web_source_snapshot_block import WebSourceSnapshotBlock
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 
@@ -94,8 +97,12 @@ def main() -> None:
                 if upload_status != 200 or upload_payload["status"] != "accepted":
                     raise AssertionError(f"fixture upload must be accepted, got {upload_status} {upload_payload}")
 
-                first_refresh_status, first_refresh_payload = _post_json(refresh_url, {"as_of_date": FIRST_AS_OF_DATE})
-                if first_refresh_status != 200 or first_refresh_payload["status"] != "success":
+                first_refresh_payload = entrypoint._run_sheet_refresh(
+                    as_of_date=FIRST_AS_OF_DATE,
+                    log=None,
+                    execution_mode=EXECUTION_MODE_AUTO_DAILY,
+                )
+                if first_refresh_payload["status"] != "success":
                     raise AssertionError("first refresh must succeed")
                 first_status_rows = _fetch_status_rows(status_url, FIRST_AS_OF_DATE)
                 for source_key in ("web_source_snapshot", "seller_funnel_snapshot"):
@@ -115,8 +122,12 @@ def main() -> None:
                     closure_sync=closure_sync,
                     current_hour=8,
                 )
-                second_refresh_status, second_refresh_payload = _post_json(refresh_url, {"as_of_date": SECOND_AS_OF_DATE})
-                if second_refresh_status != 200 or second_refresh_payload["status"] != "success":
+                second_refresh_payload = entrypoint._run_sheet_refresh(
+                    as_of_date=SECOND_AS_OF_DATE,
+                    log=None,
+                    execution_mode=EXECUTION_MODE_AUTO_DAILY,
+                )
+                if second_refresh_payload["status"] != "success":
                     raise AssertionError("second refresh must succeed")
                 if second_refresh_payload["date_columns"] != [SECOND_AS_OF_DATE, SECOND_CURRENT_DATE]:
                     raise AssertionError("second refresh must materialize requested yesterday + current today")
@@ -151,8 +162,12 @@ def main() -> None:
                     closure_sync=closure_sync,
                     current_hour=10,
                 )
-                third_refresh_status, third_refresh_payload = _post_json(refresh_url, {"as_of_date": SECOND_AS_OF_DATE})
-                if third_refresh_status != 200 or third_refresh_payload["status"] != "success":
+                third_refresh_payload = entrypoint._run_sheet_refresh(
+                    as_of_date=SECOND_AS_OF_DATE,
+                    log=None,
+                    execution_mode=EXECUTION_MODE_AUTO_DAILY,
+                )
+                if third_refresh_payload["status"] != "success":
                     raise AssertionError("third refresh must succeed")
 
                 third_status_rows = _fetch_status_rows(status_url, SECOND_AS_OF_DATE)

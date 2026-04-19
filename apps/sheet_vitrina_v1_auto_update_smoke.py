@@ -213,13 +213,20 @@ def _expected_server_context() -> dict[str, str]:
         "business_now": "2026-04-13T13:00:00+05:00",
         "default_as_of_date": AS_OF_DATE,
         "today_current_date": TODAY_CURRENT_DATE,
-        "daily_refresh_business_time": "11:00 Asia/Yekaterinburg",
-        "daily_refresh_systemd_time": "06:00:00 UTC",
-        "daily_refresh_systemd_oncalendar": "*-*-* 06:00:00 UTC",
+        "daily_refresh_business_time": "11:00, 20:00 Asia/Yekaterinburg",
+        "daily_refresh_systemd_time": "06:00:00 UTC, 15:00:00 UTC",
+        "daily_refresh_systemd_oncalendar": "*-*-* 06:00:00 UTC; *-*-* 15:00:00 UTC",
         "daily_auto_action": "загрузка данных + отправка данных в таблицу",
-        "daily_auto_description": "Ежедневно в 11:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу",
+        "daily_auto_description": "Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу",
         "daily_auto_trigger_name": "wb-core-sheet-vitrina-refresh.timer",
-        "daily_auto_trigger_description": "wb-core-sheet-vitrina-refresh.timer -> POST /v1/sheet-vitrina-v1/refresh (auto_load=true)",
+        "daily_auto_trigger_description": (
+            "wb-core-sheet-vitrina-refresh.timer -> POST /v1/sheet-vitrina-v1/refresh "
+            "(auto_load=true) в 11:00, 20:00 Asia/Yekaterinburg"
+        ),
+        "retry_runner_description": (
+            "Persisted retry runner: дожимает due yesterday_closed для historical/date-period families "
+            "и same-day today_current только для WB API current-snapshot-only families; manual refresh такие хвосты не создаёт."
+        ),
         "last_auto_run_status": "success",
         "last_auto_run_status_label": "успех",
         "last_auto_run_time": "2026-04-13T17:06:00+05:00",
@@ -238,7 +245,7 @@ def _assert_counting_calls(counters: dict[str, CountingBlock]) -> None:
         "sf_period": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "spp": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "ads_bids": [TODAY_CURRENT_DATE],
-        "stocks": [TODAY_CURRENT_DATE],
+        "stocks": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "ads_compact": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "fin_report_daily": [AS_OF_DATE, TODAY_CURRENT_DATE],
     }
