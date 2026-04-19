@@ -161,7 +161,8 @@ update_note: "Обновлён под current factory-order historical seam и c
 - Source-aware invalid signatures для strict closed-day policy:
   - `seller_funnel_snapshot`: zero-filled payload plus freshness gate `source_fetched_at >= next business day start in Asia/Yekaterinburg`;
   - `web_source_snapshot`: zero-filled payload plus freshness gate `search_analytics_raw.fetched_at >= next business day start in Asia/Yekaterinburg`;
-  - `prices_snapshot`, `ads_bids`, `stocks` не попадают под strict closed-day policy и сохраняют current-only semantics `not_available` для `yesterday_closed`.
+  - `prices_snapshot` и `ads_bids` не попадают под strict closed-day policy и сохраняют current-only semantics `not_available` для `yesterday_closed`;
+  - `stocks` тоже не входит в strict bot/web closure policy, но больше не current-only: `sheet_vitrina_v1` получает closed-day stocks через exact-date runtime cache `temporal_source_snapshots[source_key=stocks]`, built from Seller Analytics CSV `STOCK_HISTORY_DAILY_CSV`, while `today_current` остаётся `not_available`.
 - Repo-owned bounded retry cycle теперь materialize-ится отдельным runner’ом:
   - `apps/sheet_vitrina_v1_temporal_closure_retry_live.py`
   - runner вызывает existing runtime path `run_sheet_temporal_closure_retry_cycle(...)`, выбирает due source/date pairs из persisted closure state и безопасно reuses existing refresh/load contour вместо нового parallel app.

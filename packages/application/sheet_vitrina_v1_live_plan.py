@@ -19,7 +19,7 @@ from packages.adapters.sales_funnel_history_block import HttpBackedSalesFunnelHi
 from packages.adapters.seller_funnel_snapshot_block import HttpBackedSellerFunnelSnapshotSource
 from packages.adapters.sf_period_block import HttpBackedSfPeriodSource
 from packages.adapters.spp_block import HttpBackedSppSource
-from packages.adapters.stocks_block import HttpBackedStocksSource
+from packages.adapters.stocks_block import HistoricalCsvBackedStocksSource
 from packages.adapters.web_source_current_sync import ShellBackedWebSourceCurrentSync
 from packages.adapters.web_source_snapshot_block import HttpBackedWebSourceSnapshotSource
 from packages.application.ads_bids_block import AdsBidsBlock
@@ -107,7 +107,7 @@ SOURCE_TEMPORAL_POLICIES = {
     "sf_period": "dual_day_capable",
     "spp": "dual_day_capable",
     "ads_bids": "today_current",
-    "stocks": "today_current",
+    "stocks": "not_available_for_today",
     "ads_compact": "dual_day_capable",
     "fin_report_daily": "dual_day_capable",
     "cost_price": "dual_day_capable",
@@ -166,8 +166,13 @@ SOURCE_DIAGNOSTIC_SPECS = {
     "stocks": {
         "module": "packages.application.stocks_block",
         "block": "StocksBlock",
-        "adapter": "HttpBackedStocksSource",
-        "endpoint": "POST /api/analytics/v1/stocks-report/wb-warehouses",
+        "adapter": "HistoricalCsvBackedStocksSource",
+        "endpoint": (
+            "POST /api/v2/nm-report/downloads + "
+            "GET /api/v2/nm-report/downloads + "
+            "GET /api/v2/nm-report/downloads/file/{downloadId} "
+            "[reportType=STOCK_HISTORY_DAILY_CSV]"
+        ),
     },
     "ads_compact": {
         "module": "packages.application.ads_compact_block",
@@ -281,7 +286,7 @@ class SheetVitrinaV1LivePlanBlock:
         self.sf_period_block = sf_period_block or SfPeriodBlock(HttpBackedSfPeriodSource())
         self.spp_block = spp_block or SppBlock(HttpBackedSppSource())
         self.ads_bids_block = ads_bids_block or AdsBidsBlock(HttpBackedAdsBidsSource())
-        self.stocks_block = stocks_block or StocksBlock(HttpBackedStocksSource())
+        self.stocks_block = stocks_block or StocksBlock(HistoricalCsvBackedStocksSource())
         self.ads_compact_block = ads_compact_block or AdsCompactBlock(HttpBackedAdsCompactSource())
         self.fin_report_daily_block = fin_report_daily_block or FinReportDailyBlock(HttpBackedFinReportDailySource())
         self.current_web_source_sync = current_web_source_sync or ShellBackedWebSourceCurrentSync()
@@ -643,6 +648,18 @@ class SheetVitrinaV1LivePlanBlock:
                         requested_nm_ids=requested_nm_ids,
                         loader=loader,
                     )
+                elif source_key == "stocks":
+                    status, payload = self._capture_cached_temporal_source(
+                        source_key=source_key,
+                        temporal_slot=slot.slot_key,
+                        temporal_policy=temporal_policy,
+                        column_date=slot.column_date,
+                        requested_nm_ids=requested_nm_ids,
+                        loader=loader,
+                        runtime_cache_note="resolution_rule=exact_date_stocks_history_runtime_cache",
+                        live_fetch_note="resolution_rule=historical_stocks_csv_fetch",
+                        prefer_cached_first=True,
+                    )
                 else:
                     status, payload = _capture_live_source(
                         source_key=source_key,
@@ -745,7 +762,21 @@ class SheetVitrinaV1LivePlanBlock:
         column_date: str,
         requested_nm_ids: list[int],
         loader: Callable[[], Any],
+        runtime_cache_note: str = "resolution_rule=exact_date_runtime_cache",
+        live_fetch_note: str | None = None,
+        prefer_cached_first: bool = False,
     ) -> tuple[LiveSourceStatus, Any | None]:
+        if prefer_cached_first:
+            cached_result = self._load_cached_temporal_source(
+                source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
+                requested_nm_ids=requested_nm_ids,
+                runtime_cache_note=runtime_cache_note,
+            )
+            if cached_result is not None:
+                return cached_result
         status, payload = _capture_live_source(
             source_key=source_key,
             temporal_slot=temporal_slot,
@@ -761,18 +792,41 @@ class SheetVitrinaV1LivePlanBlock:
                 captured_at=_format_runtime_timestamp(self.now_factory()),
                 payload=payload,
             )
+            if live_fetch_note:
+                return _append_status_note(status, live_fetch_note), payload
             return status, payload
 
         if status.kind != "not_found":
             return status, payload
 
+        cached_result = self._load_cached_temporal_source(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            runtime_cache_note=runtime_cache_note,
+        )
+        if cached_result is not None:
+            return cached_result
+        return status, payload
+
+    def _load_cached_temporal_source(
+        self,
+        *,
+        source_key: str,
+        temporal_slot: str,
+        temporal_policy: str,
+        column_date: str,
+        requested_nm_ids: list[int],
+        runtime_cache_note: str,
+    ) -> tuple[LiveSourceStatus, Any | None] | None:
         cached_payload, cached_at = self.runtime.load_temporal_source_snapshot(
             source_key=source_key,
             snapshot_date=column_date,
         )
         if cached_payload is None or not _is_exact_snapshot_payload(cached_payload, column_date):
-            return status, payload
-
+            return None
         cached_status, _ = _capture_live_source(
             source_key=source_key,
             temporal_slot=temporal_slot,
@@ -781,13 +835,10 @@ class SheetVitrinaV1LivePlanBlock:
             requested_nm_ids=requested_nm_ids,
             loader=lambda: cached_payload,
         )
-        cache_note = "resolution_rule=exact_date_runtime_cache"
+        cache_note = runtime_cache_note
         if cached_at:
             cache_note = f"{cache_note}; cache_captured_at={cached_at}"
-        return (
-            _append_status_note(cached_status, cache_note),
-            cached_payload,
-        )
+        return _append_status_note(cached_status, cache_note), cached_payload
 
     def _capture_provisional_current_web_source(
         self,

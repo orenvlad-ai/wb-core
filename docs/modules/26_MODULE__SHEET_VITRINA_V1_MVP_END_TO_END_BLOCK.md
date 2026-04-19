@@ -206,7 +206,8 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - per-source/per-slot `STATUS` rows
 - В bounded live contour используется следующая temporal policy matrix:
   - `dual_day_capable`: `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `sf_period`, `spp`, `ads_compact`, `fin_report_daily`, `cost_price`
-  - `today_current`: `prices_snapshot`, `ads_bids`, `stocks`
+  - `today_current`: `prices_snapshot`, `ads_bids`
+  - `not_available_for_today`: `stocks`
   - `blocked`: `promo_by_price`
 - Для bot/web-source family (`seller_funnel_snapshot`, `web_source_snapshot`) current server-side read rule теперь bounded и truthful:
   - сначала source adapter пробует explicit requested date/window;
@@ -232,13 +233,17 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
 - Для strict closed-day acceptance current checkpoint применяет source-aware invalid signatures only to closed-day-capable bot/web-source families:
   - `seller_funnel_snapshot`: zero-filled payload или `source_fetched_at < next business day start in Asia/Yekaterinburg`
   - `web_source_snapshot`: zero-filled payload или `search_analytics_raw.fetched_at < next business day start in Asia/Yekaterinburg`
-  - `prices_snapshot`, `ads_bids`, `stocks` остаются current-only и truthfully surface-ят `not_available` для `yesterday_closed`.
+  - `prices_snapshot` и `ads_bids` остаются current-only и truthfully surface-ят `not_available` для `yesterday_closed`;
+  - `stocks` больше не current-only: `yesterday_closed` читает authoritative historical closed-day payload, а `today_current` truthfully остаётся `not_available`.
 - Current-only sources не backfill-ятся в closed-day column:
-  - `stocks[yesterday_closed]`, `prices_snapshot[yesterday_closed]`, `ads_bids[yesterday_closed]` materialize-ятся как `not_available`
+  - `prices_snapshot[yesterday_closed]`, `ads_bids[yesterday_closed]` materialize-ятся как `not_available`
   - `today_current` values остаются в своей фактической колонке и не маскируются под yesterday EOD
-- Для `stocks[today_current]` server truth дополнительно обязан:
-  - нормализовать live WB region aliases `Южный +/и Северо-Кавказский` и `Дальневосточный +/и Сибирский` в canonical district metrics;
-  - не терять quantity вне configured district map молча: она остаётся внутри `stock_total` и surface-ится в `STATUS.stocks[today_current].note`
+- Для `stocks` current checkpoint теперь обязан:
+  - materialize-ить `stocks[yesterday_closed]` из Seller Analytics CSV path `STOCK_HISTORY_DAILY_CSV`;
+  - сохранять exact-date success payload server-side в `temporal_source_snapshots[source_key=stocks]`;
+  - использовать current `wb-warehouses` endpoint только как bounded metadata bridge `OfficeName -> regionName`, а не как active current stocks truth внутри витрины;
+  - не терять quantity вне configured district map молча: она остаётся внутри `stock_total` и surface-ится в `STATUS.stocks[yesterday_closed].note`;
+  - оставлять `stocks[today_current]` blank/`not_available` вместо intraday snapshot.
 - Для `cost_price[*]` server truth обязан:
   - брать только authoritative dataset из separate `POST /v1/cost-price/upload`;
   - match по `group`;
@@ -328,11 +333,12 @@ Bounded допущение:
 - Uploaded `section` dictionary считается authoritative и не remap-ится локально.
 - `CONFIG!H:I` service/status block сохраняется при `prepare`, `upload`, `load`.
 - Для current-only sources bounded contour честно предпочитает `not_available` в `yesterday_closed`, а не backfill текущих значений в yesterday-column.
+- Для `stocks` bounded contour теперь применяет обратную норму: closed-day value обязана приходить из authoritative historical snapshot, а не из `today_current`.
 
 ## 3.4 Явный live blocker
 
 - `promo_by_price` не имеет live HTTP adapter в текущем contour.
-- Отдельный historical/EOD path для `stocks[yesterday_closed]` в этом checkpoint не materialized, поэтому yesterday stocks остаются честным gap до отдельного bounded шага, а не подменяются current snapshot-ом.
+- `stocks[yesterday_closed]` больше не является declared gap: official historical Seller Analytics CSV path materialized и authoritative runtime cache `temporal_source_snapshots[source_key=stocks]` now owns the closed-day truth for this source family.
 - Legacy `cogs_by_group` rule module не используется как live fallback для `sheet_vitrina_v1`: текущий contour опирается только на authoritative `COST_PRICE` dataset.
 - Поэтому full current truth / `STATUS` остаются шире чисто sheet-side presentation pass.
 - Это сознательно лучше, чем тихо подменять server contour локальным fixture/rule path или возвращать heavy aggregation logic в Apps Script.
