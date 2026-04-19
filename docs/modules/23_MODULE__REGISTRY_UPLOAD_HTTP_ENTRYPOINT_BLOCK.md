@@ -137,7 +137,7 @@ update_note: "Обновлён под current factory-order historical seam и c
   - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
   - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result
   - `GET /v1/sheet-vitrina-v1/job` = cheap poll/read surface для live operator log и async action state
-  - `GET /sheet-vitrina-v1/operator` = simple repo-owned page с top-level tabs `Обновление данных витрины` / `Расчёт поставок` / `Отчёты`
+  - `GET /sheet-vitrina-v1/operator` = simple repo-owned page с top-level tabs `Обновление данных` / `Расчёт поставок` / `Отчёты`
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/status` = cheap JSON status surface для bounded factory-order flow
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/*.xlsx` = operator template downloads с русскими headers
   - `POST /v1/sheet-vitrina-v1/supply/factory-order/upload/*` = server-side XLSX parse/validation/upload
@@ -220,10 +220,10 @@ update_note: "Обновлён под current factory-order historical seam и c
   - district XLSX содержит district identification + compact operator rows `nmId / SKU / Количество к поставке` именно по фактически аллоцированному количеству после ограничения `stock_ff`.
 - Current repo state не имел другого authoritative source для legacy parity term `FO_INBOUND_FF_TO_WB`, поэтому entrypoint получил narrow explicit upload contract `Товары в пути от ФФ на Wildberries`; silent drop этого члена формулы считается некорректным.
 - Operator page keeps narrow Russian chrome for operator-visible labels (`Загрузить данные`, `Отправить данные`, compact `Статус` / `Лог`, row-count labels, `Скачать лог`) without explanatory subtitle/subcopy про refresh/date defaults/temporal slots под заголовком или кнопкой.
-- Operator page добавляет отдельный top-level tab `Отчёты` с двумя collapsible server-driven block:
+- Operator page добавляет отдельный top-level tab `Отчёты` с одним sibling selector по образцу supply tab:
   - `Ежедневные отчёты`
   - `Отчёт по остаткам`
-  - оба блока по умолчанию collapsed и раскрываются только локальным page-state без browser persistence;
+  - по умолчанию открыт `Ежедневные отчёты`, одновременно показывается только один report body, browser persistence не используется;
 - `Ежедневные отчёты`:
   - block сравнивает только два последних closed business day в `Asia/Yekaterinburg`;
   - current rule = `current business date -> compare yesterday_closed(default_business_as_of_date(now)) vs yesterday_closed(default_business_as_of_date(now)-1 day)`;
@@ -285,7 +285,7 @@ update_note: "Обновлён под current factory-order historical seam и c
     - `stock_ru_volga` -> `Приволжский ФО`
     - `stock_ru_ural` -> `Уральский ФО`
     - `stock_ru_south_caucasus` -> `Юг и СКФО`
-    - `stock_ru_far_siberia` -> `ДВ и Сибирь`
+  - merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь` deliberately excluded from stock-report filter and display, because current truth does not split Far East from Siberia
 - Operator page добавляет один compact server-driven info block `Сервер и расписание`:
   - `Часовой пояс`
   - `Текущее время сервера`

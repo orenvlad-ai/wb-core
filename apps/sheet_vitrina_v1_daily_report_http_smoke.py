@@ -121,7 +121,7 @@ def main() -> None:
             if operator_status != 200:
                 raise AssertionError(f"operator page must return 200, got {operator_status}")
             for expected in (
-                "Обновление данных витрины",
+                "Обновление данных",
                 "Расчёт поставок",
                 "Отчёты",
                 "Ежедневные отчёты",
@@ -138,14 +138,21 @@ def main() -> None:
                 if expected not in operator_html:
                     raise AssertionError(f"operator page must expose {expected!r}")
             for expected in (
-                'id="dailyReportToggle"',
-                'id="stockReportToggle"',
-                'id="dailyReportPanelBody" class="report-accordion-body" hidden',
-                'id="stockReportPanelBody" class="report-accordion-body" hidden',
-                'aria-expanded="false"',
+                'data-report-section-button="daily"',
+                'data-report-section-button="stock"',
+                'data-report-section-panel="daily"',
+                'data-report-section-panel="stock" hidden',
+                'id="dailyReportPeriod"',
+                'id="stockReportPeriod"',
             ):
                 if expected not in operator_html:
-                    raise AssertionError(f"reports tab must expose collapsed accordion contract token {expected!r}")
+                    raise AssertionError(f"reports tab must expose subsection contract token {expected!r}")
+            if "dailyReportToggle" in operator_html or "stockReportToggle" in operator_html or "report-accordion" in operator_html:
+                raise AssertionError("broken reports accordion contract must be removed from operator page")
+            if operator_html.count("<h1>") != 0:
+                raise AssertionError("duplicated top-level headings must be removed from panel bodies")
+            if "Ежедневный отчёт за " in operator_html:
+                raise AssertionError("misleading single-day daily-report wording must not remain in operator HTML")
 
             status_code, status_payload = _get_json(f"{base_url}{DEFAULT_SHEET_STATUS_PATH}")
             if status_code != 200 or status_payload.get("status") != "success":
@@ -160,6 +167,8 @@ def main() -> None:
                 raise AssertionError(f"daily report route must return available JSON, got {report_code} {report_payload}")
             if report_payload.get("newer_closed_date") != "2026-04-18":
                 raise AssertionError(f"daily report must expose current closed-day compare date, got {report_payload}")
+            if report_payload.get("older_closed_date") != "2026-04-17":
+                raise AssertionError(f"daily report must expose previous closed-day compare date, got {report_payload}")
             if not report_payload.get("top_metric_declines") or not report_payload.get("top_sku_order_sum_declines"):
                 raise AssertionError(f"daily report must publish ranked blocks, got {report_payload}")
             if any(item.get("metric_key") == "total_open_card_count" for item in (report_payload.get("top_metric_declines") or []) + (report_payload.get("top_metric_growth") or [])):
@@ -182,6 +191,9 @@ def main() -> None:
                 raise AssertionError(f"stock report must disclose threshold <50, got {stock_payload}")
             if not stock_payload.get("rows"):
                 raise AssertionError(f"stock report must publish breached SKU rows, got {stock_payload}")
+            district_keys = {str(item.get("metric_key")) for item in stock_payload.get("districts") or []}
+            if "stock_ru_far_siberia" in district_keys:
+                raise AssertionError(f"stock report HTTP surface must exclude merged far-east bucket, got {district_keys}")
 
             print("operator_daily_report_html: ok ->", DEFAULT_SHEET_OPERATOR_UI_PATH)
             print("status_route: ok ->", status_payload["status"])

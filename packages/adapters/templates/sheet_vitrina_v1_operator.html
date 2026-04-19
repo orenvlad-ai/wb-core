@@ -113,13 +113,6 @@
       border-color: rgba(11, 99, 246, 0.46);
     }
 
-    h1 {
-      margin: 0;
-      font-size: clamp(28px, 4vw, 36px);
-      line-height: 1.15;
-      font-weight: 650;
-    }
-
     .section-lead {
       margin: 14px 0 0;
       max-width: 720px;
@@ -294,80 +287,6 @@
     .daily-report {
       display: grid;
       gap: 18px;
-    }
-
-    .report-accordion {
-      padding: 0;
-      overflow: hidden;
-    }
-
-    .report-accordion-button {
-      appearance: none;
-      width: 100%;
-      border: 0;
-      background: transparent;
-      color: inherit;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-      padding: 20px;
-      text-align: left;
-      cursor: pointer;
-      transition: background-color 120ms ease;
-    }
-
-    .report-accordion-button:hover {
-      background: rgba(15, 23, 42, 0.02);
-    }
-
-    .report-accordion-meta {
-      display: grid;
-      gap: 6px;
-      min-width: 0;
-    }
-
-    .report-accordion-title {
-      margin: 0;
-      font-size: 13px;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      color: var(--muted);
-    }
-
-    .report-accordion-date {
-      font-size: 14px;
-      font-weight: 600;
-      color: var(--text);
-    }
-
-    .report-accordion-chevron {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 32px;
-      height: 32px;
-      border-radius: 999px;
-      border: 1px solid rgba(15, 23, 42, 0.08);
-      background: #ffffff;
-      color: var(--muted);
-      font-size: 14px;
-      transition: transform 120ms ease, color 120ms ease, border-color 120ms ease;
-      flex-shrink: 0;
-    }
-
-    .report-accordion-button[aria-expanded="true"] .report-accordion-chevron {
-      transform: rotate(180deg);
-      color: var(--text);
-      border-color: rgba(11, 99, 246, 0.18);
-    }
-
-    .report-accordion-body {
-      display: grid;
-      gap: 16px;
-      padding: 0 20px 20px;
-      border-top: 1px solid rgba(15, 23, 42, 0.08);
     }
 
     .report-period {
@@ -714,6 +633,14 @@
       display: none;
     }
 
+    .report-panel {
+      margin-top: 28px;
+    }
+
+    .report-panel[hidden] {
+      display: none;
+    }
+
     .factory-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1017,7 +944,7 @@
 <body>
   <main class="page">
     <div class="tab-strip" role="tablist" aria-label="Операторские вкладки">
-      <button class="tab-button is-active" type="button" data-tab-button="vitrina" role="tab" aria-selected="true">Обновление данных витрины</button>
+      <button class="tab-button is-active" type="button" data-tab-button="vitrina" role="tab" aria-selected="true">Обновление данных</button>
       <button class="tab-button" type="button" data-tab-button="factory-order" role="tab" aria-selected="false">Расчёт поставок</button>
       <button class="tab-button" type="button" data-tab-button="reports" role="tab" aria-selected="false">Отчёты</button>
     </div>
@@ -1025,7 +952,6 @@
     <section class="panel">
       <section class="operator-panel" data-tab-panel="vitrina">
         <a class="eyebrow eyebrow-link" href="__SHEET_VITRINA_V1_SPREADSHEET_URL__" target="_blank" rel="noreferrer">sheet_vitrina_v1</a>
-        <h1>__SHEET_VITRINA_V1_OPERATOR_PAGE_TITLE__</h1>
         <div class="actions">
           <button id="refreshButton" class="action-button primary-button" type="button">Загрузить данные</button>
           <button id="loadButton" class="action-button secondary-button" type="button">Отправить данные</button>
@@ -1112,28 +1038,21 @@
 
       <section class="operator-panel" data-tab-panel="reports" hidden>
         <a class="eyebrow eyebrow-link" href="__SHEET_VITRINA_V1_SPREADSHEET_URL__" target="_blank" rel="noreferrer">sheet_vitrina_v1</a>
-        <h1>Отчёты</h1>
         <p class="section-lead">
           Reports tab остаётся полностью server-driven: daily-report читает два последних closed business day, а stock-report
           читает current business day через persisted ready snapshot без browser-side analytics.
         </p>
 
-        <div class="grid">
-          <section class="block report-accordion" aria-labelledby="daily-report-title">
-            <button
-              id="dailyReportToggle"
-              class="report-accordion-button"
-              type="button"
-              aria-expanded="false"
-              aria-controls="dailyReportPanelBody"
-            >
-              <span class="report-accordion-meta">
-                <span id="daily-report-title" class="report-accordion-title">Ежедневные отчёты</span>
-                <span id="dailyReportHeaderDate" class="report-accordion-date">-</span>
-              </span>
-              <span class="report-accordion-chevron" aria-hidden="true">▾</span>
-            </button>
-            <div id="dailyReportPanelBody" class="report-accordion-body" hidden>
+        <div class="subsection-strip" role="tablist" aria-label="Внутренние разделы отчётов">
+          <button class="subsection-button is-active" type="button" data-report-section-button="daily" aria-selected="true">Ежедневные отчёты</button>
+          <button class="subsection-button" type="button" data-report-section-button="stock" aria-selected="false">Отчёт по остаткам</button>
+        </div>
+
+        <section class="report-panel" data-report-section-panel="daily">
+          <div class="grid">
+            <section class="block">
+              <h2 class="block-title">Ежедневные отчёты</h2>
+              <p id="dailyReportPeriod" class="report-period">Сравнение двух последних closed business day.</p>
               <p id="dailyReportLead" class="field-note">
                 Сравниваем два последних closed business day по persisted ready snapshots.
               </p>
@@ -1174,24 +1093,15 @@
                 </div>
               </div>
               <div id="dailyReportNotes" class="report-notes"></div>
-            </div>
-          </section>
+            </section>
+          </div>
+        </section>
 
-          <section class="block report-accordion" aria-labelledby="stock-report-title">
-            <button
-              id="stockReportToggle"
-              class="report-accordion-button"
-              type="button"
-              aria-expanded="false"
-              aria-controls="stockReportPanelBody"
-            >
-              <span class="report-accordion-meta">
-                <span id="stock-report-title" class="report-accordion-title">Отчёт по остаткам</span>
-                <span id="stockReportHeaderDate" class="report-accordion-date">-</span>
-              </span>
-              <span class="report-accordion-chevron" aria-hidden="true">▾</span>
-            </button>
-            <div id="stockReportPanelBody" class="report-accordion-body" hidden>
+        <section class="report-panel" data-report-section-panel="stock" hidden>
+          <div class="grid">
+            <section class="block">
+              <h2 class="block-title">Отчёт по остаткам</h2>
+              <p id="stockReportPeriod" class="report-period">Дата отчёта: -</p>
               <p id="stockReportLead" class="field-note">
                 Показываем только SKU, где хотя бы по одному supported district stock меньше 50 единиц.
               </p>
@@ -1204,14 +1114,13 @@
                 </section>
               </div>
               <div id="stockReportNotes" class="report-notes"></div>
-            </div>
-          </section>
-        </div>
+            </section>
+          </div>
+        </section>
       </section>
 
       <section class="operator-panel" data-tab-panel="factory-order" hidden>
         <a class="eyebrow eyebrow-link" href="__SHEET_VITRINA_V1_SPREADSHEET_URL__" target="_blank" rel="noreferrer">sheet_vitrina_v1</a>
-        <h1>Расчёт поставок</h1>
         <p class="section-lead">
           Во вкладке materialized два sibling-раздела: <strong>Заказ на фабрике</strong> и
           <strong>Поставка на Wildberries</strong>. Оба расчёта идут server-side; блок поставки на Wildberries считает
@@ -1508,6 +1417,8 @@
       const config = JSON.parse(document.getElementById("sheet-vitrina-v1-operator-config").textContent);
       const tabButtons = Array.from(document.querySelectorAll("[data-tab-button]"));
       const tabPanels = Array.from(document.querySelectorAll("[data-tab-panel]"));
+      const reportSectionButtons = Array.from(document.querySelectorAll("[data-report-section-button]"));
+      const reportSectionPanels = Array.from(document.querySelectorAll("[data-report-section-panel]"));
       const supplySectionButtons = Array.from(document.querySelectorAll("[data-supply-section-button]"));
       const supplySectionPanels = Array.from(document.querySelectorAll("[data-supply-section-panel]"));
 
@@ -1526,9 +1437,7 @@
       const serverLastAutoStatus = document.getElementById("serverLastAutoStatus");
       const serverLastAutoSuccess = document.getElementById("serverLastAutoSuccess");
       const serverTrigger = document.getElementById("serverTrigger");
-      const dailyReportToggle = document.getElementById("dailyReportToggle");
-      const dailyReportPanelBody = document.getElementById("dailyReportPanelBody");
-      const dailyReportHeaderDate = document.getElementById("dailyReportHeaderDate");
+      const dailyReportPeriod = document.getElementById("dailyReportPeriod");
       const dailyReportLead = document.getElementById("dailyReportLead");
       const dailyReportStatus = document.getElementById("dailyReportStatus");
       const dailyReportContent = document.getElementById("dailyReportContent");
@@ -1540,9 +1449,7 @@
       const dailyNegativeFactors = document.getElementById("dailyNegativeFactors");
       const dailyPositiveFactors = document.getElementById("dailyPositiveFactors");
       const dailyReportNotes = document.getElementById("dailyReportNotes");
-      const stockReportToggle = document.getElementById("stockReportToggle");
-      const stockReportPanelBody = document.getElementById("stockReportPanelBody");
-      const stockReportHeaderDate = document.getElementById("stockReportHeaderDate");
+      const stockReportPeriod = document.getElementById("stockReportPeriod");
       const stockReportLead = document.getElementById("stockReportLead");
       const stockReportStatus = document.getElementById("stockReportStatus");
       const stockReportContent = document.getElementById("stockReportContent");
@@ -1660,15 +1567,14 @@
         });
       }
 
-      function setReportExpanded(button, panel, expanded) {
-        button.setAttribute("aria-expanded", expanded ? "true" : "false");
-        panel.hidden = !expanded;
-      }
-
-      function bindReportToggle(button, panel) {
-        button.addEventListener("click", () => {
-          const expanded = button.getAttribute("aria-expanded") === "true";
-          setReportExpanded(button, panel, !expanded);
+      function activateReportSection(sectionName) {
+        reportSectionButtons.forEach((button) => {
+          const selected = button.dataset.reportSectionButton === sectionName;
+          button.classList.toggle("is-active", selected);
+          button.setAttribute("aria-selected", selected ? "true" : "false");
+        });
+        reportSectionPanels.forEach((panel) => {
+          panel.hidden = panel.dataset.reportSectionPanel !== sectionName;
         });
       }
 
@@ -1678,6 +1584,10 @@
 
       supplySectionButtons.forEach((button) => {
         button.addEventListener("click", () => activateSupplySection(button.dataset.supplySectionButton));
+      });
+
+      reportSectionButtons.forEach((button) => {
+        button.addEventListener("click", () => activateReportSection(button.dataset.reportSectionButton));
       });
 
       function setState(nextState) {
@@ -1739,6 +1649,31 @@
         }
         const prefix = value > 0 ? "+" : "";
         return prefix + numberFormatter.format(value) + "%";
+      }
+
+      function formatHumanDate(value) {
+        const raw = valueOrDash(value);
+        if (raw === "-") {
+          return raw;
+        }
+        const parsed = new Date(raw + "T00:00:00");
+        if (Number.isNaN(parsed.getTime())) {
+          return raw;
+        }
+        return new Intl.DateTimeFormat("ru-RU", {
+          day: "numeric",
+          month: "long",
+          year: "numeric"
+        }).format(parsed);
+      }
+
+      function formatDailyComparisonLabel(olderDate, newerDate) {
+        const older = formatHumanDate(olderDate);
+        const newer = formatHumanDate(newerDate);
+        if (older === "-" || newer === "-") {
+          return "Сравнение двух последних closed business day.";
+        }
+        return "Сравнение " + older + " и " + newer + ".";
       }
 
       function deltaClass(direction) {
@@ -1827,7 +1762,10 @@
       }
 
       function renderDailyReportUnavailable(payload, fallbackMessage) {
-        dailyReportHeaderDate.textContent = valueOrDash(payload && payload.newer_closed_date);
+        dailyReportPeriod.textContent = formatDailyComparisonLabel(
+          payload && payload.older_closed_date,
+          payload && payload.newer_closed_date
+        );
         dailyReportLead.textContent = "Сравниваем два последних closed business day по persisted yesterday_closed ready snapshots.";
         dailyReportStatus.textContent = valueOrDash((payload && payload.reason) || fallbackMessage || "Ежедневный отчёт пока недоступен.");
         dailyReportStatus.className = "section-message";
@@ -1848,8 +1786,8 @@
           return;
         }
         const total = payload.total_order_sum || {};
-        dailyReportHeaderDate.textContent = valueOrDash(payload.newer_closed_date);
-        dailyReportLead.textContent = "Сравнение двух последних closed business day: " + valueOrDash(payload.newer_closed_date) + " против " + valueOrDash(payload.older_closed_date) + ".";
+        dailyReportPeriod.textContent = formatDailyComparisonLabel(payload.older_closed_date, payload.newer_closed_date);
+        dailyReportLead.textContent = "Сравниваем два последних closed business day по persisted yesterday_closed ready snapshots.";
         dailyReportStatus.textContent = "Ранжирование: по % change. Absolute delta показан только как secondary detail.";
         dailyReportStatus.className = "section-message";
         dailyReportContent.hidden = false;
@@ -1921,7 +1859,7 @@
       }
 
       function renderStockReportUnavailable(payload, fallbackMessage) {
-        stockReportHeaderDate.textContent = valueOrDash(payload && payload.report_date);
+        stockReportPeriod.textContent = "Дата отчёта: " + formatHumanDate(payload && payload.report_date);
         stockReportLead.textContent = "Показываем только SKU, где хотя бы по одному supported district stock меньше 50 единиц.";
         stockReportStatus.textContent = valueOrDash((payload && payload.reason) || fallbackMessage || "Отчёт по остаткам пока недоступен.");
         stockReportStatus.className = "section-message";
@@ -1959,7 +1897,7 @@
           renderStockReportUnavailable(payload, "Отчёт по остаткам пока недоступен.");
           return;
         }
-        stockReportHeaderDate.textContent = valueOrDash(payload.report_date);
+        stockReportPeriod.textContent = "Дата отчёта: " + formatHumanDate(payload.report_date) + ".";
         stockReportLead.textContent = "Current business day: " + valueOrDash(payload.report_date) + ". Порог риска: остаток < " + valueOrDash(payload.threshold_lt) + ".";
         stockReportStatus.textContent = "Source of truth: persisted ready snapshot / DATA_VITRINA / today_current.";
         stockReportStatus.className = "section-message";
@@ -2765,13 +2703,10 @@
       calculateFactoryOrderButton.addEventListener("click", calculateFactoryOrder);
       calculateRegionalSupplyButton.addEventListener("click", calculateRegionalSupply);
       downloadRecommendationButton.addEventListener("click", downloadRecommendation);
-      bindReportToggle(dailyReportToggle, dailyReportPanelBody);
-      bindReportToggle(stockReportToggle, stockReportPanelBody);
 
       activateTab("vitrina");
+      activateReportSection("daily");
       activateSupplySection("factory");
-      setReportExpanded(dailyReportToggle, dailyReportPanelBody, false);
-      setReportExpanded(stockReportToggle, stockReportPanelBody, false);
       setActionState(null);
       setCompletedJob(null);
       loadStatus();

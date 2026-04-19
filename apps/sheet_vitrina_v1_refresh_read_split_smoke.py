@@ -129,7 +129,7 @@ def main() -> None:
             if operator_ui_status != 200:
                 raise AssertionError(f"operator UI must return 200, got {operator_ui_status}")
             if (
-                "Обновление данных витрины" not in operator_ui_html
+                "Обновление данных" not in operator_ui_html
                 or "Загрузить данные" not in operator_ui_html
                 or "Отправить данные" not in operator_ui_html
             ):
