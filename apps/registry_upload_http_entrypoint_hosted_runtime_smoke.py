@@ -128,6 +128,8 @@ def main() -> None:
                 raise AssertionError("deploy --dry-run must expose runtime pip install command for openpyxl")
             if "playwright==1.58.0" not in " ".join(deploy_dry_run["commands"]["runtime_pip_install"]):
                 raise AssertionError("deploy --dry-run must expose runtime pip install command for playwright")
+            if "import openpyxl, playwright" not in " ".join(deploy_dry_run["commands"]["runtime_pip_install"]):
+                raise AssertionError("deploy --dry-run must guard on both openpyxl and playwright imports")
             if "install" not in " ".join(deploy_dry_run["commands"]["systemd_install"]):
                 raise AssertionError("deploy --dry-run must expose systemd install command")
             if "daemon-reload" not in " ".join(deploy_dry_run["commands"]["systemd_daemon_reload"]):
