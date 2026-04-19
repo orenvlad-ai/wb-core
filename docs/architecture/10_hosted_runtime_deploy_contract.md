@@ -16,6 +16,7 @@ Contract покрывает hosted contour на `api.selleros.pro` для routes
 - `POST /v1/cost-price/upload`
 - `POST /v1/sheet-vitrina-v1/refresh`
 - `POST /v1/sheet-vitrina-v1/load`
+- `GET /v1/sheet-vitrina-v1/daily-report`
 - `GET /v1/sheet-vitrina-v1/plan`
 - `GET /v1/sheet-vitrina-v1/status`
 - `GET /v1/sheet-vitrina-v1/job`
@@ -127,10 +128,14 @@ If any of these steps are unavailable or unsafe, execution must return incomplet
 Loopback/runtime probe validates the hosted process behind the reverse proxy or equivalent publish layer.
 
 Public probe validates:
-- `GET /sheet-vitrina-v1/operator` returns `200` + `text/html` and still contains the compact operator tokens for separated refresh/load plus server/time block and both bounded supply subsections (`Загрузить данные`, `Отправить данные`, `Скачать лог`, `Лог`, `Сервер и расписание`, `Часовой пояс`, `Автообновление`, `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление`, `Общий вход для двух расчётов`, `Заказ на фабрике`, `Поставка на Wildberries`, `Цикл заказов`, `Цикл поставок`)
+- `GET /sheet-vitrina-v1/operator` returns `200` + `text/html` and still contains the compact operator tokens for separated refresh/load plus daily-report block, server/time block and both bounded supply subsections (`Загрузить данные`, `Отправить данные`, `Ежедневные отчёты`, `Total Order Sum`, `Скачать лог`, `Лог`, `Сервер и расписание`, `Часовой пояс`, `Автообновление`, `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление`, `Общий вход для двух расчётов`, `Заказ на фабрике`, `Поставка на Wildberries`, `Цикл заказов`, `Цикл поставок`)
+- `GET /v1/sheet-vitrina-v1/daily-report` returns `200` + JSON for both states:
+  - `status=available` when ready snapshots for `default_business_as_of_date(now)` and `default_business_as_of_date(now)-1 day` are present and their `yesterday_closed` slots are comparable;
+  - `status=unavailable` with truthful `reason` when one of those ready snapshots is missing or structurally unusable;
+  - route stays read-only and must not trigger refresh/upstream fetch from the public read path
 - `GET /v1/sheet-vitrina-v1/status` returns JSON with either success shape including `server_context` or truthful `422 {"error": ..., "server_context": ...}`
 - `GET /v1/sheet-vitrina-v1/plan` returns JSON with either success shape or truthful `422 {"error": ...}`
-- after the historical stocks checkpoint switch, `stocks[yesterday_closed]` must resolve through exact-date runtime snapshots sourced from Seller Analytics CSV `STOCK_HISTORY_DAILY_CSV`, while `stocks[today_current]` stays truthful `not_available`
+- after the historical stocks checkpoint switch, both `stocks[yesterday_closed]` and `stocks[today_current]` must resolve through exact-date runtime snapshots sourced from Seller Analytics CSV `STOCK_HISTORY_DAILY_CSV`
 - when strict bot/web-source closed-day acceptance is active, `STATUS` / `plan` / job surfaces must disclose truthful closure states (`closure_pending`, `closure_retrying`, `closure_rate_limited`, `closure_exhausted`, `success`) instead of silently reusing provisional same-day values in `yesterday_closed`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/status` returns JSON with dataset states, active SKU count and recommendation path
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/status` returns JSON with active SKU count, methodology note, shared dataset state and optional last result

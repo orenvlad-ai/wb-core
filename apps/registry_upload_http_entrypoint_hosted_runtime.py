@@ -29,6 +29,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
+    DEFAULT_SHEET_DAILY_REPORT_PATH,
     DEFAULT_SHEET_JOB_PATH,
     DEFAULT_SHEET_LOAD_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
@@ -219,6 +220,12 @@ def collect_public_surface(
                 f"{base_url}{route_paths['SHEET_VITRINA_STATUS_HTTP_PATH']}",
                 as_of_date,
             ),
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
+            name="daily_report",
+            method="GET",
+            url=f"{base_url}{DEFAULT_SHEET_DAILY_REPORT_PATH}",
             timeout_seconds=timeout_seconds,
         ),
         _collect_http_probe(
@@ -628,6 +635,8 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Цикл поставок, дней",
             "https://docs.google.com/spreadsheets/d/",
             "Сервер и расписание",
+            "Ежедневные отчёты",
+            DEFAULT_SHEET_DAILY_REPORT_PATH,
             "Часовой пояс",
             "Автообновление",
             "Последний автозапуск",
@@ -699,6 +708,22 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
                 "server_context",
             ],
             error_keys=["error", "server_context"],
+        )
+        return evaluation
+
+    if route == "daily_report":
+        evaluation["ok"], evaluation["detail"] = _validate_json_result(
+            status,
+            payload,
+            success_keys=[
+                "status",
+                "business_timezone",
+                "current_business_date",
+                "comparison_basis",
+                "newer_closed_date",
+                "older_closed_date",
+                "notes",
+            ],
         )
         return evaluation
 
@@ -974,6 +999,7 @@ results = [
     _collect("load_route", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/load"),
     _collect("job", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/job?job_id=hosted_runtime_probe"),
     _collect("status", "GET", _append_as_of_date(PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_STATUS_HTTP_PATH"], PAYLOAD["as_of_date"])),
+    _collect("daily_report", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/daily-report"),
     _collect("plan", "GET", _append_as_of_date(PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_HTTP_PATH"], PAYLOAD["as_of_date"])),
     _collect("factory_order_status", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/status"),
     _collect("factory_order_template_stock_ff", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"),

@@ -76,6 +76,8 @@ python3 apps/sheet_vitrina_v1_temporal_closure_retry_smoke.py
 python3 apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py
 python3 apps/sheet_vitrina_v1_stocks_refresh_smoke.py
 python3 apps/sheet_vitrina_v1_auto_update_smoke.py
+python3 apps/sheet_vitrina_v1_daily_report_smoke.py
+python3 apps/sheet_vitrina_v1_daily_report_http_smoke.py
 python3 apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py
 python3 apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py
 git diff --check
@@ -147,6 +149,7 @@ Expected routes:
 - `POST /v1/cost-price/upload`
 - `POST /v1/sheet-vitrina-v1/refresh`
 - `POST /v1/sheet-vitrina-v1/load`
+- `GET /v1/sheet-vitrina-v1/daily-report`
 - `GET /v1/sheet-vitrina-v1/plan`
 - `GET /v1/sheet-vitrina-v1/status`
 - `GET /v1/sheet-vitrina-v1/job`
@@ -309,7 +312,8 @@ Operational rule:
 - applicable себестоимость резолвится server-side по `group + latest effective_from <= slot_date`;
 - operator-facing derived rows используют canonical keys `total_proxy_profit_rub` и `proxy_margin_pct_total`;
 - `GET /sheet-vitrina-v1/operator` поднимает simple operator page без SPA/build pipeline;
-- operator page показывает только narrow status/log surface: separate actions `Загрузить данные` / `Отправить данные`, compact Russian chrome для status/`Лог` и row-count labels плюс один compact server-driven block `Сервер и расписание`; log viewport при этом fixed-height scrollable, completed run можно скачать через `Скачать лог`, а raw log/error text и technical values остаются canonical;
+- operator page показывает narrow server-driven surface: separate actions `Загрузить данные` / `Отправить данные`, compact block `Ежедневные отчёты`, compact Russian chrome для status/`Лог` и row-count labels плюс один compact server-driven block `Сервер и расписание`; log viewport при этом fixed-height scrollable, completed run можно скачать через `Скачать лог`, а raw log/error text и technical values остаются canonical;
+- `GET /v1/sheet-vitrina-v1/daily-report` остаётся cheap read-only JSON path: route сравнивает только два последних closed business day через persisted ready snapshots `default_business_as_of_date(now)` и `default_business_as_of_date(now)-1 day` и не имеет права trigger-ить refresh/upstream fetch;
 - в block `Сервер и расписание` `Автообновление` должно быть backend-driven description full daily chain, а не только scheduler time; current truthful wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`;
 - тот же block должен surface-ить `Последний автозапуск`, `Статус последнего автозапуска` и `Последнее успешное автообновление` из backend/status contract;
 - `POST /v1/sheet-vitrina-v1/refresh` обновляет date-aware ready snapshot в repo-owned SQLite runtime contour;
@@ -342,6 +346,8 @@ Operational rule:
 | `sheet_vitrina_v1 ready snapshot missing` после upload | load path is cheap-read only; explicit refresh has not materialized snapshot for the current bundle / date yet |
 | `Снимок пока не подготовлен.` на `/sheet-vitrina-v1/operator` | operator page честно сообщает, что explicit refresh ещё не запускался для current bundle / date |
 | на `/sheet-vitrina-v1/operator` пустой/неактуальный block `Сервер и расписание` | stale deploy, stale operator template или `GET /v1/sheet-vitrina-v1/status` не несёт expected `server_context` |
+| `Ежедневный отчёт пока недоступен` при ожидаемо готовых closed-day snapshots | missing/stale deploy, broken `GET /v1/sheet-vitrina-v1/daily-report` route, либо один из required ready snapshots (`default_business_as_of_date(now)` / `minus 1 day`) не materialized |
+| daily-report block сравнивает `today_current` вместо двух closed days | broken server-side comparison rule или stale operator JS/template |
 | `sheet vitrina endpoint returned non-JSON response` | wrong publish/upstream route or HTML error surface instead of expected JSON |
 | `today_current` values оказались под yesterday date column | live runtime или GAS publish stale; current contour всё ещё использует single-date surrogate вместо two-slot ready snapshot |
 | default refresh without `as_of_date` materialize-ит `UTC yesterday` / `UTC today` вместо EKT dates | stale deploy or stale business-time helper; current runtime still uses UTC-bound default-date semantics instead of `Asia/Yekaterinburg` |

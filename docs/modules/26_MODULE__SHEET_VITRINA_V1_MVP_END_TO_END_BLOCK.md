@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-26-SHEET-VITRINA-V1-MVP-END-TO-END-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `sheet_vitrina_v1_mvp_end_to_end_block`."
-scope: "Первый bounded end-to-end alignment для `sheet_vitrina_v1`: uploaded compact bootstrap `CONFIG / METRICS / FORMULAS`, sibling `COST_PRICE` upload contour, сохранённый upload trigger, explicit refresh в repo-owned date-aware ready snapshot, separate load этого snapshot в live sheet, server-side cost overlay в operator-facing rows, cheap read этого snapshot в `DATA_VITRINA` и narrow server-side operator page без возврата heavy logic в Google Sheets, дополненная bounded factory-order supply tab без переноса расчётной логики в Apps Script."
+scope: "Первый bounded end-to-end alignment для `sheet_vitrina_v1`: uploaded compact bootstrap `CONFIG / METRICS / FORMULAS`, sibling `COST_PRICE` upload contour, сохранённый upload trigger, explicit refresh в repo-owned date-aware ready snapshot, separate load этого snapshot в live sheet, server-side cost overlay в operator-facing rows, cheap read этого snapshot в `DATA_VITRINA`, compact daily-report read model for two latest closed business days и narrow server-side operator page без возврата heavy logic в Google Sheets, дополненная bounded factory-order supply tab без переноса расчётной логики в Apps Script."
 source_basis:
   - "migration/90_registry_upload_http_entrypoint.md"
   - "migration/91_sheet_vitrina_v1_registry_upload_trigger.md"
@@ -41,6 +41,7 @@ related_endpoints:
   - "POST /v1/cost-price/upload"
   - "POST /v1/sheet-vitrina-v1/refresh"
   - "POST /v1/sheet-vitrina-v1/load"
+  - "GET /v1/sheet-vitrina-v1/daily-report"
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
   - "GET /v1/sheet-vitrina-v1/job"
@@ -68,6 +69,8 @@ related_runners:
   - "apps/sheet_vitrina_v1_factory_order_http_smoke.py"
   - "apps/web_source_temporal_adapter_smoke.py"
   - "apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py"
+  - "apps/sheet_vitrina_v1_daily_report_smoke.py"
+  - "apps/sheet_vitrina_v1_daily_report_http_smoke.py"
   - "apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py"
   - "apps/registry_upload_http_entrypoint_live.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime.py"
@@ -122,9 +125,20 @@ update_note: "Обновлён под final temporal classifier и execution mod
   - две explicit actions `Загрузить данные` и `Отправить данные`
   - `Загрузить данные` вызывает existing `POST /v1/sheet-vitrina-v1/refresh` и materialize-ит ready snapshot only
   - `Отправить данные` вызывает `POST /v1/sheet-vitrina-v1/load` и пишет в live sheet только already prepared snapshot
+  - page additionally читает `GET /v1/sheet-vitrina-v1/daily-report` для compact блока `Ежедневные отчёты`
   - page читает `GET /v1/sheet-vitrina-v1/status` для compact status block
   - page читает `GET /v1/sheet-vitrina-v1/job` для detailed построчного operator log без отдельного audit subsystem
   - тот же `job` route поддерживает text-export конкретного completed run через `format=text&download=1`
+  - daily-report block остаётся read-only и server-owned:
+    - compare target = два последних closed business day в `Asia/Yekaterinburg`
+    - current rule = `yesterday_closed` из ready snapshot `as_of_date=default_business_as_of_date(now)` versus `yesterday_closed` из ready snapshot `as_of_date=default_business_as_of_date(now)-1 day`
+    - `today_current` не используется как comparison baseline
+    - block читает только persisted ready snapshots и current registry labels, без новых upstream fetch и без browser-side ranking logic
+    - ranked total metric pool intentionally остаётся узким и canonical: `total_view_count`, `total_views_current`, `total_open_card_count`, `avg_ctr_current`, `avg_addToCartConversion`, `avg_cartToOrderConversion`, `avg_spp`, `avg_ads_bid_search`, `total_ads_views`, `total_ads_sum`, `avg_localizationPercent`
+    - seller-funnel `ctr` не входит в total ranking, потому что current truth не materialize-ит отдельную total-level row для двух closed days
+    - SKU identity в этом block truthfully остаётся `display_name + nmId`
+    - ranked explanation factors используют только deterministic sign-safe signals (`views/search views/card opens/CTR/conversions`, `price_seller_discounted`, `Нет остатков`, district low-stock `< 20` except `stock_ru_far_siberia`)
+    - `SPP`, `ads_bid_search` и `localizationPercent` не входят в ranked explanation factors, потому что current repo norm не фиксирует для них однозначный good/bad sign
   - page дополнительно показывает compact block `Сервер и расписание`, который заполняется только из server-driven `server_context`
   - `Автообновление` в этом block должно описывать полный daily auto cycle, а не только schedule time: current truthful wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
   - тот же block additionally показывает `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление` из backend/status surface
@@ -184,6 +198,11 @@ update_note: "Обновлён под final temporal classifier и execution mod
   - response body = latest persisted `SheetVitrinaV1RefreshResult`-compatible metadata для current bundle / requested `as_of_date`
   - same response additionally carries `server_context` with business timezone/current time and daily refresh trigger metadata
   - when ready snapshot is still missing, route stays truthful `422`, but error payload still carries `server_context` for the operator page empty state
+- Канонический operator daily-report path:
+  - `GET /v1/sheet-vitrina-v1/daily-report`
+  - response body = compact JSON summary для operator block `Ежедневные отчёты`
+  - route keeps `200` even when report is not yet comparable and then returns truthful `status=unavailable` + exact `reason`
+  - route does not build a new ready snapshot, does not fetch upstream data and does not read `today_current` as the comparison baseline
 - Канонический operator live-log path:
   - `GET /v1/sheet-vitrina-v1/job`
   - default response body = current async action status + detailed postрочный live log для `refresh` или `load`
@@ -261,6 +280,7 @@ update_note: "Обновлён под final temporal classifier и execution mod
 - Таблица остаётся thin shell: ни `load`, ни bound Apps Script не пытаются локально угадывать, какая дата у source values.
 - Новый factory-order contour тоже остаётся thin shell:
   - operator page only orchestrates download/upload/calculate/download actions;
+  - daily-report block only renders a ready-made JSON summary and does not compute ranking logic in browser JS;
   - XLSX files carry only operator-facing Russian columns, not hidden technical truth;
   - all validation, active-SKU expansion, demand averaging and recommendation math live server-side.
 - `POST /v1/sheet-vitrina-v1/load` тоже остаётся thin bridge:

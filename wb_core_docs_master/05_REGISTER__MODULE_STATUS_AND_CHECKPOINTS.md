@@ -75,8 +75,11 @@ Current sibling operator input flow:
 
 Current repo-owned operator refresh surface:
 - `GET /sheet-vitrina-v1/operator`
-- page uses `POST /v1/sheet-vitrina-v1/refresh`, `POST /v1/sheet-vitrina-v1/load`, `GET /v1/sheet-vitrina-v1/status` and `GET /v1/sheet-vitrina-v1/job`
-- page stays intentionally narrow: separate buttons `Загрузить данные` / `Отправить данные`, compact status, one compact `Сервер и расписание` block and one fixed-height scrollable `Лог` block with `Скачать лог`
+- page uses `POST /v1/sheet-vitrina-v1/refresh`, `POST /v1/sheet-vitrina-v1/load`, `GET /v1/sheet-vitrina-v1/daily-report`, `GET /v1/sheet-vitrina-v1/status` and `GET /v1/sheet-vitrina-v1/job`
+- page stays intentionally narrow: separate buttons `Загрузить данные` / `Отправить данные`, one compact read-only block `Ежедневные отчёты`, compact status, one compact `Сервер и расписание` block and one fixed-height scrollable `Лог` block with `Скачать лог`
+- daily-report block compares only the two latest closed business days in `Asia/Yekaterinburg`: `yesterday_closed(default_business_as_of_date(now))` vs `yesterday_closed(default_business_as_of_date(now)-1 day)`, never `today_current`
+- daily-report ranked totals stay on the current canonical pool only (`total_view_count`, `total_views_current`, `total_open_card_count`, `avg_ctr_current`, `avg_addToCartConversion`, `avg_cartToOrderConversion`, `avg_spp`, `avg_ads_bid_search`, `total_ads_views`, `total_ads_sum`, `avg_localizationPercent`)
+- daily-report SKU block truthfully shows only `display_name + nmId`; common factors use only deterministic sign-safe signals (`views/search views/card opens/CTR/conversions`, `price_seller_discounted`, `Нет остатков`, district low-stock `< 20` except `stock_ru_far_siberia`)
 - status/refresh responses drive the block through `server_context`, so timezone/scheduler wording is not hardcoded in UI; `Автообновление` now truthfully describes the full daily chain `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
 - the same block shows backend-driven `Последний автозапуск`, `Статус последнего автозапуска` and `Последнее успешное автообновление`
 - `refresh` и `load` не смешиваются: refresh materialize-ит ready snapshot only, load пишет only already prepared snapshot в live sheet
