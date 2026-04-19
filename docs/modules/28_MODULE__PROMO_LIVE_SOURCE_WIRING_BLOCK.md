@@ -135,8 +135,9 @@ update_note: "Создан как канонический модульный д
   - `DATA_VITRINA` получает non-zero promo-backed values
   - collector trace и downloaded promo folders truthfully surface-ятся в runtime note/output
 - Hosted live closure additionally depends on one bounded runtime dependency seam:
-  - remote system python must have `openpyxl==3.1.5`;
-  - canonical repo-owned hosted deploy contract now installs this dependency before service restart instead of leaving it as hidden host drift.
+  - remote system python must have `openpyxl==3.1.5` and `playwright==1.58.0`;
+  - canonical repo-owned hosted deploy contract now installs these python packages before service restart instead of leaving them as hidden host drift;
+  - browser binaries stay owned by the already existing seller-site contour on the live host and are not re-installed by `wb-core`.
 
 # 8. Что уже доказано по модулю
 

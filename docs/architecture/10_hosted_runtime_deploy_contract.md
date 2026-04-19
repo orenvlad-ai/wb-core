@@ -123,8 +123,9 @@ Current promo live-wiring note:
 - if hosted runtime uses the repo-owned `promo_by_price` live seam, service env must expose a valid seller session state path for the bounded browser collector;
 - canonical selleros host default = `/opt/wb-web-bot/storage_state.json`, but runtime may override it explicitly via `PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH`.
 - hosted deploy contract must also materialize the bounded workbook parser dependency on the remote system python:
-  - current canonical package = `openpyxl==3.1.5`
-  - deploy runner installs it on host before restart if it is still missing.
+  - current canonical packages = `openpyxl==3.1.5`, `playwright==1.58.0`
+  - deploy runner installs them on host before restart if they are still missing;
+  - browser binaries themselves stay outside `wb-core` deploy contract and are expected to come from the existing seller-site contour already present on the selleros host.
 
 Secrets stay outside Git. Repo stores only env names and target shape.
 
@@ -144,7 +145,7 @@ For live/public tasks affecting this contour `repo-only` does not count as compl
 Current deploy contract note:
 - `deploy` does more than `rsync + restart`:
   - sync current checkout;
-  - ensure required hosted runtime python packages are present (`openpyxl==3.1.5`);
+  - ensure required hosted runtime python packages are present (`openpyxl==3.1.5`, `playwright==1.58.0`);
   - install/update repo-owned systemd units when configured;
   - restart runtime;
   - only after that run loopback/public verification.
