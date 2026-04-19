@@ -92,6 +92,9 @@ update_note: "Обновлён под current temporal closure seam: SQLite-back
 - Для current factory-order seam `temporal_source_snapshots[source_key=sales_funnel_history]` является authoritative server-side storage contract для persisted `orderCount` history:
   - bounded historical window может truthfully replace-иться целиком;
   - future exact-date snapshots продолжают дописываться existing live flow без возврата truth logic в sheet.
+- Для current `sheet_vitrina_v1` stocks seam `temporal_source_snapshots[source_key=stocks]` теперь является authoritative exact-date closed-day storage contract:
+  - bounded historical window `2026-03-01..2026-04-18` может truthfully persist-иться в тот же runtime layer;
+  - future `stocks[yesterday_closed]` reads reuse exact-date runtime snapshots instead of current intraday `wb-warehouses` values.
 
 ## 3.1 Допущение bounded шага
 
@@ -156,6 +159,9 @@ update_note: "Обновлён под current temporal closure seam: SQLite-back
   - `yesterday_closed` не обязан reuse-ить provisional current payload;
   - accepted closed-day truth materialize-ится только после отдельного acceptance step и сохраняется отдельно от provisional/candidate state;
   - retry/backoff lifecycle живёт server-side и не переносится в Apps Script.
+- Тот же runtime слой теперь достаточно выразителен и для historical stocks truth:
+  - `stocks` exact-date success payload хранится в общем `temporal_source_snapshots` без нового отдельного storage contour;
+  - live refresh может читать этот cache runtime-first и не refetch-ить historical CSV при уже materialized snapshot.
 
 # 8. Что пока не является частью финальной production-сборки
 

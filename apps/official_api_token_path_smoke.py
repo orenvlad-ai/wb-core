@@ -16,7 +16,7 @@ from packages.adapters.prices_snapshot_block import HttpBackedPricesSnapshotSour
 from packages.adapters.sales_funnel_history_block import HttpBackedSalesFunnelHistorySource
 from packages.adapters.sf_period_block import HttpBackedSfPeriodSource
 from packages.adapters.spp_block import HttpBackedSppSource
-from packages.adapters.stocks_block import HttpBackedStocksSource
+from packages.adapters.stocks_block import HistoricalCsvBackedStocksSource, HttpBackedStocksSource
 
 
 def main() -> None:
@@ -26,6 +26,7 @@ def main() -> None:
         "spp": HttpBackedSppSource(),
         "ads_bids": HttpBackedAdsBidsSource(),
         "stocks": HttpBackedStocksSource(),
+        "stocks_history_csv": HistoricalCsvBackedStocksSource(),
         "sales_funnel_history": HttpBackedSalesFunnelHistorySource(),
         "ads_compact": HttpBackedAdsCompactSource(),
         "fin_report_daily": HttpBackedFinReportDailySource(),

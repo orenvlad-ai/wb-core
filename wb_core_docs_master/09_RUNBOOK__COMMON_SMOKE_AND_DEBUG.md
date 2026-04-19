@@ -169,7 +169,16 @@ Norm:
 - use the retry runner for due `seller_funnel_snapshot` / `web_source_snapshot` closure states or one-off corrective re-closure of already damaged dates;
 - `today_current` may remain incomplete and blank, but `yesterday_closed` must not silently inherit provisional same-day values;
 - closed-day-capable bot/web-source families accept closed truth only after exact-date sync + source freshness validation (`source_fetched_at` / `fetched_at` after next business-day start in `Asia/Yekaterinburg`);
-- `prices_snapshot`, `ads_bids`, `stocks` remain current-only and truthfully stay `not_available` for `yesterday_closed`.
+- `prices_snapshot` and `ads_bids` remain current-only and truthfully stay `not_available` for `yesterday_closed`.
+- `stocks` no longer stays current-only inside `sheet_vitrina_v1`: `yesterday_closed` must resolve through exact-date runtime cache `temporal_source_snapshots[source_key=stocks]` built from Seller Analytics CSV `STOCK_HISTORY_DAILY_CSV`, while `today_current` stays `not_available`.
+
+One-off stocks backfill runner:
+
+```bash
+python3 apps/sheet_vitrina_v1_stocks_historical_backfill.py \
+  --date-from 2026-03-01 \
+  --date-to 2026-04-18
+```
 
 ## Live GAS checks
 
@@ -309,8 +318,9 @@ Operational rule:
 - `CONFIG!H:I` preserves `endpoint_url`, `last_bundle_version`, `last_status`, `last_http_status`;
 - current truth / ready snapshot keep `95` enabled+show_in_data metrics;
 - `DATA_VITRINA` keeps the same server-driven truth as operator-facing two-day `date_matrix`: `1631` source rows, `34` blocks, `33` separators, `1698` rendered rows и `95` unique metric keys при `yesterday_closed + today_current`;
-- `STATUS` names live sources per temporal slot, such as `seller_funnel_snapshot[yesterday_closed]`, `seller_funnel_snapshot[today_current]`, `stocks[today_current]`, `cost_price[yesterday_closed]`, `cost_price[today_current]`, plus blocked `promo_by_price`;
-- current-only sources (`stocks`, `prices_snapshot`, `ads_bids`) are expected to show `not_available` for `yesterday_closed` instead of copying `today_current` into a closed-day column;
+- `STATUS` names live sources per temporal slot, such as `seller_funnel_snapshot[yesterday_closed]`, `seller_funnel_snapshot[today_current]`, `stocks[yesterday_closed]`, `stocks[today_current]`, `cost_price[yesterday_closed]`, `cost_price[today_current]`, plus blocked `promo_by_price`;
+- current-only sources (`prices_snapshot`, `ads_bids`) are expected to show `not_available` for `yesterday_closed` instead of copying `today_current` into a closed-day column;
+- `stocks[yesterday_closed]` is expected to materialize as success from exact-date runtime cache / historical CSV after the stocks checkpoint switch, while `stocks[today_current]` stays `not_available`;
 - `seller_funnel_snapshot` and `web_source_snapshot` use bounded `explicit-date -> latest-if-date-matches` only for current-day read resolution; `yesterday_closed` accepts only an explicit accepted closed-day snapshot and must not silently reuse provisional same-day values;
 - if exact-date `today_current` snapshot is still missing for `seller_funnel_snapshot` / `web_source_snapshot`, refresh may bounded-trigger server-local `/opt/wb-web-bot` same-day runners plus `/opt/wb-ai/run_web_source_handoff.py` before final read-side fetch;
 - zero-filled exact-date `seller_funnel_snapshot` is not treated as truthful success anymore: refresh retries current-day capture/handoff, and if the payload still stays all-zero it surfaces as source error/blank instead of `view_count=0` / `open_card_count=0` rows;
@@ -331,15 +341,16 @@ Operational rule:
 | `today_current` values оказались под yesterday date column | live runtime или GAS publish stale; current contour всё ещё использует single-date surrogate вместо two-slot ready snapshot |
 | default refresh without `as_of_date` materialize-ит `UTC yesterday` / `UTC today` вместо EKT dates | stale deploy or stale business-time helper; current runtime still uses UTC-bound default-date semantics instead of `Asia/Yekaterinburg` |
 | `required env WB_API_TOKEN is not set` | live/runtime secret boundary is not aligned with the canonical WB token path |
-| `official stocks request failed with status 429` in `STATUS.stocks[today_current].note` | live runtime still hits WB inventory limiter; confirm batched `stocks` path is deployed, no stale runtime remains, and upstream wait headers are being honored |
-| `STATUS.stocks[today_current] = error` with blank stock rows after refresh | bounded refresh stayed honest about stocks failure; investigate upstream inventory rate-limit / token scope instead of treating blanks as fresh stock values |
-| `STATUS.stocks[yesterday_closed] = not_available` | expected bounded semantics: current-only stocks are not backfilled into yesterday EOD without dedicated historical path |
+| `historical stocks report .* did not finish within bounded polling window` or `... was not listed` | Seller Analytics CSV historical report did not become downloadable in bounded time; inspect `STOCK_HISTORY_DAILY_CSV` report queue / token scope / upstream availability |
+| `STATUS.stocks[yesterday_closed] = error` with note from historical CSV fetch | closed-day stocks path failed before exact-date runtime cache was materialized; inspect Seller Analytics CSV create/poll/download chain and runtime backfill state |
+| `STATUS.stocks[yesterday_closed] = not_available` | stale deploy or stale ready snapshot: after the historical stocks checkpoint switch, this source should no longer stay current-only in `sheet_vitrina_v1` |
+| `STATUS.stocks[today_current] = not_available` | expected bounded semantics after the historical stocks switch: intraday stocks are no longer materialized in `today_current` |
 | `STATUS.web_source_snapshot[yesterday_closed] = not_found` or `STATUS.seller_funnel_snapshot[yesterday_closed] = not_found` with `resolution_rule=explicit_or_latest_date_match` | upstream latest payload no longer matches requested day and exact-date runtime cache for that date is still missing |
 | `STATUS.web_source_snapshot[yesterday_closed]` or `STATUS.seller_funnel_snapshot[yesterday_closed]` is `closure_retrying` / `closure_rate_limited` / `closure_exhausted` | strict closed-day acceptance has not confirmed final truth yet; closed slot must stay blank/error instead of silently inheriting provisional same-day values |
 | `STATUS.web_source_snapshot[today_current].note` or `STATUS.seller_funnel_snapshot[today_current].note` starts with `current_day_web_source_sync_failed=` | bounded refresh tried server-local same-day capture/handoff and failed before exact-date local snapshot became available; investigate `/opt/wb-web-bot` runners, `/opt/wb-ai/run_web_source_handoff.py`, env and host-local owner paths |
 | `STATUS.seller_funnel_snapshot[*] = error` with `invalid_exact_snapshot=zero_filled_seller_funnel_snapshot` | exact-date seller-funnel payload existed but every `view_count/open_card_count` was zero; runtime rejected it as invalid instead of materializing false zero metrics, so inspect `/opt/wb-web-bot` capture freshness and rerun handoff |
 | `STATUS.web_source_snapshot[yesterday_closed].note` contains `closed_day_source_freshness_not_accepted` | exact-date search snapshot was fetched before the business day was actually closed; rerun authoritative closure path instead of accepting a provisional payload as final truth |
-| `STATUS.stocks[today_current].note` starts with `unmapped stocks quantity outside configured district map=` | raw payload contains quantity outside the current RU district mapping; `stock_total` keeps it, district rows stay source-backed, and the residual is surfaced explicitly instead of being dropped |
+| `STATUS.stocks[yesterday_closed].note` starts with `unmapped stocks quantity outside configured district map=` | historical stocks payload contains quantity outside the current RU district mapping; `stock_total` keeps it, district rows stay source-backed, and the residual is surfaced explicitly instead of being dropped |
 | `ReferenceError: URL is not defined` | Apps Script runtime bug in sheet-side URL derivation |
 | `registry upload bundle must contain 5-64 metrics_v2 entries` | live runtime still serves stale validator / stale deploy and is not aligned with current repo semantics |
 | `ACCESS_TOKEN_SCOPE_INSUFFICIENT` for `clasp` | local GAS OAuth scopes are insufficient for content read/write |

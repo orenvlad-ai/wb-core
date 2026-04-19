@@ -41,7 +41,7 @@ REFRESHED_AT = "2026-04-13T12:05:00Z"
 AS_OF_DATE = "2026-04-12"
 TODAY_CURRENT_DATE = "2026-04-13"
 SERVER_NOW = datetime(2026, 4, 13, 8, 0, tzinfo=timezone.utc)
-CURRENT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "stocks"}
+CURRENT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids"}
 
 
 class CountingBlock:
@@ -231,16 +231,21 @@ def main() -> None:
             if plan_payload["date_columns"] != [AS_OF_DATE, TODAY_CURRENT_DATE]:
                 raise AssertionError("plan endpoint must expose both materialized dates")
             if any(
-                block.request_dates != ([TODAY_CURRENT_DATE] if block.source_key in CURRENT_ONLY_SOURCE_KEYS else [AS_OF_DATE, TODAY_CURRENT_DATE])
+                block.request_dates
+                != (
+                    [TODAY_CURRENT_DATE]
+                    if block.source_key in CURRENT_ONLY_SOURCE_KEYS
+                    else ([AS_OF_DATE] if block.source_key == "stocks" else [AS_OF_DATE, TODAY_CURRENT_DATE])
+                )
                 for block in counters.values()
             ):
                 raise AssertionError("cheap read endpoint must not trigger heavy source blocks after refresh")
             status_sheet = next(sheet for sheet in plan_payload["sheets"] if sheet["sheet_name"] == "STATUS")
             status_rows = {row[0]: row for row in status_sheet["rows"]}
-            if status_rows["stocks[yesterday_closed]"][1] != "not_available":
-                raise AssertionError("stocks yesterday_closed must stay explicitly unavailable")
-            if status_rows["stocks[today_current]"][1] != "success":
-                raise AssertionError("stocks today_current must materialize current data")
+            if status_rows["stocks[yesterday_closed]"][1] != "success":
+                raise AssertionError("stocks yesterday_closed must materialize historical closed-day data")
+            if status_rows["stocks[today_current]"][1] != "not_available":
+                raise AssertionError("stocks today_current must stay explicitly unavailable")
             if status_rows["prices_snapshot[yesterday_closed]"][1] != "not_available":
                 raise AssertionError("prices yesterday_closed must stay explicitly unavailable")
             if status_rows["prices_snapshot[today_current]"][1] != "success":
@@ -263,7 +268,12 @@ def main() -> None:
             if ready_load["sheets"]["STATUS"]["values"][1][0] != "registry_upload_current_state":
                 raise AssertionError("STATUS sheet must be materialized from ready snapshot")
             if any(
-                block.request_dates != ([TODAY_CURRENT_DATE] if block.source_key in CURRENT_ONLY_SOURCE_KEYS else [AS_OF_DATE, TODAY_CURRENT_DATE])
+                block.request_dates
+                != (
+                    [TODAY_CURRENT_DATE]
+                    if block.source_key in CURRENT_ONLY_SOURCE_KEYS
+                    else ([AS_OF_DATE] if block.source_key == "stocks" else [AS_OF_DATE, TODAY_CURRENT_DATE])
+                )
                 for block in counters.values()
             ):
                 raise AssertionError("sheet-side load must not trigger heavy source blocks after refresh")
@@ -313,7 +323,7 @@ def _assert_counting_calls(counters: dict[str, CountingBlock]) -> None:
         "sf_period": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "spp": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "ads_bids": [TODAY_CURRENT_DATE],
-        "stocks": [TODAY_CURRENT_DATE],
+        "stocks": [AS_OF_DATE],
         "ads_compact": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "fin_report_daily": [AS_OF_DATE, TODAY_CURRENT_DATE],
     }
