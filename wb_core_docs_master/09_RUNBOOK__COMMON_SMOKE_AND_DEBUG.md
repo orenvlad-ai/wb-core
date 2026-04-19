@@ -171,6 +171,10 @@ Current promo runtime env override when hosted runtime needs explicit seller ses
 - `PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH`
 - canonical selleros value = `/opt/wb-web-bot/storage_state.json`
 
+Current hosted runtime dependency note for promo live wiring:
+- hosted `deploy` now also ensures `openpyxl==3.1.5` on the remote system python before restarting `wb-core-registry-http.service`;
+- if deploy still fails before HTTP probes, first inspect `journalctl -u wb-core-registry-http.service` for import-time dependency drift instead of treating it as an unspecified runtime outage.
+
 Current canonical business timezone for server-side `sheet_vitrina_v1` date math:
 - `Asia/Yekaterinburg`
 - default `as_of_date` = previous business day in `Asia/Yekaterinburg`

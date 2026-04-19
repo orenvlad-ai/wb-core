@@ -71,6 +71,9 @@ OPTIONAL_RUNTIME_CONTRACT = [
     "WB_STATISTICS_API_BASE_URL",
     "PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH",
 ]
+RUNTIME_PIP_PACKAGES = [
+    "openpyxl==3.1.5",
+]
 ROUTE_ENV_DEFAULTS = {
     "REGISTRY_UPLOAD_HTTP_PATH": DEFAULT_UPLOAD_PATH,
     "COST_PRICE_UPLOAD_HTTP_PATH": DEFAULT_COST_PRICE_UPLOAD_PATH,
@@ -204,6 +207,7 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
     missing = _missing_for_deploy(target)
     deploy_sequence = [
         "sync current checked-out worktree to target_dir via rsync",
+        "install required Python runtime packages on the hosted system python",
     ]
     if target.has_managed_systemd_units:
         deploy_sequence.extend(
@@ -421,6 +425,7 @@ def deploy_current_checkout(
         target,
         f"cd {shlex.quote(target.target_dir)} && {target.restart_command}",
     )
+    runtime_pip_install_command = _build_runtime_pip_install_command(target)
     systemd_commands = _build_managed_systemd_commands(target)
     status_command = (
         _remote_shell_command(
@@ -437,6 +442,7 @@ def deploy_current_checkout(
         "commands": {
             "mkdir": mkdir_command,
             "rsync": rsync_plan,
+            "runtime_pip_install": runtime_pip_install_command,
             "systemd_install": systemd_commands["install"],
             "systemd_daemon_reload": systemd_commands["daemon_reload"],
             "restart": restart_command,
@@ -450,6 +456,7 @@ def deploy_current_checkout(
 
     _run_command(mkdir_command)
     _run_command(rsync_plan)
+    _run_command(runtime_pip_install_command)
     if systemd_commands["install"]:
         _run_command(systemd_commands["install"])
         _run_command(systemd_commands["daemon_reload"])
@@ -461,6 +468,14 @@ def deploy_current_checkout(
     if status_command:
         _run_command(status_command)
     return summary
+
+
+def _build_runtime_pip_install_command(target: HostedRuntimeTarget) -> list[str]:
+    package_names = " ".join(shlex.quote(item) for item in RUNTIME_PIP_PACKAGES)
+    python_check = "python3 -c 'import openpyxl' >/dev/null 2>&1"
+    pip_install = f"python3 -m pip install --break-system-packages {package_names}"
+    command = f"{python_check} || {pip_install}"
+    return _remote_shell_command(target, command)
 
 
 def run_public_probe_command(args: argparse.Namespace) -> int:
