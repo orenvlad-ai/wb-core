@@ -24,6 +24,7 @@ related_modules:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
+  - "docs/modules/27_MODULE__PROMO_XLSX_COLLECTOR_BLOCK.md"
 related_paths:
   - "packages/"
   - "apps/"
@@ -44,7 +45,8 @@ built_from_commit: "0b9cd8078fca3f3f4ad7325768fef4b31cb87c7e"
 - source/data blocks `01–12` уже смёржены;
 - table/projection/wide/sheet read-side `13–19` уже смёржены;
 - registry upload line `20–23` уже смёржена;
-- sheet-side operator line `24–26` уже смёржена, включая первый bounded MVP `prepare -> upload -> refresh -> load`.
+- sheet-side operator line `24–26` уже смёржена, включая первый bounded MVP `prepare -> upload -> refresh -> load`;
+- bounded browser-capture collector `27` уже смёржен как repo-owned local promo XLSX runner с truthful sidecar contract.
 
 # Current norm
 
@@ -71,6 +73,11 @@ Confirmed contour на текущем `main`:
 - compact seed bootstrap для `CONFIG / METRICS / FORMULAS`;
 - выравнивание sheet/upload/runtime под uploaded compact package `33 / 102 / 7`;
 - bounded refresh/read reverse-load в `DATA_VITRINA` и `STATUS`, где ready snapshot хранится в repo-owned SQLite runtime contour.
+- repo-owned bounded `promo_xlsx_collector_block`:
+  - canonical `direct_open -> cookie -> hydrated DOM -> optional modal close`
+  - canonical drawer reset inside `#Portal-drawer`
+  - truthful `metadata.json` for every promo
+  - workbook inspection and export-kind classification for downloaded promo XLSX.
 
 ## Primary source of truth
 
@@ -85,7 +92,7 @@ Confirmed contour на текущем `main`:
 # Known gaps
 
 - full legacy parity по всем historical metric sections и registry rows;
-- live numeric fill для promo-backed metrics и других bounded long-tail gaps beyond current `COST_PRICE` overlay;
+- wiring promo collector output обратно в current `sheet_vitrina_v1` refresh/load/operator line и final live numeric fill для promo-backed metrics;
 - repo-owned hosted deploy/probe contract вокруг upload/load runtime;
 - окончательная судьба `AI_EXPORT` как compatibility contract;
 - materialized `packages/domain`, `infra/`, `tests/`, `api/`, `jobs/`, `db/`.

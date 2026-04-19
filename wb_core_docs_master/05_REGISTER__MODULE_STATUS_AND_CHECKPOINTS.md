@@ -4,7 +4,7 @@ doc_id: "WB-CORE-PROJECT-05-MODULE-STATUS"
 doc_type: "register"
 status: "active"
 purpose: "Дать compact register смёрженных модулей и current checkpoints без чтения всех module docs подряд."
-scope: "Семейства модулей, диапазоны `01–26`, текущий статус `main`, главный current checkpoint и открытые хвосты."
+scope: "Семейства модулей, диапазоны `01–27`, текущий статус `main`, главный current checkpoint и открытые хвосты."
 source_basis:
   - "docs/modules/00_INDEX__MODULES.md"
   - "README.md"
@@ -25,7 +25,7 @@ built_from_commit: "4f738f1ea652dc21c85f1977dd35997eb4591401"
 
 # Summary
 
-На текущем `main` main-confirmed module set уже доходит до `26`.
+На текущем `main` main-confirmed module set уже доходит до `27`.
 
 Практически это значит:
 - source/data foundation уже materialized;
@@ -41,6 +41,7 @@ built_from_commit: "4f738f1ea652dc21c85f1977dd35997eb4591401"
 | `13–19` | `table-facing` / `projection` / `wide-matrix` / `sheet-side scaffold` | смёржены в `main` |
 | `20–23` | `registry upload line` | смёржены в `main` до live HTTP entrypoint |
 | `24–26` | `sheet-side operator line` | смёржены в `main` до первого bounded MVP |
+| `27` | `browser-capture collector` | смёржен в `main` как bounded local promo XLSX collector contour |
 
 ## Current checkpoint ladder
 
@@ -59,6 +60,7 @@ built_from_commit: "4f738f1ea652dc21c85f1977dd35997eb4591401"
 13. `sheet_vitrina_v1_registry_upload_trigger_block`
 14. `sheet_vitrina_v1_registry_seed_v3_bootstrap_block`
 15. `sheet_vitrina_v1_mvp_end_to_end_block`
+16. `promo_xlsx_collector_block`
 
 ## Operator-facing checkpoint
 
@@ -72,6 +74,11 @@ Current sibling operator input flow:
 - `Подготовить лист COST_PRICE`
 - `Отправить себестоимости`
 - flow обновляет separate `COST_PRICE` authoritative dataset, а existing refresh/read contour затем использует его server-side в current `DATA_VITRINA` / `STATUS`
+
+Current sibling local promo collector flow:
+- `python3 apps/promo_xlsx_collector_live.py`
+- flow делает bounded seller-portal capture только вне repo tree и materialize-ит `metadata.json` для каждого promo plus `workbook.xlsx` для downloaded current/future promo
+- contour intentionally stays outside current public HTTP/operator page and does not yet wire into `refresh/load`
 
 Current repo-owned operator refresh surface:
 - `GET /sheet-vitrina-v1/operator`
@@ -133,7 +140,8 @@ This is the first bounded MVP checkpoint, not final production parity.
 # Known gaps
 
 - full legacy parity beyond current main-confirmed sheet/upload dictionary;
-- live numeric fill для promo-backed metrics и других bounded long-tail rows beyond current `COST_PRICE` overlay;
+- repo-owned promo collector contour уже materialized, но его output ещё не включён в current live `sheet_vitrina_v1` refresh/load/operator line;
+- final live numeric fill для promo-backed metrics и других bounded long-tail rows beyond current `COST_PRICE` overlay;
 - отдельный bounded fix по любому remaining non-district / foreign stocks residual, если одной truthful `STATUS` note окажется недостаточно для operator flow;
 - production hardening around runtime/deploy/auth;
 - generic orchestration platform beyond current bounded auto + retry timers;
