@@ -160,7 +160,8 @@ def main() -> None:
             if operator_status != 200:
                 raise AssertionError(f"operator UI must return 200, got {operator_status}")
             for expected in (
-                "Автообновление",
+                "Автообновления",
+                "Автоцепочка",
                 "Последний автозапуск",
                 "Статус последнего автозапуска",
                 "Последнее успешное автообновление",

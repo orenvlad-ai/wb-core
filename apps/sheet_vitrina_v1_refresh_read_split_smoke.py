@@ -134,22 +134,25 @@ def main() -> None:
                 or "Отправить данные" not in operator_ui_html
             ):
                 raise AssertionError("operator UI must expose the expected operator controls")
-            if "Статус" not in operator_ui_html or "Лог" not in operator_ui_html or "ожидание" not in operator_ui_html:
-                raise AssertionError("operator UI must keep the compact Russian chrome")
+            if (
+                "Ручная загрузка данных" not in operator_ui_html
+                or "Лог" not in operator_ui_html
+                or "нет активной операции" not in operator_ui_html
+            ):
+                raise AssertionError("operator UI must keep the compact manual/log chrome")
             if "Скачать лог" not in operator_ui_html or "max-height: 420px" not in operator_ui_html:
                 raise AssertionError("operator UI must expose log download control and fixed-height log viewport")
             if "Строки DATA_VITRINA" not in operator_ui_html or "Строки STATUS" not in operator_ui_html:
                 raise AssertionError("operator UI must expose row-count fields with Russian labels")
-            if "Сервер и расписание" not in operator_ui_html or "Часовой пояс" not in operator_ui_html:
-                raise AssertionError("operator UI must expose the compact server context block")
+            if "Автообновления" not in operator_ui_html or "Часовой пояс" not in operator_ui_html:
+                raise AssertionError("operator UI must expose the compact auto-update block")
             if (
-                "Автообновление" not in operator_ui_html
+                "Автоцепочка" not in operator_ui_html
                 or "Последний автозапуск" not in operator_ui_html
                 or "Статус последнего автозапуска" not in operator_ui_html
                 or "Последнее успешное автообновление" not in operator_ui_html
-                or "Технический триггер" not in operator_ui_html
             ):
-                raise AssertionError("operator UI must expose scheduler labels in Russian")
+                raise AssertionError("operator UI must expose auto-update labels in Russian")
             if "Снимок пока не подготовлен." not in operator_ui_html:
                 raise AssertionError("operator UI must keep the Russian empty-state helper text")
             if (
