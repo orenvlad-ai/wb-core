@@ -1,0 +1,8 @@
+[Unit]
+Description=WB Core Sheet Vitrina Daily Refresh
+After=network.target wb-core-registry-http.service
+Wants=network.target wb-core-registry-http.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/curl --fail --silent --show-error --max-time 900 --header 'Content-Type: application/json' --data '{"auto_load":true}' http://127.0.0.1:8765/v1/sheet-vitrina-v1/refresh

@@ -35,6 +35,20 @@ def main() -> None:
             "restart_command": "sudo systemctl restart wb-core-registry-upload",
             "status_command": "sudo systemctl status --no-pager wb-core-registry-upload",
             "environment_file": "/etc/wb-core/registry-upload.env",
+            "systemd_unit_directory": "/etc/systemd/system",
+            "systemd_units_source_dir": "artifacts/registry_upload_http_entrypoint/systemd",
+            "managed_systemd_units": [
+                {
+                    "name": "wb-core-sheet-vitrina-refresh.service",
+                    "enable": False,
+                    "restart": False,
+                },
+                {
+                    "name": "wb-core-sheet-vitrina-refresh.timer",
+                    "enable": True,
+                    "restart": True,
+                },
+            ],
             "runtime_env": {
                 "REGISTRY_UPLOAD_HTTP_HOST": "127.0.0.1",
                 "REGISTRY_UPLOAD_HTTP_PORT": str(port),
@@ -90,6 +104,8 @@ def main() -> None:
                 raise AssertionError("print-plan must confirm applicability to current checkout")
             if "WB_API_TOKEN" not in print_plan["required_secret_contract"]:
                 raise AssertionError("print-plan must expose canonical secret contract")
+            if len(print_plan["deploy_plan"]["managed_systemd_units"]) != 2:
+                raise AssertionError("print-plan must expose managed systemd units when configured")
 
             deploy_dry_run = _run_json(
                 [
@@ -106,6 +122,14 @@ def main() -> None:
                 raise AssertionError("deploy --dry-run must stay dry-run")
             if "rsync" not in " ".join(deploy_dry_run["commands"]["rsync"]):
                 raise AssertionError("deploy --dry-run must expose rsync command")
+            if "install" not in " ".join(deploy_dry_run["commands"]["systemd_install"]):
+                raise AssertionError("deploy --dry-run must expose systemd install command")
+            if "daemon-reload" not in " ".join(deploy_dry_run["commands"]["systemd_daemon_reload"]):
+                raise AssertionError("deploy --dry-run must expose daemon-reload command")
+            if "enable" not in " ".join(deploy_dry_run["commands"]["systemd_enable"]):
+                raise AssertionError("deploy --dry-run must expose systemd enable command")
+            if "restart" not in " ".join(deploy_dry_run["commands"]["systemd_restart"]):
+                raise AssertionError("deploy --dry-run must expose systemd restart command")
 
             public_probe = _run_json(
                 [
@@ -176,6 +200,10 @@ def main() -> None:
 
             print(f"print_plan: ok -> {print_plan['deploy_plan']['target_id']}")
             print(f"deploy_dry_run: ok -> {deploy_dry_run['commands']['restart'][-1]}")
+            print(
+                "deploy_dry_run_systemd: ok -> "
+                f"{deploy_dry_run['commands']['systemd_restart'][-1]}"
+            )
             print(f"public_probe_refresh: ok -> {route_map['refresh']['http_status']}")
             print(f"public_probe_stock_report: ok -> {route_map['stock_report']['http_status']}")
             print(f"factory_order_status: ok -> {route_map['factory_order_status']['http_status']}")

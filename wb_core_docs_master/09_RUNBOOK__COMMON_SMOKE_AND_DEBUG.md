@@ -134,6 +134,13 @@ Required local env for the runner itself:
 
 Canonical target template:
 - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__example.json`
+- current selleros live target:
+  - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__selleros_api.json`
+- repo-owned systemd artifacts:
+  - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.service`
+  - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`
+  - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.service`
+  - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
 
 Current canonical WB secret path for official adapters:
 - `WB_API_TOKEN`

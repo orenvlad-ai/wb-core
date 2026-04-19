@@ -90,6 +90,13 @@ RSYNC_EXCLUDES = [
 
 
 @dataclass(frozen=True)
+class ManagedSystemdUnit:
+    name: str
+    enable: bool = False
+    restart: bool = False
+
+
+@dataclass(frozen=True)
 class HostedRuntimeTarget:
     target_id: str
     public_base_url: str
@@ -101,6 +108,9 @@ class HostedRuntimeTarget:
     status_command: str
     environment_file: str
     runtime_env: dict[str, str] = field(default_factory=dict)
+    systemd_unit_directory: str = ""
+    systemd_units_source_dir: str = ""
+    managed_systemd_units: tuple[ManagedSystemdUnit, ...] = field(default_factory=tuple)
 
     @property
     def route_paths(self) -> dict[str, str]:
@@ -108,6 +118,16 @@ class HostedRuntimeTarget:
             env_name: str(self.runtime_env.get(env_name) or default).strip() or default
             for env_name, default in ROUTE_ENV_DEFAULTS.items()
         }
+
+    @property
+    def has_managed_systemd_units(self) -> bool:
+        return bool(self.managed_systemd_units)
+
+    @property
+    def remote_systemd_units_source_dir(self) -> str:
+        if not self.systemd_units_source_dir:
+            return ""
+        return f"{self.target_dir.rstrip('/')}/{self.systemd_units_source_dir.strip('/')}"
 
 
 def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
@@ -120,6 +140,20 @@ def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
     if not isinstance(raw_runtime_env, dict):
         raise ValueError("runtime_env must be a JSON object")
     runtime_env = {str(key): str(value) for key, value in raw_runtime_env.items()}
+    raw_managed_systemd_units = payload.get("managed_systemd_units") or []
+    if not isinstance(raw_managed_systemd_units, list):
+        raise ValueError("managed_systemd_units must be a JSON array")
+    managed_systemd_units: list[ManagedSystemdUnit] = []
+    for raw_unit in raw_managed_systemd_units:
+        if not isinstance(raw_unit, dict):
+            raise ValueError("managed_systemd_units entries must be JSON objects")
+        managed_systemd_units.append(
+            ManagedSystemdUnit(
+                name=str(raw_unit.get("name", "")).strip(),
+                enable=bool(raw_unit.get("enable", False)),
+                restart=bool(raw_unit.get("restart", False)),
+            )
+        )
 
     return HostedRuntimeTarget(
         target_id=str(payload.get("target_id", "")).strip(),
@@ -132,6 +166,9 @@ def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
         status_command=str(payload.get("status_command", "")).strip(),
         environment_file=str(payload.get("environment_file", "")).strip(),
         runtime_env=runtime_env,
+        systemd_unit_directory=str(payload.get("systemd_unit_directory", "")).strip(),
+        systemd_units_source_dir=str(payload.get("systemd_units_source_dir", "")).strip(),
+        managed_systemd_units=tuple(managed_systemd_units),
     )
 
 
@@ -164,6 +201,23 @@ def build_runtime_contract_summary(target: HostedRuntimeTarget) -> dict[str, Any
 
 def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
     missing = _missing_for_deploy(target)
+    deploy_sequence = [
+        "sync current checked-out worktree to target_dir via rsync",
+    ]
+    if target.has_managed_systemd_units:
+        deploy_sequence.extend(
+            [
+                "install repo-owned systemd units into systemd_unit_directory",
+                "daemon-reload systemd and apply managed unit changes",
+            ]
+        )
+    deploy_sequence.extend(
+        [
+            "restart hosted runtime via restart_command",
+            "probe loopback/runtime contour",
+            "probe public contour",
+        ]
+    )
     return {
         "target_id": target.target_id,
         "public_base_url": target.public_base_url,
@@ -172,16 +226,14 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
         "service_name": target.service_name or "<missing>",
         "target_dir": target.target_dir or "<missing>",
         "environment_file": target.environment_file or "<missing>",
+        "systemd_unit_directory": target.systemd_unit_directory or None,
+        "systemd_units_source_dir": target.systemd_units_source_dir or None,
+        "managed_systemd_units": _describe_managed_systemd_units(target),
         "route_paths": target.route_paths,
         "runtime_env_contract": RUNTIME_ENV_CONTRACT,
         "required_secret_contract": REQUIRED_SECRET_CONTRACT,
         "optional_runtime_contract": OPTIONAL_RUNTIME_CONTRACT,
-        "deploy_sequence": [
-            "sync current checked-out worktree to target_dir via rsync",
-            "restart hosted runtime via restart_command",
-            "probe loopback/runtime contour",
-            "probe public contour",
-        ],
+        "deploy_sequence": deploy_sequence,
         "missing_for_deploy": missing,
         "applicable_to_current_checkout_without_merge": True,
     }
@@ -350,6 +402,7 @@ def deploy_current_checkout(
         raise ValueError(f"deploy target is incomplete for deploy: {', '.join(missing)}")
     if not allow_dirty:
         _ensure_clean_worktree()
+    _validate_managed_systemd_units(target)
 
     ssh_command = _ssh_command()
     rsync_plan = [
@@ -367,6 +420,7 @@ def deploy_current_checkout(
         target,
         f"cd {shlex.quote(target.target_dir)} && {target.restart_command}",
     )
+    systemd_commands = _build_managed_systemd_commands(target)
     status_command = (
         _remote_shell_command(
             target,
@@ -382,7 +436,11 @@ def deploy_current_checkout(
         "commands": {
             "mkdir": mkdir_command,
             "rsync": rsync_plan,
+            "systemd_install": systemd_commands["install"],
+            "systemd_daemon_reload": systemd_commands["daemon_reload"],
             "restart": restart_command,
+            "systemd_enable": systemd_commands["enable"],
+            "systemd_restart": systemd_commands["restart"],
             "status": status_command,
         },
     }
@@ -391,7 +449,14 @@ def deploy_current_checkout(
 
     _run_command(mkdir_command)
     _run_command(rsync_plan)
+    if systemd_commands["install"]:
+        _run_command(systemd_commands["install"])
+        _run_command(systemd_commands["daemon_reload"])
     _run_command(restart_command)
+    if systemd_commands["enable"]:
+        _run_command(systemd_commands["enable"])
+    if systemd_commands["restart"]:
+        _run_command(systemd_commands["restart"])
     if status_command:
         _run_command(status_command)
     return summary
@@ -1124,6 +1189,68 @@ def _run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, check=True, text=True, cwd=ROOT)
 
 
+def _describe_managed_systemd_units(target: HostedRuntimeTarget) -> list[dict[str, Any]]:
+    if not target.has_managed_systemd_units:
+        return []
+    return [
+        {
+            "name": unit.name,
+            "enable": unit.enable,
+            "restart": unit.restart,
+            "source_path": _remote_systemd_unit_source_path(target, unit.name),
+            "destination_path": _remote_systemd_unit_destination_path(target, unit.name),
+        }
+        for unit in target.managed_systemd_units
+    ]
+
+
+def _validate_managed_systemd_units(target: HostedRuntimeTarget) -> None:
+    if not target.has_managed_systemd_units:
+        return
+    source_dir = _resolve_repo_relative_dir(target.systemd_units_source_dir)
+    if not source_dir.exists():
+        raise FileNotFoundError(f"managed systemd unit source dir not found: {source_dir}")
+    for unit in target.managed_systemd_units:
+        unit_path = source_dir / unit.name
+        if not unit_path.exists():
+            raise FileNotFoundError(f"managed systemd unit file not found: {unit_path}")
+
+
+def _build_managed_systemd_commands(target: HostedRuntimeTarget) -> dict[str, list[str] | None]:
+    if not target.has_managed_systemd_units:
+        return {
+            "install": None,
+            "daemon_reload": None,
+            "enable": None,
+            "restart": None,
+        }
+
+    install_steps = [f"install -d {shlex.quote(target.systemd_unit_directory)}"]
+    for unit in target.managed_systemd_units:
+        install_steps.append(
+            "install -m 0644 "
+            f"{shlex.quote(_remote_systemd_unit_source_path(target, unit.name))} "
+            f"{shlex.quote(_remote_systemd_unit_destination_path(target, unit.name))}"
+        )
+
+    enable_names = [shlex.quote(unit.name) for unit in target.managed_systemd_units if unit.enable]
+    restart_names = [shlex.quote(unit.name) for unit in target.managed_systemd_units if unit.restart]
+    return {
+        "install": _remote_shell_command(target, " && ".join(install_steps)),
+        "daemon_reload": _remote_shell_command(target, "systemctl daemon-reload"),
+        "enable": (
+            _remote_shell_command(target, f"systemctl enable {' '.join(enable_names)}")
+            if enable_names
+            else None
+        ),
+        "restart": (
+            _remote_shell_command(target, f"systemctl restart {' '.join(restart_names)}")
+            if restart_names
+            else None
+        ),
+    }
+
+
 def _ensure_clean_worktree() -> None:
     if _git_output(["git", "status", "--short"]):
         raise ValueError("deploy requires a clean git worktree; use --allow-dirty only when intentional")
@@ -1140,9 +1267,16 @@ def _missing_for_deploy(target: HostedRuntimeTarget) -> list[str]:
         "service_name": target.service_name,
         "restart_command": target.restart_command,
     }
+    if target.has_managed_systemd_units:
+        required["systemd_unit_directory"] = target.systemd_unit_directory
+        required["systemd_units_source_dir"] = target.systemd_units_source_dir
     for key, value in required.items():
         if _is_placeholder(value):
             missing.append(key)
+    if target.has_managed_systemd_units:
+        for unit in target.managed_systemd_units:
+            if _is_placeholder(unit.name):
+                missing.append("managed_systemd_units[].name")
     return missing
 
 
@@ -1154,6 +1288,21 @@ def _normalize_base_url(value: str) -> str:
     if not value:
         return value
     return value.rstrip("/")
+
+
+def _resolve_repo_relative_dir(raw_value: str) -> Path:
+    relative_path = Path(raw_value.strip())
+    if relative_path.is_absolute():
+        raise ValueError("managed systemd unit source dir must be repo-relative")
+    return ROOT / relative_path
+
+
+def _remote_systemd_unit_source_path(target: HostedRuntimeTarget, unit_name: str) -> str:
+    return f"{target.remote_systemd_units_source_dir.rstrip('/')}/{unit_name}"
+
+
+def _remote_systemd_unit_destination_path(target: HostedRuntimeTarget, unit_name: str) -> str:
+    return f"{target.systemd_unit_directory.rstrip('/')}/{unit_name}"
 
 
 def _git_output(command: list[str]) -> str:
