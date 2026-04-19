@@ -623,6 +623,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
     if route == "operator":
         body = str(result.get("body_excerpt", ""))
         tokens = [
+            "Обновление данных",
             "Загрузить данные",
             "Отправить данные",
             "Скачать лог",
@@ -649,6 +650,10 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Позитивные факторы",
             DEFAULT_SHEET_DAILY_REPORT_PATH,
             DEFAULT_SHEET_STOCK_REPORT_PATH,
+            'data-report-section-button="daily"',
+            'data-report-section-button="stock"',
+            'id="dailyReportPeriod"',
+            'id="stockReportPeriod"',
             "Часовой пояс",
             "Автообновление",
             "Последний автозапуск",
@@ -661,11 +666,18 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             DEFAULT_SHEET_JOB_PATH,
         ]
         missing_tokens = [token for token in tokens if token not in body]
-        evaluation["ok"] = status == 200 and "text/html" in content_type and not missing_tokens
+        forbidden_tokens = [
+            "dailyReportToggle",
+            "stockReportToggle",
+            "report-accordion",
+            "<h1>",
+        ]
+        present_forbidden = [token for token in forbidden_tokens if token in body]
+        evaluation["ok"] = status == 200 and "text/html" in content_type and not missing_tokens and not present_forbidden
         evaluation["detail"] = (
             "operator page shape ok"
             if evaluation["ok"]
-            else f"expected 200 text/html with operator tokens, missing={missing_tokens}"
+            else f"expected 200 text/html with operator tokens, missing={missing_tokens}, forbidden={present_forbidden}"
         )
         return evaluation
 

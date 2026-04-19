@@ -23,12 +23,12 @@ STOCK_REPORT_DISTRICTS = (
     ("stock_ru_volga", "Приволжский ФО"),
     ("stock_ru_ural", "Уральский ФО"),
     ("stock_ru_south_caucasus", "Юг и СКФО"),
-    ("stock_ru_far_siberia", "ДВ и Сибирь"),
 )
 REPORT_NOTES = (
     "Отчёт использует только persisted ready snapshot и slot today_current для current business day.",
     "В список попадают только SKU, у которых хотя бы по одному supported district stock меньше 50 единиц.",
-    "Короткие district labels остаются truthful к current merged buckets: `Юг и СКФО` и `ДВ и Сибирь` не разрезаются искусственно.",
+    "Merged bucket `ДВ и Сибирь` целиком исключён из текущего report contour: current truth не делит его на отдельный Дальний Восток и Сибирь.",
+    "Короткий label `Юг и СКФО` остаётся truthful к current merged bucket и не разрезается искусственно.",
 )
 
 

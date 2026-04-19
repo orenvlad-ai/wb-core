@@ -93,7 +93,7 @@ def main() -> None:
                 "stock_ru_volga": 80.0,
                 "stock_ru_ural": 90.0,
                 "stock_ru_south_caucasus": 100.0,
-                "stock_ru_far_siberia": 120.0,
+                "stock_ru_far_siberia": 12.0,
             },
         }
         older_sku = {
@@ -144,22 +144,31 @@ def main() -> None:
         expected_district_map = dict(STOCK_REPORT_DISTRICTS)
         if district_map != expected_district_map:
             raise AssertionError(f"stock report must expose compact district labels, got {district_map}")
+        if "stock_ru_far_siberia" in district_map:
+            raise AssertionError(f"whole merged far-east bucket must be excluded from the district map, got {district_map}")
 
         rows = payload.get("rows") or []
         if payload.get("row_count") != 3 or len(rows) != 3:
             raise AssertionError(f"stock report must keep only breached SKU rows, got {payload}")
-        if [int(item["nm_id"]) for item in rows] != [nm_ids[1], nm_ids[2], nm_ids[0]]:
+        if [int(item["nm_id"]) for item in rows] != [nm_ids[2], nm_ids[0], nm_ids[1]]:
             raise AssertionError(f"stock severity sort must be min stock asc, then breadth desc, got {rows}")
 
         first_breaches = {(item["metric_key"], item["label"], item["stock"]) for item in rows[0]["breached_districts"]}
         if first_breaches != {
-            ("stock_ru_south_caucasus", "Юг и СКФО", 49.0),
-            ("stock_ru_far_siberia", "ДВ и Сибирь", 7.0),
+            ("stock_ru_northwest", "Северо-Западный ФО", 7.0),
         }:
             raise AssertionError(f"stock report must surface only breached districts with short truthful labels, got {rows[0]}")
 
-        if rows[1]["min_breached_stock"] != 7.0 or rows[1]["breached_district_count"] != 1:
-            raise AssertionError(f"secondary severity ordering must stay truthful, got {rows[1]}")
+        if rows[2]["min_breached_stock"] != 49.0 or rows[2]["breached_district_count"] != 1:
+            raise AssertionError(f"secondary severity ordering must stay truthful after far-east exclusion, got {rows[2]}")
+        if any(
+            district["metric_key"] == "stock_ru_far_siberia"
+            for row in rows
+            for district in row["breached_districts"]
+        ):
+            raise AssertionError(f"far-east merged bucket must not be rendered in breached districts, got {rows}")
+        if nm_ids[3] in [int(item["nm_id"]) for item in rows]:
+            raise AssertionError(f"SKU with only far-east breach must be excluded from the report, got {rows}")
 
         print("stock_report_status: ok ->", payload["status"])
         print("stock_report_source: ok ->", source_of_truth["read_model"], source_of_truth["temporal_slot"])

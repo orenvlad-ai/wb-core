@@ -122,7 +122,7 @@ update_note: "Обновлён под final temporal classifier и execution mod
   - existing refresh/read contour затем подключает этот dataset server-side в `DATA_VITRINA` и `STATUS`
 - Канонический operator-facing refresh surface:
   - `GET /sheet-vitrina-v1/operator`
-  - top-level tabs = `Обновление данных витрины`, `Расчёт поставок`, `Отчёты`
+  - top-level tabs = `Обновление данных`, `Расчёт поставок`, `Отчёты`
   - две explicit actions `Загрузить данные` и `Отправить данные`
   - `Загрузить данные` вызывает existing `POST /v1/sheet-vitrina-v1/refresh` и materialize-ит ready snapshot only
   - `Отправить данные` вызывает `POST /v1/sheet-vitrina-v1/load` и пишет в live sheet только already prepared snapshot
@@ -131,7 +131,7 @@ update_note: "Обновлён под final temporal classifier и execution mod
   - page читает `GET /v1/sheet-vitrina-v1/status` для compact status block
   - page читает `GET /v1/sheet-vitrina-v1/job` для detailed построчного operator log без отдельного audit subsystem
   - тот же `job` route поддерживает text-export конкретного completed run через `format=text&download=1`
-  - оба report block в `Отчёты` остаются read-only и server-owned и по умолчанию rendered as collapsed accordion cards
+  - `Отчёты` uses the same sibling subsection selector pattern as the supply tab: default section = `Ежедневные отчёты`, second section = `Отчёт по остаткам`, only one report body is visible at a time
   - daily-report block остаётся read-only и server-owned:
     - compare target = два последних closed business day в `Asia/Yekaterinburg`
     - current rule = `yesterday_closed` из ready snapshot `as_of_date=default_business_as_of_date(now)` versus `yesterday_closed` из ready snapshot `as_of_date=default_business_as_of_date(now)-1 day`
@@ -153,7 +153,8 @@ update_note: "Обновлён под final temporal classifier и execution mod
     - source seam = persisted ready snapshot `as_of_date=default_business_as_of_date(now)` -> `DATA_VITRINA` -> slot `today_current`
     - include rule = only SKU with at least one district stock `< 50`
     - sort = min breached district stock ascending, then breached district breadth descending, then total stock ascending
-    - compact district labels remain truthful to current repo buckets: `Центральный ФО`, `Северо-Западный ФО`, `Приволжский ФО`, `Уральский ФО`, `Юг и СКФО`, `ДВ и Сибирь`
+    - compact district labels remain truthful to current repo buckets: `Центральный ФО`, `Северо-Западный ФО`, `Приволжский ФО`, `Уральский ФО`, `Юг и СКФО`
+    - merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь` stays fully excluded from stock-report filter/display because current truth does not split Far East from Siberia
   - page дополнительно показывает compact block `Сервер и расписание`, который заполняется только из server-driven `server_context`
   - `Автообновление` в этом block должно описывать полный daily auto cycle, а не только schedule time: current truthful wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
   - тот же block additionally показывает `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление` из backend/status surface

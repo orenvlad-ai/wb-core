@@ -1,4 +1,4 @@
-"""Targeted smoke-check for the reports tab accordion contract on the operator page."""
+"""Targeted smoke-check for the reports tab subsection contract on the operator page."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def main() -> None:
     )
 
     for token in (
-        "Обновление данных витрины",
+        "Обновление данных",
         "Расчёт поставок",
         "Отчёты",
         "Ежедневные отчёты",
@@ -38,23 +38,30 @@ def main() -> None:
             raise AssertionError(f"reports tab chrome must keep token {token!r}")
 
     for token in (
-        'id="dailyReportToggle"',
-        'id="stockReportToggle"',
-        'id="dailyReportPanelBody" class="report-accordion-body" hidden',
-        'id="stockReportPanelBody" class="report-accordion-body" hidden',
+        'data-report-section-button="daily"',
+        'data-report-section-button="stock"',
+        'data-report-section-panel="daily"',
+        'data-report-section-panel="stock" hidden',
+        'id="dailyReportPeriod"',
+        'id="stockReportPeriod"',
         DEFAULT_SHEET_DAILY_REPORT_PATH,
         DEFAULT_SHEET_STOCK_REPORT_PATH,
     ):
         if token not in html:
-            raise AssertionError(f"reports accordion contract must include token {token!r}")
+            raise AssertionError(f"reports subsection contract must include token {token!r}")
 
-    false_count = len(re.findall(r'aria-expanded="false"', html))
-    if false_count < 2:
-        raise AssertionError(f"both reports accordions must default to collapsed state, got only {false_count} false toggles")
+    if "dailyReportToggle" in html or "stockReportToggle" in html or "report-accordion" in html:
+        raise AssertionError("legacy reports accordion contract must be removed from the operator page")
+    if 'formatDailyComparisonLabel(payload.older_closed_date, payload.newer_closed_date)' not in html:
+        raise AssertionError("daily-report period wording must be built from both closed dates")
+    if "Ежедневный отчёт за " in html:
+        raise AssertionError("misleading single-day daily-report wording must not remain in the template")
+    if len(re.findall(r"<h1>", html)) != 0:
+        raise AssertionError("duplicated top-level headings must be removed from panel bodies")
 
-    print("reports_ui_sections: ok -> Обновление данных витрины / Расчёт поставок / Отчёты")
-    print("reports_ui_accordions: ok -> dailyReportToggle / stockReportToggle")
-    print("reports_ui_default_collapsed: ok ->", false_count)
+    print("reports_ui_sections: ok -> Обновление данных / Расчёт поставок / Отчёты")
+    print("reports_ui_subsections: ok -> daily / stock")
+    print("reports_ui_heading_dedup: ok -> no panel-body h1 duplicates")
 
 
 if __name__ == "__main__":

@@ -1196,7 +1196,7 @@ def _render_sheet_vitrina_operator_ui(
 ) -> str:
     spreadsheet_url = resolve_sheet_vitrina_live_spreadsheet_url()
     config_payload = {
-        "page_title": "Обновление данных витрины",
+        "page_title": "Обновление данных",
         "daily_report_path": daily_report_path,
         "stock_report_path": stock_report_path,
         "refresh_path": refresh_path,

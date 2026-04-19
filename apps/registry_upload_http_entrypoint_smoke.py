@@ -127,7 +127,7 @@ def main() -> None:
             if operator_ui_status != 200:
                 raise AssertionError(f"operator UI must return 200, got {operator_ui_status}")
             if (
-                "Обновление данных витрины" not in operator_ui_html
+                "Обновление данных" not in operator_ui_html
                 or "Загрузить данные" not in operator_ui_html
                 or "Отправить данные" not in operator_ui_html
             ):
@@ -136,10 +136,18 @@ def main() -> None:
                 "Отчёты" not in operator_ui_html
                 or "Ежедневные отчёты" not in operator_ui_html
                 or "Отчёт по остаткам" not in operator_ui_html
-                or 'id="dailyReportToggle"' not in operator_ui_html
-                or 'id="stockReportToggle"' not in operator_ui_html
+                or 'data-report-section-button="daily"' not in operator_ui_html
+                or 'data-report-section-button="stock"' not in operator_ui_html
             ):
-                raise AssertionError("operator UI must expose the compact reports tab with both collapsible report blocks")
+                raise AssertionError("operator UI must expose the compact reports tab with both subsection-switched report blocks")
+            if (
+                "dailyReportToggle" in operator_ui_html
+                or "stockReportToggle" in operator_ui_html
+                or "report-accordion" in operator_ui_html
+            ):
+                raise AssertionError("operator UI must not keep the broken collapsible reports contract")
+            if operator_ui_html.count("<h1>") != 0:
+                raise AssertionError("operator UI must not duplicate top-level tab headings inside panel bodies")
             if "Статус" not in operator_ui_html or "Лог" not in operator_ui_html or "ожидание" not in operator_ui_html:
                 raise AssertionError("operator UI must keep the compact Russian chrome")
             if "Скачать лог" not in operator_ui_html or "max-height: 420px" not in operator_ui_html:
@@ -202,7 +210,7 @@ def main() -> None:
                 raise AssertionError("operator UI must not keep the stale explanatory date subtitle")
             operator_ui_config = _extract_operator_ui_config(operator_ui_html)
             if operator_ui_config != {
-                "page_title": "Обновление данных витрины",
+                "page_title": "Обновление данных",
                 "refresh_path": config.sheet_refresh_path,
                 "load_path": DEFAULT_SHEET_LOAD_PATH,
                 "status_path": config.sheet_status_path,
