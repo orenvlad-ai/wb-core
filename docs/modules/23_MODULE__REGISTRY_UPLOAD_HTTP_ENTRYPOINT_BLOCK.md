@@ -224,7 +224,7 @@ update_note: "Обновлён под current factory-order historical seam и c
   - server хранит и публикует отдельный XLSX на каждый округ, а не один общий recommendation workbook;
   - district XLSX содержит district identification + compact operator rows `nmId / SKU / Количество к поставке` именно по фактически аллоцированному количеству после ограничения `stock_ff`.
 - Current repo state не имел другого authoritative source для legacy parity term `FO_INBOUND_FF_TO_WB`, поэтому entrypoint получил narrow explicit upload contract `Товары в пути от ФФ на Wildberries`; silent drop этого члена формулы считается некорректным.
-- Operator page keeps narrow Russian chrome for operator-visible labels (`Загрузить данные`, `Отправить данные`, compact `Статус` / `Лог`, row-count labels, `Скачать лог`) without explanatory subtitle/subcopy про refresh/date defaults/temporal slots под заголовком или кнопкой.
+- Operator page keeps narrow Russian chrome for operator-visible labels: compact manual block `Ручная загрузка данных` with embedded actions `Загрузить данные` / `Отправить данные`, prepared-snapshot row-count fields, separate `Лог` block and separate compact auto block `Автообновления`; page reload must not present persisted refresh metadata as standalone proof of the last manual sheet write.
 - Operator page добавляет отдельный top-level tab `Отчёты` с одним sibling selector по образцу supply tab:
   - `Ежедневные отчёты`
   - `Отчёт по остаткам`
@@ -291,16 +291,24 @@ update_note: "Обновлён под current factory-order historical seam и c
     - `stock_ru_ural` -> `Уральский ФО`
     - `stock_ru_south_caucasus` -> `Юг и СКФО`
   - merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь` deliberately excluded from stock-report filter and display, because current truth does not split Far East from Siberia
-- Operator page добавляет один compact server-driven info block `Сервер и расписание`:
+- Operator page keeps one compact server-driven manual block `Ручная загрузка данных`:
+  - embedded actions `Загрузить данные` / `Отправить данные`
+  - `Ручная операция`
+  - `Снимок на дату`
+  - `Колонки дат`
+  - `Подготовлен`
+  - `Строки DATA_VITRINA`
+  - `Строки STATUS`
+  - reload/page-open state for this block may show only the last prepared snapshot; successful manual `load` is proved only by the completed job log
+- Operator page keeps one compact server-driven auto block `Автообновления`:
   - `Часовой пояс`
   - `Текущее время сервера`
-  - `Автообновление`
+  - `Автоцепочка`
   - `Последний автозапуск`
   - `Статус последнего автозапуска`
   - `Последнее успешное автообновление`
-  - `Технический триггер`
-- Этот block не hardcode-ится в UI: page читает его только из existing `GET /v1/sheet-vitrina-v1/status` / `POST /v1/sheet-vitrina-v1/refresh` response field `server_context`.
-- `Автообновление` в этом block обязано быть truthful server-driven описанием полного daily auto path, а не только временем:
+- Этот auto block не hardcode-ится в UI: page читает его только из existing `GET /v1/sheet-vitrina-v1/status` / `POST /v1/sheet-vitrina-v1/refresh` response field `server_context`.
+- `Автоцепочка` в этом block обязана быть truthful server-driven описанием полного daily auto path, а не только временем:
   - canonical current wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
   - manual operator semantics теперь явно отличаются от auto path: explicit UI buttons всё ещё разделяют `refresh` и `load`, short retries остаются внутри одного run, но persisted long-retry state после manual refresh не создаётся
 - Operator log surface обязан показывать построчный start / key steps / finish / error для обеих operator actions:
@@ -449,7 +457,7 @@ update_note: "Обновлён под current factory-order historical seam и c
   - что accepted response возвращается в канонической форме;
   - что current server-side truth обновляется через runtime DB;
   - что operator page `GET /sheet-vitrina-v1/operator` отдается тем же contour и публикует правильные refresh/load/status/job paths;
-  - что operator page рендерит compact `Сервер и расписание` block с русскими labels, а не hardcoded timezone text;
+  - что operator page рендерит compact blocks `Ручная загрузка данных` и `Автообновления` с русскими labels и truthful manual-vs-auto semantics, а не hardcoded status copy;
   - что `GET /v1/sheet-vitrina-v1/status` до refresh честно возвращает `ready snapshot missing`;
   - что `GET /v1/sheet-vitrina-v1/status` до refresh всё равно несёт `server_context` с `Asia/Yekaterinburg` и current scheduler trigger metadata;
   - что async operator `refresh` / `load` live-log surface отдаёт построчные шаги и не смешивает `refresh` с `load`;

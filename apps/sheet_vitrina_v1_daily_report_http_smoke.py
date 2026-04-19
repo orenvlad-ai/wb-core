@@ -122,6 +122,7 @@ def main() -> None:
                 raise AssertionError(f"operator page must return 200, got {operator_status}")
             for expected in (
                 "Обновление данных",
+                "Ручная загрузка данных",
                 "Расчёт поставок",
                 "Отчёты",
                 "Ежедневные отчёты",
@@ -131,7 +132,7 @@ def main() -> None:
                 "Позитивные факторы",
                 "Загрузить данные",
                 "Отправить данные",
-                "Сервер и расписание",
+                "Автообновления",
                 DEFAULT_SHEET_DAILY_REPORT_PATH,
                 DEFAULT_SHEET_STOCK_REPORT_PATH,
             ):

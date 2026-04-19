@@ -128,7 +128,7 @@ update_note: "Обновлён под final temporal classifier и execution mod
   - `Отправить данные` вызывает `POST /v1/sheet-vitrina-v1/load` и пишет в live sheet только already prepared snapshot
   - page additionally читает `GET /v1/sheet-vitrina-v1/daily-report` для compact блока `Ежедневные отчёты` внутри отдельного top-level tab `Отчёты`
   - page additionally читает `GET /v1/sheet-vitrina-v1/stock-report` для compact блока `Отчёт по остаткам` внутри того же top-level tab `Отчёты`
-  - page читает `GET /v1/sheet-vitrina-v1/status` для compact status block
+  - page читает `GET /v1/sheet-vitrina-v1/status` для compact manual/auto status surface
   - page читает `GET /v1/sheet-vitrina-v1/job` для detailed построчного operator log без отдельного audit subsystem
   - тот же `job` route поддерживает text-export конкретного completed run через `format=text&download=1`
   - `Отчёты` uses the same sibling subsection selector pattern as the supply tab: default section = `Ежедневные отчёты`, second section = `Отчёт по остаткам`, only one report body is visible at a time
@@ -155,9 +155,11 @@ update_note: "Обновлён под final temporal classifier и execution mod
     - sort = min breached district stock ascending, then breached district breadth descending, then total stock ascending
     - compact district labels remain truthful to current repo buckets: `Центральный ФО`, `Северо-Западный ФО`, `Приволжский ФО`, `Уральский ФО`, `Юг и СКФО`
     - merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь` stays fully excluded from stock-report filter/display because current truth does not split Far East from Siberia
-  - page дополнительно показывает compact block `Сервер и расписание`, который заполняется только из server-driven `server_context`
-  - `Автообновление` в этом block должно описывать полный daily auto cycle, а не только schedule time: current truthful wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
-  - тот же block additionally показывает `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление` из backend/status surface
+  - page дополнительно показывает compact manual block `Ручная загрузка данных` с embedded actions `Загрузить данные` / `Отправить данные`, badge `Ручная операция` и prepared-snapshot fields `Снимок на дату / Колонки дат / Подготовлен / Строки DATA_VITRINA / Строки STATUS`
+  - reload/page-open state этого manual block truthfully показывает только последний подготовленный snapshot и не является самостоятельным доказательством успешной последней manual `Отправить данные`
+  - page дополнительно показывает compact block `Автообновления`, который заполняется только из server-driven `server_context`
+  - `Автоцепочка` в этом block должна описывать полный daily auto cycle, а не только schedule time: current truthful wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
+  - тот же auto block additionally показывает `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление` из backend/status surface
   - log block остаётся fixed-height scrollable viewport с title `Лог` и одной bounded action `Скачать лог`
 - Канонический operator-facing supply surface в том же repo-owned page:
   - top-level tab `Расчёт поставок`
@@ -344,7 +346,7 @@ update_note: "Обновлён под final temporal classifier и execution mod
   - heavy refresh logic stays in existing `POST /v1/sheet-vitrina-v1/refresh`
   - auto path сначала делает refresh/persist ready snapshot, затем в том же server-owned cycle вызывает existing load bridge и доводит обновление до live sheet
   - refresh/load cycle защищён bounded mutual exclusion lock и не должен destructively смешивать parallel auto/manual/retry writes
-  - runtime/status surface хранит last auto run status / timestamps separately from manual operator jobs, чтобы block `Сервер и расписание` truthfully показывал именно результат daily auto chain
+  - runtime/status surface хранит last auto run status / timestamps separately from manual operator jobs, чтобы block `Автообновления` truthfully показывал именно результат daily auto chain
   - Apps Script remains thin shell and does not own scheduling or date math
 - `Прокси маржинальность всего, %` фиксируется на canonical row `proxy_margin_pct_total`.
 - Расчёт остаётся server-side:
@@ -488,7 +490,7 @@ Bounded допущение:
   - что `prepare` поднимает operator seed `33 / 102 / 7`;
   - что upload из sheet-side trigger сохраняет current truth в existing runtime без усечения `metrics_v2`;
   - что operator page `GET /sheet-vitrina-v1/operator` отдается тем же server contour и публикует refresh/load/status/job paths;
-  - что operator page показывает compact `Сервер и расписание` block с русскими labels, отдельный `Лог`, fixed-height scroll viewport и `Скачать лог`;
+  - что operator page показывает compact `Ручная загрузка данных` + `Автообновления`, отдельный `Лог`, fixed-height scroll viewport и `Скачать лог`;
   - что `POST /v1/sheet-vitrina-v1/refresh` вызывает heavy source blocks и обновляет persisted date-aware ready snapshot;
   - что `POST /v1/sheet-vitrina-v1/load` пишет в live shell только already prepared snapshot и не триггерит heavy refresh заново;
   - что `GET /v1/sheet-vitrina-v1/status` возвращает последний persisted refresh result без live fetch и с `date_columns` / `temporal_slots` plus `server_context`;
