@@ -155,8 +155,9 @@ update_note: "Обновлён под final temporal classifier и execution mod
     - sort = min breached district stock ascending, then breached district breadth descending, then total stock ascending
     - compact district labels remain truthful to current repo buckets: `Центральный ФО`, `Северо-Западный ФО`, `Приволжский ФО`, `Уральский ФО`, `Юг и СКФО`
     - merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь` stays fully excluded from stock-report filter/display because current truth does not split Far East from Siberia
-  - page дополнительно показывает compact manual block `Ручная загрузка данных` с embedded actions `Загрузить данные` / `Отправить данные`, badge `Ручная операция` и prepared-snapshot fields `Снимок на дату / Колонки дат / Подготовлен / Строки DATA_VITRINA / Строки STATUS`
-  - reload/page-open state этого manual block truthfully показывает только последний подготовленный snapshot и не является самостоятельным доказательством успешной последней manual `Отправить данные`
+  - page дополнительно показывает compact manual block `Ручная загрузка данных` с embedded actions `Загрузить данные` / `Отправить данные` и только двумя persisted manual-success fields `Последняя удачная загрузка` / `Последняя удачная отправка`
+  - эти два manual fields заполняются только из `manual_context`: successful manual `refresh` обновляет только `Последняя удачная загрузка`, successful manual `load` обновляет только `Последняя удачная отправка`, auto path их не трогает
+  - reload/page-open state этого manual block truthfully показывает только persisted manual-success facts и не является самостоятельным доказательством успешной последней manual `Отправить данные` без completed job/log
   - page дополнительно показывает compact block `Автообновления`, который заполняется только из server-driven `server_context`
   - `Автоцепочка` в этом block должна описывать полный daily auto cycle, а не только schedule time: current truthful wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
   - тот же auto block additionally показывает `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление` из backend/status surface

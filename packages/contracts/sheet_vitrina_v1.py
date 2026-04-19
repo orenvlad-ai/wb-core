@@ -67,3 +67,9 @@ class SheetVitrinaV1AutoUpdateState:
     last_run_as_of_date: str | None = None
     last_run_refreshed_at: str | None = None
     last_successful_auto_update_at: str | None = None
+
+
+@dataclass(frozen=True)
+class SheetVitrinaV1ManualOperatorState:
+    last_successful_manual_refresh_at: str | None = None
+    last_successful_manual_load_at: str | None = None

@@ -155,10 +155,11 @@ def main() -> None:
                 "Скачать лог",
                 "Лог",
                 "Автообновления",
+                "Последняя удачная загрузка",
+                "Последняя удачная отправка",
                 "Последний автозапуск",
                 "Статус последнего автозапуска",
                 "Последнее успешное автообновление",
-                "нет активной операции",
                 "max-height: 420px",
                 DEFAULT_SHEET_JOB_PATH,
             ):
@@ -199,6 +200,10 @@ def main() -> None:
                     raise AssertionError(f"refresh live-log must contain {expected!r}")
             if refresh_job["result"]["date_columns"] != [AS_OF_DATE, TODAY_CURRENT_DATE]:
                 raise AssertionError("async refresh result must keep dual-date snapshot semantics")
+            if refresh_job["result"].get("manual_context") != _expected_manual_context(
+                refresh_at="2026-04-13T17:05:00+05:00"
+            ):
+                raise AssertionError("async refresh result must update only the manual refresh timestamp")
             _assert_counting_calls(counters)
 
             before_load_requests = {key: list(block.request_dates) for key, block in counters.items()}
@@ -251,6 +256,11 @@ def main() -> None:
                 raise AssertionError("load result must surface bridge payload")
             if load_job["result"]["refreshed_at"] != REFRESHED_AT:
                 raise AssertionError("load result must keep the persisted refresh timestamp")
+            if load_job["result"].get("manual_context") != _expected_manual_context(
+                refresh_at="2026-04-13T17:05:00+05:00",
+                load_at="2026-04-13T17:00:03+05:00",
+            ):
+                raise AssertionError("async load result must expose both persisted manual success timestamps")
             if int(load_job.get("log_line_count", 0)) < 10:
                 raise AssertionError("load job must expose detailed diagnostic log with multiple lines")
             if load_runner.calls != [refresh_job["result"]["snapshot_id"]]:
@@ -278,6 +288,8 @@ def main() -> None:
                 raise AssertionError(f"status after async load must return 200, got {status_after_load}")
             if status_payload["snapshot_id"] != refresh_job["result"]["snapshot_id"]:
                 raise AssertionError("status after load must still point to the prepared ready snapshot")
+            if status_payload.get("manual_context") != load_job["result"].get("manual_context"):
+                raise AssertionError("status after load must keep the persisted manual timestamps")
 
             print(f"load_missing_snapshot: ok -> {missing_load_payload['error']}")
             print(f"async_refresh_logs: ok -> {len(refresh_job['log_lines'])} lines")
@@ -386,6 +398,13 @@ def _get_text_with_headers(url: str) -> tuple[int, str, dict[str, str]]:
             return response.status, response.read().decode("utf-8"), dict(response.headers.items())
     except error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8"), dict(exc.headers.items())
+
+
+def _expected_manual_context(*, refresh_at: str = "", load_at: str = "") -> dict[str, str]:
+    return {
+        "last_successful_manual_refresh_at": refresh_at,
+        "last_successful_manual_load_at": load_at,
+    }
 
 
 def _reserve_free_port() -> int:

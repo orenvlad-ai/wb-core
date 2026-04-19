@@ -960,34 +960,14 @@
                 <button id="loadButton" class="action-button secondary-button" type="button">Отправить данные</button>
               </div>
             </div>
-            <p class="field-note">
-              Показываем последний подготовленный снимок. Reload страницы сам по себе не подтверждает успешную отправку в таблицу:
-              это видно только по логу завершённой ручной операции.
-            </p>
-            <div class="status-row">
-              <span class="status-label">Ручная операция</span>
-              <span id="stateBadge" class="badge is-idle">нет активной операции</span>
-            </div>
             <dl class="meta-grid">
               <div>
-                <dt>Снимок на дату</dt>
-                <dd id="asOfDate">-</dd>
+                <dt>Последняя удачная загрузка</dt>
+                <dd id="manualLastRefresh">ещё не выполнялась</dd>
               </div>
               <div>
-                <dt>Колонки дат</dt>
-                <dd id="dateColumns">-</dd>
-              </div>
-              <div>
-                <dt>Подготовлен</dt>
-                <dd id="refreshedAt">-</dd>
-              </div>
-              <div>
-                <dt>Строки DATA_VITRINA</dt>
-                <dd id="dataRows">-</dd>
-              </div>
-              <div>
-                <dt>Строки STATUS</dt>
-                <dd id="statusRows">-</dd>
+                <dt>Последняя удачная отправка</dt>
+                <dd id="manualLastLoad">ещё не выполнялась</dd>
               </div>
             </dl>
           </section>
@@ -1424,12 +1404,8 @@
 
       const refreshButton = document.getElementById("refreshButton");
       const loadButton = document.getElementById("loadButton");
-      const stateBadge = document.getElementById("stateBadge");
-      const asOfDate = document.getElementById("asOfDate");
-      const dateColumns = document.getElementById("dateColumns");
-      const refreshedAt = document.getElementById("refreshedAt");
-      const dataRows = document.getElementById("dataRows");
-      const statusRows = document.getElementById("statusRows");
+      const manualLastRefresh = document.getElementById("manualLastRefresh");
+      const manualLastLoad = document.getElementById("manualLastLoad");
       const serverTimezone = document.getElementById("serverTimezone");
       const serverNow = document.getElementById("serverNow");
       const serverAutoDescription = document.getElementById("serverAutoDescription");
@@ -1522,12 +1498,6 @@
       const regionalDistrictDownloads = document.getElementById("regionalDistrictDownloads");
       const calculateRegionalSupplyButton = document.getElementById("calculateRegionalSupplyButton");
 
-      const stateLabels = {
-        idle: "нет активной операции",
-        loading: "операция выполняется",
-        success: "операция завершена",
-        error: "ошибка"
-      };
       const actionLabels = {
         refresh: {
           idle: "Загрузить данные",
@@ -1588,11 +1558,6 @@
       reportSectionButtons.forEach((button) => {
         button.addEventListener("click", () => activateReportSection(button.dataset.reportSectionButton));
       });
-
-      function setState(nextState, labelOverride) {
-        stateBadge.textContent = labelOverride || stateLabels[nextState] || nextState;
-        stateBadge.className = "badge is-" + nextState;
-      }
 
       function setActionState(activeAction) {
         const refreshLoading = activeAction === "refresh";
@@ -1905,14 +1870,6 @@
         renderStockReportNotes(payload.notes);
       }
 
-      function normalizeState(value, fallback) {
-        const candidate = valueOrDash(value).toLowerCase();
-        if (candidate === "idle" || candidate === "loading" || candidate === "success" || candidate === "error") {
-          return candidate;
-        }
-        return fallback;
-      }
-
       function sheetCount(counts, key) {
         if (!counts || typeof counts[key] !== "number") {
           return "-";
@@ -1939,63 +1896,46 @@
           .join(", ");
       }
 
-      function formatBusinessNow(value) {
+      function formatTimestamp(value, emptyLabel) {
         const normalized = valueOrDash(value);
         if (normalized === "-") {
-          return normalized;
+          return emptyLabel || normalized;
         }
         return normalized.replace("T", " ");
-      }
-
-      function operationLabel(operation) {
-        return operation === "load" ? "отправка" : "загрузка";
-      }
-
-      function runningStateLabel(operation) {
-        return "идёт " + operationLabel(operation);
-      }
-
-      function finishedStateLabel(job) {
-        const rawStatus = valueOrDash(job && job.status).toLowerCase();
-        if (rawStatus === "running" || rawStatus === "loading") {
-          return runningStateLabel(job && job.operation);
-        }
-        const status = normalizeState(rawStatus, "success");
-        const label = operationLabel(job && job.operation);
-        if (status === "success") {
-          return label + " завершена";
-        }
-        if (status === "error") {
-          return label + " с ошибкой";
-        }
-        return stateLabels[status] || status;
       }
 
       function renderServerContext(payload) {
         const context = payload && payload.server_context ? payload.server_context : {};
         serverTimezone.textContent = valueOrDash(context.business_timezone);
-        serverNow.textContent = formatBusinessNow(context.business_now);
+        serverNow.textContent = formatTimestamp(context.business_now, "-");
         serverAutoDescription.textContent = valueOrDash(
           context.daily_auto_description || context.daily_refresh_business_time
         );
-        serverLastAutoRun.textContent = formatBusinessNow(context.last_auto_run_time);
+        serverLastAutoRun.textContent = formatTimestamp(context.last_auto_run_time, "-");
         serverLastAutoStatus.textContent = valueOrDash(context.last_auto_run_status_label);
-        serverLastAutoSuccess.textContent = formatBusinessNow(context.last_successful_auto_update_at);
+        serverLastAutoSuccess.textContent = formatTimestamp(context.last_successful_auto_update_at, "-");
       }
 
-      function renderSnapshotFields(payload) {
-        const counts = payload.sheet_row_counts || {};
+      function renderManualContext(payload) {
+        const context = payload && payload.manual_context ? payload.manual_context : {};
+        manualLastRefresh.textContent = formatTimestamp(
+          context.last_successful_manual_refresh_at,
+          "ещё не выполнялась"
+        );
+        manualLastLoad.textContent = formatTimestamp(
+          context.last_successful_manual_load_at,
+          "ещё не выполнялась"
+        );
+      }
+
+      function renderStatusContexts(payload) {
         renderServerContext(payload);
-        asOfDate.textContent = valueOrDash(payload.as_of_date);
-        dateColumns.textContent = formatDateColumns(payload);
-        refreshedAt.textContent = valueOrDash(payload.refreshed_at || payload.finished_at);
-        dataRows.textContent = sheetCount(counts, "DATA_VITRINA");
-        statusRows.textContent = sheetCount(counts, "STATUS");
+        renderManualContext(payload);
       }
 
       function renderSnapshotSummary(payload, intro) {
         const counts = payload.sheet_row_counts || {};
-        renderSnapshotFields(payload);
+        renderStatusContexts(payload);
         renderLogText([
           intro,
           "Снимок на дату: " + valueOrDash(payload.as_of_date),
@@ -2010,28 +1950,19 @@
       }
 
       function renderEmpty(message, payload) {
-        renderServerContext(payload);
-        asOfDate.textContent = "-";
-        dateColumns.textContent = "-";
-        refreshedAt.textContent = "-";
-        dataRows.textContent = "-";
-        statusRows.textContent = "-";
-        setState("idle", "снимок не подготовлен");
+        renderStatusContexts(payload);
         setCompletedJob(null);
         renderLogText(message);
       }
 
       function renderError(message, detail) {
-        setState("error");
         setCompletedJob(null);
         renderLogText([message, detail].filter(Boolean).join("\n\n"));
       }
 
       function renderJob(job) {
-        const nextState = job.status === "running" ? "loading" : normalizeState(job.status, "success");
-        setState(nextState, finishedStateLabel(job));
         if (job.result) {
-          renderSnapshotFields(job.result);
+          renderStatusContexts(job.result);
         }
         renderLogText(Array.isArray(job.log_lines) && job.log_lines.length
           ? job.log_lines.join("\n")
@@ -2272,10 +2203,9 @@
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
           if (activeJobId) {
-            renderSnapshotFields(payload);
+            renderStatusContexts(payload);
             return;
           }
-          setState("idle", "готов снимок");
           setCompletedJob(null);
           renderSnapshotSummary(
             payload,
@@ -2395,7 +2325,6 @@
         const startMessage = actionName === "refresh"
           ? "Запускаем refresh ready snapshot..."
           : "Запускаем отправку готового snapshot в таблицу...";
-        setState("loading", runningStateLabel(actionName));
         setActionState(actionName);
         setCompletedJob(null);
         renderLogText(startMessage);
@@ -2417,7 +2346,7 @@
           const finalJob = await pollJob(payload.job_id);
           setCompletedJob(finalJob);
           if (finalJob.result) {
-            renderSnapshotFields(finalJob.result);
+            renderStatusContexts(finalJob.result);
           }
           await Promise.all([loadDailyReport(), loadStockReport()]);
         } catch (error) {

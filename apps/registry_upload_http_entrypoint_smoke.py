@@ -151,7 +151,8 @@ def main() -> None:
             if (
                 "Ручная загрузка данных" not in operator_ui_html
                 or "Лог" not in operator_ui_html
-                or "нет активной операции" not in operator_ui_html
+                or "Последняя удачная загрузка" not in operator_ui_html
+                or "Последняя удачная отправка" not in operator_ui_html
             ):
                 raise AssertionError("operator UI must keep the compact manual/log chrome")
             if "Скачать лог" not in operator_ui_html or "max-height: 420px" not in operator_ui_html:
@@ -192,8 +193,6 @@ def main() -> None:
                 or ".addEventListener(\"change\", () => uploadDataset(" not in operator_ui_html
             ):
                 raise AssertionError("operator UI must use auto-upload after file selection without separate upload buttons")
-            if "Строки DATA_VITRINA" not in operator_ui_html or "Строки STATUS" not in operator_ui_html:
-                raise AssertionError("operator UI must surface row-count fields with Russian labels")
             if "Автообновления" not in operator_ui_html or "Часовой пояс" not in operator_ui_html:
                 raise AssertionError("operator UI must expose the compact auto-update block")
             if (
@@ -264,6 +263,11 @@ def main() -> None:
                 raise AssertionError("status read before refresh must expose retry-runner semantics")
             if server_context.get("last_auto_run_status") != "never":
                 raise AssertionError("status read before refresh must surface the empty auto-run state")
+            if missing_status_payload.get("manual_context") != {
+                "last_successful_manual_refresh_at": "",
+                "last_successful_manual_load_at": "",
+            }:
+                raise AssertionError("status read before refresh must expose empty manual operator timestamps")
 
             duplicate_status, duplicate_payload = _post_json(base_url, _load_json(INPUT_BUNDLE_FIXTURE))
             if duplicate_status != 409:

@@ -187,6 +187,8 @@ def main() -> None:
                 raise AssertionError("auto update must keep the refresh timestamp from the prepared snapshot")
             if refresh_payload.get("bridge_result", {}).get("bridge") != "fake":
                 raise AssertionError("auto update must run the sheet bridge")
+            if refresh_payload.get("manual_context") != _expected_manual_context():
+                raise AssertionError("auto update must not pollute manual operator timestamps")
             if load_runner.calls != [str(refresh_payload["snapshot_id"])]:
                 raise AssertionError("auto update must write the prepared snapshot exactly once")
             _assert_counting_calls(counters)
@@ -198,6 +200,8 @@ def main() -> None:
                 raise AssertionError("status must point to the persisted snapshot created by auto update")
             if status_payload.get("server_context") != _expected_server_context():
                 raise AssertionError("status must surface the persisted auto-update metadata")
+            if status_payload.get("manual_context") != _expected_manual_context():
+                raise AssertionError("status must keep manual timestamps empty after auto update")
 
             print(f"auto_update: ok -> {refresh_payload['snapshot_id']}")
             print(f"auto_status: ok -> {status_payload['server_context']['last_auto_run_status_label']}")
@@ -234,6 +238,13 @@ def _expected_server_context() -> dict[str, str]:
         "last_auto_run_finished_at": "2026-04-13T17:07:10+05:00",
         "last_successful_auto_update_at": "2026-04-13T17:07:10+05:00",
         "last_auto_run_error": "",
+    }
+
+
+def _expected_manual_context() -> dict[str, str]:
+    return {
+        "last_successful_manual_refresh_at": "",
+        "last_successful_manual_load_at": "",
     }
 
 

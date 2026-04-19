@@ -137,13 +137,12 @@ def main() -> None:
             if (
                 "Ручная загрузка данных" not in operator_ui_html
                 or "Лог" not in operator_ui_html
-                or "нет активной операции" not in operator_ui_html
+                or "Последняя удачная загрузка" not in operator_ui_html
+                or "Последняя удачная отправка" not in operator_ui_html
             ):
                 raise AssertionError("operator UI must keep the compact manual/log chrome")
             if "Скачать лог" not in operator_ui_html or "max-height: 420px" not in operator_ui_html:
                 raise AssertionError("operator UI must expose log download control and fixed-height log viewport")
-            if "Строки DATA_VITRINA" not in operator_ui_html or "Строки STATUS" not in operator_ui_html:
-                raise AssertionError("operator UI must expose row-count fields with Russian labels")
             if "Автообновления" not in operator_ui_html or "Часовой пояс" not in operator_ui_html:
                 raise AssertionError("operator UI must expose the compact auto-update block")
             if (
@@ -195,6 +194,8 @@ def main() -> None:
                 raise AssertionError("cheap status endpoint must report missing ready snapshot before refresh")
             if pre_refresh_payload.get("server_context") != _expected_server_context():
                 raise AssertionError("cheap status endpoint must expose server_context even before refresh")
+            if pre_refresh_payload.get("manual_context") != _expected_manual_context():
+                raise AssertionError("cheap status endpoint must expose empty manual timestamps before refresh")
 
             refresh_status, refresh_payload = _post_json(refresh_url, {"as_of_date": AS_OF_DATE})
             if refresh_status != 200:
@@ -209,6 +210,8 @@ def main() -> None:
                 raise AssertionError("refresh_result date_columns mismatch")
             if refresh_payload["server_context"] != _expected_server_context():
                 raise AssertionError("refresh_result must expose the same server_context block")
+            if refresh_payload.get("manual_context") != _expected_manual_context(refresh_at="2026-04-13T17:05:00+05:00"):
+                raise AssertionError("refresh_result must expose the updated manual refresh timestamp")
             if [slot["slot_key"] for slot in refresh_payload["temporal_slots"]] != [
                 "yesterday_closed",
                 "today_current",
@@ -229,6 +232,8 @@ def main() -> None:
                 raise AssertionError("status endpoint must expose both materialized dates")
             if status_payload["server_context"] != refresh_payload["server_context"]:
                 raise AssertionError("status endpoint must expose the same server_context metadata")
+            if status_payload.get("manual_context") != refresh_payload.get("manual_context"):
+                raise AssertionError("status endpoint must expose the same manual refresh timestamp after refresh")
 
             plan_status, plan_payload = _get_json(f"{plan_url}?{urllib_parse.urlencode({'as_of_date': AS_OF_DATE})}")
             if plan_status != 200:
@@ -433,6 +438,13 @@ def _expected_server_context() -> dict[str, str]:
         "last_auto_run_finished_at": "",
         "last_successful_auto_update_at": "",
         "last_auto_run_error": "",
+    }
+
+
+def _expected_manual_context(*, refresh_at: str = "", load_at: str = "") -> dict[str, str]:
+    return {
+        "last_successful_manual_refresh_at": refresh_at,
+        "last_successful_manual_load_at": load_at,
     }
 
 
