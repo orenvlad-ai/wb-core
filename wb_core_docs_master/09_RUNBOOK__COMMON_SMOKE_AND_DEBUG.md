@@ -33,7 +33,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "078201a7131674e4fd7c9c272ef98baa17d959bf"
+built_from_commit: "847121253d61497cba0f1541121ed35f060705ed"
 ---
 
 # Summary
@@ -172,7 +172,8 @@ Current promo runtime env override when hosted runtime needs explicit seller ses
 - canonical selleros value = `/opt/wb-web-bot/storage_state.json`
 
 Current hosted runtime dependency note for promo live wiring:
-- hosted `deploy` now also ensures `openpyxl==3.1.5` on the remote system python before restarting `wb-core-registry-http.service`;
+- hosted `deploy` now also ensures `openpyxl==3.1.5` and `playwright==1.58.0` on the remote system python before restarting `wb-core-registry-http.service`;
+- browser binaries remain an existing external host contour expectation and are not installed by `wb-core` deploy;
 - if deploy still fails before HTTP probes, first inspect `journalctl -u wb-core-registry-http.service` for import-time dependency drift instead of treating it as an unspecified runtime outage.
 
 Current canonical business timezone for server-side `sheet_vitrina_v1` date math:
