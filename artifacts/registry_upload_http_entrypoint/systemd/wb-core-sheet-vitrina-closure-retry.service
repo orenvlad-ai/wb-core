@@ -1,0 +1,14 @@
+[Unit]
+Description=WB Core Sheet Vitrina Closed-Day Closure Retry
+After=network.target wb-core-registry-http.service
+Wants=network.target wb-core-registry-http.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/wb-core-runtime/app
+Environment=PYTHONUNBUFFERED=1
+Environment=REGISTRY_UPLOAD_HTTP_HOST=127.0.0.1
+Environment=REGISTRY_UPLOAD_HTTP_PORT=8765
+Environment=REGISTRY_UPLOAD_RUNTIME_DIR=/opt/wb-core-runtime/state
+EnvironmentFile=/opt/wb-ai/.env
+ExecStart=/usr/bin/python3 /opt/wb-core-runtime/app/apps/sheet_vitrina_v1_temporal_closure_retry_live.py

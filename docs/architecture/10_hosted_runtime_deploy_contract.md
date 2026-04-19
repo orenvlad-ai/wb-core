@@ -7,7 +7,7 @@
 Цель bounded шага:
 - убрать hidden operational knowledge о target routes и проверках;
 - дать один canonical runner для `deploy -> loopback probe -> public probe`;
-- не коммитить secrets и не invent-ить неизвестные host-specific значения.
+- не коммитить secrets и materialize-ить repo-owned runtime/timer wiring без ручного host drift.
 
 ## Canonical Scope
 
@@ -44,6 +44,15 @@ Canonical runner:
 Canonical target template:
 - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__example.json`
 
+Canonical live target for the current selleros host:
+- `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__selleros_api.json`
+
+Canonical repo-owned systemd artifacts for this contour:
+- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.service`
+- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`
+- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.service`
+- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
+
 Runner работает от current checked-out worktree и поэтому применим к незамёрженному branch/PR without merge-before-verify, если доступны safe deploy rights.
 
 Supported commands:
@@ -65,23 +74,27 @@ Checked-in target template фиксирует field names, которые бол
 - `restart_command`
 - `status_command`
 - `environment_file`
+- `systemd_unit_directory`
+- `systemd_units_source_dir`
+- `managed_systemd_units`
 - `runtime_env`
 
-Known repo-backed facts уже можно фиксировать directly:
+Known selleros target values теперь зафиксированы repo-owned:
 - `public_base_url = https://api.selleros.pro`
-- `ssh_destination = api.selleros.pro`
 - `loopback_base_url = http://127.0.0.1:8765`
+- `ssh_destination = selleros-root`
+- `target_dir = /opt/wb-core-runtime/app`
+- `service_name = wb-core-registry-http.service`
+- `restart_command = systemctl restart wb-core-registry-http.service`
+- `status_command = systemctl status --no-pager --full wb-core-registry-http.service`
+- `environment_file = /opt/wb-ai/.env`
+- `runtime_env.REGISTRY_UPLOAD_RUNTIME_DIR = /opt/wb-core-runtime/state`
+- `systemd_unit_directory = /etc/systemd/system`
+- `systemd_units_source_dir = artifacts/registry_upload_http_entrypoint/systemd`
+- `managed_systemd_units = refresh.service + refresh.timer + closure-retry.service + closure-retry.timer`
 - route paths inside `runtime_env` follow current entrypoint defaults
 
-Unknown host-specific values не invent-ятся:
-- `target_dir`
-- `service_name`
-- `restart_command`
-- `status_command`
-- `environment_file`
-- live `REGISTRY_UPLOAD_RUNTIME_DIR`
-
-Пока эти значения не заполнены и deploy access не выдан, hosted task не считается `live-complete`.
+Secrets and mutable credentials по-прежнему не хранятся в Git. Repo stores only non-secret target wiring and unit artifacts.
 
 ## Canonical Runtime Env Contract
 
@@ -115,7 +128,7 @@ For live/public tasks affecting this contour `repo-only` does not count as compl
 3. `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py deploy`;
 4. `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py loopback-probe`;
 5. `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py public-probe`;
-6. if the task changes `sheet_vitrina_v1` temporal closure semantics, install/update the corresponding bounded retry timer or equivalent existing host wiring;
+6. verify the installed repo-owned systemd units via `systemctl cat` / `systemctl list-timers` when the task depends on scheduler truth;
 7. if the task changes bound Apps Script or live sheet behavior, finish the corresponding `clasp`/sheet verify path.
 
 `deploy-and-verify` may be used as one combined step when access is already safe and available.
@@ -162,7 +175,7 @@ Timeout, non-JSON body, wrong content type, `404`, stale HTML error surface or m
 
 If the task introduces or changes temporal closed-day retry behavior for `sheet_vitrina_v1`, live closure additionally requires:
 - verify the repo-owned retry runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py` on the hosted target;
-- verify the host timer/service wiring if that runner is expected to self-heal delayed closed-day acceptance (`wb-core-sheet-vitrina-closure-retry.service` / `.timer` on the current host contract);
+- verify the repo-owned timer/service artifacts are installed on host as `wb-core-sheet-vitrina-closure-retry.service` / `.timer`;
 - verify at least one affected `as_of_date` where a strict closed-day-capable source either transitions to `success` after retry or stays in a truthful retry/exhausted/blocker state without fake closed values in the visible slot.
 
 If the local machine cannot validate the current selleros certificate chain, public probe may reuse the existing bounded diagnostic fallback:
@@ -173,7 +186,7 @@ This fallback is only for local diagnostic reachability. It is not a statement t
 ## Human-Only Boundary
 
 One minimal human-only step remains allowed only when repo-owned contract still cannot execute due missing access:
-- fill actual hosted target values and grant deploy access for `api.selleros.pro`
+- grant deploy access for `selleros-root` / `api.selleros.pro`
 
 Without that step a live/public/GAS task stays `live-complete = blocked`; reporting only `repo-complete` is insufficient.
 The blocker must name the concrete missing access/value and must not be phrased as unspecified operational uncertainty.

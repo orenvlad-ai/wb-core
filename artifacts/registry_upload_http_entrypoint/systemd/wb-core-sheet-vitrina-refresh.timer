@@ -1,0 +1,12 @@
+[Unit]
+Description=WB Core Sheet Vitrina Daily Refresh Timer
+
+[Timer]
+OnCalendar=*-*-* 06:00:00 UTC
+OnCalendar=*-*-* 15:00:00 UTC
+Persistent=true
+AccuracySec=1m
+Unit=wb-core-sheet-vitrina-refresh.service
+
+[Install]
+WantedBy=timers.target

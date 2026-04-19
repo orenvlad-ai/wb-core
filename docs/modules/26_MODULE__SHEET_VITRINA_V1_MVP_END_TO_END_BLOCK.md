@@ -321,14 +321,24 @@ update_note: "Обновлён под final temporal classifier и execution mod
   - timer target = `POST /v1/sheet-vitrina-v1/refresh` with payload flag `auto_load=true`
   - schedule = `11:00, 20:00 Asia/Yekaterinburg`
   - current live host keeps `Etc/UTC`, поэтому systemd timer stores `OnCalendar=*-*-* 06:00:00 UTC; *-*-* 15:00:00 UTC`
-- Schedule storage lives in live-owned systemd units:
-  - `/etc/systemd/system/wb-core-sheet-vitrina-refresh.service`
-  - `/etc/systemd/system/wb-core-sheet-vitrina-refresh.timer`
-- Persisted retry completion for historical/date-period families plus same-day current-only captures materialize-ится отдельным bounded timer/service pair:
-  - `/etc/systemd/system/wb-core-sheet-vitrina-closure-retry.service`
-  - `/etc/systemd/system/wb-core-sheet-vitrina-closure-retry.timer`
+- Schedule storage is repo-owned and deploys into live systemd units:
+  - source artifacts = `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.service`
+  - source artifacts = `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`
+  - live install path = `/etc/systemd/system/wb-core-sheet-vitrina-refresh.service`
+  - live install path = `/etc/systemd/system/wb-core-sheet-vitrina-refresh.timer`
+- Persisted retry completion for historical/date-period families plus same-day current-only captures materialize-ится отдельным bounded repo-owned timer/service pair:
+  - source artifacts = `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.service`
+  - source artifacts = `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
+  - live install path = `/etc/systemd/system/wb-core-sheet-vitrina-closure-retry.service`
+  - live install path = `/etc/systemd/system/wb-core-sheet-vitrina-closure-retry.timer`
   - service runs repo-owned runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py`
   - actual retry cadence remains runtime-owned via `next_retry_at`; timer may poll more frequently without turning into a tight loop.
+- Canonical hosted deploy runner `apps/registry_upload_http_entrypoint_hosted_runtime.py` now owns the bounded install path for these unit artifacts:
+  - rsync current clean worktree to `/opt/wb-core-runtime/app`
+  - install checked-in unit files into `/etc/systemd/system`
+  - `systemctl daemon-reload`
+  - restart `wb-core-registry-http.service`
+  - enable/restart the managed timers so host runtime and `server_context` stay aligned on the same schedule truth
 - Repo-owned truth при этом остаётся в current code:
   - default `as_of_date` / `today_current` semantics live in `packages/business_time.py`
   - heavy refresh logic stays in existing `POST /v1/sheet-vitrina-v1/refresh`

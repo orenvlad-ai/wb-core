@@ -365,20 +365,20 @@ update_note: "Обновлён под current factory-order historical seam и c
 - Hosted runtime contract теперь materialized в repo:
   - `apps/registry_upload_http_entrypoint_hosted_runtime.py`
   - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__example.json`
+  - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__selleros_api.json`
+  - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.service`
+  - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`
+  - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.service`
+  - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
   - `docs/architecture/10_hosted_runtime_deploy_contract.md`
 - Этот contract фиксирует:
   - canonical public base URL `https://api.selleros.pro`;
   - canonical loopback base URL `http://127.0.0.1:8765`;
   - canonical route paths через existing entrypoint env names;
-  - required target fields `ssh_destination / target_dir / service_name / restart_command / environment_file`;
-  - one repo-owned sequence `deploy -> loopback-probe -> public-probe`.
-- Unknown host-specific values не invent-ятся в repo:
-  - actual `target_dir`
-  - actual `service_name`
-  - actual `restart_command`
-  - actual `status_command`
-  - actual `environment_file`
-- Пока эти values или deploy rights не даны, live task обязана завершаться точным blocker-ом, а не vague ссылкой на “external operational knowledge”.
+  - checked-in selleros target values `ssh_destination=selleros-root`, `target_dir=/opt/wb-core-runtime/app`, `service_name=wb-core-registry-http.service`, `restart_command=systemctl restart wb-core-registry-http.service`, `status_command=systemctl status --no-pager --full wb-core-registry-http.service`, `environment_file=/opt/wb-ai/.env`, `REGISTRY_UPLOAD_RUNTIME_DIR=/opt/wb-core-runtime/state`;
+  - repo-owned systemd unit artifacts for the daily refresh timer and closure-retry timer;
+  - one repo-owned sequence `deploy -> install units -> daemon-reload -> restart runtime -> loopback-probe -> public-probe`.
+- Secrets по-прежнему не invent-ятся и не хранятся в repo; если deploy rights недоступны, live task обязана завершаться точным blocker-ом, а не vague ссылкой на “external operational knowledge”.
 
 # 4. Артефакты и wiring по модулю
 
@@ -388,6 +388,14 @@ update_note: "Обновлён под current factory-order historical seam и c
   - `artifacts/registry_upload_http_entrypoint/target/http_result__accepted__fixture.json`
   - `artifacts/registry_upload_http_entrypoint/target/http_result__duplicate_bundle_version__fixture.json`
   - `artifacts/registry_upload_http_entrypoint/target/current_state__fixture.json`
+- hosted target artifacts:
+  - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__example.json`
+  - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__selleros_api.json`
+- hosted systemd artifacts:
+  - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.service`
+  - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`
+  - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.service`
+  - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
 - parity:
   - `artifacts/registry_upload_http_entrypoint/parity/request-vs-runtime__comparison.md`
 - evidence:
