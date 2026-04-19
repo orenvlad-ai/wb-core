@@ -127,18 +127,20 @@ update_note: "Обновлён под final temporal classifier и execution mod
   - `Загрузить данные` вызывает existing `POST /v1/sheet-vitrina-v1/refresh` и materialize-ит ready snapshot only
   - `Отправить данные` вызывает `POST /v1/sheet-vitrina-v1/load` и пишет в live sheet только already prepared snapshot
   - page additionally читает `GET /v1/sheet-vitrina-v1/daily-report` для compact блока `Ежедневные отчёты` внутри отдельного top-level tab `Отчёты`
+  - page additionally читает `GET /v1/sheet-vitrina-v1/stock-report` для compact блока `Отчёт по остаткам` внутри того же top-level tab `Отчёты`
   - page читает `GET /v1/sheet-vitrina-v1/status` для compact status block
   - page читает `GET /v1/sheet-vitrina-v1/job` для detailed построчного operator log без отдельного audit subsystem
   - тот же `job` route поддерживает text-export конкретного completed run через `format=text&download=1`
+  - оба report block в `Отчёты` остаются read-only и server-owned и по умолчанию rendered as collapsed accordion cards
   - daily-report block остаётся read-only и server-owned:
     - compare target = два последних closed business day в `Asia/Yekaterinburg`
     - current rule = `yesterday_closed` из ready snapshot `as_of_date=default_business_as_of_date(now)` versus `yesterday_closed` из ready snapshot `as_of_date=default_business_as_of_date(now)-1 day`
     - `today_current` не используется как comparison baseline
     - block читает только persisted ready snapshots и current registry labels, без новых upstream fetch и без browser-side ranking logic
-    - ranked total metric pool intentionally остаётся узким и canonical: `total_view_count`, `total_views_current`, `total_open_card_count`, `avg_ctr_current`, `avg_addToCartConversion`, `avg_cartToOrderConversion`, `avg_spp`, `avg_ads_bid_search`, `total_ads_views`, `total_ads_sum`, `avg_localizationPercent`
-    - seller-funnel `ctr` не входит в total ranking, потому что current truth не materialize-ит отдельную total-level row для двух closed days
+    - ranked total metric pool intentionally остаётся узким и canonical: `total_view_count`, `total_views_current`, `avg_ctr_current`, `avg_addToCartConversion`, `avg_cartToOrderConversion`, `avg_spp`, `avg_ads_bid_search`, `total_ads_views`, `total_ads_sum`, `avg_localizationPercent`
+    - seller-funnel `ctr` и `open_card_count` intentionally исключены из daily-report current pool, so the block keeps only one transparent CTR = `CTR в поиске`
     - SKU identity в этом block truthfully остаётся `display_name + nmId`
-    - ranked explanation factors используют только deterministic sign-safe signals (`views/search views/card opens/CTR/conversions`, `price_seller_discounted`, `Нет остатков`, district low-stock `< 20` except `stock_ru_far_siberia`)
+    - ranked explanation factors используют только deterministic sign-safe signals (`views/search views/search CTR/conversions`, `ads_sum`, `price_seller_discounted`, `Нет остатков`, district low-stock `< 20` except `stock_ru_far_siberia`)
     - negative/positive factor sections are no longer capped at top-5; they render the full valid factor set
     - factor rows stay compact but now include factor label, restrained direction arrow, matched SKU count and a type-aware aggregate summary
     - aggregate summary stays truthful per factor type:
@@ -147,6 +149,11 @@ update_note: "Обновлён под final temporal classifier и execution mod
       - stock/distribution flags = median stock context in pieces
     - route now surfaces `metric_ranking_diagnostics` so operator/debug tooling can explain why a ranked metric list contains fewer than five items
     - `SPP`, `ads_bid_search` и `localizationPercent` не входят в ranked explanation factors, потому что current repo norm не фиксирует для них однозначный good/bad sign
+  - stock-report block остаётся read-only и server-owned:
+    - source seam = persisted ready snapshot `as_of_date=default_business_as_of_date(now)` -> `DATA_VITRINA` -> slot `today_current`
+    - include rule = only SKU with at least one district stock `< 50`
+    - sort = min breached district stock ascending, then breached district breadth descending, then total stock ascending
+    - compact district labels remain truthful to current repo buckets: `Центральный ФО`, `Северо-Западный ФО`, `Приволжский ФО`, `Уральский ФО`, `Юг и СКФО`, `ДВ и Сибирь`
   - page дополнительно показывает compact block `Сервер и расписание`, который заполняется только из server-driven `server_context`
   - `Автообновление` в этом block должно описывать полный daily auto cycle, а не только schedule time: current truthful wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
   - тот же block additionally показывает `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление` из backend/status surface

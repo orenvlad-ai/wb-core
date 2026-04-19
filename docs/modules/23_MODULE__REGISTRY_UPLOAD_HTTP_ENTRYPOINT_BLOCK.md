@@ -133,6 +133,7 @@ update_note: "Обновлён под current factory-order historical seam и c
   - `POST /v1/sheet-vitrina-v1/refresh` = existing heavy server-side action
   - `POST /v1/sheet-vitrina-v1/load` = thin operator action, который пишет уже готовый snapshot в live sheet через existing bound Apps Script bridge
   - `GET /v1/sheet-vitrina-v1/daily-report` = cheap read-only JSON summary для compact блока `Ежедневные отчёты`
+  - `GET /v1/sheet-vitrina-v1/stock-report` = cheap read-only JSON summary для compact блока `Отчёт по остаткам`
   - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
   - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result
   - `GET /v1/sheet-vitrina-v1/job` = cheap poll/read surface для live operator log и async action state
@@ -219,7 +220,11 @@ update_note: "Обновлён под current factory-order historical seam и c
   - district XLSX содержит district identification + compact operator rows `nmId / SKU / Количество к поставке` именно по фактически аллоцированному количеству после ограничения `stock_ff`.
 - Current repo state не имел другого authoritative source для legacy parity term `FO_INBOUND_FF_TO_WB`, поэтому entrypoint получил narrow explicit upload contract `Товары в пути от ФФ на Wildberries`; silent drop этого члена формулы считается некорректным.
 - Operator page keeps narrow Russian chrome for operator-visible labels (`Загрузить данные`, `Отправить данные`, compact `Статус` / `Лог`, row-count labels, `Скачать лог`) without explanatory subtitle/subcopy про refresh/date defaults/temporal slots под заголовком или кнопкой.
-- Operator page добавляет отдельный top-level tab `Отчёты` с compact server-driven block `Ежедневные отчёты`:
+- Operator page добавляет отдельный top-level tab `Отчёты` с двумя collapsible server-driven block:
+  - `Ежедневные отчёты`
+  - `Отчёт по остаткам`
+  - оба блока по умолчанию collapsed и раскрываются только локальным page-state без browser persistence;
+- `Ежедневные отчёты`:
   - block сравнивает только два последних closed business day в `Asia/Yekaterinburg`;
   - current rule = `current business date -> compare yesterday_closed(default_business_as_of_date(now)) vs yesterday_closed(default_business_as_of_date(now)-1 day)`;
   - block не использует `today_current` как baseline и не trigger-ит новых upstream fetch;
@@ -232,7 +237,6 @@ update_note: "Обновлён под current factory-order historical seam и c
   - ranked metric pool intentionally остаётся узким и canonical:
     - `total_view_count`
     - `total_views_current`
-    - `total_open_card_count`
     - `avg_ctr_current`
     - `avg_addToCartConversion`
     - `avg_cartToOrderConversion`
@@ -241,10 +245,11 @@ update_note: "Обновлён под current factory-order historical seam и c
     - `total_ads_views`
     - `total_ads_sum`
     - `avg_localizationPercent`;
-  - seller-funnel `ctr` не попадает в ranked total metric pool, потому что current truth не materialize-ит отдельную total-level row для двух closed days;
+  - seller-funnel `ctr` и `open_card_count` не попадают в daily-report current pool, чтобы не дублировать верх воронки и не оставлять двусмысленный второй CTR рядом с `CTR в поиске`;
   - SKU lists truthfully surface only `display_name + nmId`, because this is the stable operator-facing identity in current repo-owned truth;
   - explanatory factor ranking uses only deterministic sign-safe signals:
-    - views/search views/card opens/CTR/conversions up-or-down
+    - views/search views/search CTR/conversions up-or-down
+    - `ads_sum` up/down
     - `price_seller_discounted` up/down
     - `Нет остатков`
     - district low-stock warnings `< 20` excluding `stock_ru_far_siberia`;
@@ -260,14 +265,27 @@ update_note: "Обновлён под current factory-order historical seam и c
     - `positive_count`
     - `flat_or_unknown_count`
     - `excluded_from_declines[]` with per-metric `metric_key`, `label`, `reason`, `newer_value`, `older_value`
-  - current truthful diagnostic for the observed `Топ-5 самых снизившихся метрик` case is:
-    - `raw_candidate_count=11`
-    - `present_after_none_filter_count=10`
+  - repo-owned diagnostic smoke for the short decline-list case now keeps:
+    - `raw_candidate_count=10`
+    - `present_after_none_filter_count=9`
     - `negative_count=3`
-    - `positive_count=7`
+    - `positive_count=6`
     - excluded metric = `avg_ads_bid_search` with `reason=missing_both_closed_day_values`
-    - this is a data-shape result for the current closed-day pair, not a hardcoded top-cap bug
+    - this remains a truthful data-shape result, not a hardcoded top-cap bug
   - `SPP`, `ads_bid_search` и `localizationPercent` не входят в ranked explanation factors, because current repo norm does not fix one unambiguous good/bad sign for them.
+- `Отчёт по остаткам`:
+  - route = `GET /v1/sheet-vitrina-v1/stock-report`
+  - source seam = persisted ready snapshot `as_of_date=default_business_as_of_date(now)` -> sheet `DATA_VITRINA` -> slot `today_current`
+  - report date = current business date in `Asia/Yekaterinburg`
+  - threshold = include only SKU where at least one supported district stock is `< 50`
+  - sort = `min breached stock asc`, then `breached district count desc`, then `stock_total asc`
+  - supported district labels stay compact and truthful to current merged buckets:
+    - `stock_ru_central` -> `Центральный ФО`
+    - `stock_ru_northwest` -> `Северо-Западный ФО`
+    - `stock_ru_volga` -> `Приволжский ФО`
+    - `stock_ru_ural` -> `Уральский ФО`
+    - `stock_ru_south_caucasus` -> `Юг и СКФО`
+    - `stock_ru_far_siberia` -> `ДВ и Сибирь`
 - Operator page добавляет один compact server-driven info block `Сервер и расписание`:
   - `Часовой пояс`
   - `Текущее время сервера`

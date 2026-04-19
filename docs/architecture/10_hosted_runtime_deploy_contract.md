@@ -128,10 +128,14 @@ If any of these steps are unavailable or unsafe, execution must return incomplet
 Loopback/runtime probe validates the hosted process behind the reverse proxy or equivalent publish layer.
 
 Public probe validates:
-- `GET /sheet-vitrina-v1/operator` returns `200` + `text/html` and still contains the compact operator tokens for the three top-level sections, separated refresh/load, reports block, server/time block and both bounded supply subsections (`Обновление данных витрины`, `Расчёт поставок`, `Отчёты`, `Загрузить данные`, `Отправить данные`, `Ежедневные отчёты`, `Total Order Sum`, `Негативные факторы`, `Позитивные факторы`, `Скачать лог`, `Лог`, `Сервер и расписание`, `Часовой пояс`, `Автообновление`, `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление`, `Общий вход для двух расчётов`, `Заказ на фабрике`, `Поставка на Wildberries`, `Цикл заказов`, `Цикл поставок`)
+- `GET /sheet-vitrina-v1/operator` returns `200` + `text/html` and still contains the compact operator tokens for the three top-level sections, separated refresh/load, reports block, server/time block and both bounded supply subsections (`Обновление данных витрины`, `Расчёт поставок`, `Отчёты`, `Загрузить данные`, `Отправить данные`, `Ежедневные отчёты`, `Отчёт по остаткам`, `Total Order Sum`, `Негативные факторы`, `Позитивные факторы`, `Скачать лог`, `Лог`, `Сервер и расписание`, `Часовой пояс`, `Автообновление`, `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление`, `Общий вход для двух расчётов`, `Заказ на фабрике`, `Поставка на Wildberries`, `Цикл заказов`, `Цикл поставок`)
 - `GET /v1/sheet-vitrina-v1/daily-report` returns `200` + JSON for both states:
   - `status=available` when ready snapshots for `default_business_as_of_date(now)` and `default_business_as_of_date(now)-1 day` are present and their `yesterday_closed` slots are comparable;
   - `status=unavailable` with truthful `reason` when one of those ready snapshots is missing or structurally unusable;
+  - route stays read-only and must not trigger refresh/upstream fetch from the public read path
+- `GET /v1/sheet-vitrina-v1/stock-report` returns `200` + JSON for both states:
+  - `status=available` when the current `ready snapshot` for `default_business_as_of_date(now)` contains a valid `today_current` slot for the current business day;
+  - `status=unavailable` with truthful `reason` when the current ready snapshot or `today_current` slot is missing/stale;
   - route stays read-only and must not trigger refresh/upstream fetch from the public read path
 - `GET /v1/sheet-vitrina-v1/status` returns JSON with either success shape including `server_context` or truthful `422 {"error": ..., "server_context": ...}`
 - `GET /v1/sheet-vitrina-v1/plan` returns JSON with either success shape or truthful `422 {"error": ...}`

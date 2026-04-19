@@ -129,6 +129,8 @@ def main() -> None:
                 raise AssertionError("status before refresh must stay 422 ready snapshot missing")
             if route_map["daily_report"]["http_status"] != 200:
                 raise AssertionError("daily-report route must be publicly readable before refresh")
+            if route_map["stock_report"]["http_status"] != 200:
+                raise AssertionError("stock-report route must be publicly readable before refresh")
             if route_map["plan"]["http_status"] != 422:
                 raise AssertionError("plan before refresh must stay 422 ready snapshot missing")
             if route_map["factory_order_status"]["http_status"] != 200:
@@ -167,12 +169,15 @@ def main() -> None:
                 raise AssertionError("status after refresh must become 200")
             if loopback_routes["daily_report"]["http_status"] != 200:
                 raise AssertionError("daily-report route must stay 200 after refresh")
+            if loopback_routes["stock_report"]["http_status"] != 200:
+                raise AssertionError("stock-report route must stay 200 after refresh")
             if loopback_routes["plan"]["http_status"] != 200:
                 raise AssertionError("plan after refresh must become 200")
 
             print(f"print_plan: ok -> {print_plan['deploy_plan']['target_id']}")
             print(f"deploy_dry_run: ok -> {deploy_dry_run['commands']['restart'][-1]}")
             print(f"public_probe_refresh: ok -> {route_map['refresh']['http_status']}")
+            print(f"public_probe_stock_report: ok -> {route_map['stock_report']['http_status']}")
             print(f"factory_order_status: ok -> {route_map['factory_order_status']['http_status']}")
             print(f"wb_regional_status: ok -> {route_map['wb_regional_status']['http_status']}")
             print(f"loopback_probe_status: ok -> {loopback_routes['status']['http_status']}")

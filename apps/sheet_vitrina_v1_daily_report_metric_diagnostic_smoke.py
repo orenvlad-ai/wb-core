@@ -59,7 +59,6 @@ def main() -> None:
             "total_orderSum": 3000.0,
             "total_view_count": 100.0,
             "total_views_current": 100.0,
-            "total_open_card_count": 100.0,
             "avg_ctr_current": 0.10,
             "avg_addToCartConversion": 0.20,
             "avg_cartToOrderConversion": 0.30,
@@ -72,7 +71,6 @@ def main() -> None:
             "total_orderSum": 3300.0,
             "total_view_count": 110.0,
             "total_views_current": 110.0,
-            "total_open_card_count": 110.0,
             "avg_ctr_current": 0.11,
             "avg_addToCartConversion": 0.19,
             "avg_cartToOrderConversion": 0.29,
@@ -124,14 +122,14 @@ def main() -> None:
         diagnostics = payload.get("metric_ranking_diagnostics") or {}
         if payload.get("status") != "available":
             raise AssertionError(f"daily report must be available, got {payload}")
-        if diagnostics.get("raw_candidate_count") != 11:
-            raise AssertionError(f"raw metric candidate count must stay 11, got {diagnostics}")
-        if diagnostics.get("present_after_none_filter_count") != 10:
-            raise AssertionError(f"present metric count must stay 10, got {diagnostics}")
+        if diagnostics.get("raw_candidate_count") != 10:
+            raise AssertionError(f"raw metric candidate count must stay 10 after pool cleanup, got {diagnostics}")
+        if diagnostics.get("present_after_none_filter_count") != 9:
+            raise AssertionError(f"present metric count must stay 9 after pool cleanup, got {diagnostics}")
         if diagnostics.get("negative_count") != 3:
             raise AssertionError(f"negative metric count must stay 3, got {diagnostics}")
-        if diagnostics.get("positive_count") != 7:
-            raise AssertionError(f"positive metric count must stay 7, got {diagnostics}")
+        if diagnostics.get("positive_count") != 6:
+            raise AssertionError(f"positive metric count must stay 6, got {diagnostics}")
         if diagnostics.get("flat_or_unknown_count") != 0:
             raise AssertionError(f"flat/unknown metric count must stay 0, got {diagnostics}")
 
@@ -149,7 +147,7 @@ def main() -> None:
         if len(payload.get("top_metric_declines") or []) != 3:
             raise AssertionError(f"decline list must truthfully expose only 3 negative metrics, got {payload}")
 
-        print("daily_report_metric_diagnostic: ok -> raw=11 present=10 negative=3 positive=7")
+        print("daily_report_metric_diagnostic: ok -> raw=10 present=9 negative=3 positive=6")
         print("daily_report_metric_missing: ok ->", missing_bid["metric_key"], missing_bid["reason"])
         print("daily_report_metric_decline_count: ok ->", len(payload["top_metric_declines"]))
 
@@ -169,7 +167,6 @@ def _build_plan(
         "total_orderSum",
         "total_view_count",
         "total_views_current",
-        "total_open_card_count",
         "avg_ctr_current",
         "avg_addToCartConversion",
         "avg_cartToOrderConversion",

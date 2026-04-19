@@ -21,6 +21,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_DAILY_REPORT_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
+    DEFAULT_SHEET_STOCK_REPORT_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_UPLOAD_PATH,
     build_registry_upload_http_server,
@@ -98,7 +99,8 @@ def main() -> None:
                     today_date="2026-04-19",
                     current_state=current_state,
                     metric_labels=metric_labels,
-                    sku_values=new_sku,
+                    closed_sku_values=new_sku,
+                    today_sku_values=new_sku,
                 ),
             )
             runtime.save_sheet_vitrina_ready_snapshot(
@@ -110,7 +112,8 @@ def main() -> None:
                     today_date="2026-04-18",
                     current_state=current_state,
                     metric_labels=metric_labels,
-                    sku_values=old_sku,
+                    closed_sku_values=old_sku,
+                    today_sku_values=old_sku,
                 ),
             )
 
@@ -122,6 +125,7 @@ def main() -> None:
                 "Расчёт поставок",
                 "Отчёты",
                 "Ежедневные отчёты",
+                "Отчёт по остаткам",
                 "Total Order Sum",
                 "Негативные факторы",
                 "Позитивные факторы",
@@ -129,9 +133,19 @@ def main() -> None:
                 "Отправить данные",
                 "Сервер и расписание",
                 DEFAULT_SHEET_DAILY_REPORT_PATH,
+                DEFAULT_SHEET_STOCK_REPORT_PATH,
             ):
                 if expected not in operator_html:
                     raise AssertionError(f"operator page must expose {expected!r}")
+            for expected in (
+                'id="dailyReportToggle"',
+                'id="stockReportToggle"',
+                'id="dailyReportPanelBody" class="report-accordion-body" hidden',
+                'id="stockReportPanelBody" class="report-accordion-body" hidden',
+                'aria-expanded="false"',
+            ):
+                if expected not in operator_html:
+                    raise AssertionError(f"reports tab must expose collapsed accordion contract token {expected!r}")
 
             status_code, status_payload = _get_json(f"{base_url}{DEFAULT_SHEET_STATUS_PATH}")
             if status_code != 200 or status_payload.get("status") != "success":
@@ -148,11 +162,32 @@ def main() -> None:
                 raise AssertionError(f"daily report must expose current closed-day compare date, got {report_payload}")
             if not report_payload.get("top_metric_declines") or not report_payload.get("top_sku_order_sum_declines"):
                 raise AssertionError(f"daily report must publish ranked blocks, got {report_payload}")
+            if any(item.get("metric_key") == "total_open_card_count" for item in (report_payload.get("top_metric_declines") or []) + (report_payload.get("top_metric_growth") or [])):
+                raise AssertionError(f"daily report HTTP surface must not keep total_open_card_count in ranking pool, got {report_payload}")
+            negative_labels = {str(item.get("label")) for item in report_payload.get("top_negative_factors") or []}
+            positive_labels = {str(item.get("label")) for item in report_payload.get("top_positive_factors") or []}
+            if "Открытия карточки" in negative_labels or "CTR открытия карточки" in negative_labels:
+                raise AssertionError(f"negative factor pool must drop card-open metrics, got {negative_labels}")
+            if "Открытия карточки" in positive_labels or "CTR открытия карточки" in positive_labels:
+                raise AssertionError(f"positive factor pool must drop card-open metrics, got {positive_labels}")
+            if not any("расход" in label.lower() for label in negative_labels | positive_labels):
+                raise AssertionError(f"AdSum factor must surface when closed-day comparable, got {report_payload}")
+
+            stock_code, stock_payload = _get_json(f"{base_url}{DEFAULT_SHEET_STOCK_REPORT_PATH}")
+            if stock_code != 200 or stock_payload.get("status") != "available":
+                raise AssertionError(f"stock report route must return available JSON, got {stock_code} {stock_payload}")
+            if stock_payload.get("report_date") != "2026-04-19":
+                raise AssertionError(f"stock report must expose current business date, got {stock_payload}")
+            if stock_payload.get("threshold_lt") != 50:
+                raise AssertionError(f"stock report must disclose threshold <50, got {stock_payload}")
+            if not stock_payload.get("rows"):
+                raise AssertionError(f"stock report must publish breached SKU rows, got {stock_payload}")
 
             print("operator_daily_report_html: ok ->", DEFAULT_SHEET_OPERATOR_UI_PATH)
             print("status_route: ok ->", status_payload["status"])
             print("plan_route: ok ->", plan_payload["as_of_date"])
             print("daily_report_route: ok ->", report_payload["newer_closed_date"], report_payload["older_closed_date"])
+            print("stock_report_route: ok ->", stock_payload["report_date"], stock_payload["threshold_lt"])
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -343,15 +378,15 @@ def _build_plan(
     today_date: str,
     current_state: Any,
     metric_labels: dict[str, str],
-    sku_values: dict[int, dict[str, float]],
+    closed_sku_values: dict[int, dict[str, float]],
+    today_sku_values: dict[int, dict[str, float]],
 ) -> SheetVitrinaV1Envelope:
-    total_values = _aggregate_totals(sku_values)
+    total_values = _aggregate_totals(closed_sku_values)
     rows = []
     total_metric_keys = [
         "total_orderSum",
         "total_view_count",
         "total_views_current",
-        "total_open_card_count",
         "avg_ctr_current",
         "avg_addToCartConversion",
         "avg_cartToOrderConversion",
@@ -373,7 +408,8 @@ def _build_plan(
     for config_item in current_state.config_v2:
         if not config_item.enabled:
             continue
-        values = sku_values.get(config_item.nm_id, {})
+        closed_values = closed_sku_values.get(config_item.nm_id, {})
+        today_values = today_sku_values.get(config_item.nm_id, {})
         for metric_key in [
             "orderSum",
             "view_count",
@@ -396,14 +432,14 @@ def _build_plan(
             "ads_sum",
             "localizationPercent",
         ]:
-            if metric_key not in values:
+            if metric_key not in closed_values and metric_key not in today_values:
                 continue
             rows.append(
                 [
                     f"{config_item.display_name}: {metric_labels.get(metric_key, metric_key)}",
                     f"SKU:{config_item.nm_id}|{metric_key}",
-                    values[metric_key],
-                    "",
+                    closed_values.get(metric_key, ""),
+                    today_values.get(metric_key, ""),
                 ]
             )
 
@@ -462,7 +498,6 @@ def _aggregate_totals(sku_values: dict[int, dict[str, float]]) -> dict[str, floa
         "total_orderSum": sum(item["orderSum"] for item in rows),
         "total_view_count": sum(item["view_count"] for item in rows),
         "total_views_current": sum(item["views_current"] for item in rows),
-        "total_open_card_count": sum(item["open_card_count"] for item in rows),
         "avg_ctr_current": sum(item["ctr_current"] for item in rows) / len(rows),
         "avg_addToCartConversion": sum(item["addToCartConversion"] for item in rows) / len(rows),
         "avg_cartToOrderConversion": sum(item["cartToOrderConversion"] for item in rows) / len(rows),

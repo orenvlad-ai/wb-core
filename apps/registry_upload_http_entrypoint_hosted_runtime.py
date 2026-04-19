@@ -35,6 +35,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_REFRESH_PATH,
+    DEFAULT_SHEET_STOCK_REPORT_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_UPLOAD_PATH,
     DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX,
@@ -226,6 +227,12 @@ def collect_public_surface(
             name="daily_report",
             method="GET",
             url=f"{base_url}{DEFAULT_SHEET_DAILY_REPORT_PATH}",
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
+            name="stock_report",
+            method="GET",
+            url=f"{base_url}{DEFAULT_SHEET_STOCK_REPORT_PATH}",
             timeout_seconds=timeout_seconds,
         ),
         _collect_http_probe(
@@ -637,9 +644,11 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "https://docs.google.com/spreadsheets/d/",
             "Сервер и расписание",
             "Ежедневные отчёты",
+            "Отчёт по остаткам",
             "Негативные факторы",
             "Позитивные факторы",
             DEFAULT_SHEET_DAILY_REPORT_PATH,
+            DEFAULT_SHEET_STOCK_REPORT_PATH,
             "Часовой пояс",
             "Автообновление",
             "Последний автозапуск",
@@ -679,6 +688,15 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "factory-order recommendation route returned XLSX"
             if evaluation["ok"]
             else "expected XLSX content-type for successful recommendation route"
+        )
+        return evaluation
+
+    if route == "wb_regional_district_central" and status == 200:
+        evaluation["ok"] = "spreadsheetml.sheet" in content_type
+        evaluation["detail"] = (
+            "wb-regional district route returned XLSX"
+            if evaluation["ok"]
+            else "expected XLSX content-type for successful district route"
         )
         return evaluation
 
@@ -725,6 +743,23 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
                 "comparison_basis",
                 "newer_closed_date",
                 "older_closed_date",
+                "notes",
+            ],
+        )
+        return evaluation
+
+    if route == "stock_report":
+        evaluation["ok"], evaluation["detail"] = _validate_json_result(
+            status,
+            payload,
+            success_keys=[
+                "status",
+                "business_timezone",
+                "current_business_date",
+                "report_date",
+                "threshold_lt",
+                "districts",
+                "source_of_truth",
                 "notes",
             ],
         )
@@ -1003,6 +1038,7 @@ results = [
     _collect("job", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/job?job_id=hosted_runtime_probe"),
     _collect("status", "GET", _append_as_of_date(PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_STATUS_HTTP_PATH"], PAYLOAD["as_of_date"])),
     _collect("daily_report", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/daily-report"),
+    _collect("stock_report", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/stock-report"),
     _collect("plan", "GET", _append_as_of_date(PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_HTTP_PATH"], PAYLOAD["as_of_date"])),
     _collect("factory_order_status", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/status"),
     _collect("factory_order_template_stock_ff", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"),

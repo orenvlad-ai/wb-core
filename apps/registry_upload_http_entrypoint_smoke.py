@@ -36,9 +36,11 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FF_TO_WB_PATH,
     DEFAULT_FACTORY_ORDER_UPLOAD_STOCK_FF_PATH,
     DEFAULT_SHEET_JOB_PATH,
+    DEFAULT_SHEET_DAILY_REPORT_PATH,
     DEFAULT_SHEET_LOAD_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_REFRESH_PATH,
+    DEFAULT_SHEET_STOCK_REPORT_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_UPLOAD_PATH,
@@ -130,6 +132,14 @@ def main() -> None:
                 or "Отправить данные" not in operator_ui_html
             ):
                 raise AssertionError("operator UI must expose the expected minimal page")
+            if (
+                "Отчёты" not in operator_ui_html
+                or "Ежедневные отчёты" not in operator_ui_html
+                or "Отчёт по остаткам" not in operator_ui_html
+                or 'id="dailyReportToggle"' not in operator_ui_html
+                or 'id="stockReportToggle"' not in operator_ui_html
+            ):
+                raise AssertionError("operator UI must expose the compact reports tab with both collapsible report blocks")
             if "Статус" not in operator_ui_html or "Лог" not in operator_ui_html or "ожидание" not in operator_ui_html:
                 raise AssertionError("operator UI must keep the compact Russian chrome")
             if "Скачать лог" not in operator_ui_html or "max-height: 420px" not in operator_ui_html:
@@ -197,6 +207,8 @@ def main() -> None:
                 "load_path": DEFAULT_SHEET_LOAD_PATH,
                 "status_path": config.sheet_status_path,
                 "job_path": DEFAULT_SHEET_JOB_PATH,
+                "daily_report_path": DEFAULT_SHEET_DAILY_REPORT_PATH,
+                "stock_report_path": DEFAULT_SHEET_STOCK_REPORT_PATH,
                 "factory_order_status_path": DEFAULT_FACTORY_ORDER_STATUS_PATH,
                 "factory_order_template_stock_ff_path": DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
                 "factory_order_template_inbound_factory_path": DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
@@ -209,7 +221,7 @@ def main() -> None:
                 "wb_regional_status_path": DEFAULT_WB_REGIONAL_STATUS_PATH,
                 "wb_regional_calculate_path": DEFAULT_WB_REGIONAL_CALCULATE_PATH,
             }:
-                raise AssertionError("operator UI config must expose refresh/status paths plus both supply blocks")
+                raise AssertionError("operator UI config must expose refresh/status paths, both report routes and both supply blocks")
 
             missing_plan_status, missing_plan_payload = _get_json(plan_url)
             if missing_plan_status != 422:

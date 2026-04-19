@@ -285,6 +285,10 @@ def main() -> None:
             raise AssertionError(f"negative factors must include price and out-of-stock, got {negative_labels}")
         if len(negative_factors) <= 5:
             raise AssertionError(f"negative factors must expose the full valid list, got {negative_factors}")
+        if "Открытия карточки" in negative_labels or "CTR открытия карточки" in negative_labels:
+            raise AssertionError(f"card-open metrics must be removed from negative factor pool, got {negative_labels}")
+        if not any("расход" in str(label).lower() for label in negative_labels):
+            raise AssertionError(f"negative factors must include AdSum when closed-day comparable, got {negative_labels}")
 
         positive_factors = payload.get("top_positive_factors") or []
         positive_labels = {item.get("label") for item in positive_factors}
@@ -292,6 +296,10 @@ def main() -> None:
             raise AssertionError(f"positive factors must include price, got {positive_labels}")
         if len(positive_factors) <= 5:
             raise AssertionError(f"positive factors must expose the full valid list, got {positive_factors}")
+        if "Открытия карточки" in positive_labels or "CTR открытия карточки" in positive_labels:
+            raise AssertionError(f"card-open metrics must be removed from positive factor pool, got {positive_labels}")
+        if not any("расход" in str(label).lower() for label in positive_labels):
+            raise AssertionError(f"positive factors must include AdSum when closed-day comparable, got {positive_labels}")
 
         negative_price = next(item for item in negative_factors if item.get("label") == "Цена")
         if negative_price.get("direction") != "up" or "₽" not in str(negative_price.get("aggregate_summary")):
@@ -303,9 +311,16 @@ def main() -> None:
         _assert_factor_ranking_sorted(negative_factors)
         _assert_factor_ranking_sorted(positive_factors)
 
-        metric_declines = {item.get("metric_key") for item in payload.get("top_metric_declines") or []}
-        if "avg_ads_bid_search" not in metric_declines and "total_view_count" not in metric_declines:
-            raise AssertionError(f"declining metric pool must include allowed canonical metrics, got {metric_declines}")
+        metric_ranking_keys = {
+            item.get("metric_key")
+            for item in (payload.get("top_metric_declines") or []) + (payload.get("top_metric_growth") or [])
+        }
+        if "total_open_card_count" in metric_ranking_keys:
+            raise AssertionError(f"open_card_count total metric must be removed from ranking pool, got {metric_ranking_keys}")
+        if "total_ads_sum" not in metric_ranking_keys:
+            raise AssertionError(f"AdSum total metric must stay in ranking pool, got {metric_ranking_keys}")
+        if "avg_ctr_current" not in metric_ranking_keys:
+            raise AssertionError(f"search CTR must stay in ranking pool, got {metric_ranking_keys}")
 
         print("daily_report_status: ok ->", payload["status"])
         print("daily_report_closed_days: ok ->", payload["newer_closed_date"], payload["older_closed_date"])
@@ -347,7 +362,6 @@ def _build_plan(
         "total_orderSum",
         "total_view_count",
         "total_views_current",
-        "total_open_card_count",
         "avg_ctr_current",
         "avg_addToCartConversion",
         "avg_cartToOrderConversion",
@@ -459,7 +473,6 @@ def _aggregate_totals(sku_values: dict[int, dict[str, float]]) -> dict[str, floa
         "total_orderSum": sum(item["orderSum"] for item in rows),
         "total_view_count": sum(item["view_count"] for item in rows),
         "total_views_current": sum(item["views_current"] for item in rows),
-        "total_open_card_count": sum(item["open_card_count"] for item in rows),
         "avg_ctr_current": sum(item["ctr_current"] for item in rows) / len(rows),
         "avg_addToCartConversion": sum(item["addToCartConversion"] for item in rows) / len(rows),
         "avg_cartToOrderConversion": sum(item["cartToOrderConversion"] for item in rows) / len(rows),

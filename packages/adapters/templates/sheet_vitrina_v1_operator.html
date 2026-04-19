@@ -296,6 +296,80 @@
       gap: 18px;
     }
 
+    .report-accordion {
+      padding: 0;
+      overflow: hidden;
+    }
+
+    .report-accordion-button {
+      appearance: none;
+      width: 100%;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 20px;
+      text-align: left;
+      cursor: pointer;
+      transition: background-color 120ms ease;
+    }
+
+    .report-accordion-button:hover {
+      background: rgba(15, 23, 42, 0.02);
+    }
+
+    .report-accordion-meta {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .report-accordion-title {
+      margin: 0;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .report-accordion-date {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .report-accordion-chevron {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      border-radius: 999px;
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      background: #ffffff;
+      color: var(--muted);
+      font-size: 14px;
+      transition: transform 120ms ease, color 120ms ease, border-color 120ms ease;
+      flex-shrink: 0;
+    }
+
+    .report-accordion-button[aria-expanded="true"] .report-accordion-chevron {
+      transform: rotate(180deg);
+      color: var(--text);
+      border-color: rgba(11, 99, 246, 0.18);
+    }
+
+    .report-accordion-body {
+      display: grid;
+      gap: 16px;
+      padding: 0 20px 20px;
+      border-top: 1px solid rgba(15, 23, 42, 0.08);
+    }
+
     .report-period {
       font-size: 13px;
       font-weight: 600;
@@ -504,6 +578,42 @@
       font-size: 12px;
       line-height: 1.6;
       color: var(--muted);
+    }
+
+    .stock-report-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: grid;
+      gap: 12px;
+    }
+
+    .stock-report-item {
+      display: grid;
+      gap: 10px;
+      padding: 14px 16px;
+      border-radius: 14px;
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      background: #ffffff;
+    }
+
+    .stock-report-chip-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .stock-report-chip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: var(--error-bg);
+      color: var(--error-text);
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
     }
 
     .log-actions {
@@ -1004,55 +1114,96 @@
         <a class="eyebrow eyebrow-link" href="__SHEET_VITRINA_V1_SPREADSHEET_URL__" target="_blank" rel="noreferrer">sheet_vitrina_v1</a>
         <h1>Отчёты</h1>
         <p class="section-lead">
-          Компактный ежедневный аналитический срез остаётся полностью server-driven: сравниваем только два последних
-          closed business day через persisted ready snapshots и не используем <code>today_current</code> как baseline.
+          Reports tab остаётся полностью server-driven: daily-report читает два последних closed business day, а stock-report
+          читает current business day через persisted ready snapshot без browser-side analytics.
         </p>
 
         <div class="grid">
-          <section class="block" aria-labelledby="daily-report-title">
-            <div class="block-header">
-              <h2 id="daily-report-title" class="block-title">Ежедневные отчёты</h2>
-              <span id="dailyReportPeriod" class="report-period">-</span>
-            </div>
-            <p id="dailyReportLead" class="field-note">
-              Сравниваем два последних closed business day по persisted ready snapshots.
-            </p>
-            <p id="dailyReportStatus" class="section-message">Читаем ежедневный отчёт...</p>
-            <div id="dailyReportBody" class="daily-report" hidden>
-              <section id="dailyReportHero"></section>
-              <div class="report-card-grid">
-                <section class="report-card">
-                  <h3>Топ-5 самых снизившихся метрик</h3>
-                  <p>Primary ranking basis: процентное day-over-day изменение между двумя closed days.</p>
-                  <div id="dailyMetricDeclines"></div>
-                </section>
-                <section class="report-card">
-                  <h3>Топ-5 самых выросших метрик</h3>
-                  <p>Показываем только canonical total-level метрики из разрешённого numeric pool.</p>
-                  <div id="dailyMetricGrowth"></div>
-                </section>
-                <section class="report-card">
-                  <h3>Топ-10 SKU с самым сильным падением order sum</h3>
-                  <p>SKU ранжируются по процентному изменению order sum между closed days.</p>
-                  <div id="dailySkuDeclines"></div>
-                </section>
-                <section class="report-card">
-                  <h3>Топ-10 SKU с самым сильным ростом order sum</h3>
-                  <p>Показываем только current registry identity: display_name и nmId.</p>
-                  <div id="dailySkuGrowth"></div>
-                </section>
-                <section class="report-card">
-                  <h3>Негативные факторы</h3>
-                  <p>Показываем весь valid factor set: частота остаётся primary sort, numeric aggregate показывает силу изменения.</p>
-                  <div id="dailyNegativeFactors"></div>
-                </section>
-                <section class="report-card">
-                  <h3>Позитивные факторы</h3>
-                  <p>Тот же deterministic ranking: matched SKU count сначала, затем strongest truthful aggregate.</p>
-                  <div id="dailyPositiveFactors"></div>
-                </section>
+          <section class="block report-accordion" aria-labelledby="daily-report-title">
+            <button
+              id="dailyReportToggle"
+              class="report-accordion-button"
+              type="button"
+              aria-expanded="false"
+              aria-controls="dailyReportPanelBody"
+            >
+              <span class="report-accordion-meta">
+                <span id="daily-report-title" class="report-accordion-title">Ежедневные отчёты</span>
+                <span id="dailyReportHeaderDate" class="report-accordion-date">-</span>
+              </span>
+              <span class="report-accordion-chevron" aria-hidden="true">▾</span>
+            </button>
+            <div id="dailyReportPanelBody" class="report-accordion-body" hidden>
+              <p id="dailyReportLead" class="field-note">
+                Сравниваем два последних closed business day по persisted ready snapshots.
+              </p>
+              <p id="dailyReportStatus" class="section-message">Читаем ежедневный отчёт...</p>
+              <div id="dailyReportContent" class="daily-report" hidden>
+                <section id="dailyReportHero"></section>
+                <div class="report-card-grid">
+                  <section class="report-card">
+                    <h3>Топ-5 самых снизившихся метрик</h3>
+                    <p>Primary ranking basis: процентное day-over-day изменение между двумя closed days.</p>
+                    <div id="dailyMetricDeclines"></div>
+                  </section>
+                  <section class="report-card">
+                    <h3>Топ-5 самых выросших метрик</h3>
+                    <p>Показываем только canonical total-level метрики из разрешённого numeric pool.</p>
+                    <div id="dailyMetricGrowth"></div>
+                  </section>
+                  <section class="report-card">
+                    <h3>Топ-10 SKU с самым сильным падением order sum</h3>
+                    <p>SKU ранжируются по процентному изменению order sum между closed days.</p>
+                    <div id="dailySkuDeclines"></div>
+                  </section>
+                  <section class="report-card">
+                    <h3>Топ-10 SKU с самым сильным ростом order sum</h3>
+                    <p>Показываем только current registry identity: display_name и nmId.</p>
+                    <div id="dailySkuGrowth"></div>
+                  </section>
+                  <section class="report-card">
+                    <h3>Негативные факторы</h3>
+                    <p>Показываем весь valid factor set: частота остаётся primary sort, numeric aggregate показывает силу изменения.</p>
+                    <div id="dailyNegativeFactors"></div>
+                  </section>
+                  <section class="report-card">
+                    <h3>Позитивные факторы</h3>
+                    <p>Тот же deterministic ranking: matched SKU count сначала, затем strongest truthful aggregate.</p>
+                    <div id="dailyPositiveFactors"></div>
+                  </section>
+                </div>
               </div>
               <div id="dailyReportNotes" class="report-notes"></div>
+            </div>
+          </section>
+
+          <section class="block report-accordion" aria-labelledby="stock-report-title">
+            <button
+              id="stockReportToggle"
+              class="report-accordion-button"
+              type="button"
+              aria-expanded="false"
+              aria-controls="stockReportPanelBody"
+            >
+              <span class="report-accordion-meta">
+                <span id="stock-report-title" class="report-accordion-title">Отчёт по остаткам</span>
+                <span id="stockReportHeaderDate" class="report-accordion-date">-</span>
+              </span>
+              <span class="report-accordion-chevron" aria-hidden="true">▾</span>
+            </button>
+            <div id="stockReportPanelBody" class="report-accordion-body" hidden>
+              <p id="stockReportLead" class="field-note">
+                Показываем только SKU, где хотя бы по одному supported district stock меньше 50 единиц.
+              </p>
+              <p id="stockReportStatus" class="section-message">Читаем отчёт по остаткам...</p>
+              <div id="stockReportContent" class="daily-report" hidden>
+                <section class="report-card">
+                  <h3>SKU с низким остатком по округам</h3>
+                  <p>Source seam остаётся server-owned: current business day и slot <code>today_current</code> читаются только из persisted ready snapshot.</p>
+                  <div id="stockReportRows"></div>
+                </section>
+              </div>
+              <div id="stockReportNotes" class="report-notes"></div>
             </div>
           </section>
         </div>
@@ -1375,10 +1526,12 @@
       const serverLastAutoStatus = document.getElementById("serverLastAutoStatus");
       const serverLastAutoSuccess = document.getElementById("serverLastAutoSuccess");
       const serverTrigger = document.getElementById("serverTrigger");
-      const dailyReportPeriod = document.getElementById("dailyReportPeriod");
+      const dailyReportToggle = document.getElementById("dailyReportToggle");
+      const dailyReportPanelBody = document.getElementById("dailyReportPanelBody");
+      const dailyReportHeaderDate = document.getElementById("dailyReportHeaderDate");
       const dailyReportLead = document.getElementById("dailyReportLead");
       const dailyReportStatus = document.getElementById("dailyReportStatus");
-      const dailyReportBody = document.getElementById("dailyReportBody");
+      const dailyReportContent = document.getElementById("dailyReportContent");
       const dailyReportHero = document.getElementById("dailyReportHero");
       const dailyMetricDeclines = document.getElementById("dailyMetricDeclines");
       const dailyMetricGrowth = document.getElementById("dailyMetricGrowth");
@@ -1387,6 +1540,14 @@
       const dailyNegativeFactors = document.getElementById("dailyNegativeFactors");
       const dailyPositiveFactors = document.getElementById("dailyPositiveFactors");
       const dailyReportNotes = document.getElementById("dailyReportNotes");
+      const stockReportToggle = document.getElementById("stockReportToggle");
+      const stockReportPanelBody = document.getElementById("stockReportPanelBody");
+      const stockReportHeaderDate = document.getElementById("stockReportHeaderDate");
+      const stockReportLead = document.getElementById("stockReportLead");
+      const stockReportStatus = document.getElementById("stockReportStatus");
+      const stockReportContent = document.getElementById("stockReportContent");
+      const stockReportRows = document.getElementById("stockReportRows");
+      const stockReportNotes = document.getElementById("stockReportNotes");
       const downloadButton = document.getElementById("downloadButton");
       const logViewport = document.getElementById("logViewport");
       const logBlock = document.getElementById("logBlock");
@@ -1496,6 +1657,18 @@
         });
         supplySectionPanels.forEach((panel) => {
           panel.hidden = panel.dataset.supplySectionPanel !== sectionName;
+        });
+      }
+
+      function setReportExpanded(button, panel, expanded) {
+        button.setAttribute("aria-expanded", expanded ? "true" : "false");
+        panel.hidden = !expanded;
+      }
+
+      function bindReportToggle(button, panel) {
+        button.addEventListener("click", () => {
+          const expanded = button.getAttribute("aria-expanded") === "true";
+          setReportExpanded(button, panel, !expanded);
         });
       }
 
@@ -1654,11 +1827,11 @@
       }
 
       function renderDailyReportUnavailable(payload, fallbackMessage) {
-        dailyReportPeriod.textContent = valueOrDash(payload && payload.newer_closed_date) + " vs " + valueOrDash(payload && payload.older_closed_date);
+        dailyReportHeaderDate.textContent = valueOrDash(payload && payload.newer_closed_date);
         dailyReportLead.textContent = "Сравниваем два последних closed business day по persisted yesterday_closed ready snapshots.";
         dailyReportStatus.textContent = valueOrDash((payload && payload.reason) || fallbackMessage || "Ежедневный отчёт пока недоступен.");
         dailyReportStatus.className = "section-message";
-        dailyReportBody.hidden = true;
+        dailyReportContent.hidden = true;
         dailyReportHero.innerHTML = "";
         dailyMetricDeclines.innerHTML = "";
         dailyMetricGrowth.innerHTML = "";
@@ -1675,11 +1848,11 @@
           return;
         }
         const total = payload.total_order_sum || {};
-        dailyReportPeriod.textContent = valueOrDash(payload.newer_closed_date) + " vs " + valueOrDash(payload.older_closed_date);
+        dailyReportHeaderDate.textContent = valueOrDash(payload.newer_closed_date);
         dailyReportLead.textContent = "Сравнение двух последних closed business day: " + valueOrDash(payload.newer_closed_date) + " против " + valueOrDash(payload.older_closed_date) + ".";
         dailyReportStatus.textContent = "Ранжирование: по % change. Absolute delta показан только как secondary detail.";
         dailyReportStatus.className = "section-message";
-        dailyReportBody.hidden = false;
+        dailyReportContent.hidden = false;
         dailyReportHero.innerHTML = [
           "<article class=\"report-hero-card\">",
           "<div class=\"report-hero-top\">",
@@ -1735,6 +1908,64 @@
           "Частые позитивные факторы пока не выделяются на текущем comparable pool."
         );
         renderDailyReportNotes(payload.notes);
+      }
+
+      function renderStockReportNotes(notes) {
+        if (!Array.isArray(notes) || !notes.length) {
+          stockReportNotes.innerHTML = "";
+          return;
+        }
+        stockReportNotes.innerHTML = notes
+          .map((note) => "<p class=\"report-note\">" + escapeHtml(note) + "</p>")
+          .join("");
+      }
+
+      function renderStockReportUnavailable(payload, fallbackMessage) {
+        stockReportHeaderDate.textContent = valueOrDash(payload && payload.report_date);
+        stockReportLead.textContent = "Показываем только SKU, где хотя бы по одному supported district stock меньше 50 единиц.";
+        stockReportStatus.textContent = valueOrDash((payload && payload.reason) || fallbackMessage || "Отчёт по остаткам пока недоступен.");
+        stockReportStatus.className = "section-message";
+        stockReportContent.hidden = true;
+        stockReportRows.innerHTML = "";
+        renderStockReportNotes(payload && payload.notes);
+      }
+
+      function renderStockReportRows(rows) {
+        if (!Array.isArray(rows) || !rows.length) {
+          stockReportRows.innerHTML = "<p class=\"report-empty\">SKU с district stock меньше 50 единиц сейчас не найдено.</p>";
+          return;
+        }
+        stockReportRows.innerHTML = [
+          "<ol class=\"stock-report-list\">",
+          rows.map((item) => [
+            "<li class=\"stock-report-item\">",
+            "<div class=\"report-list-main\">",
+            "<div class=\"report-list-title\">" + escapeHtml(item.identity_label || "-") + "</div>",
+            "<div class=\"report-list-meta\">Общий остаток: " + escapeHtml(formatNumber(item.stock_total)) + "</div>",
+            "</div>",
+            "<div class=\"stock-report-chip-list\">",
+            ((Array.isArray(item.breached_districts) ? item.breached_districts : []).map((district) => (
+              "<span class=\"stock-report-chip\">" + escapeHtml(String(district.label || "-") + " — " + formatNumber(district.stock)) + "</span>"
+            )).join("")),
+            "</div>",
+            "</li>",
+          ].join("")).join(""),
+          "</ol>"
+        ].join("");
+      }
+
+      function renderStockReport(payload) {
+        if (!payload || payload.status !== "available") {
+          renderStockReportUnavailable(payload, "Отчёт по остаткам пока недоступен.");
+          return;
+        }
+        stockReportHeaderDate.textContent = valueOrDash(payload.report_date);
+        stockReportLead.textContent = "Current business day: " + valueOrDash(payload.report_date) + ". Порог риска: остаток < " + valueOrDash(payload.threshold_lt) + ".";
+        stockReportStatus.textContent = "Source of truth: persisted ready snapshot / DATA_VITRINA / today_current.";
+        stockReportStatus.className = "section-message";
+        stockReportContent.hidden = false;
+        renderStockReportRows(payload.rows);
+        renderStockReportNotes(payload.notes);
       }
 
       function normalizeState(value, fallback) {
@@ -2173,6 +2404,29 @@
         }
       }
 
+      async function loadStockReport() {
+        try {
+          const response = await fetch(config.stock_report_path, {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          renderStockReport(payload);
+        } catch (error) {
+          renderStockReportUnavailable(
+            {
+              report_date: "",
+              reason: "Не удалось прочитать отчёт по остаткам: " + (error instanceof Error ? error.message : String(error)),
+              notes: []
+            },
+            "Отчёт по остаткам пока недоступен."
+          );
+        }
+      }
+
       async function pollJob(jobId) {
         while (true) {
           const response = await fetch(config.job_path + "?job_id=" + encodeURIComponent(jobId), {
@@ -2220,7 +2474,7 @@
           if (finalJob.result) {
             renderSnapshotFields(finalJob.result);
           }
-          await loadDailyReport();
+          await Promise.all([loadDailyReport(), loadStockReport()]);
         } catch (error) {
           renderError(
             actionName === "refresh" ? "Refresh завершился с ошибкой." : "Отправка завершилась с ошибкой.",
@@ -2511,13 +2765,18 @@
       calculateFactoryOrderButton.addEventListener("click", calculateFactoryOrder);
       calculateRegionalSupplyButton.addEventListener("click", calculateRegionalSupply);
       downloadRecommendationButton.addEventListener("click", downloadRecommendation);
+      bindReportToggle(dailyReportToggle, dailyReportPanelBody);
+      bindReportToggle(stockReportToggle, stockReportPanelBody);
 
       activateTab("vitrina");
       activateSupplySection("factory");
+      setReportExpanded(dailyReportToggle, dailyReportPanelBody, false);
+      setReportExpanded(stockReportToggle, stockReportPanelBody, false);
       setActionState(null);
       setCompletedJob(null);
       loadStatus();
       loadDailyReport();
+      loadStockReport();
       loadFactoryStatus();
       loadRegionalStatus();
     })();
