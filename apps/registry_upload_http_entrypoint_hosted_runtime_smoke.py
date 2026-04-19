@@ -124,6 +124,8 @@ def main() -> None:
                 raise AssertionError("deploy --dry-run must stay dry-run")
             if "rsync" not in " ".join(deploy_dry_run["commands"]["rsync"]):
                 raise AssertionError("deploy --dry-run must expose rsync command")
+            if "openpyxl==3.1.5" not in " ".join(deploy_dry_run["commands"]["runtime_pip_install"]):
+                raise AssertionError("deploy --dry-run must expose runtime pip install command for openpyxl")
             if "install" not in " ".join(deploy_dry_run["commands"]["systemd_install"]):
                 raise AssertionError("deploy --dry-run must expose systemd install command")
             if "daemon-reload" not in " ".join(deploy_dry_run["commands"]["systemd_daemon_reload"]):
@@ -202,6 +204,7 @@ def main() -> None:
 
             print(f"print_plan: ok -> {print_plan['deploy_plan']['target_id']}")
             print(f"deploy_dry_run: ok -> {deploy_dry_run['commands']['restart'][-1]}")
+            print(f"deploy_dry_run_runtime_pip: ok -> {deploy_dry_run['commands']['runtime_pip_install'][-1]}")
             print(
                 "deploy_dry_run_systemd: ok -> "
                 f"{deploy_dry_run['commands']['systemd_restart'][-1]}"

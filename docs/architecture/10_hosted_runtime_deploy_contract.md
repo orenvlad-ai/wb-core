@@ -122,6 +122,9 @@ Optional runtime overrides remain the same as in current official-api boundary:
 Current promo live-wiring note:
 - if hosted runtime uses the repo-owned `promo_by_price` live seam, service env must expose a valid seller session state path for the bounded browser collector;
 - canonical selleros host default = `/opt/wb-web-bot/storage_state.json`, but runtime may override it explicitly via `PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH`.
+- hosted deploy contract must also materialize the bounded workbook parser dependency on the remote system python:
+  - current canonical package = `openpyxl==3.1.5`
+  - deploy runner installs it on host before restart if it is still missing.
 
 Secrets stay outside Git. Repo stores only env names and target shape.
 
@@ -137,6 +140,14 @@ For live/public tasks affecting this contour `repo-only` does not count as compl
 7. if the task changes bound Apps Script or live sheet behavior, finish the corresponding `clasp`/sheet verify path.
 
 `deploy-and-verify` may be used as one combined step when access is already safe and available.
+
+Current deploy contract note:
+- `deploy` does more than `rsync + restart`:
+  - sync current checkout;
+  - ensure required hosted runtime python packages are present (`openpyxl==3.1.5`);
+  - install/update repo-owned systemd units when configured;
+  - restart runtime;
+  - only after that run loopback/public verification.
 
 If deploy / publish / restart / probe / `clasp` / verify steps are safe and available, Codex обязана выполнить их в том же bounded execution.
 If any of these steps are unavailable or unsafe, execution must return incomplete with an exact blocker instead of a vague ops-gap.

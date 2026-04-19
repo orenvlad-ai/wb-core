@@ -33,7 +33,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "967edcc2059b36db36a3846d9f773c0b90e20f90"
+built_from_commit: "078201a7131674e4fd7c9c272ef98baa17d959bf"
 ---
 
 # Summary
@@ -170,6 +170,10 @@ Current canonical WB secret path for official adapters:
 Current promo runtime env override when hosted runtime needs explicit seller session path:
 - `PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH`
 - canonical selleros value = `/opt/wb-web-bot/storage_state.json`
+
+Current hosted runtime dependency note for promo live wiring:
+- hosted `deploy` now also ensures `openpyxl==3.1.5` on the remote system python before restarting `wb-core-registry-http.service`;
+- if deploy still fails before HTTP probes, first inspect `journalctl -u wb-core-registry-http.service` for import-time dependency drift instead of treating it as an unspecified runtime outage.
 
 Current canonical business timezone for server-side `sheet_vitrina_v1` date math:
 - `Asia/Yekaterinburg`
