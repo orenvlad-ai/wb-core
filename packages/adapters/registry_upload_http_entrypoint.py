@@ -677,6 +677,7 @@ def _build_handler(
                         {
                             "error": str(exc),
                             "server_context": entrypoint.build_sheet_server_context(),
+                            "manual_context": entrypoint.build_sheet_manual_context(),
                         },
                     )
                     return

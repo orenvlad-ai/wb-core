@@ -743,7 +743,8 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Статус последнего автозапуска",
             "Последнее успешное автообновление",
             "Лог",
-            "нет активной операции",
+            "Последняя удачная загрузка",
+            "Последняя удачная отправка",
             route_paths["SHEET_VITRINA_REFRESH_HTTP_PATH"],
             route_paths["SHEET_VITRINA_STATUS_HTTP_PATH"],
             DEFAULT_SHEET_LOAD_PATH,
@@ -823,8 +824,9 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
                 "plan_version",
                 "sheet_row_counts",
                 "server_context",
+                "manual_context",
             ],
-            error_keys=["error", "server_context"],
+            error_keys=["error", "server_context", "manual_context"],
         )
         return evaluation
 

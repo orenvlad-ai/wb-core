@@ -224,7 +224,7 @@ update_note: "Обновлён под current factory-order historical seam и c
   - server хранит и публикует отдельный XLSX на каждый округ, а не один общий recommendation workbook;
   - district XLSX содержит district identification + compact operator rows `nmId / SKU / Количество к поставке` именно по фактически аллоцированному количеству после ограничения `stock_ff`.
 - Current repo state не имел другого authoritative source для legacy parity term `FO_INBOUND_FF_TO_WB`, поэтому entrypoint получил narrow explicit upload contract `Товары в пути от ФФ на Wildberries`; silent drop этого члена формулы считается некорректным.
-- Operator page keeps narrow Russian chrome for operator-visible labels: compact manual block `Ручная загрузка данных` with embedded actions `Загрузить данные` / `Отправить данные`, prepared-snapshot row-count fields, separate `Лог` block and separate compact auto block `Автообновления`; page reload must not present persisted refresh metadata as standalone proof of the last manual sheet write.
+- Operator page keeps narrow Russian chrome for operator-visible labels: compact manual block `Ручная загрузка данных` with embedded actions `Загрузить данные` / `Отправить данные` plus only two truthful persisted manual-success fields `Последняя удачная загрузка` / `Последняя удачная отправка`, separate `Лог` block and separate compact auto block `Автообновления`; page reload must not present persisted refresh metadata as standalone proof of the last manual sheet write.
 - Operator page добавляет отдельный top-level tab `Отчёты` с одним sibling selector по образцу supply tab:
   - `Ежедневные отчёты`
   - `Отчёт по остаткам`
@@ -293,13 +293,14 @@ update_note: "Обновлён под current factory-order historical seam и c
   - merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь` deliberately excluded from stock-report filter and display, because current truth does not split Far East from Siberia
 - Operator page keeps one compact server-driven manual block `Ручная загрузка данных`:
   - embedded actions `Загрузить данные` / `Отправить данные`
-  - `Ручная операция`
-  - `Снимок на дату`
-  - `Колонки дат`
-  - `Подготовлен`
-  - `Строки DATA_VITRINA`
-  - `Строки STATUS`
-  - reload/page-open state for this block may show only the last prepared snapshot; successful manual `load` is proved only by the completed job log
+  - `Последняя удачная загрузка`
+  - `Последняя удачная отправка`
+  - fields are filled only from persisted `manual_context`
+  - `Последняя удачная загрузка` = only the last successful manual `refresh`
+  - `Последняя удачная отправка` = only the last successful manual `load`
+  - auto-update success must not overwrite these fields
+  - failed manual attempts must not erase the previously known successful manual time
+  - reload/page-open state for this block stays truthful to persisted manual-success facts; technical prepared-snapshot details stay only in the job/log surface
 - Operator page keeps one compact server-driven auto block `Автообновления`:
   - `Часовой пояс`
   - `Текущее время сервера`
@@ -307,7 +308,7 @@ update_note: "Обновлён под current factory-order historical seam и c
   - `Последний автозапуск`
   - `Статус последнего автозапуска`
   - `Последнее успешное автообновление`
-- Этот auto block не hardcode-ится в UI: page читает его только из existing `GET /v1/sheet-vitrina-v1/status` / `POST /v1/sheet-vitrina-v1/refresh` response field `server_context`.
+- Этот auto block не hardcode-ится в UI: page читает его только из existing `GET /v1/sheet-vitrina-v1/status` / `POST /v1/sheet-vitrina-v1/refresh` response field `server_context`, а manual-success fields page читает только из sibling field `manual_context`.
 - `Автоцепочка` в этом block обязана быть truthful server-driven описанием полного daily auto path, а не только временем:
   - canonical current wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
   - manual operator semantics теперь явно отличаются от auto path: explicit UI buttons всё ещё разделяют `refresh` и `load`, short retries остаются внутри одного run, но persisted long-retry state после manual refresh не создаётся

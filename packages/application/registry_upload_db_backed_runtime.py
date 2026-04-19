@@ -38,6 +38,7 @@ from packages.contracts.registry_upload_file_backed_service import (
 from packages.contracts.sheet_vitrina_v1 import (
     SheetVitrinaV1AutoUpdateState,
     SheetVitrinaV1Envelope,
+    SheetVitrinaV1ManualOperatorState,
     SheetVitrinaV1RefreshResult,
 )
 
@@ -500,6 +501,93 @@ class RegistryUploadDbBackedRuntime:
                 last_run_as_of_date=row["last_run_as_of_date"],
                 last_run_refreshed_at=row["last_run_refreshed_at"],
                 last_successful_auto_update_at=row["last_successful_auto_update_at"],
+            )
+
+    def save_sheet_vitrina_manual_refresh_success(self, *, refreshed_at: str) -> None:
+        _validate_timestamp(refreshed_at, field_name="refreshed_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            previous = conn.execute(
+                """
+                SELECT last_successful_manual_load_at
+                FROM sheet_vitrina_v1_manual_operator_state
+                WHERE slot = 1
+                """
+            ).fetchone()
+            last_successful_manual_load_at = (
+                previous["last_successful_manual_load_at"] if previous is not None else None
+            )
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_manual_operator_state(
+                    slot,
+                    last_successful_manual_refresh_at,
+                    last_successful_manual_load_at
+                )
+                VALUES(1, ?, ?)
+                ON CONFLICT(slot) DO UPDATE SET
+                    last_successful_manual_refresh_at = excluded.last_successful_manual_refresh_at,
+                    last_successful_manual_load_at = excluded.last_successful_manual_load_at
+                """,
+                (
+                    refreshed_at,
+                    last_successful_manual_load_at,
+                ),
+            )
+            conn.commit()
+
+    def save_sheet_vitrina_manual_load_success(self, *, loaded_at: str) -> None:
+        _validate_timestamp(loaded_at, field_name="loaded_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            previous = conn.execute(
+                """
+                SELECT last_successful_manual_refresh_at
+                FROM sheet_vitrina_v1_manual_operator_state
+                WHERE slot = 1
+                """
+            ).fetchone()
+            last_successful_manual_refresh_at = (
+                previous["last_successful_manual_refresh_at"] if previous is not None else None
+            )
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_manual_operator_state(
+                    slot,
+                    last_successful_manual_refresh_at,
+                    last_successful_manual_load_at
+                )
+                VALUES(1, ?, ?)
+                ON CONFLICT(slot) DO UPDATE SET
+                    last_successful_manual_refresh_at = excluded.last_successful_manual_refresh_at,
+                    last_successful_manual_load_at = excluded.last_successful_manual_load_at
+                """,
+                (
+                    last_successful_manual_refresh_at,
+                    loaded_at,
+                ),
+            )
+            conn.commit()
+
+    def load_sheet_vitrina_manual_operator_state(self) -> SheetVitrinaV1ManualOperatorState:
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT
+                    last_successful_manual_refresh_at,
+                    last_successful_manual_load_at
+                FROM sheet_vitrina_v1_manual_operator_state
+                WHERE slot = 1
+                """
+            ).fetchone()
+            if row is None:
+                return SheetVitrinaV1ManualOperatorState()
+            return SheetVitrinaV1ManualOperatorState(
+                last_successful_manual_refresh_at=row["last_successful_manual_refresh_at"],
+                last_successful_manual_load_at=row["last_successful_manual_load_at"],
             )
 
     def load_persisted_upload_result(self, bundle_version: str) -> RegistryUploadResult:
@@ -1671,6 +1759,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             last_run_as_of_date TEXT,
             last_run_refreshed_at TEXT,
             last_successful_auto_update_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_manual_operator_state (
+            slot INTEGER PRIMARY KEY CHECK (slot = 1),
+            last_successful_manual_refresh_at TEXT,
+            last_successful_manual_load_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS cost_price_upload_versions (

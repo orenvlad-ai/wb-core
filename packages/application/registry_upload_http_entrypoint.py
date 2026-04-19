@@ -127,6 +127,7 @@ class RegistryUploadHttpEntrypoint:
     def handle_sheet_status_request(self, as_of_date: str | None = None) -> dict[str, Any]:
         payload = asdict(self.runtime.load_sheet_vitrina_refresh_status(as_of_date=as_of_date))
         payload["server_context"] = self.build_sheet_server_context()
+        payload["manual_context"] = self.build_sheet_manual_context()
         return payload
 
     def handle_sheet_daily_report_request(self) -> dict[str, Any]:
@@ -238,7 +239,11 @@ class RegistryUploadHttpEntrypoint:
                         as_of_date=default_visible_as_of_date,
                     )
                 )
-                load_result = self._run_sheet_load(as_of_date=default_visible_as_of_date, log=emit)
+                load_result = self._run_sheet_load(
+                    as_of_date=default_visible_as_of_date,
+                    log=emit,
+                    execution_mode=EXECUTION_MODE_PERSISTED_RETRY,
+                )
 
             closure_states = self.runtime.list_temporal_source_closure_states(
                 source_keys=sorted(HISTORICAL_CLOSED_DAY_SOURCE_KEYS | CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS),
@@ -274,6 +279,7 @@ class RegistryUploadHttpEntrypoint:
                     )
                 ],
                 "server_context": self.build_sheet_server_context(),
+                "manual_context": self.build_sheet_manual_context(),
             }
         emit(
             _format_log_event(
@@ -369,6 +375,7 @@ class RegistryUploadHttpEntrypoint:
                 load_payload = self._run_sheet_load(
                     as_of_date=str(refresh_payload["as_of_date"]),
                     log=emit,
+                    execution_mode=EXECUTION_MODE_AUTO_DAILY,
                 )
             except Exception as exc:
                 finished_at = self.activated_at_factory()
@@ -428,6 +435,7 @@ class RegistryUploadHttpEntrypoint:
             payload["auto_update_started_at"] = started_at
             payload["auto_update_finished_at"] = finished_at
             payload["server_context"] = self.build_sheet_server_context()
+            payload["manual_context"] = self.build_sheet_manual_context()
             return payload
 
     def _run_sheet_refresh(
@@ -497,8 +505,13 @@ class RegistryUploadHttpEntrypoint:
                 refreshed_at=self.refreshed_at_factory(),
                 plan=plan,
             )
+            if execution_mode == EXECUTION_MODE_MANUAL_OPERATOR:
+                self.runtime.save_sheet_vitrina_manual_refresh_success(
+                    refreshed_at=refresh_result.refreshed_at,
+                )
             payload = asdict(refresh_result)
             payload["server_context"] = self.build_sheet_server_context()
+            payload["manual_context"] = self.build_sheet_manual_context()
             emit(
                 _format_log_event(
                     "refresh_runtime_save_finish",
@@ -525,6 +538,7 @@ class RegistryUploadHttpEntrypoint:
         *,
         as_of_date: str | None,
         log: OperatorLogEmitter | None,
+        execution_mode: str = EXECUTION_MODE_MANUAL_OPERATOR,
     ) -> dict[str, Any]:
         emit = log or _noop_log
         with self._sheet_cycle_lock:
@@ -536,6 +550,7 @@ class RegistryUploadHttpEntrypoint:
                     route=SHEET_VITRINA_LOAD_ROUTE,
                     requested_as_of_date=as_of_date or "latest_bundle_snapshot",
                     action="write_prepared_snapshot_only",
+                    execution_mode=execution_mode,
                 )
             )
             emit(
@@ -581,6 +596,9 @@ class RegistryUploadHttpEntrypoint:
                 )
             )
             bridge_result = self.sheet_load_runner(plan, emit)
+            finished_at = self.activated_at_factory()
+            if execution_mode == EXECUTION_MODE_MANUAL_OPERATOR:
+                self.runtime.save_sheet_vitrina_manual_load_success(loaded_at=finished_at)
             _emit_bridge_result_log(bridge_result, emit, cycle="load")
             emit(
                 _format_log_event(
@@ -608,6 +626,7 @@ class RegistryUploadHttpEntrypoint:
                 "bridge_result": bridge_result,
             }
             payload["server_context"] = self.build_sheet_server_context()
+            payload["manual_context"] = self.build_sheet_manual_context()
             return payload
 
     def build_sheet_server_context(self) -> dict[str, str]:
@@ -635,6 +654,17 @@ class RegistryUploadHttpEntrypoint:
                 auto_update_state.last_successful_auto_update_at
             ),
             "last_auto_run_error": auto_update_state.last_run_error or "",
+        }
+
+    def build_sheet_manual_context(self) -> dict[str, str]:
+        manual_state = self.runtime.load_sheet_vitrina_manual_operator_state()
+        return {
+            "last_successful_manual_refresh_at": _format_optional_business_timestamp(
+                manual_state.last_successful_manual_refresh_at
+            ),
+            "last_successful_manual_load_at": _format_optional_business_timestamp(
+                manual_state.last_successful_manual_load_at
+            ),
         }
 
 
