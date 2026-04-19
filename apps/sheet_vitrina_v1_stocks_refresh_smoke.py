@@ -51,6 +51,7 @@ def main() -> None:
         _ingest_bundle(runtime=runtime, bundle=bundle)
         current_state = runtime.load_current_state()
         requested_nm_ids = [int(item.nm_id) for item in current_state.config_v2 if item.enabled]
+        expected_today_total = 14.0 + max(len(requested_nm_ids) - 1, 0) * 2.0
         runtime.save_temporal_source_snapshot(
             source_key="stocks",
             snapshot_date=AS_OF_DATE,
@@ -74,7 +75,7 @@ def main() -> None:
             sf_period_block=_SyntheticSuccessBlock("sf_period"),
             spp_block=_SyntheticSuccessBlock("spp"),
             ads_bids_block=_SyntheticSuccessBlock("ads_bids"),
-            stocks_block=StocksBlock(_ExplodingStocksSource()),
+            stocks_block=StocksBlock(_HybridStocksSource(requested_nm_ids=requested_nm_ids)),
             ads_compact_block=_SyntheticSuccessBlock("ads_compact"),
             fin_report_daily_block=_SyntheticSuccessBlock("fin_report_daily"),
             now_factory=lambda: datetime(2026, 4, 16, 21, 30, tzinfo=timezone.utc),
@@ -127,19 +128,21 @@ def main() -> None:
                 raise AssertionError(f"stocks[yesterday_closed] freshness mismatch: {stocks_yesterday}")
             if "resolution_rule=exact_date_stocks_history_runtime_cache" not in str(stocks_yesterday["note"]):
                 raise AssertionError(f"stocks cache note missing: {stocks_yesterday}")
-            if stocks_today["kind"] != "not_available":
-                raise AssertionError(f"stocks[today_current] must stay not_available, got {stocks_today}")
+            if stocks_today["kind"] != "success":
+                raise AssertionError(f"stocks[today_current] must materialize current exact-date truth, got {stocks_today}")
 
             stock_rows = _find_data_rows(plan_payload, "stock_total")
             if not stock_rows:
                 raise AssertionError("plan must contain stock_total rows")
             if not any(_row_yesterday_value(row) == 18.0 for row in stock_rows):
                 raise AssertionError("historical stocks must materialize SKU yesterday values")
-            if any(_row_today_value(row) not in ("", None) for row in stock_rows):
-                raise AssertionError("today_current stock values must stay blank")
+            if not any(_row_today_value(row) == 14.0 for row in stock_rows):
+                raise AssertionError("today_current stock values must materialize current-date stocks")
             total_stock_rows = _find_data_rows(plan_payload, "total_stock_total")
             if not any(_row_yesterday_value(row) == 50.0 for row in total_stock_rows):
                 raise AssertionError("TOTAL stock_total must aggregate historical closed-day values")
+            if not any(_row_today_value(row) == expected_today_total for row in total_stock_rows):
+                raise AssertionError("TOTAL stock_total must aggregate today_current exact-date values")
             if not any(_row_yesterday_value(row) == 5.0 for row in _find_data_rows(plan_payload, "stock_ru_south_caucasus")):
                 raise AssertionError("south/caucasus district must materialize from cached historical stocks")
             if not any(_row_yesterday_value(row) == 2.0 for row in _find_data_rows(plan_payload, "stock_ru_far_siberia")):
@@ -153,8 +156,8 @@ def main() -> None:
             loaded_rows = load_harness_result["sheets"]["DATA_VITRINA"]["values"]
             if not any(_row_yesterday_value(row) == 50.0 for row in _find_loaded_rows(loaded_rows, "total_stock_total")):
                 raise AssertionError("loaded DATA_VITRINA must keep historical total_stock_total")
-            if any(_row_today_value(row) not in ("", None) for row in _find_loaded_rows(loaded_rows, "stock_total")):
-                raise AssertionError("loaded DATA_VITRINA must keep today_current stocks blank")
+            if not any(_row_today_value(row) == 14.0 for row in _find_loaded_rows(loaded_rows, "stock_total")):
+                raise AssertionError("loaded DATA_VITRINA must keep today_current stocks materialized")
             if status_payload["snapshot_id"] != refresh_payload["snapshot_id"]:
                 raise AssertionError("status snapshot_id must match refreshed snapshot")
 
@@ -187,9 +190,17 @@ class _SyntheticSuccessBlock:
         return SimpleNamespace(result=payload)
 
 
-class _ExplodingStocksSource:
+class _HybridStocksSource:
+    def __init__(self, *, requested_nm_ids: list[int]) -> None:
+        self.requested_nm_ids = requested_nm_ids
+
     def fetch(self, request: object) -> dict[str, Any]:
-        raise AssertionError("historical stocks loader must not be called when runtime cache is already backfilled")
+        snapshot_date = str(getattr(request, "snapshot_date"))
+        if snapshot_date == AS_OF_DATE:
+            raise AssertionError("historical stocks loader must not be called when runtime cache is already backfilled")
+        if snapshot_date != TODAY_CURRENT_DATE:
+            raise AssertionError(f"unexpected stocks snapshot_date: {snapshot_date}")
+        return _today_stocks_payload(self.requested_nm_ids)
 
 
 def _historical_stocks_payload(requested_nm_ids: list[int]) -> dict[str, Any]:
@@ -211,6 +222,29 @@ def _historical_stocks_payload(requested_nm_ids: list[int]) -> dict[str, Any]:
         "data": {
             "rows": rows,
             "requested_snapshot_date": AS_OF_DATE,
+        },
+    }
+
+
+def _today_stocks_payload(requested_nm_ids: list[int]) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = [
+        _row(TODAY_CURRENT_DATE, requested_nm_ids[0], "Центральный", 9),
+        _row(TODAY_CURRENT_DATE, requested_nm_ids[0], "Приволжский", 3),
+        _row(TODAY_CURRENT_DATE, requested_nm_ids[0], "Южный и Северо-Кавказский", 2),
+    ]
+    for nm_id in requested_nm_ids[1:]:
+        rows.append(_row(TODAY_CURRENT_DATE, nm_id, "Центральный", 1))
+        rows.append(_row(TODAY_CURRENT_DATE, nm_id, "Приволжский", 1))
+    return {
+        "snapshot_date": TODAY_CURRENT_DATE,
+        "requested_nm_ids": requested_nm_ids,
+        "source": {
+            "report_type": "STOCK_HISTORY_DAILY_CSV",
+            "download_id": "smoke-download-id-current",
+        },
+        "data": {
+            "rows": rows,
+            "requested_snapshot_date": TODAY_CURRENT_DATE,
         },
     }
 

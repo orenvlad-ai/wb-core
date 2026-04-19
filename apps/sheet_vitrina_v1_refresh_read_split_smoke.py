@@ -77,7 +77,11 @@ def _build_items(source_key: str) -> list[SimpleNamespace]:
         return [SimpleNamespace(nm_id=100000001, views_current=7, ctr_current=0.21, orders_current=2)]
     if source_key == "sales_funnel_history":
         return [SimpleNamespace(nm_id=100000001, add_to_cart_count=5, orders_count=2)]
-    if source_key in {"prices_snapshot", "sf_period", "spp", "ads_bids", "stocks", "ads_compact", "fin_report_daily"}:
+    if source_key == "prices_snapshot":
+        return [SimpleNamespace(nm_id=100000001, price_seller=219.0, price_seller_discounted=199.0)]
+    if source_key == "ads_bids":
+        return [SimpleNamespace(nm_id=100000001, ads_bid_search=12.0, ads_bid_recommendations=9.0)]
+    if source_key in {"sf_period", "spp", "stocks", "ads_compact", "fin_report_daily"}:
         return [SimpleNamespace(nm_id=100000001)]
     return []
 
@@ -235,7 +239,7 @@ def main() -> None:
                 != (
                     [TODAY_CURRENT_DATE]
                     if block.source_key in CURRENT_ONLY_SOURCE_KEYS
-                    else ([AS_OF_DATE] if block.source_key == "stocks" else [AS_OF_DATE, TODAY_CURRENT_DATE])
+                    else [AS_OF_DATE, TODAY_CURRENT_DATE]
                 )
                 for block in counters.values()
             ):
@@ -244,8 +248,8 @@ def main() -> None:
             status_rows = {row[0]: row for row in status_sheet["rows"]}
             if status_rows["stocks[yesterday_closed]"][1] != "success":
                 raise AssertionError("stocks yesterday_closed must materialize historical closed-day data")
-            if status_rows["stocks[today_current]"][1] != "not_available":
-                raise AssertionError("stocks today_current must stay explicitly unavailable")
+            if status_rows["stocks[today_current]"][1] != "success":
+                raise AssertionError("stocks today_current must now materialize exact-date current data")
             if status_rows["prices_snapshot[yesterday_closed]"][1] != "not_available":
                 raise AssertionError("prices yesterday_closed must stay explicitly unavailable")
             if status_rows["prices_snapshot[today_current]"][1] != "success":
@@ -272,7 +276,7 @@ def main() -> None:
                 != (
                     [TODAY_CURRENT_DATE]
                     if block.source_key in CURRENT_ONLY_SOURCE_KEYS
-                    else ([AS_OF_DATE] if block.source_key == "stocks" else [AS_OF_DATE, TODAY_CURRENT_DATE])
+                    else [AS_OF_DATE, TODAY_CURRENT_DATE]
                 )
                 for block in counters.values()
             ):
@@ -323,7 +327,7 @@ def _assert_counting_calls(counters: dict[str, CountingBlock]) -> None:
         "sf_period": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "spp": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "ads_bids": [TODAY_CURRENT_DATE],
-        "stocks": [AS_OF_DATE],
+        "stocks": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "ads_compact": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "fin_report_daily": [AS_OF_DATE, TODAY_CURRENT_DATE],
     }
@@ -406,13 +410,20 @@ def _expected_server_context() -> dict[str, str]:
         "business_now": "2026-04-13T13:00:00+05:00",
         "default_as_of_date": AS_OF_DATE,
         "today_current_date": TODAY_CURRENT_DATE,
-        "daily_refresh_business_time": "11:00 Asia/Yekaterinburg",
-        "daily_refresh_systemd_time": "06:00:00 UTC",
-        "daily_refresh_systemd_oncalendar": "*-*-* 06:00:00 UTC",
+        "daily_refresh_business_time": "11:00, 20:00 Asia/Yekaterinburg",
+        "daily_refresh_systemd_time": "06:00:00 UTC, 15:00:00 UTC",
+        "daily_refresh_systemd_oncalendar": "*-*-* 06:00:00 UTC; *-*-* 15:00:00 UTC",
         "daily_auto_action": "загрузка данных + отправка данных в таблицу",
-        "daily_auto_description": "Ежедневно в 11:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу",
+        "daily_auto_description": "Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу",
         "daily_auto_trigger_name": "wb-core-sheet-vitrina-refresh.timer",
-        "daily_auto_trigger_description": "wb-core-sheet-vitrina-refresh.timer -> POST /v1/sheet-vitrina-v1/refresh (auto_load=true)",
+        "daily_auto_trigger_description": (
+            "wb-core-sheet-vitrina-refresh.timer -> POST /v1/sheet-vitrina-v1/refresh "
+            "(auto_load=true) в 11:00, 20:00 Asia/Yekaterinburg"
+        ),
+        "retry_runner_description": (
+            "Persisted retry runner: дожимает due yesterday_closed для historical/date-period families "
+            "и same-day today_current только для WB API current-snapshot-only families; manual refresh такие хвосты не создаёт."
+        ),
         "last_auto_run_status": "never",
         "last_auto_run_status_label": "ещё не выполнялся",
         "last_auto_run_time": "",

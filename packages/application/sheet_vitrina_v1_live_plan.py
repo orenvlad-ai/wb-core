@@ -80,10 +80,25 @@ AGGREGATE_AVG_PREFIX = "avg_"
 DELIVERY_CONTRACT_VERSION = "sheet_vitrina_v1_temporal_live_v1"
 TEMPORAL_SLOT_YESTERDAY_CLOSED = "yesterday_closed"
 TEMPORAL_SLOT_TODAY_CURRENT = "today_current"
+EXECUTION_MODE_AUTO_DAILY = "auto_daily"
+EXECUTION_MODE_MANUAL_OPERATOR = "manual_operator"
+EXECUTION_MODE_PERSISTED_RETRY = "persisted_retry"
 STRICT_CLOSED_DAY_SOURCE_KEYS = {"seller_funnel_snapshot", "web_source_snapshot"}
+HISTORICAL_CLOSED_DAY_SOURCE_KEYS = STRICT_CLOSED_DAY_SOURCE_KEYS | {
+    "sales_funnel_history",
+    "sf_period",
+    "spp",
+    "stocks",
+    "ads_compact",
+    "fin_report_daily",
+}
+CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids"}
+ACCEPTED_CURRENT_SOURCE_KEYS = HISTORICAL_CLOSED_DAY_SOURCE_KEYS | CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS
+EXACT_DATE_RUNTIME_CACHE_SOURCE_KEYS = {"sales_funnel_history", "stocks"}
 TEMPORAL_ROLE_PROVISIONAL_CURRENT = "provisional_current_snapshot"
 TEMPORAL_ROLE_CLOSED_DAY_CANDIDATE = "closed_day_candidate_snapshot"
 TEMPORAL_ROLE_ACCEPTED_CLOSED = "accepted_closed_day_snapshot"
+TEMPORAL_ROLE_ACCEPTED_CURRENT = "accepted_current_snapshot"
 CLOSURE_STATE_PENDING = "closure_pending"
 CLOSURE_STATE_RETRYING = "closure_retrying"
 CLOSURE_STATE_RATE_LIMITED = "closure_rate_limited"
@@ -107,11 +122,25 @@ SOURCE_TEMPORAL_POLICIES = {
     "sf_period": "dual_day_capable",
     "spp": "dual_day_capable",
     "ads_bids": "today_current",
-    "stocks": "not_available_for_today",
+    "stocks": "dual_day_capable",
     "ads_compact": "dual_day_capable",
     "fin_report_daily": "dual_day_capable",
     "cost_price": "dual_day_capable",
     "promo_by_price": "blocked",
+}
+SOURCE_CLASSIFICATION_GROUPS = {
+    "seller_funnel_snapshot": "A_bot_web_source_historical_closed_day_capable",
+    "web_source_snapshot": "A_bot_web_source_historical_closed_day_capable",
+    "sales_funnel_history": "B_wb_api_date_period_capable",
+    "sf_period": "B_wb_api_date_period_capable",
+    "spp": "B_wb_api_date_period_capable",
+    "stocks": "B_wb_api_date_period_capable",
+    "ads_compact": "B_wb_api_date_period_capable",
+    "fin_report_daily": "B_wb_api_date_period_capable",
+    "prices_snapshot": "C_wb_api_current_snapshot_only",
+    "ads_bids": "C_wb_api_current_snapshot_only",
+    "cost_price": "D_other_non_wb_or_blocked",
+    "promo_by_price": "D_other_non_wb_or_blocked",
 }
 PERCENT_SOURCE_KEYS = {"ctr", "ctr_current", "localizationPercent"}
 DECISION_SUMMARY = {
@@ -297,6 +326,7 @@ class SheetVitrinaV1LivePlanBlock:
         self,
         as_of_date: str | None = None,
         log: LivePlanLogEmitter | None = None,
+        execution_mode: str = EXECUTION_MODE_AUTO_DAILY,
     ) -> SheetVitrinaV1Envelope:
         emit = log or _noop_live_plan_log
         current_state = self.runtime.load_current_state()
@@ -313,6 +343,7 @@ class SheetVitrinaV1LivePlanBlock:
                 requested_as_of_date=as_of_date or "default",
                 resolved_as_of_date=effective_date,
                 current_business_date=current_date,
+                execution_mode=execution_mode,
                 temporal_slots=",".join(
                     f"{slot.slot_key}:{slot.column_date}" for slot in temporal_slots
                 ),
@@ -366,6 +397,7 @@ class SheetVitrinaV1LivePlanBlock:
             temporal_slots,
             cost_price_state,
             current_web_source_sync_note=current_web_source_sync_note,
+            execution_mode=execution_mode,
             log=emit,
         )
         evaluator = _MetricEvaluator(
@@ -407,6 +439,7 @@ class SheetVitrinaV1LivePlanBlock:
             temporal_slots=temporal_slots,
             scope_row_counts=scope_row_counts,
             section_row_counts=section_row_counts,
+            execution_mode=execution_mode,
         )
         emit(
             _format_log_event(
@@ -429,6 +462,8 @@ class SheetVitrinaV1LivePlanBlock:
                 for slot in temporal_slots
             ],
             "source_temporal_policies": SOURCE_TEMPORAL_POLICIES,
+            "source_classification_groups": SOURCE_CLASSIFICATION_GROUPS,
+            "execution_mode": execution_mode,
             "data_vitrina": {
                 "sheet_name": "DATA_VITRINA",
                 "header": data_header,
@@ -449,11 +484,29 @@ class SheetVitrinaV1LivePlanBlock:
     def list_due_closed_day_retries(self) -> list[TemporalSourceClosureState]:
         now = self.now_factory()
         states = self.runtime.list_temporal_source_closure_states(
-            source_keys=sorted(STRICT_CLOSED_DAY_SOURCE_KEYS),
+            source_keys=sorted(HISTORICAL_CLOSED_DAY_SOURCE_KEYS),
             slot_kind=TEMPORAL_SLOT_YESTERDAY_CLOSED,
             states=sorted(CLOSURE_PENDING_STATES),
         )
         return [state for state in states if _closure_attempt_is_due(state, now)]
+
+    def list_due_current_capture_retries(
+        self,
+        *,
+        current_date: str | None = None,
+    ) -> list[TemporalSourceClosureState]:
+        now = self.now_factory()
+        effective_current_date = current_date or current_business_date_iso(now)
+        states = self.runtime.list_temporal_source_closure_states(
+            source_keys=sorted(CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS),
+            slot_kind=TEMPORAL_SLOT_TODAY_CURRENT,
+            states=sorted(CLOSURE_PENDING_STATES),
+        )
+        return [
+            state
+            for state in states
+            if state.target_date == effective_current_date and _closure_attempt_is_due(state, now)
+        ]
 
     def _sync_current_web_source_snapshot(self, current_date: str) -> str | None:
         try:
@@ -468,6 +521,7 @@ class SheetVitrinaV1LivePlanBlock:
         temporal_slots: list[SheetVitrinaV1TemporalSlot],
         cost_price_state: CostPriceCurrentState | None,
         current_web_source_sync_note: str | None = None,
+        execution_mode: str = EXECUTION_MODE_AUTO_DAILY,
         log: LivePlanLogEmitter | None = None,
     ) -> TemporalLiveSources:
         emit = log or _noop_live_plan_log
@@ -616,59 +670,20 @@ class SheetVitrinaV1LivePlanBlock:
                     statuses.append(gap_status)
                     _emit_source_status_log(emit, gap_status)
                     continue
-                if source_key in STRICT_CLOSED_DAY_SOURCE_KEYS and slot.slot_key == TEMPORAL_SLOT_YESTERDAY_CLOSED:
-                    status, payload = self._capture_closed_day_web_source(
-                        source_key=source_key,
-                        temporal_slot=slot.slot_key,
-                        temporal_policy=temporal_policy,
-                        column_date=slot.column_date,
-                        requested_nm_ids=requested_nm_ids,
-                        loader=loader,
-                    )
-                elif source_key in STRICT_CLOSED_DAY_SOURCE_KEYS:
-                    status, payload = self._capture_provisional_current_web_source(
-                        source_key=source_key,
-                        temporal_slot=slot.slot_key,
-                        temporal_policy=temporal_policy,
-                        column_date=slot.column_date,
-                        requested_nm_ids=requested_nm_ids,
-                        loader=loader,
-                        current_web_source_sync_note=(
-                            current_web_source_sync_note
-                            if slot.slot_key == TEMPORAL_SLOT_TODAY_CURRENT
-                            else None
-                        ),
-                    )
-                elif source_key in {"sales_funnel_history"}:
-                    status, payload = self._capture_cached_temporal_source(
-                        source_key=source_key,
-                        temporal_slot=slot.slot_key,
-                        temporal_policy=temporal_policy,
-                        column_date=slot.column_date,
-                        requested_nm_ids=requested_nm_ids,
-                        loader=loader,
-                    )
-                elif source_key == "stocks":
-                    status, payload = self._capture_cached_temporal_source(
-                        source_key=source_key,
-                        temporal_slot=slot.slot_key,
-                        temporal_policy=temporal_policy,
-                        column_date=slot.column_date,
-                        requested_nm_ids=requested_nm_ids,
-                        loader=loader,
-                        runtime_cache_note="resolution_rule=exact_date_stocks_history_runtime_cache",
-                        live_fetch_note="resolution_rule=historical_stocks_csv_fetch",
-                        prefer_cached_first=True,
-                    )
-                else:
-                    status, payload = _capture_live_source(
-                        source_key=source_key,
-                        temporal_slot=slot.slot_key,
-                        temporal_policy=temporal_policy,
-                        column_date=slot.column_date,
-                        requested_nm_ids=requested_nm_ids,
-                        loader=loader,
-                    )
+                status, payload = self._capture_slot_source(
+                    source_key=source_key,
+                    temporal_slot=slot.slot_key,
+                    temporal_policy=temporal_policy,
+                    column_date=slot.column_date,
+                    requested_nm_ids=requested_nm_ids,
+                    loader=loader,
+                    execution_mode=execution_mode,
+                    current_web_source_sync_note=(
+                        current_web_source_sync_note
+                        if slot.slot_key == TEMPORAL_SLOT_TODAY_CURRENT
+                        else None
+                    ),
+                )
                 statuses.append(status)
                 _emit_source_status_log(emit, status)
                 if source_key == "seller_funnel_snapshot":
@@ -752,6 +767,335 @@ class SheetVitrinaV1LivePlanBlock:
             slot_lookups=slot_lookups,
             source_temporal_policies=dict(SOURCE_TEMPORAL_POLICIES),
         )
+
+    def _capture_slot_source(
+        self,
+        *,
+        source_key: str,
+        temporal_slot: str,
+        temporal_policy: str,
+        column_date: str,
+        requested_nm_ids: list[int],
+        loader: Callable[[], Any],
+        execution_mode: str,
+        current_web_source_sync_note: str | None,
+    ) -> tuple[LiveSourceStatus, Any | None]:
+        if temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED and source_key in HISTORICAL_CLOSED_DAY_SOURCE_KEYS:
+            return self._capture_temporal_source_with_acceptance(
+                source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
+                requested_nm_ids=requested_nm_ids,
+                loader=loader,
+                execution_mode=execution_mode,
+                accepted_role=TEMPORAL_ROLE_ACCEPTED_CLOSED,
+                allow_persisted_retry=_execution_mode_allows_persisted_retry(execution_mode),
+                current_web_source_sync_note=None,
+            )
+        if temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT and source_key in ACCEPTED_CURRENT_SOURCE_KEYS:
+            return self._capture_temporal_source_with_acceptance(
+                source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
+                requested_nm_ids=requested_nm_ids,
+                loader=loader,
+                execution_mode=execution_mode,
+                accepted_role=TEMPORAL_ROLE_ACCEPTED_CURRENT,
+                allow_persisted_retry=(
+                    source_key in CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS
+                    and _execution_mode_allows_persisted_retry(execution_mode)
+                ),
+                current_web_source_sync_note=current_web_source_sync_note,
+            )
+        return _capture_live_source(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            loader=loader,
+        )
+
+    def _capture_temporal_source_with_acceptance(
+        self,
+        *,
+        source_key: str,
+        temporal_slot: str,
+        temporal_policy: str,
+        column_date: str,
+        requested_nm_ids: list[int],
+        loader: Callable[[], Any],
+        execution_mode: str,
+        accepted_role: str,
+        allow_persisted_retry: bool,
+        current_web_source_sync_note: str | None,
+    ) -> tuple[LiveSourceStatus, Any | None]:
+        now = self.now_factory()
+        now_iso = _format_runtime_timestamp(now)
+        closure_state = self.runtime.load_temporal_source_closure_state(
+            source_key=source_key,
+            target_date=column_date,
+            slot_kind=temporal_slot,
+        )
+        accepted_snapshot = self._load_slot_snapshot_status(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            snapshot_role=accepted_role,
+        )
+        if accepted_snapshot is None and source_key in STRICT_CLOSED_DAY_SOURCE_KEYS and temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT:
+            accepted_snapshot = self._load_slot_snapshot_status(
+                source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
+                requested_nm_ids=requested_nm_ids,
+                snapshot_role=TEMPORAL_ROLE_PROVISIONAL_CURRENT,
+            )
+        if accepted_snapshot is None and temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED and source_key in EXACT_DATE_RUNTIME_CACHE_SOURCE_KEYS:
+            cached_snapshot = self._load_cached_temporal_source(
+                source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
+                requested_nm_ids=requested_nm_ids,
+                runtime_cache_note=_runtime_cache_note(source_key),
+            )
+            if cached_snapshot is not None:
+                cached_status, cached_payload = cached_snapshot
+                self.runtime.save_temporal_source_slot_snapshot(
+                    source_key=source_key,
+                    snapshot_date=column_date,
+                    snapshot_role=accepted_role,
+                    captured_at=now_iso,
+                    payload=cached_payload,
+                )
+                if _source_slot_supports_persisted_retry(source_key=source_key, temporal_slot=temporal_slot):
+                    self.runtime.save_temporal_source_closure_state(
+                        source_key=source_key,
+                        target_date=column_date,
+                        slot_kind=temporal_slot,
+                        state=CLOSURE_STATE_SUCCESS,
+                        attempt_count=closure_state.attempt_count if closure_state is not None else 0,
+                        next_retry_at=None,
+                        last_reason="accepted_from_runtime_cache",
+                        last_attempt_at=now_iso,
+                        last_success_at=now_iso,
+                        accepted_at=now_iso,
+                    )
+                return (
+                    _append_status_note(
+                        cached_status,
+                        f"{_accepted_resolution_note(temporal_slot)}; accepted_at={now_iso}",
+                    ),
+                    cached_payload,
+                )
+
+        sync_error: str | None = None
+        if source_key in STRICT_CLOSED_DAY_SOURCE_KEYS and temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED:
+            try:
+                self.closed_day_web_source_sync.ensure_closed_day_snapshot(
+                    source_key=source_key,
+                    snapshot_date=column_date,
+                )
+            except Exception as exc:  # pragma: no cover - live sync fallback
+                sync_error = str(exc)
+
+        status, payload = _capture_live_source(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            loader=loader,
+        )
+        if current_web_source_sync_note:
+            status = _append_current_web_source_sync_note(status, current_web_source_sync_note)
+        if sync_error:
+            status = _append_status_note(status, f"closed_day_sync_error={sync_error}")
+
+        if payload is not None and _is_exact_snapshot_payload(payload, column_date):
+            if source_key in EXACT_DATE_RUNTIME_CACHE_SOURCE_KEYS:
+                self.runtime.save_temporal_source_snapshot(
+                    source_key=source_key,
+                    snapshot_date=column_date,
+                    captured_at=now_iso,
+                    payload=payload,
+                )
+            if source_key in STRICT_CLOSED_DAY_SOURCE_KEYS and temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT:
+                self.runtime.save_temporal_source_slot_snapshot(
+                    source_key=source_key,
+                    snapshot_date=column_date,
+                    snapshot_role=TEMPORAL_ROLE_PROVISIONAL_CURRENT,
+                    captured_at=now_iso,
+                    payload=payload,
+                )
+            if source_key in STRICT_CLOSED_DAY_SOURCE_KEYS and temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED:
+                self.runtime.save_temporal_source_slot_snapshot(
+                    source_key=source_key,
+                    snapshot_date=column_date,
+                    snapshot_role=TEMPORAL_ROLE_CLOSED_DAY_CANDIDATE,
+                    captured_at=now_iso,
+                    payload=payload,
+                )
+
+        candidate_valid = _is_valid_temporal_candidate(
+            source_key=source_key,
+            status=status,
+            payload=payload,
+            column_date=column_date,
+            temporal_slot=temporal_slot,
+        )
+        if payload is not None and _is_exact_snapshot_payload(payload, column_date) and not candidate_valid:
+            status = _coerce_invalid_temporal_candidate_status(
+                status=status,
+                requested_nm_ids=requested_nm_ids,
+                note_suffix=_invalid_temporal_candidate_note(source_key, temporal_slot),
+            )
+
+        if candidate_valid:
+            self.runtime.save_temporal_source_slot_snapshot(
+                source_key=source_key,
+                snapshot_date=column_date,
+                snapshot_role=accepted_role,
+                captured_at=now_iso,
+                payload=payload,
+            )
+            if _source_slot_supports_persisted_retry(source_key=source_key, temporal_slot=temporal_slot):
+                self.runtime.save_temporal_source_closure_state(
+                    source_key=source_key,
+                    target_date=column_date,
+                    slot_kind=temporal_slot,
+                    state=CLOSURE_STATE_SUCCESS,
+                    attempt_count=(closure_state.attempt_count if closure_state is not None else 0) + 1,
+                    next_retry_at=None,
+                    last_reason=_accepted_resolution_note(temporal_slot),
+                    last_attempt_at=now_iso,
+                    last_success_at=now_iso,
+                    accepted_at=now_iso,
+                )
+            return (
+                _append_status_note(
+                    status,
+                    f"{_accepted_resolution_note(temporal_slot)}; accepted_at={now_iso}",
+                ),
+                payload,
+            )
+
+        cached_snapshot = self._load_cached_temporal_source(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            runtime_cache_note=_runtime_cache_note(source_key),
+        )
+        if accepted_snapshot is None and cached_snapshot is not None:
+            accepted_snapshot = (cached_snapshot[0], cached_snapshot[1], None)
+
+        if accepted_snapshot is not None:
+            accepted_status, accepted_payload, accepted_at = accepted_snapshot
+            preserved_at = accepted_at or now_iso
+            self.runtime.save_temporal_source_slot_snapshot(
+                source_key=source_key,
+                snapshot_date=column_date,
+                snapshot_role=accepted_role,
+                captured_at=preserved_at,
+                payload=accepted_payload,
+            )
+            if _source_slot_supports_persisted_retry(source_key=source_key, temporal_slot=temporal_slot):
+                self.runtime.save_temporal_source_closure_state(
+                    source_key=source_key,
+                    target_date=column_date,
+                    slot_kind=temporal_slot,
+                    state=CLOSURE_STATE_SUCCESS,
+                    attempt_count=closure_state.attempt_count if closure_state is not None else 0,
+                    next_retry_at=None,
+                    last_reason="accepted_snapshot_preserved_after_invalid_attempt",
+                    last_attempt_at=now_iso,
+                    last_success_at=preserved_at,
+                    accepted_at=preserved_at,
+                )
+            return (
+                _build_preserved_accepted_status(
+                    accepted_status=accepted_status,
+                    accepted_at=preserved_at,
+                    latest_status=status,
+                    temporal_slot=temporal_slot,
+                ),
+                accepted_payload,
+            )
+
+        if allow_persisted_retry and _source_slot_supports_persisted_retry(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+        ):
+            reason = status.note or sync_error or _invalid_temporal_candidate_note(source_key, temporal_slot)
+            next_retry_at, retry_state = _next_closure_retry(now, (closure_state.attempt_count if closure_state is not None else 0) + 1, reason)
+            self.runtime.save_temporal_source_closure_state(
+                source_key=source_key,
+                target_date=column_date,
+                slot_kind=temporal_slot,
+                state=retry_state,
+                attempt_count=(closure_state.attempt_count if closure_state is not None else 0) + 1,
+                next_retry_at=next_retry_at,
+                last_reason=reason,
+                last_attempt_at=now_iso,
+                last_success_at=closure_state.last_success_at if closure_state is not None else None,
+                accepted_at=closure_state.accepted_at if closure_state is not None else None,
+            )
+            return _build_closure_retry_status(
+                source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
+                requested_nm_ids=requested_nm_ids,
+                closure_state=TemporalSourceClosureState(
+                    source_key=source_key,
+                    target_date=column_date,
+                    slot_kind=temporal_slot,
+                    state=retry_state,
+                    attempt_count=(closure_state.attempt_count if closure_state is not None else 0) + 1,
+                    next_retry_at=next_retry_at,
+                    last_reason=reason,
+                    last_attempt_at=now_iso,
+                    last_success_at=closure_state.last_success_at if closure_state is not None else None,
+                    accepted_at=closure_state.accepted_at if closure_state is not None else None,
+                ),
+            ), None
+
+        return status, None
+
+    def _load_slot_snapshot_status(
+        self,
+        *,
+        source_key: str,
+        temporal_slot: str,
+        temporal_policy: str,
+        column_date: str,
+        requested_nm_ids: list[int],
+        snapshot_role: str,
+    ) -> tuple[LiveSourceStatus, Any, str | None] | None:
+        cached_payload, cached_at = self.runtime.load_temporal_source_slot_snapshot(
+            source_key=source_key,
+            snapshot_date=column_date,
+            snapshot_role=snapshot_role,
+        )
+        if cached_payload is None or not _is_exact_snapshot_payload(cached_payload, column_date):
+            return None
+        cached_status, _ = _capture_live_source(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            loader=lambda: cached_payload,
+        )
+        return cached_status, cached_payload, cached_at
 
     def _capture_cached_temporal_source(
         self,
@@ -1255,6 +1599,7 @@ class _MetricEvaluator:
             ("sf_period_lookup", "feedback_rating", 1.0),
             ("spp_lookup", "spp", 1.0),
             ("ads_bids_lookup", "ads_bid_search", 1.0),
+            ("ads_bids_lookup", "ads_bid_recommendations", 1.0),
             ("stocks_lookup", "stock_total", 1.0),
             ("stocks_lookup", "stock_ru_central", 1.0),
             ("stocks_lookup", "stock_ru_northwest", 1.0),
@@ -1378,6 +1723,7 @@ def _build_status_rows(
     temporal_slots: list[SheetVitrinaV1TemporalSlot],
     scope_row_counts: Mapping[str, int],
     section_row_counts: Mapping[str, int],
+    execution_mode: str,
 ) -> list[list[Any]]:
     non_empty_value_rows = sum(
         1
@@ -1408,6 +1754,7 @@ def _build_status_rows(
                     "section_dictionary": "uploaded_authoritative",
                     "config_service_values": "preserve_CONFIG_HI",
                     "date_columns": ",".join(slot.column_date for slot in temporal_slots),
+                    "execution_mode": execution_mode,
                 }
             ),
         ]
@@ -1453,6 +1800,7 @@ def _build_status_rows(
                     "temporal_slots": ",".join(
                         f"{slot.slot_key}:{slot.column_date}" for slot in temporal_slots
                     ),
+                    "execution_mode": execution_mode,
                     "blocked_sources": ",".join(sorted(BLOCKED_SOURCE_STATUSES)),
                 }
             ),
@@ -1765,6 +2113,116 @@ def _build_cost_price_status(
             note=_format_note(note_payload),
         ),
         resolved,
+    )
+
+
+def _execution_mode_allows_persisted_retry(execution_mode: str) -> bool:
+    return execution_mode in {EXECUTION_MODE_AUTO_DAILY, EXECUTION_MODE_PERSISTED_RETRY}
+
+
+def _source_slot_supports_persisted_retry(*, source_key: str, temporal_slot: str) -> bool:
+    if temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED:
+        return source_key in HISTORICAL_CLOSED_DAY_SOURCE_KEYS
+    if temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT:
+        return source_key in CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS
+    return False
+
+
+def _accepted_resolution_note(temporal_slot: str) -> str:
+    if temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED:
+        return "resolution_rule=accepted_closed_current_attempt"
+    return "resolution_rule=accepted_current_current_attempt"
+
+
+def _runtime_cache_note(source_key: str) -> str:
+    if source_key == "stocks":
+        return "resolution_rule=exact_date_stocks_history_runtime_cache"
+    return "resolution_rule=exact_date_runtime_cache"
+
+
+def _invalid_temporal_candidate_note(source_key: str, temporal_slot: str) -> str:
+    if source_key in STRICT_CLOSED_DAY_SOURCE_KEYS:
+        return _invalid_temporal_web_source_note(source_key)
+    if temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT and source_key == "prices_snapshot":
+        return "invalid_exact_snapshot=zero_filled_prices_snapshot"
+    if temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT and source_key == "ads_bids":
+        return "invalid_exact_snapshot=zero_filled_ads_bids_snapshot"
+    return "invalid_exact_snapshot"
+
+
+def _is_valid_temporal_candidate(
+    *,
+    source_key: str,
+    status: LiveSourceStatus,
+    payload: Any | None,
+    column_date: str,
+    temporal_slot: str,
+) -> bool:
+    if payload is None or not _is_exact_snapshot_payload(payload, column_date):
+        return False
+    if status.kind != "success":
+        return False
+    if _is_invalid_temporal_web_source_payload(
+        source_key=source_key,
+        payload=payload,
+        column_date=column_date,
+        closed_day_required=temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED,
+    ):
+        return False
+    if source_key == "prices_snapshot":
+        items = getattr(payload, "items", None)
+        if not isinstance(items, list) or not items:
+            return False
+        return any(
+            _numeric_payload_value(getattr(item, "price_seller", None)) > 0
+            or _numeric_payload_value(getattr(item, "price_seller_discounted", None)) > 0
+            for item in items
+        )
+    if source_key == "ads_bids":
+        items = getattr(payload, "items", None)
+        if not isinstance(items, list) or not items:
+            return False
+        return any(
+            _numeric_payload_value(getattr(item, "ads_bid_search", None)) > 0
+            or _numeric_payload_value(getattr(item, "ads_bid_recommendations", None)) > 0
+            for item in items
+        )
+    return True
+
+
+def _build_preserved_accepted_status(
+    *,
+    accepted_status: LiveSourceStatus,
+    accepted_at: str | None,
+    latest_status: LiveSourceStatus,
+    temporal_slot: str,
+) -> LiveSourceStatus:
+    resolution_rule = (
+        "resolution_rule=accepted_closed_preserved_after_invalid_attempt"
+        if temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED
+        else "resolution_rule=accepted_current_preserved_after_invalid_attempt"
+    )
+    note_parts = [resolution_rule]
+    if accepted_at:
+        note_parts.append(f"accepted_at={accepted_at}")
+    note_parts.append(f"latest_attempt_kind={latest_status.kind}")
+    if latest_status.note:
+        note_parts.append(f"latest_attempt_note={latest_status.note}")
+    return _append_status_note(accepted_status, "; ".join(note_parts))
+
+
+def _coerce_invalid_temporal_candidate_status(
+    *,
+    status: LiveSourceStatus,
+    requested_nm_ids: list[int],
+    note_suffix: str,
+) -> LiveSourceStatus:
+    return replace(
+        status,
+        kind="error",
+        covered_count=0,
+        missing_nm_ids=sorted(set(requested_nm_ids)),
+        note=_append_invalid_payload_note(status.note, note_suffix),
     )
 
 

@@ -81,7 +81,7 @@ related_docs:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под EKT-aligned date-aware ready snapshot, authoritative `COST_PRICE` overlay, bounded current-day web-source sync, daily live refresh timer, separate operator `refresh`/`load` actions, repo-owned hosted deploy contract и первую bounded supply capability `Заказ на фабрике`: heavy build остаётся в `POST /v1/sheet-vitrina-v1/refresh`, persisted plan materialize-ит `yesterday_closed + today_current` по `Asia/Yekaterinburg`, `GET /v1/sheet-vitrina-v1/plan`, `POST /v1/sheet-vitrina-v1/load` и existing Apps Script `loadSheetVitrinaTable` читают только этот persisted plan, proxy-profit rows / cost diagnostics resolve server-side from uploaded `COST_PRICE` by `group + max(effective_from <= slot_date)`, а factory-order tab на той же operator page даёт server-owned XLSX template/upload/calculate/download flow с русскими headers и multi-shipment inbound events без возврата heavy logic в GAS."
+update_note: "Обновлён под final temporal classifier и execution modes: `sheet_vitrina_v1` теперь явно разделяет group A bot/web-source historical, group B WB API date/period-capable, group C WB API current-snapshot-only и group D other/manual overlays; `stocks` закреплены как date/period-capable source c exact-date runtime cache и `yesterday_closed + today_current`, current-only group живёт по non-destructive same-day accepted-state contract, manual refresh больше не создаёт persisted long-retry tails, а daily auto chain truthfully описан как `11:00, 20:00 Asia/Yekaterinburg`."
 ---
 
 # 1. Идентификатор и статус
@@ -126,7 +126,7 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - page читает `GET /v1/sheet-vitrina-v1/job` для detailed построчного operator log без отдельного audit subsystem
   - тот же `job` route поддерживает text-export конкретного completed run через `format=text&download=1`
   - page дополнительно показывает compact block `Сервер и расписание`, который заполняется только из server-driven `server_context`
-  - `Автообновление` в этом block должно описывать полный daily auto cycle, а не только schedule time: current truthful wording = `Ежедневно в 11:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
+  - `Автообновление` в этом block должно описывать полный daily auto cycle, а не только schedule time: current truthful wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
   - тот же block additionally показывает `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление` из backend/status surface
   - log block остаётся fixed-height scrollable viewport с title `Лог` и одной bounded action `Скачать лог`
 - Канонический operator-facing supply surface в том же repo-owned page:
@@ -204,10 +204,13 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - `temporal_slots`
   - `source_temporal_policies`
   - per-source/per-slot `STATUS` rows
-- В bounded live contour используется следующая temporal policy matrix:
-  - `dual_day_capable`: `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `sf_period`, `spp`, `ads_compact`, `fin_report_daily`, `cost_price`
+- В bounded live contour используется следующая source-classification и temporal policy matrix:
+  - group A `bot/web-source historical / closed-day-capable`: `seller_funnel_snapshot`, `web_source_snapshot`; allowed slots = `yesterday_closed + today_current`
+  - group B `WB API historical/date-period capable`: `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`; allowed slots = `yesterday_closed + today_current`
+  - group C `WB API current-snapshot-only`: `prices_snapshot`, `ads_bids`; allowed slots = `today_current`, bounded same-day capture/retry only
+  - group D `other/non-WB or blocked`: `cost_price`, `promo_by_price`; `cost_price` resolves `yesterday_closed + today_current` by `effective_from <= slot_date`, `promo_by_price` stays blocked
+  - `dual_day_capable`: `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`, `cost_price`
   - `today_current`: `prices_snapshot`, `ads_bids`
-  - `not_available_for_today`: `stocks`
   - `blocked`: `promo_by_price`
 - Для bot/web-source family (`seller_funnel_snapshot`, `web_source_snapshot`) current server-side read rule теперь bounded и truthful:
   - сначала source adapter пробует explicit requested date/window;
@@ -230,20 +233,26 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - `closure_rate_limited`
   - `closure_exhausted`
   - `success`
-- Для strict closed-day acceptance current checkpoint применяет source-aware invalid signatures only to closed-day-capable bot/web-source families:
+- Для accepted-state policy current checkpoint применяет source-aware invalid signatures:
   - `seller_funnel_snapshot`: zero-filled payload или `source_fetched_at < next business day start in Asia/Yekaterinburg`
   - `web_source_snapshot`: zero-filled payload или `search_analytics_raw.fetched_at < next business day start in Asia/Yekaterinburg`
-  - `prices_snapshot` и `ads_bids` остаются current-only и truthfully surface-ят `not_available` для `yesterday_closed`;
-  - `stocks` больше не current-only: `yesterday_closed` читает authoritative historical closed-day payload, а `today_current` truthfully остаётся `not_available`.
+  - `prices_snapshot` и `ads_bids` остаются current-only и truthfully surface-ят `not_available` для `yesterday_closed`, но valid same-day accepted snapshot не может быть затёрт later invalid/blank/zero attempt того же дня;
+  - `stocks` больше не current-only: `yesterday_closed` и `today_current` читают authoritative exact-date historical payload/runtime cache.
 - Current-only sources не backfill-ятся в closed-day column:
   - `prices_snapshot[yesterday_closed]`, `ads_bids[yesterday_closed]` materialize-ятся как `not_available`
   - `today_current` values остаются в своей фактической колонке и не маскируются под yesterday EOD
+  - manual invalid run не затирает already accepted same-day snapshot и не создаёт persisted due retry states
 - Для `stocks` current checkpoint теперь обязан:
   - materialize-ить `stocks[yesterday_closed]` из Seller Analytics CSV path `STOCK_HISTORY_DAILY_CSV`;
+  - materialize-ить `stocks[today_current]` из того же exact-date historical CSV/runtime path;
   - сохранять exact-date success payload server-side в `temporal_source_snapshots[source_key=stocks]`;
   - использовать current `wb-warehouses` endpoint только как bounded metadata bridge `OfficeName -> regionName`, а не как active current stocks truth внутри витрины;
   - не терять quantity вне configured district map молча: она остаётся внутри `stock_total` и surface-ится в `STATUS.stocks[yesterday_closed].note`;
-  - оставлять `stocks[today_current]` blank/`not_available` вместо intraday snapshot.
+  - later invalid attempt не может destructively очистить already accepted exact-date snapshot ни для `yesterday_closed`, ни для `today_current`.
+- Execution modes теперь разделены явно:
+  - `auto_daily` = `11:00, 20:00 Asia/Yekaterinburg`, short retries inside run, persisted long-retry allowed where policy permits
+  - `manual_operator` = short retries yes, persisted long-retry no, invalid candidate never overwrites accepted truth
+  - `persisted_retry` = дожимает due `yesterday_closed` for groups A/B and same-day `today_current` only for group C within the current business day
 - Для `cost_price[*]` server truth обязан:
   - брать только authoritative dataset из separate `POST /v1/cost-price/upload`;
   - match по `group`;
@@ -274,12 +283,12 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
 
 - Daily auto-refresh materialize-ится поверх existing heavy route, а не через новый scheduler contour:
   - timer target = `POST /v1/sheet-vitrina-v1/refresh` with payload flag `auto_load=true`
-  - schedule = `11:00 Asia/Yekaterinburg`
-  - current live host keeps `Etc/UTC`, поэтому systemd timer stores `OnCalendar=*-*-* 06:00:00 UTC`
+  - schedule = `11:00, 20:00 Asia/Yekaterinburg`
+  - current live host keeps `Etc/UTC`, поэтому systemd timer stores `OnCalendar=*-*-* 06:00:00 UTC; *-*-* 15:00:00 UTC`
 - Schedule storage lives in live-owned systemd units:
   - `/etc/systemd/system/wb-core-sheet-vitrina-refresh.service`
   - `/etc/systemd/system/wb-core-sheet-vitrina-refresh.timer`
-- Closed-day retry completion for strict bot/web-source family materialize-ится отдельным bounded timer/service pair:
+- Persisted retry completion for historical/date-period families plus same-day current-only captures materialize-ится отдельным bounded timer/service pair:
   - `/etc/systemd/system/wb-core-sheet-vitrina-closure-retry.service`
   - `/etc/systemd/system/wb-core-sheet-vitrina-closure-retry.timer`
   - service runs repo-owned runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py`
@@ -288,6 +297,7 @@ update_note: "Обновлён под EKT-aligned date-aware ready snapshot, aut
   - default `as_of_date` / `today_current` semantics live in `packages/business_time.py`
   - heavy refresh logic stays in existing `POST /v1/sheet-vitrina-v1/refresh`
   - auto path сначала делает refresh/persist ready snapshot, затем в том же server-owned cycle вызывает existing load bridge и доводит обновление до live sheet
+  - refresh/load cycle защищён bounded mutual exclusion lock и не должен destructively смешивать parallel auto/manual/retry writes
   - runtime/status surface хранит last auto run status / timestamps separately from manual operator jobs, чтобы block `Сервер и расписание` truthfully показывал именно результат daily auto chain
   - Apps Script remains thin shell and does not own scheduling or date math
 - `Прокси маржинальность всего, %` фиксируется на canonical row `proxy_margin_pct_total`.
@@ -333,7 +343,7 @@ Bounded допущение:
 - Uploaded `section` dictionary считается authoritative и не remap-ится локально.
 - `CONFIG!H:I` service/status block сохраняется при `prepare`, `upload`, `load`.
 - Для current-only sources bounded contour честно предпочитает `not_available` в `yesterday_closed`, а не backfill текущих значений в yesterday-column.
-- Для `stocks` bounded contour теперь применяет обратную норму: closed-day value обязана приходить из authoritative historical snapshot, а не из `today_current`.
+- Для `stocks` bounded contour теперь применяет task-local classifier norm: both `yesterday_closed` и `today_current` обязаны приходить из authoritative exact-date historical snapshot/runtime cache, а не из intraday surrogate.
 
 ## 3.4 Явный live blocker
 
@@ -403,6 +413,8 @@ Bounded допущение:
 - smoke:
 - `apps/sheet_vitrina_v1_business_time_smoke.py`
 - `apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py`
+- `apps/sheet_vitrina_v1_auto_update_smoke.py`
+- `apps/sheet_vitrina_v1_current_snapshot_acceptance_smoke.py`
 - `apps/sheet_vitrina_v1_refresh_read_split_smoke.py`
 - `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`
 - `apps/web_source_temporal_adapter_smoke.py`
@@ -419,6 +431,8 @@ Bounded допущение:
 - Подтверждён targeted current-day web-source sync smoke через `apps/sheet_vitrina_v1_web_source_current_sync_smoke.py`.
 - Подтверждён targeted closed-day source freshness smoke через `apps/web_source_current_sync_closed_day_freshness_smoke.py`.
 - Подтверждён targeted temporal closure retry smoke через `apps/sheet_vitrina_v1_temporal_closure_retry_smoke.py`.
+- Подтверждён targeted current-snapshot acceptance smoke через `apps/sheet_vitrina_v1_current_snapshot_acceptance_smoke.py`.
+- Подтверждён targeted auto scheduler/status smoke через `apps/sheet_vitrina_v1_auto_update_smoke.py`.
 - Подтверждён integration smoke для retry/acceptance cycle через `apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py`.
 - Подтверждён targeted server-driven smoke через `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`, включая same-day blank overwrite, который обязан затирать stale sheet cell вместо сохранения старого значения.
 - Smoke проверяет:
@@ -438,6 +452,8 @@ Bounded допущение:
   - что при отсутствии ready snapshot load path возвращает явную ошибку `ready snapshot missing`;
   - что `DATA_VITRINA` materialize-ит полный server-driven metric set как `date_matrix`, не режется до `7` metric keys и сразу грузит `yesterday_closed + today_current`;
   - что current-only sources не попадают в yesterday-column и materialize-ятся как `not_available` в `STATUS`;
+  - что later invalid auto/manual current-only attempt не перетирает already accepted same-day snapshot;
+  - что manual refresh не создаёт persisted long-retry tail;
   - что `STATUS` фиксирует live sources per temporal slot, `cost_price[*]` coverage и blocked source `promo_by_price`;
   - что service/status block `CONFIG!H:I` сохраняется и не перезаписывается при load.
 
@@ -449,6 +465,7 @@ Bounded допущение:
 - У explicit refresh появился отдельный repo-owned operator page, поэтому нормальный operator path больше не зависит от ручного `curl`.
 - Read path больше не строит live plan on-demand: heavy fetch живёт только в explicit refresh action, а `load` читает persisted date-aware snapshot из current runtime contour.
 - При missing current-day bot/web-source snapshot refresh больше не ограничен pure read-side fallback: он может bounded-trigger'ить same-day capture/handoff на server host и затем materialize-ить truthful `today_current` values в том же operator flow.
+- Persisted retry semantics больше не ограничены только bot/web-source family: due `yesterday_closed` теперь дожимаются для всей historical/date-period matrix, а due current-only captures дожимаются только в пределах того же business day.
 - Single-date surrogate semantics убраны: current-day values больше не маскируются под `as_of_date`, а `DATA_VITRINA` materialize-ит `yesterday_closed + today_current` как server-owned `date_matrix`.
 - `DATA_VITRINA` materialize-ит полный incoming current-truth row set `95` metric keys / `1631` source rows как operator-facing `date_matrix` (`34` blocks / `1698` rendered rows на двух date columns) и не теряет `show_in_data` metrics на sheet-side bridge.
 - Existing upload contour не ломается: bundle/result contracts и control block сохраняются.
@@ -462,6 +479,6 @@ Bounded допущение:
 - отдельный bounded fix по любому оставшемуся non-district / foreign stocks residual, если он потребует отдельной operator-facing semantics beyond current truthful `STATUS` note;
 - stable hosted runtime URL и production-bound operator runtime;
 - deploy/auth-hardening;
-- generic orchestration platform beyond current one daily timer;
+- generic orchestration platform beyond current bounded auto + retry timers;
 - кабинет/панель администрирования;
 - большой UI/UX redesign таблицы.

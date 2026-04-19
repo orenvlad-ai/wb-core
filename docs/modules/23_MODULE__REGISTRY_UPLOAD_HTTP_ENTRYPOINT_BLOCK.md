@@ -153,19 +153,29 @@ update_note: "Обновлён под current factory-order historical seam и c
   - `provisional_current_snapshot` для открытого `today_current`;
   - `closed_day_candidate_snapshot` для явной попытки закрытия уже завершённого дня;
   - `accepted_closed_day_snapshot` как единственный допустимый truth для `yesterday_closed`.
-- Для `seller_funnel_snapshot` и `web_source_snapshot` `yesterday_closed` теперь не может silently наследоваться из provisional snapshot:
-  - closed slot сначала ищет уже сохранённый `accepted_closed_day_snapshot`;
-  - если его нет, contour запускает explicit closure attempt через тот же owner path;
-  - invalid candidate не принимается и не оставляет в closed slot старое provisional same-day значение;
-  - вместо этого source/date уходит в persisted retry state `closure_pending / closure_retrying / closure_rate_limited / closure_exhausted`.
-- Source-aware invalid signatures для strict closed-day policy:
+- Final source matrix теперь materialized server-side как четыре группы:
+  - A. bot/web-source historical / closed-day-capable = `seller_funnel_snapshot`, `web_source_snapshot`
+  - B. WB API historical/date-period capable = `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`
+  - C. WB API current-snapshot-only = `prices_snapshot`, `ads_bids`
+  - D. other/non-WB or blocked = `cost_price`, `promo_by_price`
+- Group A + B используют one-way accepted closed-day contract для `yesterday_closed`:
+  - closed slot сначала читает уже сохранённый accepted snapshot/runtime cache;
+  - если valid exact-date truth ещё не принят, auto/retry contour создаёт или продолжает persisted retry state `closure_pending / closure_retrying / closure_rate_limited / closure_exhausted`;
+  - invalid / missing / incomplete candidate не принимается как final closed truth;
+  - already accepted closed snapshot не может быть затёрт later invalid attempt.
+- Group C использует отдельный non-destructive same-day accepted contract:
+  - `yesterday_closed` остаётся truthful `not_available`;
+  - `today_current` может long-retry-иться только в пределах текущего business day / current capture window;
+  - later invalid/blank/zero candidate сохраняет earlier accepted current snapshot того же дня;
+  - только новый valid current snapshot может заменить уже accepted same-day snapshot.
+- Source-aware invalid signatures для accepted-state policy:
   - `seller_funnel_snapshot`: zero-filled payload plus freshness gate `source_fetched_at >= next business day start in Asia/Yekaterinburg`;
   - `web_source_snapshot`: zero-filled payload plus freshness gate `search_analytics_raw.fetched_at >= next business day start in Asia/Yekaterinburg`;
-  - `prices_snapshot` и `ads_bids` не попадают под strict closed-day policy и сохраняют current-only semantics `not_available` для `yesterday_closed`;
-  - `stocks` тоже не входит в strict bot/web closure policy, но больше не current-only: `sheet_vitrina_v1` получает closed-day stocks через exact-date runtime cache `temporal_source_snapshots[source_key=stocks]`, built from Seller Analytics CSV `STOCK_HISTORY_DAILY_CSV`, while `today_current` остаётся `not_available`.
+  - `prices_snapshot` и `ads_bids` не попадают под historical closed-day acceptance, но current same-day accepted snapshot не должен перетираться zero-filled/blank candidate;
+  - `stocks` теперь входит именно в WB API date/period-capable group: `sheet_vitrina_v1` получает both `yesterday_closed` и `today_current` через exact-date runtime/cache path `temporal_source_snapshots[source_key=stocks]`, built from Seller Analytics CSV `STOCK_HISTORY_DAILY_CSV`.
 - Repo-owned bounded retry cycle теперь materialize-ится отдельным runner’ом:
   - `apps/sheet_vitrina_v1_temporal_closure_retry_live.py`
-  - runner вызывает existing runtime path `run_sheet_temporal_closure_retry_cycle(...)`, выбирает due source/date pairs из persisted closure state и безопасно reuses existing refresh/load contour вместо нового parallel app.
+  - runner вызывает existing runtime path `run_sheet_temporal_closure_retry_cycle(...)`, выбирает due `yesterday_closed` historical/date-period pairs plus due same-day current-only captures и безопасно reuses existing refresh/load contour вместо нового parallel app.
 - Operator page не invent-ит новый heavy route: UI запускает existing heavy `POST /v1/sheet-vitrina-v1/refresh` отдельно от narrow `POST /v1/sheet-vitrina-v1/load`, а live progress читает только через cheap poll surface `GET /v1/sheet-vitrina-v1/job`.
 - Во второй tab `Расчёт поставок` current bounded scope materialize-ит два sibling block внутри одного narrow operator page:
   - shared block `Остатки ФФ` остаётся один для обоих расчётов и хранится в одном server-owned dataset state;
@@ -210,8 +220,8 @@ update_note: "Обновлён под current factory-order historical seam и c
   - `Технический триггер`
 - Этот block не hardcode-ится в UI: page читает его только из existing `GET /v1/sheet-vitrina-v1/status` / `POST /v1/sheet-vitrina-v1/refresh` response field `server_context`.
 - `Автообновление` в этом block обязано быть truthful server-driven описанием полного daily auto path, а не только временем:
-  - canonical current wording = `Ежедневно в 11:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
-  - manual operator semantics при этом не меняются: explicit UI buttons всё ещё разделяют `refresh` и `load`
+  - canonical current wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
+  - manual operator semantics теперь явно отличаются от auto path: explicit UI buttons всё ещё разделяют `refresh` и `load`, short retries остаются внутри одного run, но persisted long-retry state после manual refresh не создаётся
 - Operator log surface обязан показывать построчный start / key steps / finish / error для обеих operator actions:
   - `refresh` = build/persist ready snapshot only
   - `load` = write already prepared snapshot only
@@ -241,6 +251,7 @@ update_note: "Обновлён под current factory-order historical seam и c
   - `daily_auto_description`
   - `daily_auto_trigger_name`
   - `daily_auto_trigger_description`
+  - `retry_runner_description`
   - `last_auto_run_status`
   - `last_auto_run_status_label`
   - `last_auto_run_time`
@@ -366,14 +377,15 @@ update_note: "Обновлён под current factory-order historical seam и c
 - Repo-owned operator page для explicit refresh теперь живёт на том же thin HTTP entrypoint и убирает ручной `curl` из нормального operator path.
 - Existing operator page/status surface теперь server-driven показывает текущую EKT business-time truth и current timer trigger metadata без отдельного meta route и без hardcoded UI copy.
 - Live service остаётся тонкой loopback HTTP boundary (`wb-core-registry-http.service` -> `127.0.0.1:8765`) и не переносит heavy truth в Apps Script.
-- Existing live daily refresh scheduler materialize-ится как external systemd timer `wb-core-sheet-vitrina-refresh.timer`, который вызывает тот же existing `POST /v1/sheet-vitrina-v1/refresh` ежедневно в `11:00 Asia/Yekaterinburg` (`06:00 UTC` на current host), но теперь делает это в `auto_load=true` режиме:
+- Existing live daily refresh scheduler materialize-ится как external systemd timer `wb-core-sheet-vitrina-refresh.timer`, который вызывает тот же existing `POST /v1/sheet-vitrina-v1/refresh` ежедневно в `11:00` и `20:00 Asia/Yekaterinburg` (`06:00 UTC` и `15:00 UTC` на current host), но теперь делает это в `auto_load=true` режиме:
   - server contour сначала materialize-ит ready snapshot тем же heavy refresh path;
   - затем в том же auto cycle вызывает existing load bridge и доводит результат до live sheet;
   - итоговый auto result persist-ится в runtime/status surface как last auto run status / timestamps, чтобы operator page не маскировала refresh-only под sheet-complete.
 - Existing live contour также допускает отдельный bounded retry timer `wb-core-sheet-vitrina-closure-retry.timer`, который вызывает repo-owned runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py`:
   - timer не делает tight loop и может запускаться чаще, чем real retry cadence, потому что due/backoff decision already lives in persisted runtime state;
-  - один и тот же source/date не должен принимать competing closed-day truth параллельно: retry runner читает only due states from runtime and materialize-ит acceptance через existing refresh path.
-- Если bot/web-source family не успела materialize-ить current-day snapshot по daily cron/handoff policy, same refresh route теперь может bounded-trigger'ить server-local same-day capture + handoff и закрыть `today_current` без возврата heavy producer logic в Apps Script.
+  - retry runner дожимает due `yesterday_closed` для всей historical/date-period matrix и same-day `today_current` only for current-snapshot-only group;
+  - manual operator refresh в этот persisted runner path не попадает и не должен создавать due states.
+- Если bot/web-source family не успела materialize-ить current-day snapshot по daily cron/handoff policy, same refresh route теперь может bounded-trigger'ить server-local same-day capture + handoff и закрыть `today_current` без возврата heavy producer logic в Apps Script; later invalid attempt при уже accepted current snapshot не имеет права затереть принятый same-day truth.
 - HTTP boundary выровнен с current upload semantics: валидируется содержимое registry rows, а не их заранее зашитое количество.
 - Live closure для этого блока теперь тоже имеет repo-owned contract: Codex больше не должна угадывать target route/service steps руками, а должна идти через canonical hosted runner.
 

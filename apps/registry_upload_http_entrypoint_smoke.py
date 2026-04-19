@@ -227,16 +227,18 @@ def main() -> None:
                 raise AssertionError("status read before refresh must still expose server_context metadata")
             if server_context.get("business_timezone") != "Asia/Yekaterinburg":
                 raise AssertionError("status read before refresh must expose the canonical business timezone")
-            if server_context.get("daily_refresh_business_time") != "11:00 Asia/Yekaterinburg":
+            if server_context.get("daily_refresh_business_time") != "11:00, 20:00 Asia/Yekaterinburg":
                 raise AssertionError("status read before refresh must expose the daily business refresh time")
-            if server_context.get("daily_refresh_systemd_time") != "06:00:00 UTC":
+            if server_context.get("daily_refresh_systemd_time") != "06:00:00 UTC, 15:00:00 UTC":
                 raise AssertionError("status read before refresh must expose the current host UTC trigger time")
-            if server_context.get("daily_refresh_systemd_oncalendar") != "*-*-* 06:00:00 UTC":
+            if server_context.get("daily_refresh_systemd_oncalendar") != "*-*-* 06:00:00 UTC; *-*-* 15:00:00 UTC":
                 raise AssertionError("status read before refresh must expose the configured OnCalendar trigger")
             if server_context.get("daily_auto_description") != (
-                "Ежедневно в 11:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу"
+                "Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу"
             ):
                 raise AssertionError("status read before refresh must expose the truthful auto-update description")
+            if "same-day today_current" not in str(server_context.get("retry_runner_description", "")):
+                raise AssertionError("status read before refresh must expose retry-runner semantics")
             if server_context.get("last_auto_run_status") != "never":
                 raise AssertionError("status read before refresh must surface the empty auto-run state")
 

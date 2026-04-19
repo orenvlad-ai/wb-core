@@ -77,16 +77,18 @@ Current repo-owned operator refresh surface:
 - `GET /sheet-vitrina-v1/operator`
 - page uses `POST /v1/sheet-vitrina-v1/refresh`, `POST /v1/sheet-vitrina-v1/load`, `GET /v1/sheet-vitrina-v1/status` and `GET /v1/sheet-vitrina-v1/job`
 - page stays intentionally narrow: separate buttons `Загрузить данные` / `Отправить данные`, compact status, one compact `Сервер и расписание` block and one fixed-height scrollable `Лог` block with `Скачать лог`
-- status/refresh responses drive the block through `server_context`, so timezone/scheduler wording is not hardcoded in UI; `Автообновление` now truthfully describes the full daily chain `Ежедневно в 11:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
+- status/refresh responses drive the block through `server_context`, so timezone/scheduler wording is not hardcoded in UI; `Автообновление` now truthfully describes the full daily chain `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
 - the same block shows backend-driven `Последний автозапуск`, `Статус последнего автозапуска` and `Последнее успешное автообновление`
 - `refresh` и `load` не смешиваются: refresh materialize-ит ready snapshot only, load пишет only already prepared snapshot в live sheet
 - job/log surface is detailed and machine-useful: source/module/adapter/endpoint steps, source result kinds/counts, metric batch summaries and bridge/write results stay server-driven and can be exported per completed run through `GET /v1/sheet-vitrina-v1/job?job_id=...&format=text&download=1`
 - server-side business timezone = `Asia/Yekaterinburg` for default `as_of_date`, `today_current` and operator-facing freshness dates
-- live daily auto-refresh = `wb-core-sheet-vitrina-refresh.timer` -> existing `POST /v1/sheet-vitrina-v1/refresh` at `11:00 Asia/Yekaterinburg` (`06:00 UTC` on current host) with `auto_load=true`, so the daily path now finishes as `refresh + load to live sheet`
-- strict closed-day policy applies only to closed-day-capable bot/web-source families `seller_funnel_snapshot` and `web_source_snapshot`; current-only families `prices_snapshot` and `ads_bids` keep truthful `not_available` for `yesterday_closed`
-- `stocks` no longer belongs to the current-only group inside `sheet_vitrina_v1`: `yesterday_closed` now reads authoritative closed-day Seller Analytics CSV snapshots from `temporal_source_snapshots[source_key=stocks]`, while `today_current` stays truthful `not_available`
-- `today_current` for bot/web-source may stay provisional/incomplete, but `yesterday_closed` now accepts only `accepted_closed_day_snapshot`; invalid candidate goes to persisted `closure_retrying / closure_rate_limited / closure_exhausted` instead of silently inheriting same-day provisional values
-- live retry completion is bounded by repo-owned runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py` plus host timer `wb-core-sheet-vitrina-closure-retry.timer`
+- live daily auto-refresh = `wb-core-sheet-vitrina-refresh.timer` -> existing `POST /v1/sheet-vitrina-v1/refresh` at `11:00, 20:00 Asia/Yekaterinburg` (`06:00 UTC` and `15:00 UTC` on current host) with `auto_load=true`, so the daily path now finishes as `refresh + load to live sheet`
+- source matrix is now explicit: group A bot/web-source historical, group B WB API historical/date-period capable, group C WB API current-snapshot-only, group D other/manual overlays
+- historical/date-period families (`seller_funnel_snapshot`, `web_source_snapshot`, `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`) now use persisted accepted closed-day semantics for `yesterday_closed`
+- current-only families (`prices_snapshot`, `ads_bids`) keep truthful `not_available` for `yesterday_closed`, use same-day accepted snapshot semantics for `today_current` and must not be destructively overwritten by later invalid auto/manual attempts
+- `stocks` is now fully in the date/period-capable group inside `sheet_vitrina_v1`: both `yesterday_closed` and `today_current` read authoritative exact-date Seller Analytics CSV snapshots from `temporal_source_snapshots[source_key=stocks]`
+- manual operator refresh keeps short retries inside the run but does not create persisted long-retry tails and does not overwrite accepted truth on invalid candidates
+- live retry completion is bounded by repo-owned runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py` plus host timer `wb-core-sheet-vitrina-closure-retry.timer`; the runner covers due `yesterday_closed` for the full historical/date-period matrix and same-day current-only capture retries only within the current business day
 
 Current additional operator supply flow on the same page:
 - top-level tab `Расчёт поставок` keeps the existing page pattern and now materializes two bounded sibling blocks: `Заказ на фабрике` and `Поставка на Wildberries`
@@ -113,7 +115,7 @@ Current main-confirmed counts для этого flow:
 - current truth / ready snapshot displayed metrics = `95`
 - refresh materialize-ит date-aware ready snapshot `yesterday_closed + today_current`
 - operator-facing `DATA_VITRINA` = server-driven two-day `date_matrix` `1698` rendered rows / `95` metric keys (`1631` source rows, `34` blocks)
-- operator-facing `STATUS` = per-source/per-slot freshness surface; current-only sources (`prices_snapshot`, `ads_bids`) показывают `not_available` для `yesterday_closed`, а `stocks[yesterday_closed]` now resolves through historical exact-date runtime snapshots instead of current backfill
+- operator-facing `STATUS` = per-source/per-slot freshness surface; current-only sources (`prices_snapshot`, `ads_bids`) показывают `not_available` для `yesterday_closed`, `stocks[yesterday_closed]` и `stocks[today_current]` now resolve through historical exact-date runtime snapshots, а failed later attempts preserve the last accepted truth instead of blank/zero overwrite
 - bot/web-source family (`seller_funnel_snapshot`, `web_source_snapshot`) uses bounded `explicit-date -> latest-if-date-matches` reads for `today_current`; exact-date runtime cache may truthfully surface previous captured day as next `yesterday_closed`, with explicit `STATUS` note instead of slot-copying
 - if exact-date `today_current` snapshot is still missing for bot/web-source family, refresh may bounded-trigger server-local same-day capture in `/opt/wb-web-bot` plus `/opt/wb-ai/run_web_source_handoff.py` before final read-side fetch
 - sibling `COST_PRICE` contour = отдельный sheet/menu/upload path и separate runtime current-state seam вне compact bundle
@@ -127,7 +129,7 @@ This is the first bounded MVP checkpoint, not final production parity.
 - live numeric fill для promo-backed metrics и других bounded long-tail rows beyond current `COST_PRICE` overlay;
 - отдельный bounded fix по любому remaining non-district / foreign stocks residual, если одной truthful `STATUS` note окажется недостаточно для operator flow;
 - production hardening around runtime/deploy/auth;
-- generic orchestration platform beyond current one daily timer;
+- generic orchestration platform beyond current bounded auto + retry timers;
 - actual deploy rights/publish wiring for hosted contour;
 - unresolved long-tail compatibility around `AI_EXPORT`.
 
