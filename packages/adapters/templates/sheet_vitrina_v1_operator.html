@@ -534,6 +534,148 @@
       white-space: nowrap;
     }
 
+    .stock-report-toolbar {
+      display: flex;
+      align-items: flex-end;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin: 18px 0 14px;
+    }
+
+    .stock-selector-field {
+      flex: 1 1 320px;
+      min-width: 280px;
+    }
+
+    .stock-selector-label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 12px;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .stock-selector-popover {
+      position: relative;
+    }
+
+    .stock-selector-summary {
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #ffffff;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+      user-select: none;
+    }
+
+    .stock-selector-summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .stock-selector-summary::after {
+      content: "▾";
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .stock-selector-popover[open] .stock-selector-summary::after {
+      content: "▴";
+    }
+
+    .stock-selector-panel {
+      position: absolute;
+      top: calc(100% + 8px);
+      left: 0;
+      right: 0;
+      z-index: 20;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: #ffffff;
+      box-shadow: 0 18px 42px rgba(15, 23, 42, 0.14);
+    }
+
+    .stock-selector-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+
+    .stock-selector-action {
+      appearance: none;
+      border: 0;
+      background: #ecf3ff;
+      color: #184e96;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .stock-selector-list {
+      display: grid;
+      gap: 8px;
+      max-height: 280px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+
+    .stock-selector-option {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 10px 12px;
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      border-radius: 12px;
+      background: #f8fbff;
+      cursor: pointer;
+    }
+
+    .stock-selector-option input {
+      margin-top: 2px;
+      flex: 0 0 auto;
+    }
+
+    .stock-selector-option span {
+      font-size: 14px;
+      line-height: 1.45;
+      color: var(--text);
+    }
+
+    .stock-selector-hint,
+    .stock-selector-validation {
+      margin: 8px 0 0;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .stock-selector-hint {
+      color: var(--muted);
+    }
+
+    .stock-selector-validation {
+      color: var(--error-text);
+    }
+
+    .stock-selector-empty {
+      margin: 0;
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--muted);
+    }
+
     .log-actions {
       display: flex;
       gap: 8px;
@@ -932,6 +1074,15 @@
         min-width: 0;
       }
 
+      .stock-selector-field {
+        min-width: 0;
+      }
+
+      .stock-selector-panel {
+        position: static;
+        margin-top: 8px;
+      }
+
       .action-button,
       .tab-button,
       .subsection-button {
@@ -1085,6 +1236,24 @@
               <p id="stockReportLead" class="field-note">
                 Показываем только SKU, где хотя бы по одному supported district stock меньше 50 единиц.
               </p>
+              <div class="stock-report-toolbar">
+                <div class="stock-selector-field">
+                  <span class="stock-selector-label">SKU</span>
+                  <details id="stockReportSkuSelector" class="stock-selector-popover">
+                    <summary id="stockReportSkuSummary" class="stock-selector-summary">Выбраны все active SKU</summary>
+                    <div class="stock-selector-panel">
+                      <div class="stock-selector-actions">
+                        <button id="stockReportSelectAllButton" class="stock-selector-action" type="button">Выбрать все</button>
+                        <button id="stockReportClearAllButton" class="stock-selector-action" type="button">Снять все</button>
+                      </div>
+                      <div id="stockReportSkuList" class="stock-selector-list"></div>
+                    </div>
+                  </details>
+                  <p class="stock-selector-hint">Список строится из current active SKU truth (`config_v2`). Изменения применяются после кнопки «Рассчитать».</p>
+                  <p id="stockReportSkuValidation" class="stock-selector-validation" hidden>Выберите хотя бы один SKU</p>
+                </div>
+                <button id="stockReportApplyButton" class="action-button secondary-button" type="button">Рассчитать</button>
+              </div>
               <p id="stockReportStatus" class="section-message">Читаем отчёт по остаткам...</p>
               <div id="stockReportContent" class="daily-report" hidden>
                 <section class="report-card">
@@ -1430,6 +1599,13 @@
       const stockReportContent = document.getElementById("stockReportContent");
       const stockReportRows = document.getElementById("stockReportRows");
       const stockReportNotes = document.getElementById("stockReportNotes");
+      const stockReportSkuSelector = document.getElementById("stockReportSkuSelector");
+      const stockReportSkuSummary = document.getElementById("stockReportSkuSummary");
+      const stockReportSkuList = document.getElementById("stockReportSkuList");
+      const stockReportSkuValidation = document.getElementById("stockReportSkuValidation");
+      const stockReportSelectAllButton = document.getElementById("stockReportSelectAllButton");
+      const stockReportClearAllButton = document.getElementById("stockReportClearAllButton");
+      const stockReportApplyButton = document.getElementById("stockReportApplyButton");
       const downloadButton = document.getElementById("downloadButton");
       const logViewport = document.getElementById("logViewport");
       const logBlock = document.getElementById("logBlock");
@@ -1513,6 +1689,11 @@
       let activeJobId = null;
       let completedJob = null;
       let recommendationDownloadPath = config.factory_order_recommendation_path || "";
+      const stockReportActiveSkus = normalizeStockReportActiveSkus(config.stock_report_active_skus);
+      const allStockReportSkuIds = stockReportActiveSkus.map((item) => item.nm_id);
+      let stockReportSelectedSkuIds = allStockReportSkuIds.slice();
+      let stockReportAppliedSkuIds = allStockReportSkuIds.slice();
+      let stockReportPayload = null;
 
       function activateTab(tabName) {
         tabButtons.forEach((button) => {
@@ -1638,6 +1819,118 @@
           return "Сравнение двух последних closed business day.";
         }
         return "Сравнение " + older + " и " + newer + ".";
+      }
+
+      function normalizeStockReportActiveSkus(rawItems) {
+        const seen = new Set();
+        return (Array.isArray(rawItems) ? rawItems : []).reduce((acc, item) => {
+          const nmId = Number(item && item.nm_id);
+          if (!Number.isInteger(nmId) || seen.has(nmId)) {
+            return acc;
+          }
+          seen.add(nmId);
+          const displayName = valueOrDash(item && item.display_name);
+          const identityLabel = valueOrDash(item && item.identity_label) !== "-"
+            ? String(item.identity_label)
+            : String(displayName + " · nmId " + nmId);
+          acc.push({
+            nm_id: nmId,
+            display_name: String(displayName),
+            identity_label: identityLabel
+          });
+          return acc;
+        }, []);
+      }
+
+      function setStockReportValidation(message) {
+        const normalized = String(message || "").trim();
+        stockReportSkuValidation.textContent = normalized;
+        stockReportSkuValidation.hidden = !normalized;
+      }
+
+      function updateStockReportSkuSummary(selectedIds) {
+        const total = stockReportActiveSkus.length;
+        const count = Array.isArray(selectedIds) ? selectedIds.length : 0;
+        if (!total) {
+          stockReportSkuSummary.textContent = "Active SKU пока недоступны";
+          return;
+        }
+        if (count === total) {
+          stockReportSkuSummary.textContent = "SKU: все " + total;
+          return;
+        }
+        stockReportSkuSummary.textContent = "SKU: " + count + " из " + total;
+      }
+
+      function setStockReportDraftSelection(selectedIds) {
+        const selected = new Set(Array.isArray(selectedIds) ? selectedIds : []);
+        Array.from(stockReportSkuList.querySelectorAll("input[type=\"checkbox\"]")).forEach((input) => {
+          const nmId = Number(input.value);
+          input.checked = selected.has(nmId);
+        });
+        stockReportSelectedSkuIds = Array.from(selected);
+      }
+
+      function readStockReportDraftSelection() {
+        return Array.from(stockReportSkuList.querySelectorAll("input[type=\"checkbox\"]"))
+          .filter((input) => input.checked)
+          .map((input) => Number(input.value))
+          .filter((value) => Number.isInteger(value));
+      }
+
+      function renderStockReportSkuSelector() {
+        if (!stockReportActiveSkus.length) {
+          stockReportSkuList.innerHTML = "<p class=\"stock-selector-empty\">Активные SKU из current registry state пока недоступны.</p>";
+          stockReportSelectAllButton.disabled = true;
+          stockReportClearAllButton.disabled = true;
+          stockReportApplyButton.disabled = true;
+          updateStockReportSkuSummary([]);
+          return;
+        }
+        stockReportSkuList.innerHTML = stockReportActiveSkus.map((item) => [
+          "<label class=\"stock-selector-option\">",
+          "<input type=\"checkbox\" value=\"" + escapeHtml(item.nm_id) + "\" checked>",
+          "<span>" + escapeHtml(item.identity_label || "-") + "</span>",
+          "</label>"
+        ].join("")).join("");
+        stockReportSelectAllButton.disabled = false;
+        stockReportClearAllButton.disabled = false;
+        stockReportApplyButton.disabled = false;
+        stockReportSelectedSkuIds = allStockReportSkuIds.slice();
+        stockReportAppliedSkuIds = allStockReportSkuIds.slice();
+        updateStockReportSkuSummary(stockReportAppliedSkuIds);
+        Array.from(stockReportSkuList.querySelectorAll("input[type=\"checkbox\"]")).forEach((input) => {
+          input.addEventListener("change", () => {
+            stockReportSelectedSkuIds = readStockReportDraftSelection();
+            if (stockReportSelectedSkuIds.length) {
+              setStockReportValidation("");
+            }
+          });
+        });
+      }
+
+      function filterStockReportRows(rows) {
+        const items = Array.isArray(rows) ? rows : [];
+        if (!stockReportActiveSkus.length) {
+          return items;
+        }
+        const selected = new Set(stockReportAppliedSkuIds);
+        return items.filter((item) => selected.has(Number(item && item.nm_id)));
+      }
+
+      function applyStockReportSelection() {
+        stockReportSelectedSkuIds = readStockReportDraftSelection();
+        if (!stockReportSelectedSkuIds.length) {
+          setStockReportValidation("Выберите хотя бы один SKU");
+          return;
+        }
+        setStockReportValidation("");
+        stockReportAppliedSkuIds = stockReportSelectedSkuIds.slice();
+        updateStockReportSkuSummary(stockReportAppliedSkuIds);
+        if (stockReportSkuSelector) {
+          stockReportSkuSelector.open = false;
+        }
+        renderStockReport(stockReportPayload);
       }
 
       function deltaClass(direction) {
@@ -1834,7 +2127,12 @@
 
       function renderStockReportRows(rows) {
         if (!Array.isArray(rows) || !rows.length) {
-          stockReportRows.innerHTML = "<p class=\"report-empty\">SKU с district stock меньше 50 единиц сейчас не найдено.</p>";
+          const emptyMessage = stockReportActiveSkus.length
+            && stockReportAppliedSkuIds.length
+            && stockReportAppliedSkuIds.length < stockReportActiveSkus.length
+            ? "Для выбранных SKU district stock меньше 50 единиц не найдено."
+            : "SKU с district stock меньше 50 единиц сейчас не найдено.";
+          stockReportRows.innerHTML = "<p class=\"report-empty\">" + escapeHtml(emptyMessage) + "</p>";
           return;
         }
         stockReportRows.innerHTML = [
@@ -1861,12 +2159,17 @@
           renderStockReportUnavailable(payload, "Отчёт по остаткам пока недоступен.");
           return;
         }
+        const filteredRows = filterStockReportRows(payload.rows);
+        const selectedCount = stockReportActiveSkus.length ? stockReportAppliedSkuIds.length : 0;
+        const selectionSummary = stockReportActiveSkus.length
+          ? " SKU в фильтре: " + selectedCount + " из " + stockReportActiveSkus.length + "."
+          : "";
         stockReportPeriod.textContent = "Дата отчёта: " + formatHumanDate(payload.report_date) + ".";
-        stockReportLead.textContent = "Closed business day: " + valueOrDash(payload.report_date) + ". Порог риска: остаток < " + valueOrDash(payload.threshold_lt) + ".";
+        stockReportLead.textContent = "Closed business day: " + valueOrDash(payload.report_date) + ". Порог риска: остаток < " + valueOrDash(payload.threshold_lt) + "." + selectionSummary;
         stockReportStatus.textContent = "Source of truth: persisted ready snapshot / DATA_VITRINA / yesterday_closed.";
         stockReportStatus.className = "section-message";
         stockReportContent.hidden = false;
-        renderStockReportRows(payload.rows);
+        renderStockReportRows(filteredRows);
         renderStockReportNotes(payload.notes);
       }
 
@@ -2289,8 +2592,10 @@
           if (!response.ok) {
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
+          stockReportPayload = payload;
           renderStockReport(payload);
         } catch (error) {
+          stockReportPayload = null;
           renderStockReportUnavailable(
             {
               report_date: "",
@@ -2639,12 +2944,21 @@
       calculateFactoryOrderButton.addEventListener("click", calculateFactoryOrder);
       calculateRegionalSupplyButton.addEventListener("click", calculateRegionalSupply);
       downloadRecommendationButton.addEventListener("click", downloadRecommendation);
+      stockReportSelectAllButton.addEventListener("click", () => {
+        setStockReportDraftSelection(allStockReportSkuIds);
+        setStockReportValidation("");
+      });
+      stockReportClearAllButton.addEventListener("click", () => {
+        setStockReportDraftSelection([]);
+      });
+      stockReportApplyButton.addEventListener("click", applyStockReportSelection);
 
       activateTab("vitrina");
       activateReportSection("daily");
       activateSupplySection("factory");
       setActionState(null);
       setCompletedJob(null);
+      renderStockReportSkuSelector();
       loadStatus();
       loadDailyReport();
       loadStockReport();

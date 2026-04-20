@@ -17,6 +17,7 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.sheet_vitrina_v1_stock_report import (
     STOCK_REPORT_DISTRICTS,
     SheetVitrinaV1StockReportBlock,
+    list_active_sku_options,
 )
 from packages.contracts.sheet_vitrina_v1 import (
     SheetVitrinaV1Envelope,
@@ -186,6 +187,22 @@ def main() -> None:
         if nm_ids[3] in [int(item["nm_id"]) for item in rows]:
             raise AssertionError(f"SKU with only far-east breach must be excluded from the report, got {rows}")
 
+        active_skus = list_active_sku_options(current_state.config_v2)
+        if [item["nm_id"] for item in active_skus[:4]] != nm_ids:
+            raise AssertionError(f"active SKU selector source must preserve enabled config_v2 order, got {active_skus[:4]}")
+        if len(active_skus) <= len(rows):
+            raise AssertionError("active SKU selector source must include more than the breached-row subset when fixture has non-breached SKU")
+        selected_subset = {nm_ids[1]}
+        filtered_rows = [row for row in rows if int(row["nm_id"]) in selected_subset]
+        if [int(row["nm_id"]) for row in filtered_rows] != [nm_ids[1]]:
+            raise AssertionError(f"SKU filter semantics must exclude deselected breached SKU and keep selected rows, got {filtered_rows}")
+        selected_without_breach = {nm_ids[3]}
+        filtered_empty_rows = [row for row in rows if int(row["nm_id"]) in selected_without_breach]
+        if filtered_empty_rows:
+            raise AssertionError(
+                f"selected non-breached SKU must produce an empty filtered result instead of stale rows, got {filtered_empty_rows}"
+            )
+
         override_payload = SheetVitrinaV1StockReportBlock(
             runtime=runtime,
             now_factory=lambda: NOW,
@@ -203,6 +220,7 @@ def main() -> None:
         print("stock_report_threshold: ok ->", payload["threshold_lt"])
         print("stock_report_rows: ok ->", ", ".join(item["identity_label"] for item in rows))
         print("stock_report_districts: ok ->", ", ".join(item["label"] for item in rows[0]["breached_districts"]))
+        print("stock_report_selector_source: ok ->", len(active_skus), "active SKU")
         print("stock_report_override: ok ->", override_payload["report_date"])
 
 

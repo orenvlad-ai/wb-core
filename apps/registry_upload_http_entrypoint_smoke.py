@@ -141,6 +141,18 @@ def main() -> None:
             ):
                 raise AssertionError("operator UI must expose the compact reports tab with both subsection-switched report blocks")
             if (
+                'id="stockReportSkuSelector"' not in operator_ui_html
+                or 'id="stockReportApplyButton"' not in operator_ui_html
+                or 'id="stockReportSkuValidation"' not in operator_ui_html
+                or "Выберите хотя бы один SKU" not in operator_ui_html
+            ):
+                raise AssertionError("operator UI must expose the SKU selector, apply action and empty-selection validation")
+            if (
+                "let stockReportSelectedSkuIds = allStockReportSkuIds.slice();" not in operator_ui_html
+                or "let stockReportAppliedSkuIds = allStockReportSkuIds.slice();" not in operator_ui_html
+            ):
+                raise AssertionError("operator UI must default both draft and applied stock-report selection to all active SKU")
+            if (
                 "dailyReportToggle" in operator_ui_html
                 or "stockReportToggle" in operator_ui_html
                 or "report-accordion" in operator_ui_html
@@ -210,6 +222,15 @@ def main() -> None:
                 or "Ready snapshot пока не materialized." in operator_ui_html
             ):
                 raise AssertionError("operator UI must not keep the stale explanatory date subtitle")
+            expected_active_skus = [
+                {
+                    "nm_id": int(item["nm_id"]),
+                    "display_name": str(item["display_name"]),
+                    "identity_label": f"{item['display_name']} · nmId {item['nm_id']}",
+                }
+                for item in current_state["config_v2"]
+                if bool(item["enabled"])
+            ]
             operator_ui_config = _extract_operator_ui_config(operator_ui_html)
             if operator_ui_config != {
                 "page_title": "Обновление данных",
@@ -230,8 +251,13 @@ def main() -> None:
                 "factory_order_recommendation_path": DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
                 "wb_regional_status_path": DEFAULT_WB_REGIONAL_STATUS_PATH,
                 "wb_regional_calculate_path": DEFAULT_WB_REGIONAL_CALCULATE_PATH,
+                "stock_report_active_skus": expected_active_skus,
+                "stock_report_active_sku_count": len(expected_active_skus),
+                "stock_report_active_sku_source": "current_registry_config_v2",
             }:
-                raise AssertionError("operator UI config must expose refresh/status paths, both report routes and both supply blocks")
+                raise AssertionError(
+                    "operator UI config must expose refresh/status paths, both report routes, both supply blocks and the full active SKU selector source"
+                )
 
             missing_plan_status, missing_plan_payload = _get_json(plan_url)
             if missing_plan_status != 422:

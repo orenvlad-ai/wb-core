@@ -439,6 +439,7 @@ def _build_handler(
                         load_path=sheet_load_path,
                         status_path=sheet_status_path,
                         job_path=sheet_job_path,
+                        operator_context=entrypoint.build_sheet_operator_ui_context(),
                     ),
                 )
                 return
@@ -1203,8 +1204,10 @@ def _render_sheet_vitrina_operator_ui(
     load_path: str,
     status_path: str,
     job_path: str,
+    operator_context: Mapping[str, Any] | None = None,
 ) -> str:
     spreadsheet_url = resolve_sheet_vitrina_live_spreadsheet_url()
+    operator_ui_context = operator_context or {}
     config_payload = {
         "page_title": "Обновление данных",
         "daily_report_path": daily_report_path,
@@ -1224,6 +1227,11 @@ def _render_sheet_vitrina_operator_ui(
         "factory_order_recommendation_path": DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
         "wb_regional_status_path": DEFAULT_WB_REGIONAL_STATUS_PATH,
         "wb_regional_calculate_path": DEFAULT_WB_REGIONAL_CALCULATE_PATH,
+        "stock_report_active_skus": list(operator_ui_context.get("stock_report_active_skus") or []),
+        "stock_report_active_sku_count": int(operator_ui_context.get("stock_report_active_sku_count") or 0),
+        "stock_report_active_sku_source": str(
+            operator_ui_context.get("stock_report_active_sku_source") or "current_registry_config_v2"
+        ),
     }
     template = OPERATOR_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     return (

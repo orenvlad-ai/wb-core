@@ -159,6 +159,29 @@ class SheetVitrinaV1StockReportBlock:
         }
 
 
+def list_active_sku_options(config_items: list[Any]) -> list[dict[str, Any]]:
+    active_items = sorted(
+        [item for item in config_items if getattr(item, "enabled", False)],
+        key=lambda item: getattr(item, "display_order", 0),
+    )
+    options: list[dict[str, Any]] = []
+    seen_nm_ids: set[int] = set()
+    for item in active_items:
+        nm_id = int(getattr(item, "nm_id"))
+        if nm_id in seen_nm_ids:
+            continue
+        seen_nm_ids.add(nm_id)
+        display_name = str(getattr(item, "display_name"))
+        options.append(
+            {
+                "nm_id": nm_id,
+                "display_name": display_name,
+                "identity_label": f"{display_name} · nmId {nm_id}",
+            }
+        )
+    return options
+
+
 def _extract_closed_slot_view(
     plan: SheetVitrinaV1Envelope,
     *,
