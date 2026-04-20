@@ -311,6 +311,7 @@ Operational rule:
   - the same closure rule now covers the sibling regional block under `Расчёт поставок`: shared `stock_ff` upload lifecycle, regional calculate, summary table and per-district XLSX routes are part of the same operator/public contour;
   - sheet/GAS verify stays `not in scope`, пока change не затрагивает bound Apps Script или live sheet write path.
   - if the task changes upload state handling, closure additionally verifies auto-upload-after-file-pick plus `upload -> current uploaded file download -> delete -> absent state`;
+  - for inbound upload contract changes, controlled live scenario must cover both mixed positive/zero rows and zero-only files, and status must truthfully expose accepted empty datasets as `row_count = 0`;
   - current UI may accept any positive `sales_avg_period_days`; backend now uses persisted runtime coverage instead of fixed `<= 7`, so covered windows such as `10 / 14 / 21` must succeed after truthful reconcile/backfill.
   - if the task changes operator defaults or supply vocabulary, probe/operator smokes must also confirm the current field values and labels (`Цикл заказов`, `Цикл поставок`, batch label, lead-time labels) on page load;
   - bounded historical reconcile may use live `DATA_VITRINA` only as migration input for window `2026-03-01..2026-04-18`; ongoing truth remains server-side in `temporal_source_snapshots[source_key=sales_funnel_history]`.

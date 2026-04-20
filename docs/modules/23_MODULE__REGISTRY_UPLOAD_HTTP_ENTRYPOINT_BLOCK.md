@@ -219,6 +219,8 @@ update_note: "Обновлён под current factory-order historical seam и c
   - `Товары в пути от фабрики` и `Товары в пути от ФФ на Wildberries` трактуют одну строку как один отдельный inbound event;
   - duplicate `nmId` в inbound templates допустимы и expected, если это разные ожидаемые поставки;
   - inbound datasets optional: если `Товары в пути от фабрики` и/или `Товары в пути от ФФ на Wildberries` не загружены либо удалены, расчёт не блокируется, а соответствующие coverage terms truthfully считаются как `0`;
+  - inbound rows with `Количество в пути = 0` больше не считаются validation error: backend принимает такой XLSX, отбрасывает zero-rows при normalization/runtime payload и не включает их в inbound coverage;
+  - если после фильтрации zero-rows inbound dataset становится пустым, upload всё равно считается accepted, dataset state остаётся uploaded с truthful `row_count = 0`, а соответствующий coverage term в расчёте остаётся `0`;
   - upload UX simplified: после выбора XLSX upload starts immediately, separate `Загрузить ...` buttons are removed, а текущий uploaded file по-прежнему surface-ится как download link + subtle delete icon;
   - status surface для каждого upload block показывает current uploaded filename, download link и delete action, если файл действительно хранится в current server-owned state;
   - upper `sheet_vitrina_v1` label в operator panels is a truthful clickable link to the current bound live spreadsheet target resolved from the current Apps Script bridge config;
