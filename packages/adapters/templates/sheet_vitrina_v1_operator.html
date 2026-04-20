@@ -676,6 +676,131 @@
       color: var(--muted);
     }
 
+    .plan-report-toolbar {
+      display: grid;
+      gap: 16px;
+      margin: 18px 0 14px;
+    }
+
+    .plan-report-controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: flex-end;
+    }
+
+    .plan-report-field {
+      flex: 1 1 180px;
+      min-width: 150px;
+    }
+
+    .plan-report-grid {
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .plan-report-card {
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      border-radius: 14px;
+      background: #ffffff;
+      padding: 18px;
+    }
+
+    .plan-report-card.is-primary {
+      grid-column: 1 / -1;
+    }
+
+    .plan-report-card-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .plan-report-card h3 {
+      margin: 0;
+      font-size: 16px;
+    }
+
+    .plan-report-card p {
+      margin: 4px 0 0;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--muted);
+    }
+
+    .plan-report-table-wrap {
+      overflow-x: auto;
+    }
+
+    .plan-report-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      min-width: 680px;
+    }
+
+    .plan-report-table th,
+    .plan-report-table td {
+      padding: 10px 12px;
+      border-top: 1px solid rgba(15, 23, 42, 0.08);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .plan-report-table thead th {
+      border-top: 0;
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+      background: #f8fbff;
+    }
+
+    .plan-report-table tbody tr:first-child td {
+      border-top: 1px solid rgba(15, 23, 42, 0.08);
+    }
+
+    .plan-report-metric-label {
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .plan-report-status-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .plan-report-status-badge.is-ok {
+      background: var(--success-bg);
+      color: var(--success-text);
+    }
+
+    .plan-report-status-badge.is-alert {
+      background: var(--error-bg);
+      color: var(--error-text);
+    }
+
+    .plan-report-status-badge.is-unknown {
+      background: var(--idle-bg);
+      color: var(--idle-text);
+    }
+
+    .plan-report-validation {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--error-text);
+    }
+
     .log-actions {
       display: flex;
       gap: 8px;
@@ -1065,6 +1190,7 @@
       .summary-grid,
       .report-kpis,
       .report-card-grid,
+      .plan-report-grid,
       .field-grid,
       .factory-grid {
         grid-template-columns: 1fr;
@@ -1171,12 +1297,14 @@
         <a class="eyebrow eyebrow-link" href="__SHEET_VITRINA_V1_SPREADSHEET_URL__" target="_blank" rel="noreferrer">sheet_vitrina_v1</a>
         <p class="section-lead">
           Reports tab остаётся полностью server-driven: daily-report читает два последних closed business day, а stock-report
-          по умолчанию читает previous closed business day через persisted ready snapshot без browser-side analytics.
+          по умолчанию читает previous closed business day через persisted ready snapshot, а `Выполнение плана` считает
+          факт только из persisted accepted closed-day snapshots `fin_buyout_rub` + `ads_sum` без browser-side analytics.
         </p>
 
         <div class="subsection-strip" role="tablist" aria-label="Внутренние разделы отчётов">
           <button class="subsection-button is-active" type="button" data-report-section-button="daily" aria-selected="true">Ежедневные отчёты</button>
           <button class="subsection-button" type="button" data-report-section-button="stock" aria-selected="false">Отчёт по остаткам</button>
+          <button class="subsection-button" type="button" data-report-section-button="plan" aria-selected="false">Выполнение плана</button>
         </div>
 
         <section class="report-panel" data-report-section-panel="daily">
@@ -1263,6 +1391,99 @@
                 </section>
               </div>
               <div id="stockReportNotes" class="report-notes"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="report-panel" data-report-section-panel="plan" hidden>
+          <div class="grid">
+            <section class="block">
+              <h2 class="block-title">Выполнение плана</h2>
+              <p id="planReportPeriod" class="report-period">Выберите период и задайте квартальные планы.</p>
+              <p id="planReportLead" class="field-note">
+                Факт считается server-side из accepted closed-day snapshots `fin_buyout_rub` и `ads_sum`; план распределяется по календарным дням кварталов.
+              </p>
+              <div class="plan-report-toolbar">
+                <div class="plan-report-controls">
+                  <div class="field plan-report-field">
+                    <label for="planReportPeriodSelect">Основной период</label>
+                    <select id="planReportPeriodSelect">
+                      <option value="yesterday">За вчера</option>
+                      <option value="last_7_days">За последние 7 дней</option>
+                      <option value="last_30_days">За последние 30 дней</option>
+                      <option value="current_month" selected>За текущий месяц</option>
+                      <option value="current_quarter">За текущий квартал</option>
+                      <option value="current_year">За текущий год</option>
+                    </select>
+                  </div>
+                  <div class="field plan-report-field">
+                    <label for="planReportQ1Input">План выкупа Q1, руб.</label>
+                    <input id="planReportQ1Input" type="number" min="0" step="0.01" inputmode="decimal">
+                  </div>
+                  <div class="field plan-report-field">
+                    <label for="planReportQ2Input">План выкупа Q2, руб.</label>
+                    <input id="planReportQ2Input" type="number" min="0" step="0.01" inputmode="decimal">
+                  </div>
+                  <div class="field plan-report-field">
+                    <label for="planReportQ3Input">План выкупа Q3, руб.</label>
+                    <input id="planReportQ3Input" type="number" min="0" step="0.01" inputmode="decimal">
+                  </div>
+                  <div class="field plan-report-field">
+                    <label for="planReportQ4Input">План выкупа Q4, руб.</label>
+                    <input id="planReportQ4Input" type="number" min="0" step="0.01" inputmode="decimal">
+                  </div>
+                  <div class="field plan-report-field">
+                    <label for="planReportDrrInput">Плановый DRR, %</label>
+                    <input id="planReportDrrInput" type="number" min="0" step="0.01" inputmode="decimal">
+                  </div>
+                </div>
+                <div class="block-actions">
+                  <button id="planReportApplyButton" class="action-button secondary-button" type="button">Рассчитать</button>
+                </div>
+                <p id="planReportValidation" class="plan-report-validation" hidden>Заполните квартальные планы и плановый DRR.</p>
+              </div>
+              <p id="planReportStatus" class="section-message">Заполните параметры и нажмите «Рассчитать».</p>
+              <div id="planReportContent" class="daily-report" hidden>
+                <div class="plan-report-grid">
+                  <section class="plan-report-card is-primary">
+                    <div class="plan-report-card-head">
+                      <div>
+                        <h3 id="planReportSelectedTitle">Основной период</h3>
+                        <p id="planReportSelectedRange">-</p>
+                      </div>
+                    </div>
+                    <div id="planReportSelectedTable" class="plan-report-table-wrap"></div>
+                  </section>
+                  <section class="plan-report-card">
+                    <div class="plan-report-card-head">
+                      <div>
+                        <h3>С начала месяца</h3>
+                        <p id="planReportMtdRange">-</p>
+                      </div>
+                    </div>
+                    <div id="planReportMtdTable" class="plan-report-table-wrap"></div>
+                  </section>
+                  <section class="plan-report-card">
+                    <div class="plan-report-card-head">
+                      <div>
+                        <h3>С начала квартала</h3>
+                        <p id="planReportQtdRange">-</p>
+                      </div>
+                    </div>
+                    <div id="planReportQtdTable" class="plan-report-table-wrap"></div>
+                  </section>
+                  <section class="plan-report-card">
+                    <div class="plan-report-card-head">
+                      <div>
+                        <h3>С начала года</h3>
+                        <p id="planReportYtdRange">-</p>
+                      </div>
+                    </div>
+                    <div id="planReportYtdTable" class="plan-report-table-wrap"></div>
+                  </section>
+                </div>
+              </div>
+              <div id="planReportNotes" class="report-notes"></div>
             </section>
           </div>
         </section>
@@ -1606,6 +1827,28 @@
       const stockReportSelectAllButton = document.getElementById("stockReportSelectAllButton");
       const stockReportClearAllButton = document.getElementById("stockReportClearAllButton");
       const stockReportApplyButton = document.getElementById("stockReportApplyButton");
+      const planReportPeriod = document.getElementById("planReportPeriod");
+      const planReportLead = document.getElementById("planReportLead");
+      const planReportStatus = document.getElementById("planReportStatus");
+      const planReportContent = document.getElementById("planReportContent");
+      const planReportPeriodSelect = document.getElementById("planReportPeriodSelect");
+      const planReportQ1Input = document.getElementById("planReportQ1Input");
+      const planReportQ2Input = document.getElementById("planReportQ2Input");
+      const planReportQ3Input = document.getElementById("planReportQ3Input");
+      const planReportQ4Input = document.getElementById("planReportQ4Input");
+      const planReportDrrInput = document.getElementById("planReportDrrInput");
+      const planReportApplyButton = document.getElementById("planReportApplyButton");
+      const planReportValidation = document.getElementById("planReportValidation");
+      const planReportSelectedTitle = document.getElementById("planReportSelectedTitle");
+      const planReportSelectedRange = document.getElementById("planReportSelectedRange");
+      const planReportSelectedTable = document.getElementById("planReportSelectedTable");
+      const planReportMtdRange = document.getElementById("planReportMtdRange");
+      const planReportMtdTable = document.getElementById("planReportMtdTable");
+      const planReportQtdRange = document.getElementById("planReportQtdRange");
+      const planReportQtdTable = document.getElementById("planReportQtdTable");
+      const planReportYtdRange = document.getElementById("planReportYtdRange");
+      const planReportYtdTable = document.getElementById("planReportYtdTable");
+      const planReportNotes = document.getElementById("planReportNotes");
       const downloadButton = document.getElementById("downloadButton");
       const logViewport = document.getElementById("logViewport");
       const logBlock = document.getElementById("logBlock");
@@ -1692,7 +1935,7 @@
       const DEFAULT_REPORT_SECTION = "daily";
       const DEFAULT_SUPPLY_SECTION = "factory";
       const VALID_TABS = new Set(["vitrina", "factory-order", "reports"]);
-      const VALID_REPORT_SECTIONS = new Set(["daily", "stock"]);
+      const VALID_REPORT_SECTIONS = new Set(["daily", "stock", "plan"]);
       const VALID_SUPPLY_SECTIONS = new Set(["factory", "regional"]);
       let activeJobId = null;
       let completedJob = null;
@@ -1703,6 +1946,7 @@
       let stockReportSelectedSkuIds = resolveRestoredStockReportDraftSkuIds(persistedOperatorUiState);
       let stockReportAppliedSkuIds = resolveRestoredStockReportAppliedSkuIds(persistedOperatorUiState);
       let stockReportPayload = null;
+      let planReportPayload = null;
 
       function readPersistedOperatorUiState() {
         if (!window || !window.localStorage) {
@@ -2305,6 +2549,200 @@
         stockReportContent.hidden = false;
         renderStockReportRows(filteredRows);
         renderStockReportNotes(payload.notes);
+      }
+
+      function setPlanReportValidation(message) {
+        const normalized = String(message || "").trim();
+        planReportValidation.textContent = normalized;
+        planReportValidation.hidden = !normalized;
+      }
+
+      function renderPlanReportNotes(notes) {
+        if (!Array.isArray(notes) || !notes.length) {
+          planReportNotes.innerHTML = "";
+          return;
+        }
+        planReportNotes.innerHTML = notes
+          .map((note) => "<p class=\"report-note\">" + escapeHtml(note) + "</p>")
+          .join("");
+      }
+
+      function formatPercentValue(value) {
+        if (!isFiniteNumber(value)) {
+          return "н/д";
+        }
+        return numberFormatter.format(value) + "%";
+      }
+
+      function formatSignedPercentPoint(value) {
+        if (!isFiniteNumber(value)) {
+          return "н/д";
+        }
+        if (Math.abs(value) < 0.005) {
+          return "0 п.п.";
+        }
+        const prefix = value > 0 ? "+" : "";
+        return prefix + numberFormatter.format(value) + " п.п.";
+      }
+
+      function formatDateRange(dateFrom, dateTo, dayCount) {
+        const start = formatHumanDate(dateFrom);
+        const end = formatHumanDate(dateTo);
+        const days = isFiniteNumber(dayCount) ? String(dayCount) + " дн." : "";
+        if (start === "-" || end === "-") {
+          return days || "-";
+        }
+        return [start + " — " + end, days].filter(Boolean).join(" · ");
+      }
+
+      function planStatusBadgeClass(status) {
+        if (status === "ok" || status === "alert" || status === "unknown") {
+          return "plan-report-status-badge is-" + status;
+        }
+        return "plan-report-status-badge is-unknown";
+      }
+
+      function renderPlanMetricTable(periodBlock) {
+        const metrics = periodBlock && periodBlock.metrics ? periodBlock.metrics : {};
+        const rows = [
+          metrics.buyout_rub,
+          metrics.drr_pct,
+          metrics.ads_sum_rub
+        ].filter(Boolean);
+        if (!rows.length) {
+          return "<p class=\"report-empty\">Показатели периода пока недоступны.</p>";
+        }
+        return [
+          "<table class=\"plan-report-table\">",
+          "<thead><tr><th>Показатель</th><th>Факт</th><th>План</th><th>Отклонение</th><th>Отклонение, %</th><th>Статус</th></tr></thead>",
+          "<tbody>",
+          rows.map((metric) => [
+            "<tr>",
+            "<td class=\"plan-report-metric-label\">" + escapeHtml(metric.label || "-") + "</td>",
+            "<td>" + escapeHtml(metric.entity_key === "drr_pct" ? formatPercentValue(metric.fact) : formatNumber(metric.fact)) + "</td>",
+            "<td>" + escapeHtml(metric.entity_key === "drr_pct" ? formatPercentValue(metric.plan) : formatNumber(metric.plan)) + "</td>",
+            "<td>" + escapeHtml(metric.entity_key === "drr_pct" ? formatSignedPercentPoint(metric.delta_pp) : formatSignedNumber(metric.delta_abs)) + "</td>",
+            "<td>" + escapeHtml(formatPctChange(metric.delta_pct)) + "</td>",
+            "<td><span class=\"" + planStatusBadgeClass(metric.status) + "\">" + escapeHtml(metric.status_label || "н/д") + "</span></td>",
+            "</tr>"
+          ].join("")).join(""),
+          "</tbody>",
+          "</table>"
+        ].join("");
+      }
+
+      function renderPlanReportUnavailable(payload, fallbackMessage) {
+        planReportPayload = payload || null;
+        planReportPeriod.textContent = "Выберите период и задайте квартальные планы.";
+        planReportLead.textContent = "Факт считается server-side из accepted closed-day snapshots `fin_buyout_rub` и `ads_sum`; план распределяется по календарным дням кварталов.";
+        planReportStatus.textContent = valueOrDash((payload && payload.reason) || fallbackMessage || "Отчёт выполнения плана пока недоступен.");
+        planReportStatus.className = "section-message";
+        planReportContent.hidden = true;
+        planReportSelectedTitle.textContent = "Основной период";
+        planReportSelectedRange.textContent = "-";
+        planReportMtdRange.textContent = "-";
+        planReportQtdRange.textContent = "-";
+        planReportYtdRange.textContent = "-";
+        planReportSelectedTable.innerHTML = "";
+        planReportMtdTable.innerHTML = "";
+        planReportQtdTable.innerHTML = "";
+        planReportYtdTable.innerHTML = "";
+        renderPlanReportNotes(payload && payload.notes);
+      }
+
+      function renderPlanReport(payload) {
+        if (!payload || payload.status !== "available") {
+          renderPlanReportUnavailable(payload, "Отчёт выполнения плана пока недоступен.");
+          return;
+        }
+        planReportPayload = payload;
+        const periods = payload.periods || {};
+        const selectedPeriod = periods.selected_period || {};
+        const mtd = periods.month_to_date || {};
+        const qtd = periods.quarter_to_date || {};
+        const ytd = periods.year_to_date || {};
+        planReportPeriod.textContent = "Reference date: " + formatHumanDate(payload.reference_date) + ". Основной период: " + valueOrDash(payload.selected_period_label) + ".";
+        planReportLead.textContent = "Active SKU в current config: " + valueOrDash(payload.active_sku_count) + ". План по выкупу распределяется по календарным дням кварталов; факт DRR считается как ads_sum / fin_buyout_rub * 100.";
+        planReportStatus.textContent = "Source of truth: accepted closed-day runtime snapshots `fin_report_daily` + `ads_compact`.";
+        planReportStatus.className = "section-message";
+        planReportContent.hidden = false;
+        planReportSelectedTitle.textContent = valueOrDash(selectedPeriod.label) === "-" ? "Основной период" : String(selectedPeriod.label);
+        planReportSelectedRange.textContent = formatDateRange(selectedPeriod.date_from, selectedPeriod.date_to, selectedPeriod.day_count);
+        planReportMtdRange.textContent = formatDateRange(mtd.date_from, mtd.date_to, mtd.day_count);
+        planReportQtdRange.textContent = formatDateRange(qtd.date_from, qtd.date_to, qtd.day_count);
+        planReportYtdRange.textContent = formatDateRange(ytd.date_from, ytd.date_to, ytd.day_count);
+        planReportSelectedTable.innerHTML = renderPlanMetricTable(selectedPeriod);
+        planReportMtdTable.innerHTML = renderPlanMetricTable(mtd);
+        planReportQtdTable.innerHTML = renderPlanMetricTable(qtd);
+        planReportYtdTable.innerHTML = renderPlanMetricTable(ytd);
+        renderPlanReportNotes(payload.notes);
+      }
+
+      function readPlanReportRequest() {
+        const request = {
+          period: String(planReportPeriodSelect.value || "").trim(),
+          q1_buyout_plan_rub: String(planReportQ1Input.value || "").trim(),
+          q2_buyout_plan_rub: String(planReportQ2Input.value || "").trim(),
+          q3_buyout_plan_rub: String(planReportQ3Input.value || "").trim(),
+          q4_buyout_plan_rub: String(planReportQ4Input.value || "").trim(),
+          plan_drr_pct: String(planReportDrrInput.value || "").trim(),
+        };
+        const missing = Object.entries(request).find(([key, value]) => key !== "period" && !value);
+        if (!request.period || missing) {
+          return { error: "Заполните квартальные планы и плановый DRR." };
+        }
+        const numericKeys = [
+          "q1_buyout_plan_rub",
+          "q2_buyout_plan_rub",
+          "q3_buyout_plan_rub",
+          "q4_buyout_plan_rub",
+          "plan_drr_pct",
+        ];
+        const params = new URLSearchParams();
+        params.set("period", request.period);
+        for (const key of numericKeys) {
+          const numericValue = Number(request[key]);
+          if (!Number.isFinite(numericValue) || numericValue < 0) {
+            return { error: "Каждое значение должно быть числом не меньше 0." };
+          }
+          params.set(key, String(numericValue));
+        }
+        return { query: params.toString() };
+      }
+
+      async function loadPlanReport() {
+        const request = readPlanReportRequest();
+        if (request.error) {
+          setPlanReportValidation(request.error);
+          return;
+        }
+        setPlanReportValidation("");
+        planReportApplyButton.disabled = true;
+        planReportApplyButton.textContent = "Считаем...";
+        planReportStatus.textContent = "Собираем факт и план по закрытым дням...";
+        planReportStatus.className = "section-message";
+        try {
+          const response = await fetch(config.plan_report_path + "?" + request.query, {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          renderPlanReport(payload);
+        } catch (error) {
+          renderPlanReportUnavailable(
+            {
+              reason: "Не удалось прочитать отчёт выполнения плана: " + (error instanceof Error ? error.message : String(error)),
+              notes: []
+            },
+            "Отчёт выполнения плана пока недоступен."
+          );
+        } finally {
+          planReportApplyButton.disabled = false;
+          planReportApplyButton.textContent = "Рассчитать";
+        }
       }
 
       function sheetCount(counts, key) {
@@ -3094,6 +3532,25 @@
         });
       });
       stockReportApplyButton.addEventListener("click", applyStockReportSelection);
+      planReportApplyButton.addEventListener("click", loadPlanReport);
+      [
+        planReportPeriodSelect,
+        planReportQ1Input,
+        planReportQ2Input,
+        planReportQ3Input,
+        planReportQ4Input,
+        planReportDrrInput
+      ].forEach((input) => {
+        input.addEventListener("input", () => {
+          if (planReportValidation.hidden) {
+            return;
+          }
+          const request = readPlanReportRequest();
+          if (!request.error) {
+            setPlanReportValidation("");
+          }
+        });
+      });
 
       activateTab(persistedOperatorUiState.active_tab || DEFAULT_ACTIVE_TAB);
       activateReportSection(persistedOperatorUiState.report_section || DEFAULT_REPORT_SECTION);

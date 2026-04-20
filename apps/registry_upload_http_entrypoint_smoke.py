@@ -39,6 +39,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_DAILY_REPORT_PATH,
     DEFAULT_SHEET_LOAD_PATH,
     DEFAULT_SHEET_PLAN_PATH,
+    DEFAULT_SHEET_PLAN_REPORT_PATH,
     DEFAULT_SHEET_REFRESH_PATH,
     DEFAULT_SHEET_STOCK_REPORT_PATH,
     DEFAULT_SHEET_STATUS_PATH,
@@ -136,10 +137,12 @@ def main() -> None:
                 "Отчёты" not in operator_ui_html
                 or "Ежедневные отчёты" not in operator_ui_html
                 or "Отчёт по остаткам" not in operator_ui_html
+                or "Выполнение плана" not in operator_ui_html
                 or 'data-report-section-button="daily"' not in operator_ui_html
                 or 'data-report-section-button="stock"' not in operator_ui_html
+                or 'data-report-section-button="plan"' not in operator_ui_html
             ):
-                raise AssertionError("operator UI must expose the compact reports tab with both subsection-switched report blocks")
+                raise AssertionError("operator UI must expose the compact reports tab with all subsection-switched report blocks")
             if (
                 'id="stockReportSkuSelector"' not in operator_ui_html
                 or 'id="stockReportApplyButton"' not in operator_ui_html
@@ -147,6 +150,15 @@ def main() -> None:
                 or "Выберите хотя бы один SKU" not in operator_ui_html
             ):
                 raise AssertionError("operator UI must expose the SKU selector, apply action and empty-selection validation")
+            if (
+                'id="planReportPeriodSelect"' not in operator_ui_html
+                or 'id="planReportQ1Input"' not in operator_ui_html
+                or 'id="planReportQ4Input"' not in operator_ui_html
+                or 'id="planReportDrrInput"' not in operator_ui_html
+                or 'id="planReportApplyButton"' not in operator_ui_html
+                or DEFAULT_SHEET_PLAN_REPORT_PATH not in operator_ui_html
+            ):
+                raise AssertionError("operator UI must expose the compact plan-report form and its read-only route wiring")
             if (
                 "const OPERATOR_UI_STORAGE_KEY = \"wb-core:sheet-vitrina-v1:operator-ui-state:v1\";" not in operator_ui_html
                 or "window.localStorage.getItem(OPERATOR_UI_STORAGE_KEY)" not in operator_ui_html
@@ -247,6 +259,7 @@ def main() -> None:
                 "job_path": DEFAULT_SHEET_JOB_PATH,
                 "daily_report_path": DEFAULT_SHEET_DAILY_REPORT_PATH,
                 "stock_report_path": DEFAULT_SHEET_STOCK_REPORT_PATH,
+                "plan_report_path": DEFAULT_SHEET_PLAN_REPORT_PATH,
                 "factory_order_status_path": DEFAULT_FACTORY_ORDER_STATUS_PATH,
                 "factory_order_template_stock_ff_path": DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
                 "factory_order_template_inbound_factory_path": DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
@@ -263,7 +276,7 @@ def main() -> None:
                 "stock_report_active_sku_source": "current_registry_config_v2",
             }:
                 raise AssertionError(
-                    "operator UI config must expose refresh/status paths, both report routes, both supply blocks and the full active SKU selector source"
+                    "operator UI config must expose refresh/status paths, all report routes, both supply blocks and the full active SKU selector source"
                 )
 
             missing_plan_status, missing_plan_payload = _get_json(plan_url)

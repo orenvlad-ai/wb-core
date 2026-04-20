@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-23-REGISTRY-UPLOAD-HTTP-ENTRYPOINT-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `registry_upload_http_entrypoint_block`."
-scope: "Первый live inbound HTTP entrypoint для V2-реестров, separate `COST_PRICE` upload contour и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, sibling cost-price request, thin request -> runtime -> response wiring, server-side `activated_at`, separated refresh/load actions, date-aware plan/status read, compact read-only daily-report surface for two latest closed business days, repo-owned orchestration-first operator page, sibling phase-1 web-vitrina page shell и stable read-only `web_vitrina_contract` v1, plus bounded server-side factory-order supply contour без SPA/build pipeline."
+scope: "Первый live inbound HTTP entrypoint для V2-реестров, separate `COST_PRICE` upload contour и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, sibling cost-price request, thin request -> runtime -> response wiring, server-side `activated_at`, separated refresh/load actions, date-aware plan/status read, compact read-only daily/stock/plan report surfaces, repo-owned orchestration-first operator page, sibling phase-1 web-vitrina page shell и stable read-only `web_vitrina_contract` v1, plus bounded server-side factory-order supply contour без SPA/build pipeline."
 source_basis:
   - "migration/86_registry_upload_contract.md"
   - "migration/89_registry_upload_db_backed_runtime.md"
@@ -25,6 +25,7 @@ related_modules:
   - "packages/application/factory_order_supply.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
+  - "packages/application/sheet_vitrina_v1_plan_report.py"
   - "packages/application/simple_xlsx.py"
   - "packages/application/sheet_vitrina_v1_load_bridge.py"
   - "packages/application/sheet_vitrina_v1_web_vitrina.py"
@@ -41,6 +42,8 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/refresh"
   - "POST /v1/sheet-vitrina-v1/load"
   - "GET /v1/sheet-vitrina-v1/daily-report"
+  - "GET /v1/sheet-vitrina-v1/stock-report"
+  - "GET /v1/sheet-vitrina-v1/plan-report"
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
   - "GET /v1/sheet-vitrina-v1/job"
@@ -68,6 +71,8 @@ related_runners:
   - "apps/sheet_vitrina_v1_factory_order_http_smoke.py"
   - "apps/sheet_vitrina_v1_daily_report_smoke.py"
   - "apps/sheet_vitrina_v1_daily_report_http_smoke.py"
+  - "apps/sheet_vitrina_v1_plan_report_smoke.py"
+  - "apps/sheet_vitrina_v1_plan_report_http_smoke.py"
   - "apps/sheet_vitrina_v1_operator_load_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
@@ -84,7 +89,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под web-vitrina phase-1/phase-3 split: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, read-only `GET /v1/sheet-vitrina-v1/web-vitrina` materialize-ит stable library-agnostic `web_vitrina_contract` v1 поверх existing ready snapshot/current truth без grid-library dependency, `view_model` остаётся отдельным repo-owned seam, а Gravity-specific `grid_adapter` теперь тоже materialized repo-side и по-прежнему вынесен за пределы HTTP boundary/page shell."
+update_note: "Обновлён под bounded plan-report checkpoint: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, `Отчёты` получают третий compact subsection `Выполнение плана`, а new read-only `GET /v1/sheet-vitrina-v1/plan-report` materialize-ит server-side plan-vs-fact contract поверх persisted accepted closed-day temporal snapshots + current active `config_v2`, не trigger-ит refresh/upstream fetch и не вводит отдельный frontend/backend contour."
 ---
 
 # 1. Идентификатор и статус
@@ -146,6 +151,7 @@ update_note: "Обновлён под web-vitrina phase-1/phase-3 split: existin
   - `POST /v1/sheet-vitrina-v1/load` = thin operator action, который пишет уже готовый snapshot в live sheet через existing bound Apps Script bridge
   - `GET /v1/sheet-vitrina-v1/daily-report` = cheap read-only JSON summary для compact блока `Ежедневные отчёты`
   - `GET /v1/sheet-vitrina-v1/stock-report` = cheap read-only JSON summary для compact блока `Отчёт по остаткам`
+  - `GET /v1/sheet-vitrina-v1/plan-report` = cheap read-only JSON summary для compact блока `Выполнение плана`
   - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
   - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result
   - `GET /v1/sheet-vitrina-v1/job` = cheap poll/read surface для live operator log и async action state
@@ -267,7 +273,8 @@ update_note: "Обновлён под web-vitrina phase-1/phase-3 split: existin
 - Operator page добавляет отдельный top-level tab `Отчёты` с одним sibling selector по образцу supply tab:
   - `Ежедневные отчёты`
   - `Отчёт по остаткам`
-  - по умолчанию открыт `Ежедневные отчёты`, одновременно показывается только один report body, browser persistence не используется;
+  - `Выполнение плана`
+  - по умолчанию открыт `Ежедневные отчёты`, одновременно показывается только один report body, а browser persistence хранит только last valid top-level/report subsection state и stock-report SKU subset в namespaced `localStorage`;
 - `Ежедневные отчёты`:
   - block сравнивает только два последних closed business day в `Asia/Yekaterinburg`;
   - current rule = `current business date -> compare yesterday_closed(default_business_as_of_date(now)) vs yesterday_closed(default_business_as_of_date(now)-1 day)`;
@@ -340,6 +347,36 @@ update_note: "Обновлён под web-vitrina phase-1/phase-3 split: existin
     - `stock_ru_ural` -> `Уральский ФО`
     - `stock_ru_south_caucasus` -> `Юг и СКФО`
   - merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь` deliberately excluded from stock-report filter and display, because current truth does not split Far East from Siberia
+- `Выполнение плана`:
+  - route = `GET /v1/sheet-vitrina-v1/plan-report`
+  - route stays cheap read-only and server-driven: browser sends only period + quarterly buyout plan + plan DRR inputs, while all calculations stay repo-side and must not trigger refresh/upstream fetch
+  - source seam = persisted temporal source slot snapshots with `snapshot_role=accepted_closed_day_snapshot` for `fin_report_daily` and `ads_compact`, plus current active SKU truth from `config_v2`
+  - operator block keeps compact inputs only:
+    - selector `за вчера / последние 7 дней / последние 30 дней / текущий месяц / текущий квартал / текущий год`
+    - quarterly buyout plan inputs `Q1 / Q2 / Q3 / Q4`
+    - fixed `Плановый DRR, %`
+    - `Рассчитать`
+  - fact metrics stay canonical and narrow:
+    - buyout fact = `fin_buyout_rub`
+    - DRR fact = `ads_sum / fin_buyout_rub * 100`
+    - ads fact = `ads_sum`
+  - plan math stays calendar-day based:
+    - each day uses the quarter plan of its calendar quarter divided by the number of calendar days in that quarter
+    - any requested window sums those per-day buyout plans across its exact dates, including cross-quarter windows such as `last_7_days`, `last_30_days`, `current_year`, `QTD`, `YTD`
+    - ads-spend plan = `buyout_plan_for_period * plan_drr_pct / 100`
+    - DRR plan remains the fixed operator-entered percent and is not converted into plan ad spend inside the DRR block
+  - response always materializes four blocks with the same metric structure:
+    - selected period
+    - month-to-date
+    - quarter-to-date
+    - year-to-date
+  - each block surfaces the same three entities:
+    - `Выкуп, руб.`
+    - `DRR, %`
+    - `Рекламные расходы, руб.`
+  - each entity surfaces `fact`, `plan`, absolute delta, relative delta and a compact status label, with DRR absolute delta expressed in p.p.
+  - if one or more accepted closed-day snapshots are missing inside the required coverage window, route remains truthful `status=unavailable` and discloses `coverage.missing_dates_by_source` instead of fabricating partial windows
+  - operator page does not persist quarterly plan or DRR inputs server-side; persistent user preference/profile state stays out of scope
 - Operator page keeps one compact server-driven manual block `Ручная загрузка данных`:
   - embedded actions `Загрузить данные` / `Отправить данные`
   - `Последняя удачная загрузка`

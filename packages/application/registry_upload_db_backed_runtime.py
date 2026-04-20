@@ -780,6 +780,40 @@ class RegistryUploadDbBackedRuntime:
                 return None, None
             return _deserialize_temporal_source_payload(row["payload_json"]), row["captured_at"]
 
+    def load_temporal_source_slot_snapshots(
+        self,
+        *,
+        source_key: str,
+        date_from: str,
+        date_to: str,
+        snapshot_role: str,
+    ) -> dict[str, dict[str, Any]]:
+        _validate_iso_date(date_from, field_name="date_from")
+        _validate_iso_date(date_to, field_name="date_to")
+        if date_to < date_from:
+            raise ValueError("date_to must be >= date_from")
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT snapshot_date, captured_at, payload_json
+                FROM temporal_source_slot_snapshots
+                WHERE source_key = ?
+                  AND snapshot_role = ?
+                  AND snapshot_date >= ?
+                  AND snapshot_date <= ?
+                ORDER BY snapshot_date
+                """,
+                (source_key, snapshot_role, date_from, date_to),
+            ).fetchall()
+            return {
+                str(row["snapshot_date"]): {
+                    "payload": _deserialize_temporal_source_payload(row["payload_json"]),
+                    "captured_at": row["captured_at"],
+                }
+                for row in rows
+            }
+
     def delete_temporal_source_slot_snapshots(
         self,
         *,

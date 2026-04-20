@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_DAILY_REPORT_PATH,
+    DEFAULT_SHEET_PLAN_REPORT_PATH,
     DEFAULT_SHEET_STOCK_REPORT_PATH,
     _render_sheet_vitrina_operator_ui,
 )
@@ -31,6 +32,7 @@ def main() -> None:
         job_path="/v1/sheet-vitrina-v1/job",
         daily_report_path=DEFAULT_SHEET_DAILY_REPORT_PATH,
         stock_report_path=DEFAULT_SHEET_STOCK_REPORT_PATH,
+        plan_report_path=DEFAULT_SHEET_PLAN_REPORT_PATH,
         operator_context={
             "stock_report_active_skus": active_skus,
             "stock_report_active_sku_count": len(active_skus),
@@ -44,6 +46,7 @@ def main() -> None:
         "Отчёты",
         "Ежедневные отчёты",
         "Отчёт по остаткам",
+        "Выполнение плана",
     ):
         if token not in html:
             raise AssertionError(f"reports tab chrome must keep token {token!r}")
@@ -51,17 +54,27 @@ def main() -> None:
     for token in (
         'data-report-section-button="daily"',
         'data-report-section-button="stock"',
+        'data-report-section-button="plan"',
         'data-report-section-panel="daily"',
         'data-report-section-panel="stock" hidden',
+        'data-report-section-panel="plan" hidden',
         'id="dailyReportPeriod"',
         'id="stockReportPeriod"',
+        'id="planReportPeriod"',
         'id="stockReportSkuSelector"',
         'id="stockReportApplyButton"',
         'id="stockReportSkuValidation"',
         'id="stockReportSelectAllButton"',
         'id="stockReportClearAllButton"',
+        'id="planReportPeriodSelect"',
+        'id="planReportQ1Input"',
+        'id="planReportQ4Input"',
+        'id="planReportDrrInput"',
+        'id="planReportApplyButton"',
+        'id="planReportValidation"',
         DEFAULT_SHEET_DAILY_REPORT_PATH,
         DEFAULT_SHEET_STOCK_REPORT_PATH,
+        DEFAULT_SHEET_PLAN_REPORT_PATH,
     ):
         if token not in html:
             raise AssertionError(f"reports subsection contract must include token {token!r}")
@@ -96,6 +109,10 @@ def main() -> None:
         raise AssertionError("supply subsection must restore from persisted browser state")
     if 'setStockReportValidation("Выберите хотя бы один SKU");' not in html:
         raise AssertionError("stock-report selector must reject empty SKU selection before recalculation")
+    if "config.plan_report_path + \"?\" + request.query" not in html:
+        raise AssertionError("plan-report UI must call the dedicated read-only route with query-string inputs")
+    if "accepted closed-day runtime snapshots `fin_report_daily` + `ads_compact`" not in html:
+        raise AssertionError("plan-report UI must disclose the accepted closed-day source seam")
 
     config_payload = _extract_operator_ui_config(html)
     if config_payload.get("stock_report_active_skus") != active_skus:
@@ -104,6 +121,8 @@ def main() -> None:
         raise AssertionError("reports UI config must disclose the active SKU count")
     if config_payload.get("stock_report_active_sku_source") != "current_registry_config_v2":
         raise AssertionError("reports UI config must disclose current registry state as the selector source")
+    if config_payload.get("plan_report_path") != DEFAULT_SHEET_PLAN_REPORT_PATH:
+        raise AssertionError("reports UI config must expose the dedicated plan-report route path")
 
     fake_rows = [
         {"nm_id": 1001, "identity_label": "SKU Alpha · nmId 1001"},
@@ -115,8 +134,9 @@ def main() -> None:
         raise AssertionError("stock-report selector semantics must exclude deselected SKU from the rendered row set")
 
     print("reports_ui_sections: ok -> Обновление данных / Расчёт поставок / Отчёты")
-    print("reports_ui_subsections: ok -> daily / stock")
+    print("reports_ui_subsections: ok -> daily / stock / plan")
     print("reports_ui_stock_selector: ok -> full active SKU config, default=all, empty-selection validation")
+    print("reports_ui_plan_report: ok -> dedicated plan subsection, compact form and read-only route wiring")
     print("reports_ui_heading_dedup: ok -> no panel-body h1 duplicates")
 
 

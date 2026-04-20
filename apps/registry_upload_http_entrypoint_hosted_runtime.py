@@ -34,6 +34,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_LOAD_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
+    DEFAULT_SHEET_PLAN_REPORT_PATH,
     DEFAULT_SHEET_REFRESH_PATH,
     DEFAULT_SHEET_STOCK_REPORT_PATH,
     DEFAULT_SHEET_STATUS_PATH,
@@ -308,6 +309,25 @@ def collect_public_surface(
             name="stock_report",
             method="GET",
             url=f"{base_url}{DEFAULT_SHEET_STOCK_REPORT_PATH}",
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
+            name="plan_report",
+            method="GET",
+            url=_append_query_params(
+                _append_as_of_date(
+                    f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_PATH}",
+                    as_of_date,
+                ),
+                {
+                    "period": "yesterday",
+                    "q1_buyout_plan_rub": "100000",
+                    "q2_buyout_plan_rub": "100000",
+                    "q3_buyout_plan_rub": "100000",
+                    "q4_buyout_plan_rub": "100000",
+                    "plan_drr_pct": "10",
+                },
+            ),
             timeout_seconds=timeout_seconds,
         ),
         _collect_http_probe(
@@ -746,6 +766,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Автообновления",
             "Ежедневные отчёты",
             "Отчёт по остаткам",
+            "Выполнение плана",
             "SKU",
             "Рассчитать",
             "Выберите хотя бы один SKU",
@@ -755,12 +776,16 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Позитивные факторы",
             DEFAULT_SHEET_DAILY_REPORT_PATH,
             DEFAULT_SHEET_STOCK_REPORT_PATH,
+            DEFAULT_SHEET_PLAN_REPORT_PATH,
             'data-report-section-button="daily"',
             'data-report-section-button="stock"',
+            'data-report-section-button="plan"',
             'id="dailyReportPeriod"',
             'id="stockReportPeriod"',
+            'id="planReportPeriod"',
             'id="stockReportSkuSelector"',
             'id="stockReportApplyButton"',
+            'id="planReportApplyButton"',
             "Часовой пояс",
             "Автоцепочка",
             "Последний автозапуск",
@@ -920,6 +945,25 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
                 "threshold_lt",
                 "districts",
                 "source_of_truth",
+                "notes",
+            ],
+        )
+        return evaluation
+
+    if route == "plan_report":
+        evaluation["ok"], evaluation["detail"] = _validate_json_result(
+            status,
+            payload,
+            success_keys=[
+                "status",
+                "business_timezone",
+                "current_business_date",
+                "reference_date",
+                "selected_period_key",
+                "selected_period_label",
+                "inputs",
+                "source_of_truth",
+                "coverage",
                 "notes",
             ],
         )
@@ -1125,6 +1169,12 @@ def _append_as_of_date(url, as_of_date):
     separator = '&' if '?' in url else '?'
     return f"{{url}}{{separator}}{{query}}"
 
+def _append_query_params(url, params):
+    if not params:
+        return url
+    separator = '&' if '?' in url else '?'
+    return f"{{url}}{{separator}}{{urllib_parse.urlencode(params)}}"
+
 def _try_load_json(body_text):
     try:
         return json.loads(body_text)
@@ -1201,6 +1251,17 @@ results = [
     _collect("web_vitrina_read", "GET", _append_as_of_date(PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_READ_PATH!r}, PAYLOAD["as_of_date"])),
     _collect("daily_report", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/daily-report"),
     _collect("stock_report", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/stock-report"),
+    _collect("plan_report", "GET", _append_query_params(
+        _append_as_of_date(PAYLOAD["base_url"] + {DEFAULT_SHEET_PLAN_REPORT_PATH!r}, PAYLOAD["as_of_date"]),
+        {{
+            "period": "yesterday",
+            "q1_buyout_plan_rub": "100000",
+            "q2_buyout_plan_rub": "100000",
+            "q3_buyout_plan_rub": "100000",
+            "q4_buyout_plan_rub": "100000",
+            "plan_drr_pct": "10",
+        }},
+    )),
     _collect("plan", "GET", _append_as_of_date(PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_HTTP_PATH"], PAYLOAD["as_of_date"])),
     _collect("factory_order_status", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/status"),
     _collect("factory_order_template_stock_ff", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"),
@@ -1229,6 +1290,13 @@ def _append_as_of_date(url: str, as_of_date: str | None) -> str:
     query = urllib_parse.urlencode({"as_of_date": as_of_date})
     separator = "&" if "?" in url else "?"
     return f"{url}{separator}{query}"
+
+
+def _append_query_params(url: str, params: dict[str, str]) -> str:
+    if not params:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}{urllib_parse.urlencode(params)}"
 
 
 def _try_load_json(body_text: str) -> Any:

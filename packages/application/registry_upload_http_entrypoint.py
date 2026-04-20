@@ -15,6 +15,7 @@ from packages.application.promo_live_source import PromoLiveSourceBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_daily_report import SheetVitrinaV1DailyReportBlock
 from packages.application.sheet_vitrina_v1_load_bridge import load_sheet_vitrina_ready_snapshot_via_clasp
+from packages.application.sheet_vitrina_v1_plan_report import SheetVitrinaV1PlanReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import SheetVitrinaV1StockReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import list_active_sku_options
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
@@ -98,6 +99,10 @@ class RegistryUploadHttpEntrypoint:
             runtime=self.runtime,
             now_factory=self.now_factory,
         )
+        self.plan_report_block = SheetVitrinaV1PlanReportBlock(
+            runtime=self.runtime,
+            now_factory=self.now_factory,
+        )
         self.web_vitrina_block = SheetVitrinaV1WebVitrinaBlock(
             runtime=self.runtime,
             now_factory=self.now_factory,
@@ -141,6 +146,27 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_sheet_stock_report_request(self, as_of_date: str | None = None) -> dict[str, Any]:
         return self.stock_report_block.build(as_of_date=as_of_date)
+
+    def handle_sheet_plan_report_request(
+        self,
+        *,
+        period: str,
+        q1_buyout_plan_rub: float,
+        q2_buyout_plan_rub: float,
+        q3_buyout_plan_rub: float,
+        q4_buyout_plan_rub: float,
+        plan_drr_pct: float,
+        as_of_date: str | None = None,
+    ) -> dict[str, Any]:
+        return self.plan_report_block.build(
+            period=period,
+            q1_buyout_plan_rub=q1_buyout_plan_rub,
+            q2_buyout_plan_rub=q2_buyout_plan_rub,
+            q3_buyout_plan_rub=q3_buyout_plan_rub,
+            q4_buyout_plan_rub=q4_buyout_plan_rub,
+            plan_drr_pct=plan_drr_pct,
+            as_of_date=as_of_date,
+        )
 
     def handle_sheet_web_vitrina_request(
         self,
