@@ -79,6 +79,7 @@ _DEFAULT_CYCLE_ORDER_DAYS = 14
 _COVERAGE_CONTRACT_NOTE = (
     "Файлы «Товары в пути от фабрики» и «Товары в пути от ФФ на Wildberries» необязательны: "
     "если файл не загружен, соответствующий inbound считается как 0. "
+    "Строки inbound с количеством 0 принимаются, но игнорируются и не влияют на coverage. "
     "В пути ФФ -> Wildberries учитываются только из отдельного загруженного шаблона, "
     "потому что в текущем wb-core нет другого authoritative source для этого члена формулы."
 )
@@ -567,11 +568,14 @@ class FactoryOrderSupplyBlock:
             if _event_row_is_placeholder(quantity_raw, date_raw, comment):
                 ignored_row_count += 1
                 continue
-            quantity = _parse_positive_number(
+            quantity = _parse_nonnegative_number(
                 quantity_raw,
                 row_index=row_index,
                 field_label="Количество в пути",
             )
+            if quantity == 0:
+                ignored_row_count += 1
+                continue
             planned_arrival_date = _parse_required_date(
                 date_raw,
                 row_index=row_index,

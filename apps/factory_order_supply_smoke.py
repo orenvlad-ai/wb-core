@@ -234,7 +234,61 @@ def main() -> None:
         ):
             raise AssertionError("recommended qty without inbound files must still round by box multiple after cycle extension")
 
-        # Scenario 2: upload both inbound files and keep only the events inside horizon.
+        # Scenario 2: zero-only inbound files are accepted as an empty dataset.
+        inbound_factory_zero_upload = block.upload_dataset(
+            DATASET_INBOUND_FACTORY_TO_FF,
+            build_single_sheet_workbook_bytes(
+                "В пути от фабрики",
+                [
+                    inbound_rows[0],
+                    [210183919, "SKU 1", 0, "", ""],
+                    [210184534, "SKU 2", 0, "", ""],
+                ],
+            ),
+            uploaded_filename="factory-inbound-zero.xlsx",
+        )
+        if inbound_factory_zero_upload.accepted_row_count != 0 or inbound_factory_zero_upload.ignored_row_count != 2:
+            raise AssertionError("zero-only factory inbound upload must be accepted as an empty dataset")
+
+        inbound_ff_to_wb_zero_upload = block.upload_dataset(
+            DATASET_INBOUND_FF_TO_WB,
+            build_single_sheet_workbook_bytes(
+                "В пути ФФ -> WB",
+                [
+                    ["nmId", "Комментарий SKU", "Количество в пути", "Планируемая дата прихода на Wildberries", "Комментарий"],
+                    [210183919, "SKU 1", 0, "", ""],
+                    [210184534, "SKU 2", 0, "", ""],
+                ],
+            ),
+            uploaded_filename="ff-to-wb-zero.xlsx",
+        )
+        if inbound_ff_to_wb_zero_upload.accepted_row_count != 0 or inbound_ff_to_wb_zero_upload.ignored_row_count != 2:
+            raise AssertionError("zero-only ff_to_wb upload must be accepted as an empty dataset")
+
+        zero_only_status = block.build_status()
+        if zero_only_status.datasets[DATASET_INBOUND_FACTORY_TO_FF].row_count != 0:
+            raise AssertionError("accepted zero-only inbound_factory upload must persist as row_count=0")
+        if zero_only_status.datasets[DATASET_INBOUND_FF_TO_WB].row_count != 0:
+            raise AssertionError("accepted zero-only inbound_ff_to_wb upload must persist as row_count=0")
+
+        result_zero_only_inbound = block.calculate(
+            {
+                "prod_lead_time_days": 10,
+                "lead_time_factory_to_ff_days": 5,
+                "lead_time_ff_to_wb_days": 2,
+                "safety_days_mp": 3,
+                "safety_days_ff": 2,
+                "cycle_order_days": 14,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "sales_avg_period_days": 3,
+            }
+        )
+        zero_only_sku = {item.nm_id: item for item in result_zero_only_inbound.rows}[210183919]
+        if zero_only_sku.inbound_factory_to_ff != 0.0 or zero_only_sku.inbound_ff_to_wb != 0.0:
+            raise AssertionError("zero-only inbound uploads must keep coverage terms at zero")
+
+        # Scenario 3: upload both inbound files with zero rows mixed in and keep only the positive events inside horizon.
         inbound_factory_upload = block.upload_dataset(
             DATASET_INBOUND_FACTORY_TO_FF,
             build_single_sheet_workbook_bytes(
@@ -242,13 +296,14 @@ def main() -> None:
                 [
                     inbound_rows[0],
                     [210183919, "SKU 1", 40, "2026-04-25", ""],
+                    [210184534, "SKU 2", 0, "", ""],
                     [210183919, "SKU 1", 12, "2026-05-05", ""],
                 ],
             ),
             uploaded_filename="factory-inbound.xlsx",
         )
-        if inbound_factory_upload.accepted_row_count != 2:
-            raise AssertionError("factory inbound upload must keep multiple rows for one SKU")
+        if inbound_factory_upload.accepted_row_count != 2 or inbound_factory_upload.ignored_row_count != 1:
+            raise AssertionError("factory inbound upload must ignore zero rows and keep positive rows for one SKU")
 
         inbound_ff_to_wb_upload = block.upload_dataset(
             DATASET_INBOUND_FF_TO_WB,
@@ -257,13 +312,14 @@ def main() -> None:
                 [
                     ["nmId", "Комментарий SKU", "Количество в пути", "Планируемая дата прихода на Wildberries", "Комментарий"],
                     [210183919, "SKU 1", 10, "2026-04-26", ""],
+                    [210183919, "SKU 1", 0, "", ""],
                     [210184534, "SKU 2", 25, "2026-04-28", ""],
                 ],
             ),
             uploaded_filename="ff-to-wb.xlsx",
         )
-        if inbound_ff_to_wb_upload.accepted_row_count != 2:
-            raise AssertionError("ff_to_wb upload must be accepted")
+        if inbound_ff_to_wb_upload.accepted_row_count != 2 or inbound_ff_to_wb_upload.ignored_row_count != 1:
+            raise AssertionError("ff_to_wb upload must ignore zero rows and keep positive rows")
 
         result_with_inbound = block.calculate(
             {
@@ -298,7 +354,7 @@ def main() -> None:
         if summary_rows[0][0] != "Общее количество" or summary_rows[1][0] != "Расчётный вес":
             raise AssertionError("recommendation workbook summary must stay operator-facing and Russian")
 
-        # Scenario 3: delete inbound files and verify recalculation falls back to zero.
+        # Scenario 4: delete inbound files and verify recalculation falls back to zero.
         delete_inbound_factory = block.delete_dataset(DATASET_INBOUND_FACTORY_TO_FF)
         delete_inbound_ff_to_wb = block.delete_dataset(DATASET_INBOUND_FF_TO_WB)
         if delete_inbound_factory.status != "deleted" or delete_inbound_ff_to_wb.status != "deleted":
@@ -330,7 +386,7 @@ def main() -> None:
         if sku_one_after_delete.recommended_order_qty % 25 != 0:
             raise AssertionError("box multiple must still be applied after inbound deletion")
 
-        # Scenario 4: a different report date and box multiple must change the recommendation math.
+        # Scenario 5: a different report date and box multiple must change the recommendation math.
         shifted_result = block.calculate(
             {
                 "prod_lead_time_days": 4,
@@ -528,6 +584,7 @@ def main() -> None:
             raise AssertionError("status must persist the last successful calculation result")
 
         print(f"scenario_without_inbound: ok -> total_qty={result_without_inbound.summary.total_qty}")
+        print("scenario_zero_only_inbound: ok -> accepted_row_count=0, coverage=0")
         print(f"scenario_multi_inbound: ok -> sku_one_inbound_factory={sku_one.inbound_factory_to_ff}")
         print(f"scenario_delete_then_zero: ok -> sku_one_coverage={sku_one_after_delete.coverage_qty}")
         print(f"scenario_shifted_report_date: ok -> sku_one_qty={shifted_sku_one.recommended_order_qty}, sku_two_qty={shifted_sku_two.recommended_order_qty}")

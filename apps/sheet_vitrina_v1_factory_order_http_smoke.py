@@ -246,10 +246,75 @@ def main() -> None:
             if first_sku.get("inbound_factory_to_ff") != 0.0 or first_sku.get("inbound_ff_to_wb") != 0.0:
                 raise AssertionError("missing inbound files must be treated as zero in HTTP calc path")
 
+            inbound_factory_zero_rows = read_first_sheet_rows(inbound_factory_bytes)
+            inbound_factory_zero_rows = [
+                inbound_factory_zero_rows[0],
+                [210183919, "SKU 1", 0, "", ""],
+                [210184534, "SKU 2", 0, "", ""],
+            ]
+            inbound_factory_zero_upload_status, inbound_factory_zero_upload_payload = _post_multipart(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FACTORY_PATH}",
+                build_single_sheet_workbook_bytes("В пути от фабрики", inbound_factory_zero_rows),
+                filename="factory-inbound-zero.xlsx",
+            )
+            if (
+                inbound_factory_zero_upload_status != 200
+                or inbound_factory_zero_upload_payload.get("accepted_row_count") != 0
+                or inbound_factory_zero_upload_payload.get("ignored_row_count") != 2
+            ):
+                raise AssertionError("zero-only inbound_factory upload must be accepted as an empty dataset")
+
+            inbound_ff_to_wb_zero_rows = read_first_sheet_rows(inbound_ff_to_wb_bytes)
+            inbound_ff_to_wb_zero_rows = [
+                inbound_ff_to_wb_zero_rows[0],
+                [210183919, "SKU 1", 0, "", ""],
+                [210184534, "SKU 2", 0, "", ""],
+            ]
+            inbound_ff_to_wb_zero_upload_status, inbound_ff_to_wb_zero_upload_payload = _post_multipart(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FF_TO_WB_PATH}",
+                build_single_sheet_workbook_bytes("В пути ФФ -> WB", inbound_ff_to_wb_zero_rows),
+                filename="ff-to-wb-zero.xlsx",
+            )
+            if (
+                inbound_ff_to_wb_zero_upload_status != 200
+                or inbound_ff_to_wb_zero_upload_payload.get("accepted_row_count") != 0
+                or inbound_ff_to_wb_zero_upload_payload.get("ignored_row_count") != 2
+            ):
+                raise AssertionError("zero-only inbound_ff_to_wb upload must be accepted as an empty dataset")
+
+            zero_only_status_code, zero_only_status_payload = _get_json(f"{base_url}{DEFAULT_FACTORY_ORDER_STATUS_PATH}")
+            if zero_only_status_code != 200:
+                raise AssertionError("factory-order status route must return 200 after zero-only inbound upload")
+            zero_only_inbound_factory_state = zero_only_status_payload.get("datasets", {}).get("inbound_factory_to_ff", {})
+            zero_only_inbound_ff_to_wb_state = zero_only_status_payload.get("datasets", {}).get("inbound_ff_to_wb", {})
+            if zero_only_inbound_factory_state.get("row_count") != 0 or zero_only_inbound_ff_to_wb_state.get("row_count") != 0:
+                raise AssertionError("zero-only inbound uploads must persist as uploaded datasets with row_count=0")
+
+            calc_zero_only_status, calc_zero_only_payload = _post_json(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
+                {
+                    "prod_lead_time_days": 10,
+                    "lead_time_factory_to_ff_days": 5,
+                    "lead_time_ff_to_wb_days": 2,
+                    "safety_days_mp": 3,
+                    "safety_days_ff": 2,
+                    "cycle_order_days": 14,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "sales_avg_period_days": 3,
+                },
+            )
+            if calc_zero_only_status != 200:
+                raise AssertionError("calc with zero-only inbound uploads must still succeed")
+            zero_only_first_sku = next(item for item in calc_zero_only_payload.get("rows", []) if item.get("nm_id") == 210183919)
+            if zero_only_first_sku.get("inbound_factory_to_ff") != 0.0 or zero_only_first_sku.get("inbound_ff_to_wb") != 0.0:
+                raise AssertionError("zero-only inbound uploads must keep HTTP coverage terms at zero")
+
             inbound_factory_rows = read_first_sheet_rows(inbound_factory_bytes)
             inbound_factory_rows = [
                 inbound_factory_rows[0],
                 [210183919, "SKU 1", 40, "2026-04-25", ""],
+                [210184534, "SKU 2", 0, "", ""],
                 [210183919, "SKU 1", 12, "2026-05-05", ""],
             ]
             inbound_factory_upload_status, inbound_factory_upload_payload = _post_multipart(
@@ -257,13 +322,18 @@ def main() -> None:
                 build_single_sheet_workbook_bytes("В пути от фабрики", inbound_factory_rows),
                 filename="factory-inbound.xlsx",
             )
-            if inbound_factory_upload_status != 200 or inbound_factory_upload_payload.get("accepted_row_count") != 2:
-                raise AssertionError("inbound_factory upload must keep multiple rows per SKU")
+            if (
+                inbound_factory_upload_status != 200
+                or inbound_factory_upload_payload.get("accepted_row_count") != 2
+                or inbound_factory_upload_payload.get("ignored_row_count") != 1
+            ):
+                raise AssertionError("inbound_factory upload must ignore zero rows and keep multiple positive rows per SKU")
 
             inbound_ff_to_wb_rows = read_first_sheet_rows(inbound_ff_to_wb_bytes)
             inbound_ff_to_wb_rows = [
                 inbound_ff_to_wb_rows[0],
                 [210183919, "SKU 1", 10, "2026-04-26", ""],
+                [210183919, "SKU 1", 0, "", ""],
                 [210184534, "SKU 2", 25, "2026-04-28", ""],
             ]
             inbound_ff_to_wb_upload_status, inbound_ff_to_wb_upload_payload = _post_multipart(
@@ -271,8 +341,12 @@ def main() -> None:
                 build_single_sheet_workbook_bytes("В пути ФФ -> WB", inbound_ff_to_wb_rows),
                 filename="ff-to-wb.xlsx",
             )
-            if inbound_ff_to_wb_upload_status != 200 or inbound_ff_to_wb_upload_payload.get("accepted_row_count") != 2:
-                raise AssertionError("inbound_ff_to_wb upload must be accepted")
+            if (
+                inbound_ff_to_wb_upload_status != 200
+                or inbound_ff_to_wb_upload_payload.get("accepted_row_count") != 2
+                or inbound_ff_to_wb_upload_payload.get("ignored_row_count") != 1
+            ):
+                raise AssertionError("inbound_ff_to_wb upload must ignore zero rows and keep positive rows")
 
             # Scenario 2: file lifecycle state is visible through status and current uploaded routes.
             status_code, status_payload = _get_json(f"{base_url}{DEFAULT_FACTORY_ORDER_STATUS_PATH}")
@@ -468,6 +542,7 @@ def main() -> None:
                 raise AssertionError("HTTP calc must surface the exact coverage blocker outside the persisted runtime window")
 
             print(f"scenario_without_inbound_http: ok -> total_qty={calc_without_inbound_payload['summary']['total_qty']}")
+            print("scenario_zero_only_inbound_http: ok -> accepted_row_count=0, coverage=0")
             print(f"scenario_current_file_lifecycle_http: ok -> {inbound_factory_state['uploaded_filename']}")
             print(
                 f"scenario_multi_inbound_http: ok -> inbound_factory={first_sku_with_inbound.get('inbound_factory_to_ff', 0.0)}"

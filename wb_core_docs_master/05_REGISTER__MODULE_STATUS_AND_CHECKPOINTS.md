@@ -130,6 +130,8 @@ Current additional operator supply flow on the same page:
 - current repo had no other authoritative source for legacy parity term `FF -> WB inbound`, so the bounded flow uses a separate operator upload contract instead of silently dropping that coverage component
 - operator-facing label for batch size = `Кратность штук в коробке`
 - inbound files are optional for calculation; when absent or deleted, both inbound coverage terms truthfully become `0`
+- inbound rows with `Количество в пути = 0` are accepted and ignored by backend normalization; they do not count as validation errors and do not contribute to coverage
+- if an inbound workbook contains only zero rows after filtering, backend still stores it as an accepted uploaded dataset with truthful `row_count = 0`
 - each upload block now surfaces the current uploaded filename plus download/delete actions from backend state
 - current UI no longer hard-caps `sales_avg_period_days`; authoritative `orderCount` history now lives server-side in `temporal_source_snapshots[source_key=sales_funnel_history]`, so any positive covered window is allowed and blocker appears only when requested range falls outside runtime coverage
 - live `DATA_VITRINA` may be used only as one-time migration input for bounded historical reconcile window `2026-03-01..2026-04-18`; sheet does not become a permanent source of truth

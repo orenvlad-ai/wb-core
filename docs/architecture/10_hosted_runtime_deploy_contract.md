@@ -175,6 +175,7 @@ Public probe validates:
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/status` returns JSON with dataset states, active SKU count and recommendation path
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/status` returns JSON with active SKU count, methodology note, shared dataset state and optional last result
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/*.xlsx` returns `200` + XLSX content type for all operator templates with Russian headers
+- `POST /v1/sheet-vitrina-v1/supply/factory-order/upload/inbound-*` accepts zero-quantity rows, drops them from normalized runtime payload and coverage, and still accepts a workbook that becomes an empty inbound dataset after zero-row filtering
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/uploaded/*` returns the exact currently stored operator workbook when the dataset is uploaded, or truthful `422 {"error": ...}` when it is absent
 - `DELETE /v1/sheet-vitrina-v1/supply/factory-order/upload/*` returns a truthful deleted/absent state and is reflected back through `GET /v1/sheet-vitrina-v1/supply/factory-order/status`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx` returns either `200` + XLSX after calculation or truthful `422 {"error": ...}` before the first successful calculation
@@ -184,10 +185,10 @@ Public probe validates:
 
 If the task changes operator upload/calculate write paths inside this contour, live closure additionally requires one controlled end-to-end HTTP scenario on the hosted runtime:
 - download the relevant operator templates;
-- upload bounded test data through the published write routes, including auto-upload-after-file-pick UX when the operator page contract changed;
+- upload bounded test data through the published write routes, including mixed positive/zero inbound rows and zero-only inbound files when the changed contract touches inbound acceptance;
 - verify current uploaded file download/delete lifecycle if the task changes upload state handling;
 - run the server-side calculation or equivalent write action;
-- verify the published result surface (`status`, operator HTML, downloadable XLSX, summary JSON) without inventing sheet/GAS steps that are outside the actual change scope.
+- verify the published result surface (`status`, operator HTML, downloadable XLSX, summary JSON), including truthful `row_count=0` for accepted empty inbound datasets, without inventing sheet/GAS steps that are outside the actual change scope.
 
 Timeout, non-JSON body, wrong content type, `404`, stale HTML error surface or missing operator route tokens are treated as stale deploy/publish symptoms.
 
