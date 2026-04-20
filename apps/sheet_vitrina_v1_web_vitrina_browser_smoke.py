@@ -57,6 +57,7 @@ STATUS_HEADER = [
 def main() -> None:
     parser = argparse.ArgumentParser(description="Browser smoke-check the web-vitrina page.")
     parser.add_argument("--base-url", default="", help="Existing base URL, for example https://api.selleros.pro")
+    parser.add_argument("--as-of-date", default="", help="Optional as_of_date query parameter for historical read-side checks.")
     parser.add_argument(
         "--ignore-https-errors",
         action="store_true",
@@ -65,12 +66,16 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.base_url:
-        result = run_browser_checks(args.base_url.rstrip("/"), ignore_https_errors=args.ignore_https_errors)
+        result = run_browser_checks(
+            args.base_url.rstrip("/"),
+            ignore_https_errors=args.ignore_https_errors,
+            as_of_date=args.as_of_date.strip(),
+        )
         _print_summary(result)
         return
 
     with LocalWebVitrinaFixtureServer(with_ready_snapshot=True) as ready_base_url:
-        ready_result = run_browser_checks(ready_base_url, ignore_https_errors=False)
+        ready_result = run_browser_checks(ready_base_url, ignore_https_errors=False, as_of_date="")
     with LocalWebVitrinaFixtureServer(with_ready_snapshot=False) as error_base_url:
         error_result = run_error_state_check(error_base_url, ignore_https_errors=False)
     _print_summary({
@@ -147,8 +152,10 @@ class LocalWebVitrinaFixtureServer:
         self.runtime_dir_obj.cleanup()
 
 
-def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str, object]:
+def run_browser_checks(base_url: str, *, ignore_https_errors: bool, as_of_date: str = "") -> dict[str, object]:
     page_url = base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH
+    if as_of_date:
+        page_url = f"{page_url}?as_of_date={as_of_date}"
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         context = browser.new_context(ignore_https_errors=ignore_https_errors)
@@ -207,6 +214,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
 
     return {
         "base_url": base_url,
+        "as_of_date": as_of_date,
         "table_rendered": total_rows > 0,
         "default_total_first": initial_order[0]["scope_label"] == "ИТОГО",
         "default_sku_metric_cluster": sku_cluster_ok,
@@ -246,6 +254,8 @@ def run_error_state_check(base_url: str, *, ignore_https_errors: bool) -> dict[s
 
 def _print_summary(result: dict[str, object]) -> None:
     print("web_vitrina_browser_base_url: ok ->", result["base_url"])
+    if result.get("as_of_date"):
+        print("web_vitrina_browser_as_of_date: ok ->", result["as_of_date"])
     print("web_vitrina_browser_table: ok ->", result["table_rendered"])
     print("web_vitrina_browser_default_total_first: ok ->", result["default_total_first"])
     print("web_vitrina_browser_default_sku_metric_cluster: ok ->", result["default_sku_metric_cluster"])
