@@ -19,6 +19,8 @@ source_basis:
   - "apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py"
   - "apps/sheet_vitrina_v1_refresh_read_split_smoke.py"
   - "apps/sheet_vitrina_v1_operator_load_smoke.py"
+  - "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py"
+  - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
   - "apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py"
   - "apps/promo_xlsx_collector_contract_smoke.py"
   - "apps/promo_xlsx_collector_integration_smoke.py"
@@ -82,6 +84,8 @@ python3 apps/sheet_vitrina_v1_stocks_refresh_smoke.py
 python3 apps/sheet_vitrina_v1_auto_update_smoke.py
 python3 apps/sheet_vitrina_v1_daily_report_smoke.py
 python3 apps/sheet_vitrina_v1_daily_report_http_smoke.py
+python3 apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py
+python3 apps/sheet_vitrina_v1_web_vitrina_http_smoke.py
 python3 apps/sheet_vitrina_v1_operator_ui_persistence_smoke.py
 python3 apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py
 python3 apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py
@@ -200,6 +204,8 @@ Expected routes:
 - `GET /v1/sheet-vitrina-v1/status`
 - `GET /v1/sheet-vitrina-v1/job`
 - `GET /sheet-vitrina-v1/operator`
+- `GET /sheet-vitrina-v1/vitrina`
+- `GET /v1/sheet-vitrina-v1/web-vitrina`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/status`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/inbound-factory.xlsx`
@@ -242,6 +248,8 @@ clasp run prepareCostPriceSheet
 clasp run uploadCostPriceSheet
 # open the narrow repo-owned operator page for explicit refresh
 python3 -m webbrowser http://127.0.0.1:8765/sheet-vitrina-v1/operator
+# open the sibling phase-1 web-vitrina shell if the task changes its route/contract
+python3 -m webbrowser http://127.0.0.1:8765/sheet-vitrina-v1/vitrina
 # curl remains a fallback if browser/UI surface is unavailable
 curl -X POST http://127.0.0.1:8765/v1/sheet-vitrina-v1/refresh \
   -H 'Content-Type: application/json' \
@@ -359,6 +367,8 @@ Operational rule:
 - applicable себестоимость резолвится server-side по `group + latest effective_from <= slot_date`;
 - operator-facing derived rows используют canonical keys `total_proxy_profit_rub` и `proxy_margin_pct_total`;
 - `GET /sheet-vitrina-v1/operator` поднимает simple operator page без SPA/build pipeline;
+- `GET /sheet-vitrina-v1/vitrina` поднимает отдельный thin sibling shell и не встраивается в existing `/sheet-vitrina-v1/operator`;
+- `GET /v1/sheet-vitrina-v1/web-vitrina` остаётся cheap read-only JSON path: current v1 shape = `contract_name / contract_version / page_route / read_route / meta / status_summary / schema / rows / capabilities`, optional `as_of_date` stays on том же route и не имеет права trigger-ить refresh/upstream fetch;
 - operator page показывает narrow server-driven surface: top-level sections `Обновление данных` / `Расчёт поставок` / `Отчёты`, compact manual block `Ручная загрузка данных` with embedded actions `Загрузить данные` / `Отправить данные`, one compact reports subsection-switch `Ежедневные отчёты` / `Отчёт по остаткам` inside `Отчёты`, separate compact auto block `Автообновления` и отдельный `Лог`; manual block показывает только persisted manual-success timestamps `Последняя удачная загрузка` / `Последняя удачная отправка` из `manual_context`, reload страницы не считается proof последней manual `Отправить данные`, а completed run можно скачать через `Скачать лог`;
 - `GET /v1/sheet-vitrina-v1/daily-report` остаётся cheap read-only JSON path: route сравнивает только два последних closed business day через persisted ready snapshots `default_business_as_of_date(now)` и `default_business_as_of_date(now)-1 day` и не имеет права trigger-ить refresh/upstream fetch;
 - `GET /v1/sheet-vitrina-v1/stock-report` остаётся cheap read-only JSON path: route по умолчанию читает previous closed business day only from persisted ready snapshot `DATA_VITRINA[yesterday_closed]`, принимает optional explicit `as_of_date` override на том же read path, не trigger-ит refresh/upstream fetch и включает только SKU с district stock `< 50`;

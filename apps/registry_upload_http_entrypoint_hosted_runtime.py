@@ -37,6 +37,8 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_REFRESH_PATH,
     DEFAULT_SHEET_STOCK_REPORT_PATH,
     DEFAULT_SHEET_STATUS_PATH,
+    DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+    DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
     DEFAULT_UPLOAD_PATH,
     DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX,
     DEFAULT_WB_REGIONAL_STATUS_PATH,
@@ -261,6 +263,12 @@ def collect_public_surface(
             timeout_seconds=timeout_seconds,
         ),
         _collect_http_probe(
+            name="web_vitrina_page",
+            method="GET",
+            url=f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}",
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
             name="load_route",
             method="GET",
             url=f"{base_url}{DEFAULT_SHEET_LOAD_PATH}",
@@ -277,6 +285,15 @@ def collect_public_surface(
             method="GET",
             url=_append_as_of_date(
                 f"{base_url}{route_paths['SHEET_VITRINA_STATUS_HTTP_PATH']}",
+                as_of_date,
+            ),
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
+            name="web_vitrina_read",
+            method="GET",
+            url=_append_as_of_date(
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}",
                 as_of_date,
             ),
             timeout_seconds=timeout_seconds,
@@ -773,6 +790,26 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         )
         return evaluation
 
+    if route == "web_vitrina_page":
+        body = str(result.get("body_excerpt", ""))
+        tokens = [
+            "Phase 1 Web-Vitrina Boundary",
+            "Web-витрина",
+            DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+            route_paths["SHEET_VITRINA_OPERATOR_UI_PATH"],
+            "grid_adapter",
+            "page_composition",
+            "export_layer",
+        ]
+        missing_tokens = [token for token in tokens if token not in body]
+        evaluation["ok"] = status == 200 and "text/html" in content_type and not missing_tokens
+        evaluation["detail"] = (
+            "web-vitrina page shell ok"
+            if evaluation["ok"]
+            else f"expected 200 text/html with web-vitrina shell tokens, missing={missing_tokens}"
+        )
+        return evaluation
+
     if route in {
         "factory_order_template_stock_ff",
         "factory_order_template_inbound_factory",
@@ -834,6 +871,24 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
                 "manual_context",
             ],
             error_keys=["error", "server_context", "manual_context"],
+        )
+        return evaluation
+
+    if route == "web_vitrina_read":
+        evaluation["ok"], evaluation["detail"] = _validate_json_result(
+            status,
+            payload,
+            success_keys=[
+                "contract_name",
+                "contract_version",
+                "page_route",
+                "read_route",
+                "meta",
+                "status_summary",
+                "schema",
+                "rows",
+                "capabilities",
+            ],
         )
         return evaluation
 
@@ -1139,9 +1194,11 @@ def _collect(name, method, url, json_payload=None):
 
 results = [
     _collect("operator", "GET", PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_OPERATOR_UI_PATH"]),
+    _collect("web_vitrina_page", "GET", PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_UI_PATH!r}),
     _collect("load_route", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/load"),
     _collect("job", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/job?job_id=hosted_runtime_probe"),
     _collect("status", "GET", _append_as_of_date(PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_STATUS_HTTP_PATH"], PAYLOAD["as_of_date"])),
+    _collect("web_vitrina_read", "GET", _append_as_of_date(PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_READ_PATH!r}, PAYLOAD["as_of_date"])),
     _collect("daily_report", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/daily-report"),
     _collect("stock_report", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/stock-report"),
     _collect("plan", "GET", _append_as_of_date(PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_HTTP_PATH"], PAYLOAD["as_of_date"])),

@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-26-SHEET-VITRINA-V1-MVP-END-TO-END-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `sheet_vitrina_v1_mvp_end_to_end_block`."
-scope: "Первый bounded end-to-end alignment для `sheet_vitrina_v1`: uploaded compact bootstrap `CONFIG / METRICS / FORMULAS`, sibling `COST_PRICE` upload contour, сохранённый upload trigger, explicit refresh в repo-owned date-aware ready snapshot, separate load этого snapshot в live sheet, server-side cost overlay в operator-facing rows, cheap read этого snapshot в `DATA_VITRINA`, compact daily-report read model for two latest closed business days и narrow server-side operator page без возврата heavy logic в Google Sheets, дополненная bounded factory-order supply tab без переноса расчётной логики в Apps Script."
+scope: "Первый bounded end-to-end alignment для `sheet_vitrina_v1`: uploaded compact bootstrap `CONFIG / METRICS / FORMULAS`, sibling `COST_PRICE` upload contour, сохранённый upload trigger, explicit refresh в repo-owned date-aware ready snapshot, separate load этого snapshot в live sheet, server-side cost overlay в operator-facing rows, cheap read этого snapshot в `DATA_VITRINA`, compact daily-report read model for two latest closed business days, narrow server-side orchestration-first operator page и sibling phase-1 web-vitrina route/contract fixation без возврата heavy logic в Google Sheets, дополненная bounded factory-order supply tab без переноса расчётной логики в Apps Script."
 source_basis:
   - "migration/90_registry_upload_http_entrypoint.md"
   - "migration/91_sheet_vitrina_v1_registry_upload_trigger.md"
@@ -18,15 +18,18 @@ related_modules:
   - "gas/sheet_vitrina_v1/PresentationPass.gs"
   - "packages/contracts/cost_price_upload.py"
   - "packages/contracts/factory_order_supply.py"
+  - "packages/contracts/web_vitrina_contract.py"
   - "packages/application/cost_price_upload.py"
   - "packages/application/factory_order_supply.py"
   - "packages/application/simple_xlsx.py"
   - "packages/application/sheet_vitrina_v1_live_plan.py"
   - "packages/application/sheet_vitrina_v1.py"
   - "packages/application/sheet_vitrina_v1_load_bridge.py"
+  - "packages/application/sheet_vitrina_v1_web_vitrina.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/adapters/registry_upload_http_entrypoint.py"
+  - "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"
   - "packages/adapters/web_source_current_sync.py"
   - "packages/adapters/web_source_snapshot_block.py"
   - "packages/adapters/seller_funnel_snapshot_block.py"
@@ -46,6 +49,8 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/status"
   - "GET /v1/sheet-vitrina-v1/job"
   - "GET /sheet-vitrina-v1/operator"
+  - "GET /sheet-vitrina-v1/vitrina"
+  - "GET /v1/sheet-vitrina-v1/web-vitrina"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/status"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/template/inbound-factory.xlsx"
@@ -71,6 +76,8 @@ related_runners:
   - "apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py"
   - "apps/sheet_vitrina_v1_daily_report_smoke.py"
   - "apps/sheet_vitrina_v1_daily_report_http_smoke.py"
+  - "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py"
+  - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
   - "apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py"
   - "apps/registry_upload_http_entrypoint_live.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime.py"
@@ -123,6 +130,7 @@ update_note: "Обновлён под final temporal classifier и execution mod
 - Канонический operator-facing refresh surface:
   - `GET /sheet-vitrina-v1/operator`
   - top-level tabs = `Обновление данных`, `Расчёт поставок`, `Отчёты`
+  - this page intentionally stays orchestration-first control surface and does not become the future web-vitrina container
   - две explicit actions `Загрузить данные` и `Отправить данные`
   - `Загрузить данные` вызывает existing `POST /v1/sheet-vitrina-v1/refresh` и materialize-ит ready snapshot only
   - `Отправить данные` вызывает `POST /v1/sheet-vitrina-v1/load` и пишет в live sheet только already prepared snapshot
@@ -131,6 +139,13 @@ update_note: "Обновлён под final temporal classifier и execution mod
   - page читает `GET /v1/sheet-vitrina-v1/status` для compact manual/auto status surface
   - page читает `GET /v1/sheet-vitrina-v1/job` для detailed построчного operator log без отдельного audit subsystem
   - тот же `job` route поддерживает text-export конкретного completed run через `format=text&download=1`
+  - sibling phase-1 web-vitrina surface is fixed separately:
+    - chosen page route = `GET /sheet-vitrina-v1/vitrina`
+    - chosen JSON read route = `GET /v1/sheet-vitrina-v1/web-vitrina`
+    - route is sibling, not `/sheet-vitrina-v1/operator/vitrina`, because future web-vitrina must remain a separate working surface instead of a nested subpanel under orchestration-first operator UI
+    - v1 response is a stable library-agnostic server contract over existing ready snapshot/current truth: `meta + status_summary + schema + rows + capabilities`
+    - v1 phase scope is intentionally narrow: route fixation + contract + minimal shell only
+    - full grid UI, `@gravity-ui/table` adapter, export layer, cutover away from Google Sheets and broad feature parity remain later layers
   - `Отчёты` uses the same sibling subsection selector pattern as the supply tab: default section = `Ежедневные отчёты`, second section = `Отчёт по остаткам`, only one report body is visible at a time
   - daily-report block остаётся read-only и server-owned:
     - compare target = два последних closed business day в `Asia/Yekaterinburg`
@@ -494,12 +509,14 @@ Bounded допущение:
   - что `prepare` поднимает operator seed `33 / 102 / 7`;
   - что upload из sheet-side trigger сохраняет current truth в existing runtime без усечения `metrics_v2`;
   - что operator page `GET /sheet-vitrina-v1/operator` отдается тем же server contour и публикует refresh/load/status/job paths;
+  - что sibling `GET /sheet-vitrina-v1/vitrina` и `GET /v1/sheet-vitrina-v1/web-vitrina` поднимаются тем же contour, но не встраивают новый heavy block в existing operator page;
   - что operator page показывает compact `Ручная загрузка данных` + `Автообновления`, отдельный `Лог`, fixed-height scroll viewport и `Скачать лог`;
   - что `POST /v1/sheet-vitrina-v1/refresh` вызывает heavy source blocks и обновляет persisted date-aware ready snapshot;
   - что `POST /v1/sheet-vitrina-v1/load` пишет в live shell только already prepared snapshot и не триггерит heavy refresh заново;
   - что `GET /v1/sheet-vitrina-v1/status` возвращает последний persisted refresh result без live fetch и с `date_columns` / `temporal_slots` plus `server_context`;
   - что `GET /v1/sheet-vitrina-v1/status` до первого refresh остаётся truthful `422`, но всё равно несёт `server_context`;
   - что `GET /v1/sheet-vitrina-v1/job` показывает построчные start / key steps / finish / error для operator actions;
+  - что `GET /v1/sheet-vitrina-v1/web-vitrina` возвращает stable library-agnostic contract и honors optional `as_of_date` without refresh/upstream fetch;
   - что `GET /v1/sheet-vitrina-v1/plan` и sheet-side `load` читают только ready snapshot и не делают live fetch;
   - что authoritative `COST_PRICE` current state резолвится server-side по `group + latest effective_from <= slot_date`;
   - что `total_proxy_profit_rub` и `proxy_margin_pct_total` materialize-ятся в `DATA_VITRINA` только при applicable `COST_PRICE` coverage;
