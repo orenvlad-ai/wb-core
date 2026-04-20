@@ -321,33 +321,95 @@ def _build_rows(
     group_labels: Mapping[str, str],
 ) -> list[WebVitrinaViewModelRow]:
     rows: list[WebVitrinaViewModelRow] = []
-    for row in rows_payload:
+    presentation_row_order_by_id = _build_presentation_row_order(rows_payload)
+    ordered_rows_payload = sorted(
+        rows_payload,
+        key=lambda row: presentation_row_order_by_id[str(row["row_id"])],
+    )
+    for row in ordered_rows_payload:
+        row_id = str(row["row_id"])
+        presentation_row = dict(row)
+        presentation_row["row_order"] = presentation_row_order_by_id[row_id]
         section_label = _section_label(row)
         group_label = _group_label(row)
         cells = [
-            _build_cell(column, row)
+            _build_cell(column, presentation_row)
             for column in columns
         ]
         search_terms = [
-            str(row.get("scope_label") or ""),
-            str(row.get("metric_label") or ""),
-            str(row.get("group") or ""),
-            str(row.get("section") or ""),
-            str(row.get("nm_id") or ""),
+            str(presentation_row.get("scope_label") or ""),
+            str(presentation_row.get("metric_label") or ""),
+            str(presentation_row.get("group") or ""),
+            str(presentation_row.get("section") or ""),
+            str(presentation_row.get("nm_id") or ""),
             *(cell.display_text for cell in cells if cell.display_text not in {"", "—"}),
         ]
         rows.append(
             WebVitrinaViewModelRow(
-                row_id=str(row["row_id"]),
-                row_kind=str(row.get("scope_kind") or "OTHER").lower(),
+                row_id=row_id,
+                row_kind=str(presentation_row.get("scope_kind") or "OTHER").lower(),
                 section_id=section_labels[section_label],
                 group_id=group_labels[group_label],
                 cells=cells,
                 search_text=" ".join(term for term in search_terms if term),
-                filter_tokens=_build_filter_tokens(row, group_id=group_labels[group_label], section_id=section_labels[section_label]),
+                filter_tokens=_build_filter_tokens(
+                    presentation_row,
+                    group_id=group_labels[group_label],
+                    section_id=section_labels[section_label],
+                ),
             )
         )
     return rows
+
+
+def _build_presentation_row_order(rows_payload: list[Mapping[str, Any]]) -> dict[str, int]:
+    if not rows_payload:
+        return {}
+
+    metric_order: dict[str, int] = {}
+    group_order: dict[str, int] = {}
+    sku_order_by_group: dict[str, dict[str, int]] = {}
+
+    for row in rows_payload:
+        metric_key = str(row.get("metric_key") or "")
+        if metric_key and metric_key not in metric_order:
+            metric_order[metric_key] = len(metric_order) + 1
+
+        group_label = _group_label(row)
+        if group_label not in group_order:
+            group_order[group_label] = len(group_order) + 1
+
+        scope_kind = str(row.get("scope_kind") or "OTHER")
+        if scope_kind != "SKU":
+            continue
+        sku_key = _sku_identity(row)
+        if not sku_key:
+            continue
+        sku_order = sku_order_by_group.setdefault(group_label, {})
+        if sku_key not in sku_order:
+            sku_order[sku_key] = len(sku_order) + 1
+
+    def presentation_key(row: Mapping[str, Any]) -> tuple[int, int, int, int, int]:
+        scope_kind = str(row.get("scope_kind") or "OTHER")
+        metric_rank = metric_order.get(str(row.get("metric_key") or ""), len(metric_order) + 1)
+        raw_row_order = int(row.get("row_order") or 0)
+        group_label = _group_label(row)
+        group_rank = group_order.get(group_label, len(group_order) + 1)
+
+        if scope_kind == "TOTAL":
+            return (0, 0, 0, metric_rank, raw_row_order)
+        if scope_kind == "GROUP":
+            return (1, group_rank, 0, metric_rank, raw_row_order)
+        if scope_kind == "SKU":
+            sku_rank = sku_order_by_group.get(group_label, {}).get(_sku_identity(row), 0)
+            return (2, group_rank, sku_rank, metric_rank, raw_row_order)
+        return (3, group_rank, 0, metric_rank, raw_row_order)
+
+    ordered_rows = sorted(rows_payload, key=presentation_key)
+    return {
+        str(row["row_id"]): index
+        for index, row in enumerate(ordered_rows, start=1)
+    }
 
 
 def _build_cell(column: WebVitrinaViewModelColumn, row: Mapping[str, Any]) -> WebVitrinaViewModelCell:
@@ -499,3 +561,12 @@ def _section_id(label: str) -> str:
     if label == "Без секции":
         return "section:unsectioned"
     return f"section:{label}"
+
+
+def _sku_identity(row: Mapping[str, Any]) -> str:
+    if row.get("nm_id") not in {None, ""}:
+        return str(row["nm_id"])
+    scope_key = str(row.get("scope_key") or "")
+    if scope_key:
+        return scope_key
+    return str(row.get("scope_label") or "")

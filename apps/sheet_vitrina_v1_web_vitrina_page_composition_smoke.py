@@ -59,6 +59,7 @@ def main() -> None:
         enabled = [item for item in current_state.config_v2 if item.enabled]
         if len(enabled) < 2:
             raise AssertionError("fixture must expose at least two enabled SKU rows")
+        first_group = enabled[0].group
 
         runtime.save_sheet_vitrina_ready_snapshot(
             current_state=current_state,
@@ -66,7 +67,7 @@ def main() -> None:
             plan=_build_plan(
                 first_nm_id=enabled[0].nm_id,
                 second_nm_id=enabled[1].nm_id,
-                first_group=enabled[0].group,
+                first_group=first_group,
             ),
         )
 
@@ -109,6 +110,20 @@ def main() -> None:
             raise AssertionError(f"table surface is empty, got {composition['table_surface']}")
         if composition["status_badge"]["tone"] != "success":
             raise AssertionError(f"status badge mismatch, got {composition['status_badge']}")
+        ordered_row_ids = [row["row_id"] for row in composition["table_surface"]["rows"]]
+        expected_row_ids = [
+            "TOTAL|total_view_count",
+            "TOTAL|total_orderSum",
+            f"SKU:{enabled[0].nm_id}|avg_price_seller_discounted",
+            f"SKU:{enabled[0].nm_id}|avg_addToCartConversion",
+            f"SKU:{enabled[1].nm_id}|avg_price_seller_discounted",
+            f"SKU:{enabled[1].nm_id}|avg_addToCartConversion",
+        ]
+        if ordered_row_ids != expected_row_ids:
+            raise AssertionError(f"page composition row ordering mismatch, got {ordered_row_ids}")
+        grouping_ids = [item["grouping_id"] for item in composition["table_surface"]["groupings"]]
+        if grouping_ids != ["group:overview", f"group:{first_group}"]:
+            raise AssertionError(f"page composition grouping order mismatch, got {grouping_ids}")
 
         error_payload = build_web_vitrina_page_error_composition(
             page_route="/sheet-vitrina-v1/vitrina",
@@ -161,18 +176,20 @@ def _build_plan(
             SheetVitrinaWriteTarget(
                 sheet_name="DATA_VITRINA",
                 write_start_cell="A1",
-                write_rect="A1:D5",
+                write_rect="A1:D7",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
                 header=["label", "key", "2026-04-20", "2026-04-21"],
                 rows=[
                     ["Итого: Показы в воронке", "TOTAL|total_view_count", 100, 140],
-                    [f"Группа {first_group}: Показы в воронке", f"GROUP:{first_group}|view_count", 40, 55],
+                    ["Итого: Сумма заказов", "TOTAL|total_orderSum", 1000, 1200],
                     [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|avg_price_seller_discounted", 990, 1110],
-                    [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 11.5, 13.0],
+                    [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|avg_price_seller_discounted", 1090, 1210],
+                    [f"SKU A: Конверсия в корзину", f"SKU:{first_nm_id}|avg_addToCartConversion", 11.5, 13.0],
+                    [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 10.5, 12.0],
                 ],
-                row_count=4,
+                row_count=6,
                 column_count=4,
             ),
             SheetVitrinaWriteTarget(
