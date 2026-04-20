@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "967edcc2059b36db36a3846d9f773c0b90e20f90"
+built_from_commit: "ae486b1ff53136a633fc34389f1c5b025a3d180c"
 ---
 
 # Summary

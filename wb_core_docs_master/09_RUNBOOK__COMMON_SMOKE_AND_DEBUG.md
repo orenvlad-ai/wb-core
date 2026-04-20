@@ -39,7 +39,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "847121253d61497cba0f1541121ed35f060705ed"
+built_from_commit: "ae486b1ff53136a633fc34389f1c5b025a3d180c"
 ---
 
 # Summary
