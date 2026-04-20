@@ -211,7 +211,7 @@ Norm:
 - use the retry runner for due `yesterday_closed` states across the full historical/date-period matrix (`seller_funnel_snapshot`, `web_source_snapshot`, `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`) and for same-day current-only capture retries only within the current business day;
 - `today_current` may remain incomplete and blank, but `yesterday_closed` must not silently inherit provisional same-day values;
 - group A bot/web-source families accept closed truth only after exact-date sync + source freshness validation (`source_fetched_at` / `fetched_at` after next business-day start in `Asia/Yekaterinburg`);
-- group C current-only sources (`prices_snapshot`, `ads_bids`) remain truthful `not_available` for `yesterday_closed`, but valid same-day accepted snapshots must survive later invalid/blank/zero auto or manual attempts;
+- group C current-snapshot-only sources (`prices_snapshot`, `ads_bids`) still capture upstream truth only as current snapshot, but an already accepted snapshot for closed business day D must materialize as `yesterday_closed=D` on D+1; later invalid/blank/zero auto or manual attempts must preserve both prior-day accepted truth and any already accepted same-day truth;
 - `stocks` is no longer current-only inside `sheet_vitrina_v1`: both `yesterday_closed` and `today_current` must resolve through exact-date runtime cache `temporal_source_snapshots[source_key=stocks]` built from Seller Analytics CSV `STOCK_HISTORY_DAILY_CSV`;
 - manual operator refresh keeps short retries inside the run, but must not leak persisted due retry states into this runner path.
 
@@ -366,7 +366,7 @@ Operational rule:
 - current truth / ready snapshot keep `95` enabled+show_in_data metrics;
 - `DATA_VITRINA` keeps the same server-driven truth as operator-facing two-day `date_matrix`: `1631` source rows, `34` blocks, `33` separators, `1698` rendered rows и `95` unique metric keys при `yesterday_closed + today_current`;
 - `STATUS` names live sources per temporal slot, such as `seller_funnel_snapshot[yesterday_closed]`, `seller_funnel_snapshot[today_current]`, `stocks[yesterday_closed]`, `stocks[today_current]`, `cost_price[yesterday_closed]`, `cost_price[today_current]`, `promo_by_price[yesterday_closed]`, `promo_by_price[today_current]`;
-- current-only sources (`prices_snapshot`, `ads_bids`) are expected to show `not_available` for `yesterday_closed` instead of copying `today_current` into a closed-day column;
+- current-snapshot-only sources (`prices_snapshot`, `ads_bids`) are expected to read `yesterday_closed` from the already accepted current snapshot of the previous business day instead of historical refetching or blanking the closed-day column;
 - `stocks[yesterday_closed]` and `stocks[today_current]` are expected to materialize as success from exact-date runtime cache / historical CSV after the classifier switch;
 - `seller_funnel_snapshot` and `web_source_snapshot` use bounded `explicit-date -> latest-if-date-matches` only for current-day read resolution; `yesterday_closed` accepts only an explicit accepted closed-day snapshot and must not silently reuse provisional same-day values;
 - if exact-date `today_current` snapshot is still missing for `seller_funnel_snapshot` / `web_source_snapshot`, refresh may bounded-trigger server-local `/opt/wb-web-bot` same-day runners plus `/opt/wb-ai/run_web_source_handoff.py` before final read-side fetch;

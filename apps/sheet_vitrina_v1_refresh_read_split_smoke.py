@@ -30,18 +30,24 @@ from packages.adapters.registry_upload_http_entrypoint import (
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
-from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock
+from packages.application.sheet_vitrina_v1_live_plan import (
+    SheetVitrinaV1LivePlanBlock,
+    TEMPORAL_ROLE_ACCEPTED_CURRENT,
+)
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 
 INPUT_BUNDLE_FIXTURE = (
     ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
 )
+FIXTURE_BUNDLE = json.loads(INPUT_BUNDLE_FIXTURE.read_text(encoding="utf-8"))
+PROBE_NM_ID = next(int(item["nm_id"]) for item in FIXTURE_BUNDLE["config_v2"] if item["enabled"])
 ACTIVATED_AT = "2026-04-13T12:00:03Z"
 REFRESHED_AT = "2026-04-13T12:05:00Z"
 AS_OF_DATE = "2026-04-12"
 TODAY_CURRENT_DATE = "2026-04-13"
 SERVER_NOW = datetime(2026, 4, 13, 8, 0, tzinfo=timezone.utc)
 CURRENT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids"}
+ACCEPTED_CURRENT_CAPTURED_AT = "2026-04-12T15:05:00Z"
 
 
 class CountingBlock:
@@ -72,25 +78,26 @@ class _NoopClosedDayWebSourceSync:
 
 def _build_items(source_key: str) -> list[SimpleNamespace]:
     if source_key == "seller_funnel_snapshot":
-        return [SimpleNamespace(nm_id=100000001, view_count=11, open_card_count=3)]
+        return [SimpleNamespace(nm_id=PROBE_NM_ID, view_count=11, open_card_count=3)]
     if source_key == "web_source_snapshot":
-        return [SimpleNamespace(nm_id=100000001, views_current=7, ctr_current=0.21, orders_current=2)]
+        return [SimpleNamespace(nm_id=PROBE_NM_ID, views_current=7, ctr_current=0.21, orders_current=2)]
     if source_key == "sales_funnel_history":
-        return [SimpleNamespace(nm_id=100000001, add_to_cart_count=5, orders_count=2)]
+        return [SimpleNamespace(nm_id=PROBE_NM_ID, add_to_cart_count=5, orders_count=2)]
     if source_key == "prices_snapshot":
-        return [SimpleNamespace(nm_id=100000001, price_seller=219.0, price_seller_discounted=199.0)]
+        return [SimpleNamespace(nm_id=PROBE_NM_ID, price_seller=219.0, price_seller_discounted=199.0)]
     if source_key == "ads_bids":
-        return [SimpleNamespace(nm_id=100000001, ads_bid_search=12.0, ads_bid_recommendations=9.0)]
+        return [SimpleNamespace(nm_id=PROBE_NM_ID, ads_bid_search=12.0, ads_bid_recommendations=9.0)]
     if source_key in {"sf_period", "spp", "stocks", "ads_compact", "fin_report_daily"}:
-        return [SimpleNamespace(nm_id=100000001)]
+        return [SimpleNamespace(nm_id=PROBE_NM_ID)]
     return []
 
 
 def main() -> None:
-    bundle = _load_json(INPUT_BUNDLE_FIXTURE)
+    bundle = dict(FIXTURE_BUNDLE)
     with TemporaryDirectory(prefix="sheet-vitrina-refresh-read-split-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+        _seed_prior_accepted_current_snapshots(runtime)
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=runtime_dir,
             runtime=runtime,
@@ -258,10 +265,18 @@ def main() -> None:
                 raise AssertionError("stocks yesterday_closed must materialize historical closed-day data")
             if status_rows["stocks[today_current]"][1] != "success":
                 raise AssertionError("stocks today_current must now materialize exact-date current data")
-            if status_rows["prices_snapshot[yesterday_closed]"][1] != "not_available":
-                raise AssertionError("prices yesterday_closed must stay explicitly unavailable")
+            if status_rows["prices_snapshot[yesterday_closed]"][1] != "success":
+                raise AssertionError("prices yesterday_closed must materialize the prior accepted current snapshot")
+            if "accepted_closed_from_prior_current_snapshot" not in str(status_rows["prices_snapshot[yesterday_closed]"][10]):
+                raise AssertionError("prices yesterday_closed must explain accepted-current rollover semantics")
             if status_rows["prices_snapshot[today_current]"][1] != "success":
                 raise AssertionError("prices today_current must materialize current data")
+            if status_rows["ads_bids[yesterday_closed]"][1] != "success":
+                raise AssertionError("ads_bids yesterday_closed must materialize the prior accepted current snapshot")
+            if "accepted_closed_from_prior_current_snapshot" not in str(status_rows["ads_bids[yesterday_closed]"][10]):
+                raise AssertionError("ads_bids yesterday_closed must explain accepted-current rollover semantics")
+            if status_rows["ads_bids[today_current]"][1] != "success":
+                raise AssertionError("ads_bids today_current must materialize current data")
             if status_rows["seller_funnel_snapshot[yesterday_closed]"][1] != "success":
                 raise AssertionError("dual-day source must materialize yesterday_closed")
             if status_rows["seller_funnel_snapshot[today_current]"][1] != "success":
@@ -269,6 +284,15 @@ def main() -> None:
             data_sheet = next(sheet for sheet in plan_payload["sheets"] if sheet["sheet_name"] == "DATA_VITRINA")
             if data_sheet["header"] != ["label", "key", AS_OF_DATE, TODAY_CURRENT_DATE]:
                 raise AssertionError("DATA_VITRINA plan header must contain yesterday + today")
+            data_rows = {row[1]: row for row in data_sheet["rows"]}
+            if data_rows[f"SKU:{PROBE_NM_ID}|price_seller_discounted"][2:] != [189.0, 199.0]:
+                raise AssertionError(
+                    "DATA_VITRINA must keep prior accepted price in yesterday_closed and current price in today_current"
+                )
+            if data_rows[f"SKU:{PROBE_NM_ID}|ads_bid_search"][2:] != [10.0, 12.0]:
+                raise AssertionError(
+                    "DATA_VITRINA must keep prior accepted ads bid in yesterday_closed and current bid in today_current"
+                )
 
             ready_load = _run_load_harness(upload_url, as_of_date=AS_OF_DATE)
             if ready_load["load_error"]:
@@ -279,6 +303,11 @@ def main() -> None:
                 raise AssertionError("sheet-side load must materialize yesterday + today")
             if ready_load["sheets"]["STATUS"]["values"][1][0] != "registry_upload_current_state":
                 raise AssertionError("STATUS sheet must be materialized from ready snapshot")
+            load_data_rows = {row[1]: row for row in ready_load["sheets"]["DATA_VITRINA"]["values"][1:] if len(row) > 1}
+            if load_data_rows["avg_price_seller_discounted"][2:] != [189, 199]:
+                raise AssertionError("sheet-side load must not blank-overwrite the rolled-over accepted price")
+            if load_data_rows["avg_ads_bid_search"][2:] != [10, 12]:
+                raise AssertionError("sheet-side load must not blank-overwrite the rolled-over accepted ads bid")
             if any(
                 block.request_dates
                 != (
@@ -316,6 +345,31 @@ def _build_counting_blocks() -> dict[str, CountingBlock]:
         "ads_compact_block": CountingBlock("ads_compact"),
         "fin_report_daily_block": CountingBlock("fin_report_daily"),
     }
+
+
+def _seed_prior_accepted_current_snapshots(runtime: RegistryUploadDbBackedRuntime) -> None:
+    runtime.save_temporal_source_slot_snapshot(
+        source_key="prices_snapshot",
+        snapshot_date=AS_OF_DATE,
+        snapshot_role=TEMPORAL_ROLE_ACCEPTED_CURRENT,
+        captured_at=ACCEPTED_CURRENT_CAPTURED_AT,
+        payload=SimpleNamespace(
+            kind="success",
+            snapshot_date=AS_OF_DATE,
+            items=[SimpleNamespace(nm_id=PROBE_NM_ID, price_seller=209.0, price_seller_discounted=189.0)],
+        ),
+    )
+    runtime.save_temporal_source_slot_snapshot(
+        source_key="ads_bids",
+        snapshot_date=AS_OF_DATE,
+        snapshot_role=TEMPORAL_ROLE_ACCEPTED_CURRENT,
+        captured_at=ACCEPTED_CURRENT_CAPTURED_AT,
+        payload=SimpleNamespace(
+            kind="success",
+            snapshot_date=AS_OF_DATE,
+            items=[SimpleNamespace(nm_id=PROBE_NM_ID, ads_bid_search=10.0, ads_bid_recommendations=7.0)],
+        ),
+    )
 
 
 def _request_date(request: object) -> str:
