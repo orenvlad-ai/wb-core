@@ -100,6 +100,7 @@ HISTORICAL_CLOSED_DAY_SOURCE_KEYS = STRICT_CLOSED_DAY_SOURCE_KEYS | {
     "fin_report_daily",
 }
 CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "promo_by_price"}
+CURRENT_SNAPSHOT_ONLY_ROLLOVER_SOURCE_KEYS = {"prices_snapshot", "ads_bids"}
 ACCEPTED_CURRENT_SOURCE_KEYS = HISTORICAL_CLOSED_DAY_SOURCE_KEYS | CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS
 EXACT_DATE_RUNTIME_CACHE_SOURCE_KEYS = {"sales_funnel_history", "stocks", "promo_by_price"}
 TEMPORAL_ROLE_PROVISIONAL_CURRENT = "provisional_current_snapshot"
@@ -123,10 +124,10 @@ SOURCE_TEMPORAL_POLICIES = {
     "seller_funnel_snapshot": "dual_day_capable",
     "sales_funnel_history": "dual_day_capable",
     "web_source_snapshot": "dual_day_capable",
-    "prices_snapshot": "today_current",
+    "prices_snapshot": "accepted_current_rollover",
     "sf_period": "dual_day_capable",
     "spp": "dual_day_capable",
-    "ads_bids": "today_current",
+    "ads_bids": "accepted_current_rollover",
     "stocks": "dual_day_capable",
     "ads_compact": "dual_day_capable",
     "fin_report_daily": "dual_day_capable",
@@ -847,6 +848,17 @@ class SheetVitrinaV1LivePlanBlock:
                 column_date=column_date,
                 requested_nm_ids=requested_nm_ids,
             )
+        if (
+            temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED
+            and source_key in CURRENT_SNAPSHOT_ONLY_ROLLOVER_SOURCE_KEYS
+        ):
+            return self._capture_current_snapshot_closed_day_from_accepted_current(
+                source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
+                requested_nm_ids=requested_nm_ids,
+            )
         if temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED and source_key in HISTORICAL_CLOSED_DAY_SOURCE_KEYS:
             return self._capture_temporal_source_with_acceptance(
                 source_key=source_key,
@@ -953,6 +965,53 @@ class SheetVitrinaV1LivePlanBlock:
                 note=(
                     "promo yesterday_closed requires accepted prior current snapshot; "
                     "runtime cache missing for requested closed day"
+                ),
+            ),
+            None,
+        )
+
+    def _capture_current_snapshot_closed_day_from_accepted_current(
+        self,
+        *,
+        source_key: str,
+        temporal_slot: str,
+        temporal_policy: str,
+        column_date: str,
+        requested_nm_ids: list[int],
+    ) -> tuple[LiveSourceStatus, Any | None]:
+        accepted_snapshot = self._load_slot_snapshot_status(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            snapshot_role=TEMPORAL_ROLE_ACCEPTED_CURRENT,
+        )
+        if accepted_snapshot is not None:
+            accepted_status, accepted_payload, accepted_at = accepted_snapshot
+            note = "resolution_rule=accepted_closed_from_prior_current_snapshot"
+            if accepted_at:
+                note = f"{note}; accepted_at={accepted_at}"
+            return _append_status_note(accepted_status, note), accepted_payload
+
+        return (
+            LiveSourceStatus(
+                source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
+                kind="missing",
+                freshness="",
+                snapshot_date="",
+                date="",
+                date_from="",
+                date_to="",
+                requested_count=len(requested_nm_ids),
+                covered_count=0,
+                missing_nm_ids=sorted(set(requested_nm_ids)),
+                note=(
+                    "current-snapshot-only yesterday_closed requires prior accepted current snapshot; "
+                    "accepted current snapshot missing for requested closed day"
                 ),
             ),
             None,
@@ -2393,6 +2452,8 @@ def _resolve_freshness(payload: Any) -> str:
 
 def _source_policy_supports_slot(temporal_policy: str, temporal_slot: str) -> bool:
     if temporal_policy == "dual_day_capable":
+        return True
+    if temporal_policy == "accepted_current_rollover":
         return True
     if temporal_policy == TEMPORAL_SLOT_YESTERDAY_CLOSED:
         return temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED

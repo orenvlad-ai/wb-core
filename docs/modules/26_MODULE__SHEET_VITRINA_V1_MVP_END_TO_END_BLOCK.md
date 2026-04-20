@@ -245,10 +245,10 @@ update_note: "Обновлён под final temporal classifier и execution mod
 - В bounded live contour используется следующая source-classification и temporal policy matrix:
   - group A `bot/web-source historical / closed-day-capable`: `seller_funnel_snapshot`, `web_source_snapshot`; allowed slots = `yesterday_closed + today_current`
   - group B `WB API historical/date-period capable`: `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`; allowed slots = `yesterday_closed + today_current`
-  - group C `WB API current-snapshot-only`: `prices_snapshot`, `ads_bids`; allowed slots = `today_current`, bounded same-day capture/retry only
+  - group C `WB API current-snapshot-only`: `prices_snapshot`, `ads_bids`; accepted truth is captured only as current snapshot, but the accepted snapshot for closed business day D must materialize as `yesterday_closed=D` on D+1 without historical refetch
   - group D `other/non-WB/manual/browser-collector`: `cost_price`, `promo_by_price`; `cost_price` resolves `yesterday_closed + today_current` by `effective_from <= slot_date`, `promo_by_price` now reads bounded live/current truth from repo-owned promo collector sidecar + workbook seam
   - `dual_day_capable`: `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`, `cost_price`
-  - `today_current`: `prices_snapshot`, `ads_bids`
+  - `accepted_current_rollover`: `prices_snapshot`, `ads_bids`
   - `dual_day_capable`: `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`, `cost_price`, `promo_by_price`
 - Для bot/web-source family (`seller_funnel_snapshot`, `web_source_snapshot`) current server-side read rule теперь bounded и truthful:
   - сначала source adapter пробует explicit requested date/window;
@@ -274,12 +274,13 @@ update_note: "Обновлён под final temporal classifier и execution mod
 - Для accepted-state policy current checkpoint применяет source-aware invalid signatures:
   - `seller_funnel_snapshot`: zero-filled payload или `source_fetched_at < next business day start in Asia/Yekaterinburg`
   - `web_source_snapshot`: zero-filled payload или `search_analytics_raw.fetched_at < next business day start in Asia/Yekaterinburg`
-  - `prices_snapshot` и `ads_bids` остаются current-only и truthfully surface-ят `not_available` для `yesterday_closed`, но valid same-day accepted snapshot не может быть затёрт later invalid/blank/zero attempt того же дня;
+  - `prices_snapshot` и `ads_bids` остаются current-snapshot-only, но accepted snapshot предыдущего business day обязан truthfully materialize-иться в `yesterday_closed`, а later invalid/blank/zero attempt не может затереть ни accepted yesterday truth, ни already accepted same-day current truth;
   - `stocks` больше не current-only: `yesterday_closed` и `today_current` читают authoritative exact-date historical payload/runtime cache.
-- Current-only sources не backfill-ятся в closed-day column:
-  - `prices_snapshot[yesterday_closed]`, `ads_bids[yesterday_closed]` materialize-ятся как `not_available`
-  - `today_current` values остаются в своей фактической колонке и не маскируются под yesterday EOD
-  - manual invalid run не затирает already accepted same-day snapshot и не создаёт persisted due retry states
+- Current-snapshot-only rollover contract is non-destructive:
+  - day D valid snapshot is accepted only as current snapshot for D;
+  - on D+1 the already accepted snapshot for D materializes into `yesterday_closed=D` via persisted accepted-current seam, without destructive historical refetch;
+  - `today_current=D+1` remains a separate current slot and does not overwrite `yesterday_closed=D`;
+  - manual invalid run does not blank accepted yesterday/current truth and does not create persisted due retry states.
 - Для `stocks` current checkpoint теперь обязан:
   - materialize-ить `stocks[yesterday_closed]` из Seller Analytics CSV path `STOCK_HISTORY_DAILY_CSV`;
   - materialize-ить `stocks[today_current]` из того же exact-date historical CSV/runtime path;
@@ -391,7 +392,7 @@ Bounded допущение:
   - `avg_*` = arithmetic mean по доступным enabled SKU values.
 - Uploaded `section` dictionary считается authoritative и не remap-ится локально.
 - `CONFIG!H:I` service/status block сохраняется при `prepare`, `upload`, `load`.
-- Для current-only sources bounded contour честно предпочитает `not_available` в `yesterday_closed`, а не backfill текущих значений в yesterday-column.
+- Для current-snapshot-only sources bounded contour читает `yesterday_closed` из already accepted current snapshot предыдущего business day и не делает destructive historical refetch или blank overwrite accepted truth.
 - Для `stocks` bounded contour теперь применяет task-local classifier norm: both `yesterday_closed` и `today_current` обязаны приходить из authoritative exact-date historical snapshot/runtime cache, а не из intraday surrogate.
 
 ## 3.4 Явный live blocker
@@ -503,7 +504,7 @@ Bounded допущение:
   - что empty/missing `COST_PRICE` state оставляет cost-based rows blank и surface-ит truthful `STATUS.cost_price[*]`;
   - что при отсутствии ready snapshot load path возвращает явную ошибку `ready snapshot missing`;
   - что `DATA_VITRINA` materialize-ит полный server-driven metric set как `date_matrix`, не режется до `7` metric keys и сразу грузит `yesterday_closed + today_current`;
-  - что current-only sources не попадают в yesterday-column и materialize-ятся как `not_available` в `STATUS`;
+  - что current-snapshot-only sources materialize-ят `yesterday_closed` через accepted-current rollover seam и не blank-ят already accepted previous-day truth;
   - что later invalid auto/manual current-only attempt не перетирает already accepted same-day snapshot;
   - что manual refresh не создаёт persisted long-retry tail;
   - что `STATUS` фиксирует live sources per temporal slot, `cost_price[*]` coverage и current/closed promo source facts `promo_by_price[*]` with collector trace/debug note;

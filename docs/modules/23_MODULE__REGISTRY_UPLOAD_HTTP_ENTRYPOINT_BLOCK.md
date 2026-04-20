@@ -174,9 +174,10 @@ update_note: "Обновлён под current factory-order historical seam и c
   - invalid / missing / incomplete candidate не принимается как final closed truth;
   - already accepted closed snapshot не может быть затёрт later invalid attempt.
 - Group C использует отдельный non-destructive same-day accepted contract:
-  - `yesterday_closed` остаётся truthful `not_available`;
+  - upstream truth снимается только как current snapshot, но accepted snapshot закрытого business day D обязан materialize-иться как `yesterday_closed=D` на D+1 через persisted accepted-current seam;
+  - contour не делает destructive historical refetch для D и не заменяет already accepted snapshot blank/error только потому, что upstream historical path unsupported;
   - `today_current` может long-retry-иться только в пределах текущего business day / current capture window;
-  - later invalid/blank/zero candidate сохраняет earlier accepted current snapshot того же дня;
+  - later invalid/blank/zero candidate сохраняет и prior-day accepted truth, и earlier accepted current snapshot того же дня;
   - только новый valid current snapshot может заменить уже accepted same-day snapshot.
 - `promo_by_price` в current checkpoint больше не остаётся blocked gap:
   - `today_current` trigger-ит bounded repo-owned promo collector run поверх existing seller session reuse contour;
@@ -186,7 +187,7 @@ update_note: "Обновлён под current factory-order historical seam и c
 - Source-aware invalid signatures для accepted-state policy:
   - `seller_funnel_snapshot`: zero-filled payload plus freshness gate `source_fetched_at >= next business day start in Asia/Yekaterinburg`;
   - `web_source_snapshot`: zero-filled payload plus freshness gate `search_analytics_raw.fetched_at >= next business day start in Asia/Yekaterinburg`;
-  - `prices_snapshot` и `ads_bids` не попадают под historical closed-day acceptance, но current same-day accepted snapshot не должен перетираться zero-filled/blank candidate;
+  - `prices_snapshot` и `ads_bids` не попадают под destructive historical closed-day refetch: `yesterday_closed` читается из accepted current snapshot предыдущего business day, а invalid later candidate не должен перетирать accepted yesterday/current truth;
   - `stocks` теперь входит именно в WB API date/period-capable group: `sheet_vitrina_v1` получает both `yesterday_closed` и `today_current` через exact-date runtime/cache path `temporal_source_snapshots[source_key=stocks]`, built from Seller Analytics CSV `STOCK_HISTORY_DAILY_CSV`.
 - Repo-owned bounded retry cycle теперь materialize-ится отдельным runner’ом:
   - `apps/sheet_vitrina_v1_temporal_closure_retry_live.py`
