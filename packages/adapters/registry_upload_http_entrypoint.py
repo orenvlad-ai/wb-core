@@ -34,6 +34,7 @@ DEFAULT_SHEET_PLAN_PATH = "/v1/sheet-vitrina-v1/plan"
 DEFAULT_SHEET_DAILY_REPORT_PATH = "/v1/sheet-vitrina-v1/daily-report"
 DEFAULT_SHEET_STOCK_REPORT_PATH = "/v1/sheet-vitrina-v1/stock-report"
 DEFAULT_SHEET_WEB_VITRINA_READ_PATH = "/v1/sheet-vitrina-v1/web-vitrina"
+DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE = "page_composition"
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_SHEET_LOAD_PATH = "/v1/sheet-vitrina-v1/load"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
@@ -460,10 +461,34 @@ def _build_handler(
 
             if parsed.path == DEFAULT_SHEET_WEB_VITRINA_READ_PATH:
                 try:
+                    surface = _resolve_sheet_web_vitrina_surface_from_query(parsed.query)
+                    as_of_date = _resolve_as_of_date_from_query(parsed.query) or None
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+
+                if surface == DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE:
+                    payload = entrypoint.handle_sheet_web_vitrina_page_composition_request(
+                        page_route=DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
+                        read_route=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+                        operator_route=sheet_operator_ui_path,
+                        as_of_date=as_of_date,
+                    )
+                    _write_json_response(
+                        self,
+                        HTTPStatus.OK,
+                        payload,
+                    )
+                    return
+                try:
                     payload = entrypoint.handle_sheet_web_vitrina_request(
                         page_route=DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
                         read_route=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
-                        as_of_date=_resolve_as_of_date_from_query(parsed.query) or None,
+                        as_of_date=as_of_date,
                     )
                 except ValueError as exc:
                     _write_json_response(
@@ -1293,9 +1318,26 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "page_title": "Web-витрина",
         "read_path": read_path,
         "operator_path": operator_path,
+        "page_composition_surface": DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
     }
     template = WEB_VITRINA_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     return (
         template.replace("__SHEET_VITRINA_V1_WEB_VITRINA_PAGE_TITLE__", config_payload["page_title"])
         .replace("__SHEET_VITRINA_V1_WEB_VITRINA_CONFIG_JSON__", json.dumps(config_payload, ensure_ascii=False))
+    )
+
+
+def _resolve_sheet_web_vitrina_surface_from_query(query: str) -> str:
+    params = urllib_parse.parse_qs(query or "", keep_blank_values=False)
+    values = params.get("surface") or []
+    if not values:
+        return "contract"
+    if len(values) != 1:
+        raise ValueError("surface must be provided at most once")
+    surface = values[0].strip() or "contract"
+    if surface in {"contract", DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}:
+        return surface
+    raise ValueError(
+        "unsupported web-vitrina surface: "
+        f"{surface!r}; expected 'contract' or '{DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}'"
     )

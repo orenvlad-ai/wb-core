@@ -18,6 +18,14 @@ from packages.application.sheet_vitrina_v1_load_bridge import load_sheet_vitrina
 from packages.application.sheet_vitrina_v1_stock_report import SheetVitrinaV1StockReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import list_active_sku_options
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
+from packages.application.web_vitrina_gravity_table_adapter import (
+    build_web_vitrina_gravity_table_adapter,
+)
+from packages.application.web_vitrina_page_composition import (
+    build_web_vitrina_page_composition,
+    build_web_vitrina_page_error_composition,
+)
+from packages.application.web_vitrina_view_model import build_web_vitrina_view_model
 from packages.application.wb_regional_supply import WbRegionalSupplyBlock
 from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE_NAME,
@@ -155,6 +163,41 @@ class RegistryUploadHttpEntrypoint:
                 read_route=read_route,
                 as_of_date=as_of_date,
             )
+        )
+
+    def handle_sheet_web_vitrina_page_composition_request(
+        self,
+        *,
+        page_route: str,
+        read_route: str,
+        operator_route: str,
+        as_of_date: str | None = None,
+    ) -> dict[str, Any]:
+        effective_as_of_date = as_of_date or default_business_as_of_date(self.now_factory())
+        try:
+            contract = self.web_vitrina_block.build(
+                page_route=page_route,
+                read_route=read_route,
+                as_of_date=as_of_date,
+            )
+            view_model = build_web_vitrina_view_model(contract)
+            adapter = build_web_vitrina_gravity_table_adapter(view_model)
+        except Exception as exc:
+            return build_web_vitrina_page_error_composition(
+                page_route=page_route,
+                read_route=read_route,
+                operator_route=operator_route,
+                as_of_date=effective_as_of_date,
+                error_message=str(exc),
+            )
+
+        return build_web_vitrina_page_composition(
+            contract=contract,
+            view_model=view_model,
+            adapter=adapter,
+            page_route=page_route,
+            read_route=read_route,
+            operator_route=operator_route,
         )
 
     def handle_sheet_refresh_request(

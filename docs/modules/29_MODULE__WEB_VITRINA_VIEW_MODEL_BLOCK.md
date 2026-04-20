@@ -103,10 +103,10 @@ update_note: "Phase 2 web-vitrina materialize-ит отдельный library-ag
   - server-owned truth/read contract
 - `web_vitrina_view_model` v1:
   - library-agnostic presentation-domain schema
-- current later layer above it:
+- current later layers above it:
   - `web_vitrina_gravity_table_adapter`
-- still-later layers:
-  - `page_composition`
+  - `web_vitrina_page_composition`
+- still-later layer:
   - `export_layer`
 
 # 4. Артефакты и wiring по модулю
@@ -149,9 +149,8 @@ update_note: "Phase 2 web-vitrina materialize-ит отдельный library-ag
 
 # 8. Что пока не является частью финальной production-сборки
 
-- `@gravity-ui/table` adapter
-- full grid UI
-- sticky/resizing/virtualization implementation
-- page composition
+- `@gravity-ui/table` runtime/package integration
+- advanced grid UI beyond the current bounded page
+- sticky/resizing/virtualization implementation beyond the current thin page layer
 - export implementation
 - любой browser-side business truth assembly

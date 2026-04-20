@@ -94,6 +94,8 @@ python3 apps/sheet_vitrina_v1_web_vitrina_view_model_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_view_model_integration_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_integration_smoke.py
+python3 apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py
+python3 apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py
 python3 apps/sheet_vitrina_v1_operator_ui_persistence_smoke.py
 python3 apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py
 python3 apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py
@@ -114,6 +116,10 @@ Current web-vitrina phase-2 smoke intent:
 Current web-vitrina phase-3 smoke intent:
 - `apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_smoke.py` keeps Gravity-specific config/data/render hints isolated in the adapter layer and checks sticky/sizing/sort/filter/useTable/state invariants without changing `view_model`.
 - `apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_integration_smoke.py` proves the full seam `contract -> view_model -> gravity adapter` and keeps per-cell renderer bindings authoritative for mixed temporal columns.
+
+Current web-vitrina phase-4 smoke intent:
+- `apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py` keeps page composition server-driven and checks source-chain metadata, filter surface, row counts and ready/error state behavior without changing the default read contract.
+- `apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py` proves the real sibling page on `/sheet-vitrina-v1/vitrina`: table render, filter controls, empty state, reset recovery and truthful error state all run through the same HTTP contour.
 
 Targeted expectation for `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`:
 - same-day incoming blank cell in server-owned `DATA_VITRINA` plan must clear the live-sheet cell instead of preserving a stale historical value or stale zero.
@@ -383,8 +389,9 @@ Operational rule:
 - applicable себестоимость резолвится server-side по `group + latest effective_from <= slot_date`;
 - operator-facing derived rows используют canonical keys `total_proxy_profit_rub` и `proxy_margin_pct_total`;
 - `GET /sheet-vitrina-v1/operator` поднимает simple operator page без SPA/build pipeline;
-- `GET /sheet-vitrina-v1/vitrina` поднимает отдельный thin sibling shell и не встраивается в existing `/sheet-vitrina-v1/operator`;
-- `GET /v1/sheet-vitrina-v1/web-vitrina` остаётся cheap read-only JSON path: current v1 shape = `contract_name / contract_version / page_route / read_route / meta / status_summary / schema / rows / capabilities`, optional `as_of_date` stays on том же route и не имеет права trigger-ить refresh/upstream fetch;
+- `GET /sheet-vitrina-v1/vitrina` поднимает отдельную live read-only sibling page и не встраивается в existing `/sheet-vitrina-v1/operator`;
+- `GET /v1/sheet-vitrina-v1/web-vitrina` остаётся cheap read-only JSON path: default v1 shape = `contract_name / contract_version / page_route / read_route / meta / status_summary / schema / rows / capabilities`, optional `as_of_date` stays on том же route и не имеет права trigger-ить refresh/upstream fetch;
+- `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition` now adds the page-only payload for `/sheet-vitrina-v1/vitrina`: `composition_name / composition_version / meta / summary_cards / filter_surface / table_surface / status_summary / capabilities`; route still stays read-only and must not trigger refresh/upstream fetch;
 - operator page показывает narrow server-driven surface: top-level sections `Обновление данных` / `Расчёт поставок` / `Отчёты`, compact manual block `Ручная загрузка данных` with embedded actions `Загрузить данные` / `Отправить данные`, one compact reports subsection-switch `Ежедневные отчёты` / `Отчёт по остаткам` inside `Отчёты`, separate compact auto block `Автообновления` и отдельный `Лог`; manual block показывает только persisted manual-success timestamps `Последняя удачная загрузка` / `Последняя удачная отправка` из `manual_context`, reload страницы не считается proof последней manual `Отправить данные`, а completed run можно скачать через `Скачать лог`;
 - `GET /v1/sheet-vitrina-v1/daily-report` остаётся cheap read-only JSON path: route сравнивает только два последних closed business day через persisted ready snapshots `default_business_as_of_date(now)` и `default_business_as_of_date(now)-1 day` и не имеет права trigger-ить refresh/upstream fetch;
 - `GET /v1/sheet-vitrina-v1/stock-report` остаётся cheap read-only JSON path: route по умолчанию читает previous closed business day only from persisted ready snapshot `DATA_VITRINA[yesterday_closed]`, принимает optional explicit `as_of_date` override на том же read path, не trigger-ит refresh/upstream fetch и включает только SKU с district stock `< 50`;

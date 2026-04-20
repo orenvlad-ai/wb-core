@@ -19,6 +19,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
+    DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
     DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
     DEFAULT_UPLOAD_PATH,
@@ -117,18 +118,31 @@ def main() -> None:
             ]:
                 raise AssertionError(f"web-vitrina rows mismatch, got {row_ids}")
 
+            composition_status, composition_payload = _get_json(
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}"
+            )
+            if composition_status != 200:
+                raise AssertionError(f"web-vitrina page composition surface must return 200, got {composition_status}")
+            if composition_payload.get("composition_name") != "web_vitrina_page_composition":
+                raise AssertionError(f"web-vitrina page composition identity mismatch, got {composition_payload}")
+            if composition_payload.get("meta", {}).get("current_state") != "ready":
+                raise AssertionError(f"web-vitrina page composition state mismatch, got {composition_payload}")
+            if composition_payload.get("table_surface", {}).get("total_row_count") != 4:
+                raise AssertionError(f"web-vitrina page composition row count mismatch, got {composition_payload}")
+
             page_status, page_html = _get_text(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}")
             if page_status != 200:
                 raise AssertionError(f"web-vitrina page route must return 200, got {page_status}")
             for expected in (
                 "Web-витрина",
-                "Phase 1 Web-Vitrina Boundary",
-                "web_vitrina_contract",
+                "Phase 4 Web-Vitrina Page Composition",
                 DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
                 DEFAULT_SHEET_OPERATOR_UI_PATH,
-                "grid_adapter",
-                "page_composition",
-                "export_layer",
+                "surface=page_composition",
+                "web_vitrina_page_composition",
+                "web_vitrina_view_model",
+                "web_vitrina_gravity_table_adapter",
+                "data-filter-controls",
             ):
                 if expected not in page_html:
                     raise AssertionError(f"web-vitrina page shell must expose {expected!r}")
@@ -140,6 +154,7 @@ def main() -> None:
                 raise AssertionError(f"web-vitrina read route must honor as_of_date, got {dated_status} {dated_payload}")
 
             print("web_vitrina_read_route: ok ->", contract_payload["meta"]["snapshot_id"])
+            print("web_vitrina_page_composition_surface: ok ->", composition_payload["composition_name"], composition_payload["meta"]["current_state"])
             print("web_vitrina_page_route: ok ->", DEFAULT_SHEET_WEB_VITRINA_UI_PATH)
             print("web_vitrina_query_override: ok ->", dated_payload["meta"]["as_of_date"])
         finally:

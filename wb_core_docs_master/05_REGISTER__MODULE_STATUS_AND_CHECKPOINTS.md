@@ -25,13 +25,13 @@ built_from_commit: "967edcc2059b36db36a3846d9f773c0b90e20f90"
 
 # Summary
 
-На текущем `main` main-confirmed module set уже доходит до `30`.
+На текущем `main` main-confirmed module set уже доходит до `31`.
 
 Практически это значит:
 - source/data foundation уже materialized;
 - registry upload line уже замкнута до HTTP entrypoint;
 - sheet-side line уже дошла до bounded MVP `prepare -> upload -> refresh -> load`.
-- web-vitrina line уже имеет stable route/contract seam, отдельный library-agnostic `view_model` и первый concrete grid adapter layer без live boundary shift.
+- web-vitrina line уже имеет stable route/contract seam, отдельный library-agnostic `view_model`, первый concrete grid adapter layer и real live page composition на sibling route.
 
 # Current norm
 
@@ -44,7 +44,7 @@ built_from_commit: "967edcc2059b36db36a3846d9f773c0b90e20f90"
 | `24–26` | `sheet-side operator line` | смёржены в `main` до первого bounded MVP |
 | `27` | `browser-capture collector` | смёржен в `main` как bounded local promo XLSX collector contour |
 | `28` | `browser-capture live wiring` | смёржен в `main` как promo live source seam inside refresh/runtime/read-side |
-| `29–30` | `web-vitrina seams` | смёржены в `main` как stable read/view-model/adapter ladder без live page redesign |
+| `29–31` | `web-vitrina seams` | смёржены в `main` как stable read/view-model/adapter ladder plus real sibling page composition |
 
 ## Current checkpoint ladder
 
@@ -67,6 +67,7 @@ built_from_commit: "967edcc2059b36db36a3846d9f773c0b90e20f90"
 17. `promo_live_source_wiring_block`
 18. `web_vitrina_view_model_block`
 19. `web_vitrina_gravity_table_adapter_block`
+20. `web_vitrina_page_composition_block`
 
 ## Operator-facing checkpoint
 
@@ -97,12 +98,13 @@ Current repo-owned operator refresh surface:
 - `GET /sheet-vitrina-v1/operator`
 - page uses `POST /v1/sheet-vitrina-v1/refresh`, `POST /v1/sheet-vitrina-v1/load`, `GET /v1/sheet-vitrina-v1/daily-report`, `GET /v1/sheet-vitrina-v1/stock-report`, `GET /v1/sheet-vitrina-v1/status` and `GET /v1/sheet-vitrina-v1/job`
 - current `/sheet-vitrina-v1/operator` remains orchestration-first control surface and is intentionally not reused as `/sheet-vitrina-v1/operator/vitrina`
-- phase-1 web-vitrina is now fixed as sibling routes `GET /sheet-vitrina-v1/vitrina` + `GET /v1/sheet-vitrina-v1/web-vitrina`
-- `GET /v1/sheet-vitrina-v1/web-vitrina` stays server-owned and library-agnostic: current v1 shape is `meta + status_summary + schema + rows + capabilities`, built only from existing ready snapshot/current truth and optional `as_of_date`
-- phase-2 web-vitrina now additionally materializes repo-owned `web_vitrina_view_model` over that stable contract: current schema = `columns + rows + groups + sections + formatters + filters + sorts + state_model`
-- phase-3 web-vitrina now additionally materializes repo-owned `web_vitrina_gravity_table_adapter` over that `view_model`: current Gravity-specific surface = `columns + rows + renderers + groupings + filters + sorts + use_table_options + table_props + state_surface`
-- `web_vitrina_view_model` remains canonical and library-agnostic, while the concrete Gravity-specific adapter stays isolated repo-side; current live routes and thin page shell stay unchanged on this checkpoint
-- phase-1/2/3 scope remains narrow: route fixation, stable read contract, library-agnostic presentation seam and the first concrete grid adapter only; full live grid UI/page composition, export layer, Google Sheets cutover and broad feature parity stay later
+- web-vitrina is fixed as sibling routes `GET /sheet-vitrina-v1/vitrina` + `GET /v1/sheet-vitrina-v1/web-vitrina`
+- `GET /v1/sheet-vitrina-v1/web-vitrina` stays server-owned and library-agnostic on the default path: current v1 shape is `meta + status_summary + schema + rows + capabilities`, built only from existing ready snapshot/current truth and optional `as_of_date`
+- phase-2 web-vitrina additionally materializes repo-owned `web_vitrina_view_model` over that stable contract: current schema = `columns + rows + groups + sections + formatters + filters + sorts + state_model`
+- phase-3 web-vitrina additionally materializes repo-owned `web_vitrina_gravity_table_adapter` over that `view_model`: current Gravity-specific surface = `columns + rows + renderers + groupings + filters + sorts + use_table_options + table_props + state_surface`
+- phase-4 web-vitrina additionally materializes repo-owned `web_vitrina_page_composition` on the same read route via optional `surface=page_composition`, while `/sheet-vitrina-v1/vitrina` becomes a real read-only page with summary, filters, table container and truthful loading/empty/error states
+- `web_vitrina_view_model` remains canonical and library-agnostic, the concrete Gravity-specific adapter stays isolated repo-side, and the page layer stays a page-only consumer instead of a second truth owner
+- current phase-1/2/3/4 scope remains narrow: route fixation, stable read contract, library-agnostic presentation seam, concrete grid adapter and minimal live page composition only; export layer, Google Sheets cutover and broad feature parity stay later
 - page stays intentionally narrow: top-level sections `Обновление данных` / `Расчёт поставок` / `Отчёты`, compact manual block `Ручная загрузка данных` with embedded buttons `Загрузить данные` / `Отправить данные` and only two persisted manual-success fields `Последняя удачная загрузка` / `Последняя удачная отправка`, one compact reports subsection-switch `Ежедневные отчёты` / `Отчёт по остаткам` inside `Отчёты`, separate compact auto block `Автообновления` and one fixed-height scrollable `Лог` block with `Скачать лог`
 - daily-report block compares only the two latest closed business days in `Asia/Yekaterinburg`: `yesterday_closed(default_business_as_of_date(now))` vs `yesterday_closed(default_business_as_of_date(now)-1 day)`, never `today_current`
 - daily-report ranked totals stay on the current canonical pool only (`total_view_count`, `total_views_current`, `avg_ctr_current`, `avg_addToCartConversion`, `avg_cartToOrderConversion`, `avg_spp`, `avg_ads_bid_search`, `total_ads_views`, `total_ads_sum`, `avg_localizationPercent`)

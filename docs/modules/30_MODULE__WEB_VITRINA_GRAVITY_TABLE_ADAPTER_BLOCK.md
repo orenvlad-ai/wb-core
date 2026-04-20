@@ -128,12 +128,11 @@ update_note: "Phase 3 web-vitrina materialize-ит первый concrete `grid_a
   - `web_vitrina_view_model`
   - `web_vitrina_gravity_table_adapter`
 - Current repo can now prove a concrete library adapter without forcing a live frontend platform or changing public HTML.
-- Later client work can mostly focus on render/page composition because adapter payload already isolates Gravity-specific column/row/renderer/state seams.
+- Phase-4 client/page work can now stay narrow because adapter payload already isolates Gravity-specific column/row/renderer/state seams.
 
 # 8. Что пока не является частью финальной production-сборки
 
-- live bundled `@gravity-ui/table` rendering on `/sheet-vitrina-v1/vitrina`
-- full page composition
+- real bundled `@gravity-ui/table` package/runtime rendering on `/sheet-vitrina-v1/vitrina`
 - grid virtualization/resizing UX implementation
 - export layer
 - any business-truth logic in browser
