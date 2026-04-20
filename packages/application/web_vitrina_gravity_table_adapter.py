@@ -234,32 +234,28 @@ def _build_rows(
 
 
 def _build_groupings(payload: Mapping[str, Any]) -> list[WebVitrinaGravityTableGrouping]:
-    section_by_id = {
-        item["section_id"]: item
-        for item in payload["sections"]
-    }
     group_by_id = {
         item["group_id"]: item
         for item in payload["groups"]
     }
-    row_ids_by_pair: dict[tuple[str, str], list[str]] = {}
+    row_ids_by_group: dict[str, list[str]] = {}
+    section_ids_by_group: dict[str, set[str]] = {}
     for row in payload["rows"]:
-        pair = (str(row["section_id"]), str(row["group_id"]))
-        row_ids_by_pair.setdefault(pair, []).append(str(row["row_id"]))
+        group_id = str(row["group_id"])
+        row_ids_by_group.setdefault(group_id, []).append(str(row["row_id"]))
+        section_ids_by_group.setdefault(group_id, set()).add(str(row["section_id"]))
 
     groupings: list[WebVitrinaGravityTableGrouping] = []
-    for order, pair in enumerate(sorted(row_ids_by_pair, key=lambda key: (_section_order(section_by_id, key[0]), _group_order(group_by_id, key[1]))), start=1):
-        section_id, group_id = pair
-        section_label = str(section_by_id[section_id]["label"])
+    for order, group_id in enumerate(sorted(row_ids_by_group, key=lambda key: _group_order(group_by_id, key)), start=1):
         group_label = str(group_by_id[group_id]["label"])
         groupings.append(
             WebVitrinaGravityTableGrouping(
-                grouping_id=f"{section_id}::{group_id}",
-                section_id=section_id,
+                grouping_id=group_id,
+                section_id=_grouping_section_id(section_ids_by_group.get(group_id) or set()),
                 group_id=group_id,
-                title=f"{section_label} / {group_label}",
+                title=group_label,
                 order=order,
-                row_ids=row_ids_by_pair[pair],
+                row_ids=row_ids_by_group[group_id],
                 collapsed_by_default=bool(group_by_id[group_id]["collapsed_by_default"]),
             )
         )
@@ -350,9 +346,13 @@ def _min_size(width_hint: int) -> int:
     return max(72, min(width_hint, 120))
 
 
-def _section_order(section_by_id: Mapping[str, Mapping[str, Any]], section_id: str) -> int:
-    return int(section_by_id[section_id]["order"])
-
-
 def _group_order(group_by_id: Mapping[str, Mapping[str, Any]], group_id: str) -> int:
     return int(group_by_id[group_id]["order"])
+
+
+def _grouping_section_id(section_ids: set[str]) -> str:
+    if not section_ids:
+        return "section:unsectioned"
+    if len(section_ids) == 1:
+        return next(iter(section_ids))
+    return "section:mixed"

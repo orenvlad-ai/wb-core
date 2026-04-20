@@ -42,6 +42,8 @@ def main() -> None:
     rows = {row.row_id: row for row in view_model.rows}
     price_row = rows["SKU:101|avg_price_seller_discounted"]
     percent_row = rows["SKU:101|avg_addToCartConversion"]
+    second_price_row = rows["SKU:102|avg_price_seller_discounted"]
+    second_percent_row = rows["SKU:102|avg_addToCartConversion"]
     total_row = rows["TOTAL|total_view_count"]
     if total_row.row_kind != "total" or total_row.group_id != "group:overview":
         raise AssertionError(f"total row mapping mismatch, got {total_row}")
@@ -59,6 +61,21 @@ def main() -> None:
         raise AssertionError(f"percent cell mapping mismatch, got {percent_cell}")
     if empty_cell.cell_kind != "empty" or empty_cell.display_text != "—":
         raise AssertionError(f"empty cell mapping mismatch, got {empty_cell}")
+
+    ordered_row_ids = [row.row_id for row in view_model.rows]
+    expected_order = [
+        "TOTAL|total_view_count",
+        "SKU:101|avg_price_seller_discounted",
+        "SKU:101|avg_addToCartConversion",
+        "SKU:102|avg_price_seller_discounted",
+        "SKU:102|avg_addToCartConversion",
+    ]
+    if ordered_row_ids != expected_order:
+        raise AssertionError(f"canonical row ordering mismatch, got {ordered_row_ids}")
+    if _cell(price_row, "row_order").value != 2 or _cell(percent_row, "row_order").value != 3:
+        raise AssertionError(f"first SKU ordering mismatch, got {_cell(price_row, 'row_order').value} / {_cell(percent_row, 'row_order').value}")
+    if _cell(second_price_row, "row_order").value != 4 or _cell(second_percent_row, "row_order").value != 5:
+        raise AssertionError(f"second SKU ordering mismatch, got {_cell(second_price_row, 'row_order').value} / {_cell(second_percent_row, 'row_order').value}")
 
     filters = {item.filter_id: item for item in view_model.filters}
     sorts = {item.sort_id: item for item in view_model.sorts}
@@ -108,7 +125,7 @@ def _build_contract_payload() -> dict[str, object]:
             ],
             "generated_at": "2026-04-21T08:00:00Z",
             "refreshed_at": "2026-04-21T07:55:00Z",
-            "row_count": 3,
+            "row_count": 5,
         },
         "status_summary": {
             "refresh_status": "success",
@@ -190,8 +207,22 @@ def _build_contract_payload() -> dict[str, object]:
                 "values_by_date": {"2026-04-19": 1200, "2026-04-20": 1250},
             },
             {
-                "row_id": "SKU:101|avg_addToCartConversion",
+                "row_id": "SKU:102|avg_price_seller_discounted",
                 "row_order": 3,
+                "scope_kind": "SKU",
+                "scope_key": "SKU:102",
+                "scope_label": "SKU Чехол 102",
+                "metric_key": "avg_price_seller_discounted",
+                "metric_label": "Цена продавца средняя",
+                "section": "Цены",
+                "group": "Чехлы",
+                "nm_id": 102,
+                "format": "rub",
+                "values_by_date": {"2026-04-19": 1300, "2026-04-20": 1350},
+            },
+            {
+                "row_id": "SKU:101|avg_addToCartConversion",
+                "row_order": 4,
                 "scope_kind": "SKU",
                 "scope_key": "SKU:101",
                 "scope_label": "SKU Чехол 101",
@@ -202,6 +233,20 @@ def _build_contract_payload() -> dict[str, object]:
                 "nm_id": 101,
                 "format": "percent",
                 "values_by_date": {"2026-04-19": "", "2026-04-20": 12.5},
+            },
+            {
+                "row_id": "SKU:102|avg_addToCartConversion",
+                "row_order": 5,
+                "scope_kind": "SKU",
+                "scope_key": "SKU:102",
+                "scope_label": "SKU Чехол 102",
+                "metric_key": "avg_addToCartConversion",
+                "metric_label": "Конверсия в корзину",
+                "section": "Воронка",
+                "group": "Чехлы",
+                "nm_id": 102,
+                "format": "percent",
+                "values_by_date": {"2026-04-19": "", "2026-04-20": 13.5},
             },
         ],
         "capabilities": {

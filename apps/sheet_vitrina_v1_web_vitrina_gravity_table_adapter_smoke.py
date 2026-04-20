@@ -62,8 +62,10 @@ def main() -> None:
         raise AssertionError(f"renderer registry mismatch, got {adapter.renderers}")
 
     grouping = next(item for item in adapter.groupings if item.group_id == "group:Чехлы")
-    if grouping.title != "Воронка / Чехлы" or grouping.row_ids != ["SKU:101|avg_addToCartConversion"]:
+    if grouping.title != "Чехлы" or grouping.row_ids != ["SKU:101|avg_price_seller_discounted", "SKU:101|avg_addToCartConversion"]:
         raise AssertionError(f"grouping seam mismatch, got {grouping}")
+    if grouping.section_id != "section:mixed":
+        raise AssertionError(f"grouping section scope mismatch, got {grouping}")
     if adapter.use_table_options.manual_sorting is not True or adapter.use_table_options.manual_filtering is not True:
         raise AssertionError(f"useTable options mismatch, got {adapter.use_table_options}")
     if adapter.state_surface.current_state != "ready" or adapter.table_props.component != "Table":
