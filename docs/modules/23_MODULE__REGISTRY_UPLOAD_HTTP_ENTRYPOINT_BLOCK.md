@@ -284,6 +284,11 @@ update_note: "Обновлён под current factory-order historical seam и c
   - default source seam = persisted ready snapshot `as_of_date=default_business_as_of_date(now)` -> sheet `DATA_VITRINA` -> slot `yesterday_closed`
   - default report date = previous closed business day in `Asia/Yekaterinburg`
   - optional manual override keeps the same read path via query `?as_of_date=YYYY-MM-DD`, without upstream fetch or browser-side date math
+  - operator block adds a compact SKU selector plus `Рассчитать`; selector source = full active SKU catalog from current authoritative registry state `config_v2`, not the breached-row subset from `stock-report`
+  - selector labels stay operator-readable and truthful: `display_name · nmId <id>`
+  - first page load defaults to all active SKU selected; no persistent server-side preference is stored for this filter state
+  - `Рассчитать` applies only the current selected SKU subset to the already loaded read-only report rows; deselected SKU are excluded from the final rendered result set before the low-stock row list is shown
+  - if the selected subset has no breached rows under the existing threshold, operator page must show an honest empty result instead of stale rows; zero selected SKU is rejected client-side with `Выберите хотя бы один SKU`
   - threshold = include only SKU where at least one supported district stock is `< 50`
   - sort = `min breached stock asc`, then `breached district count desc`, then `stock_total asc`
   - supported district labels stay compact and truthful to current merged buckets:

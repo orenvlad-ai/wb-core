@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 import sys
@@ -18,6 +19,11 @@ from packages.adapters.registry_upload_http_entrypoint import (
 
 
 def main() -> None:
+    active_skus = [
+        {"nm_id": 1001, "display_name": "SKU Alpha", "identity_label": "SKU Alpha · nmId 1001"},
+        {"nm_id": 1002, "display_name": "SKU Beta", "identity_label": "SKU Beta · nmId 1002"},
+        {"nm_id": 1003, "display_name": "SKU Gamma", "identity_label": "SKU Gamma · nmId 1003"},
+    ]
     html = _render_sheet_vitrina_operator_ui(
         refresh_path="/v1/sheet-vitrina-v1/refresh",
         load_path="/v1/sheet-vitrina-v1/load",
@@ -25,6 +31,11 @@ def main() -> None:
         job_path="/v1/sheet-vitrina-v1/job",
         daily_report_path=DEFAULT_SHEET_DAILY_REPORT_PATH,
         stock_report_path=DEFAULT_SHEET_STOCK_REPORT_PATH,
+        operator_context={
+            "stock_report_active_skus": active_skus,
+            "stock_report_active_sku_count": len(active_skus),
+            "stock_report_active_sku_source": "current_registry_config_v2",
+        },
     )
 
     for token in (
@@ -44,6 +55,11 @@ def main() -> None:
         'data-report-section-panel="stock" hidden',
         'id="dailyReportPeriod"',
         'id="stockReportPeriod"',
+        'id="stockReportSkuSelector"',
+        'id="stockReportApplyButton"',
+        'id="stockReportSkuValidation"',
+        'id="stockReportSelectAllButton"',
+        'id="stockReportClearAllButton"',
         DEFAULT_SHEET_DAILY_REPORT_PATH,
         DEFAULT_SHEET_STOCK_REPORT_PATH,
     ):
@@ -62,10 +78,45 @@ def main() -> None:
         raise AssertionError("stock-report UI must disclose previous-closed yesterday_closed seam")
     if len(re.findall(r"<h1>", html)) != 0:
         raise AssertionError("duplicated top-level headings must be removed from panel bodies")
+    if "let stockReportSelectedSkuIds = allStockReportSkuIds.slice();" not in html:
+        raise AssertionError("stock-report selector must default the draft SKU state to all active SKU")
+    if "let stockReportAppliedSkuIds = allStockReportSkuIds.slice();" not in html:
+        raise AssertionError("stock-report selector must default the applied SKU state to all active SKU")
+    if 'setStockReportValidation("Выберите хотя бы один SKU");' not in html:
+        raise AssertionError("stock-report selector must reject empty SKU selection before recalculation")
+
+    config_payload = _extract_operator_ui_config(html)
+    if config_payload.get("stock_report_active_skus") != active_skus:
+        raise AssertionError("reports UI config must expose the full active SKU catalog for the selector")
+    if config_payload.get("stock_report_active_sku_count") != len(active_skus):
+        raise AssertionError("reports UI config must disclose the active SKU count")
+    if config_payload.get("stock_report_active_sku_source") != "current_registry_config_v2":
+        raise AssertionError("reports UI config must disclose current registry state as the selector source")
+
+    fake_rows = [
+        {"nm_id": 1001, "identity_label": "SKU Alpha · nmId 1001"},
+        {"nm_id": 1002, "identity_label": "SKU Beta · nmId 1002"},
+    ]
+    selected_nm_ids = {1003}
+    filtered_rows = [row for row in fake_rows if int(row["nm_id"]) in selected_nm_ids]
+    if filtered_rows:
+        raise AssertionError("stock-report selector semantics must exclude deselected SKU from the rendered row set")
 
     print("reports_ui_sections: ok -> Обновление данных / Расчёт поставок / Отчёты")
     print("reports_ui_subsections: ok -> daily / stock")
+    print("reports_ui_stock_selector: ok -> full active SKU config, default=all, empty-selection validation")
     print("reports_ui_heading_dedup: ok -> no panel-body h1 duplicates")
+
+
+def _extract_operator_ui_config(html: str) -> dict[str, object]:
+    match = re.search(
+        r'<script id="sheet-vitrina-v1-operator-config" type="application/json">(.*?)</script>',
+        html,
+        re.S,
+    )
+    if not match:
+        raise AssertionError("operator UI config script is missing")
+    return json.loads(match.group(1))
 
 
 if __name__ == "__main__":

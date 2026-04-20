@@ -16,6 +16,7 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.sheet_vitrina_v1_daily_report import SheetVitrinaV1DailyReportBlock
 from packages.application.sheet_vitrina_v1_load_bridge import load_sheet_vitrina_ready_snapshot_via_clasp
 from packages.application.sheet_vitrina_v1_stock_report import SheetVitrinaV1StockReportBlock
+from packages.application.sheet_vitrina_v1_stock_report import list_active_sku_options
 from packages.application.wb_regional_supply import WbRegionalSupplyBlock
 from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE_NAME,
@@ -665,6 +666,19 @@ class RegistryUploadHttpEntrypoint:
             "last_successful_manual_load_at": _format_optional_business_timestamp(
                 manual_state.last_successful_manual_load_at
             ),
+        }
+
+    def build_sheet_operator_ui_context(self) -> dict[str, Any]:
+        try:
+            current_state = self.runtime.load_current_state()
+        except ValueError:
+            active_skus: list[dict[str, Any]] = []
+        else:
+            active_skus = list_active_sku_options(current_state.config_v2)
+        return {
+            "stock_report_active_skus": active_skus,
+            "stock_report_active_sku_count": len(active_skus),
+            "stock_report_active_sku_source": "current_registry_config_v2",
         }
 
 
