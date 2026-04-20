@@ -1020,7 +1020,7 @@
         <a class="eyebrow eyebrow-link" href="__SHEET_VITRINA_V1_SPREADSHEET_URL__" target="_blank" rel="noreferrer">sheet_vitrina_v1</a>
         <p class="section-lead">
           Reports tab остаётся полностью server-driven: daily-report читает два последних closed business day, а stock-report
-          читает current business day через persisted ready snapshot без browser-side analytics.
+          по умолчанию читает previous closed business day через persisted ready snapshot без browser-side analytics.
         </p>
 
         <div class="subsection-strip" role="tablist" aria-label="Внутренние разделы отчётов">
@@ -1089,7 +1089,7 @@
               <div id="stockReportContent" class="daily-report" hidden>
                 <section class="report-card">
                   <h3>SKU с низким остатком по округам</h3>
-                  <p>Source seam остаётся server-owned: current business day и slot <code>today_current</code> читаются только из persisted ready snapshot.</p>
+                  <p>Source seam остаётся server-owned: previous closed business day и slot <code>yesterday_closed</code> читаются только из persisted ready snapshot.</p>
                   <div id="stockReportRows"></div>
                 </section>
               </div>
@@ -1862,8 +1862,8 @@
           return;
         }
         stockReportPeriod.textContent = "Дата отчёта: " + formatHumanDate(payload.report_date) + ".";
-        stockReportLead.textContent = "Current business day: " + valueOrDash(payload.report_date) + ". Порог риска: остаток < " + valueOrDash(payload.threshold_lt) + ".";
-        stockReportStatus.textContent = "Source of truth: persisted ready snapshot / DATA_VITRINA / today_current.";
+        stockReportLead.textContent = "Closed business day: " + valueOrDash(payload.report_date) + ". Порог риска: остаток < " + valueOrDash(payload.threshold_lt) + ".";
+        stockReportStatus.textContent = "Source of truth: persisted ready snapshot / DATA_VITRINA / yesterday_closed.";
         stockReportStatus.className = "section-message";
         stockReportContent.hidden = false;
         renderStockReportRows(payload.rows);

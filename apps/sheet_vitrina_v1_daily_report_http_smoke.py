@@ -186,21 +186,38 @@ def main() -> None:
             stock_code, stock_payload = _get_json(f"{base_url}{DEFAULT_SHEET_STOCK_REPORT_PATH}")
             if stock_code != 200 or stock_payload.get("status") != "available":
                 raise AssertionError(f"stock report route must return available JSON, got {stock_code} {stock_payload}")
-            if stock_payload.get("report_date") != "2026-04-19":
-                raise AssertionError(f"stock report must expose current business date, got {stock_payload}")
+            if stock_payload.get("report_date") != "2026-04-18":
+                raise AssertionError(f"stock report must default to previous closed business day, got {stock_payload}")
             if stock_payload.get("threshold_lt") != 50:
                 raise AssertionError(f"stock report must disclose threshold <50, got {stock_payload}")
             if not stock_payload.get("rows"):
                 raise AssertionError(f"stock report must publish breached SKU rows, got {stock_payload}")
+            stock_source = stock_payload.get("source_of_truth") or {}
+            if stock_source.get("temporal_slot") != "yesterday_closed" or stock_source.get("slot_date") != "2026-04-18":
+                raise AssertionError(f"stock report must disclose yesterday_closed seam, got {stock_payload}")
             district_keys = {str(item.get("metric_key")) for item in stock_payload.get("districts") or []}
             if "stock_ru_far_siberia" in district_keys:
                 raise AssertionError(f"stock report HTTP surface must exclude merged far-east bucket, got {district_keys}")
+
+            stock_override_code, stock_override_payload = _get_json(
+                f"{base_url}{DEFAULT_SHEET_STOCK_REPORT_PATH}?as_of_date=2026-04-17"
+            )
+            if stock_override_code != 200 or stock_override_payload.get("status") != "available":
+                raise AssertionError(
+                    f"stock report route must keep explicit as_of_date override readable, got {stock_override_code} {stock_override_payload}"
+                )
+            if stock_override_payload.get("report_date") != "2026-04-17":
+                raise AssertionError(f"stock report route must honor explicit as_of_date override, got {stock_override_payload}")
+            override_source = stock_override_payload.get("source_of_truth") or {}
+            if override_source.get("snapshot_as_of_date") != "2026-04-17" or override_source.get("slot_date") != "2026-04-17":
+                raise AssertionError(f"stock report HTTP override must keep requested closed-day seam, got {stock_override_payload}")
 
             print("operator_daily_report_html: ok ->", DEFAULT_SHEET_OPERATOR_UI_PATH)
             print("status_route: ok ->", status_payload["status"])
             print("plan_route: ok ->", plan_payload["as_of_date"])
             print("daily_report_route: ok ->", report_payload["newer_closed_date"], report_payload["older_closed_date"])
             print("stock_report_route: ok ->", stock_payload["report_date"], stock_payload["threshold_lt"])
+            print("stock_report_override_route: ok ->", stock_override_payload["report_date"])
         finally:
             server.shutdown()
             thread.join(timeout=5)

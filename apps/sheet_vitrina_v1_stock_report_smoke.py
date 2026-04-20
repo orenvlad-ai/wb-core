@@ -58,7 +58,7 @@ def main() -> None:
 
         nm_ids = [item.nm_id for item in enabled]
         metric_labels = {item.metric_key: item.label_ru for item in current_state.metrics_v2 if item.enabled}
-        today_sku = {
+        closed_sku = {
             nm_ids[0]: {
                 "stock_total": 120.0,
                 "stock_ru_central": 34.0,
@@ -96,7 +96,7 @@ def main() -> None:
                 "stock_ru_far_siberia": 12.0,
             },
         }
-        older_sku = {
+        today_sku = {
             nm_id: {"stock_total": 999.0}
             for nm_id in nm_ids
         }
@@ -110,7 +110,23 @@ def main() -> None:
                 today_date="2026-04-19",
                 current_state=current_state,
                 metric_labels=metric_labels,
-                closed_sku_values=older_sku,
+                closed_sku_values=closed_sku,
+                today_sku_values=today_sku,
+            ),
+        )
+        runtime.save_sheet_vitrina_ready_snapshot(
+            current_state=current_state,
+            refreshed_at="2026-04-19T09:06:00Z",
+            plan=_build_plan(
+                as_of_date="2026-04-17",
+                closed_date="2026-04-17",
+                today_date="2026-04-18",
+                current_state=current_state,
+                metric_labels=metric_labels,
+                closed_sku_values={
+                    nm_ids[0]: {"stock_total": 88.0, "stock_ru_central": 12.0},
+                    nm_ids[1]: {"stock_total": 77.0, "stock_ru_south_caucasus": 11.0},
+                },
                 today_sku_values=today_sku,
             ),
         )
@@ -122,8 +138,8 @@ def main() -> None:
 
         if payload.get("status") != "available":
             raise AssertionError(f"stock report must be available, got {payload}")
-        if payload.get("report_date") != "2026-04-19":
-            raise AssertionError(f"stock report date must be current business day, got {payload}")
+        if payload.get("report_date") != "2026-04-18":
+            raise AssertionError(f"stock report date must default to previous closed business day, got {payload}")
         if payload.get("threshold_lt") != 50:
             raise AssertionError(f"stock threshold must stay <50, got {payload}")
 
@@ -132,8 +148,8 @@ def main() -> None:
             "read_model": "persisted_ready_snapshot",
             "sheet_name": "DATA_VITRINA",
             "snapshot_as_of_date": "2026-04-18",
-            "temporal_slot": "today_current",
-            "slot_date": "2026-04-19",
+            "temporal_slot": "yesterday_closed",
+            "slot_date": "2026-04-18",
         }:
             raise AssertionError(f"stock report must disclose exact source seam, got {source_of_truth}")
 
@@ -170,11 +186,24 @@ def main() -> None:
         if nm_ids[3] in [int(item["nm_id"]) for item in rows]:
             raise AssertionError(f"SKU with only far-east breach must be excluded from the report, got {rows}")
 
+        override_payload = SheetVitrinaV1StockReportBlock(
+            runtime=runtime,
+            now_factory=lambda: NOW,
+        ).build(as_of_date="2026-04-17")
+        if override_payload.get("report_date") != "2026-04-17":
+            raise AssertionError(f"explicit stock report as_of_date must override the default, got {override_payload}")
+        override_source = override_payload.get("source_of_truth") or {}
+        if override_source.get("snapshot_as_of_date") != "2026-04-17" or override_source.get("slot_date") != "2026-04-17":
+            raise AssertionError(f"explicit stock report as_of_date must keep the requested closed-day seam, got {override_payload}")
+        if not override_payload.get("rows"):
+            raise AssertionError(f"explicit stock report as_of_date must keep rows for the requested closed day, got {override_payload}")
+
         print("stock_report_status: ok ->", payload["status"])
         print("stock_report_source: ok ->", source_of_truth["read_model"], source_of_truth["temporal_slot"])
         print("stock_report_threshold: ok ->", payload["threshold_lt"])
         print("stock_report_rows: ok ->", ", ".join(item["identity_label"] for item in rows))
         print("stock_report_districts: ok ->", ", ".join(item["label"] for item in rows[0]["breached_districts"]))
+        print("stock_report_override: ok ->", override_payload["report_date"])
 
 
 def _build_plan(

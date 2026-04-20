@@ -463,7 +463,16 @@ def _build_handler(
 
             if parsed.path == DEFAULT_SHEET_STOCK_REPORT_PATH:
                 try:
-                    payload = entrypoint.handle_sheet_stock_report_request()
+                    payload = entrypoint.handle_sheet_stock_report_request(
+                        as_of_date=_resolve_as_of_date_from_query(parsed.query) or None
+                    )
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
