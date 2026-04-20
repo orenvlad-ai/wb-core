@@ -947,27 +947,41 @@ class SheetVitrinaV1LivePlanBlock:
                 cached_payload,
             )
 
+        replay_status, replay_payload = _capture_live_source(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            loader=lambda: self.promo_live_source_block.execute(
+                PromoLiveSourceRequest(
+                    snapshot_date=column_date,
+                    nm_ids=requested_nm_ids,
+                )
+            ).result,
+        )
+        if replay_payload is None or not _is_exact_snapshot_payload(replay_payload, column_date):
+            return replay_status, replay_payload
+        accepted_at = _format_runtime_timestamp(self.now_factory())
+        self.runtime.save_temporal_source_snapshot(
+            source_key=source_key,
+            snapshot_date=column_date,
+            captured_at=accepted_at,
+            payload=replay_payload,
+        )
+        self.runtime.save_temporal_source_slot_snapshot(
+            source_key=source_key,
+            snapshot_date=column_date,
+            snapshot_role=TEMPORAL_ROLE_ACCEPTED_CLOSED,
+            captured_at=accepted_at,
+            payload=replay_payload,
+        )
         return (
-            LiveSourceStatus(
-                source_key=source_key,
-                temporal_slot=temporal_slot,
-                temporal_policy=temporal_policy,
-                column_date=column_date,
-                kind="missing",
-                freshness="",
-                snapshot_date="",
-                date="",
-                date_from=column_date,
-                date_to=column_date,
-                requested_count=len(requested_nm_ids),
-                covered_count=0,
-                missing_nm_ids=sorted(set(requested_nm_ids)),
-                note=(
-                    "promo yesterday_closed requires accepted prior current snapshot; "
-                    "runtime cache missing for requested closed day"
-                ),
+            _append_status_note(
+                replay_status,
+                f"resolution_rule=accepted_closed_from_interval_replay; accepted_at={accepted_at}",
             ),
-            None,
+            replay_payload,
         )
 
     def _capture_current_snapshot_closed_day_from_accepted_current(

@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-27-PROMO-XLSX-COLLECTOR-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `promo_xlsx_collector_block`."
-scope: "Repo-owned bounded local runner для promo XLSX collector contour: thin browser adapter boundary, canonical hydration/modal/drawer sequences, sidecar contract, workbook inspection, смоки и границы текущего checkpoint."
+scope: "Repo-owned bounded promo campaign collector contour: thin browser adapter boundary, canonical hydration/modal/drawer sequences, archive-first workbook reuse, metadata sidecar, workbook inspection, смоки и границы текущего checkpoint."
 source_basis:
   - "artifacts/promo_xlsx_collector_block/evidence/initial__promo-xlsx-collector__evidence.md"
   - "artifacts/promo_xlsx_collector_block/fixture/card__cross_year__fixture.json"
@@ -17,6 +17,7 @@ related_modules:
   - "packages/contracts/promo_xlsx_collector_block.py"
   - "packages/adapters/promo_xlsx_collector_block.py"
   - "packages/application/promo_xlsx_collector_block.py"
+  - "packages/application/promo_campaign_archive.py"
 related_tables: []
 related_endpoints: []
 related_runners:
@@ -28,7 +29,7 @@ related_docs:
   - "docs/architecture/01_target_architecture.md"
   - "docs/modules/00_INDEX__MODULES.md"
 source_of_truth_level: "module_canonical"
-update_note: "Создан как канонический модульный документ для первого repo-owned bounded promo XLSX collector contour: wb-core materialize-ит local runner, truthful metadata sidecar и workbook inspection; дальнейшее live wiring этого precursor описывается уже в `28_MODULE__PROMO_LIVE_SOURCE_WIRING_BLOCK.md`."
+update_note: "Обновлён под archive-first promo semantics: collector reuse-ит already archived unchanged campaign artifacts, скачивает только новые/изменившиеся кампании и оставляет truthful metadata/workbook archive для interval-based historical replay, а live wiring этого precursor описывается в `28_MODULE__PROMO_LIVE_SOURCE_WIRING_BLOCK.md`."
 ---
 
 # 1. Идентификатор и статус
@@ -69,6 +70,14 @@ update_note: "Создан как канонический модульный д
   - `generate_screen.png`
   - `ready_signal.png`
   - `workbook_inspection.json`
+- Для already archived unchanged promo collector больше не скачивает duplicate workbook повторно:
+  - outcome `reused_archive`
+  - local run dir сохраняет fresh `card.json` + `metadata.json` + `archive_reuse.json`
+  - `saved_path` указывает на already archived workbook artifact
+- Archive-first invariant:
+  - stable campaign identity = `promo_id` + `period_id` + canonical title slug
+  - archive root хранит `archive_record.json`, normalized `metadata.json`, `workbook.xlsx` и optional `workbook_inspection.json`
+  - unchanged campaign metadata must reuse existing workbook artifact instead of generating a new download
 - Canonical metadata fields:
   - `collected_at`
   - `trace_run_dir`
@@ -134,6 +143,9 @@ update_note: "Создан как канонический модульный д
 
 - `wb-core` теперь владеет bounded repo-owned collector logic и local runner без копирования всего `wb-web-bot`.
 - Browser internals остаются thin adapter boundary.
+- Collector теперь archive-first, а не download-everything:
+  - unchanged campaign artifacts reuse-ятся из `promo_campaign_archive`
+  - workbook redownload допускается только когда metadata/content changed or archive artifact missing
 - Export kinds truthfully materialize-ятся как:
   - `exclude_list_template`
   - `eligible_items_report`

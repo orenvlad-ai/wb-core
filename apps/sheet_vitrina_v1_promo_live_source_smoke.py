@@ -10,11 +10,13 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any
 
+from openpyxl import Workbook
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from packages.application.promo_live_source import PromoLiveSourceBlock
 from packages.application.promo_xlsx_collector_block import parse_period_text
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
@@ -30,6 +32,7 @@ from packages.contracts.promo_live_source import (
     PromoLiveSourceRequest,
     PromoLiveSourceSuccess,
 )
+from packages.contracts.promo_xlsx_collector_block import PromoMetadata
 
 
 INPUT_BUNDLE_FIXTURE = (
@@ -38,6 +41,7 @@ INPUT_BUNDLE_FIXTURE = (
 AS_OF_DATE = "2026-04-19"
 CURRENT_DATE = "2026-04-20"
 ACTIVATED_AT = "2026-04-20T06:00:00Z"
+INTERVAL_REPLAY_DATE = "2026-04-17"
 
 
 def main() -> None:
@@ -49,10 +53,12 @@ def main() -> None:
     _assert_cross_year_parse_rule()
     _assert_promo_source_runtime_mapping(bundle, requested_nm_ids)
     preserved_note = _assert_accepted_current_preserved_after_invalid_attempt(bundle, requested_nm_ids)
+    replay_note = _assert_historical_interval_replay_cache_fill(requested_nm_ids)
 
     print("cross_year_parse_rule: ok -> low-confidence period keeps null exact dates")
     print("promo_source_runtime_mapping: ok -> promo metrics reach STATUS and DATA_VITRINA via runtime source")
     print(f"accepted_current_preservation: ok -> {preserved_note}")
+    print(f"historical_interval_replay: ok -> {replay_note}")
     print("smoke-check passed")
 
 
@@ -208,6 +214,114 @@ def _assert_accepted_current_preserved_after_invalid_attempt(
         if closure_state is None or closure_state.state != "success":
             raise AssertionError(f"accepted promo current snapshot must keep success closure state, got {closure_state}")
         return note
+
+
+def _assert_historical_interval_replay_cache_fill(requested_nm_ids: list[int]) -> str:
+    with TemporaryDirectory(prefix="sheet-vitrina-promo-archive-replay-") as tmp:
+        runtime_dir = Path(tmp) / "runtime"
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+        promo_run_dir = runtime_dir / "promo_xlsx_collector_runs" / "2026-04-20__fixture" / "promos" / "2287__2236__fixture-promo"
+        promo_run_dir.mkdir(parents=True, exist_ok=True)
+        workbook_path = promo_run_dir / "workbook.xlsx"
+        _write_interval_fixture_workbook(workbook_path, requested_nm_ids)
+        metadata = PromoMetadata(
+            collected_at="2026-04-20T08:00:00+05:00",
+            trace_run_dir=str(runtime_dir / "promo_xlsx_collector_runs" / "2026-04-20__fixture"),
+            source_tab="Доступные",
+            source_filter_code="AVAILABLE",
+            calendar_url="https://seller.wildberries.ru/dp-promo-calendar?action=2287",
+            promo_id=2287,
+            period_id=2236,
+            promo_title="Fixture promo",
+            promo_period_text="16 апреля 02:00 → 25 апреля 01:59",
+            promo_start_at="2026-04-16T02:00",
+            promo_end_at="2026-04-25T01:59",
+            period_parse_confidence="high",
+            temporal_classification="current",
+            promo_status="Акция идёт",
+            promo_status_text="Автоакция: участие подтверждено",
+            eligible_count=3,
+            participating_count=2,
+            excluded_count=1,
+            export_kind="eligible_items_report",
+            original_suggested_filename="fixture.xlsx",
+            saved_filename="workbook.xlsx",
+            saved_path=str(workbook_path),
+            workbook_sheet_names=["Promo"],
+            workbook_row_count=4,
+            workbook_col_count=3,
+            workbook_header_summary=["Артикул WB", "Плановая цена для акции", "Текущая розничная цена"],
+            workbook_has_date_fields=False,
+            workbook_item_status_distinct_values=[],
+        )
+        (promo_run_dir / "metadata.json").write_text(
+            json.dumps(metadata.__dict__, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        plan_block = SheetVitrinaV1LivePlanBlock(
+            runtime=runtime,
+            now_factory=_MutableNowFactory("2026-04-20T08:00:00+00:00"),
+            promo_live_source_block=PromoLiveSourceBlock(
+                runtime_dir=runtime_dir,
+                now_factory=_MutableNowFactory("2026-04-20T08:00:00+00:00"),
+            ),
+            current_web_source_sync=_NoopCurrentWebSourceSync(),
+            seller_funnel_block=_SyntheticSuccessBlock("seller_funnel_snapshot"),
+            web_source_block=_SyntheticSuccessBlock("web_source_snapshot"),
+            sales_funnel_history_block=_SyntheticSuccessBlock("sales_funnel_history"),
+            prices_snapshot_block=_SyntheticSuccessBlock("prices_snapshot"),
+            sf_period_block=_SyntheticSuccessBlock("sf_period"),
+            spp_block=_SyntheticSuccessBlock("spp"),
+            ads_bids_block=_SyntheticSuccessBlock("ads_bids"),
+            stocks_block=_SyntheticSuccessBlock("stocks"),
+            ads_compact_block=_SyntheticSuccessBlock("ads_compact"),
+            fin_report_daily_block=_SyntheticSuccessBlock("fin_report_daily"),
+        )
+
+        status, payload = plan_block._capture_promo_closed_day_from_cache(
+            source_key="promo_by_price",
+            temporal_slot="yesterday_closed",
+            temporal_policy="dual_day_capable",
+            column_date=INTERVAL_REPLAY_DATE,
+            requested_nm_ids=requested_nm_ids,
+        )
+        if status.kind != "success":
+            raise AssertionError(f"interval replay must materialize historical promo success, got {status}")
+        if "accepted_closed_from_interval_replay" not in str(status.note):
+            raise AssertionError(f"historical replay note must expose interval replay acceptance, got {status}")
+        if payload is None:
+            raise AssertionError("interval replay must persist payload")
+        payload_items = {item.nm_id: item for item in payload.items}
+        if payload_items[requested_nm_ids[0]].promo_participation != 1.0:
+            raise AssertionError("covered nm_id with current < planned must participate via interval replay")
+        if payload_items[requested_nm_ids[1]].promo_participation != 0.0:
+            raise AssertionError("covered nm_id with current >= planned must stay non-participating")
+        exact_payload, _ = runtime.load_temporal_source_snapshot(
+            source_key="promo_by_price",
+            snapshot_date=INTERVAL_REPLAY_DATE,
+        )
+        if exact_payload is None:
+            raise AssertionError("interval replay must fill exact-date runtime seam")
+        accepted_payload, _ = runtime.load_temporal_source_slot_snapshot(
+            source_key="promo_by_price",
+            snapshot_date=INTERVAL_REPLAY_DATE,
+            snapshot_role="accepted_closed_day_snapshot",
+        )
+        if accepted_payload is None:
+            raise AssertionError("interval replay must accept closed-day slot snapshot")
+        return str(status.note)
+
+
+def _write_interval_fixture_workbook(path: Path, requested_nm_ids: list[int]) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Promo"
+    sheet.append(["Артикул WB", "Плановая цена для акции", "Текущая розничная цена"])
+    sheet.append([requested_nm_ids[0], 1000.0, 900.0])
+    sheet.append([requested_nm_ids[1], 1000.0, 1000.0])
+    sheet.append([requested_nm_ids[2], 1500.0, 1700.0])
+    workbook.save(path)
 
 
 def _build_entrypoint(

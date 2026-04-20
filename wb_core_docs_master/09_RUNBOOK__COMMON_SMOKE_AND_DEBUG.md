@@ -91,6 +91,9 @@ python3 apps/sheet_vitrina_v1_promo_live_source_integration_smoke.py
 git diff --check
 ```
 
+Current promo smoke intent:
+- `apps/sheet_vitrina_v1_promo_live_source_smoke.py` now additionally proves historical interval replay fills the exact-date promo seam on `yesterday_closed` cache miss.
+
 Targeted expectation for `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`:
 - same-day incoming blank cell in server-owned `DATA_VITRINA` plan must clear the live-sheet cell instead of preserving a stale historical value or stale zero.
 
@@ -170,6 +173,11 @@ Current canonical WB secret path for official adapters:
 Current promo runtime env override when hosted runtime needs explicit seller session path:
 - `PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH`
 - canonical selleros value = `/opt/wb-web-bot/storage_state.json`
+
+Current promo archive/runtime norm:
+- promo collector is archive-first: unchanged campaigns reuse archived workbook artifacts instead of redownloading every Excel
+- historical `promo_by_price[yesterday_closed]` may be truthfully filled from campaign interval replay into exact-date runtime seam when archive coverage exists
+- uncovered dates must stay blank/incomplete; no fake sheet-side backfill is allowed
 
 Current hosted runtime dependency note for promo live wiring:
 - hosted `deploy` now also ensures `openpyxl==3.1.5` and `playwright==1.58.0` on the remote system python before restarting `wb-core-registry-http.service`;

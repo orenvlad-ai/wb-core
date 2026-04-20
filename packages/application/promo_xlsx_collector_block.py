@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from openpyxl import load_workbook
 
 from packages.adapters.promo_xlsx_collector_block import PromoCollectorDriver
+from packages.application.promo_campaign_archive import resolve_reusable_campaign
 from packages.contracts.promo_xlsx_collector_block import (
     CollectorRunSummary,
     CollectorStateSnapshot,
@@ -123,6 +124,9 @@ class PromoXlsxCollectorBlock:
                 summary.card_confirmed_count += 1 if outcome.card_path else 0
                 if outcome.status == "downloaded":
                     summary.downloaded_count += 1
+                    downloads_seen += 1
+                elif outcome.status == "reused_archive":
+                    summary.reused_archive_count += 1
                     downloads_seen += 1
                 elif outcome.status == "skipped_past":
                     summary.skipped_past_count += 1
@@ -296,6 +300,16 @@ class PromoXlsxCollectorBlock:
                 drawer_reset=drawer_reset,
             )
 
+        reusable = self._resolve_reusable_archive_record(request=request, card=card)
+        if reusable is not None:
+            return self._reused_from_archive(
+                run_dir=run_dir,
+                candidate=candidate,
+                card=card,
+                request=request,
+                record=reusable,
+            )
+
         try:
             generate_state = self._driver.open_generate_screen(slugify(card.promo_title))
         except Exception as exc:
@@ -380,6 +394,119 @@ class PromoXlsxCollectorBlock:
             saved_path=str(workbook_path),
             original_suggested_filename=download.original_suggested_filename,
             export_kind=export_kind,
+            drawer_reset=drawer_reset,
+        )
+
+    def _resolve_reusable_archive_record(
+        self,
+        *,
+        request: PromoXlsxCollectorRequest,
+        card: PromoCardData,
+    ):
+        archive_root_text = str(request.archive_root or "").strip()
+        if not archive_root_text:
+            return None
+        archive_root = Path(archive_root_text)
+        if not archive_root.exists():
+            return None
+        live_metadata = build_metadata(
+            card=card,
+            trace_run_dir=request.output_root,
+            source_tab=request.source_tab,
+            source_filter_code=request.source_filter_code,
+            export_kind=None,
+            download=None,
+            workbook=None,
+        )
+        return resolve_reusable_campaign(
+            archive_root=archive_root,
+            metadata=live_metadata,
+        )
+
+    def _reused_from_archive(
+        self,
+        *,
+        run_dir: Path,
+        candidate: TimelineCandidate,
+        card: PromoCardData,
+        request: PromoXlsxCollectorRequest,
+        record,
+    ) -> PromoOutcome:
+        promo_folder = run_dir / "promos" / build_promo_folder_name(
+            card.promo_id,
+            record.metadata.period_id,
+            card.promo_title,
+        )
+        promo_folder.mkdir(parents=True, exist_ok=True)
+        card_path = promo_folder / "card.json"
+        card_png = promo_folder / "card.png"
+        self._write_json(card_path, asdict(card))
+        shutil.copy2(card.state_snapshot.screenshot, card_png)
+
+        inspection = None
+        inspection_path: Path | None = None
+        if record.workbook_inspection_path and Path(record.workbook_inspection_path).exists():
+            inspection = WorkbookInspection(
+                **json.loads(Path(record.workbook_inspection_path).read_text(encoding="utf-8"))
+            )
+            inspection_path = promo_folder / "workbook_inspection.json"
+            inspection_path.write_text(
+                json.dumps(asdict(inspection), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+        workbook_path = Path(str(record.workbook_path))
+        metadata = build_metadata(
+            card=card,
+            trace_run_dir=request.output_root,
+            source_tab=request.source_tab,
+            source_filter_code=request.source_filter_code,
+            export_kind=record.metadata.export_kind,
+            download=DownloadArtifact(
+                original_suggested_filename=(
+                    record.metadata.original_suggested_filename
+                    or record.metadata.saved_filename
+                    or workbook_path.name
+                ),
+                saved_filename=workbook_path.name,
+                saved_path=str(workbook_path),
+                period_id=record.metadata.period_id,
+            ),
+            workbook=inspection,
+        )
+        metadata_path = promo_folder / "metadata.json"
+        self._write_json(metadata_path, asdict(metadata))
+        (promo_folder / "archive_reuse.json").write_text(
+            json.dumps(
+                {
+                    "archive_key": record.archive_key,
+                    "archive_dir": record.archive_dir,
+                    "reused_workbook_path": str(workbook_path),
+                    "downloaded_at": record.downloaded_at,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        drawer_reset = self._driver.reset_drawer(f"after_archive_reuse__{slugify(card.promo_title)}")
+        return PromoOutcome(
+            promo_title=card.promo_title,
+            timeline_block_index=candidate.index,
+            timeline_short_period_text=candidate.short_period_text,
+            timeline_preliminary_classification=candidate.preliminary_classification,
+            status="reused_archive",
+            promo_id=card.promo_id,
+            period_id=record.metadata.period_id,
+            promo_folder=str(promo_folder),
+            blocker=None,
+            metadata=metadata,
+            card_path=str(card_path),
+            metadata_path=str(metadata_path),
+            workbook_inspection_path=str(inspection_path) if inspection_path is not None else record.workbook_inspection_path,
+            saved_path=str(workbook_path),
+            original_suggested_filename=metadata.original_suggested_filename,
+            export_kind=metadata.export_kind,
             drawer_reset=drawer_reset,
         )
 

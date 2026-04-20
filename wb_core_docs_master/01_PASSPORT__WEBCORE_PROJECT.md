@@ -79,10 +79,12 @@ Confirmed contour на текущем `main`:
   - canonical `direct_open -> cookie -> hydrated DOM -> optional modal close`
   - canonical drawer reset inside `#Portal-drawer`
   - truthful `metadata.json` for every promo
-  - workbook inspection and export-kind classification for downloaded promo XLSX.
+  - archive-first workbook reuse for unchanged campaigns
+  - workbook inspection and export-kind classification for downloaded/reused promo XLSX.
 - repo-owned bounded `promo_live_source_wiring_block`:
-  - `promo_by_price[today_current]` materialize-ится через repo-owned collector run
-  - `promo_by_price[yesterday_closed]` читается только из accepted/runtime-cached promo truth
+  - `promo_by_price[today_current]` materialize-ится через repo-owned archive-first collector run
+  - `promo_by_price[yesterday_closed]` по-прежнему читается только из accepted/runtime-cached exact-date promo truth
+  - exact-date promo truth now may be populated server-side from archived campaign interval replay on cache miss
   - invalid later attempts do not overwrite accepted current/closed promo truth
   - low-confidence cross-year labels keep `promo_start_at/end_at = null`
 
