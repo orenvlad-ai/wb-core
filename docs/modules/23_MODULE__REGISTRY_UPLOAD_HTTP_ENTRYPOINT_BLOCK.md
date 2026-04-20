@@ -80,7 +80,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под phase-1 web-vitrina route fixation: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, а new read-only `GET /v1/sheet-vitrina-v1/web-vitrina` materialize-ит stable library-agnostic `web_vitrina_contract` v1 поверх existing ready snapshot/current truth без grid-library dependency, alongside current factory-order historical seam и current-day seller-funnel repair semantics."
+update_note: "Обновлён под web-vitrina phase-1/phase-2 split: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, read-only `GET /v1/sheet-vitrina-v1/web-vitrina` materialize-ит stable library-agnostic `web_vitrina_contract` v1 поверх existing ready snapshot/current truth без grid-library dependency, а новый repo-owned `view_model` слой остаётся явно вынесен за пределы HTTP boundary и future adapter/page composition."
 ---
 
 # 1. Идентификатор и статус
@@ -160,9 +160,9 @@ update_note: "Обновлён под phase-1 web-vitrina route fixation: existi
   - phase 1 scope for this sibling contour:
     - in scope = route fixation, stable read contract v1, minimal page shell placeholder, targeted docs/smokes
     - out of scope = full grid UI, `@gravity-ui/table` adapter, full filter UX, export implementation, Google Sheets cutover, broad feature parity with all current reports/supply blocks
-  - future layering note remains explicit:
-    - `web_vitrina_contract`
-    - `view_model`
+  - current layering note remains explicit:
+    - `web_vitrina_contract` = current server-owned route contract
+    - `view_model` = current phase-2 repo-owned presentation-domain mapper over that contract, still outside HTTP boundary and still library-agnostic
     - `grid_adapter`
     - `page_composition`
     - `export_layer`
