@@ -27,7 +27,7 @@ related_docs:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Phase 2 web-vitrina теперь materialize-ит отдельный library-agnostic `view_model` слой поверх stable `web_vitrina_contract` v1: mapper не меняет server truth, не тянет `@gravity-ui/table` и оставляет `grid_adapter / page_composition / export_layer` как отдельные later phases."
+update_note: "Phase 2 web-vitrina materialize-ит отдельный library-agnostic `view_model` слой поверх stable `web_vitrina_contract` v1: mapper не меняет server truth, а phase 3 теперь уже подключает отдельный Gravity-specific adapter поверх этого seam, не меняя сам `view_model`."
 ---
 
 # 1. Идентификатор и статус
@@ -103,8 +103,9 @@ update_note: "Phase 2 web-vitrina теперь materialize-ит отдельны
   - server-owned truth/read contract
 - `web_vitrina_view_model` v1:
   - library-agnostic presentation-domain schema
-- later layers:
-  - `grid_adapter`
+- current later layer above it:
+  - `web_vitrina_gravity_table_adapter`
+- still-later layers:
   - `page_composition`
   - `export_layer`
 

@@ -21,6 +21,8 @@ source_basis:
   - "apps/sheet_vitrina_v1_operator_load_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
+  - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_smoke.py"
+  - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_integration_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_view_model_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_view_model_integration_smoke.py"
   - "apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py"
@@ -90,6 +92,8 @@ python3 apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_http_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_view_model_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_view_model_integration_smoke.py
+python3 apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_smoke.py
+python3 apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_integration_smoke.py
 python3 apps/sheet_vitrina_v1_operator_ui_persistence_smoke.py
 python3 apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py
 python3 apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py
@@ -106,6 +110,10 @@ Current promo smoke intent:
 Current web-vitrina phase-2 smoke intent:
 - `apps/sheet_vitrina_v1_web_vitrina_view_model_smoke.py` keeps the mapper library-agnostic and checks canonical `columns / rows / groups / sections / formatters / filters / sorts / state_model`.
 - `apps/sheet_vitrina_v1_web_vitrina_view_model_integration_smoke.py` proves the typed Phase 1 contract builder still feeds the same view-model seam without changing public routes or deploy requirements.
+
+Current web-vitrina phase-3 smoke intent:
+- `apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_smoke.py` keeps Gravity-specific config/data/render hints isolated in the adapter layer and checks sticky/sizing/sort/filter/useTable/state invariants without changing `view_model`.
+- `apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_integration_smoke.py` proves the full seam `contract -> view_model -> gravity adapter` and keeps per-cell renderer bindings authoritative for mixed temporal columns.
 
 Targeted expectation for `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`:
 - same-day incoming blank cell in server-owned `DATA_VITRINA` plan must clear the live-sheet cell instead of preserving a stale historical value or stale zero.

@@ -19,6 +19,7 @@ related_modules:
   - "packages/contracts/registry_upload_db_backed_runtime.py"
   - "packages/contracts/registry_upload_http_entrypoint.py"
   - "packages/contracts/web_vitrina_contract.py"
+  - "packages/contracts/web_vitrina_gravity_table_adapter.py"
   - "packages/application/cost_price_upload.py"
   - "packages/application/factory_order_sales_history.py"
   - "packages/application/factory_order_supply.py"
@@ -27,6 +28,7 @@ related_modules:
   - "packages/application/simple_xlsx.py"
   - "packages/application/sheet_vitrina_v1_load_bridge.py"
   - "packages/application/sheet_vitrina_v1_web_vitrina.py"
+  - "packages/application/web_vitrina_gravity_table_adapter.py"
   - "packages/adapters/registry_upload_http_entrypoint.py"
   - "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"
 related_tables:
@@ -69,6 +71,8 @@ related_runners:
   - "apps/sheet_vitrina_v1_operator_load_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
+  - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_smoke.py"
+  - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_integration_smoke.py"
   - "apps/cost_price_upload_http_entrypoint_smoke.py"
   - "apps/sheet_vitrina_v1_cost_price_read_side_smoke.py"
   - "apps/sheet_vitrina_v1_business_time_smoke.py"
@@ -80,7 +84,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под web-vitrina phase-1/phase-2 split: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, read-only `GET /v1/sheet-vitrina-v1/web-vitrina` materialize-ит stable library-agnostic `web_vitrina_contract` v1 поверх existing ready snapshot/current truth без grid-library dependency, а новый repo-owned `view_model` слой остаётся явно вынесен за пределы HTTP boundary и future adapter/page composition."
+update_note: "Обновлён под web-vitrina phase-1/phase-3 split: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, read-only `GET /v1/sheet-vitrina-v1/web-vitrina` materialize-ит stable library-agnostic `web_vitrina_contract` v1 поверх existing ready snapshot/current truth без grid-library dependency, `view_model` остаётся отдельным repo-owned seam, а Gravity-specific `grid_adapter` теперь тоже materialized repo-side и по-прежнему вынесен за пределы HTTP boundary/page shell."
 ---
 
 # 1. Идентификатор и статус
@@ -163,7 +167,7 @@ update_note: "Обновлён под web-vitrina phase-1/phase-2 split: existin
   - current layering note remains explicit:
     - `web_vitrina_contract` = current server-owned route contract
     - `view_model` = current phase-2 repo-owned presentation-domain mapper over that contract, still outside HTTP boundary and still library-agnostic
-    - `grid_adapter`
+    - `web_vitrina_gravity_table_adapter` = current phase-3 concrete grid-adapter layer over `view_model`, still repo-side and still outside HTTP boundary
     - `page_composition`
     - `export_layer`
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/status` = cheap JSON status surface для bounded factory-order flow
