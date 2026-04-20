@@ -732,6 +732,8 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "SKU",
             "Рассчитать",
             "Выберите хотя бы один SKU",
+            "wb-core:sheet-vitrina-v1:operator-ui-state:v1",
+            "window.localStorage",
             "Негативные факторы",
             "Позитивные факторы",
             DEFAULT_SHEET_DAILY_REPORT_PATH,

@@ -78,10 +78,22 @@ def main() -> None:
         raise AssertionError("stock-report UI must disclose previous-closed yesterday_closed seam")
     if len(re.findall(r"<h1>", html)) != 0:
         raise AssertionError("duplicated top-level headings must be removed from panel bodies")
-    if "let stockReportSelectedSkuIds = allStockReportSkuIds.slice();" not in html:
-        raise AssertionError("stock-report selector must default the draft SKU state to all active SKU")
-    if "let stockReportAppliedSkuIds = allStockReportSkuIds.slice();" not in html:
-        raise AssertionError("stock-report selector must default the applied SKU state to all active SKU")
+    if "let stockReportSelectedSkuIds = resolveRestoredStockReportDraftSkuIds(persistedOperatorUiState);" not in html:
+        raise AssertionError("stock-report selector draft state must restore from persisted browser storage")
+    if "let stockReportAppliedSkuIds = resolveRestoredStockReportAppliedSkuIds(persistedOperatorUiState);" not in html:
+        raise AssertionError("stock-report selector applied state must restore from persisted browser storage")
+    if "const OPERATOR_UI_STORAGE_KEY = \"wb-core:sheet-vitrina-v1:operator-ui-state:v1\";" not in html:
+        raise AssertionError("operator page must namespace persisted UI state under a sheet_vitrina-specific storage key")
+    if "window.localStorage.getItem(OPERATOR_UI_STORAGE_KEY)" not in html:
+        raise AssertionError("operator page must restore persisted UI state from browser storage")
+    if "window.localStorage.setItem(OPERATOR_UI_STORAGE_KEY" not in html:
+        raise AssertionError("operator page must persist tab/subsection/SKU state into browser storage")
+    if 'activateTab(persistedOperatorUiState.active_tab || DEFAULT_ACTIVE_TAB);' not in html:
+        raise AssertionError("top-level tab must restore from persisted browser state")
+    if 'activateReportSection(persistedOperatorUiState.report_section || DEFAULT_REPORT_SECTION);' not in html:
+        raise AssertionError("reports subsection must restore from persisted browser state")
+    if 'activateSupplySection(persistedOperatorUiState.supply_section || DEFAULT_SUPPLY_SECTION);' not in html:
+        raise AssertionError("supply subsection must restore from persisted browser state")
     if 'setStockReportValidation("Выберите хотя бы один SKU");' not in html:
         raise AssertionError("stock-report selector must reject empty SKU selection before recalculation")
 

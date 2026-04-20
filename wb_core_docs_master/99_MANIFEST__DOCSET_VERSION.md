@@ -20,9 +20,9 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "изменение build metadata pack"
-built_from_commit: "65dd420034805f4f75ea656c0eef5b2eb7a4c404"
-docset_version: "wb_core_docs_master_v33"
-built_at: "2026-04-20T16:33:52Z"
+built_from_commit: "40833d90bc970253b719c92abd215ae76cd090cb"
+docset_version: "wb_core_docs_master_v34"
+built_at: "2026-04-20T17:28:13Z"
 core_docs_changed:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "wb_core_docs_master/05_REGISTER__MODULE_STATUS_AND_CHECKPOINTS.md"
