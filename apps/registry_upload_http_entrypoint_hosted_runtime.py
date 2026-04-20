@@ -37,6 +37,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_REFRESH_PATH,
     DEFAULT_SHEET_STOCK_REPORT_PATH,
     DEFAULT_SHEET_STATUS_PATH,
+    DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
     DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
     DEFAULT_UPLOAD_PATH,
@@ -295,6 +296,18 @@ def collect_public_surface(
             url=_append_as_of_date(
                 f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}",
                 as_of_date,
+            ),
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
+            name="web_vitrina_page_composition",
+            method="GET",
+            url=_append_query_params(
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}",
+                {
+                    "as_of_date": as_of_date,
+                    "surface": DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
+                },
             ),
             timeout_seconds=timeout_seconds,
         ),
@@ -793,28 +806,46 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
     if route == "web_vitrina_page":
         body = str(result.get("body_excerpt", ""))
         tokens = [
-            "Phase 1 Web-Vitrina Boundary",
+            "Phase 4 Web-Vitrina Page Composition",
             "Web-витрина",
             DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
             route_paths["SHEET_VITRINA_OPERATOR_UI_PATH"],
-            "grid_adapter",
-            "page_composition",
-            "export_layer",
+            "surface=page_composition",
+            "web_vitrina_page_composition",
+            "web_vitrina_view_model",
+            "web_vitrina_gravity_table_adapter",
+            "data-filter-controls",
         ]
         missing_tokens = [token for token in tokens if token not in body]
         evaluation["ok"] = status == 200 and "text/html" in content_type and not missing_tokens
         evaluation["detail"] = (
-            "web-vitrina page shell ok"
+            "web-vitrina page composition shell ok"
             if evaluation["ok"]
-            else f"expected 200 text/html with web-vitrina shell tokens, missing={missing_tokens}"
+            else f"expected 200 text/html with web-vitrina page tokens, missing={missing_tokens}"
         )
         return evaluation
 
     if route in {
+        "web_vitrina_page_composition",
         "factory_order_template_stock_ff",
         "factory_order_template_inbound_factory",
         "factory_order_template_inbound_ff_to_wb",
     }:
+        if route == "web_vitrina_page_composition":
+            json_body = result.get("json_body") or {}
+            evaluation["ok"] = (
+                status == 200
+                and "application/json" in content_type
+                and json_body.get("composition_name") == "web_vitrina_page_composition"
+                and json_body.get("composition_version") == "v1"
+                and isinstance(json_body.get("table_surface"), dict)
+            )
+            evaluation["detail"] = (
+                "web-vitrina page composition surface ok"
+                if evaluation["ok"]
+                else "expected 200 JSON page composition surface on web-vitrina read route"
+            )
+            return evaluation
         evaluation["ok"] = status == 200 and "spreadsheetml.sheet" in content_type
         evaluation["detail"] = (
             "factory-order template download route ok"
@@ -1125,6 +1156,18 @@ def _append_as_of_date(url, as_of_date):
     separator = '&' if '?' in url else '?'
     return f"{{url}}{{separator}}{{query}}"
 
+def _append_query_params(url, params):
+    normalized = {{
+        str(key): str(value)
+        for key, value in params.items()
+        if value not in {{None, ''}}
+    }}
+    if not normalized:
+        return url
+    query = urllib_parse.urlencode(normalized)
+    separator = '&' if '?' in url else '?'
+    return f"{{url}}{{separator}}{{query}}"
+
 def _try_load_json(body_text):
     try:
         return json.loads(body_text)
@@ -1199,6 +1242,7 @@ results = [
     _collect("job", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/job?job_id=hosted_runtime_probe"),
     _collect("status", "GET", _append_as_of_date(PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_STATUS_HTTP_PATH"], PAYLOAD["as_of_date"])),
     _collect("web_vitrina_read", "GET", _append_as_of_date(PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_READ_PATH!r}, PAYLOAD["as_of_date"])),
+    _collect("web_vitrina_page_composition", "GET", _append_query_params(PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_READ_PATH!r}, {{"as_of_date": PAYLOAD["as_of_date"], "surface": {DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE!r}}})),
     _collect("daily_report", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/daily-report"),
     _collect("stock_report", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/stock-report"),
     _collect("plan", "GET", _append_as_of_date(PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_HTTP_PATH"], PAYLOAD["as_of_date"])),
@@ -1227,6 +1271,19 @@ def _append_as_of_date(url: str, as_of_date: str | None) -> str:
     if not as_of_date:
         return url
     query = urllib_parse.urlencode({"as_of_date": as_of_date})
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}{query}"
+
+
+def _append_query_params(url: str, params: dict[str, str | None]) -> str:
+    normalized = {
+        str(key): str(value)
+        for key, value in params.items()
+        if value not in {None, ""}
+    }
+    if not normalized:
+        return url
+    query = urllib_parse.urlencode(normalized)
     separator = "&" if "?" in url else "?"
     return f"{url}{separator}{query}"
 

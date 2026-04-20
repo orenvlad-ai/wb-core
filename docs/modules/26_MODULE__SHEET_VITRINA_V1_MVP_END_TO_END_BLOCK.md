@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-26-SHEET-VITRINA-V1-MVP-END-TO-END-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `sheet_vitrina_v1_mvp_end_to_end_block`."
-scope: "Первый bounded end-to-end alignment для `sheet_vitrina_v1`: uploaded compact bootstrap `CONFIG / METRICS / FORMULAS`, sibling `COST_PRICE` upload contour, сохранённый upload trigger, explicit refresh в repo-owned date-aware ready snapshot, separate load этого snapshot в live sheet, server-side cost overlay в operator-facing rows, cheap read этого snapshot в `DATA_VITRINA`, compact daily-report read model for two latest closed business days, narrow server-side orchestration-first operator page, sibling phase-1 web-vitrina route/contract fixation, phase-2 library-agnostic `view_model` seam и phase-3 concrete `@gravity-ui/table` adapter seam без возврата heavy logic в Google Sheets, дополненная bounded factory-order supply tab без переноса расчётной логики в Apps Script."
+scope: "Первый bounded end-to-end alignment для `sheet_vitrina_v1`: uploaded compact bootstrap `CONFIG / METRICS / FORMULAS`, sibling `COST_PRICE` upload contour, сохранённый upload trigger, explicit refresh в repo-owned date-aware ready snapshot, separate load этого snapshot в live sheet, server-side cost overlay в operator-facing rows, cheap read этого snapshot в `DATA_VITRINA`, compact daily-report read model for two latest closed business days, narrow server-side orchestration-first operator page, sibling web-vitrina route/contract fixation, phase-2 library-agnostic `view_model` seam, phase-3 concrete `@gravity-ui/table` adapter seam и phase-4 real page composition/live read-only page без возврата heavy logic в Google Sheets, дополненная bounded factory-order supply tab без переноса расчётной логики в Apps Script."
 source_basis:
   - "migration/90_registry_upload_http_entrypoint.md"
   - "migration/91_sheet_vitrina_v1_registry_upload_trigger.md"
@@ -29,6 +29,7 @@ related_modules:
   - "packages/application/sheet_vitrina_v1_load_bridge.py"
   - "packages/application/sheet_vitrina_v1_web_vitrina.py"
   - "packages/application/web_vitrina_gravity_table_adapter.py"
+  - "packages/application/web_vitrina_page_composition.py"
   - "packages/application/web_vitrina_view_model.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
@@ -82,6 +83,8 @@ related_runners:
   - "apps/sheet_vitrina_v1_daily_report_http_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
+  - "apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py"
+  - "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_integration_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_view_model_smoke.py"
@@ -101,7 +104,7 @@ related_docs:
   - "docs/modules/29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md"
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current web-vitrina checkpoint: `sheet_vitrina_v1` по-прежнему разделяет group A bot/web-source historical, group B WB API date/period-capable, group C WB API current-snapshot-only и group D other/manual overlays; sibling web-vitrina boundary остаётся fixed как `/sheet-vitrina-v1/vitrina` + `GET /v1/sheet-vitrina-v1/web-vitrina`, phase-2 library-agnostic `web_vitrina_view_model` остаётся stable repo-side seam, а phase-3 `web_vitrina_gravity_table_adapter` materialize-ит первый concrete grid adapter поверх него без live boundary shift."
+update_note: "Обновлён под current web-vitrina checkpoint: `sheet_vitrina_v1` по-прежнему разделяет group A bot/web-source historical, group B WB API date/period-capable, group C WB API current-snapshot-only и group D other/manual overlays; sibling web-vitrina boundary остаётся fixed как `/sheet-vitrina-v1/vitrina` + `GET /v1/sheet-vitrina-v1/web-vitrina`, phase-2 library-agnostic `web_vitrina_view_model` и phase-3 `web_vitrina_gravity_table_adapter` остаются stable repo-side seams, а phase-4 `web_vitrina_page_composition` теперь materialize-ит реальную live page surface через optional `surface=page_composition` на existing read route."
 ---
 
 # 1. Идентификатор и статус
@@ -156,8 +159,9 @@ update_note: "Обновлён под current web-vitrina checkpoint: `sheet_vit
     - v1 response is a stable library-agnostic server contract over existing ready snapshot/current truth: `meta + status_summary + schema + rows + capabilities`
     - phase 2 now additionally materializes repo-owned `web_vitrina_view_model` as a separate presentation-domain seam over that contract: `columns + rows + groups + sections + formatters + filters + sorts + state_model`
     - phase 3 now additionally materializes repo-owned `web_vitrina_gravity_table_adapter` as the first concrete adapter over that `view_model`: isolated Gravity-specific `columns + rows + renderers + groupings + filters + sorts + use_table_options + table_props + state_surface`
-    - the new `view_model` layer stays library-agnostic, while the concrete Gravity-specific seam remains repo-side and explicitly separate from future `page_composition`
-    - full live grid UI/page composition, export layer, cutover away from Google Sheets and broad feature parity remain later layers
+    - phase 4 now additionally materializes repo-owned `web_vitrina_page_composition` over the same seams: `/sheet-vitrina-v1/vitrina` fetches optional `surface=page_composition` on the existing read route and renders a real summary/filter/table page without turning browser state into canonical truth
+    - the `view_model` layer stays library-agnostic, the Gravity-specific seam stays repo-side, and page composition remains a page-only layer above them
+    - export layer, cutover away from Google Sheets and broad feature parity remain later layers
   - `Отчёты` uses the same sibling subsection selector pattern as the supply tab: default section = `Ежедневные отчёты`, second section = `Отчёт по остаткам`, only one report body is visible at a time
   - daily-report block остаётся read-only и server-owned:
     - compare target = два последних closed business day в `Asia/Yekaterinburg`
