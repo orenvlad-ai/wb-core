@@ -33,11 +33,13 @@ DEFAULT_COST_PRICE_UPLOAD_PATH = "/v1/cost-price/upload"
 DEFAULT_SHEET_PLAN_PATH = "/v1/sheet-vitrina-v1/plan"
 DEFAULT_SHEET_DAILY_REPORT_PATH = "/v1/sheet-vitrina-v1/daily-report"
 DEFAULT_SHEET_STOCK_REPORT_PATH = "/v1/sheet-vitrina-v1/stock-report"
+DEFAULT_SHEET_WEB_VITRINA_READ_PATH = "/v1/sheet-vitrina-v1/web-vitrina"
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_SHEET_LOAD_PATH = "/v1/sheet-vitrina-v1/load"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
 DEFAULT_SHEET_JOB_PATH = "/v1/sheet-vitrina-v1/job"
 DEFAULT_SHEET_OPERATOR_UI_PATH = "/sheet-vitrina-v1/operator"
+DEFAULT_SHEET_WEB_VITRINA_UI_PATH = "/sheet-vitrina-v1/vitrina"
 DEFAULT_FACTORY_ORDER_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/status"
 DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"
 DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH = (
@@ -74,6 +76,7 @@ DEFAULT_WB_REGIONAL_CALCULATE_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/ca
 DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX = "/v1/sheet-vitrina-v1/supply/wb-regional/district"
 DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
 OPERATOR_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_operator.html"
+WEB_VITRINA_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_web_vitrina.html"
 
 
 def load_registry_upload_http_entrypoint_config() -> RegistryUploadHttpEntrypointConfig:
@@ -428,6 +431,17 @@ def _build_handler(
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urllib_parse.urlparse(self.path)
+            if parsed.path == DEFAULT_SHEET_WEB_VITRINA_UI_PATH:
+                _write_html_response(
+                    self,
+                    HTTPStatus.OK,
+                    _render_sheet_vitrina_web_vitrina_ui(
+                        read_path=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+                        operator_path=sheet_operator_ui_path,
+                    ),
+                )
+                return
+
             if parsed.path == sheet_operator_ui_path:
                 _write_html_response(
                     self,
@@ -441,6 +455,35 @@ def _build_handler(
                         job_path=sheet_job_path,
                         operator_context=entrypoint.build_sheet_operator_ui_context(),
                     ),
+                )
+                return
+
+            if parsed.path == DEFAULT_SHEET_WEB_VITRINA_READ_PATH:
+                try:
+                    payload = entrypoint.handle_sheet_web_vitrina_request(
+                        page_route=DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
+                        read_route=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+                        as_of_date=_resolve_as_of_date_from_query(parsed.query) or None,
+                    )
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina web-vitrina runtime failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(
+                    self,
+                    HTTPStatus.OK,
+                    payload,
                 )
                 return
 
@@ -1238,4 +1281,21 @@ def _render_sheet_vitrina_operator_ui(
         template.replace("__SHEET_VITRINA_V1_OPERATOR_PAGE_TITLE__", config_payload["page_title"])
         .replace("__SHEET_VITRINA_V1_SPREADSHEET_URL__", spreadsheet_url)
         .replace("__SHEET_VITRINA_V1_OPERATOR_CONFIG_JSON__", json.dumps(config_payload, ensure_ascii=False))
+    )
+
+
+def _render_sheet_vitrina_web_vitrina_ui(
+    *,
+    read_path: str,
+    operator_path: str,
+) -> str:
+    config_payload = {
+        "page_title": "Web-витрина",
+        "read_path": read_path,
+        "operator_path": operator_path,
+    }
+    template = WEB_VITRINA_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return (
+        template.replace("__SHEET_VITRINA_V1_WEB_VITRINA_PAGE_TITLE__", config_payload["page_title"])
+        .replace("__SHEET_VITRINA_V1_WEB_VITRINA_CONFIG_JSON__", json.dumps(config_payload, ensure_ascii=False))
     )

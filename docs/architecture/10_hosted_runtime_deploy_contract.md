@@ -21,6 +21,8 @@ Contract покрывает hosted contour на `api.selleros.pro` для routes
 - `GET /v1/sheet-vitrina-v1/status`
 - `GET /v1/sheet-vitrina-v1/job`
 - `GET /sheet-vitrina-v1/operator`
+- `GET /sheet-vitrina-v1/vitrina`
+- `GET /v1/sheet-vitrina-v1/web-vitrina`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/status`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/inbound-factory.xlsx`
@@ -159,6 +161,11 @@ Loopback/runtime probe validates the hosted process behind the reverse proxy or 
 
 Public probe validates:
 - `GET /sheet-vitrina-v1/operator` returns `200` + `text/html` and still contains the compact operator tokens for the three top-level sections, separated refresh/load, truthful manual-vs-auto blocks and both bounded supply subsections (`Обновление данных`, `Ручная загрузка данных`, `Расчёт поставок`, `Отчёты`, `Загрузить данные`, `Отправить данные`, `Последняя удачная загрузка`, `Последняя удачная отправка`, `Ежедневные отчёты`, `Отчёт по остаткам`, `Total Order Sum`, `Негативные факторы`, `Позитивные факторы`, `Скачать лог`, `Лог`, `Автообновления`, `Часовой пояс`, `Автоцепочка`, `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление`, `Общий вход для двух расчётов`, `Заказ на фабрике`, `Поставка на Wildberries`, `Цикл заказов`, `Цикл поставок`)
+- `GET /sheet-vitrina-v1/vitrina` returns `200` + `text/html` and stays a thin sibling shell: page must contain `Phase 1 Web-Vitrina Boundary`, `Web-витрина`, canonical JSON route token `/v1/sheet-vitrina-v1/web-vitrina` and the later-layer note `grid_adapter / page_composition / export_layer`, without bundling grid-library-specific fields into HTML
+- `GET /v1/sheet-vitrina-v1/web-vitrina` returns either:
+  - `200` + JSON `web_vitrina_contract` v1 when a ready snapshot is present, with root fields `contract_name`, `contract_version`, `page_route`, `read_route`, `meta`, `status_summary`, `schema`, `rows`, `capabilities`
+  - truthful `422 {"error": ...}` when the ready snapshot is absent
+  - route remains read-only, optional `as_of_date` override stays on the same boundary and must not trigger refresh/upstream fetch
 - `GET /v1/sheet-vitrina-v1/daily-report` returns `200` + JSON for both states:
   - `status=available` when ready snapshots for `default_business_as_of_date(now)` and `default_business_as_of_date(now)-1 day` are present and their `yesterday_closed` slots are comparable;
   - `status=unavailable` with truthful `reason` when one of those ready snapshots is missing or structurally unusable;

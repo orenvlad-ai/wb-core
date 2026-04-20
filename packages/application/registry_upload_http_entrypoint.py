@@ -17,6 +17,7 @@ from packages.application.sheet_vitrina_v1_daily_report import SheetVitrinaV1Dai
 from packages.application.sheet_vitrina_v1_load_bridge import load_sheet_vitrina_ready_snapshot_via_clasp
 from packages.application.sheet_vitrina_v1_stock_report import SheetVitrinaV1StockReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import list_active_sku_options
+from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
 from packages.application.wb_regional_supply import WbRegionalSupplyBlock
 from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE_NAME,
@@ -97,6 +98,10 @@ class RegistryUploadHttpEntrypoint:
             runtime=self.runtime,
             now_factory=self.now_factory,
         )
+        self.web_vitrina_block = SheetVitrinaV1WebVitrinaBlock(
+            runtime=self.runtime,
+            now_factory=self.now_factory,
+        )
         self.sheet_load_runner = sheet_load_runner or load_sheet_vitrina_ready_snapshot_via_clasp
         self.operator_jobs = SheetVitrinaV1OperatorJobStore(timestamp_factory=self.activated_at_factory)
         self.factory_order_supply_block = FactoryOrderSupplyBlock(
@@ -136,6 +141,21 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_sheet_stock_report_request(self, as_of_date: str | None = None) -> dict[str, Any]:
         return self.stock_report_block.build(as_of_date=as_of_date)
+
+    def handle_sheet_web_vitrina_request(
+        self,
+        *,
+        page_route: str,
+        read_route: str,
+        as_of_date: str | None = None,
+    ) -> dict[str, Any]:
+        return asdict(
+            self.web_vitrina_block.build(
+                page_route=page_route,
+                read_route=read_route,
+                as_of_date=as_of_date,
+            )
+        )
 
     def handle_sheet_refresh_request(
         self,

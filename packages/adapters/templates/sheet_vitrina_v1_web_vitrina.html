@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>__SHEET_VITRINA_V1_WEB_VITRINA_PAGE_TITLE__</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --page-bg: #f3f5f7;
+      --panel-bg: #ffffff;
+      --border: #d7dee7;
+      --border-strong: #c6d3e4;
+      --text: #18212b;
+      --muted: #637182;
+      --accent: #0b63f6;
+      --accent-hover: #084dc7;
+      --idle-bg: #eef2f6;
+      --shadow: 0 18px 48px rgba(17, 24, 39, 0.08);
+      --radius: 18px;
+      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at top left, rgba(11, 99, 246, 0.06), transparent 34%),
+        linear-gradient(180deg, #f8fafc 0%, var(--page-bg) 100%);
+      color: var(--text);
+    }
+
+    .page {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 72px 24px;
+    }
+
+    .hero,
+    .panel {
+      background: var(--panel-bg);
+      border: 1px solid rgba(215, 222, 231, 0.9);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .hero {
+      padding: 40px;
+      margin-bottom: 24px;
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 38px;
+      line-height: 1.1;
+    }
+
+    .lead {
+      margin: 16px 0 0;
+      max-width: 720px;
+      font-size: 16px;
+      line-height: 1.7;
+      color: var(--muted);
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 26px;
+    }
+
+    .button {
+      appearance: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 12px;
+      padding: 13px 20px;
+      font: inherit;
+      font-size: 15px;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      transition: background-color 120ms ease, transform 120ms ease;
+    }
+
+    .button.primary {
+      border: 0;
+      background: var(--accent);
+      color: #ffffff;
+    }
+
+    .button.primary:hover {
+      background: var(--accent-hover);
+      transform: translateY(-1px);
+    }
+
+    .button.secondary {
+      border: 1px solid var(--border);
+      background: var(--idle-bg);
+      color: var(--text);
+    }
+
+    .button.secondary:hover {
+      background: #e1e7ee;
+      transform: translateY(-1px);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .panel {
+      padding: 24px;
+    }
+
+    .panel h2 {
+      margin: 0 0 16px;
+      font-size: 16px;
+    }
+
+    .metric-label {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .metric-value {
+      margin-top: 10px;
+      font-size: 28px;
+      font-weight: 700;
+    }
+
+    .metric-subvalue {
+      margin-top: 6px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .note-list {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+
+    .note-list li + li {
+      margin-top: 8px;
+    }
+
+    .preview {
+      background: #0f172a;
+      color: #e2e8f0;
+      border-radius: 14px;
+      padding: 18px;
+      overflow: auto;
+      font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.55;
+      max-height: 420px;
+    }
+
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border-radius: 999px;
+      padding: 8px 12px;
+      background: #eef4ff;
+      color: var(--accent);
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .status-chip.error {
+      background: #fdeaea;
+      color: #b42318;
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <p class="eyebrow">Phase 1 Web-Vitrina Boundary</p>
+      <h1>Web-витрина</h1>
+      <p class="lead">
+        Эта sibling-страница отделена от orchestration-first <code>/sheet-vitrina-v1/operator</code>.
+        На фазе 1 здесь фиксируется только server-owned read contract и page shell без grid library, full filter UX и broad SPA/build redesign.
+      </p>
+      <div class="actions">
+        <a class="button primary" data-open-contract href="#">Открыть JSON contract</a>
+        <a class="button secondary" data-open-operator href="#">Открыть operator surface</a>
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="panel">
+        <div class="metric-label">Статус contract</div>
+        <div class="metric-value" data-metric="contract-status">Загрузка…</div>
+        <div class="metric-subvalue" data-metric="contract-substatus">Читаем server-owned snapshot.</div>
+      </article>
+      <article class="panel">
+        <div class="metric-label">Snapshot</div>
+        <div class="metric-value" data-metric="snapshot-id">—</div>
+        <div class="metric-subvalue" data-metric="snapshot-as-of">—</div>
+      </article>
+      <article class="panel">
+        <div class="metric-label">Rows</div>
+        <div class="metric-value" data-metric="row-count">—</div>
+        <div class="metric-subvalue" data-metric="date-columns">—</div>
+      </article>
+      <article class="panel">
+        <div class="metric-label">Server truth</div>
+        <div class="metric-value" data-metric="bundle-version">—</div>
+        <div class="metric-subvalue" data-metric="refreshed-at">—</div>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="panel">
+        <h2>Phase 1 Scope</h2>
+        <ul class="note-list">
+          <li>Входит только route fixation, stable read contract и thin page shell.</li>
+          <li>Rows остаются server-owned и берутся из existing ready snapshot / current truth.</li>
+          <li>Contract не зависит от <code>@gravity-ui/table</code> или другой grid library.</li>
+        </ul>
+      </article>
+      <article class="panel">
+        <h2>Later Layers</h2>
+        <ul class="note-list">
+          <li><code>web_vitrina_contract</code></li>
+          <li><code>view_model</code></li>
+          <li><code>grid_adapter</code></li>
+          <li><code>page_composition</code></li>
+          <li><code>export_layer</code></li>
+        </ul>
+      </article>
+      <article class="panel">
+        <h2>Probe</h2>
+        <div class="status-chip" data-probe-state>waiting</div>
+        <p class="lead" style="margin-top: 14px;">
+          Shell делает only read probe к canonical JSON route и не переносит расчётную/business logic в браузер.
+        </p>
+      </article>
+    </section>
+
+    <section class="panel">
+      <h2>Contract Preview</h2>
+      <pre class="preview" data-contract-preview>Загрузка…</pre>
+    </section>
+  </main>
+
+  <script>
+    const WEB_VITRINA_CONFIG = __SHEET_VITRINA_V1_WEB_VITRINA_CONFIG_JSON__;
+    const previewNode = document.querySelector("[data-contract-preview]");
+    const probeStateNode = document.querySelector("[data-probe-state]");
+    const contractStatusNode = document.querySelector("[data-metric='contract-status']");
+    const contractSubstatusNode = document.querySelector("[data-metric='contract-substatus']");
+    const snapshotIdNode = document.querySelector("[data-metric='snapshot-id']");
+    const snapshotAsOfNode = document.querySelector("[data-metric='snapshot-as-of']");
+    const rowCountNode = document.querySelector("[data-metric='row-count']");
+    const dateColumnsNode = document.querySelector("[data-metric='date-columns']");
+    const bundleVersionNode = document.querySelector("[data-metric='bundle-version']");
+    const refreshedAtNode = document.querySelector("[data-metric='refreshed-at']");
+    const openContractLink = document.querySelector("[data-open-contract]");
+    const openOperatorLink = document.querySelector("[data-open-operator]");
+
+    openOperatorLink.href = WEB_VITRINA_CONFIG.operator_path;
+
+    function buildReadUrl() {
+      const url = new URL(WEB_VITRINA_CONFIG.read_path, window.location.origin);
+      const params = new URLSearchParams(window.location.search);
+      const asOfDate = params.get("as_of_date");
+      if (asOfDate) {
+        url.searchParams.set("as_of_date", asOfDate);
+      }
+      return url;
+    }
+
+    function setErrorState(message, previewText) {
+      probeStateNode.textContent = "error";
+      probeStateNode.classList.add("error");
+      contractStatusNode.textContent = "Ошибка";
+      contractSubstatusNode.textContent = message;
+      previewNode.textContent = previewText;
+      snapshotIdNode.textContent = "—";
+      snapshotAsOfNode.textContent = "—";
+      rowCountNode.textContent = "—";
+      dateColumnsNode.textContent = "—";
+      bundleVersionNode.textContent = "—";
+      refreshedAtNode.textContent = "—";
+    }
+
+    function renderPayload(payload) {
+      probeStateNode.textContent = "ok";
+      contractStatusNode.textContent = payload.contract_name + " " + payload.contract_version;
+      contractSubstatusNode.textContent =
+        payload.status_summary.read_model + " / " + payload.status_summary.source_sheet_name;
+      snapshotIdNode.textContent = payload.meta.snapshot_id;
+      snapshotAsOfNode.textContent = "as_of_date " + payload.meta.as_of_date;
+      rowCountNode.textContent = String(payload.meta.row_count);
+      dateColumnsNode.textContent = payload.meta.date_columns.join(", ");
+      bundleVersionNode.textContent = payload.meta.bundle_version;
+      refreshedAtNode.textContent = "refreshed_at " + payload.meta.refreshed_at;
+      previewNode.textContent = JSON.stringify(
+        {
+          page_route: payload.page_route,
+          read_route: payload.read_route,
+          meta: payload.meta,
+          status_summary: payload.status_summary,
+          schema: payload.schema,
+          rows_preview: payload.rows.slice(0, 5),
+          capabilities: payload.capabilities
+        },
+        null,
+        2
+      );
+    }
+
+    async function loadContract() {
+      const readUrl = buildReadUrl();
+      openContractLink.href = readUrl.toString();
+      try {
+        const response = await fetch(readUrl.toString(), {
+          headers: {"Accept": "application/json"}
+        });
+        const text = await response.text();
+        let payload = {};
+        try {
+          payload = JSON.parse(text);
+        } catch (error) {
+          throw new Error("non-json response from web-vitrina route");
+        }
+        if (!response.ok) {
+          throw new Error(payload.error || ("contract route returned " + response.status));
+        }
+        renderPayload(payload);
+      } catch (error) {
+        const previewText = JSON.stringify(
+          {
+            page_route: WEB_VITRINA_CONFIG.operator_path,
+            read_path: buildReadUrl().toString(),
+            error: String(error && error.message ? error.message : error)
+          },
+          null,
+          2
+        );
+        setErrorState("Read contract пока недоступен.", previewText);
+      }
+    }
+
+    loadContract();
+  </script>
+</body>
+</html>
