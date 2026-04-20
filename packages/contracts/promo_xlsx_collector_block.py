@@ -11,6 +11,7 @@ PeriodParseConfidence = Literal["high", "medium", "low"]
 TemporalClassification = Literal["current", "future", "past", "ambiguous"]
 PromoOutcomeStatus = Literal[
     "downloaded",
+    "reused_archive",
     "skipped_past",
     "blocked_before_card",
     "blocked_after_card",
@@ -24,6 +25,7 @@ ExportKind = Literal["exclude_list_template", "eligible_items_report", "unknown"
 class PromoXlsxCollectorRequest:
     output_root: str
     storage_state_path: str
+    archive_root: str = ""
     start_url: str = "https://seller.wildberries.ru/dp-promo-calendar"
     source_tab: str = "Доступные"
     source_filter_code: str = "AVAILABLE"
@@ -208,6 +210,7 @@ class CollectorRunSummary:
     timeline_candidates_found: int = 0
     card_confirmed_count: int = 0
     downloaded_count: int = 0
+    reused_archive_count: int = 0
     skipped_past_count: int = 0
     blocked_before_card_count: int = 0
     blocked_after_card_count: int = 0

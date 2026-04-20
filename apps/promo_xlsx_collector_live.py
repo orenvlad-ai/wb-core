@@ -49,6 +49,7 @@ def main() -> None:
     print(f"timeline_candidates_found: {result.timeline_candidates_found}")
     print(f"card_confirmed_count: {result.card_confirmed_count}")
     print(f"downloaded_count: {result.downloaded_count}")
+    print(f"reused_archive_count: {result.reused_archive_count}")
     print(f"skipped_past_count: {result.skipped_past_count}")
     print(f"blocked_before_card_count: {result.blocked_before_card_count}")
     print(f"blocked_after_card_count: {result.blocked_after_card_count}")

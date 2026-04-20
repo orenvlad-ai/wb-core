@@ -79,13 +79,14 @@ Current sibling operator input flow:
 
 Current sibling local promo collector precursor flow:
 - `python3 apps/promo_xlsx_collector_live.py`
-- flow делает bounded seller-portal capture только вне repo tree и materialize-ит `metadata.json` для каждого promo plus `workbook.xlsx` для downloaded current/future promo
+- flow делает bounded seller-portal capture только вне repo tree, reuse-ит unchanged archived campaign artifacts и materialize-ит `metadata.json` для каждого promo plus `workbook.xlsx` для downloaded/reused current promo
 - contour remains the thin browser-capture precursor under the live-wired promo source seam
 
 Current live promo source flow:
 - `POST /v1/sheet-vitrina-v1/refresh`
-- contour now invokes repo-owned promo collector server-side for `promo_by_price[today_current]`
-- `promo_by_price[yesterday_closed]` reads only accepted/runtime-cached promo truth
+- contour now invokes repo-owned archive-first promo collector server-side for `promo_by_price[today_current]`
+- `promo_by_price[yesterday_closed]` still reads only accepted/runtime-cached exact-date promo truth
+- cache miss on `promo_by_price[yesterday_closed]` may be filled server-side by interval replay from archived campaign artifacts when authoritative coverage exists
 - `STATUS` and ready snapshot now expose truthful promo source facts instead of a permanent blocked gap
 
 Current repo-owned operator refresh surface:

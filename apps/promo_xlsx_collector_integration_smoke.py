@@ -27,22 +27,24 @@ def main() -> None:
     result = block.execute(request)
     if result.status not in {"success", "partial"}:
         raise AssertionError(f"integration smoke must reach bounded success/partial state, got {result.status}")
-    if result.downloaded_count < 1:
-        raise AssertionError("integration smoke must prove at least one current/future download with sidecar")
+    handled_count = result.downloaded_count + result.reused_archive_count
+    if handled_count < 1:
+        raise AssertionError("integration smoke must prove at least one current/future workbook via download or archive reuse")
     if not result.hydration_attempts or not any(attempt.hydrated_success for attempt in result.hydration_attempts):
         raise AssertionError("canonical direct_open hydration sequence must succeed")
-    downloaded = [promo for promo in result.promos if promo.status == "downloaded"]
-    if not downloaded:
-        raise AssertionError("downloaded promo outcome list must not be empty")
-    first_downloaded = downloaded[0]
-    if not first_downloaded.metadata_path or not Path(first_downloaded.metadata_path).exists():
-        raise AssertionError("downloaded promo must persist metadata.json")
-    if not first_downloaded.saved_path or not Path(first_downloaded.saved_path).exists():
-        raise AssertionError("downloaded promo must persist workbook.xlsx")
+    handled = [promo for promo in result.promos if promo.status in {"downloaded", "reused_archive"}]
+    if not handled:
+        raise AssertionError("handled promo outcome list must not be empty")
+    first_handled = handled[0]
+    if not first_handled.metadata_path or not Path(first_handled.metadata_path).exists():
+        raise AssertionError("handled promo must persist metadata.json")
+    if not first_handled.saved_path or not Path(first_handled.saved_path).exists():
+        raise AssertionError("handled promo must resolve workbook.xlsx")
     print(f"run_dir: {tmp}")
     print(f"downloaded_count: {result.downloaded_count}")
+    print(f"reused_archive_count: {result.reused_archive_count}")
     print(f"skipped_past_count: {result.skipped_past_count}")
-    print(f"first_downloaded: {first_downloaded.promo_title}")
+    print(f"first_handled: {first_handled.promo_title}")
     print("integration-smoke passed")
 
 
