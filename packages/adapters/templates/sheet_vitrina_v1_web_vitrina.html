@@ -7,25 +7,26 @@
   <style>
     :root {
       color-scheme: light;
-      --page-bg: #edf2f7;
+      --page-bg: #f4f6f8;
       --panel-bg: #ffffff;
-      --panel-subtle: #f6f8fb;
-      --border: #d8e0ea;
-      --border-strong: #c1cfde;
-      --text: #16212c;
-      --muted: #617284;
-      --accent: #0f63ff;
-      --accent-hover: #0a4fce;
-      --success-bg: #eaf7ef;
+      --panel-subtle: #f7f8fb;
+      --border: #d7dde6;
+      --border-strong: #c6cfda;
+      --text: #202a36;
+      --muted: #5f6f81;
+      --accent: #2f6fed;
+      --accent-hover: #255acc;
+      --success-bg: #edf7f0;
       --success-text: #166534;
-      --warning-bg: #fff7e8;
+      --warning-bg: #fff8eb;
       --warning-text: #92400e;
-      --error-bg: #fdecec;
+      --error-bg: #fdf0ef;
       --error-text: #b42318;
-      --shadow: 0 20px 52px rgba(15, 23, 42, 0.08);
-      --radius: 18px;
-      --sticky-shadow: inset -1px 0 0 rgba(193, 207, 222, 0.85);
-      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      --shadow: none;
+      --radius: 8px;
+      --sticky-shadow: inset -1px 0 0 rgba(199, 207, 217, 0.95);
+      --table-font-size: 10.5px;
+      font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
     }
 
     * {
@@ -35,34 +36,32 @@
     body {
       margin: 0;
       min-height: 100vh;
-      background:
-        radial-gradient(circle at top left, rgba(15, 99, 255, 0.08), transparent 28%),
-        linear-gradient(180deg, #f8fafc 0%, var(--page-bg) 100%);
+      background: var(--page-bg);
       color: var(--text);
     }
 
     .page {
-      max-width: 1440px;
+      max-width: none;
       margin: 0 auto;
-      padding: 52px 24px 72px;
+      padding: 18px 18px 24px;
     }
 
     .hero,
     .panel {
       background: var(--panel-bg);
-      border: 1px solid rgba(216, 224, 234, 0.9);
+      border: 1px solid var(--border);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
     }
 
     .hero {
-      padding: 34px;
-      margin-bottom: 18px;
+      padding: 16px 18px;
+      margin-bottom: 8px;
     }
 
     .hero-top {
       display: flex;
-      gap: 24px;
+      gap: 16px;
       justify-content: space-between;
       align-items: flex-start;
       flex-wrap: wrap;
@@ -70,7 +69,7 @@
 
     .eyebrow {
       margin: 0 0 10px;
-      font-size: 12px;
+      font-size: 10px;
       font-weight: 700;
       letter-spacing: 0.08em;
       text-transform: uppercase;
@@ -79,23 +78,23 @@
 
     h1 {
       margin: 0;
-      font-size: 38px;
-      line-height: 1.05;
+      font-size: 30px;
+      line-height: 1.08;
     }
 
     .lead {
-      margin: 14px 0 0;
-      max-width: 880px;
-      font-size: 16px;
-      line-height: 1.65;
+      margin: 10px 0 0;
+      max-width: 920px;
+      font-size: 12.5px;
+      line-height: 1.55;
       color: var(--muted);
     }
 
     .meta-line,
     .source-line {
-      margin: 14px 0 0;
-      font-size: 14px;
-      line-height: 1.5;
+      margin: 10px 0 0;
+      font-size: 11px;
+      line-height: 1.45;
       color: var(--muted);
       word-break: break-word;
     }
@@ -104,8 +103,8 @@
       display: flex;
       flex-direction: column;
       align-items: flex-end;
-      gap: 12px;
-      min-width: 240px;
+      gap: 8px;
+      min-width: 220px;
     }
 
     .hero-buttons {
@@ -120,12 +119,12 @@
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      border-radius: 12px;
+      border-radius: 6px;
       border: 1px solid var(--border);
-      padding: 12px 16px;
-      min-height: 44px;
+      padding: 8px 12px;
+      min-height: 34px;
       font: inherit;
-      font-size: 14px;
+      font-size: 12px;
       font-weight: 600;
       text-decoration: none;
       cursor: pointer;
@@ -159,8 +158,8 @@
       align-items: center;
       gap: 8px;
       border-radius: 999px;
-      padding: 8px 14px;
-      font-size: 13px;
+      padding: 6px 11px;
+      font-size: 11px;
       font-weight: 700;
       letter-spacing: 0.02em;
     }
@@ -196,21 +195,21 @@
 
     .summary-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 14px;
-      margin-bottom: 18px;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px;
+      margin-bottom: 8px;
     }
 
     .summary-card {
       background: var(--panel-bg);
-      border: 1px solid rgba(216, 224, 234, 0.9);
-      border-radius: 16px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
       box-shadow: var(--shadow);
-      padding: 20px;
+      padding: 10px 12px;
     }
 
     .summary-card-label {
-      font-size: 12px;
+      font-size: 10px;
       font-weight: 700;
       letter-spacing: 0.08em;
       text-transform: uppercase;
@@ -218,66 +217,67 @@
     }
 
     .summary-card-value {
-      margin-top: 8px;
-      font-size: 24px;
+      margin-top: 4px;
+      font-size: 18px;
       font-weight: 700;
-      line-height: 1.2;
+      line-height: 1.15;
       word-break: break-word;
     }
 
     .summary-card-detail {
-      margin-top: 6px;
-      font-size: 13px;
+      margin-top: 4px;
+      font-size: 11px;
       color: var(--muted);
       line-height: 1.45;
       word-break: break-word;
     }
 
     .panel {
-      padding: 24px;
-      margin-bottom: 18px;
+      padding: 12px 14px;
+      margin-bottom: 8px;
     }
 
     .panel-top {
       display: flex;
-      gap: 16px;
+      gap: 12px;
       justify-content: space-between;
       align-items: flex-start;
       flex-wrap: wrap;
-      margin-bottom: 18px;
+      margin-bottom: 10px;
     }
 
     .panel h2 {
       margin: 0;
-      font-size: 20px;
+      font-size: 18px;
       line-height: 1.2;
     }
 
     .panel-note {
-      margin: 6px 0 0;
+      margin: 4px 0 0;
       max-width: 860px;
-      font-size: 14px;
-      color: var(--muted);
-      line-height: 1.55;
-    }
-
-    .panel-meta {
-      margin: 0;
-      font-size: 13px;
+      font-size: 12px;
       color: var(--muted);
       line-height: 1.45;
     }
 
+    .panel-meta {
+      margin: 0;
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.45;
+      text-align: right;
+    }
+
     .filters-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+      gap: 8px;
     }
 
     .filter-card {
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 4px;
     }
 
     .filter-card-wide {
@@ -285,7 +285,7 @@
     }
 
     .filter-label {
-      font-size: 12px;
+      font-size: 10px;
       font-weight: 700;
       letter-spacing: 0.08em;
       text-transform: uppercase;
@@ -295,12 +295,12 @@
     .input,
     .select {
       width: 100%;
-      min-height: 44px;
+      min-height: 34px;
       border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 10px 12px;
+      border-radius: 4px;
+      padding: 6px 10px;
       font: inherit;
-      font-size: 14px;
+      font-size: 12px;
       color: var(--text);
       background: #ffffff;
     }
@@ -319,42 +319,48 @@
       justify-content: space-between;
       align-items: center;
       flex-wrap: wrap;
-      margin-top: 16px;
+      margin-top: 10px;
     }
 
     .filter-summary {
       margin: 0;
-      font-size: 14px;
+      font-size: 12px;
       color: var(--muted);
       line-height: 1.5;
     }
 
     .table-shell {
       border: 1px solid var(--border);
-      border-radius: 16px;
+      border-radius: 6px;
       overflow: hidden;
       background: #ffffff;
     }
 
     .table-scroll {
       overflow: auto;
-      max-height: 72vh;
+      max-height: 78vh;
     }
 
     .vitrina-table {
       border-collapse: separate;
       border-spacing: 0;
       min-width: 100%;
+      width: max-content;
+      font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
     }
 
     .vitrina-table th,
     .vitrina-table td {
       border-bottom: 1px solid var(--border);
-      padding: 11px 12px;
-      font-size: 14px;
-      line-height: 1.45;
+      border-right: 1px solid var(--border);
+      padding: 5px 8px;
+      font-size: var(--table-font-size);
+      line-height: 1.25;
       background: #ffffff;
-      vertical-align: top;
+      vertical-align: middle;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .vitrina-table thead th {
@@ -362,15 +368,32 @@
       top: 0;
       z-index: 3;
       background: var(--panel-subtle);
-      font-size: 12px;
+      font-size: var(--table-font-size);
       font-weight: 700;
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-      color: var(--muted);
+      letter-spacing: 0;
+      text-transform: none;
+      color: #475569;
     }
 
     .vitrina-table tbody tr:hover td {
-      background: #fbfdff;
+      background: #f7faff;
+    }
+
+    .vitrina-table th:last-child,
+    .vitrina-table td:last-child {
+      border-right: 0;
+    }
+
+    .vitrina-table th[data-col-id^="date:"] {
+      text-align: center;
+    }
+
+    .vitrina-table td[data-col-id="scope_label"],
+    .vitrina-table td[data-col-id="metric_label"],
+    .vitrina-table td[data-col-id="scope_key"],
+    .vitrina-table td[data-col-id="metric_key"],
+    .vitrina-table td[data-col-id="group"] {
+      white-space: nowrap;
     }
 
     .table-cell-sticky {
@@ -404,27 +427,27 @@
       align-items: center;
       justify-content: center;
       border-radius: 999px;
-      padding: 4px 8px;
-      font-size: 12px;
+      padding: 2px 7px;
+      font-size: 10px;
       font-weight: 700;
-      background: #eef4ff;
-      color: #1d4ed8;
+      background: #eef2f6;
+      color: #445468;
       white-space: nowrap;
     }
 
     .cell-row-kind.total {
-      background: #eaf7ef;
+      background: #edf7f0;
       color: #166534;
     }
 
     .cell-row-kind.group {
-      background: #fff7e8;
+      background: #fff8eb;
       color: #92400e;
     }
 
     .cell-row-kind.sku {
-      background: #eef4ff;
-      color: #1d4ed8;
+      background: #edf2ff;
+      color: #3159c7;
     }
 
     .cell-placeholder {
@@ -432,32 +455,32 @@
     }
 
     .group-row td {
-      background: #f7f9fc;
-      font-size: 13px;
+      background: #f3f5f8;
+      font-size: var(--table-font-size);
       font-weight: 700;
-      letter-spacing: 0.02em;
-      color: var(--muted);
+      letter-spacing: 0;
+      color: #4f6072;
       position: sticky;
-      top: 42px;
+      top: 28px;
       z-index: 1;
     }
 
     .state-box {
       border: 1px dashed var(--border-strong);
-      border-radius: 16px;
-      padding: 24px;
-      background: var(--panel-subtle);
+      border-radius: 6px;
+      padding: 16px;
+      background: #fafbfd;
     }
 
     .state-title {
       margin: 0;
-      font-size: 18px;
+      font-size: 16px;
       line-height: 1.25;
     }
 
     .state-body {
-      margin: 10px 0 0;
-      font-size: 14px;
+      margin: 8px 0 0;
+      font-size: 12px;
       line-height: 1.6;
       color: var(--muted);
     }
@@ -468,16 +491,16 @@
 
     @media (max-width: 900px) {
       .page {
-        padding: 32px 16px 52px;
+        padding: 12px;
       }
 
       .hero,
       .panel {
-        padding: 18px;
+        padding: 12px;
       }
 
       h1 {
-        font-size: 30px;
+        font-size: 24px;
       }
 
       .hero-actions {
@@ -496,6 +519,10 @@
       .filter-card-wide {
         grid-column: span 1;
       }
+
+      .panel-meta {
+        text-align: left;
+      }
     }
   </style>
 </head>
@@ -507,9 +534,8 @@
           <p class="eyebrow">Phase 4 Web-Vitrina Page Composition</p>
           <h1>Web-витрина</h1>
           <p class="lead">
-            Read-only sibling surface для <code>/sheet-vitrina-v1/vitrina</code>. Страница не встраивается в
-            <code>/sheet-vitrina-v1/operator</code>, не переносит business truth в браузер и рендерит только server-driven
-            page composition поверх stable seams.
+            Read-only web-витрина поверх persisted snapshot. Визуальный shell стал плотнее и ближе к рабочему табличному
+            референсу, но truth assembly и data seams по-прежнему полностью server-driven.
           </p>
           <p class="meta-line" data-page-meta>
             Загрузка page composition…
@@ -536,8 +562,7 @@
         <div>
           <h2>Фильтры</h2>
           <p class="panel-note">
-            Browser-side state здесь только page-local: search/select/sort для уже собранного server-driven payload.
-            Никаких business calculations, canonical truth assembly или persistent user profile semantics в браузере нет.
+            Только page-local search/select/sort поверх уже собранного server-driven payload. Никакой business logic в браузер не перенесён.
           </p>
         </div>
         <p class="panel-meta" data-filter-meta>
@@ -556,8 +581,7 @@
         <div>
           <h2>Таблица</h2>
           <p class="panel-note">
-            Sticky columns, grouping headers и client-side sort/filter работают поверх repo-owned Gravity adapter payload.
-            Браузер не становится owner ни для contract, ни для view_model, ни для adapter semantics.
+            Таблица остаётся thin render shell поверх repo-owned Gravity adapter payload и не становится owner для truth или расчётов.
           </p>
         </div>
         <p class="panel-meta" data-table-meta>
@@ -965,8 +989,12 @@
       return (
         '<th class="' +
         classes.join(" ") +
+        '" data-col-id="' +
+        escapeHtml(column.id) +
         '" style="' +
         columnStyle(column, stickyLeft) +
+        '" title="' +
+        escapeHtml(column.header) +
         '">' +
         escapeHtml(column.header) +
         "</th>"
@@ -998,11 +1026,16 @@
       if (cell.cell_kind === "unknown" || cell.cell_kind === "empty") {
         classes.push("cell-placeholder");
       }
+      const title = formatCellTitle(column, row, cell);
       return (
         '<td class="' +
         classes.join(" ") +
+        '" data-col-id="' +
+        escapeHtml(column.id) +
         '" style="' +
         columnStyle(column, stickyLeft) +
+        '" title="' +
+        escapeHtml(title) +
         '">' +
         formatCellContent(column, row, cell) +
         "</td>"
@@ -1047,6 +1080,13 @@
         return formatNumber(numberValue, decimals, formatter ? formatter.thousands_separator !== false : true) + suffix;
       }
       return String(cell.display_text || cell.value || "—");
+    }
+
+    function formatCellTitle(column, row, cell) {
+      if (column.id === "scope_kind") {
+        return scopeKindLabel(String(row.row_kind || ""));
+      }
+      return formatCellValue(cell);
     }
 
     function buildStickyOffsets(columns) {
