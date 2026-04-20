@@ -148,10 +148,17 @@ def main() -> None:
             ):
                 raise AssertionError("operator UI must expose the SKU selector, apply action and empty-selection validation")
             if (
-                "let stockReportSelectedSkuIds = allStockReportSkuIds.slice();" not in operator_ui_html
-                or "let stockReportAppliedSkuIds = allStockReportSkuIds.slice();" not in operator_ui_html
+                "const OPERATOR_UI_STORAGE_KEY = \"wb-core:sheet-vitrina-v1:operator-ui-state:v1\";" not in operator_ui_html
+                or "window.localStorage.getItem(OPERATOR_UI_STORAGE_KEY)" not in operator_ui_html
+                or "window.localStorage.setItem(OPERATOR_UI_STORAGE_KEY" not in operator_ui_html
             ):
-                raise AssertionError("operator UI must default both draft and applied stock-report selection to all active SKU")
+                raise AssertionError("operator UI must persist and restore browser-owned state through the namespaced localStorage key")
+            if (
+                'activateTab(persistedOperatorUiState.active_tab || DEFAULT_ACTIVE_TAB);' not in operator_ui_html
+                or 'activateReportSection(persistedOperatorUiState.report_section || DEFAULT_REPORT_SECTION);' not in operator_ui_html
+                or 'activateSupplySection(persistedOperatorUiState.supply_section || DEFAULT_SUPPLY_SECTION);' not in operator_ui_html
+            ):
+                raise AssertionError("operator UI must restore the active top-level tab and both subsection tabs from persisted state")
             if (
                 "dailyReportToggle" in operator_ui_html
                 or "stockReportToggle" in operator_ui_html

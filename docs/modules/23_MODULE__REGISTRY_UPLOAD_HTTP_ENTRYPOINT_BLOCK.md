@@ -54,6 +54,7 @@ related_runners:
   - "apps/registry_upload_http_entrypoint_hosted_runtime.py"
   - "apps/registry_upload_http_entrypoint_smoke.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"
+  - "apps/sheet_vitrina_v1_operator_ui_persistence_smoke.py"
   - "apps/factory_order_sales_history_smoke.py"
   - "apps/factory_order_sales_history_reconcile.py"
   - "apps/factory_order_supply_smoke.py"
@@ -137,7 +138,7 @@ update_note: "Обновлён под current factory-order historical seam и c
   - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
   - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result
   - `GET /v1/sheet-vitrina-v1/job` = cheap poll/read surface для live operator log и async action state
-  - `GET /sheet-vitrina-v1/operator` = simple repo-owned page с top-level tabs `Обновление данных` / `Расчёт поставок` / `Отчёты`
+- `GET /sheet-vitrina-v1/operator` = simple repo-owned page с top-level tabs `Обновление данных` / `Расчёт поставок` / `Отчёты`
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/status` = cheap JSON status surface для bounded factory-order flow
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/*.xlsx` = operator template downloads с русскими headers
   - `POST /v1/sheet-vitrina-v1/supply/factory-order/upload/*` = server-side XLSX parse/validation/upload
@@ -193,6 +194,10 @@ update_note: "Обновлён под current factory-order historical seam и c
   - `apps/sheet_vitrina_v1_temporal_closure_retry_live.py`
   - runner вызывает existing runtime path `run_sheet_temporal_closure_retry_cycle(...)`, выбирает due `yesterday_closed` historical/date-period pairs plus due same-day current-only captures и безопасно reuses existing refresh/load contour вместо нового parallel app.
 - Operator page не invent-ит новый heavy route: UI запускает existing heavy `POST /v1/sheet-vitrina-v1/refresh` отдельно от narrow `POST /v1/sheet-vitrina-v1/load`, а live progress читает только через cheap poll surface `GET /v1/sheet-vitrina-v1/job`.
+- Browser-side operator state remains strictly page-owned and non-persistent on the server:
+  - top-level tab, `Отчёты` / `Расчёт поставок` subsection and stock-report SKU selection are stored only in namespaced `localStorage`;
+  - broken, outdated or foreign storage payload must fall back to the same default UI state without breaking the page;
+  - restored stock-report selection is revalidated against current active `config_v2`, so removed `nmId` values are silently dropped and new active SKU default to selected only when no valid stored subset remains.
 - Во второй tab `Расчёт поставок` current bounded scope materialize-ит два sibling block внутри одного narrow operator page:
   - shared block `Остатки ФФ` остаётся один для обоих расчётов и хранится в одном server-owned dataset state;
   - block `Заказ на фабрике` сохраняет existing behavior, но vocabulary/settings now include explicit `cycle_order_days` (`Цикл заказов`) as an additive day tail in `target_qty`;
@@ -287,6 +292,10 @@ update_note: "Обновлён под current factory-order historical seam и c
   - operator block adds a compact SKU selector plus `Рассчитать`; selector source = full active SKU catalog from current authoritative registry state `config_v2`, not the breached-row subset from `stock-report`
   - selector labels stay operator-readable and truthful: `display_name · nmId <id>`
   - first page load defaults to all active SKU selected; no persistent server-side preference is stored for this filter state
+  - operator page persists current top-level tab, sibling subsection tabs and stock-report SKU selector state in namespaced browser storage only; server-side profile/preferences state is still out of scope
+  - persisted state restore stays defensive:
+    - broken/unknown storage payload falls back to the existing default tab/section/filter state
+    - obsolete `nmId` values are silently dropped against the current active SKU catalog before restore
   - `Рассчитать` applies only the current selected SKU subset to the already loaded read-only report rows; deselected SKU are excluded from the final rendered result set before the low-stock row list is shown
   - if the selected subset has no breached rows under the existing threshold, operator page must show an honest empty result instead of stale rows; zero selected SKU is rejected client-side with `Выберите хотя бы один SKU`
   - threshold = include only SKU where at least one supported district stock is `< 50`

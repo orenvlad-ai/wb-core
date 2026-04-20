@@ -1686,46 +1686,164 @@
       };
       const numberFormatter = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 });
       const integerFormatter = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 });
+      const OPERATOR_UI_STORAGE_KEY = "wb-core:sheet-vitrina-v1:operator-ui-state:v1";
+      const OPERATOR_UI_STORAGE_VERSION = 1;
+      const DEFAULT_ACTIVE_TAB = "vitrina";
+      const DEFAULT_REPORT_SECTION = "daily";
+      const DEFAULT_SUPPLY_SECTION = "factory";
+      const VALID_TABS = new Set(["vitrina", "factory-order", "reports"]);
+      const VALID_REPORT_SECTIONS = new Set(["daily", "stock"]);
+      const VALID_SUPPLY_SECTIONS = new Set(["factory", "regional"]);
       let activeJobId = null;
       let completedJob = null;
       let recommendationDownloadPath = config.factory_order_recommendation_path || "";
       const stockReportActiveSkus = normalizeStockReportActiveSkus(config.stock_report_active_skus);
       const allStockReportSkuIds = stockReportActiveSkus.map((item) => item.nm_id);
-      let stockReportSelectedSkuIds = allStockReportSkuIds.slice();
-      let stockReportAppliedSkuIds = allStockReportSkuIds.slice();
+      let persistedOperatorUiState = readPersistedOperatorUiState();
+      let stockReportSelectedSkuIds = resolveRestoredStockReportDraftSkuIds(persistedOperatorUiState);
+      let stockReportAppliedSkuIds = resolveRestoredStockReportAppliedSkuIds(persistedOperatorUiState);
       let stockReportPayload = null;
 
-      function activateTab(tabName) {
+      function readPersistedOperatorUiState() {
+        if (!window || !window.localStorage) {
+          return {};
+        }
+        try {
+          const raw = window.localStorage.getItem(OPERATOR_UI_STORAGE_KEY);
+          if (!raw) {
+            return {};
+          }
+          const parsed = JSON.parse(raw);
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            return {};
+          }
+          if (Number(parsed.version) !== OPERATOR_UI_STORAGE_VERSION) {
+            return {};
+          }
+          return parsed;
+        } catch (error) {
+          return {};
+        }
+      }
+
+      function writePersistedOperatorUiState(patch) {
+        if (!window || !window.localStorage || !patch || typeof patch !== "object") {
+          return;
+        }
+        persistedOperatorUiState = {
+          ...persistedOperatorUiState,
+          ...patch,
+          version: OPERATOR_UI_STORAGE_VERSION
+        };
+        try {
+          window.localStorage.setItem(OPERATOR_UI_STORAGE_KEY, JSON.stringify(persistedOperatorUiState));
+        } catch (error) {
+          return;
+        }
+      }
+
+      function normalizePersistedSectionName(value, validValues, fallbackValue) {
+        const normalized = String(value || "").trim();
+        return validValues.has(normalized) ? normalized : fallbackValue;
+      }
+
+      function sanitizePersistedSkuIds(rawValue, options) {
+        const allowEmpty = Boolean(options && options.allowEmpty);
+        if (!Array.isArray(rawValue)) {
+          return null;
+        }
+        if (!rawValue.length) {
+          return allowEmpty ? [] : null;
+        }
+        const allowed = new Set(allStockReportSkuIds);
+        const seen = new Set();
+        const filtered = rawValue.reduce((acc, item) => {
+          const nmId = Number(item);
+          if (!Number.isInteger(nmId) || !allowed.has(nmId) || seen.has(nmId)) {
+            return acc;
+          }
+          seen.add(nmId);
+          acc.push(nmId);
+          return acc;
+        }, []);
+        if (!filtered.length) {
+          return null;
+        }
+        return filtered;
+      }
+
+      function resolveRestoredStockReportDraftSkuIds(storageState) {
+        const rawState = storageState && typeof storageState === "object" ? storageState : {};
+        const persistedDraft = sanitizePersistedSkuIds(rawState.stock_report_selected_sku_ids, { allowEmpty: true });
+        if (persistedDraft !== null) {
+          return persistedDraft.slice();
+        }
+        const persistedApplied = sanitizePersistedSkuIds(rawState.stock_report_applied_sku_ids, { allowEmpty: false });
+        if (persistedApplied && persistedApplied.length) {
+          return persistedApplied.slice();
+        }
+        return allStockReportSkuIds.slice();
+      }
+
+      function resolveRestoredStockReportAppliedSkuIds(storageState) {
+        const rawState = storageState && typeof storageState === "object" ? storageState : {};
+        const persistedDraft = sanitizePersistedSkuIds(rawState.stock_report_selected_sku_ids, { allowEmpty: true });
+        if (persistedDraft && persistedDraft.length) {
+          return persistedDraft.slice();
+        }
+        const persistedApplied = sanitizePersistedSkuIds(rawState.stock_report_applied_sku_ids, { allowEmpty: false });
+        if (persistedApplied && persistedApplied.length) {
+          return persistedApplied.slice();
+        }
+        return allStockReportSkuIds.slice();
+      }
+
+      function activateTab(tabName, options) {
+        const activeTabName = normalizePersistedSectionName(tabName, VALID_TABS, DEFAULT_ACTIVE_TAB);
         tabButtons.forEach((button) => {
-          const selected = button.dataset.tabButton === tabName;
+          const selected = button.dataset.tabButton === activeTabName;
           button.classList.toggle("is-active", selected);
           button.setAttribute("aria-selected", selected ? "true" : "false");
         });
         tabPanels.forEach((panel) => {
-          panel.hidden = panel.dataset.tabPanel !== tabName;
+          panel.hidden = panel.dataset.tabPanel !== activeTabName;
         });
+        if (!options || options.persist !== false) {
+          writePersistedOperatorUiState({ active_tab: activeTabName });
+        }
+        return activeTabName;
       }
 
-      function activateSupplySection(sectionName) {
+      function activateSupplySection(sectionName, options) {
+        const activeSectionName = normalizePersistedSectionName(sectionName, VALID_SUPPLY_SECTIONS, DEFAULT_SUPPLY_SECTION);
         supplySectionButtons.forEach((button) => {
-          const selected = button.dataset.supplySectionButton === sectionName;
+          const selected = button.dataset.supplySectionButton === activeSectionName;
           button.classList.toggle("is-active", selected);
           button.setAttribute("aria-selected", selected ? "true" : "false");
         });
         supplySectionPanels.forEach((panel) => {
-          panel.hidden = panel.dataset.supplySectionPanel !== sectionName;
+          panel.hidden = panel.dataset.supplySectionPanel !== activeSectionName;
         });
+        if (!options || options.persist !== false) {
+          writePersistedOperatorUiState({ supply_section: activeSectionName });
+        }
+        return activeSectionName;
       }
 
-      function activateReportSection(sectionName) {
+      function activateReportSection(sectionName, options) {
+        const activeSectionName = normalizePersistedSectionName(sectionName, VALID_REPORT_SECTIONS, DEFAULT_REPORT_SECTION);
         reportSectionButtons.forEach((button) => {
-          const selected = button.dataset.reportSectionButton === sectionName;
+          const selected = button.dataset.reportSectionButton === activeSectionName;
           button.classList.toggle("is-active", selected);
           button.setAttribute("aria-selected", selected ? "true" : "false");
         });
         reportSectionPanels.forEach((panel) => {
-          panel.hidden = panel.dataset.reportSectionPanel !== sectionName;
+          panel.hidden = panel.dataset.reportSectionPanel !== activeSectionName;
         });
+        if (!options || options.persist !== false) {
+          writePersistedOperatorUiState({ report_section: activeSectionName });
+        }
+        return activeSectionName;
       }
 
       tabButtons.forEach((button) => {
@@ -1869,6 +1987,7 @@
           input.checked = selected.has(nmId);
         });
         stockReportSelectedSkuIds = Array.from(selected);
+        updateStockReportSkuSummary(stockReportSelectedSkuIds);
       }
 
       function readStockReportDraftSelection() {
@@ -1889,23 +2008,30 @@
         }
         stockReportSkuList.innerHTML = stockReportActiveSkus.map((item) => [
           "<label class=\"stock-selector-option\">",
-          "<input type=\"checkbox\" value=\"" + escapeHtml(item.nm_id) + "\" checked>",
+          "<input type=\"checkbox\" value=\"" + escapeHtml(item.nm_id) + "\"" + (stockReportSelectedSkuIds.includes(item.nm_id) ? " checked" : "") + ">",
           "<span>" + escapeHtml(item.identity_label || "-") + "</span>",
           "</label>"
         ].join("")).join("");
         stockReportSelectAllButton.disabled = false;
         stockReportClearAllButton.disabled = false;
         stockReportApplyButton.disabled = false;
-        stockReportSelectedSkuIds = allStockReportSkuIds.slice();
-        stockReportAppliedSkuIds = allStockReportSkuIds.slice();
-        updateStockReportSkuSummary(stockReportAppliedSkuIds);
+        updateStockReportSkuSummary(stockReportSelectedSkuIds);
         Array.from(stockReportSkuList.querySelectorAll("input[type=\"checkbox\"]")).forEach((input) => {
           input.addEventListener("change", () => {
             stockReportSelectedSkuIds = readStockReportDraftSelection();
+            updateStockReportSkuSummary(stockReportSelectedSkuIds);
+            writePersistedOperatorUiState({
+              stock_report_selected_sku_ids: stockReportSelectedSkuIds.slice(),
+              stock_report_applied_sku_ids: stockReportAppliedSkuIds.slice(),
+            });
             if (stockReportSelectedSkuIds.length) {
               setStockReportValidation("");
             }
           });
+        });
+        writePersistedOperatorUiState({
+          stock_report_selected_sku_ids: stockReportSelectedSkuIds.slice(),
+          stock_report_applied_sku_ids: stockReportAppliedSkuIds.slice(),
         });
       }
 
@@ -1921,12 +2047,20 @@
       function applyStockReportSelection() {
         stockReportSelectedSkuIds = readStockReportDraftSelection();
         if (!stockReportSelectedSkuIds.length) {
+          writePersistedOperatorUiState({
+            stock_report_selected_sku_ids: [],
+            stock_report_applied_sku_ids: stockReportAppliedSkuIds.slice(),
+          });
           setStockReportValidation("Выберите хотя бы один SKU");
           return;
         }
         setStockReportValidation("");
         stockReportAppliedSkuIds = stockReportSelectedSkuIds.slice();
         updateStockReportSkuSummary(stockReportAppliedSkuIds);
+        writePersistedOperatorUiState({
+          stock_report_selected_sku_ids: stockReportSelectedSkuIds.slice(),
+          stock_report_applied_sku_ids: stockReportAppliedSkuIds.slice(),
+        });
         if (stockReportSkuSelector) {
           stockReportSkuSelector.open = false;
         }
@@ -2946,16 +3080,24 @@
       downloadRecommendationButton.addEventListener("click", downloadRecommendation);
       stockReportSelectAllButton.addEventListener("click", () => {
         setStockReportDraftSelection(allStockReportSkuIds);
+        writePersistedOperatorUiState({
+          stock_report_selected_sku_ids: stockReportSelectedSkuIds.slice(),
+          stock_report_applied_sku_ids: stockReportAppliedSkuIds.slice(),
+        });
         setStockReportValidation("");
       });
       stockReportClearAllButton.addEventListener("click", () => {
         setStockReportDraftSelection([]);
+        writePersistedOperatorUiState({
+          stock_report_selected_sku_ids: [],
+          stock_report_applied_sku_ids: stockReportAppliedSkuIds.slice(),
+        });
       });
       stockReportApplyButton.addEventListener("click", applyStockReportSelection);
 
-      activateTab("vitrina");
-      activateReportSection("daily");
-      activateSupplySection("factory");
+      activateTab(persistedOperatorUiState.active_tab || DEFAULT_ACTIVE_TAB);
+      activateReportSection(persistedOperatorUiState.report_section || DEFAULT_REPORT_SECTION);
+      activateSupplySection(persistedOperatorUiState.supply_section || DEFAULT_SUPPLY_SECTION);
       setActionState(null);
       setCompletedJob(null);
       renderStockReportSkuSelector();
