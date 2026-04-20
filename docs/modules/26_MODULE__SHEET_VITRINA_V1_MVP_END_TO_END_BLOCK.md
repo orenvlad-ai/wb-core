@@ -150,7 +150,9 @@ update_note: "Обновлён под final temporal classifier и execution mod
     - route now surfaces `metric_ranking_diagnostics` so operator/debug tooling can explain why a ranked metric list contains fewer than five items
     - `SPP`, `ads_bid_search` и `localizationPercent` не входят в ranked explanation factors, потому что current repo norm не фиксирует для них однозначный good/bad sign
   - stock-report block остаётся read-only и server-owned:
-    - source seam = persisted ready snapshot `as_of_date=default_business_as_of_date(now)` -> `DATA_VITRINA` -> slot `today_current`
+    - default source seam = persisted ready snapshot `as_of_date=default_business_as_of_date(now)` -> `DATA_VITRINA` -> slot `yesterday_closed`
+    - default report date = previous closed business day in `Asia/Yekaterinburg`
+    - optional explicit `as_of_date` keeps the same persisted closed-day seam and does not trigger refresh/upstream fetch
     - include rule = only SKU with at least one district stock `< 50`
     - sort = min breached district stock ascending, then breached district breadth descending, then total stock ascending
     - compact district labels remain truthful to current repo buckets: `Центральный ФО`, `Северо-Западный ФО`, `Приволжский ФО`, `Уральский ФО`, `Юг и СКФО`

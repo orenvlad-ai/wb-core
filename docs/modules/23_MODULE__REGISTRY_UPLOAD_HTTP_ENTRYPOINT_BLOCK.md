@@ -281,8 +281,9 @@ update_note: "Обновлён под current factory-order historical seam и c
   - `SPP`, `ads_bid_search` и `localizationPercent` не входят в ranked explanation factors, because current repo norm does not fix one unambiguous good/bad sign for them.
 - `Отчёт по остаткам`:
   - route = `GET /v1/sheet-vitrina-v1/stock-report`
-  - source seam = persisted ready snapshot `as_of_date=default_business_as_of_date(now)` -> sheet `DATA_VITRINA` -> slot `today_current`
-  - report date = current business date in `Asia/Yekaterinburg`
+  - default source seam = persisted ready snapshot `as_of_date=default_business_as_of_date(now)` -> sheet `DATA_VITRINA` -> slot `yesterday_closed`
+  - default report date = previous closed business day in `Asia/Yekaterinburg`
+  - optional manual override keeps the same read path via query `?as_of_date=YYYY-MM-DD`, without upstream fetch or browser-side date math
   - threshold = include only SKU where at least one supported district stock is `< 50`
   - sort = `min breached stock asc`, then `breached district count desc`, then `stock_total asc`
   - supported district labels stay compact and truthful to current merged buckets:

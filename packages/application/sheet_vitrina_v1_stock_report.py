@@ -1,4 +1,4 @@
-"""Read-only current-day stock report for the sheet_vitrina_v1 operator page."""
+"""Read-only closed-day stock report for the sheet_vitrina_v1 operator page."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from packages.business_time import (
 )
 from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope
 
-TEMPORAL_SLOT_TODAY_CURRENT = "today_current"
+TEMPORAL_SLOT_YESTERDAY_CLOSED = "yesterday_closed"
 STOCK_ALERT_THRESHOLD = 50.0
 EPS = 1e-9
 STOCK_REPORT_DISTRICTS = (
@@ -25,7 +25,8 @@ STOCK_REPORT_DISTRICTS = (
     ("stock_ru_south_caucasus", "Юг и СКФО"),
 )
 REPORT_NOTES = (
-    "Отчёт использует только persisted ready snapshot и slot today_current для current business day.",
+    "По умолчанию отчёт использует previous closed business day через persisted ready snapshot и slot yesterday_closed.",
+    "При explicit as_of_date route остаётся server-owned и читает именно requested closed business day, без upstream fetch.",
     "В список попадают только SKU, у которых хотя бы по одному supported district stock меньше 50 единиц.",
     "Merged bucket `ДВ и Сибирь` целиком исключён из текущего report contour: current truth не делит его на отдельный Дальний Восток и Сибирь.",
     "Короткий label `Юг и СКФО` остаётся truthful к current merged bucket и не разрезается искусственно.",
@@ -40,7 +41,7 @@ class SnapshotSlotView:
 
 
 class SheetVitrinaV1StockReportBlock:
-    """Build a compact operator-facing current-day stock report from the ready snapshot."""
+    """Build a compact operator-facing closed-day stock report from the ready snapshot."""
 
     def __init__(
         self,
@@ -51,16 +52,17 @@ class SheetVitrinaV1StockReportBlock:
         self.runtime = runtime
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
 
-    def build(self) -> dict[str, Any]:
+    def build(self, *, as_of_date: str | None = None) -> dict[str, Any]:
         business_date = date.fromisoformat(current_business_date_iso(self.now_factory()))
         current_business_date = business_date.isoformat()
-        current_as_of_date = default_business_as_of_date(self.now_factory())
+        requested_as_of_date = as_of_date or default_business_as_of_date(self.now_factory())
+        date.fromisoformat(requested_as_of_date)
         base_payload = {
             "status": "unavailable",
             "reason": "",
             "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
             "current_business_date": current_business_date,
-            "report_date": current_business_date,
+            "report_date": requested_as_of_date,
             "threshold_lt": int(STOCK_ALERT_THRESHOLD),
             "notes": list(REPORT_NOTES),
             "districts": [
@@ -73,9 +75,9 @@ class SheetVitrinaV1StockReportBlock:
             "source_of_truth": {
                 "read_model": "persisted_ready_snapshot",
                 "sheet_name": "DATA_VITRINA",
-                "snapshot_as_of_date": current_as_of_date,
-                "temporal_slot": TEMPORAL_SLOT_TODAY_CURRENT,
-                "slot_date": current_business_date,
+                "snapshot_as_of_date": requested_as_of_date,
+                "temporal_slot": TEMPORAL_SLOT_YESTERDAY_CLOSED,
+                "slot_date": requested_as_of_date,
             },
         }
 
@@ -88,15 +90,15 @@ class SheetVitrinaV1StockReportBlock:
             }
 
         try:
-            snapshot = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=current_as_of_date)
+            snapshot = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=requested_as_of_date)
         except ValueError as exc:
             return {
                 **base_payload,
-                "reason": f"Отчёт по остаткам пока недоступен: отсутствует ready snapshot для {current_as_of_date} ({exc})",
+                "reason": f"Отчёт по остаткам пока недоступен: отсутствует ready snapshot для {requested_as_of_date} ({exc})",
             }
 
         try:
-            today_view = _extract_today_slot_view(snapshot, expected_current_date=current_business_date)
+            closed_view = _extract_closed_slot_view(snapshot, expected_closed_date=requested_as_of_date)
         except ValueError as exc:
             return {
                 **base_payload,
@@ -107,7 +109,7 @@ class SheetVitrinaV1StockReportBlock:
         for config_item in sorted(current_state.config_v2, key=lambda item: item.display_order):
             if not config_item.enabled:
                 continue
-            sku_values = today_view.sku_values.get(config_item.nm_id, {})
+            sku_values = closed_view.sku_values.get(config_item.nm_id, {})
             breached_districts = []
             for metric_key, label in STOCK_REPORT_DISTRICTS:
                 stock_value = sku_values.get(metric_key)
@@ -147,33 +149,33 @@ class SheetVitrinaV1StockReportBlock:
         return {
             **base_payload,
             "status": "available",
-            "report_date": today_view.slot_date,
+            "report_date": closed_view.slot_date,
             "row_count": len(rows),
             "rows": rows,
             "source_of_truth": {
                 **base_payload["source_of_truth"],
-                "slot_date": today_view.slot_date,
+                "slot_date": closed_view.slot_date,
             },
         }
 
 
-def _extract_today_slot_view(
+def _extract_closed_slot_view(
     plan: SheetVitrinaV1Envelope,
     *,
-    expected_current_date: str,
+    expected_closed_date: str,
 ) -> SnapshotSlotView:
     slot_index = None
     slot_date = ""
     for index, slot in enumerate(plan.temporal_slots):
-        if slot.slot_key == TEMPORAL_SLOT_TODAY_CURRENT:
+        if slot.slot_key == TEMPORAL_SLOT_YESTERDAY_CLOSED:
             slot_index = index
             slot_date = slot.column_date
             break
     if slot_index is None:
-        raise ValueError(f"ready snapshot {plan.as_of_date} does not contain today_current slot")
-    if slot_date != expected_current_date:
+        raise ValueError(f"ready snapshot {plan.as_of_date} does not contain yesterday_closed slot")
+    if slot_date != expected_closed_date:
         raise ValueError(
-            f"ready snapshot {plan.as_of_date} points today_current to {slot_date}, expected {expected_current_date}"
+            f"ready snapshot {plan.as_of_date} points yesterday_closed to {slot_date}, expected {expected_closed_date}"
         )
 
     data_sheet = next((item for item in plan.sheets if item.sheet_name == "DATA_VITRINA"), None)

@@ -133,8 +133,8 @@ class RegistryUploadHttpEntrypoint:
     def handle_sheet_daily_report_request(self) -> dict[str, Any]:
         return self.daily_report_block.build()
 
-    def handle_sheet_stock_report_request(self) -> dict[str, Any]:
-        return self.stock_report_block.build()
+    def handle_sheet_stock_report_request(self, as_of_date: str | None = None) -> dict[str, Any]:
+        return self.stock_report_block.build(as_of_date=as_of_date)
 
     def handle_sheet_refresh_request(
         self,

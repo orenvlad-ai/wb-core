@@ -164,8 +164,8 @@ Public probe validates:
   - `status=unavailable` with truthful `reason` when one of those ready snapshots is missing or structurally unusable;
   - route stays read-only and must not trigger refresh/upstream fetch from the public read path
 - `GET /v1/sheet-vitrina-v1/stock-report` returns `200` + JSON for both states:
-  - `status=available` when the current `ready snapshot` for `default_business_as_of_date(now)` contains a valid `today_current` slot for the current business day;
-  - `status=unavailable` with truthful `reason` when the current ready snapshot or `today_current` slot is missing/stale;
+  - `status=available` when the current `ready snapshot` for `default_business_as_of_date(now)` contains a valid `yesterday_closed` slot for the requested/default closed business day;
+  - `status=unavailable` with truthful `reason` when the current ready snapshot or `yesterday_closed` slot is missing/stale;
   - route stays read-only and must not trigger refresh/upstream fetch from the public read path
 - `GET /v1/sheet-vitrina-v1/status` returns JSON with either success shape including `server_context` + `manual_context` or truthful `422 {"error": ..., "server_context": ..., "manual_context": ...}`
 - `GET /v1/sheet-vitrina-v1/plan` returns JSON with either success shape or truthful `422 {"error": ...}`
