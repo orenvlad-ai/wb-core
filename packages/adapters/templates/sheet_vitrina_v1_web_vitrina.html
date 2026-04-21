@@ -877,6 +877,7 @@
     const sortOptionsByValue = new Map();
     const state = {
       composition: null,
+      requestSequence: 0,
       history: {
         availableDates: [],
         availableDateSet: new Set(),
@@ -1932,6 +1933,8 @@
     }
 
     async function loadPageComposition() {
+      const requestId = state.requestSequence + 1;
+      state.requestSequence = requestId;
       setStatusBadge({label: "Loading", tone: "neutral", detail: "loading page composition"});
       setStateBox(
         "warning",
@@ -1951,6 +1954,9 @@
         } catch (error) {
           throw new Error("non-json response from page composition surface");
         }
+        if (requestId !== state.requestSequence) {
+          return;
+        }
         if (!response.ok) {
           throw new Error(payload && payload.error ? payload.error : "page composition route returned " + response.status);
         }
@@ -1960,6 +1966,9 @@
         resetFilterState(payload);
         renderPage(payload);
       } catch (error) {
+        if (requestId !== state.requestSequence) {
+          return;
+        }
         const message = String(error && error.message ? error.message : error);
         renderSummaryCards([
           {
