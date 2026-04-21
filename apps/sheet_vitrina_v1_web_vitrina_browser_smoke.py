@@ -75,6 +75,7 @@ def main() -> None:
             expected_percent_rows=None,
             expect_cheap_refresh_same_freshness=None,
             expect_data_refresh_changes_freshness=None,
+            expected_final_badge_tone=None,
         )
         _print_summary(result)
         return
@@ -90,6 +91,7 @@ def main() -> None:
             },
             expect_cheap_refresh_same_freshness=True,
             expect_data_refresh_changes_freshness=True,
+            expected_final_badge_tone="error",
         )
     with LocalWebVitrinaFixtureServer(with_ready_snapshot=False) as error_base_url:
         error_result = run_error_state_check(error_base_url, ignore_https_errors=False)
@@ -220,6 +222,7 @@ def run_browser_checks(
     expected_percent_rows: dict[str, str] | None = None,
     expect_cheap_refresh_same_freshness: bool | None = None,
     expect_data_refresh_changes_freshness: bool | None = None,
+    expected_final_badge_tone: str | None = None,
 ) -> dict[str, object]:
     page_url = base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     if as_of_date:
@@ -254,13 +257,34 @@ def run_browser_checks(
                 "label": page.locator("[data-status-badge]").inner_text().strip(),
                 "class_name": page.locator("[data-status-badge]").get_attribute("class") or "",
             }
-            if final_badge["label"] != "Успешно" or "tone-success" not in final_badge["class_name"]:
-                raise AssertionError(f"status badge must end in Russian success state, got {final_badge}")
+            expected_badge_labels = {
+                "success": "Успешно",
+                "warning": "Внимание",
+                "error": "Ошибка",
+            }
+            if expected_final_badge_tone is None:
+                if final_badge["label"] not in expected_badge_labels.values():
+                    raise AssertionError(f"status badge must end in a Russian semantic state, got {final_badge}")
+            else:
+                expected_label = expected_badge_labels[expected_final_badge_tone]
+                if final_badge["label"] != expected_label or f"tone-{expected_final_badge_tone}" not in final_badge["class_name"]:
+                    raise AssertionError(
+                        f"status badge must end in truthful {expected_final_badge_tone} state, got {final_badge}"
+                    )
             initial_summary_cards = _read_summary_cards(page)
             initial_activity_surface = _read_activity_surface(
                 page,
                 allow_empty_log=expected_percent_rows is None,
             )
+            first_upload_item = (initial_activity_surface["upload"]["items"] or [None])[0]
+            if not isinstance(first_upload_item, dict):
+                raise AssertionError(f"activity surface must expose at least one upload item, got {initial_activity_surface}")
+            if first_upload_item.get("title") != "Цены и скидки":
+                raise AssertionError(f"activity titles must prefer human Russian labels, got {initial_activity_surface}")
+            if "Причина:" not in str(first_upload_item.get("detail") or ""):
+                raise AssertionError(f"warning/error activity items must explain the reason in Russian, got {initial_activity_surface}")
+            if "prices_snapshot" not in str(first_upload_item.get("technical") or ""):
+                raise AssertionError(f"activity items must keep the technical id only as secondary text, got {initial_activity_surface}")
             historical_panel_present = (
                 page.locator("[data-history-calendar]").count() == 1
                 and page.locator("[data-history-presets]").count() == 1
@@ -305,12 +329,14 @@ def run_browser_checks(
                 previous_summary_cards=initial_summary_cards,
                 previous_activity_surface=initial_activity_surface,
                 expect_same_freshness=expect_cheap_refresh_same_freshness,
+                expected_final_badge_tone=expected_final_badge_tone,
             )
             load_refresh_action = _check_load_refresh_action(
                 page,
                 previous_summary_cards=refresh_loading_status["summary_cards"],
                 previous_activity_surface=refresh_loading_status["activity_surface"],
                 expect_freshness_change=expect_data_refresh_changes_freshness,
+                expected_final_badge_tone=expected_final_badge_tone,
             )
 
             metric_select = page.locator("[data-filter-control='metric']")
@@ -564,6 +590,7 @@ def _check_refresh_loading_status(
     previous_summary_cards: dict[str, dict[str, str]],
     previous_activity_surface: dict[str, object],
     expect_same_freshness: bool | None,
+    expected_final_badge_tone: str | None,
 ) -> dict[str, object]:
     page.locator("[data-retry-button]").click()
     page.wait_for_function(
@@ -577,13 +604,7 @@ def _check_refresh_loading_status(
         "label": page.locator("[data-status-badge]").inner_text().strip(),
         "class_name": page.locator("[data-status-badge]").get_attribute("class") or "",
     }
-    page.wait_for_function(
-        """() => {
-          const badge = document.querySelector('[data-status-badge]');
-          return !!badge && badge.textContent.trim() === 'Успешно' && badge.className.includes('tone-success');
-        }""",
-        timeout=20000,
-    )
+    _wait_for_semantic_badge(page, expected_tone=expected_final_badge_tone, timeout=20000)
     next_summary_cards = _read_summary_cards(page)
     next_activity_surface = _read_activity_surface(page)
     _assert_page_refresh_card_changed(previous_summary_cards, next_summary_cards, action_name="cheap refresh")
@@ -620,6 +641,7 @@ def _check_load_refresh_action(
     previous_summary_cards: dict[str, dict[str, str]],
     previous_activity_surface: dict[str, object],
     expect_freshness_change: bool | None,
+    expected_final_badge_tone: str | None,
 ) -> dict[str, object]:
     button = page.locator("[data-load-refresh-button]")
     if button.count() != 1:
@@ -636,13 +658,11 @@ def _check_load_refresh_action(
         }""",
         timeout=5000,
     )
-    page.wait_for_function(
-        """() => {
-          const badge = document.querySelector('[data-status-badge]');
-          const button = document.querySelector('[data-load-refresh-button]');
-          return !!badge && !!button && badge.textContent.trim() === 'Успешно' && badge.className.includes('tone-success') && !button.disabled;
-        }""",
+    _wait_for_semantic_badge(
+        page,
+        expected_tone=expected_final_badge_tone,
         timeout=45000,
+        require_enabled_button=True,
     )
     next_summary_cards = _read_summary_cards(page)
     next_activity_surface = _read_activity_surface(page)
@@ -715,6 +735,8 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
             raise AssertionError(f"summary card {required_card_id!r} label mismatch, got {cards}")
     if "snapshot " not in cards["freshness"]["detail"] or "as_of_date " not in cards["freshness"]["detail"]:
         raise AssertionError(f"freshness card must expose truthful snapshot markers, got {cards['freshness']}")
+    if "T" in cards["freshness"]["value"] or "Z" in cards["freshness"]["value"]:
+        raise AssertionError(f"freshness card must render a user-facing timestamp without raw ISO artefacts, got {cards['freshness']}")
     if not cards["page_refresh"]["updated_at"]:
         raise AssertionError(f"page refresh card must expose an exact browser timestamp marker, got {cards['page_refresh']}")
     return cards
@@ -751,8 +773,10 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
             const items = node
               ? Array.from(node.querySelectorAll('[data-activity-summary-item]')).map(item => ({
                   endpoint_id: item.getAttribute('data-activity-summary-item') || '',
+                  title: ((item.querySelector('.activity-summary-endpoint') || {}).textContent || '').trim(),
                   status_label: ((item.querySelector('.status-pill') || {}).textContent || '').trim(),
-                  detail: ((item.querySelector('.activity-card-detail') || {}).textContent || '').trim()
+                  detail: ((item.querySelector('.activity-card-detail') || {}).textContent || '').trim(),
+                  technical: ((item.querySelector('.activity-summary-meta') || {}).textContent || '').trim()
                 }))
               : [];
             return {
@@ -782,9 +806,47 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
     update_ids = [item["endpoint_id"] for item in payload["update"]["items"]]
     if not upload_ids and allow_empty_log:
         return payload
-    if not upload_ids or upload_ids != update_ids:
-        raise AssertionError(f"upload/update summary blocks must expose the same endpoint list, got {payload}")
+    if not upload_ids or sorted(upload_ids) != sorted(update_ids):
+        raise AssertionError(f"upload/update summary blocks must expose the same endpoint set, got {payload}")
     return payload
+
+
+def _wait_for_semantic_badge(
+    page: object,
+    *,
+    expected_tone: str | None,
+    timeout: int,
+    require_enabled_button: bool = False,
+) -> None:
+    expected_label = _badge_label(expected_tone) if expected_tone else None
+    conditions = ["!!badge"]
+    if expected_label is None:
+        conditions.append("['Успешно', 'Внимание', 'Ошибка'].includes(badge.textContent.trim())")
+    else:
+        conditions.append(f"badge.textContent.trim() === '{expected_label}'")
+        conditions.append(f"badge.className.includes('tone-{expected_tone}')")
+    if require_enabled_button:
+        conditions.append("!!button")
+        conditions.append("!button.disabled")
+    page.wait_for_function(
+        f"""() => {{
+          const badge = document.querySelector('[data-status-badge]');
+          const button = document.querySelector('[data-load-refresh-button]');
+          return {' && '.join(conditions)};
+        }}""",
+        timeout=timeout,
+    )
+
+
+def _badge_label(tone: str | None) -> str | None:
+    mapping = {
+        "success": "Успешно",
+        "warning": "Внимание",
+        "error": "Ошибка",
+    }
+    if tone is None:
+        return None
+    return mapping[tone]
 
 
 def _activity_block_matches(previous_block: dict[str, object], next_block: dict[str, object]) -> bool:
@@ -976,7 +1038,7 @@ def _build_plan(
                         2,
                         2,
                         "",
-                        "",
+                        "resolution_rule=accepted_prior_current_runtime_cache",
                     ],
                     [
                         "prices_snapshot[today_current]",
@@ -1053,7 +1115,7 @@ def _stub_sheet_refresh_request(entrypoint, runtime, *, as_of_date=None, log=Non
     refreshed_at = entrypoint.refreshed_at_factory()
     emit(f"refresh_stub_start snapshot_id={plan.snapshot_id} refreshed_at={refreshed_at}")
     emit('event=source_step_finish source=seller_funnel_snapshot temporal_slot=today_current endpoint="GET /v1/sales-funnel/daily?date=<YYYY-MM-DD>" kind=success')
-    emit('event=source_step_finish source=web_source_snapshot temporal_slot=today_current endpoint="GET /v1/search-analytics/snapshot?date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>" kind=success')
+    emit('event=source_step_finish source=web_source_snapshot temporal_slot=today_current endpoint="GET /v1/search-analytics/snapshot?date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>" kind=success note="resolution_rule=accepted_prior_current_runtime_cache"')
     emit('event=source_step_finish source=prices_snapshot temporal_slot=today_current endpoint="POST /api/v2/list/goods/filter" kind=error note="no payload returned"')
     refresh_result = runtime.save_sheet_vitrina_ready_snapshot(
         current_state=current_state,

@@ -349,11 +349,11 @@
 
     .activity-summary-endpoint {
       margin: 0;
-      font-size: 11px;
+      font-size: 12px;
+      font-weight: 600;
       line-height: 1.45;
       color: var(--text);
       word-break: break-word;
-      font-family: Menlo, Consolas, Monaco, "Liberation Mono", monospace;
     }
 
     .panel {
@@ -1562,12 +1562,13 @@
     function renderSummaryCards(cards) {
       const renderedCards = composeSummaryCards(cards);
       summaryGridNode.innerHTML = renderedCards.map(function(card) {
+        const valueText = formatSummaryCardValue(card);
         return [
           '<article class="summary-card tone-' + escapeHtml(normalizeTone(card.tone)) + '" data-summary-card="' + escapeHtml(card.card_id || "") + '"' +
             (card.updated_at ? ' data-summary-card-updated-at="' + escapeHtml(card.updated_at) + '"' : "") +
             '>',
           '<div class="summary-card-label" data-summary-card-label>' + escapeHtml(card.label) + '</div>',
-          '<div class="summary-card-value" data-summary-card-value>' + escapeHtml(card.value) + '</div>',
+          '<div class="summary-card-value" data-summary-card-value>' + escapeHtml(valueText) + '</div>',
           '<div class="summary-card-detail" data-summary-card-detail>' + escapeHtml(card.detail || "") + '</div>',
           "</article>"
         ].join("");
@@ -1626,25 +1627,33 @@
       subtitleNode.textContent = String(block.subtitle || "");
       const detailParts = [];
       if (block.updated_at) {
-        detailParts.push(String(block.updated_at));
+        detailParts.push(formatTimestampDisplay(block.updated_at));
       }
       if (block.detail) {
         detailParts.push(String(block.detail));
       }
-      metaNode.textContent = detailParts.join(" · ") || "Статусы по endpoint-ам пока недоступны.";
+      metaNode.textContent = detailParts.join(" · ") || "Статусы по источникам пока недоступны.";
       const items = Array.isArray(block.items) ? block.items : [];
       if (!items.length) {
-        listNode.innerHTML = '<p class="activity-empty">' + escapeHtml(block.empty_message || "Статусы по endpoint-ам пока недоступны.") + "</p>";
+        listNode.innerHTML = '<p class="activity-empty">' + escapeHtml(block.empty_message || "Статусы по источникам пока недоступны.") + "</p>";
         return;
       }
       listNode.innerHTML = items.map(function(item) {
+        const title = String(item.label_ru || item.endpoint_label || item.source_key || item.endpoint_id || "");
+        const description = String(item.description_ru || "");
+        const reason = String(item.reason_ru || "");
+        const technicalText = String(item.technical_text || item.technical_key || item.source_key || item.endpoint_id || "");
+        const detail = description && reason
+          ? description + " Причина: " + reason
+          : (description || reason || String(item.detail || item.source_key || ""));
         return [
           '<article class="activity-summary-item" data-activity-summary-item="' + escapeHtml(item.endpoint_id || "") + '">',
           '<div class="activity-summary-top">',
-          '<p class="activity-summary-endpoint">' + escapeHtml(item.endpoint_label || item.source_key || item.endpoint_id || "") + '</p>',
+          '<p class="activity-summary-endpoint">' + escapeHtml(title) + '</p>',
           '<span class="status-pill tone-' + escapeHtml(normalizeTone(item.tone)) + '">' + escapeHtml(item.status_label || "") + '</span>',
           '</div>',
-          '<p class="activity-card-detail">' + escapeHtml(item.detail || item.source_key || "") + '</p>',
+          '<p class="activity-card-detail">' + escapeHtml(detail) + '</p>',
+          (technicalText ? '<p class="activity-summary-meta">' + escapeHtml(technicalText) + '</p>' : ''),
           '</article>'
         ].join("");
       }).join("");
@@ -1657,11 +1666,34 @@
       return {
         card_id: "page_refresh",
         label: "Последнее обновление страницы",
-        value: formatClientTimestamp(state.page.lastRenderedAt),
+        value: state.page.lastRenderedAt.toISOString(),
+        value_kind: "timestamp",
         detail: "последний успешный reread page composition в этом браузере",
         updated_at: state.page.lastRenderedAt.toISOString(),
         tone: "neutral"
       };
+    }
+
+    function formatSummaryCardValue(card) {
+      if (card && card.value_kind === "timestamp") {
+        return formatTimestampDisplay(card.value);
+      }
+      return String((card && card.value) || "");
+    }
+
+    function formatTimestampDisplay(value) {
+      if (value instanceof Date && !Number.isNaN(value.getTime())) {
+        return formatClientTimestamp(value);
+      }
+      const text = String(value || "").trim();
+      if (!text) {
+        return "";
+      }
+      const parsed = new Date(text);
+      if (Number.isNaN(parsed.getTime())) {
+        return text;
+      }
+      return formatClientTimestamp(parsed);
     }
 
     function formatClientTimestamp(dateValue) {

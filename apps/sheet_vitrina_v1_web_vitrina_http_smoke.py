@@ -190,16 +190,28 @@ def main() -> None:
                 raise AssertionError(f"web-vitrina log block must not fake a stale job download path, got {activity_surface}")
             if log_block.get("tone") != "error":
                 raise AssertionError(f"web-vitrina log block must surface persisted warning/error fallback, got {activity_surface}")
-            if "Transient refresh-log" not in str(log_block.get("subtitle", "")):
+            if "Лог последнего refresh" not in str(log_block.get("subtitle", "")):
                 raise AssertionError(f"web-vitrina log block subtitle mismatch, got {activity_surface}")
             upload_items = activity_surface.get("upload_summary", {}).get("items") or []
             update_items = activity_surface.get("update_summary", {}).get("items") or []
             if [item.get("endpoint_id") for item in upload_items] != [item.get("endpoint_id") for item in update_items]:
                 raise AssertionError(f"web-vitrina activity endpoint ids mismatch, got {activity_surface}")
-            if [item.get("status_label") for item in upload_items] != ["Успешно", "Успешно", "Ошибка"]:
-                raise AssertionError(f"upload summary binary status mismatch, got {activity_surface}")
-            if [item.get("status_label") for item in update_items] != ["Успешно", "Успешно", "Ошибка"]:
-                raise AssertionError(f"update summary binary status mismatch, got {activity_surface}")
+            if [item.get("endpoint_id") for item in upload_items] != [
+                "prices_snapshot",
+                "web_source_snapshot",
+                "seller_funnel_snapshot",
+            ]:
+                raise AssertionError(f"upload summary must be sorted error -> warning -> success, got {activity_surface}")
+            if [item.get("status_label") for item in upload_items] != ["Ошибка", "Внимание", "Успешно"]:
+                raise AssertionError(f"upload summary status mismatch, got {activity_surface}")
+            if [item.get("status_label") for item in update_items] != ["Ошибка", "Внимание", "Успешно"]:
+                raise AssertionError(f"update summary status mismatch, got {activity_surface}")
+            if upload_items[0].get("label_ru") != "Цены и скидки" or upload_items[0].get("reason_ru") != "данные не получены":
+                raise AssertionError(f"upload summary russian label/reason mismatch, got {activity_surface}")
+            if update_items[1].get("label_ru") != "Поисковая аналитика" or update_items[1].get("reason_ru") != "использована подтверждённая версия из runtime cache":
+                raise AssertionError(f"update summary warning reason mismatch, got {activity_surface}")
+            if "seller_funnel_snapshot" not in str(update_items[2].get("technical_text") or ""):
+                raise AssertionError(f"activity summary technical id mismatch, got {activity_surface}")
             if composition_payload.get("status_badge", {}).get("tone") != "error":
                 raise AssertionError(f"web-vitrina page composition must reflect semantic error tone, got {composition_payload}")
 
@@ -319,7 +331,7 @@ def _build_plan(
                         2,
                         2,
                         "",
-                        "",
+                        "resolution_rule=accepted_prior_current_runtime_cache",
                     ],
                     [
                         "prices_snapshot[today_current]",
@@ -383,7 +395,7 @@ def _stub_refresh_run(
     current_state = runtime.load_current_state()
     refreshed_at = entrypoint.refreshed_at_factory()
     log('event=source_step_finish source=seller_funnel_snapshot temporal_slot=today_current endpoint="GET /v1/sales-funnel/daily?date=<YYYY-MM-DD>" kind=success')
-    log('event=source_step_finish source=web_source_snapshot temporal_slot=today_current endpoint="GET /v1/search-analytics/snapshot?date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>" kind=success')
+    log('event=source_step_finish source=web_source_snapshot temporal_slot=today_current endpoint="GET /v1/search-analytics/snapshot?date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>" kind=success note="resolution_rule=accepted_prior_current_runtime_cache"')
     log('event=source_step_finish source=prices_snapshot temporal_slot=today_current endpoint="POST /api/v2/list/goods/filter" kind=error note="no payload returned"')
     result = runtime.save_sheet_vitrina_ready_snapshot(
         current_state=current_state,

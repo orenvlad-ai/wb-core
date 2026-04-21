@@ -151,6 +151,10 @@ def main() -> None:
             raise AssertionError(f"status summary card mismatch, got {summary_cards}")
         if summary_cards["freshness"]["label"] != "Свежесть данных":
             raise AssertionError(f"freshness summary card label mismatch, got {summary_cards}")
+        if summary_cards["freshness"]["value_kind"] != "timestamp":
+            raise AssertionError(f"freshness summary card must expose timestamp formatting kind, got {summary_cards['freshness']}")
+        if summary_cards["freshness"]["updated_at"] != "2026-04-20T12:05:00Z":
+            raise AssertionError(f"freshness summary card updated_at mismatch, got {summary_cards['freshness']}")
         if "snapshot " not in summary_cards["freshness"]["detail"] or "as_of_date 2026-04-20" not in summary_cards["freshness"]["detail"]:
             raise AssertionError(f"freshness summary card detail mismatch, got {summary_cards['freshness']}")
         if "snapshot" in summary_cards:
@@ -162,7 +166,15 @@ def main() -> None:
         update_items = activity_surface["update_summary"]["items"]
         if [item["endpoint_id"] for item in upload_items] != [item["endpoint_id"] for item in update_items]:
             raise AssertionError(f"upload/update endpoint ids must stay aligned, got {activity_surface}")
-        if upload_items[0]["status_label"] != "Успешно" or update_items[1]["status_label"] != "Ошибка":
+        if [item["status_label"] for item in upload_items] != ["Ошибка", "Внимание", "Успешно"]:
+            raise AssertionError(f"upload activity summary statuses mismatch, got {activity_surface}")
+        if [item["label_ru"] for item in upload_items] != ["Цены и скидки", "Поисковая аналитика", "Воронка продавца"]:
+            raise AssertionError(f"upload activity labels mismatch, got {activity_surface}")
+        if "Причина" not in upload_items[0]["detail"] or upload_items[0]["reason_ru"] != "данные не получены":
+            raise AssertionError(f"upload activity reason mismatch, got {activity_surface}")
+        if "web_source_snapshot" not in upload_items[1]["technical_text"]:
+            raise AssertionError(f"upload activity technical text mismatch, got {activity_surface}")
+        if update_items[1]["status_label"] != "Внимание" or update_items[1]["reason_ru"] != "использована подтверждённая версия из runtime cache":
             raise AssertionError(f"activity summary items mismatch, got {activity_surface}")
         ordered_row_ids = [row["row_id"] for row in composition["table_surface"]["rows"]]
         expected_row_ids = [
@@ -359,20 +371,43 @@ def _build_activity_surface_fixture() -> dict[str, object]:
             "updated_at": "2026-04-20T12:05:00Z",
             "items": [
                 {
-                    "endpoint_id": "seller_funnel_snapshot",
-                    "endpoint_label": "GET /v1/sales-funnel/daily?date=<YYYY-MM-DD>",
-                    "source_key": "seller_funnel_snapshot",
-                    "status_label": "Успешно",
-                    "tone": "success",
-                    "detail": "сегодня: Успешно",
-                },
-                {
                     "endpoint_id": "prices_snapshot",
                     "endpoint_label": "POST /api/v2/list/goods/filter",
                     "source_key": "prices_snapshot",
+                    "label_ru": "Цены и скидки",
+                    "description_ru": "Текущие цены продавца и скидки по SKU.",
+                    "reason_ru": "данные не получены",
+                    "technical_key": "prices_snapshot",
+                    "technical_text": "prices_snapshot · POST /api/v2/list/goods/filter",
                     "status_label": "Ошибка",
                     "tone": "error",
-                    "detail": "сегодня: Ошибка",
+                    "detail": "Текущие цены продавца и скидки по SKU. Причина: данные не получены",
+                },
+                {
+                    "endpoint_id": "web_source_snapshot",
+                    "endpoint_label": "GET /v1/search-analytics/snapshot?date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>",
+                    "source_key": "web_source_snapshot",
+                    "label_ru": "Поисковая аналитика",
+                    "description_ru": "Просмотры, CTR, заказы и средняя позиция в поиске.",
+                    "reason_ru": "использована подтверждённая версия из runtime cache",
+                    "technical_key": "web_source_snapshot",
+                    "technical_text": "web_source_snapshot · GET /v1/search-analytics/snapshot?date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>",
+                    "status_label": "Внимание",
+                    "tone": "warning",
+                    "detail": "Просмотры, CTR, заказы и средняя позиция в поиске. Причина: использована подтверждённая версия из runtime cache",
+                },
+                {
+                    "endpoint_id": "seller_funnel_snapshot",
+                    "endpoint_label": "GET /v1/sales-funnel/daily?date=<YYYY-MM-DD>",
+                    "source_key": "seller_funnel_snapshot",
+                    "label_ru": "Воронка продавца",
+                    "description_ru": "Показы карточки, открытия и базовая конверсия за дату.",
+                    "reason_ru": "",
+                    "technical_key": "seller_funnel_snapshot",
+                    "technical_text": "seller_funnel_snapshot · GET /v1/sales-funnel/daily?date=<YYYY-MM-DD>",
+                    "status_label": "Успешно",
+                    "tone": "success",
+                    "detail": "Показы карточки, открытия и базовая конверсия за дату.",
                 },
             ],
             "empty_message": "",
@@ -384,20 +419,43 @@ def _build_activity_surface_fixture() -> dict[str, object]:
             "updated_at": "2026-04-20T12:05:00Z",
             "items": [
                 {
-                    "endpoint_id": "seller_funnel_snapshot",
-                    "endpoint_label": "GET /v1/sales-funnel/daily?date=<YYYY-MM-DD>",
-                    "source_key": "seller_funnel_snapshot",
-                    "status_label": "Успешно",
-                    "tone": "success",
-                    "detail": "сегодня: Успешно",
-                },
-                {
                     "endpoint_id": "prices_snapshot",
                     "endpoint_label": "POST /api/v2/list/goods/filter",
                     "source_key": "prices_snapshot",
+                    "label_ru": "Цены и скидки",
+                    "description_ru": "Текущие цены продавца и скидки по SKU.",
+                    "reason_ru": "данные не получены",
+                    "technical_key": "prices_snapshot",
+                    "technical_text": "prices_snapshot · POST /api/v2/list/goods/filter",
                     "status_label": "Ошибка",
                     "tone": "error",
-                    "detail": "сегодня: Ошибка",
+                    "detail": "Текущие цены продавца и скидки по SKU. Причина: данные не получены",
+                },
+                {
+                    "endpoint_id": "web_source_snapshot",
+                    "endpoint_label": "GET /v1/search-analytics/snapshot?date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>",
+                    "source_key": "web_source_snapshot",
+                    "label_ru": "Поисковая аналитика",
+                    "description_ru": "Просмотры, CTR, заказы и средняя позиция в поиске.",
+                    "reason_ru": "использована подтверждённая версия из runtime cache",
+                    "technical_key": "web_source_snapshot",
+                    "technical_text": "web_source_snapshot · GET /v1/search-analytics/snapshot?date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>",
+                    "status_label": "Внимание",
+                    "tone": "warning",
+                    "detail": "Просмотры, CTR, заказы и средняя позиция в поиске. Причина: использована подтверждённая версия из runtime cache",
+                },
+                {
+                    "endpoint_id": "seller_funnel_snapshot",
+                    "endpoint_label": "GET /v1/sales-funnel/daily?date=<YYYY-MM-DD>",
+                    "source_key": "seller_funnel_snapshot",
+                    "label_ru": "Воронка продавца",
+                    "description_ru": "Показы карточки, открытия и базовая конверсия за дату.",
+                    "reason_ru": "",
+                    "technical_key": "seller_funnel_snapshot",
+                    "technical_text": "seller_funnel_snapshot · GET /v1/sales-funnel/daily?date=<YYYY-MM-DD>",
+                    "status_label": "Успешно",
+                    "tone": "success",
+                    "detail": "Показы карточки, открытия и базовая конверсия за дату.",
                 },
             ],
             "empty_message": "",

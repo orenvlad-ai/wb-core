@@ -105,7 +105,9 @@ def build_web_vitrina_page_composition(
                 "card_id": "freshness",
                 "label": "Свежесть данных",
                 "value": str(contract_payload["meta"]["refreshed_at"]),
+                "value_kind": "timestamp",
                 "detail": _freshness_detail(contract_payload),
+                "updated_at": str(contract_payload["meta"]["refreshed_at"]),
                 "tone": "neutral",
             },
         ],
@@ -349,9 +351,27 @@ def _normalize_endpoint_block(value: Any, *, default_title: str) -> dict[str, An
                 "endpoint_id": str(item_payload.get("endpoint_id") or ""),
                 "endpoint_label": str(item_payload.get("endpoint_label") or ""),
                 "source_key": str(item_payload.get("source_key") or ""),
+                "label_ru": str(
+                    item_payload.get("label_ru")
+                    or item_payload.get("endpoint_label")
+                    or item_payload.get("source_key")
+                    or item_payload.get("endpoint_id")
+                    or ""
+                ),
+                "description_ru": str(item_payload.get("description_ru") or ""),
+                "reason_ru": str(item_payload.get("reason_ru") or ""),
+                "technical_key": str(
+                    item_payload.get("technical_key")
+                    or item_payload.get("source_key")
+                    or item_payload.get("endpoint_id")
+                    or ""
+                ),
+                "technical_text": str(item_payload.get("technical_text") or ""),
                 "status_label": str(item_payload.get("status_label") or ""),
                 "tone": str(item_payload.get("tone") or "neutral"),
                 "detail": str(item_payload.get("detail") or ""),
+                "severity_rank": int(item_payload.get("severity_rank") or 0),
+                "source_order": int(item_payload.get("source_order") or 0),
             }
         )
     return {
@@ -360,7 +380,7 @@ def _normalize_endpoint_block(value: Any, *, default_title: str) -> dict[str, An
         "detail": str(payload.get("detail") or ""),
         "updated_at": str(payload.get("updated_at") or ""),
         "items": items,
-        "empty_message": str(payload.get("empty_message") or "Статусы по endpoint-ам пока недоступны."),
+        "empty_message": str(payload.get("empty_message") or "Статусы по источникам пока недоступны."),
     }
 
 

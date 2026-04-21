@@ -165,6 +165,8 @@ Public probe validates:
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition` returns `200` + JSON `web_vitrina_page_composition` v1 with `meta`, `summary_cards`, `filter_surface`, `table_surface`, `status_summary`, `capabilities`; route stays read-only and must not trigger refresh/upstream fetch from the public read path
   - top badge / summary tone must follow semantic source truth of the visible snapshot or selected period, not mere snapshot existence
   - `Лог` / `Загрузка данных` / `Обновление данных` must expose green/yellow/red semantic states and must not fabricate stale-job success when exact transient log association is unavailable
+  - item-ы inside `Загрузка данных` / `Обновление данных` must render Russian primary labels/descriptions, short Russian warning/error reasons, secondary technical source text and server-side severity order `error -> warning -> success`
+  - user-facing `Свежесть данных` value must stay separate from browser-owned `Последнее обновление страницы`, but use the same readable timestamp style without leaking raw ISO `T/Z`
 - `GET /v1/sheet-vitrina-v1/web-vitrina` returns either:
   - `200` + JSON `web_vitrina_contract` v1 when a ready snapshot is present, with root fields `contract_name`, `contract_version`, `page_route`, `read_route`, `meta`, `status_summary`, `schema`, `rows`, `capabilities`
   - truthful `422 {"error": ...}` when the ready snapshot is absent

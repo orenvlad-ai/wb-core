@@ -78,6 +78,62 @@ SHEET_VITRINA_RETRY_RUNNER_DESCRIPTION = (
     "Persisted retry runner: дожимает due yesterday_closed для historical/date-period families "
     "и same-day today_current только для WB API current-snapshot-only families; manual refresh такие хвосты не создаёт."
 )
+WEB_VITRINA_ACTIVITY_TONE_RANK = {
+    "error": 0,
+    "warning": 1,
+    "success": 2,
+    "neutral": 3,
+}
+WEB_VITRINA_ACTIVITY_ITEM_COPY = {
+    "seller_funnel_snapshot": {
+        "label_ru": "Воронка продавца",
+        "description_ru": "Показы карточки, открытия и базовая конверсия за дату.",
+    },
+    "sales_funnel_history": {
+        "label_ru": "История продаж",
+        "description_ru": "Заказы, выручка и конверсия WB за период.",
+    },
+    "web_source_snapshot": {
+        "label_ru": "Поисковая аналитика",
+        "description_ru": "Просмотры, CTR, заказы и средняя позиция в поиске.",
+    },
+    "prices_snapshot": {
+        "label_ru": "Цены и скидки",
+        "description_ru": "Текущие цены продавца и скидки по SKU.",
+    },
+    "sf_period": {
+        "label_ru": "Периодная аналитика WB",
+        "description_ru": "Локализация, рейтинг и другие периодные показатели WB.",
+    },
+    "spp": {
+        "label_ru": "СПП",
+        "description_ru": "Скидка постоянного покупателя на выбранную дату.",
+    },
+    "ads_bids": {
+        "label_ru": "Ставки рекламы",
+        "description_ru": "Ставки в поиске и рекомендациях по SKU.",
+    },
+    "stocks": {
+        "label_ru": "Остатки по складам",
+        "description_ru": "История остатков и суммарный stock по складам.",
+    },
+    "ads_compact": {
+        "label_ru": "Рекламная статистика",
+        "description_ru": "Просмотры, клики, заказы и расход по рекламе.",
+    },
+    "fin_report_daily": {
+        "label_ru": "Финансовый отчёт",
+        "description_ru": "Выкупы, доставка, комиссии и хранение за дату.",
+    },
+    "cost_price": {
+        "label_ru": "Себестоимость",
+        "description_ru": "Себестоимость из текущего загруженного bundle.",
+    },
+    "promo_by_price": {
+        "label_ru": "Промо и акции",
+        "description_ru": "Промо-показатели из browser-collected promo source.",
+    },
+}
 
 
 class RegistryUploadHttpEntrypoint:
@@ -306,9 +362,9 @@ class RegistryUploadHttpEntrypoint:
             else _extract_source_records_from_outcomes(refresh_status.source_outcomes)
         )
         update_records = _extract_source_records_from_outcomes(refresh_status.source_outcomes)
-        shared_source_keys = _ordered_activity_source_keys(upload_records, update_records)
-        upload_source_keys = shared_source_keys if upload_records else []
-        update_source_keys = shared_source_keys if update_records else []
+        shared_source_keys = _collect_activity_source_keys(upload_records, update_records)
+        upload_source_keys = _ordered_activity_source_keys(shared_source_keys, upload_records)
+        update_source_keys = _ordered_activity_source_keys(shared_source_keys, update_records)
         return {
             "log_block": _build_web_vitrina_log_block(
                 latest_job=latest_job,
@@ -318,15 +374,15 @@ class RegistryUploadHttpEntrypoint:
             "upload_summary": _build_web_vitrina_endpoint_summary_block(
                 title="Загрузка данных",
                 subtitle=(
-                    "Последний завершённый refresh-run."
+                    "Что вернули источники в последнем завершённом refresh."
                     if latest_job is not None
-                    else "Transient refresh-run log недоступен; показываем persisted outcome текущего snapshot."
+                    else "Transient refresh-log недоступен; показываем сохранённый итог по текущему срезу."
                 ),
                 records=upload_records,
                 ordered_source_keys=upload_source_keys,
                 empty_message=(
                     "Последний завершённый refresh-run в памяти сервиса пока не найден. "
-                    "Показываем только persisted source truth текущего snapshot."
+                    "Показываем только сохранённый итог по текущему срезу."
                 ),
                 block_updated_at=(
                     str(latest_job.get("finished_at") or latest_job.get("started_at") or "")
@@ -342,12 +398,12 @@ class RegistryUploadHttpEntrypoint:
             "update_summary": _build_web_vitrina_endpoint_summary_block(
                 title="Обновление данных",
                 subtitle=(
-                    "Persisted STATUS current read-side snapshot. Cheap reread перечитывает именно это "
-                    "состояние и не запускает скрытый upstream fetch."
+                    "Сохранённый итог для текущего среза. Повторное открытие страницы перечитывает именно "
+                    "это состояние и не запускает скрытую загрузку источников."
                 ),
                 records=update_records,
                 ordered_source_keys=update_source_keys,
-                empty_message="STATUS-строки для текущего snapshot пока не materialized.",
+                empty_message="STATUS-строки для текущего среза пока не материализованы.",
                 block_updated_at=refreshed_at,
                 block_detail=f"snapshot {snapshot_id} · as_of_date {snapshot_as_of_date} · {read_model}",
             ),
@@ -1626,8 +1682,8 @@ def _noop_log(_: str) -> None:
 def _empty_web_vitrina_activity_surface(
     *,
     log_message: str = "Последний релевантный run/log пока недоступен.",
-    upload_message: str = "Последний upload-run по endpoint-ам пока недоступен.",
-    update_message: str = "Persisted update summary для текущего snapshot пока недоступен.",
+    upload_message: str = "Последний upload-run по источникам пока недоступен.",
+    update_message: str = "Сохранённый итог по текущему срезу пока недоступен.",
 ) -> dict[str, Any]:
     return {
         "log_block": {
@@ -1685,7 +1741,7 @@ def _build_web_vitrina_log_block(
         )
         return {
             "title": "Лог",
-            "subtitle": "Transient refresh-log для текущего snapshot недоступен",
+            "subtitle": "Лог последнего refresh для текущего среза недоступен",
             "status_label": semantic_label,
             "tone": semantic_tone,
             "detail": semantic_reason,
@@ -1693,7 +1749,7 @@ def _build_web_vitrina_log_block(
             "line_count": 0,
             "download_path": "",
             "log_filename": "",
-            "empty_message": "Persisted snapshot truth сохранён, но transient refresh-log для этого snapshot недоступен.",
+            "empty_message": "Сохранённый итог есть, но transient refresh-log для этого среза недоступен.",
         }
     job_payload = _with_job_urls_from_job_snapshot(latest_job, job_path)
     semantic_status = str(((job_payload.get("result") or {}).get("semantic_status")) or "").strip()
@@ -1718,7 +1774,7 @@ def _build_web_vitrina_log_block(
         detail_parts.append(f"показаны последние {line_limit} строк")
     return {
         "title": "Лог",
-        "subtitle": "Последний релевантный refresh-run",
+        "subtitle": "Последний релевантный refresh",
         "status_label": status_label or _semantic_status_label(tone),
         "tone": tone,
         "detail": " · ".join(part for part in detail_parts if part),
@@ -1761,13 +1817,15 @@ def _build_web_vitrina_endpoint_summary_block(
             "items": [],
             "empty_message": empty_message,
         }
-    items = [
-        _build_endpoint_summary_item(
-            source_key=source_key,
-            record=records.get(source_key),
+    items = []
+    for source_order, source_key in enumerate(ordered_source_keys):
+        items.append(
+            _build_endpoint_summary_item(
+                source_key=source_key,
+                record=records.get(source_key),
+                source_order=source_order,
+            )
         )
-        for source_key in ordered_source_keys
-    ]
     if not any(item.get("status_label") for item in items):
         items = []
     return {
@@ -1784,31 +1842,52 @@ def _build_endpoint_summary_item(
     *,
     source_key: str,
     record: Mapping[str, Any] | None,
+    source_order: int,
 ) -> dict[str, Any]:
-    spec = SOURCE_DIAGNOSTIC_SPECS.get(source_key, {})
-    endpoint_label = str(spec.get("endpoint") or source_key)
+    copy = _web_vitrina_activity_item_copy(source_key)
+    tone = str((record or {}).get("tone") or "warning")
+    status_label = str((record or {}).get("status_label") or _semantic_status_label(tone))
+    severity_rank = _activity_tone_rank(tone)
     if record is None:
         return {
             "endpoint_id": source_key,
-            "endpoint_label": endpoint_label,
+            "endpoint_label": copy["endpoint_label"],
             "source_key": source_key,
+            "label_ru": copy["label_ru"],
+            "description_ru": copy["description_ru"],
+            "reason_ru": "обновление не подтверждено",
+            "technical_key": copy["technical_key"],
+            "technical_text": copy["technical_text"],
             "status_label": "Внимание",
             "tone": "warning",
-            "detail": "нет подтверждённой записи по endpoint в server-owned state",
+            "detail": "обновление не подтверждено",
+            "severity_rank": _activity_tone_rank("warning"),
+            "source_order": source_order,
         }
-    tone = str(record.get("tone") or "warning")
-    detail_parts = [str(record.get("detail") or "").strip()]
-    note = str(record.get("note") or "").strip()
-    if note and note not in detail_parts:
-        detail_parts.append(note)
-    detail = " · ".join(part for part in detail_parts if part)
+    reason_ru = _activity_reason_ru(
+        tone=tone,
+        detail=str(record.get("detail") or ""),
+        note=str(record.get("note") or ""),
+    )
+    detail = _activity_summary_detail(
+        description_ru=copy["description_ru"],
+        reason_ru=reason_ru,
+        fallback_detail=str(record.get("detail") or "").strip(),
+    )
     return {
         "endpoint_id": source_key,
-        "endpoint_label": endpoint_label,
+        "endpoint_label": copy["endpoint_label"],
         "source_key": source_key,
-        "status_label": str(record.get("status_label") or _semantic_status_label(tone)),
+        "label_ru": copy["label_ru"],
+        "description_ru": copy["description_ru"],
+        "reason_ru": reason_ru,
+        "technical_key": copy["technical_key"],
+        "technical_text": copy["technical_text"],
+        "status_label": status_label,
         "tone": tone,
         "detail": detail,
+        "severity_rank": severity_rank,
+        "source_order": source_order,
     }
 
 
@@ -1862,7 +1941,7 @@ def _extract_source_records_from_outcomes(
     return records
 
 
-def _ordered_activity_source_keys(
+def _collect_activity_source_keys(
     upload_records: Mapping[str, Mapping[str, Any]],
     update_records: Mapping[str, Mapping[str, Any]],
 ) -> list[str]:
@@ -1870,6 +1949,22 @@ def _ordered_activity_source_keys(
     ordered = [source_key for source_key in SOURCE_DIAGNOSTIC_SPECS if source_key in seen]
     extras = sorted(source_key for source_key in seen if source_key not in SOURCE_DIAGNOSTIC_SPECS)
     return ordered + extras
+
+
+def _ordered_activity_source_keys(
+    source_keys: Iterable[str],
+    records: Mapping[str, Mapping[str, Any]],
+) -> list[str]:
+    ordered = list(source_keys)
+    canonical_order = {source_key: index for index, source_key in enumerate(ordered)}
+    return sorted(
+        ordered,
+        key=lambda source_key: (
+            _activity_tone_rank(str((records.get(source_key) or {}).get("tone") or "warning")),
+            canonical_order.get(source_key, len(canonical_order)),
+            source_key,
+        ),
+    )
 
 
 def _accumulate_source_record(
@@ -1982,11 +2077,11 @@ def _slot_reason_from_log_record(
     if human_note:
         return human_note
     if normalized_kind == "success":
-        return "обновлено"
+        return "обновление подтверждено"
     if normalized_kind == "missing":
-        return "payload не materialized"
+        return "данные не получены"
     if normalized_kind == "not_available":
-        return "слот не обновлялся"
+        return "источник не обновлялся"
     if normalized_kind == "not_found":
         return "источник не вернул данные"
     return normalized_kind or "нужна проверка"
@@ -2008,7 +2103,7 @@ def _slot_label(slot: str) -> str:
     if slot == TEMPORAL_SLOT_TODAY_CURRENT:
         return "сегодня"
     if slot == "snapshot":
-        return "snapshot"
+        return "срез"
     return slot
 
 
@@ -2043,77 +2138,77 @@ def _humanize_note(note: str) -> str:
     replacements = (
         (
             "resolution_rule=accepted_closed_preserved_after_invalid_attempt",
-            "сохранён ранее принятый closed snapshot после невалидной попытки",
+            "использована последняя подтверждённая закрытая версия",
         ),
         (
             "resolution_rule=accepted_current_preserved_after_invalid_attempt",
-            "сохранён ранее принятый current snapshot после невалидной попытки",
+            "использована последняя подтверждённая текущая версия",
         ),
         (
             "resolution_rule=accepted_closed_from_prior_current_snapshot",
-            "использован ранее принятый current snapshot предыдущего дня",
+            "использована подтверждённая версия предыдущего дня",
         ),
         (
             "resolution_rule=accepted_closed_from_prior_current_cache",
-            "использован ранее принятый current snapshot из runtime cache",
+            "использована подтверждённая версия из runtime cache",
         ),
         (
             "resolution_rule=accepted_closed_runtime_snapshot",
-            "использован ранее принятый closed-day snapshot",
+            "использована последняя подтверждённая закрытая версия",
         ),
         (
             "resolution_rule=accepted_closed_from_interval_replay",
-            "использован сохранённый closed-day snapshot из interval replay",
+            "использована сохранённая закрытая версия из interval replay",
         ),
         (
             "resolution_rule=accepted_prior_current_runtime_cache",
-            "использован сохранённый current snapshot из runtime cache",
+            "использована подтверждённая версия из runtime cache",
         ),
         (
             "resolution_rule=exact_date_stocks_history_runtime_cache",
-            "использован exact-date runtime cache по stocks",
+            "использована сохранённая версия на точную дату",
         ),
         (
             "resolution_rule=exact_date_promo_current_runtime_cache",
-            "использован exact-date runtime cache по promo",
+            "использована сохранённая версия на точную дату",
         ),
         (
             "resolution_rule=exact_date_runtime_cache",
-            "использован exact-date runtime cache",
+            "использована сохранённая версия на точную дату",
         ),
         (
             "invalid_exact_snapshot=zero_filled_seller_funnel_snapshot",
-            "нулевой seller_funnel snapshot отклонён",
+            "источник вернул нулевой результат",
         ),
         (
             "invalid_exact_snapshot=zero_filled_web_source_snapshot",
-            "нулевой web_source snapshot отклонён",
+            "источник вернул нулевой результат",
         ),
         (
             "invalid_exact_snapshot=zero_filled_prices_snapshot",
-            "нулевой prices snapshot отклонён",
+            "источник вернул нулевой результат",
         ),
         (
             "invalid_exact_snapshot=zero_filled_ads_bids_snapshot",
-            "нулевой ads_bids snapshot отклонён",
+            "источник вернул нулевой результат",
         ),
         (
             "invalid_exact_snapshot=promo_live_source_incomplete",
-            "promo snapshot отклонён как incomplete",
+            "получена неполная версия",
         ),
-        ("no payload returned", "источник не вернул payload"),
+        ("no payload returned", "данные не получены"),
     )
     for marker, message in replacements:
         if marker in normalized:
             return message
     if "closure_state=closure_retrying" in normalized:
-        return "closed-day snapshot ещё не принят; будет retry"
+        return "источник ещё не закрылся на нужную дату; будет повторная попытка"
     if "closure_state=closure_pending" in normalized:
-        return "closed-day snapshot ожидает retry"
+        return "источник ещё не закрылся на нужную дату"
     if "closure_state=closure_rate_limited" in normalized:
-        return "источник ограничил запросы; retry запланирован"
+        return "источник ограничил запросы; повторная попытка запланирована"
     if "closure_state=closure_exhausted" in normalized:
-        return "retry для closed-day snapshot исчерпан"
+        return "повторные попытки исчерпаны"
     if "resolution_rule=latest_effective_from<=slot_date" in normalized:
         return ""
     return normalized
@@ -2147,6 +2242,105 @@ def _worst_tone(statuses: Iterable[str]) -> str:
     if any(item == "warning" for item in values):
         return "warning"
     return "success"
+
+
+def _activity_tone_rank(tone: str) -> int:
+    return WEB_VITRINA_ACTIVITY_TONE_RANK.get(str(tone or "").strip(), 4)
+
+
+def _web_vitrina_activity_item_copy(source_key: str) -> dict[str, str]:
+    spec = SOURCE_DIAGNOSTIC_SPECS.get(source_key, {})
+    item_copy = WEB_VITRINA_ACTIVITY_ITEM_COPY.get(source_key, {})
+    endpoint_label = str(spec.get("endpoint") or "").strip()
+    technical_parts = [source_key] if source_key else []
+    if endpoint_label:
+        technical_parts.append(endpoint_label)
+    return {
+        "label_ru": str(item_copy.get("label_ru") or source_key),
+        "description_ru": str(item_copy.get("description_ru") or ""),
+        "technical_key": source_key,
+        "technical_text": " · ".join(part for part in technical_parts if part),
+        "endpoint_label": endpoint_label,
+    }
+
+
+def _activity_reason_ru(*, tone: str, detail: str, note: str) -> str:
+    if str(tone or "").strip() == "success":
+        return ""
+    candidate = _humanize_activity_reason_text(detail) or _humanize_activity_reason_text(note)
+    if candidate:
+        return candidate
+    if tone == "error":
+        return "источник завершился ошибкой"
+    if tone == "warning":
+        return "обновление требует проверки"
+    return ""
+
+
+def _humanize_activity_reason_text(text: str) -> str:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return ""
+    parts: list[str] = []
+    for raw_part in normalized.split(" · "):
+        part = raw_part.strip()
+        if not part:
+            continue
+        prefix = ""
+        body = part
+        if ": " in part:
+            prefix_candidate, body_candidate = part.split(": ", 1)
+            if prefix_candidate in {"вчера", "сегодня", "snapshot", "срез"}:
+                prefix = "срез" if prefix_candidate == "snapshot" else prefix_candidate
+                body = body_candidate
+        humanized = body
+        replacements = (
+            ("Persisted STATUS не содержит итог по источнику", "итог по источнику не подтверждён"),
+            ("payload не materialized", "данные не получены"),
+            ("источник не вернул payload", "данные не получены"),
+            ("слот не обновлялся в текущем contour", "источник не обновлялся"),
+            ("источник помечен как blocked в текущем contour", "источник временно недоступен"),
+            ("использован сохранённый current snapshot из runtime cache", "использована подтверждённая версия из runtime cache"),
+            ("использован ранее принятый current snapshot из runtime cache", "использована подтверждённая версия из runtime cache"),
+            ("использован ранее принятый closed-day snapshot", "использована последняя подтверждённая закрытая версия"),
+            ("использована сохранённая закрытая версия из interval replay", "использована сохранённая закрытая версия"),
+            ("closed-day snapshot ещё не готов; ожидается retry", "источник ещё не закрылся на нужную дату"),
+            ("closed-day snapshot ещё не принят; будет retry", "источник ещё не закрылся на нужную дату"),
+            ("retry для closed-day snapshot исчерпан", "повторные попытки исчерпаны"),
+            ("источник ограничил запросы; retry запланирован", "источник ограничил запросы; повторная попытка запланирована"),
+            ("источник не вернул данные на точную дату", "данные на нужную дату не получены"),
+            ("обновление подтверждено", "обновление подтверждено"),
+        )
+        for marker, replacement in replacements:
+            if marker in humanized:
+                humanized = replacement
+                break
+        if humanized:
+            parts.append(f"{prefix}: {humanized}" if prefix else humanized)
+    deduplicated = list(dict.fromkeys(parts))
+    if len(deduplicated) == 1:
+        single = deduplicated[0]
+        for prefix in ("сегодня: ", "вчера: ", "срез: "):
+            if single.startswith(prefix):
+                return single[len(prefix):]
+    return " · ".join(deduplicated)
+
+
+def _activity_summary_detail(
+    *,
+    description_ru: str,
+    reason_ru: str,
+    fallback_detail: str,
+) -> str:
+    description = str(description_ru or "").strip()
+    reason = str(reason_ru or "").strip()
+    if description and reason:
+        return f"{description} Причина: {reason}"
+    if description:
+        return description
+    if reason:
+        return reason
+    return str(fallback_detail or "").strip()
 
 
 def _first_distinct_note(notes: list[str]) -> str:

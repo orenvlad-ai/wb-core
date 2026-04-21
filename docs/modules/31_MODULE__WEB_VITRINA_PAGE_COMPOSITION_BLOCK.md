@@ -39,7 +39,7 @@ related_docs:
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Phase 4 live page composition остаётся server-driven, но bounded UX semantics уточнены: existing `/sheet-vitrina-v1/vitrina` по-прежнему читает optional `surface=page_composition` на same read route, `Обновить` остаётся cheap reread текущего page composition, `Загрузить и обновить` reuse-ит canonical `POST /v1/sheet-vitrina-v1/refresh` + reread without Google `/load`, summary разделён на browser-owned `Последнее обновление страницы` и server-owned `Свежесть данных`, а рядом с action buttons materialized три server-owned инфоблока `Лог` / `Загрузка данных` / `Обновление данных`."
+update_note: "Phase 4 live page composition остаётся server-driven, но bounded UX semantics уточнены: existing `/sheet-vitrina-v1/vitrina` по-прежнему читает optional `surface=page_composition` на same read route, `Обновить` остаётся cheap reread текущего page composition, `Загрузить и обновить` reuse-ит canonical `POST /v1/sheet-vitrina-v1/refresh` + reread without Google `/load`, summary разделён на browser-owned `Последнее обновление страницы` и server-owned `Свежесть данных`, а item-ы в `Загрузка данных` / `Обновление данных` теперь server-side materialize-ят human-readable `label_ru / description_ru / reason_ru / technical_text`, сортируются как `error -> warning -> success` и показывают `Свежесть данных` в том же user-facing timestamp format без raw ISO `T/Z`."
 ---
 
 # 1. Идентификатор и статус
@@ -70,8 +70,8 @@ update_note: "Phase 4 live page composition остаётся server-driven, но
     - `Загрузить и обновить` = canonical server-side refresh from external sources + page reread, without Google Sheet write path
   - three server-driven action-adjacent information blocks:
     - `Лог` = compact fixed-height tail of the last relevant refresh-run plus `Скачать лог` via existing job/log contour; if exact transient job for the visible snapshot is unavailable, block must show persisted semantic fallback instead of stale green success
-    - `Загрузка данных` = per-endpoint semantic upload/fetch result from the last relevant refresh-run log or, when exact job association is unavailable, from persisted source outcomes of the visible snapshot
-    - `Обновление данных` = per-endpoint semantic materialization/update result from the persisted `STATUS` rows of the current read-side snapshot
+    - `Загрузка данных` = per-source semantic upload/fetch result from the last relevant refresh-run log or, when exact job association is unavailable, from persisted source outcomes of the visible snapshot; each item keeps Russian primary label/description, short Russian warning/error reason and only secondary technical source/endpoint text
+    - `Обновление данных` = per-source semantic materialization/update result from the persisted `STATUS` rows of the current read-side snapshot with the same human-readable item contract and server-side severity sorting `error -> warning -> success`
   - filters area
   - table container
   - truthful `loading / empty / error` states
@@ -148,11 +148,11 @@ update_note: "Phase 4 live page composition остаётся server-driven, но
 # 6. Какой smoke подтверждён
 
 - `apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py`
-  - confirms `composition_name/version`, source chain, state namespace, filter surface and ready/error composition behavior
+  - confirms `composition_name/version`, source chain, state namespace, filter surface, timestamp-format hint for `Свежесть данных` and human-readable activity payload fields
 - `apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py`
-  - confirms real page render, visible table, filter controls, empty state on no-match search, reset recovery, period selector UX (`calendar + presets + date_from/date_to + save/reset`) and truthful error state when the ready snapshot is absent
+  - confirms real page render, visible table, filter controls, Russian activity labels/reasons, unified readable freshness timestamp without raw ISO artefacts, empty state on no-match search, reset recovery, period selector UX (`calendar + presets + date_from/date_to + save/reset`) and truthful error state when the ready snapshot is absent
 - `apps/sheet_vitrina_v1_web_vitrina_http_smoke.py`
-  - confirms default `web_vitrina_contract` path stays stable, optional `date_from/date_to` works as bounded period window and optional `surface=page_composition` works on the same route
+  - confirms default `web_vitrina_contract` path stays stable, optional `date_from/date_to` works as bounded period window and optional `surface=page_composition` works on the same route with severity-sorted human activity items
 - `apps/registry_upload_http_entrypoint_hosted_runtime.py`
   - now probes both the live HTML page and the page-composition JSON surface
 
@@ -162,6 +162,9 @@ update_note: "Phase 4 live page composition остаётся server-driven, но
 - Existing stable seams are now used end-to-end in a live read-only surface.
 - The chosen client path stays intentionally minimal and repo-owned.
 - `Свежесть данных` stays server-owned and comes from the current read-side snapshot metadata (`refreshed_at / snapshot_id / as_of_date`), while `Последнее обновление страницы` is only the browser reread marker and is intentionally separate.
+- user-facing timestamp render is unified:
+  - `Свежесть данных` now reuses the same client formatter as `Последнее обновление страницы`
+  - raw ISO artefacts like `T` / `Z` stay machine-only and no longer leak into the visible page text
 - top badge and `Свежесть данных` tone now follow semantic snapshot truth:
   - green = confirmed normal result;
   - yellow = empty/zero/unchanged/stale/not_refreshed/preserved/retrying/not_verified;
@@ -172,6 +175,8 @@ update_note: "Phase 4 live page composition остаётся server-driven, но
   - log preview and `Скачать лог` reuse the existing in-memory job/log contour
   - upload summary is derived from the last relevant refresh job log and is not overwritten by cheap reread; if exact job association is unavailable, page shows persisted-source fallback with warning/error tone rather than unrelated stale run
   - update summary is derived from persisted `STATUS` rows of the current read-side snapshot and therefore may change only when the snapshot truth changes
+  - both blocks now sort item-ы server-side as `error -> warning -> success` while preserving canonical source order inside each severity bucket
+  - primary text is human Russian copy; technical source key / endpoint text stays secondary and muted
 - Historical period UX is intentionally thin:
   - calendar/preset panel lives in the same server template
   - `Сохранить` only rewrites query string and re-reads server payload
