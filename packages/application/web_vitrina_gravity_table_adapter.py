@@ -364,44 +364,110 @@ def _observed_column_width(
     column_id = str(column["id"])
     header_text = str(column["label"])
     value_type = str(column.get("value_type") or "")
-    max_text_length = len(header_text)
+    max_text_length = _header_measure_length(column_id, header_text)
     for row in rows:
         for cell in row["cells"]:
             if str(cell["column_id"]) != column_id:
                 continue
-            display_text = str(cell.get("display_text") or "")
-            if value_type.startswith("integer") or value_type.startswith("number") or value_type == "decimal":
-                display_text = display_text.replace(" ", "")
-            max_text_length = max(max_text_length, len(display_text))
+            max_text_length = max(
+                max_text_length,
+                len(_observed_cell_text(cell, value_type=value_type)),
+            )
             break
-    if column_id.startswith("date:"):
-        return max(104, int(max_text_length * 7.0 + 26))
-    char_width = 7.1 if value_type.startswith("integer") or value_type.startswith("number") or value_type == "decimal" else 6.7
-    return int(max_text_length * char_width + 26)
+    return int(max_text_length * _column_char_width(column_id, value_type=value_type) + _column_horizontal_padding(column_id))
 
 
 def _column_floor_width(column_id: str) -> int:
     if column_id == "row_order":
-        return 72
+        return 40
     if column_id.startswith("date:"):
-        return 104
+        return 84
     if column_id in {"scope_kind", "section"}:
-        return 92
-    if column_id in {"group", "nm_id"}:
-        return 96
+        return 76
+    if column_id == "group":
+        return 72
+    if column_id == "nm_id":
+        return 82
     if column_id == "scope_key":
-        return 116
+        return 90
     if column_id == "scope_label":
-        return 156
+        return 110
     if column_id == "metric_key":
-        return 148
+        return 108
     if column_id == "metric_label":
-        return 166
-    return 96
+        return 122
+    return 72
 
 
 def _min_size(width_hint: int) -> int:
-    return max(64, min(width_hint, 116))
+    return max(44, min(width_hint, 84))
+
+
+def _header_measure_length(column_id: str, header_text: str) -> int:
+    header_length = len(header_text)
+    if column_id == "row_order":
+        return min(header_length, 4)
+    if column_id.startswith("date:"):
+        return header_length
+    if column_id in {"scope_kind", "section"}:
+        return min(header_length, 8)
+    if column_id in {"group", "nm_id"}:
+        return min(header_length, 7)
+    if column_id in {"scope_key", "metric_key"}:
+        return min(header_length, 12)
+    if column_id in {"scope_label", "metric_label"}:
+        return min(header_length, 14)
+    return min(header_length, 12)
+
+
+def _observed_cell_text(cell: Mapping[str, Any], *, value_type: str) -> str:
+    display_text = str(cell.get("display_text") or "")
+    number_value = _coerce_number(cell.get("value"))
+    if number_value is None:
+        return display_text
+    cell_kind = str(cell.get("cell_kind") or "")
+    if cell_kind == "percent":
+        return _estimate_number_text(number_value * 100.0, decimals=2, use_grouping=False, suffix="%")
+    if cell_kind == "money":
+        return _estimate_number_text(number_value, decimals=0, use_grouping=True, suffix=" ₽")
+    if cell_kind == "number" or value_type.startswith("integer") or value_type.startswith("number") or value_type == "decimal":
+        return _estimate_number_text(number_value, decimals=0, use_grouping=True, suffix="")
+    return display_text
+
+
+def _coerce_number(value: Any) -> float | None:
+    try:
+        number_value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number_value if number_value == number_value and number_value not in {float("inf"), float("-inf")} else None
+
+
+def _estimate_number_text(
+    value: float,
+    *,
+    decimals: int,
+    use_grouping: bool,
+    suffix: str,
+) -> str:
+    number_pattern = f",.{decimals}f" if use_grouping else f".{decimals}f"
+    return format(value, number_pattern) + suffix
+
+
+def _column_char_width(column_id: str, *, value_type: str) -> float:
+    if column_id.startswith("date:"):
+        return 5.8
+    if value_type.startswith("integer") or value_type.startswith("number") or value_type == "decimal":
+        return 5.8
+    return 5.9
+
+
+def _column_horizontal_padding(column_id: str) -> int:
+    if column_id == "row_order":
+        return 10
+    if column_id.startswith("date:"):
+        return 14
+    return 16
 
 
 def _group_order(group_by_id: Mapping[str, Mapping[str, Any]], group_id: str) -> int:

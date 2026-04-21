@@ -25,8 +25,10 @@ def main() -> None:
         raise AssertionError(f"view_model meta counts mismatch, got {view_model.meta}")
 
     columns = {column.id: column for column in view_model.columns}
-    if columns["scope_label"].sticky != "left" or columns["scope_label"].width_hint != 280:
+    if columns["scope_label"].sticky != "left" or columns["scope_label"].width_hint != 208:
         raise AssertionError(f"scope_label column intent mismatch, got {columns['scope_label']}")
+    if columns["row_order"].width_hint != 52 or columns["date:2026-04-20"].width_hint != 88:
+        raise AssertionError(f"compact width hints mismatch, got {columns['row_order']} / {columns['date:2026-04-20']}")
     if columns["date:2026-04-20"].kind != "temporal_measure" or columns["date:2026-04-20"].align != "end":
         raise AssertionError(f"temporal column mapping mismatch, got {columns['date:2026-04-20']}")
     if columns["scope_kind"].align != "center" or columns["scope_kind"].filter_key != "scope_kind":
@@ -87,6 +89,9 @@ def main() -> None:
     formatter_ids = {item.formatter_id for item in view_model.formatters}
     if formatter_ids != {"badge_default", "empty_default", "money_rub", "number_default", "percent_default", "text_default", "unknown_default"}:
         raise AssertionError(f"formatter library mismatch, got {view_model.formatters}")
+    percent_formatter = next(item for item in view_model.formatters if item.formatter_id == "percent_default")
+    if percent_formatter.value_multiplier != 100.0:
+        raise AssertionError(f"percent formatter multiplier mismatch, got {percent_formatter}")
     if view_model.state_model.current_state != "ready":
         raise AssertionError(f"state model mismatch, got {view_model.state_model}")
 
@@ -232,7 +237,7 @@ def _build_contract_payload() -> dict[str, object]:
                 "group": "Чехлы",
                 "nm_id": 101,
                 "format": "percent",
-                "values_by_date": {"2026-04-19": "", "2026-04-20": 12.5},
+                "values_by_date": {"2026-04-19": "", "2026-04-20": 0.125},
             },
             {
                 "row_id": "SKU:102|avg_addToCartConversion",
@@ -246,7 +251,7 @@ def _build_contract_payload() -> dict[str, object]:
                 "group": "Чехлы",
                 "nm_id": 102,
                 "format": "percent",
-                "values_by_date": {"2026-04-19": "", "2026-04-20": 13.5},
+                "values_by_date": {"2026-04-19": "", "2026-04-20": 0.135},
             },
         ],
         "capabilities": {

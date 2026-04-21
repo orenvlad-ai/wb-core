@@ -102,6 +102,7 @@ class WebVitrinaViewModelFormatter:
     suffix: str | None = None
     null_display: str = "—"
     date_pattern: str | None = None
+    value_multiplier: float | None = None
 
 
 @dataclass(frozen=True)

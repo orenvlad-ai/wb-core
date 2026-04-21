@@ -67,6 +67,7 @@ _FORMATTER_LIBRARY: dict[str, WebVitrinaViewModelFormatter] = {
         decimals=2,
         thousands_separator=False,
         suffix="%",
+        value_multiplier=100.0,
     ),
     "badge_default": WebVitrinaViewModelFormatter(
         formatter_id="badge_default",
@@ -490,20 +491,20 @@ def _column_sticky(column_id: str) -> str:
 
 def _column_width_hint(column_id: str) -> int | None:
     if column_id == "row_order":
-        return 96
+        return 52
     if column_id == "scope_label":
-        return 280
+        return 208
     if column_id == "metric_label":
-        return 220
+        return 176
     if column_id.startswith("date:"):
-        return 120
+        return 88
     if column_id in {"scope_key", "metric_key"}:
-        return 180
+        return 140
     if column_id in {"scope_kind", "section"}:
-        return 132
+        return 92
     if column_id in {"group", "nm_id"}:
-        return 160
-    return 180
+        return 112
+    return 160
 
 
 def _resolve_cell_kind_and_formatter(

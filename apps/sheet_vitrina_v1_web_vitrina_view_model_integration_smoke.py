@@ -145,7 +145,7 @@ def _build_plan(
                     ["Итого: Показы в воронке", "TOTAL|total_view_count", 100, 140],
                     [f"Группа {first_group}: Показы в воронке", f"GROUP:{first_group}|view_count", 40, 55],
                     [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|avg_price_seller_discounted", 990, 1110],
-                    [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 11.5, 13.0],
+                    [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 0.115, 0.13],
                 ],
                 row_count=4,
                 column_count=4,

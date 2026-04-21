@@ -99,13 +99,13 @@ def main() -> None:
         percent_row = next(row for row in adapter.rows if row.row_id == f"SKU:{enabled[1].nm_id}|avg_addToCartConversion")
         if columns["scope_label"].meta.pin != "left":
             raise AssertionError(f"sticky pin mismatch, got {columns['scope_label']}")
-        if not (72 <= int(columns["row_order"].size or 0) < 96):
+        if not (40 <= int(columns["row_order"].size or 0) <= 52):
             raise AssertionError(f"row_order width must stay compact, got {columns['row_order']}")
-        if not (156 <= int(columns["scope_label"].size or 0) < 280):
+        if not (110 <= int(columns["scope_label"].size or 0) <= 208):
             raise AssertionError(f"scope_label width must stay content-driven, got {columns['scope_label']}")
-        if not (96 <= int(columns["group"].size or 0) < 160):
+        if not (72 <= int(columns["group"].size or 0) <= 112):
             raise AssertionError(f"group width must stay compact, got {columns['group']}")
-        if not (104 <= int(columns["date:2026-04-21"].size or 0) <= 120):
+        if not (84 <= int(columns["date:2026-04-21"].size or 0) <= 88):
             raise AssertionError(f"date column width must stay narrow and readable, got {columns['date:2026-04-21']}")
         if money_row.values["date:2026-04-21"].renderer_id != "renderer:money:money_rub":
             raise AssertionError(f"money renderer mismatch, got {money_row.values['date:2026-04-21']}")
@@ -163,7 +163,7 @@ def _build_plan(
                     ["Итого: Показы в воронке", "TOTAL|total_view_count", 100, 140],
                     [f"Группа {first_group}: Показы в воронке", f"GROUP:{first_group}|view_count", 40, 55],
                     [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|avg_price_seller_discounted", 990, 1110],
-                    [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 11.5, 13.0],
+                    [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 0.115, 0.13],
                 ],
                 row_count=4,
                 column_count=4,

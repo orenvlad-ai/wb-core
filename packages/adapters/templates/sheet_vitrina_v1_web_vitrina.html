@@ -623,7 +623,7 @@
     .vitrina-table td {
       border-bottom: 1px solid var(--border);
       border-right: 1px solid var(--border);
-      padding: 4px 7px;
+      padding: 4px 5px;
       font-size: var(--table-font-size);
       line-height: 1.25;
       background: #ffffff;
@@ -643,6 +643,17 @@
       letter-spacing: 0;
       text-transform: none;
       color: #475569;
+    }
+
+    .vitrina-table thead th[data-col-id="row_order"],
+    .vitrina-table thead th[data-col-id="scope_kind"],
+    .vitrina-table thead th[data-col-id="scope_key"],
+    .vitrina-table thead th[data-col-id="scope_label"],
+    .vitrina-table thead th[data-col-id="metric_key"],
+    .vitrina-table thead th[data-col-id="metric_label"],
+    .vitrina-table thead th[data-col-id="section"] {
+      white-space: normal;
+      line-height: 1.1;
     }
 
     .vitrina-table tbody tr:hover td {
@@ -2173,7 +2184,8 @@
         }
         const decimals = formatter && typeof formatter.decimals === "number" ? formatter.decimals : 0;
         const suffix = formatter && formatter.suffix ? formatter.suffix : "";
-        return formatNumber(numberValue, decimals, formatter ? formatter.thousands_separator !== false : true) + suffix;
+        const valueMultiplier = formatter && typeof formatter.value_multiplier === "number" ? formatter.value_multiplier : 1;
+        return formatNumber(numberValue * valueMultiplier, decimals, formatter ? formatter.thousands_separator !== false : true) + suffix;
       }
       return String(cell.display_text || cell.value || "—");
     }

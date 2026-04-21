@@ -71,12 +71,21 @@ def main() -> None:
             args.base_url.rstrip("/"),
             ignore_https_errors=args.ignore_https_errors,
             as_of_date=args.as_of_date.strip(),
+            expected_percent_rows=None,
         )
         _print_summary(result)
         return
 
     with LocalWebVitrinaFixtureServer(with_ready_snapshot=True) as ready_base_url:
-        ready_result = run_browser_checks(ready_base_url, ignore_https_errors=False, as_of_date="")
+        ready_result = run_browser_checks(
+            ready_base_url,
+            ignore_https_errors=False,
+            as_of_date="",
+            expected_percent_rows={
+                "avg_addToCartConversion#1": "11,50%",
+                "avg_addToCartConversion#2": "10,50%",
+            },
+        )
     with LocalWebVitrinaFixtureServer(with_ready_snapshot=False) as error_base_url:
         error_result = run_error_state_check(error_base_url, ignore_https_errors=False)
     _print_summary({
@@ -86,6 +95,8 @@ def main() -> None:
         "default_sku_metric_cluster": ready_result["default_sku_metric_cluster"],
         "filter_controls": ready_result["filter_controls"],
         "status_badge": ready_result["status_badge"],
+        "compact_widths": ready_result["compact_widths"],
+        "percent_formatting": ready_result["percent_formatting"],
         "column_visibility": ready_result["column_visibility"],
         "horizontal_overscroll_guard": ready_result["horizontal_overscroll_guard"],
         "operator_link": ready_result["operator_link"],
@@ -164,7 +175,13 @@ class LocalWebVitrinaFixtureServer:
         self.runtime_dir_obj.cleanup()
 
 
-def run_browser_checks(base_url: str, *, ignore_https_errors: bool, as_of_date: str = "") -> dict[str, object]:
+def run_browser_checks(
+    base_url: str,
+    *,
+    ignore_https_errors: bool,
+    as_of_date: str = "",
+    expected_percent_rows: dict[str, str] | None = None,
+) -> dict[str, object]:
     page_url = base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     if as_of_date:
         page_url = f"{page_url}?as_of_date={as_of_date}"
@@ -227,6 +244,8 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool, as_of_date: 
             }
             if not all(filter_controls.values()):
                 raise AssertionError(f"missing filter controls: {filter_controls}")
+            compact_widths = _measure_compact_widths(page)
+            percent_formatting = _check_percent_formatting(page, expected_rows=expected_percent_rows)
 
             metric_select = page.locator("[data-filter-control='metric']")
             metric_options = metric_select.locator("option").evaluate_all(
@@ -325,6 +344,8 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool, as_of_date: 
         "default_sku_metric_cluster": sku_cluster_ok,
         "filter_controls": filter_controls,
         "status_badge": final_badge,
+        "compact_widths": compact_widths,
+        "percent_formatting": percent_formatting,
         "column_visibility": column_visibility,
         "horizontal_overscroll_guard": horizontal_overscroll_guard,
         "operator_link": operator_link,
@@ -370,6 +391,8 @@ def _print_summary(result: dict[str, object]) -> None:
         print("web_vitrina_browser_as_of_date: ok ->", result["as_of_date"])
     print("web_vitrina_browser_table: ok ->", result["table_rendered"])
     print("web_vitrina_browser_status_badge: ok ->", result["status_badge"])
+    print("web_vitrina_browser_compact_widths: ok ->", result["compact_widths"])
+    print("web_vitrina_browser_percent_formatting: ok ->", result["percent_formatting"])
     print("web_vitrina_browser_column_visibility: ok ->", result["column_visibility"])
     print("web_vitrina_browser_horizontal_overscroll_guard: ok ->", result["horizontal_overscroll_guard"])
     print("web_vitrina_browser_operator_link: ok ->", result["operator_link"])
@@ -454,6 +477,66 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
     }
 
 
+def _measure_compact_widths(page: object) -> dict[str, int]:
+    widths = page.locator("[data-table-head] th").evaluate_all(
+        """nodes => Object.fromEntries(nodes.map(node => [
+          node.getAttribute('data-col-id'),
+          Math.round(node.getBoundingClientRect().width)
+        ]).filter(item => item[0]))"""
+    )
+    required = {
+        "row_order": 52,
+        "scope_label": 145,
+        "metric_key": 160,
+        "metric_label": 156,
+    }
+    for column_id, max_width in required.items():
+        if int(widths.get(column_id, 0)) <= 0:
+            raise AssertionError(f"missing width measurement for {column_id!r}: {widths}")
+        if int(widths[column_id]) > max_width:
+            raise AssertionError(f"{column_id} must stay compact in browser render, got {widths}")
+    for column_id in [key for key in widths if key.startswith("date:")]:
+        if int(widths[column_id]) > 94:
+            raise AssertionError(f"date column must stay narrow in browser render, got {widths}")
+    return {
+        "row_order": int(widths["row_order"]),
+        "scope_label": int(widths["scope_label"]),
+        "metric_key": int(widths["metric_key"]),
+        "metric_label": int(widths["metric_label"]),
+        "date": int(next(widths[key] for key in widths if key.startswith("date:"))),
+    }
+
+
+def _check_percent_formatting(page: object, *, expected_rows: dict[str, str] | None) -> dict[str, str]:
+    percent_rows = page.locator("[data-table-body] tr").evaluate_all(
+        """rows => rows
+          .map(row => {
+            const metricNode = row.querySelector('td[data-col-id="metric_key"]');
+            const valueNode = row.querySelector('td[data-col-id^="date:"]');
+            if (!metricNode || !valueNode) {
+              return null;
+            }
+            return {
+              metric_key: (metricNode.getAttribute('title') || metricNode.textContent || '').trim(),
+              value: (valueNode.getAttribute('title') || valueNode.textContent || '').trim()
+            };
+          })
+          .filter(Boolean)
+          .filter(item => item.metric_key === 'avg_addToCartConversion')"""
+    )
+    if len(percent_rows) < 2:
+        raise AssertionError(f"percent metric rows must be visible in browser smoke, got {percent_rows}")
+    first_value = str(percent_rows[0]["value"])
+    second_value = str(percent_rows[1]["value"])
+    if expected_rows is not None:
+        if first_value != expected_rows["avg_addToCartConversion#1"] or second_value != expected_rows["avg_addToCartConversion#2"]:
+            raise AssertionError(f"fractional percent rows must render as scaled percents, got {percent_rows}")
+    return {
+        "first": first_value,
+        "second": second_value,
+    }
+
+
 def _build_plan(
     *,
     as_of_date: str,
@@ -488,8 +571,8 @@ def _build_plan(
                     ["Итого: Сумма заказов", "TOTAL|total_orderSum", 1000],
                     [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|avg_price_seller_discounted", 990],
                     [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|avg_price_seller_discounted", 1090],
-                    [f"SKU A: Конверсия в корзину", f"SKU:{first_nm_id}|avg_addToCartConversion", 11.5],
-                    [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 10.5],
+                    [f"SKU A: Конверсия в корзину", f"SKU:{first_nm_id}|avg_addToCartConversion", 0.115],
+                    [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 0.105],
                 ],
                 row_count=6,
                 column_count=3,
