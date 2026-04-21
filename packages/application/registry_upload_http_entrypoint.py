@@ -6,6 +6,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+import shlex
 import threading
 from typing import Any, Callable, Mapping
 from uuid import uuid4
@@ -175,6 +176,7 @@ class RegistryUploadHttpEntrypoint:
         page_route: str,
         read_route: str,
         operator_route: str,
+        job_path: str = "/v1/sheet-vitrina-v1/job",
         as_of_date: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
@@ -206,6 +208,22 @@ class RegistryUploadHttpEntrypoint:
                 selected_date_to=date_to,
             )
 
+        activity_surface = _empty_web_vitrina_activity_surface()
+        try:
+            activity_surface = self._build_web_vitrina_activity_surface(
+                snapshot_as_of_date=str(contract.meta.as_of_date),
+                snapshot_id=str(contract.meta.snapshot_id),
+                refreshed_at=str(contract.meta.refreshed_at),
+                read_model=str(contract.status_summary.read_model),
+                job_path=job_path,
+            )
+        except Exception as exc:  # pragma: no cover - bounded fallback
+            activity_surface = _empty_web_vitrina_activity_surface(
+                log_message=f"activity surface unavailable: {exc}",
+                upload_message=f"upload summary unavailable: {exc}",
+                update_message=f"update summary unavailable: {exc}",
+            )
+
         return build_web_vitrina_page_composition(
             contract=contract,
             view_model=view_model,
@@ -217,6 +235,7 @@ class RegistryUploadHttpEntrypoint:
             selected_as_of_date=as_of_date,
             selected_date_from=date_from,
             selected_date_to=date_to,
+            activity_surface=activity_surface,
         )
 
     def handle_sheet_refresh_request(
@@ -258,6 +277,67 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_sheet_operator_job_text_request(self, job_id: str) -> tuple[str, str]:
         return self.operator_jobs.get_text(job_id)
+
+    def _build_web_vitrina_activity_surface(
+        self,
+        *,
+        snapshot_as_of_date: str,
+        snapshot_id: str,
+        refreshed_at: str,
+        read_model: str,
+        job_path: str,
+    ) -> dict[str, Any]:
+        latest_job = self.operator_jobs.latest_relevant_job(
+            operations=("refresh", "auto_update"),
+            preferred_as_of_date=snapshot_as_of_date,
+        )
+        upload_records = _extract_upload_source_records_from_job(latest_job)
+        update_records = _extract_update_source_records_from_snapshot(
+            runtime=self.runtime,
+            snapshot_as_of_date=snapshot_as_of_date,
+        )
+        ordered_source_keys = _ordered_activity_source_keys(upload_records, update_records)
+        return {
+            "log_block": _build_web_vitrina_log_block(
+                latest_job=latest_job,
+                job_path=job_path,
+            ),
+            "upload_summary": _build_web_vitrina_endpoint_summary_block(
+                title="Загрузка данных",
+                subtitle=(
+                    "Последний завершённый refresh-run. Cheap reread не создаёт новый upload-run и "
+                    "только перечитывает уже сохранённое состояние."
+                ),
+                records=upload_records,
+                ordered_source_keys=ordered_source_keys,
+                empty_message=(
+                    "Последний завершённый refresh-run в памяти сервиса пока не найден. "
+                    "После `Загрузить и обновить` здесь появится truth по endpoint-ам."
+                ),
+                block_updated_at=(
+                    str(latest_job.get("finished_at") or latest_job.get("started_at") or "")
+                    if latest_job
+                    else ""
+                ),
+                block_detail=(
+                    f"job {latest_job.get('job_id', '')} · {str(latest_job.get('operation', 'refresh'))}"
+                    if latest_job
+                    else ""
+                ),
+            ),
+            "update_summary": _build_web_vitrina_endpoint_summary_block(
+                title="Обновление данных",
+                subtitle=(
+                    "Persisted STATUS current read-side snapshot. Cheap reread перечитывает именно это "
+                    "состояние и не запускает скрытый upstream fetch."
+                ),
+                records=update_records,
+                ordered_source_keys=ordered_source_keys,
+                empty_message="STATUS-строки для текущего snapshot пока не materialized.",
+                block_updated_at=refreshed_at,
+                block_detail=f"snapshot {snapshot_id} · as_of_date {snapshot_as_of_date} · {read_model}",
+            ),
+        }
 
     def run_sheet_temporal_closure_retry_cycle(
         self,
@@ -874,6 +954,42 @@ class SheetVitrinaV1OperatorJobStore:
             filename = f"sheet-vitrina-v1-{job.operation}-{job.job_id}.txt"
             return text or "Лог пока пуст.\n", filename
 
+    def latest_relevant_job(
+        self,
+        *,
+        operations: tuple[str, ...],
+        preferred_as_of_date: str | None = None,
+    ) -> dict[str, Any] | None:
+        normalized_operations = {str(value).strip() for value in operations if str(value).strip()}
+        normalized_as_of_date = str(preferred_as_of_date or "").strip()
+        with self._lock:
+            jobs = list(self._jobs.values())
+        candidates = [
+            job
+            for job in jobs
+            if job.status in {"success", "error"}
+            and (not normalized_operations or job.operation in normalized_operations)
+        ]
+        if not candidates:
+            return None
+        if normalized_as_of_date:
+            preferred = [
+                job
+                for job in candidates
+                if str(((job.result or {}).get("as_of_date") or "")).strip() == normalized_as_of_date
+            ]
+            if preferred:
+                candidates = preferred
+        selected = max(
+            enumerate(candidates),
+            key=lambda item: (
+                str(item[1].finished_at or ""),
+                str(item[1].started_at or ""),
+                item[0],
+            ),
+        )[1]
+        return selected.snapshot()
+
     def _run(
         self,
         job_id: str,
@@ -1137,3 +1253,330 @@ def _format_log_event(event: str, **fields: Any) -> str:
 
 def _noop_log(_: str) -> None:
     return
+
+
+def _empty_web_vitrina_activity_surface(
+    *,
+    log_message: str = "Последний релевантный run/log пока недоступен.",
+    upload_message: str = "Последний upload-run по endpoint-ам пока недоступен.",
+    update_message: str = "Persisted update summary для текущего snapshot пока недоступен.",
+) -> dict[str, Any]:
+    return {
+        "log_block": {
+            "title": "Лог",
+            "subtitle": "Последний релевантный refresh-run",
+            "status_label": "Нет данных",
+            "tone": "neutral",
+            "detail": "",
+            "preview_lines": [],
+            "line_count": 0,
+            "download_path": "",
+            "log_filename": "",
+            "empty_message": log_message,
+        },
+        "upload_summary": {
+            "title": "Загрузка данных",
+            "subtitle": "",
+            "detail": "",
+            "updated_at": "",
+            "items": [],
+            "empty_message": upload_message,
+        },
+        "update_summary": {
+            "title": "Обновление данных",
+            "subtitle": "",
+            "detail": "",
+            "updated_at": "",
+            "items": [],
+            "empty_message": update_message,
+        },
+    }
+
+
+def _build_web_vitrina_log_block(
+    *,
+    latest_job: Mapping[str, Any] | None,
+    job_path: str,
+) -> dict[str, Any]:
+    if latest_job is None:
+        return _empty_web_vitrina_activity_surface()["log_block"]
+    job_payload = _with_job_urls_from_job_snapshot(latest_job, job_path)
+    tone = "success" if str(job_payload.get("status", "")) == "success" else "error"
+    preview_lines = [str(line) for line in (job_payload.get("log_lines") or []) if str(line).strip()]
+    line_limit = 240
+    truncated = len(preview_lines) > line_limit
+    if truncated:
+        preview_lines = preview_lines[-line_limit:]
+    detail_parts = [
+        f"job {job_payload.get('job_id', '')}",
+        str(job_payload.get("operation", "")),
+        str(job_payload.get("finished_at") or job_payload.get("started_at") or ""),
+    ]
+    if truncated:
+        detail_parts.append(f"показаны последние {line_limit} строк")
+    return {
+        "title": "Лог",
+        "subtitle": "Последний релевантный refresh-run",
+        "status_label": "Успешно" if tone == "success" else "Ошибка",
+        "tone": tone,
+        "detail": " · ".join(part for part in detail_parts if part),
+        "preview_lines": preview_lines,
+        "line_count": int(job_payload.get("log_line_count") or len(preview_lines)),
+        "download_path": str(job_payload.get("download_path") or ""),
+        "log_filename": str(job_payload.get("log_filename") or ""),
+        "empty_message": "Лог пока пуст.",
+    }
+
+
+def _with_job_urls_from_job_snapshot(job_payload: Mapping[str, Any], job_path: str) -> dict[str, Any]:
+    normalized = dict(job_payload)
+    job_id = str(normalized.get("job_id") or "").strip()
+    operation = str(normalized.get("operation") or "refresh").strip() or "refresh"
+    if not job_id:
+        return normalized
+    normalized["job_path"] = f"{job_path}?job_id={job_id}"
+    normalized["download_path"] = f"{job_path}?job_id={job_id}&format=text&download=1"
+    normalized["log_filename"] = f"sheet-vitrina-v1-{operation}-{job_id}.txt"
+    return normalized
+
+
+def _build_web_vitrina_endpoint_summary_block(
+    *,
+    title: str,
+    subtitle: str,
+    records: Mapping[str, Mapping[str, Any]],
+    ordered_source_keys: list[str],
+    empty_message: str,
+    block_updated_at: str,
+    block_detail: str,
+) -> dict[str, Any]:
+    if not ordered_source_keys:
+        return {
+            "title": title,
+            "subtitle": subtitle,
+            "detail": block_detail,
+            "updated_at": block_updated_at,
+            "items": [],
+            "empty_message": empty_message,
+        }
+    items = [
+        _build_endpoint_summary_item(
+            source_key=source_key,
+            record=records.get(source_key),
+        )
+        for source_key in ordered_source_keys
+    ]
+    if not any(item.get("status_label") for item in items):
+        items = []
+    return {
+        "title": title,
+        "subtitle": subtitle,
+        "detail": block_detail,
+        "updated_at": block_updated_at,
+        "items": items,
+        "empty_message": empty_message,
+    }
+
+
+def _build_endpoint_summary_item(
+    *,
+    source_key: str,
+    record: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    spec = SOURCE_DIAGNOSTIC_SPECS.get(source_key, {})
+    endpoint_label = str(spec.get("endpoint") or source_key)
+    if record is None:
+        return {
+            "endpoint_id": source_key,
+            "endpoint_label": endpoint_label,
+            "source_key": source_key,
+            "status_label": "Ошибка",
+            "tone": "error",
+            "detail": "нет подтверждённой записи по endpoint в server-owned state",
+        }
+    tone = "success" if bool(record.get("success")) else "error"
+    detail_parts = [str(record.get("slot_summary") or "").strip()]
+    note = str(record.get("note") or "").strip()
+    if note and tone == "error":
+        detail_parts.append(note)
+    detail = " · ".join(part for part in detail_parts if part)
+    return {
+        "endpoint_id": source_key,
+        "endpoint_label": endpoint_label,
+        "source_key": source_key,
+        "status_label": "Успешно" if tone == "success" else "Ошибка",
+        "tone": tone,
+        "detail": detail,
+    }
+
+
+def _extract_upload_source_records_from_job(
+    latest_job: Mapping[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    if latest_job is None:
+        return {}
+    records: dict[str, dict[str, Any]] = {}
+    for line in latest_job.get("log_lines") or []:
+        parsed = _parse_log_event_line(str(line))
+        if parsed is None:
+            continue
+        event, fields = parsed
+        if event != "source_step_finish":
+            continue
+        source_key = str(fields.get("source") or "").strip()
+        if not source_key:
+            continue
+        _accumulate_source_record(
+            records=records,
+            source_key=source_key,
+            temporal_slot=str(fields.get("temporal_slot") or ""),
+            kind=str(fields.get("kind") or ""),
+            note=str(fields.get("note") or ""),
+        )
+    return _finalize_source_records(records)
+
+
+def _extract_update_source_records_from_snapshot(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    snapshot_as_of_date: str,
+) -> dict[str, dict[str, Any]]:
+    try:
+        plan = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=snapshot_as_of_date)
+    except ValueError:
+        return {}
+    status_sheet = _find_sheet(plan, "STATUS")
+    if status_sheet is None:
+        return {}
+    records: dict[str, dict[str, Any]] = {}
+    for row in status_sheet.rows:
+        if len(row) < 11:
+            continue
+        source_key = str(row[0] or "")
+        if source_key in {"registry_upload_current_state", DELIVERY_CONTRACT_VERSION}:
+            continue
+        source_name, temporal_slot = _split_temporal_source_key(source_key)
+        if not source_name:
+            continue
+        _accumulate_source_record(
+            records=records,
+            source_key=source_name,
+            temporal_slot=temporal_slot,
+            kind=str(row[1] or ""),
+            note=str(row[10] or ""),
+        )
+    return _finalize_source_records(records)
+
+
+def _ordered_activity_source_keys(
+    upload_records: Mapping[str, Mapping[str, Any]],
+    update_records: Mapping[str, Mapping[str, Any]],
+) -> list[str]:
+    seen = set(upload_records) | set(update_records)
+    ordered = [source_key for source_key in SOURCE_DIAGNOSTIC_SPECS if source_key in seen]
+    extras = sorted(source_key for source_key in seen if source_key not in SOURCE_DIAGNOSTIC_SPECS)
+    return ordered + extras
+
+
+def _accumulate_source_record(
+    *,
+    records: dict[str, dict[str, Any]],
+    source_key: str,
+    temporal_slot: str,
+    kind: str,
+    note: str,
+) -> None:
+    bucket = records.setdefault(
+        source_key,
+        {
+            "slot_statuses": {},
+            "notes": [],
+        },
+    )
+    normalized_slot = temporal_slot or "snapshot"
+    bucket["slot_statuses"][normalized_slot] = _binary_status_from_kind(kind)
+    if note:
+        bucket["notes"].append(str(note))
+
+
+def _finalize_source_records(
+    records: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    finalized: dict[str, dict[str, Any]] = {}
+    for source_key, record in records.items():
+        slot_statuses = {
+            str(slot): str(status)
+            for slot, status in (record.get("slot_statuses") or {}).items()
+        }
+        if not slot_statuses:
+            continue
+        finalized[source_key] = {
+            "success": all(status == "success" for status in slot_statuses.values()),
+            "slot_summary": _format_slot_summary(slot_statuses),
+            "note": _first_distinct_note(record.get("notes") or []),
+        }
+    return finalized
+
+
+def _binary_status_from_kind(kind: str) -> str:
+    return "success" if str(kind).strip().lower() == "success" else "error"
+
+
+def _format_slot_summary(slot_statuses: Mapping[str, str]) -> str:
+    ordered_slots = sorted(slot_statuses.items(), key=lambda item: _slot_sort_key(item[0]))
+    return " · ".join(
+        f"{_slot_label(slot)}: {'Успешно' if status == 'success' else 'Ошибка'}"
+        for slot, status in ordered_slots
+    )
+
+
+def _slot_sort_key(slot: str) -> tuple[int, str]:
+    if slot == TEMPORAL_SLOT_YESTERDAY_CLOSED:
+        return (0, slot)
+    if slot == TEMPORAL_SLOT_TODAY_CURRENT:
+        return (1, slot)
+    if slot == "snapshot":
+        return (2, slot)
+    return (3, slot)
+
+
+def _slot_label(slot: str) -> str:
+    if slot == TEMPORAL_SLOT_YESTERDAY_CLOSED:
+        return "вчера"
+    if slot == TEMPORAL_SLOT_TODAY_CURRENT:
+        return "сегодня"
+    if slot == "snapshot":
+        return "snapshot"
+    return slot
+
+
+def _first_distinct_note(notes: list[str]) -> str:
+    for note in notes:
+        normalized = str(note).strip()
+        if normalized:
+            return normalized
+    return ""
+
+
+def _parse_log_event_line(line: str) -> tuple[str, dict[str, str]] | None:
+    text = str(line or "").strip()
+    if not text:
+        return None
+    if " " in text:
+        _, candidate = text.split(" ", 1)
+    else:
+        candidate = text
+    try:
+        parts = shlex.split(candidate)
+    except ValueError:
+        return None
+    fields: dict[str, str] = {}
+    for part in parts:
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        fields[str(key)] = str(value)
+    event = str(fields.get("event") or "").strip()
+    if not event:
+        return None
+    return event, fields

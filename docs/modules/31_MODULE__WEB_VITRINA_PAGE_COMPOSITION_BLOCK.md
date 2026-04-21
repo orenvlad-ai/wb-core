@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-31-WEB-VITRINA-PAGE-COMPOSITION-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded phase-4 слою `web_vitrina_page_composition_block`."
-scope: "Real page composition для `GET /sheet-vitrina-v1/vitrina`: separate sibling page shell, split page-refresh/data-freshness summary, bounded `Обновить` vs `Загрузить и обновить` action semantics, filters area, table container, truthful loading/empty/error states и minimal inline client island поверх stable server seams `web_vitrina_contract -> web_vitrina_view_model -> web_vitrina_gravity_table_adapter` без SPA/platform redesign."
+scope: "Real page composition для `GET /sheet-vitrina-v1/vitrina`: separate sibling page shell, split page-refresh/data-freshness summary, server-driven blocks `Лог` / `Загрузка данных` / `Обновление данных`, bounded `Обновить` vs `Загрузить и обновить` action semantics, filters area, table container, truthful loading/empty/error states и minimal inline client island поверх stable server seams `web_vitrina_contract -> web_vitrina_view_model -> web_vitrina_gravity_table_adapter` без SPA/platform redesign."
 source_basis:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
@@ -39,7 +39,7 @@ related_docs:
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Phase 4 live page composition остаётся server-driven, но bounded UX semantics уточнены: existing `/sheet-vitrina-v1/vitrina` по-прежнему читает optional `surface=page_composition` на same read route, `Обновить` остаётся cheap reread текущего page composition, `Загрузить и обновить` теперь reuse-ит canonical `POST /v1/sheet-vitrina-v1/refresh` + reread without Google `/load`, summary разделён на browser-owned `Последнее обновление страницы` и server-owned `Свежесть данных`."
+update_note: "Phase 4 live page composition остаётся server-driven, но bounded UX semantics уточнены: existing `/sheet-vitrina-v1/vitrina` по-прежнему читает optional `surface=page_composition` на same read route, `Обновить` остаётся cheap reread текущего page composition, `Загрузить и обновить` reuse-ит canonical `POST /v1/sheet-vitrina-v1/refresh` + reread without Google `/load`, summary разделён на browser-owned `Последнее обновление страницы` и server-owned `Свежесть данных`, а рядом с action buttons materialized три server-owned инфоблока `Лог` / `Загрузка данных` / `Обновление данных`."
 ---
 
 # 1. Идентификатор и статус
@@ -68,6 +68,10 @@ update_note: "Phase 4 live page composition остаётся server-driven, но
   - two truthful actions:
     - `Обновить` = cheap reread текущего page composition/current server-side snapshot
     - `Загрузить и обновить` = canonical server-side refresh from external sources + page reread, without Google Sheet write path
+  - three server-driven action-adjacent information blocks:
+    - `Лог` = compact fixed-height tail of the last relevant refresh-run plus `Скачать лог` via existing job/log contour
+    - `Загрузка данных` = binary per-endpoint upload/fetch result from the last relevant refresh-run log
+    - `Обновление данных` = binary per-endpoint materialization/update result from the persisted `STATUS` rows of the current read-side snapshot
   - filters area
   - table container
   - truthful `loading / empty / error` states
@@ -85,6 +89,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, но
   - render the received page payload
   - keep only local filter/search/sort state
   - keep only browser-owned page reread timestamp for `Последнее обновление страницы`
+  - keep zero ownership over job/log/status truth for `Лог`, `Загрузка данных` or `Обновление данных`
   - never assemble canonical truth
   - never compute business metrics
   - never replace the server contract/view-model/adapter owner
@@ -158,6 +163,10 @@ update_note: "Phase 4 live page composition остаётся server-driven, но
 - The chosen client path stays intentionally minimal and repo-owned.
 - `Свежесть данных` stays server-owned and comes from the current read-side snapshot metadata (`refreshed_at / snapshot_id / as_of_date`), while `Последнее обновление страницы` is only the browser reread marker and is intentionally separate.
 - `Загрузить и обновить` on the vitrina now reuse-ит the canonical refresh contour and no longer depends on `/load` or Google Sheet auth to refresh the web-vitrina itself.
+- `Лог` / `Загрузка данных` / `Обновление данных` stay server-driven:
+  - log preview and `Скачать лог` reuse the existing in-memory job/log contour
+  - upload summary is derived from the last relevant refresh job log and is not overwritten by cheap reread
+  - update summary is derived from persisted `STATUS` rows of the current read-side snapshot and therefore may change only when the snapshot truth changes
 - Historical period UX is intentionally thin:
   - calendar/preset panel lives in the same server template
   - `Сохранить` only rewrites query string and re-reads server payload
