@@ -1052,6 +1052,9 @@
       composition: null,
       requestSequence: 0,
       actionSequence: 0,
+      page: {
+        lastRenderedAt: null
+      },
       history: {
         availableDates: [],
         availableDateSet: new Set(),
@@ -1086,7 +1089,7 @@
     });
 
     loadRefreshButton.addEventListener("click", function() {
-      runLoadAndRefresh();
+      runSourceRefreshAndReload();
     });
 
     historyDateFromNode.addEventListener("change", function() {
@@ -1380,15 +1383,48 @@
     }
 
     function renderSummaryCards(cards) {
-      summaryGridNode.innerHTML = cards.map(function(card) {
+      const renderedCards = composeSummaryCards(cards);
+      summaryGridNode.innerHTML = renderedCards.map(function(card) {
         return [
-          '<article class="summary-card">',
-          '<div class="summary-card-label">' + escapeHtml(card.label) + '</div>',
-          '<div class="summary-card-value">' + escapeHtml(card.value) + '</div>',
-          '<div class="summary-card-detail">' + escapeHtml(card.detail || "") + '</div>',
+          '<article class="summary-card tone-' + escapeHtml(normalizeTone(card.tone)) + '" data-summary-card="' + escapeHtml(card.card_id || "") + '"' +
+            (card.updated_at ? ' data-summary-card-updated-at="' + escapeHtml(card.updated_at) + '"' : "") +
+            '>',
+          '<div class="summary-card-label" data-summary-card-label>' + escapeHtml(card.label) + '</div>',
+          '<div class="summary-card-value" data-summary-card-value>' + escapeHtml(card.value) + '</div>',
+          '<div class="summary-card-detail" data-summary-card-detail>' + escapeHtml(card.detail || "") + '</div>',
           "</article>"
         ].join("");
       }).join("");
+    }
+
+    function composeSummaryCards(cards) {
+      const normalizedCards = Array.isArray(cards) ? cards.slice() : [];
+      const pageRefreshCard = buildPageRefreshCard();
+      if (!pageRefreshCard) {
+        return normalizedCards;
+      }
+      return [pageRefreshCard].concat(normalizedCards);
+    }
+
+    function buildPageRefreshCard() {
+      if (!(state.page.lastRenderedAt instanceof Date)) {
+        return null;
+      }
+      return {
+        card_id: "page_refresh",
+        label: "Последнее обновление страницы",
+        value: formatClientTimestamp(state.page.lastRenderedAt),
+        detail: "последний успешный reread page composition в этом браузере",
+        updated_at: state.page.lastRenderedAt.toISOString(),
+        tone: "neutral"
+      };
+    }
+
+    function formatClientTimestamp(dateValue) {
+      return new Intl.DateTimeFormat("ru-RU", {
+        dateStyle: "short",
+        timeStyle: "medium"
+      }).format(dateValue);
     }
 
     function renderFilterControls(payload) {
@@ -1929,6 +1965,7 @@
 
     function renderPage(payload) {
       state.composition = payload;
+      state.page.lastRenderedAt = new Date();
       formattersById.clear();
       renderersById.clear();
       ((payload.table_surface && payload.table_surface.formatters) || []).forEach(function(item) {
@@ -2394,7 +2431,7 @@
     async function pollSheetJob(jobPath, actionId) {
       const resolvedJobPath = String(jobPath || "");
       if (!resolvedJobPath) {
-        throw new Error("job path is missing for sheet load action");
+        throw new Error("job path is missing for refresh action");
       }
       while (true) {
         const response = await fetch(
@@ -2420,18 +2457,18 @@
       }
     }
 
-    async function runLoadAndRefresh() {
+    async function runSourceRefreshAndReload() {
       const actionId = state.actionSequence + 1;
       state.actionSequence = actionId;
       setActionButtonsDisabled(true);
-      setStatusBadge({label: "Загрузка", tone: "warning", detail: "запускаем загрузку prepared snapshot в таблицу"});
+      setStatusBadge({label: "Загрузка", tone: "warning", detail: "запускаем обновление данных из внешних источников"});
       try {
         const requestPayload = {async: true};
         const asOfDate = currentActionAsOfDate();
         if (asOfDate) {
           requestPayload.as_of_date = asOfDate;
         }
-        const response = await fetch(WEB_VITRINA_CONFIG.load_path, {
+        const response = await fetch(WEB_VITRINA_CONFIG.refresh_path, {
           method: "POST",
           headers: {
             "Accept": "application/json",
@@ -2439,9 +2476,9 @@
           },
           body: JSON.stringify(requestPayload)
         });
-        const payload = await readJsonResponse(response, "non-json response from sheet load route");
+        const payload = await readJsonResponse(response, "non-json response from sheet refresh route");
         if (!response.ok) {
-          throw new Error((payload && payload.error) ? payload.error : "sheet load route returned " + response.status);
+          throw new Error((payload && payload.error) ? payload.error : "sheet refresh route returned " + response.status);
         }
         const resolvedJobPath = String(
           (payload && payload.job_path) ||
@@ -2452,9 +2489,9 @@
           return;
         }
         if (!finalJob || finalJob.status !== "success") {
-          throw new Error((finalJob && (finalJob.error || finalJob.status)) || "sheet load job failed");
+          throw new Error((finalJob && (finalJob.error || finalJob.status)) || "sheet refresh job failed");
         }
-        setStatusBadge({label: "Загрузка", tone: "warning", detail: "загрузка завершена, перечитываем витрину"});
+        setStatusBadge({label: "Загрузка", tone: "warning", detail: "данные обновлены, перечитываем витрину"});
         await loadPageComposition();
       } catch (error) {
         if (actionId !== state.actionSequence) {

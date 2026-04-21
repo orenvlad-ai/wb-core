@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -72,6 +73,8 @@ def main() -> None:
             ignore_https_errors=args.ignore_https_errors,
             as_of_date=args.as_of_date.strip(),
             expected_percent_rows=None,
+            expect_cheap_refresh_same_freshness=None,
+            expect_data_refresh_changes_freshness=None,
         )
         _print_summary(result)
         return
@@ -85,6 +88,8 @@ def main() -> None:
                 "avg_addToCartConversion#1": "11,50%",
                 "avg_addToCartConversion#2": "10,50%",
             },
+            expect_cheap_refresh_same_freshness=True,
+            expect_data_refresh_changes_freshness=True,
         )
     with LocalWebVitrinaFixtureServer(with_ready_snapshot=False) as error_base_url:
         error_result = run_error_state_check(error_base_url, ignore_https_errors=False)
@@ -123,6 +128,7 @@ class LocalWebVitrinaFixtureServer:
         self.server = None
         self.thread: threading.Thread | None = None
         self.base_url = ""
+        self._refresh_counter = 0
 
     def __enter__(self) -> str:
         bundle = json.loads(BUNDLE_FIXTURE.read_text(encoding="utf-8"))
@@ -154,8 +160,25 @@ class LocalWebVitrinaFixtureServer:
             runtime_dir=runtime_dir,
             runtime=runtime,
             activated_at_factory=lambda: "2026-04-21T15:00:00Z",
+            refreshed_at_factory=self._next_refreshed_at,
             now_factory=lambda: NOW,
             sheet_load_runner=_stub_sheet_load_runner,
+        )
+        entrypoint.handle_sheet_refresh_request = lambda as_of_date=None, auto_load=False: _stub_sheet_refresh_request(
+            entrypoint,
+            runtime,
+            as_of_date=as_of_date,
+        )
+        entrypoint.start_sheet_refresh_job = (
+            lambda as_of_date=None, auto_load=False: entrypoint.operator_jobs.start(
+                operation="refresh",
+                runner=lambda log: _stub_sheet_refresh_request(
+                    entrypoint,
+                    runtime,
+                    as_of_date=as_of_date,
+                    log=log,
+                ),
+            )
         )
         config = RegistryUploadHttpEntrypointConfig(
             host="127.0.0.1",
@@ -181,6 +204,11 @@ class LocalWebVitrinaFixtureServer:
             self.thread.join(timeout=5)
         self.runtime_dir_obj.cleanup()
 
+    def _next_refreshed_at(self) -> str:
+        refreshed_at = NOW + timedelta(minutes=10 + self._refresh_counter)
+        self._refresh_counter += 1
+        return refreshed_at.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
 
 def run_browser_checks(
     base_url: str,
@@ -188,6 +216,8 @@ def run_browser_checks(
     ignore_https_errors: bool,
     as_of_date: str = "",
     expected_percent_rows: dict[str, str] | None = None,
+    expect_cheap_refresh_same_freshness: bool | None = None,
+    expect_data_refresh_changes_freshness: bool | None = None,
 ) -> dict[str, object]:
     page_url = base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     if as_of_date:
@@ -224,6 +254,7 @@ def run_browser_checks(
             }
             if final_badge["label"] != "Успешно" or "tone-success" not in final_badge["class_name"]:
                 raise AssertionError(f"status badge must end in Russian success state, got {final_badge}")
+            initial_summary_cards = _read_summary_cards(page)
             historical_panel_present = (
                 page.locator("[data-history-calendar]").count() == 1
                 and page.locator("[data-history-presets]").count() == 1
@@ -263,8 +294,16 @@ def run_browser_checks(
                 raise AssertionError(f"missing filter controls: {filter_controls}")
             compact_widths = _measure_compact_widths(page)
             percent_formatting = _check_percent_formatting(page, expected_rows=expected_percent_rows)
-            refresh_loading_status = _check_refresh_loading_status(page)
-            load_refresh_action = _check_load_refresh_action(page)
+            refresh_loading_status = _check_refresh_loading_status(
+                page,
+                previous_summary_cards=initial_summary_cards,
+                expect_same_freshness=expect_cheap_refresh_same_freshness,
+            )
+            load_refresh_action = _check_load_refresh_action(
+                page,
+                previous_summary_cards=refresh_loading_status["summary_cards"],
+                expect_freshness_change=expect_data_refresh_changes_freshness,
+            )
 
             metric_select = page.locator("[data-filter-control='metric']")
             metric_options = metric_select.locator("option").evaluate_all(
@@ -368,6 +407,7 @@ def run_browser_checks(
         "right_edge_spacer": right_edge_spacer,
         "filter_controls": filter_controls,
         "status_badge": final_badge,
+        "summary_cards": initial_summary_cards,
         "compact_widths": compact_widths,
         "percent_formatting": percent_formatting,
         "refresh_loading_status": refresh_loading_status,
@@ -508,8 +548,12 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
         "scope_checkbox_checked_after_reset": scope_checkbox_checked,
     }
 
-
-def _check_refresh_loading_status(page: object) -> dict[str, str]:
+def _check_refresh_loading_status(
+    page: object,
+    *,
+    previous_summary_cards: dict[str, dict[str, str]],
+    expect_same_freshness: bool | None,
+) -> dict[str, object]:
     page.locator("[data-retry-button]").click()
     page.wait_for_function(
         """() => {
@@ -529,18 +573,40 @@ def _check_refresh_loading_status(page: object) -> dict[str, str]:
         }""",
         timeout=20000,
     )
-    return loading_badge
+    next_summary_cards = _read_summary_cards(page)
+    _assert_page_refresh_card_changed(previous_summary_cards, next_summary_cards, action_name="cheap refresh")
+    freshness_unchanged = _freshness_card_matches(previous_summary_cards, next_summary_cards)
+    if expect_same_freshness is True and not freshness_unchanged:
+        raise AssertionError(
+            f"cheap refresh must not fake data freshness when snapshot is unchanged, got {previous_summary_cards} -> {next_summary_cards}"
+        )
+    if expect_same_freshness is False and freshness_unchanged:
+        raise AssertionError("cheap refresh was expected to advance data freshness but did not")
+    return {
+        "loading_badge": loading_badge,
+        "page_refresh_before": previous_summary_cards["page_refresh"]["updated_at"],
+        "page_refresh_after": next_summary_cards["page_refresh"]["updated_at"],
+        "freshness_before": previous_summary_cards["freshness"]["value"],
+        "freshness_after": next_summary_cards["freshness"]["value"],
+        "freshness_unchanged": freshness_unchanged,
+        "summary_cards": next_summary_cards,
+    }
 
 
-def _check_load_refresh_action(page: object) -> dict[str, object]:
+def _check_load_refresh_action(
+    page: object,
+    *,
+    previous_summary_cards: dict[str, dict[str, str]],
+    expect_freshness_change: bool | None,
+) -> dict[str, object]:
     button = page.locator("[data-load-refresh-button]")
     if button.count() != 1:
         raise AssertionError("load+refresh button must be rendered exactly once")
-    with page.expect_response("**/v1/sheet-vitrina-v1/load") as load_response_info:
+    with page.expect_response("**/v1/sheet-vitrina-v1/refresh") as load_response_info:
         button.click()
     load_response = load_response_info.value
     if load_response.request.method != "POST":
-        raise AssertionError(f"load+refresh button must use POST /load, got {load_response.request.method}")
+        raise AssertionError(f"load+refresh button must use POST /refresh, got {load_response.request.method}")
     page.wait_for_function(
         """() => {
           const badge = document.querySelector('[data-status-badge]');
@@ -556,6 +622,15 @@ def _check_load_refresh_action(page: object) -> dict[str, object]:
         }""",
         timeout=45000,
     )
+    next_summary_cards = _read_summary_cards(page)
+    _assert_page_refresh_card_changed(previous_summary_cards, next_summary_cards, action_name="source refresh")
+    freshness_changed = not _freshness_card_matches(previous_summary_cards, next_summary_cards)
+    if expect_freshness_change is True and not freshness_changed:
+        raise AssertionError(
+            f"source refresh must advance data freshness in the local fixture, got {previous_summary_cards} -> {next_summary_cards}"
+        )
+    if expect_freshness_change is False and freshness_changed:
+        raise AssertionError("source refresh was expected to keep data freshness unchanged")
     final_badge = {
         "label": page.locator("[data-status-badge]").inner_text().strip(),
         "class_name": page.locator("[data-status-badge]").get_attribute("class") or "",
@@ -563,8 +638,77 @@ def _check_load_refresh_action(page: object) -> dict[str, object]:
     return {
         "http_status": load_response.status,
         "method": load_response.request.method,
+        "page_refresh_before": previous_summary_cards["page_refresh"]["updated_at"],
+        "page_refresh_after": next_summary_cards["page_refresh"]["updated_at"],
+        "freshness_before": previous_summary_cards["freshness"]["value"],
+        "freshness_after": next_summary_cards["freshness"]["value"],
+        "freshness_changed": freshness_changed,
         "final_badge": final_badge,
     }
+
+
+def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
+    cards = page.locator("[data-summary-card]").evaluate_all(
+        """nodes => Object.fromEntries(
+          nodes
+            .map(node => {
+              const cardId = node.getAttribute('data-summary-card') || '';
+              if (!cardId) {
+                return null;
+              }
+              const labelNode = node.querySelector('[data-summary-card-label]');
+              const valueNode = node.querySelector('[data-summary-card-value]');
+              const detailNode = node.querySelector('[data-summary-card-detail]');
+              return [
+                cardId,
+                {
+                  label: (labelNode ? labelNode.textContent : '').trim(),
+                  value: (valueNode ? valueNode.textContent : '').trim(),
+                  detail: (detailNode ? detailNode.textContent : '').trim(),
+                  updated_at: (node.getAttribute('data-summary-card-updated-at') || '').trim()
+                }
+              ];
+            })
+            .filter(Boolean)
+        )"""
+    )
+    for required_card_id, required_label in {
+        "page_refresh": "Последнее обновление страницы",
+        "freshness": "Свежесть данных",
+    }.items():
+        card = cards.get(required_card_id)
+        if card is None:
+            raise AssertionError(f"summary cards must expose {required_card_id!r}, got {cards}")
+        if card["label"] != required_label:
+            raise AssertionError(f"summary card {required_card_id!r} label mismatch, got {cards}")
+    if "snapshot " not in cards["freshness"]["detail"] or "as_of_date " not in cards["freshness"]["detail"]:
+        raise AssertionError(f"freshness card must expose truthful snapshot markers, got {cards['freshness']}")
+    if not cards["page_refresh"]["updated_at"]:
+        raise AssertionError(f"page refresh card must expose an exact browser timestamp marker, got {cards['page_refresh']}")
+    return cards
+
+
+def _assert_page_refresh_card_changed(
+    previous_summary_cards: dict[str, dict[str, str]],
+    next_summary_cards: dict[str, dict[str, str]],
+    *,
+    action_name: str,
+) -> None:
+    before = previous_summary_cards["page_refresh"]["updated_at"]
+    after = next_summary_cards["page_refresh"]["updated_at"]
+    if before == after:
+        raise AssertionError(
+            f"{action_name} must advance the page refresh marker, got {previous_summary_cards['page_refresh']} -> {next_summary_cards['page_refresh']}"
+        )
+
+
+def _freshness_card_matches(
+    previous_summary_cards: dict[str, dict[str, str]],
+    next_summary_cards: dict[str, dict[str, str]],
+) -> bool:
+    before = previous_summary_cards["freshness"]
+    after = next_summary_cards["freshness"]
+    return before["value"] == after["value"] and before["detail"] == after["detail"]
 
 
 def _measure_compact_widths(page: object) -> dict[str, int]:
@@ -776,6 +920,25 @@ def _stub_sheet_load_runner(plan, emit):
         "bridge_kind": "stub",
         "snapshot_id": plan.snapshot_id,
     }
+
+
+def _stub_sheet_refresh_request(entrypoint, runtime, *, as_of_date=None, log=None):
+    emit = log or (lambda _: None)
+    plan = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=as_of_date)
+    current_state = runtime.load_current_state()
+    refreshed_at = entrypoint.refreshed_at_factory()
+    emit(f"refresh_stub_start snapshot_id={plan.snapshot_id} refreshed_at={refreshed_at}")
+    refresh_result = runtime.save_sheet_vitrina_ready_snapshot(
+        current_state=current_state,
+        refreshed_at=refreshed_at,
+        plan=plan,
+    )
+    runtime.save_sheet_vitrina_manual_refresh_success(refreshed_at=refresh_result.refreshed_at)
+    emit(f"refresh_stub_finish snapshot_id={refresh_result.snapshot_id} refreshed_at={refresh_result.refreshed_at}")
+    payload = asdict(refresh_result)
+    payload["server_context"] = entrypoint.build_sheet_server_context()
+    payload["manual_context"] = entrypoint.build_sheet_manual_context()
+    return payload
 
 
 if __name__ == "__main__":

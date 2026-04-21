@@ -103,6 +103,10 @@ Current repo-owned operator refresh surface:
 - phase-2 web-vitrina additionally materializes repo-owned `web_vitrina_view_model` over that stable contract: current schema = `columns + rows + groups + sections + formatters + filters + sorts + state_model`
 - phase-3 web-vitrina additionally materializes repo-owned `web_vitrina_gravity_table_adapter` over that `view_model`: current Gravity-specific surface = `columns + rows + renderers + groupings + filters + sorts + use_table_options + table_props + state_surface`
 - phase-4 web-vitrina additionally materializes repo-owned `web_vitrina_page_composition` on the same read route via optional `surface=page_composition`, while `/sheet-vitrina-v1/vitrina` becomes a real read-only page with summary, filters, table container and truthful loading/empty/error states
+- current live vitrina action/status semantics are explicitly split:
+  - `Обновить` = cheap reread of the current page composition/read-side snapshot
+  - `Загрузить и обновить` = canonical `POST /v1/sheet-vitrina-v1/refresh` + reread, without mandatory `/load` / Google Sheet write dependency
+  - summary keeps browser-owned `Последнее обновление страницы` separate from server-owned `Свежесть данных` (`refreshed_at / snapshot_id / as_of_date`)
 - the same sibling page now exposes a bounded history period chooser:
   - default/no-query mode stays the cheap daily contour
   - explicit `as_of_date` keeps one-day historical mode

@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-31-WEB-VITRINA-PAGE-COMPOSITION-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded phase-4 слою `web_vitrina_page_composition_block`."
-scope: "Real page composition для `GET /sheet-vitrina-v1/vitrina`: separate sibling page shell, compact freshness summary, filters area, table container, truthful loading/empty/error states и minimal inline client island поверх stable server seams `web_vitrina_contract -> web_vitrina_view_model -> web_vitrina_gravity_table_adapter` без SPA/platform redesign."
+scope: "Real page composition для `GET /sheet-vitrina-v1/vitrina`: separate sibling page shell, split page-refresh/data-freshness summary, bounded `Обновить` vs `Загрузить и обновить` action semantics, filters area, table container, truthful loading/empty/error states и minimal inline client island поверх stable server seams `web_vitrina_contract -> web_vitrina_view_model -> web_vitrina_gravity_table_adapter` без SPA/platform redesign."
 source_basis:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
@@ -39,7 +39,7 @@ related_docs:
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Phase 4 materialize-ит реальную live web-vitrina page composition: existing `/sheet-vitrina-v1/vitrina` теперь грузит optional `surface=page_composition` на same read route, server-side собирает summary/filter/table payload поверх stable seams, а browser остаётся thin render/filter/sort island without becoming truth owner."
+update_note: "Phase 4 live page composition остаётся server-driven, но bounded UX semantics уточнены: existing `/sheet-vitrina-v1/vitrina` по-прежнему читает optional `surface=page_composition` на same read route, `Обновить` остаётся cheap reread текущего page composition, `Загрузить и обновить` теперь reuse-ит canonical `POST /v1/sheet-vitrina-v1/refresh` + reread without Google `/load`, summary разделён на browser-owned `Последнее обновление страницы` и server-owned `Свежесть данных`."
 ---
 
 # 1. Идентификатор и статус
@@ -64,7 +64,10 @@ update_note: "Phase 4 materialize-ит реальную live web-vitrina page co
 
 - `GET /sheet-vitrina-v1/vitrina` теперь является реальной usable web-vitrina page:
   - own page header/meta
-  - compact freshness/status summary
+  - compact summary with separate `Последнее обновление страницы` and `Свежесть данных`
+  - two truthful actions:
+    - `Обновить` = cheap reread текущего page composition/current server-side snapshot
+    - `Загрузить и обновить` = canonical server-side refresh from external sources + page reread, without Google Sheet write path
   - filters area
   - table container
   - truthful `loading / empty / error` states
@@ -81,6 +84,7 @@ update_note: "Phase 4 materialize-ит реальную live web-vitrina page co
 - Browser role is intentionally narrow:
   - render the received page payload
   - keep only local filter/search/sort state
+  - keep only browser-owned page reread timestamp for `Последнее обновление страницы`
   - never assemble canonical truth
   - never compute business metrics
   - never replace the server contract/view-model/adapter owner
@@ -152,6 +156,8 @@ update_note: "Phase 4 materialize-ит реальную live web-vitrina page co
 - `/sheet-vitrina-v1/vitrina` is no longer a placeholder shell.
 - Existing stable seams are now used end-to-end in a live read-only surface.
 - The chosen client path stays intentionally minimal and repo-owned.
+- `Свежесть данных` stays server-owned and comes from the current read-side snapshot metadata (`refreshed_at / snapshot_id / as_of_date`), while `Последнее обновление страницы` is only the browser reread marker and is intentionally separate.
+- `Загрузить и обновить` on the vitrina now reuse-ит the canonical refresh contour and no longer depends on `/load` or Google Sheet auth to refresh the web-vitrina itself.
 - Historical period UX is intentionally thin:
   - calendar/preset panel lives in the same server template
   - `Сохранить` only rewrites query string and re-reads server payload

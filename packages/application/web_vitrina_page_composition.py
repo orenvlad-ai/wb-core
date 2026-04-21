@@ -106,13 +106,6 @@ def build_web_vitrina_page_composition(
                 ),
             },
             {
-                "card_id": "snapshot",
-                "label": "Snapshot",
-                "value": str(contract_payload["meta"]["snapshot_id"]),
-                "detail": f"as_of_date {contract_payload['meta']['as_of_date']}",
-                "tone": "neutral",
-            },
-            {
                 "card_id": "rows",
                 "label": "Строки",
                 "value": str(contract_payload["meta"]["row_count"]),
@@ -121,9 +114,9 @@ def build_web_vitrina_page_composition(
             },
             {
                 "card_id": "freshness",
-                "label": "Свежесть",
+                "label": "Свежесть данных",
                 "value": str(contract_payload["meta"]["refreshed_at"]),
-                "detail": f"bundle_version {contract_payload['meta']['bundle_version']}",
+                "detail": _freshness_detail(contract_payload),
                 "tone": "neutral",
             },
         ],
@@ -258,13 +251,6 @@ def build_web_vitrina_page_error_composition(
                 "tone": "error",
             },
             {
-                "card_id": "snapshot",
-                "label": "Snapshot",
-                "value": "—",
-                "detail": f"as_of_date {as_of_date}",
-                "tone": "neutral",
-            },
-            {
                 "card_id": "rows",
                 "label": "Строки",
                 "value": "0",
@@ -273,9 +259,9 @@ def build_web_vitrina_page_error_composition(
             },
             {
                 "card_id": "freshness",
-                "label": "Свежесть",
+                "label": "Свежесть данных",
                 "value": "—",
-                "detail": "read-only page shell stays available",
+                "detail": f"snapshot unavailable · as_of_date {as_of_date}",
                 "tone": "neutral",
             },
         ],
@@ -533,6 +519,16 @@ def _resolve_ready_state_message(adapter_payload: Mapping[str, Any]) -> str:
     if current_state == "loading":
         return str(state_surface["loading_message"])
     return str(state_surface["error_message"])
+
+
+def _freshness_detail(contract_payload: Mapping[str, Any]) -> str:
+    meta = contract_payload["meta"]
+    status_summary = contract_payload["status_summary"]
+    return (
+        f"snapshot {meta['snapshot_id']} · "
+        f"as_of_date {meta['as_of_date']} · "
+        f"{status_summary['read_model']}"
+    )
 
 
 def _status_status_label(*, current_state: str, refresh_status: str) -> str:
