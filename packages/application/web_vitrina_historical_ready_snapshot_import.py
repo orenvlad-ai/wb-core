@@ -383,21 +383,10 @@ def _list_ready_snapshot_dates(
     date_from: str,
     date_to: str,
 ) -> list[str]:
-    current_state = runtime.load_current_state()
-    with sqlite3.connect(runtime.db_path) as connection:
-        connection.row_factory = sqlite3.Row
-        rows = connection.execute(
-            """
-            SELECT as_of_date
-            FROM sheet_vitrina_v1_ready_snapshots
-            WHERE bundle_version = ?
-              AND as_of_date >= ?
-              AND as_of_date <= ?
-            ORDER BY as_of_date
-            """,
-            (current_state.bundle_version, date_from, date_to),
-        ).fetchall()
-    return [str(row["as_of_date"]) for row in rows]
+    return runtime.list_sheet_vitrina_ready_snapshot_dates(
+        date_from=date_from,
+        date_to=date_to,
+    )
 
 
 def _ready_snapshot_exists(runtime: RegistryUploadDbBackedRuntime, *, as_of_date: str) -> bool:

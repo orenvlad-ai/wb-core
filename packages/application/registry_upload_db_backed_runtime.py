@@ -303,6 +303,34 @@ class RegistryUploadDbBackedRuntime:
                 raise ValueError(f"sheet_vitrina_v1 ready snapshot missing: {detail}")
             return _deserialize_sheet_vitrina_plan(row["plan_json"])
 
+    def list_sheet_vitrina_ready_snapshot_dates(
+        self,
+        *,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        descending: bool = False,
+    ) -> list[str]:
+        current_state = self.load_current_state()
+        conditions = ["bundle_version = ?"]
+        params: list[Any] = [current_state.bundle_version]
+        if date_from:
+            conditions.append("as_of_date >= ?")
+            params.append(date_from)
+        if date_to:
+            conditions.append("as_of_date <= ?")
+            params.append(date_to)
+        order = "DESC" if descending else "ASC"
+        query = f"""
+            SELECT as_of_date
+            FROM sheet_vitrina_v1_ready_snapshots
+            WHERE {" AND ".join(conditions)}
+            ORDER BY as_of_date {order}
+        """
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [str(row["as_of_date"]) for row in rows]
+
     def load_sheet_vitrina_refresh_status(self, as_of_date: str | None = None) -> SheetVitrinaV1RefreshResult:
         current_state = self.load_current_state()
         with _connect(self.db_path) as conn:

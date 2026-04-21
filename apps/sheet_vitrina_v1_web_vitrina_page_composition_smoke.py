@@ -63,8 +63,19 @@ def main() -> None:
 
         runtime.save_sheet_vitrina_ready_snapshot(
             current_state=current_state,
+            refreshed_at="2026-04-20T12:05:00Z",
+            plan=_build_plan(
+                as_of_date="2026-04-19",
+                first_nm_id=enabled[0].nm_id,
+                second_nm_id=enabled[1].nm_id,
+                first_group=first_group,
+            ),
+        )
+        runtime.save_sheet_vitrina_ready_snapshot(
+            current_state=current_state,
             refreshed_at="2026-04-21T12:05:00Z",
             plan=_build_plan(
+                as_of_date="2026-04-20",
                 first_nm_id=enabled[0].nm_id,
                 second_nm_id=enabled[1].nm_id,
                 first_group=first_group,
@@ -87,6 +98,8 @@ def main() -> None:
             page_route="/sheet-vitrina-v1/vitrina",
             read_route="/v1/sheet-vitrina-v1/web-vitrina",
             operator_route="/sheet-vitrina-v1/operator",
+            available_snapshot_dates=runtime.list_sheet_vitrina_ready_snapshot_dates(descending=True),
+            selected_as_of_date=None,
         )
 
         if composition["composition_name"] != "web_vitrina_page_composition" or composition["composition_version"] != "v1":
@@ -99,6 +112,13 @@ def main() -> None:
             raise AssertionError(f"page composition namespace mismatch, got {composition['meta']}")
         if composition["meta"]["browser_state_persistence"] != "none":
             raise AssertionError(f"browser state persistence mismatch, got {composition['meta']}")
+        historical_access = composition["historical_access"]
+        if historical_access["current_mode"] != "default":
+            raise AssertionError(f"historical mode mismatch, got {historical_access}")
+        if historical_access["default_as_of_date"] != "2026-04-20":
+            raise AssertionError(f"default as_of_date mismatch, got {historical_access}")
+        if [item["value"] for item in historical_access["options"]] != ["2026-04-20", "2026-04-19"]:
+            raise AssertionError(f"historical options mismatch, got {historical_access}")
 
         controls = {item["control_id"]: item for item in composition["filter_surface"]["controls"]}
         for required in ("search", "section", "group", "scope_kind", "metric"):
@@ -131,14 +151,20 @@ def main() -> None:
             operator_route="/sheet-vitrina-v1/operator",
             as_of_date="2026-04-21",
             error_message="sheet_vitrina_v1 ready snapshot missing: fixture",
+            available_snapshot_dates=runtime.list_sheet_vitrina_ready_snapshot_dates(descending=True),
+            default_as_of_date="2026-04-20",
+            selected_as_of_date="2026-04-21",
         )
         if error_payload["meta"]["current_state"] != "error":
             raise AssertionError(f"error composition state mismatch, got {error_payload['meta']}")
         if error_payload["table_surface"]["state_surface"]["current_state"] != "error":
             raise AssertionError(f"error table state mismatch, got {error_payload['table_surface']}")
+        if error_payload["historical_access"]["selected_as_of_date"] != "2026-04-21":
+            raise AssertionError(f"error composition historical selection mismatch, got {error_payload['historical_access']}")
 
         print("web_vitrina_page_composition_identity: ok ->", composition["composition_name"], composition["composition_version"])
         print("web_vitrina_page_composition_state: ok ->", composition["meta"]["current_state"], composition["status_badge"]["tone"])
+        print("web_vitrina_page_composition_history: ok ->", historical_access["current_mode"], len(historical_access["options"]))
         print("web_vitrina_page_composition_filters: ok ->", ",".join(sorted(controls)))
         print("web_vitrina_page_composition_table: ok ->", len(composition["table_surface"]["columns"]), len(composition["table_surface"]["rows"]))
         print("web_vitrina_page_composition_error: ok ->", error_payload["meta"]["current_state"])
@@ -146,76 +172,54 @@ def main() -> None:
 
 def _build_plan(
     *,
+    as_of_date: str,
     first_nm_id: int,
     second_nm_id: int,
     first_group: str,
 ) -> SheetVitrinaV1Envelope:
     return SheetVitrinaV1Envelope(
         plan_version="delivery_contract_v1__sheet_scaffold_v1",
-        snapshot_id="web-vitrina-page-composition-fixture",
-        as_of_date="2026-04-20",
-        date_columns=["2026-04-20", "2026-04-21"],
+        snapshot_id=f"web-vitrina-page-composition-fixture-{as_of_date}",
+        as_of_date=as_of_date,
+        date_columns=[as_of_date],
         temporal_slots=[
             SheetVitrinaV1TemporalSlot(
-                slot_key="yesterday_closed",
-                slot_label="Yesterday closed",
-                column_date="2026-04-20",
-            ),
-            SheetVitrinaV1TemporalSlot(
-                slot_key="today_current",
-                slot_label="Today current",
-                column_date="2026-04-21",
+                slot_key="historical_import",
+                slot_label="Historical import",
+                column_date=as_of_date,
             ),
         ],
-        source_temporal_policies={
-            "seller_funnel_snapshot": "dual_day_capable",
-            "prices_snapshot": "accepted_current_rollover",
-            "cost_price": "manual_overlay",
-        },
+        source_temporal_policies={},
         sheets=[
             SheetVitrinaWriteTarget(
                 sheet_name="DATA_VITRINA",
                 write_start_cell="A1",
-                write_rect="A1:D7",
+                write_rect="A1:C7",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
-                header=["label", "key", "2026-04-20", "2026-04-21"],
+                header=["label", "key", as_of_date],
                 rows=[
-                    ["Итого: Показы в воронке", "TOTAL|total_view_count", 100, 140],
-                    ["Итого: Сумма заказов", "TOTAL|total_orderSum", 1000, 1200],
-                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|avg_price_seller_discounted", 990, 1110],
-                    [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|avg_price_seller_discounted", 1090, 1210],
-                    [f"SKU A: Конверсия в корзину", f"SKU:{first_nm_id}|avg_addToCartConversion", 11.5, 13.0],
-                    [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 10.5, 12.0],
+                    ["Итого: Показы в воронке", "TOTAL|total_view_count", 100],
+                    ["Итого: Сумма заказов", "TOTAL|total_orderSum", 1000],
+                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|avg_price_seller_discounted", 990],
+                    [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|avg_price_seller_discounted", 1090],
+                    [f"SKU A: Конверсия в корзину", f"SKU:{first_nm_id}|avg_addToCartConversion", 11.5],
+                    [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 10.5],
                 ],
                 row_count=6,
-                column_count=4,
+                column_count=3,
             ),
             SheetVitrinaWriteTarget(
                 sheet_name="STATUS",
                 write_start_cell="A1",
-                write_rect="A1:K2",
+                write_rect="A1:K1",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
                 header=STATUS_HEADER,
-                rows=[
-                    [
-                        "seller_funnel_snapshot",
-                        "success",
-                        "fresh",
-                        "2026-04-21",
-                        "2026-04-21",
-                        "2026-04-21",
-                        "2026-04-21",
-                        2,
-                        2,
-                        "",
-                        "",
-                    ]
-                ],
-                row_count=1,
+                rows=[],
+                row_count=0,
                 column_count=len(STATUS_HEADER),
             ),
         ],

@@ -174,6 +174,8 @@ class RegistryUploadHttpEntrypoint:
         as_of_date: str | None = None,
     ) -> dict[str, Any]:
         effective_as_of_date = as_of_date or default_business_as_of_date(self.now_factory())
+        available_snapshot_dates = self.runtime.list_sheet_vitrina_ready_snapshot_dates(descending=True)
+        default_as_of_date = default_business_as_of_date(self.now_factory())
         try:
             contract = self.web_vitrina_block.build(
                 page_route=page_route,
@@ -189,6 +191,9 @@ class RegistryUploadHttpEntrypoint:
                 operator_route=operator_route,
                 as_of_date=effective_as_of_date,
                 error_message=str(exc),
+                available_snapshot_dates=available_snapshot_dates,
+                default_as_of_date=default_as_of_date,
+                selected_as_of_date=as_of_date,
             )
 
         return build_web_vitrina_page_composition(
@@ -198,6 +203,8 @@ class RegistryUploadHttpEntrypoint:
             page_route=page_route,
             read_route=read_route,
             operator_route=operator_route,
+            available_snapshot_dates=available_snapshot_dates,
+            selected_as_of_date=as_of_date,
         )
 
     def handle_sheet_refresh_request(

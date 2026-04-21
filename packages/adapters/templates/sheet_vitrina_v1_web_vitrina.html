@@ -274,6 +274,20 @@
       gap: 8px;
     }
 
+    .history-toolbar {
+      display: grid;
+      grid-template-columns: minmax(220px, 320px) auto;
+      gap: 10px;
+      align-items: end;
+    }
+
+    .history-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
     .filter-card {
       display: flex;
       flex-direction: column;
@@ -523,6 +537,18 @@
       .panel-meta {
         text-align: left;
       }
+
+      .history-toolbar {
+        grid-template-columns: 1fr;
+      }
+
+      .history-actions {
+        justify-content: stretch;
+      }
+
+      .history-actions .button {
+        flex: 1 1 100%;
+      }
     }
   </style>
 </head>
@@ -556,6 +582,36 @@
     </section>
 
     <section class="summary-grid" data-summary-grid></section>
+
+    <section class="panel">
+      <div class="panel-top">
+        <div>
+          <h2>История</h2>
+          <p class="panel-note">
+            Historical mode открывается только по явному выбору ready snapshot date. Default current mode по-прежнему живёт без
+            explicit <code>as_of_date</code> и остаётся cheap daily path.
+          </p>
+        </div>
+        <p class="panel-meta" data-history-meta>
+          loading historical access…
+        </p>
+      </div>
+      <div class="history-toolbar">
+        <label class="filter-card">
+          <span class="filter-label">Snapshot Date</span>
+          <select class="select" data-history-date-select>
+            <option value="">Текущий режим (без даты)</option>
+          </select>
+        </label>
+        <div class="history-actions">
+          <button class="button primary" type="button" data-history-open>Открыть дату</button>
+          <button class="button secondary" type="button" data-history-reset>Вернуться к текущему режиму</button>
+        </div>
+      </div>
+      <div class="filters-footer">
+        <p class="filter-summary" data-history-summary>Loading…</p>
+      </div>
+    </section>
 
     <section class="panel">
       <div class="panel-top">
@@ -614,6 +670,11 @@
     const pageMetaNode = document.querySelector("[data-page-meta]");
     const sourceChainNode = document.querySelector("[data-source-chain]");
     const statusBadgeNode = document.querySelector("[data-status-badge]");
+    const historyMetaNode = document.querySelector("[data-history-meta]");
+    const historySummaryNode = document.querySelector("[data-history-summary]");
+    const historyDateSelectNode = document.querySelector("[data-history-date-select]");
+    const historyOpenButton = document.querySelector("[data-history-open]");
+    const historyResetButton = document.querySelector("[data-history-reset]");
     const filterControlsNode = document.querySelector("[data-filter-controls]");
     const filterMetaNode = document.querySelector("[data-filter-meta]");
     const filterSummaryNode = document.querySelector("[data-filter-summary]");
@@ -652,6 +713,21 @@
       loadPageComposition();
     });
 
+    historyDateSelectNode.addEventListener("change", function() {
+      syncHistoricalControls(state.composition);
+    });
+
+    historyOpenButton.addEventListener("click", function() {
+      const selectedDate = String(historyDateSelectNode.value || "").trim();
+      updatePageAsOfDate(selectedDate);
+      loadPageComposition();
+    });
+
+    historyResetButton.addEventListener("click", function() {
+      updatePageAsOfDate("");
+      loadPageComposition();
+    });
+
     resetFiltersButton.addEventListener("click", function() {
       resetFilterState(state.composition);
       syncControlValues();
@@ -676,6 +752,17 @@
       statusBadgeNode.textContent = badge.label;
       statusBadgeNode.className = "status-badge tone-" + normalizeTone(badge.tone);
       statusBadgeNode.title = badge.detail || "";
+    }
+
+    function updatePageAsOfDate(asOfDate) {
+      const url = new URL(window.location.href);
+      if (asOfDate) {
+        url.searchParams.set("as_of_date", asOfDate);
+      } else {
+        url.searchParams.delete("as_of_date");
+      }
+      window.history.replaceState({}, "", url.toString());
+      openContractLink.href = buildReadUrl("contract").toString();
     }
 
     function normalizeTone(value) {
@@ -734,6 +821,65 @@
         node.addEventListener("change", handleFilterInput);
       });
       syncControlValues();
+    }
+
+    function renderHistoricalAccess(payload) {
+      const historical = payload.historical_access || {
+        options: [],
+        selected_as_of_date: "",
+        current_mode: "default",
+        status_text: "Исторический доступ недоступен.",
+        default_as_of_date: "",
+        url_state_mode: "query_string",
+        browser_state_persistence: "none",
+        empty_message: "Исторические ready snapshots пока не materialized."
+      };
+      const options = Array.isArray(historical.options) ? historical.options.slice() : [];
+      const selectedDate = String(historical.selected_as_of_date || "").trim();
+      if (selectedDate && !options.some(function(option) { return option.value === selectedDate; })) {
+        options.unshift({value: selectedDate, label: selectedDate});
+      }
+      historyDateSelectNode.innerHTML = [
+        '<option value="">Текущий режим (без даты)</option>',
+        options.map(function(option) {
+          return (
+            '<option value="' + escapeHtml(option.value) + '">' +
+            escapeHtml(option.label) +
+            "</option>"
+          );
+        }).join("")
+      ].join("");
+      historyDateSelectNode.value = selectedDate;
+      historyDateSelectNode.disabled = options.length === 0 && !selectedDate;
+      historyMetaNode.textContent =
+        "mode: " +
+        valueOrDash(historical.current_mode) +
+        " · default as_of_date: " +
+        valueOrDash(historical.default_as_of_date) +
+        " · route state: " +
+        valueOrDash(historical.url_state_mode);
+      historySummaryNode.textContent =
+        historical.status_text +
+        " " +
+        (options.length
+          ? "Доступно snapshots: " + options.length + "."
+          : valueOrDash(historical.empty_message));
+      syncHistoricalControls(payload);
+    }
+
+    function syncHistoricalControls(payload) {
+      const currentQueryDate = currentQueryAsOfDate();
+      const selectedDate = String(historyDateSelectNode.value || "").trim();
+      historyOpenButton.disabled = !selectedDate || selectedDate === currentQueryDate;
+      historyResetButton.disabled = !currentQueryDate;
+      if (!payload || !payload.historical_access) {
+        return;
+      }
+    }
+
+    function currentQueryAsOfDate() {
+      const params = new URLSearchParams(window.location.search);
+      return String(params.get("as_of_date") || "").trim();
     }
 
     function buildControlHtml(control) {
@@ -813,6 +959,7 @@
       });
       setStatusBadge(payload);
       renderSummaryCards(payload.summary_cards || []);
+      renderHistoricalAccess(payload);
       renderFilterControls(payload);
       if (!state.filters.sort) {
         state.filters.sort = (payload.filter_surface && payload.filter_surface.default_sort_value) || "";
@@ -1214,6 +1361,12 @@
             detail: message
           }
         ]);
+        historyDateSelectNode.innerHTML = '<option value="">Текущий режим (без даты)</option>';
+        historyDateSelectNode.disabled = true;
+        historyMetaNode.textContent = "historical access unavailable";
+        historySummaryNode.textContent = "error";
+        historyOpenButton.disabled = true;
+        historyResetButton.disabled = !currentQueryAsOfDate();
         filterControlsNode.innerHTML = "";
         filterMetaNode.textContent = "page_composition unavailable";
         filterSummaryNode.textContent = "error";

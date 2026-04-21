@@ -23,6 +23,8 @@ def build_web_vitrina_page_composition(
     page_route: str,
     read_route: str,
     operator_route: str,
+    available_snapshot_dates: list[str],
+    selected_as_of_date: str | None,
 ) -> dict[str, Any]:
     contract_payload = _to_payload(contract)
     view_model_payload = _to_payload(view_model)
@@ -68,6 +70,12 @@ def build_web_vitrina_page_composition(
             "state_namespace": WEB_VITRINA_PAGE_STATE_NAMESPACE,
             "browser_state_persistence": "none",
         },
+        "historical_access": _build_historical_access(
+            page_route=page_route,
+            default_as_of_date=str(contract_payload["status_summary"]["default_as_of_date"]),
+            available_snapshot_dates=available_snapshot_dates,
+            selected_as_of_date=selected_as_of_date,
+        ),
         "status_badge": {
             "label": _status_badge_label(current_state=current_state, refresh_status=str(contract_payload["status_summary"]["refresh_status"])),
             "tone": _status_tone(current_state=current_state, refresh_status=str(contract_payload["status_summary"]["refresh_status"])),
@@ -192,6 +200,9 @@ def build_web_vitrina_page_error_composition(
     operator_route: str,
     as_of_date: str,
     error_message: str,
+    available_snapshot_dates: list[str],
+    default_as_of_date: str,
+    selected_as_of_date: str | None,
 ) -> dict[str, Any]:
     return {
         "composition_name": WEB_VITRINA_PAGE_COMPOSITION_NAME,
@@ -216,6 +227,12 @@ def build_web_vitrina_page_error_composition(
             "state_namespace": WEB_VITRINA_PAGE_STATE_NAMESPACE,
             "browser_state_persistence": "none",
         },
+        "historical_access": _build_historical_access(
+            page_route=page_route,
+            default_as_of_date=default_as_of_date,
+            available_snapshot_dates=available_snapshot_dates,
+            selected_as_of_date=selected_as_of_date,
+        ),
         "status_badge": {
             "label": "Error",
             "tone": "error",
@@ -425,6 +442,41 @@ def _resolve_default_sort_value(adapter_payload: Mapping[str, Any]) -> str:
     if first is None or not first.get("directions"):
         return ""
     return _sort_value(str(first["sort_id"]), str(first["directions"][0]))
+
+
+def _build_historical_access(
+    *,
+    page_route: str,
+    default_as_of_date: str,
+    available_snapshot_dates: list[str],
+    selected_as_of_date: str | None,
+) -> dict[str, Any]:
+    selected_date = str(selected_as_of_date or "").strip()
+    options = [
+        {
+            "value": snapshot_date,
+            "label": snapshot_date,
+        }
+        for snapshot_date in sorted({str(item) for item in available_snapshot_dates if item}, reverse=True)
+    ]
+    current_mode = "historical" if selected_date else "default"
+    active_label = selected_date or default_as_of_date
+    if current_mode == "historical":
+        status_text = f"Открыт historical snapshot на {active_label}."
+    else:
+        status_text = f"Открыт текущий cheap daily mode на {active_label} без explicit as_of_date."
+    return {
+        "state_namespace": WEB_VITRINA_PAGE_STATE_NAMESPACE,
+        "browser_state_persistence": "none",
+        "url_state_mode": "query_string",
+        "page_route": page_route,
+        "default_as_of_date": default_as_of_date,
+        "selected_as_of_date": selected_date,
+        "current_mode": current_mode,
+        "status_text": status_text,
+        "options": options,
+        "empty_message": "Исторические ready snapshots пока не materialized.",
+    }
 
 
 def _resolve_ready_state_message(adapter_payload: Mapping[str, Any]) -> str:
