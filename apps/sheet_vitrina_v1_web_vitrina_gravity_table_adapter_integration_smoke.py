@@ -99,6 +99,14 @@ def main() -> None:
         percent_row = next(row for row in adapter.rows if row.row_id == f"SKU:{enabled[1].nm_id}|avg_addToCartConversion")
         if columns["scope_label"].meta.pin != "left":
             raise AssertionError(f"sticky pin mismatch, got {columns['scope_label']}")
+        if not (72 <= int(columns["row_order"].size or 0) < 96):
+            raise AssertionError(f"row_order width must stay compact, got {columns['row_order']}")
+        if not (156 <= int(columns["scope_label"].size or 0) < 280):
+            raise AssertionError(f"scope_label width must stay content-driven, got {columns['scope_label']}")
+        if not (96 <= int(columns["group"].size or 0) < 160):
+            raise AssertionError(f"group width must stay compact, got {columns['group']}")
+        if not (104 <= int(columns["date:2026-04-21"].size or 0) <= 120):
+            raise AssertionError(f"date column width must stay narrow and readable, got {columns['date:2026-04-21']}")
         if money_row.values["date:2026-04-21"].renderer_id != "renderer:money:money_rub":
             raise AssertionError(f"money renderer mismatch, got {money_row.values['date:2026-04-21']}")
         if percent_row.values["date:2026-04-21"].renderer_id != "renderer:percent:percent_default":

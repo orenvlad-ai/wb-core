@@ -162,14 +162,14 @@ def _build_columns(
             raise ValueError(f"renderer {renderer_id!r} was not materialized for column {item['id']!r}")
         filter_binding = filters_by_column.get(item["id"])
         sort_binding = sorts_by_column.get(item["id"])
-        width_hint = item.get("width_hint")
+        resolved_width = _resolve_column_width(item, rows=payload["rows"])
         columns.append(
             WebVitrinaGravityTableColumn(
                 id=str(item["id"]),
                 accessor_key=str(item["id"]),
                 header=str(item["label"]),
-                size=(int(width_hint) if width_hint is not None else None),
-                min_size=_min_size(int(width_hint)) if width_hint is not None else None,
+                size=resolved_width,
+                min_size=_min_size(resolved_width) if resolved_width is not None else None,
                 enable_sorting=bool(item["sortable"]),
                 enable_column_filters=bool(item["filterable"]),
                 enable_resizing=True,
@@ -342,8 +342,66 @@ def _pin_value(sticky: str) -> str | None:
     return None
 
 
+def _resolve_column_width(
+    column: Mapping[str, Any],
+    *,
+    rows: list[Mapping[str, Any]],
+) -> int | None:
+    width_hint = column.get("width_hint")
+    if width_hint is None:
+        return None
+    column_id = str(column["id"])
+    width_cap = int(width_hint)
+    observed_width = _observed_column_width(column, rows=rows)
+    return max(_column_floor_width(column_id), min(width_cap, observed_width))
+
+
+def _observed_column_width(
+    column: Mapping[str, Any],
+    *,
+    rows: list[Mapping[str, Any]],
+) -> int:
+    column_id = str(column["id"])
+    header_text = str(column["label"])
+    value_type = str(column.get("value_type") or "")
+    max_text_length = len(header_text)
+    for row in rows:
+        for cell in row["cells"]:
+            if str(cell["column_id"]) != column_id:
+                continue
+            display_text = str(cell.get("display_text") or "")
+            if value_type.startswith("integer") or value_type.startswith("number") or value_type == "decimal":
+                display_text = display_text.replace(" ", "")
+            max_text_length = max(max_text_length, len(display_text))
+            break
+    if column_id.startswith("date:"):
+        return max(104, int(max_text_length * 7.0 + 26))
+    char_width = 7.1 if value_type.startswith("integer") or value_type.startswith("number") or value_type == "decimal" else 6.7
+    return int(max_text_length * char_width + 26)
+
+
+def _column_floor_width(column_id: str) -> int:
+    if column_id == "row_order":
+        return 72
+    if column_id.startswith("date:"):
+        return 104
+    if column_id in {"scope_kind", "section"}:
+        return 92
+    if column_id in {"group", "nm_id"}:
+        return 96
+    if column_id == "scope_key":
+        return 116
+    if column_id == "scope_label":
+        return 156
+    if column_id == "metric_key":
+        return 148
+    if column_id == "metric_label":
+        return 166
+    return 96
+
+
 def _min_size(width_hint: int) -> int:
-    return max(72, min(width_hint, 120))
+    return max(64, min(width_hint, 116))
 
 
 def _group_order(group_by_id: Mapping[str, Mapping[str, Any]], group_id: str) -> int:

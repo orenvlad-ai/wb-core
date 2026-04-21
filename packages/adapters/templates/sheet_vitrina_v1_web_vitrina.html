@@ -38,12 +38,14 @@
       min-height: 100vh;
       background: var(--page-bg);
       color: var(--text);
+      overscroll-behavior-x: none;
     }
 
     .page {
       max-width: none;
       margin: 0 auto;
       padding: 18px 18px 24px;
+      overscroll-behavior-x: none;
     }
 
     .hero,
@@ -266,6 +268,112 @@
       color: var(--muted);
       line-height: 1.45;
       text-align: right;
+    }
+
+    .table-tools {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 8px;
+      min-width: min(100%, 320px);
+    }
+
+    .column-manager {
+      position: relative;
+    }
+
+    .column-manager-toggle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      list-style: none;
+      min-height: 34px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      background: var(--panel-subtle);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .column-manager-toggle::-webkit-details-marker {
+      display: none;
+    }
+
+    .column-manager-toggle::after {
+      content: "▾";
+      font-size: 10px;
+      color: var(--muted);
+    }
+
+    .column-manager[open] .column-manager-toggle::after {
+      content: "▴";
+    }
+
+    .column-manager-panel {
+      position: absolute;
+      top: calc(100% + 8px);
+      right: 0;
+      z-index: 6;
+      width: min(320px, calc(100vw - 48px));
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #ffffff;
+      box-shadow: 0 12px 24px rgba(23, 32, 45, 0.08);
+      padding: 12px;
+    }
+
+    .column-manager-note {
+      margin: 0 0 10px;
+      font-size: 11px;
+      line-height: 1.45;
+      color: var(--muted);
+      text-align: left;
+    }
+
+    .column-checkbox-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .column-checkbox {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 8px 10px;
+      align-items: start;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: var(--panel-subtle);
+      cursor: pointer;
+    }
+
+    .column-checkbox input {
+      margin: 2px 0 0;
+    }
+
+    .column-checkbox-text {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .column-checkbox-meta {
+      display: block;
+      margin-top: 2px;
+      font-size: 10px;
+      line-height: 1.4;
+      color: var(--muted);
+    }
+
+    .column-manager-actions {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 10px;
     }
 
     .filters-grid {
@@ -493,11 +601,14 @@
       border-radius: 6px;
       overflow: hidden;
       background: #ffffff;
+      overscroll-behavior-x: contain;
     }
 
     .table-scroll {
       overflow: auto;
       max-height: 78vh;
+      overscroll-behavior: contain;
+      overscroll-behavior-x: contain;
     }
 
     .vitrina-table {
@@ -512,7 +623,7 @@
     .vitrina-table td {
       border-bottom: 1px solid var(--border);
       border-right: 1px solid var(--border);
-      padding: 5px 8px;
+      padding: 4px 7px;
       font-size: var(--table-font-size);
       line-height: 1.25;
       background: #ffffff;
@@ -683,6 +794,17 @@
         text-align: left;
       }
 
+      .table-tools {
+        width: 100%;
+        align-items: stretch;
+      }
+
+      .column-manager-panel {
+        right: auto;
+        left: 0;
+        width: 100%;
+      }
+
       .history-layout,
       .history-fields {
         grid-template-columns: 1fr;
@@ -718,7 +840,7 @@
           </p>
         </div>
         <div class="hero-actions">
-          <span class="status-badge tone-neutral" data-status-badge>Loading</span>
+          <span class="status-badge tone-warning" data-status-badge>Загрузка</span>
           <div class="hero-buttons">
             <a class="button primary" data-open-contract href="#">JSON contract</a>
             <a class="button secondary" data-open-operator href="#">Operator</a>
@@ -740,7 +862,7 @@
           </p>
         </div>
         <p class="panel-meta" data-history-meta>
-          loading period access…
+          загрузка доступа к периодам…
         </p>
       </div>
       <div class="history-layout">
@@ -749,13 +871,13 @@
             <div>
               <p class="history-calendar-title">Выбор периода</p>
               <p class="history-calendar-detail" data-history-calendar-detail>
-                loading calendar…
+                загрузка календаря…
               </p>
             </div>
-            <span class="status-badge tone-neutral" data-history-mode-badge>Mode</span>
+            <span class="status-badge tone-neutral" data-history-mode-badge>Режим</span>
           </div>
           <div class="history-months" data-history-calendar>
-            loading calendar…
+            загрузка календаря…
           </div>
         </section>
         <aside class="history-presets-panel">
@@ -766,7 +888,7 @@
             </p>
           </div>
           <div class="history-preset-list" data-history-presets>
-            loading presets…
+            загрузка пресетов…
           </div>
         </aside>
       </div>
@@ -781,7 +903,7 @@
         </label>
       </div>
       <div class="filters-footer">
-        <p class="filter-summary" data-history-summary>Loading…</p>
+        <p class="filter-summary" data-history-summary>Загрузка…</p>
         <div class="history-actions">
           <button class="button secondary" type="button" data-history-reset>Сбросить</button>
           <button class="button primary" type="button" data-history-save>Сохранить</button>
@@ -798,12 +920,12 @@
           </p>
         </div>
         <p class="panel-meta" data-filter-meta>
-          loading filters…
+          загрузка фильтров…
         </p>
       </div>
       <div class="filters-grid" data-filter-controls></div>
       <div class="filters-footer">
-        <p class="filter-summary" data-filter-summary>Loading…</p>
+        <p class="filter-summary" data-filter-summary>Загрузка…</p>
         <button class="button secondary" type="button" data-reset-filters>Сбросить фильтры</button>
       </div>
     </section>
@@ -816,9 +938,25 @@
             Таблица остаётся thin render shell поверх repo-owned Gravity adapter payload и не становится owner для truth или расчётов.
           </p>
         </div>
-        <p class="panel-meta" data-table-meta>
-          awaiting server payload…
-        </p>
+        <div class="table-tools">
+          <details class="column-manager" data-column-manager>
+            <summary class="column-manager-toggle">Столбцы</summary>
+            <div class="column-manager-panel">
+              <p class="column-manager-note" data-column-manager-note>
+                Загрузка настроек столбцов…
+              </p>
+              <div class="column-checkbox-list" data-column-visibility-controls>
+                Загрузка настроек столбцов…
+              </div>
+              <div class="column-manager-actions">
+                <button class="button secondary" type="button" data-columns-reset>Сбросить столбцы</button>
+              </div>
+            </div>
+          </details>
+          <p class="panel-meta" data-table-meta>
+            ожидание server payload…
+          </p>
+        </div>
       </div>
 
       <div class="state-box" data-table-state>
@@ -830,7 +968,7 @@
       </div>
 
       <div class="table-shell is-hidden" data-table-shell>
-        <div class="table-scroll">
+        <div class="table-scroll" data-table-scroll>
           <table class="vitrina-table">
             <thead data-table-head></thead>
             <tbody data-table-body></tbody>
@@ -864,8 +1002,12 @@
     const stateTitleNode = document.querySelector("[data-state-title]");
     const stateBodyNode = document.querySelector("[data-state-body]");
     const tableShellNode = document.querySelector("[data-table-shell]");
+    const tableScrollNode = document.querySelector("[data-table-scroll]");
     const tableHeadNode = document.querySelector("[data-table-head]");
     const tableBodyNode = document.querySelector("[data-table-body]");
+    const columnManagerNoteNode = document.querySelector("[data-column-manager-note]");
+    const columnVisibilityControlsNode = document.querySelector("[data-column-visibility-controls]");
+    const columnVisibilityResetButton = document.querySelector("[data-columns-reset]");
     const openContractLink = document.querySelector("[data-open-contract]");
     const openOperatorLink = document.querySelector("[data-open-operator]");
     const retryButton = document.querySelector("[data-retry-button]");
@@ -895,6 +1037,12 @@
         scope_kind: ALL_VALUE,
         metric: ALL_VALUE,
         sort: ""
+      },
+      columns: {
+        storageKey: "",
+        defaultVisibleIds: [],
+        mandatoryIds: [],
+        visibleIds: []
       }
     };
 
@@ -947,6 +1095,19 @@
       renderTable();
     });
 
+    columnVisibilityResetButton.addEventListener("click", function() {
+      state.columns.visibleIds = state.columns.defaultVisibleIds.slice();
+      persistColumnVisibility();
+      renderColumnVisibilityControls((state.composition && state.composition.table_surface && state.composition.table_surface.columns) || []);
+      renderTable();
+    });
+
+    tableScrollNode.addEventListener("wheel", function(event) {
+      if (shouldPreventHorizontalOverscroll(tableScrollNode, event)) {
+        event.preventDefault();
+      }
+    }, {passive: false});
+
     function buildReadUrl(surface) {
       const url = new URL(WEB_VITRINA_CONFIG.read_path, window.location.origin);
       const params = new URLSearchParams(window.location.search);
@@ -966,7 +1127,7 @@
     }
 
     function setStatusBadge(payload) {
-      const badge = (payload && payload.status_badge) || {label: "Error", tone: "error", detail: "missing status"};
+      const badge = (payload && payload.status_badge) || {label: "Ошибка", tone: "error", detail: "status unavailable"};
       statusBadgeNode.textContent = badge.label;
       statusBadgeNode.className = "status-badge tone-" + normalizeTone(badge.tone);
       statusBadgeNode.title = badge.detail || "";
@@ -994,6 +1155,175 @@
         return value;
       }
       return "neutral";
+    }
+
+    function buildColumnVisibilityStorageKey(payload) {
+      const namespace = String((payload && payload.meta && payload.meta.state_namespace) || "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1");
+      return namespace + ":visible-columns:v1";
+    }
+
+    function isColumnMandatory(column) {
+      const columnId = String((column && column.id) || "");
+      return columnId === "scope_label" || columnId === "metric_label" || columnId.indexOf("date:") === 0;
+    }
+
+    function sanitizeVisibleColumnIds(candidateIds, defaultIds, mandatoryIds) {
+      const defaultSet = new Set(defaultIds);
+      const visibleSet = new Set(mandatoryIds);
+      (candidateIds || []).forEach(function(columnId) {
+        const normalizedId = String(columnId || "");
+        if (defaultSet.has(normalizedId)) {
+          visibleSet.add(normalizedId);
+        }
+      });
+      return defaultIds.filter(function(columnId) {
+        return visibleSet.has(columnId);
+      });
+    }
+
+    function readPersistedColumnVisibility(storageKey) {
+      if (!storageKey || !window || !window.localStorage) {
+        return null;
+      }
+      try {
+        const raw = window.localStorage.getItem(storageKey);
+        if (!raw) {
+          return null;
+        }
+        const payload = JSON.parse(raw);
+        return Array.isArray(payload.visible_column_ids) ? payload.visible_column_ids.map(function(columnId) {
+          return String(columnId || "");
+        }) : null;
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function persistColumnVisibility() {
+      if (!state.columns.storageKey || !window || !window.localStorage) {
+        return;
+      }
+      try {
+        window.localStorage.setItem(state.columns.storageKey, JSON.stringify({
+          visible_column_ids: state.columns.visibleIds
+        }));
+      } catch (error) {
+        // Ignore browser-local persistence failures and keep the current in-memory selection.
+      }
+    }
+
+    function sameColumnList(left, right) {
+      if ((left || []).length !== (right || []).length) {
+        return false;
+      }
+      return (left || []).every(function(value, index) {
+        return value === right[index];
+      });
+    }
+
+    function isColumnVisible(columnId) {
+      return state.columns.visibleIds.indexOf(String(columnId || "")) !== -1;
+    }
+
+    function visibleColumns(columns) {
+      return (columns || []).filter(function(column) {
+        return isColumnVisible(column.id);
+      });
+    }
+
+    function renderColumnVisibilityControls(columns) {
+      const optionalColumns = (columns || []).filter(function(column) {
+        return !isColumnMandatory(column);
+      });
+      columnManagerNoteNode.textContent = optionalColumns.length
+        ? "Основные колонки и даты остаются видимыми. Остальные можно скрывать и вернуть обратно в этом браузере."
+        : "Для текущего вида нет дополнительных колонок.";
+      if (!optionalColumns.length) {
+        columnVisibilityControlsNode.innerHTML = '<p class="filter-summary">Дополнительных колонок нет.</p>';
+        columnVisibilityResetButton.disabled = true;
+        return;
+      }
+      columnVisibilityControlsNode.innerHTML = optionalColumns.map(function(column) {
+        const columnId = String(column.id || "");
+        return [
+          '<label class="column-checkbox">',
+          '<input type="checkbox" data-column-visibility-id="' + escapeHtml(columnId) + '"' + (isColumnVisible(columnId) ? " checked" : "") + ">",
+          '<span>',
+          '<span class="column-checkbox-text">' + escapeHtml(column.header || columnId) + "</span>",
+          '<span class="column-checkbox-meta">' + escapeHtml(columnId) + "</span>",
+          "</span>",
+          "</label>"
+        ].join("");
+      }).join("");
+      columnVisibilityControlsNode.querySelectorAll("[data-column-visibility-id]").forEach(function(node) {
+        node.addEventListener("change", function() {
+          updateColumnVisibility(String(node.getAttribute("data-column-visibility-id") || ""), !!node.checked);
+        });
+      });
+      columnVisibilityResetButton.disabled = sameColumnList(state.columns.visibleIds, state.columns.defaultVisibleIds);
+    }
+
+    function updateColumnVisibility(columnId, visible) {
+      if (!columnId || state.columns.mandatoryIds.indexOf(columnId) !== -1) {
+        return;
+      }
+      const visibleSet = new Set(state.columns.visibleIds);
+      if (visible) {
+        visibleSet.add(columnId);
+      } else {
+        visibleSet.delete(columnId);
+      }
+      state.columns.visibleIds = sanitizeVisibleColumnIds(
+        Array.from(visibleSet),
+        state.columns.defaultVisibleIds,
+        state.columns.mandatoryIds
+      );
+      persistColumnVisibility();
+      renderColumnVisibilityControls((state.composition && state.composition.table_surface && state.composition.table_surface.columns) || []);
+      renderTable();
+    }
+
+    function initializeColumnVisibility(payload) {
+      const columns = (payload && payload.table_surface && payload.table_surface.columns) || [];
+      const defaultVisibleIds = columns.map(function(column) {
+        return String(column.id || "");
+      }).filter(Boolean);
+      const mandatoryIds = columns.filter(function(column) {
+        return isColumnMandatory(column);
+      }).map(function(column) {
+        return String(column.id || "");
+      });
+      const storageKey = buildColumnVisibilityStorageKey(payload);
+      const restoredVisibleIds = readPersistedColumnVisibility(storageKey);
+      state.columns.storageKey = storageKey;
+      state.columns.defaultVisibleIds = defaultVisibleIds;
+      state.columns.mandatoryIds = mandatoryIds;
+      state.columns.visibleIds = sanitizeVisibleColumnIds(
+        restoredVisibleIds || defaultVisibleIds,
+        defaultVisibleIds,
+        mandatoryIds
+      );
+      persistColumnVisibility();
+      renderColumnVisibilityControls(columns);
+    }
+
+    function shouldPreventHorizontalOverscroll(node, event) {
+      if (!node || !event) {
+        return false;
+      }
+      const deltaX = Number(event.deltaX || 0);
+      const deltaY = Number(event.deltaY || 0);
+      if (!deltaX || Math.abs(deltaX) < Math.abs(deltaY)) {
+        return false;
+      }
+      const maxScrollLeft = Math.max(0, Number(node.scrollWidth || 0) - Number(node.clientWidth || 0));
+      if (maxScrollLeft <= 0) {
+        return true;
+      }
+      const scrollLeft = Number(node.scrollLeft || 0);
+      const atLeftEdge = scrollLeft <= 1;
+      const atRightEdge = scrollLeft >= maxScrollLeft - 1;
+      return (deltaX < 0 && atLeftEdge) || (deltaX > 0 && atRightEdge);
     }
 
     function renderSummaryCards(cards) {
@@ -1114,12 +1444,12 @@
 
     function historyModeLabel(mode) {
       if (mode === "historical_period") {
-        return "Period";
+        return "Период";
       }
       if (mode === "historical_day") {
-        return "Date";
+        return "Дата";
       }
-      return "Current";
+      return "Текущий";
     }
 
     function resetHistoryDraft(payload) {
@@ -1569,6 +1899,7 @@
       renderSummaryCards(payload.summary_cards || []);
       renderHistoricalAccess(payload);
       renderFilterControls(payload);
+      initializeColumnVisibility(payload);
       if (!state.filters.sort) {
         state.filters.sort = (payload.filter_surface && payload.filter_surface.default_sort_value) || "";
       }
@@ -1591,13 +1922,8 @@
       filterMetaNode.textContent =
         "state namespace: " +
         valueOrDash(payload.meta && payload.meta.state_namespace) +
-        " · persistence: " +
+        " · server persistence: " +
         valueOrDash(payload.meta && payload.meta.browser_state_persistence);
-      tableMetaNode.textContent =
-        "grid library: " +
-        valueOrDash(payload.meta && payload.meta.grid_library_name) +
-        " · rows: " +
-        valueOrDash(payload.table_surface && payload.table_surface.total_row_count);
       renderTable();
     }
 
@@ -1614,13 +1940,28 @@
           "Витрина недоступна",
           escapeHtml(payload.meta && payload.meta.state_message ? payload.meta.state_message : "page composition unavailable")
         );
-        filterSummaryNode.textContent = "error";
+        filterSummaryNode.textContent = "Ошибка";
         return;
       }
 
       const filteredRows = sortRows(applyFilters(payload.table_surface.rows || []), payload);
+      const allColumns = (payload.table_surface && payload.table_surface.columns) || [];
+      const columns = visibleColumns(allColumns);
       const totalRows = (payload.table_surface && payload.table_surface.total_row_count) || 0;
+      tableMetaNode.textContent =
+        "grid library: " +
+        valueOrDash(payload.meta && payload.meta.grid_library_name) +
+        " · rows: " +
+        valueOrDash(totalRows) +
+        " · columns: " +
+        columns.length +
+        "/" +
+        allColumns.length;
       filterSummaryNode.textContent = filteredRows.length + " из " + totalRows + " строк";
+      if (!columns.length) {
+        setStateBox("warning", "Нет видимых столбцов", "Сбросьте настройки столбцов, чтобы вернуть полный вид таблицы.");
+        return;
+      }
       if (!filteredRows.length) {
         setStateBox(
           currentState === "empty" ? "warning" : "warning",
@@ -1686,7 +2027,7 @@
     }
 
     function renderTableMarkup(payload, visibleRows) {
-      const columns = payload.table_surface.columns || [];
+      const columns = visibleColumns(payload.table_surface.columns || []);
       const stickyOffsets = buildStickyOffsets(columns);
       tableHeadNode.innerHTML = [
         "<tr>",
@@ -1935,7 +2276,7 @@
     async function loadPageComposition() {
       const requestId = state.requestSequence + 1;
       state.requestSequence = requestId;
-      setStatusBadge({label: "Loading", tone: "neutral", detail: "loading page composition"});
+      setStatusBadge({label: "Загрузка", tone: "warning", detail: "загрузка page composition"});
       setStateBox(
         "warning",
         "Загрузка витрины…",
@@ -1973,16 +2314,16 @@
         renderSummaryCards([
           {
             label: "Статус",
-            value: "error",
+            value: "Ошибка",
             detail: message
           }
         ]);
         historyCalendarNode.innerHTML = '<div class="state-body">Периодный доступ временно недоступен.</div>';
         historyPresetsNode.innerHTML = "";
-        historyMetaNode.textContent = "historical access unavailable";
-        historySummaryNode.textContent = "error";
+        historyMetaNode.textContent = "Исторический доступ временно недоступен";
+        historySummaryNode.textContent = "Ошибка";
         historyCalendarDetailNode.textContent = message;
-        historyModeBadgeNode.textContent = "Error";
+        historyModeBadgeNode.textContent = "Ошибка";
         historyModeBadgeNode.className = "status-badge tone-error";
         historyDateFromNode.value = "";
         historyDateToNode.value = "";
@@ -1991,13 +2332,16 @@
         historySaveButton.disabled = true;
         historyResetButton.disabled = true;
         filterControlsNode.innerHTML = "";
-        filterMetaNode.textContent = "page_composition unavailable";
-        filterSummaryNode.textContent = "error";
-        tableMetaNode.textContent = "page_composition unavailable";
-        pageMetaNode.textContent = "read route error";
+        columnManagerNoteNode.textContent = "Управление колонками временно недоступно.";
+        columnVisibilityControlsNode.innerHTML = '<p class="filter-summary">Управление колонками временно недоступно.</p>';
+        columnVisibilityResetButton.disabled = true;
+        filterMetaNode.textContent = "page composition недоступен";
+        filterSummaryNode.textContent = "Ошибка";
+        tableMetaNode.textContent = "page composition недоступен";
+        pageMetaNode.textContent = "Ошибка чтения read route";
         sourceChainNode.textContent =
           "source chain: web_vitrina_contract -> web_vitrina_view_model -> web_vitrina_gravity_table_adapter -> web_vitrina_page_composition";
-        setStatusBadge({label: "Error", tone: "error", detail: message});
+        setStatusBadge({label: "Ошибка", tone: "error", detail: message});
         setStateBox("error", "Не удалось загрузить витрину", escapeHtml(message));
       }
     }
