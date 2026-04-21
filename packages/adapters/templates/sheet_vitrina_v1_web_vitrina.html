@@ -274,11 +274,156 @@
       gap: 8px;
     }
 
-    .history-toolbar {
+    .history-layout {
       display: grid;
-      grid-template-columns: minmax(220px, 320px) auto;
+      grid-template-columns: minmax(0, 2.2fr) minmax(220px, 0.95fr);
+      gap: 12px;
+      align-items: start;
+    }
+
+    .history-calendar-panel,
+    .history-presets-panel {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel-subtle);
+      padding: 10px;
+    }
+
+    .history-calendar-top {
+      display: flex;
+      justify-content: space-between;
       gap: 10px;
-      align-items: end;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+
+    .history-calendar-title {
+      margin: 0;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .history-calendar-detail {
+      margin: 3px 0 0;
+      font-size: 11px;
+      line-height: 1.45;
+      color: var(--muted);
+    }
+
+    .history-months {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 10px;
+    }
+
+    .history-month {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 8px;
+    }
+
+    .history-month-header {
+      margin: 0 0 8px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text);
+      text-transform: capitalize;
+    }
+
+    .history-weekdays,
+    .history-days {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 4px;
+    }
+
+    .history-weekdays {
+      margin-bottom: 6px;
+    }
+
+    .history-weekday {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      text-align: center;
+      color: var(--muted);
+    }
+
+    .history-day,
+    .history-day-empty {
+      min-height: 34px;
+      border-radius: 6px;
+    }
+
+    .history-day-empty {
+      background: transparent;
+    }
+
+    .history-day {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: #ffffff;
+      padding: 4px 0;
+      font: inherit;
+      font-size: 11px;
+      color: var(--text);
+      cursor: pointer;
+      transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, transform 120ms ease;
+    }
+
+    .history-day:hover:not(:disabled) {
+      transform: translateY(-1px);
+      border-color: var(--accent);
+    }
+
+    .history-day:disabled {
+      cursor: not-allowed;
+      color: #a7b3c1;
+      background: #f7f8fa;
+      border-style: dashed;
+    }
+
+    .history-day.in-range {
+      background: #edf3ff;
+      border-color: #b7cdfd;
+      color: #1d4ed8;
+    }
+
+    .history-day.range-edge {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #ffffff;
+      font-weight: 700;
+    }
+
+    .history-day.today-anchor {
+      box-shadow: inset 0 0 0 1px rgba(47, 111, 237, 0.35);
+    }
+
+    .history-presets-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .history-preset-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .history-preset-button {
+      justify-content: flex-start;
+      width: 100%;
+    }
+
+    .history-fields {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 10px;
     }
 
     .history-actions {
@@ -538,7 +683,8 @@
         text-align: left;
       }
 
-      .history-toolbar {
+      .history-layout,
+      .history-fields {
         grid-template-columns: 1fr;
       }
 
@@ -546,7 +692,8 @@
         justify-content: stretch;
       }
 
-      .history-actions .button {
+      .history-actions .button,
+      .history-preset-button {
         flex: 1 1 100%;
       }
     }
@@ -588,28 +735,57 @@
         <div>
           <h2>История</h2>
           <p class="panel-note">
-            Historical mode открывается только по явному выбору ready snapshot date. Default current mode по-прежнему живёт без
-            explicit <code>as_of_date</code> и остаётся cheap daily path.
+            Period mode открывается только по явному выбору диапазона и использует server-side ready snapshot window на existing
+            read route. Default current mode по-прежнему живёт без explicit периода и остаётся cheap daily path.
           </p>
         </div>
         <p class="panel-meta" data-history-meta>
-          loading historical access…
+          loading period access…
         </p>
       </div>
-      <div class="history-toolbar">
+      <div class="history-layout">
+        <section class="history-calendar-panel">
+          <div class="history-calendar-top">
+            <div>
+              <p class="history-calendar-title">Выбор периода</p>
+              <p class="history-calendar-detail" data-history-calendar-detail>
+                loading calendar…
+              </p>
+            </div>
+            <span class="status-badge tone-neutral" data-history-mode-badge>Mode</span>
+          </div>
+          <div class="history-months" data-history-calendar>
+            loading calendar…
+          </div>
+        </section>
+        <aside class="history-presets-panel">
+          <div>
+            <p class="history-calendar-title">Пресеты</p>
+            <p class="history-calendar-detail">
+              Пресеты подставляют period window поверх реально materialized ready snapshots.
+            </p>
+          </div>
+          <div class="history-preset-list" data-history-presets>
+            loading presets…
+          </div>
+        </aside>
+      </div>
+      <div class="history-fields">
         <label class="filter-card">
-          <span class="filter-label">Snapshot Date</span>
-          <select class="select" data-history-date-select>
-            <option value="">Текущий режим (без даты)</option>
-          </select>
+          <span class="filter-label">Начало периода</span>
+          <input class="input" type="date" data-history-date-from>
         </label>
-        <div class="history-actions">
-          <button class="button primary" type="button" data-history-open>Открыть дату</button>
-          <button class="button secondary" type="button" data-history-reset>Вернуться к текущему режиму</button>
-        </div>
+        <label class="filter-card">
+          <span class="filter-label">Конец периода</span>
+          <input class="input" type="date" data-history-date-to>
+        </label>
       </div>
       <div class="filters-footer">
         <p class="filter-summary" data-history-summary>Loading…</p>
+        <div class="history-actions">
+          <button class="button secondary" type="button" data-history-reset>Сбросить</button>
+          <button class="button primary" type="button" data-history-save>Сохранить</button>
+        </div>
       </div>
     </section>
 
@@ -672,8 +848,13 @@
     const statusBadgeNode = document.querySelector("[data-status-badge]");
     const historyMetaNode = document.querySelector("[data-history-meta]");
     const historySummaryNode = document.querySelector("[data-history-summary]");
-    const historyDateSelectNode = document.querySelector("[data-history-date-select]");
-    const historyOpenButton = document.querySelector("[data-history-open]");
+    const historyCalendarNode = document.querySelector("[data-history-calendar]");
+    const historyCalendarDetailNode = document.querySelector("[data-history-calendar-detail]");
+    const historyModeBadgeNode = document.querySelector("[data-history-mode-badge]");
+    const historyPresetsNode = document.querySelector("[data-history-presets]");
+    const historyDateFromNode = document.querySelector("[data-history-date-from]");
+    const historyDateToNode = document.querySelector("[data-history-date-to]");
+    const historySaveButton = document.querySelector("[data-history-save]");
     const historyResetButton = document.querySelector("[data-history-reset]");
     const filterControlsNode = document.querySelector("[data-filter-controls]");
     const filterMetaNode = document.querySelector("[data-filter-meta]");
@@ -696,6 +877,16 @@
     const sortOptionsByValue = new Map();
     const state = {
       composition: null,
+      history: {
+        availableDates: [],
+        availableDateSet: new Set(),
+        draftDateFrom: "",
+        draftDateTo: "",
+        awaitingRangeEnd: false,
+        visibleMonths: [],
+        defaultAsOfDate: "",
+        currentMode: "default"
+      },
       filters: {
         search: "",
         section: ALL_VALUE,
@@ -713,18 +904,39 @@
       loadPageComposition();
     });
 
-    historyDateSelectNode.addEventListener("change", function() {
-      syncHistoricalControls(state.composition);
+    historyDateFromNode.addEventListener("change", function() {
+      state.history.draftDateFrom = normalizeHistoryInputValue(historyDateFromNode.value);
+      state.history.awaitingRangeEnd = false;
+      syncHistoryFieldValues();
+      renderHistoryStatus(state.composition);
     });
 
-    historyOpenButton.addEventListener("click", function() {
-      const selectedDate = String(historyDateSelectNode.value || "").trim();
-      updatePageAsOfDate(selectedDate);
+    historyDateToNode.addEventListener("change", function() {
+      state.history.draftDateTo = normalizeHistoryInputValue(historyDateToNode.value);
+      state.history.awaitingRangeEnd = false;
+      syncHistoryFieldValues();
+      renderHistoryStatus(state.composition);
+    });
+
+    historySaveButton.addEventListener("click", function() {
+      const validationError = validateHistoryDraft();
+      if (validationError) {
+        historySummaryNode.textContent = validationError;
+        return;
+      }
+      updatePageHistoryPeriod({
+        dateFrom: state.history.draftDateFrom,
+        dateTo: state.history.draftDateTo
+      });
       loadPageComposition();
     });
 
     historyResetButton.addEventListener("click", function() {
-      updatePageAsOfDate("");
+      resetHistoryDraft(state.composition);
+      updatePageHistoryPeriod({
+        dateFrom: "",
+        dateTo: ""
+      });
       loadPageComposition();
     });
 
@@ -737,8 +949,13 @@
     function buildReadUrl(surface) {
       const url = new URL(WEB_VITRINA_CONFIG.read_path, window.location.origin);
       const params = new URLSearchParams(window.location.search);
+      const dateFrom = params.get("date_from");
+      const dateTo = params.get("date_to");
       const asOfDate = params.get("as_of_date");
-      if (asOfDate) {
+      if (dateFrom && dateTo) {
+        url.searchParams.set("date_from", dateFrom);
+        url.searchParams.set("date_to", dateTo);
+      } else if (asOfDate) {
         url.searchParams.set("as_of_date", asOfDate);
       }
       if (surface && surface !== "contract") {
@@ -754,11 +971,17 @@
       statusBadgeNode.title = badge.detail || "";
     }
 
-    function updatePageAsOfDate(asOfDate) {
+    function updatePageHistoryPeriod(payload) {
       const url = new URL(window.location.href);
-      if (asOfDate) {
-        url.searchParams.set("as_of_date", asOfDate);
+      const dateFrom = String((payload && payload.dateFrom) || "").trim();
+      const dateTo = String((payload && payload.dateTo) || "").trim();
+      if (dateFrom && dateTo) {
+        url.searchParams.set("date_from", dateFrom);
+        url.searchParams.set("date_to", dateTo);
+        url.searchParams.delete("as_of_date");
       } else {
+        url.searchParams.delete("date_from");
+        url.searchParams.delete("date_to");
         url.searchParams.delete("as_of_date");
       }
       window.history.replaceState({}, "", url.toString());
@@ -827,59 +1050,443 @@
       const historical = payload.historical_access || {
         options: [],
         selected_as_of_date: "",
+        selected_date_from: "",
+        selected_date_to: "",
         current_mode: "default",
         status_text: "Исторический доступ недоступен.",
         default_as_of_date: "",
         url_state_mode: "query_string",
         browser_state_persistence: "none",
+        supported_query_mode: "date_window",
+        preset_options: [],
         empty_message: "Исторические ready snapshots пока не materialized."
       };
-      const options = Array.isArray(historical.options) ? historical.options.slice() : [];
-      const selectedDate = String(historical.selected_as_of_date || "").trim();
-      if (selectedDate && !options.some(function(option) { return option.value === selectedDate; })) {
-        options.unshift({value: selectedDate, label: selectedDate});
+      const options = Array.isArray(historical.options) ? historical.options.slice().reverse() : [];
+      state.history.availableDates = options.map(function(option) { return String(option.value || ""); }).filter(Boolean);
+      state.history.availableDateSet = new Set(state.history.availableDates);
+      state.history.defaultAsOfDate = String(historical.default_as_of_date || "").trim();
+      state.history.currentMode = String(historical.current_mode || "default");
+      if (historical.selected_date_from || historical.selected_date_to || historical.selected_as_of_date) {
+        state.history.draftDateFrom = String(historical.selected_date_from || historical.selected_as_of_date || "").trim();
+        state.history.draftDateTo = String(historical.selected_date_to || historical.selected_as_of_date || "").trim();
+        state.history.awaitingRangeEnd = false;
+      } else {
+        resetHistoryDraft(payload);
       }
-      historyDateSelectNode.innerHTML = [
-        '<option value="">Текущий режим (без даты)</option>',
-        options.map(function(option) {
-          return (
-            '<option value="' + escapeHtml(option.value) + '">' +
-            escapeHtml(option.label) +
-            "</option>"
-          );
-        }).join("")
-      ].join("");
-      historyDateSelectNode.value = selectedDate;
-      historyDateSelectNode.disabled = options.length === 0 && !selectedDate;
       historyMetaNode.textContent =
         "mode: " +
         valueOrDash(historical.current_mode) +
+        " · supported query: " +
+        valueOrDash(historical.supported_query_mode) +
         " · default as_of_date: " +
         valueOrDash(historical.default_as_of_date) +
         " · route state: " +
         valueOrDash(historical.url_state_mode);
-      historySummaryNode.textContent =
+      historyModeBadgeNode.textContent = historyModeLabel(historical.current_mode);
+      historyModeBadgeNode.className = "status-badge tone-" + (historical.current_mode === "default" ? "neutral" : "success");
+      historyCalendarDetailNode.textContent =
         historical.status_text +
         " " +
-        (options.length
-          ? "Доступно snapshots: " + options.length + "."
+        (state.history.availableDates.length
+          ? "Доступно snapshots: " + state.history.availableDates.length + "."
           : valueOrDash(historical.empty_message));
-      syncHistoricalControls(payload);
+      historyPresetsNode.innerHTML = (historical.preset_options || []).map(function(preset) {
+        return (
+          '<button class="button secondary history-preset-button" type="button" data-history-preset="' +
+          escapeHtml(preset.preset_id) +
+          '">' +
+          escapeHtml(preset.label) +
+          "</button>"
+        );
+      }).join("");
+      historyPresetsNode.querySelectorAll("[data-history-preset]").forEach(function(node) {
+        node.addEventListener("click", function() {
+          applyHistoryPreset(String(node.getAttribute("data-history-preset") || ""));
+          syncHistoryFieldValues();
+          renderHistoryStatus(payload);
+        });
+      });
+      syncHistoryFieldValues();
+      renderHistoryCalendar(payload);
+      renderHistoryStatus(payload);
     }
 
-    function syncHistoricalControls(payload) {
-      const currentQueryDate = currentQueryAsOfDate();
-      const selectedDate = String(historyDateSelectNode.value || "").trim();
-      historyOpenButton.disabled = !selectedDate || selectedDate === currentQueryDate;
-      historyResetButton.disabled = !currentQueryDate;
-      if (!payload || !payload.historical_access) {
-        return;
+    function historyModeLabel(mode) {
+      if (mode === "historical_period") {
+        return "Period";
+      }
+      if (mode === "historical_day") {
+        return "Date";
+      }
+      return "Current";
+    }
+
+    function resetHistoryDraft(payload) {
+      state.history.draftDateFrom = "";
+      state.history.draftDateTo = "";
+      state.history.awaitingRangeEnd = false;
+      if (payload && payload.historical_access && payload.historical_access.current_mode !== "default") {
+        state.history.draftDateFrom = String(payload.historical_access.selected_date_from || payload.historical_access.selected_as_of_date || "").trim();
+        state.history.draftDateTo = String(payload.historical_access.selected_date_to || payload.historical_access.selected_as_of_date || "").trim();
+      }
+      if (!payload || !payload.historical_access || payload.historical_access.current_mode === "default") {
+        state.history.draftDateFrom = "";
+        state.history.draftDateTo = "";
       }
     }
 
-    function currentQueryAsOfDate() {
+    function syncHistoryFieldValues() {
+      const minDate = state.history.availableDates[0] || "";
+      const maxDate = state.history.availableDates[state.history.availableDates.length - 1] || "";
+      historyDateFromNode.min = minDate;
+      historyDateFromNode.max = maxDate;
+      historyDateToNode.min = minDate;
+      historyDateToNode.max = maxDate;
+      historyDateFromNode.value = state.history.draftDateFrom;
+      historyDateToNode.value = state.history.draftDateTo;
+      const disabled = state.history.availableDates.length === 0;
+      historyDateFromNode.disabled = disabled;
+      historyDateToNode.disabled = disabled;
+    }
+
+    function renderHistoryCalendar(payload) {
+      if (!state.history.availableDates.length) {
+        historyCalendarNode.innerHTML = '<div class="state-body">Исторические ready snapshots пока не materialized.</div>';
+        historySaveButton.disabled = true;
+        historyResetButton.disabled = !currentHistoryQuery().hasSelection;
+        return;
+      }
+      const visibleMonths = buildVisibleHistoryMonths();
+      historyCalendarNode.innerHTML = visibleMonths.map(function(monthDescriptor) {
+        return buildHistoryMonthMarkup(monthDescriptor);
+      }).join("");
+      historyCalendarNode.querySelectorAll("[data-history-day]").forEach(function(node) {
+        node.addEventListener("click", function() {
+          selectHistoryDay(String(node.getAttribute("data-history-day") || ""));
+          syncHistoryFieldValues();
+          renderHistoryCalendar(payload);
+          renderHistoryStatus(payload);
+        });
+      });
+    }
+
+    function renderHistoryStatus(payload) {
+      const validationError = validateHistoryDraft();
+      const currentQuery = currentHistoryQuery();
+      const isSameAsCurrent =
+        state.history.draftDateFrom === currentQuery.dateFrom &&
+        state.history.draftDateTo === currentQuery.dateTo;
+      historySaveButton.disabled = !!validationError || isSameAsCurrent || !state.history.draftDateFrom || !state.history.draftDateTo;
+      historyResetButton.disabled = !currentQuery.hasSelection;
+      if (validationError) {
+        historySummaryNode.textContent = validationError;
+        return;
+      }
+      const draftLabel = state.history.draftDateFrom && state.history.draftDateTo
+        ? state.history.draftDateFrom + " → " + state.history.draftDateTo
+        : "Текущий режим без периода";
+      historySummaryNode.textContent =
+        valueOrDash(payload && payload.historical_access && payload.historical_access.status_text) +
+        " Черновик: " +
+        draftLabel + ".";
+    }
+
+    function currentHistoryQuery() {
       const params = new URLSearchParams(window.location.search);
-      return String(params.get("as_of_date") || "").trim();
+      const dateFrom = String(params.get("date_from") || "").trim();
+      const dateTo = String(params.get("date_to") || "").trim();
+      const asOfDate = String(params.get("as_of_date") || "").trim();
+      if (dateFrom && dateTo) {
+        return {
+          dateFrom: dateFrom,
+          dateTo: dateTo,
+          hasSelection: true
+        };
+      }
+      if (asOfDate) {
+        return {
+          dateFrom: asOfDate,
+          dateTo: asOfDate,
+          hasSelection: true
+        };
+      }
+      return {
+        dateFrom: "",
+        dateTo: "",
+        hasSelection: false
+      };
+    }
+
+    function normalizeHistoryInputValue(value) {
+      return String(value || "").trim();
+    }
+
+    function validateHistoryDraft() {
+      if (!state.history.availableDates.length) {
+        return "Исторические ready snapshots пока недоступны.";
+      }
+      if (!state.history.draftDateFrom && !state.history.draftDateTo) {
+        return "";
+      }
+      if (!state.history.draftDateFrom || !state.history.draftDateTo) {
+        return "Выберите начало и конец периода.";
+      }
+      if (state.history.draftDateFrom > state.history.draftDateTo) {
+        return "Начало периода должно быть не позже конца.";
+      }
+      if (!state.history.availableDateSet.has(state.history.draftDateFrom) || !state.history.availableDateSet.has(state.history.draftDateTo)) {
+        return "Выбранная дата пока недоступна как ready snapshot.";
+      }
+      if (!isContinuousAvailableRange(state.history.draftDateFrom, state.history.draftDateTo)) {
+        return "Выбранный диапазон пока не materialized целиком.";
+      }
+      return "";
+    }
+
+    function applyHistoryPreset(presetId) {
+      if (!state.history.availableDates.length) {
+        return;
+      }
+      const anchorDate = state.history.draftDateTo || state.history.availableDates[state.history.availableDates.length - 1];
+      const presetRange = resolveHistoryPresetRange(presetId, anchorDate);
+      if (!presetRange) {
+        return;
+      }
+      state.history.draftDateFrom = presetRange.dateFrom;
+      state.history.draftDateTo = presetRange.dateTo;
+      state.history.awaitingRangeEnd = false;
+    }
+
+    function resolveHistoryPresetRange(presetId, anchorDate) {
+      const minDate = state.history.availableDates[0];
+      let rawStart = anchorDate;
+      if (presetId === "week") {
+        rawStart = shiftIsoDate(anchorDate, -6);
+      } else if (presetId === "two_weeks") {
+        rawStart = shiftIsoDate(anchorDate, -13);
+      } else if (presetId === "month") {
+        rawStart = anchorDate.slice(0, 8) + "01";
+      } else if (presetId === "quarter") {
+        rawStart = quarterStartIso(anchorDate);
+      } else if (presetId === "year") {
+        rawStart = anchorDate.slice(0, 4) + "-01-01";
+      } else {
+        return null;
+      }
+      const dateFrom = nearestAvailableOnOrAfter(maxIsoDate(rawStart, minDate));
+      const dateTo = nearestAvailableOnOrBefore(anchorDate);
+      if (!dateFrom || !dateTo || dateFrom > dateTo) {
+        return null;
+      }
+      return {dateFrom: dateFrom, dateTo: dateTo};
+    }
+
+    function selectHistoryDay(dateValue) {
+      if (!dateValue) {
+        return;
+      }
+      if (!state.history.draftDateFrom || (state.history.draftDateFrom && state.history.draftDateTo && !state.history.awaitingRangeEnd)) {
+        state.history.draftDateFrom = dateValue;
+        state.history.draftDateTo = dateValue;
+        state.history.awaitingRangeEnd = true;
+        return;
+      }
+      if (dateValue < state.history.draftDateFrom) {
+        state.history.draftDateTo = state.history.draftDateFrom;
+        state.history.draftDateFrom = dateValue;
+      } else {
+        state.history.draftDateTo = dateValue;
+      }
+      state.history.awaitingRangeEnd = false;
+    }
+
+    function buildVisibleHistoryMonths() {
+      if (!state.history.availableDates.length) {
+        state.history.visibleMonths = [];
+        return [];
+      }
+      const firstDate = state.history.availableDates[0];
+      const lastDate = state.history.availableDates[state.history.availableDates.length - 1];
+      const startMonth = startOfMonthIso(firstDate);
+      const endMonth = startOfMonthIso(lastDate);
+      const monthStarts = [];
+      let cursor = startMonth;
+      while (cursor <= endMonth) {
+        monthStarts.push(cursor);
+        cursor = addMonthsIso(cursor, 1);
+      }
+      state.history.visibleMonths = monthStarts;
+      return monthStarts.map(function(monthStart) {
+        return {
+          monthStart: monthStart,
+          monthLabel: formatHistoryMonthLabel(monthStart)
+        };
+      });
+    }
+
+    function buildHistoryMonthMarkup(monthDescriptor) {
+      const monthStart = parseIsoDate(monthDescriptor.monthStart);
+      const monthIndex = monthStart.getUTCMonth();
+      const leadingEmptyDays = mondayFirstWeekdayIndex(monthStart);
+      const dayCells = [];
+      for (let offset = 0; offset < leadingEmptyDays; offset += 1) {
+        dayCells.push('<div class="history-day-empty" aria-hidden="true"></div>');
+      }
+      let dayCursor = new Date(monthStart.getTime());
+      while (dayCursor.getUTCMonth() === monthIndex) {
+        const isoDate = formatIsoDate(dayCursor);
+        const isAvailable = state.history.availableDateSet.has(isoDate);
+        const isSelectedStart = isoDate === state.history.draftDateFrom;
+        const isSelectedEnd = isoDate === state.history.draftDateTo;
+        const isRangeEdge = isSelectedStart || isSelectedEnd;
+        const isInRange = isWithinHistoryRange(isoDate);
+        const classes = ["history-day"];
+        if (isInRange) {
+          classes.push("in-range");
+        }
+        if (isRangeEdge) {
+          classes.push("range-edge");
+        }
+        if (isoDate === state.history.defaultAsOfDate) {
+          classes.push("today-anchor");
+        }
+        const titleParts = [isoDate];
+        if (!isAvailable) {
+          titleParts.push("ready snapshot недоступен");
+        } else if (isRangeEdge) {
+          titleParts.push("граница периода");
+        } else if (isInRange) {
+          titleParts.push("внутри выбранного периода");
+        }
+        dayCells.push(
+          '<button class="' +
+            classes.join(" ") +
+            '" type="button" data-history-day="' +
+            escapeHtml(isoDate) +
+            '" title="' +
+            escapeHtml(titleParts.join(" · ")) +
+            '"' +
+            (isAvailable ? "" : " disabled") +
+            ">" +
+            escapeHtml(String(dayCursor.getUTCDate())) +
+          "</button>"
+        );
+        dayCursor = shiftDate(dayCursor, 1);
+      }
+      return [
+        '<section class="history-month">',
+        '<h3 class="history-month-header">' + escapeHtml(monthDescriptor.monthLabel) + "</h3>",
+        '<div class="history-weekdays">',
+        ["пн", "вт", "ср", "чт", "пт", "сб", "вс"].map(function(label) {
+          return '<div class="history-weekday">' + escapeHtml(label) + "</div>";
+        }).join(""),
+        "</div>",
+        '<div class="history-days">',
+        dayCells.join(""),
+        "</div>",
+        "</section>"
+      ].join("");
+    }
+
+    function isWithinHistoryRange(isoDate) {
+      if (!state.history.draftDateFrom || !state.history.draftDateTo) {
+        return false;
+      }
+      return isoDate >= state.history.draftDateFrom && isoDate <= state.history.draftDateTo;
+    }
+
+    function shiftIsoDate(isoDate, deltaDays) {
+      return formatIsoDate(shiftDate(parseIsoDate(isoDate), deltaDays));
+    }
+
+    function shiftDate(dateValue, deltaDays) {
+      const shifted = new Date(dateValue.getTime());
+      shifted.setUTCDate(shifted.getUTCDate() + Number(deltaDays || 0));
+      return shifted;
+    }
+
+    function quarterStartIso(isoDate) {
+      const dateValue = parseIsoDate(isoDate);
+      const month = dateValue.getUTCMonth();
+      const quarterMonth = Math.floor(month / 3) * 3;
+      return formatIsoDate(new Date(Date.UTC(dateValue.getUTCFullYear(), quarterMonth, 1)));
+    }
+
+    function startOfMonthIso(isoDate) {
+      const dateValue = parseIsoDate(isoDate);
+      return formatIsoDate(new Date(Date.UTC(dateValue.getUTCFullYear(), dateValue.getUTCMonth(), 1)));
+    }
+
+    function addMonthsIso(isoDate, deltaMonths) {
+      const dateValue = parseIsoDate(isoDate);
+      return formatIsoDate(new Date(Date.UTC(dateValue.getUTCFullYear(), dateValue.getUTCMonth() + Number(deltaMonths || 0), 1)));
+    }
+
+    function maxIsoDate(left, right) {
+      if (!left) {
+        return right;
+      }
+      if (!right) {
+        return left;
+      }
+      return left > right ? left : right;
+    }
+
+    function nearestAvailableOnOrAfter(isoDate) {
+      for (let index = 0; index < state.history.availableDates.length; index += 1) {
+        if (state.history.availableDates[index] >= isoDate) {
+          return state.history.availableDates[index];
+        }
+      }
+      return "";
+    }
+
+    function nearestAvailableOnOrBefore(isoDate) {
+      for (let index = state.history.availableDates.length - 1; index >= 0; index -= 1) {
+        if (state.history.availableDates[index] <= isoDate) {
+          return state.history.availableDates[index];
+        }
+      }
+      return "";
+    }
+
+    function isContinuousAvailableRange(dateFrom, dateTo) {
+      if (!dateFrom || !dateTo) {
+        return false;
+      }
+      let cursor = dateFrom;
+      while (cursor <= dateTo) {
+        if (!state.history.availableDateSet.has(cursor)) {
+          return false;
+        }
+        cursor = shiftIsoDate(cursor, 1);
+      }
+      return true;
+    }
+
+    function parseIsoDate(isoDate) {
+      return new Date(isoDate + "T00:00:00Z");
+    }
+
+    function formatIsoDate(dateValue) {
+      return [
+        dateValue.getUTCFullYear(),
+        String(dateValue.getUTCMonth() + 1).padStart(2, "0"),
+        String(dateValue.getUTCDate()).padStart(2, "0")
+      ].join("-");
+    }
+
+    function mondayFirstWeekdayIndex(dateValue) {
+      const weekday = dateValue.getUTCDay();
+      return weekday === 0 ? 6 : weekday - 1;
+    }
+
+    function formatHistoryMonthLabel(isoDate) {
+      return new Intl.DateTimeFormat("ru-RU", {
+        month: "long",
+        year: "numeric",
+        timeZone: "UTC"
+      }).format(parseIsoDate(isoDate));
     }
 
     function buildControlHtml(control) {
@@ -1361,12 +1968,19 @@
             detail: message
           }
         ]);
-        historyDateSelectNode.innerHTML = '<option value="">Текущий режим (без даты)</option>';
-        historyDateSelectNode.disabled = true;
+        historyCalendarNode.innerHTML = '<div class="state-body">Периодный доступ временно недоступен.</div>';
+        historyPresetsNode.innerHTML = "";
         historyMetaNode.textContent = "historical access unavailable";
         historySummaryNode.textContent = "error";
-        historyOpenButton.disabled = true;
-        historyResetButton.disabled = !currentQueryAsOfDate();
+        historyCalendarDetailNode.textContent = message;
+        historyModeBadgeNode.textContent = "Error";
+        historyModeBadgeNode.className = "status-badge tone-error";
+        historyDateFromNode.value = "";
+        historyDateToNode.value = "";
+        historyDateFromNode.disabled = true;
+        historyDateToNode.disabled = true;
+        historySaveButton.disabled = true;
+        historyResetButton.disabled = true;
         filterControlsNode.innerHTML = "";
         filterMetaNode.textContent = "page_composition unavailable";
         filterSummaryNode.textContent = "error";

@@ -71,6 +71,8 @@ update_note: "Phase 4 materialize-ит реальную live web-vitrina page co
   - link back to `/sheet-vitrina-v1/operator`
 - Existing `GET /v1/sheet-vitrina-v1/web-vitrina` keeps the default public contract unchanged:
   - default/no-surface path still returns `web_vitrina_contract` v1
+  - optional `as_of_date` keeps one-day historical read on the same route
+  - optional `date_from/date_to` now materializes a bounded ready-snapshot period window on the same route
   - optional `surface=page_composition` now returns a server-driven page payload for the live page shell
 - `page_composition` is server-owned and assembled only from:
   - `web_vitrina_contract`
@@ -101,6 +103,10 @@ update_note: "Phase 4 materialize-ит реальную live web-vitrina page co
 ## 3.2 Browser-state boundary
 
 - Browser-side state now exists only as ephemeral page-local filter/search/sort state.
+- Historical access state stays query-string-owned on the same route:
+  - no query = current cheap daily mode
+  - `as_of_date` = one-day historical mode
+  - `date_from/date_to` = bounded period mode assembled server-side from materialized ready snapshots
 - Namespace is explicit: `wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1`.
 - Persistence mode stays `none`; no localStorage/user-profile/server preference path is introduced.
 - This state is not canonical for truth and can be dropped without changing server semantics.
@@ -135,9 +141,9 @@ update_note: "Phase 4 materialize-ит реальную live web-vitrina page co
 - `apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py`
   - confirms `composition_name/version`, source chain, state namespace, filter surface and ready/error composition behavior
 - `apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py`
-  - confirms real page render, visible table, filter controls, empty state on no-match search, reset recovery and truthful error state when the ready snapshot is absent
+  - confirms real page render, visible table, filter controls, empty state on no-match search, reset recovery, period selector UX (`calendar + presets + date_from/date_to + save/reset`) and truthful error state when the ready snapshot is absent
 - `apps/sheet_vitrina_v1_web_vitrina_http_smoke.py`
-  - confirms default `web_vitrina_contract` path stays stable and optional `surface=page_composition` works on the same route
+  - confirms default `web_vitrina_contract` path stays stable, optional `date_from/date_to` works as bounded period window and optional `surface=page_composition` works on the same route
 - `apps/registry_upload_http_entrypoint_hosted_runtime.py`
   - now probes both the live HTML page and the page-composition JSON surface
 
@@ -146,6 +152,10 @@ update_note: "Phase 4 materialize-ит реальную live web-vitrina page co
 - `/sheet-vitrina-v1/vitrina` is no longer a placeholder shell.
 - Existing stable seams are now used end-to-end in a live read-only surface.
 - The chosen client path stays intentionally minimal and repo-owned.
+- Historical period UX is intentionally thin:
+  - calendar/preset panel lives in the same server template
+  - `Сохранить` only rewrites query string and re-reads server payload
+  - `Сбросить` only removes `as_of_date/date_from/date_to` and returns to cheap daily mode
 - The page composition layer knows only page/layout/render state and does not become a second truth owner.
 
 # 8. Что пока не является частью финальной production-сборки

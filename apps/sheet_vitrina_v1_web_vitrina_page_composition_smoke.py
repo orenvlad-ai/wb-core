@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sys
@@ -61,26 +61,19 @@ def main() -> None:
             raise AssertionError("fixture must expose at least two enabled SKU rows")
         first_group = enabled[0].group
 
-        runtime.save_sheet_vitrina_ready_snapshot(
-            current_state=current_state,
-            refreshed_at="2026-04-20T12:05:00Z",
-            plan=_build_plan(
-                as_of_date="2026-04-19",
-                first_nm_id=enabled[0].nm_id,
-                second_nm_id=enabled[1].nm_id,
-                first_group=first_group,
-            ),
-        )
-        runtime.save_sheet_vitrina_ready_snapshot(
-            current_state=current_state,
-            refreshed_at="2026-04-21T12:05:00Z",
-            plan=_build_plan(
-                as_of_date="2026-04-20",
-                first_nm_id=enabled[0].nm_id,
-                second_nm_id=enabled[1].nm_id,
-                first_group=first_group,
-            ),
-        )
+        start_date = datetime(2026, 4, 14, tzinfo=timezone.utc).date()
+        for offset in range(7):
+            snapshot_date = (start_date + timedelta(days=offset)).isoformat()
+            runtime.save_sheet_vitrina_ready_snapshot(
+                current_state=current_state,
+                refreshed_at=f"{snapshot_date}T12:05:00Z",
+                plan=_build_plan(
+                    as_of_date=snapshot_date,
+                    first_nm_id=enabled[0].nm_id,
+                    second_nm_id=enabled[1].nm_id,
+                    first_group=first_group,
+                ),
+            )
 
         contract = SheetVitrinaV1WebVitrinaBlock(
             runtime=runtime,
@@ -100,6 +93,8 @@ def main() -> None:
             operator_route="/sheet-vitrina-v1/operator",
             available_snapshot_dates=runtime.list_sheet_vitrina_ready_snapshot_dates(descending=True),
             selected_as_of_date=None,
+            selected_date_from=None,
+            selected_date_to=None,
         )
 
         if composition["composition_name"] != "web_vitrina_page_composition" or composition["composition_version"] != "v1":
@@ -117,8 +112,26 @@ def main() -> None:
             raise AssertionError(f"historical mode mismatch, got {historical_access}")
         if historical_access["default_as_of_date"] != "2026-04-20":
             raise AssertionError(f"default as_of_date mismatch, got {historical_access}")
-        if [item["value"] for item in historical_access["options"]] != ["2026-04-20", "2026-04-19"]:
+        if historical_access["supported_query_mode"] != "date_window":
+            raise AssertionError(f"historical query mode mismatch, got {historical_access}")
+        if [item["value"] for item in historical_access["options"]] != [
+            "2026-04-20",
+            "2026-04-19",
+            "2026-04-18",
+            "2026-04-17",
+            "2026-04-16",
+            "2026-04-15",
+            "2026-04-14",
+        ]:
             raise AssertionError(f"historical options mismatch, got {historical_access}")
+        if [item["preset_id"] for item in historical_access["preset_options"]] != [
+            "week",
+            "two_weeks",
+            "month",
+            "quarter",
+            "year",
+        ]:
+            raise AssertionError(f"historical preset options mismatch, got {historical_access}")
 
         controls = {item["control_id"]: item for item in composition["filter_surface"]["controls"]}
         for required in ("search", "section", "group", "scope_kind", "metric"):
@@ -145,6 +158,38 @@ def main() -> None:
         if grouping_ids != ["group:overview", f"group:{first_group}"]:
             raise AssertionError(f"page composition grouping order mismatch, got {grouping_ids}")
 
+        period_contract = SheetVitrinaV1WebVitrinaBlock(
+            runtime=runtime,
+            now_factory=lambda: NOW,
+        ).build(
+            page_route="/sheet-vitrina-v1/vitrina",
+            read_route="/v1/sheet-vitrina-v1/web-vitrina",
+            date_from="2026-04-18",
+            date_to="2026-04-20",
+        )
+        period_view_model = build_web_vitrina_view_model(period_contract)
+        period_adapter = build_web_vitrina_gravity_table_adapter(period_view_model)
+        period_composition = build_web_vitrina_page_composition(
+            contract=period_contract,
+            view_model=period_view_model,
+            adapter=period_adapter,
+            page_route="/sheet-vitrina-v1/vitrina",
+            read_route="/v1/sheet-vitrina-v1/web-vitrina",
+            operator_route="/sheet-vitrina-v1/operator",
+            available_snapshot_dates=runtime.list_sheet_vitrina_ready_snapshot_dates(descending=True),
+            selected_as_of_date=None,
+            selected_date_from="2026-04-18",
+            selected_date_to="2026-04-20",
+        )
+        if period_composition["historical_access"]["current_mode"] != "historical_period":
+            raise AssertionError(f"period composition mode mismatch, got {period_composition['historical_access']}")
+        if period_composition["historical_access"]["selected_date_from"] != "2026-04-18":
+            raise AssertionError(f"period composition selected_date_from mismatch, got {period_composition['historical_access']}")
+        if period_composition["historical_access"]["selected_date_to"] != "2026-04-20":
+            raise AssertionError(f"period composition selected_date_to mismatch, got {period_composition['historical_access']}")
+        if period_composition["table_surface"]["date_column_ids"] != ["date:2026-04-18", "date:2026-04-19", "date:2026-04-20"]:
+            raise AssertionError(f"period composition date columns mismatch, got {period_composition['table_surface']}")
+
         error_payload = build_web_vitrina_page_error_composition(
             page_route="/sheet-vitrina-v1/vitrina",
             read_route="/v1/sheet-vitrina-v1/web-vitrina",
@@ -154,17 +199,22 @@ def main() -> None:
             available_snapshot_dates=runtime.list_sheet_vitrina_ready_snapshot_dates(descending=True),
             default_as_of_date="2026-04-20",
             selected_as_of_date="2026-04-21",
+            selected_date_from=None,
+            selected_date_to=None,
         )
         if error_payload["meta"]["current_state"] != "error":
             raise AssertionError(f"error composition state mismatch, got {error_payload['meta']}")
         if error_payload["table_surface"]["state_surface"]["current_state"] != "error":
             raise AssertionError(f"error table state mismatch, got {error_payload['table_surface']}")
+        if error_payload["historical_access"]["current_mode"] != "historical_day":
+            raise AssertionError(f"error composition historical mode mismatch, got {error_payload['historical_access']}")
         if error_payload["historical_access"]["selected_as_of_date"] != "2026-04-21":
             raise AssertionError(f"error composition historical selection mismatch, got {error_payload['historical_access']}")
 
         print("web_vitrina_page_composition_identity: ok ->", composition["composition_name"], composition["composition_version"])
         print("web_vitrina_page_composition_state: ok ->", composition["meta"]["current_state"], composition["status_badge"]["tone"])
-        print("web_vitrina_page_composition_history: ok ->", historical_access["current_mode"], len(historical_access["options"]))
+        print("web_vitrina_page_composition_history: ok ->", historical_access["current_mode"], historical_access["supported_query_mode"], len(historical_access["options"]))
+        print("web_vitrina_page_composition_period: ok ->", period_composition["historical_access"]["selected_date_from"], period_composition["historical_access"]["selected_date_to"])
         print("web_vitrina_page_composition_filters: ok ->", ",".join(sorted(controls)))
         print("web_vitrina_page_composition_table: ok ->", len(composition["table_surface"]["columns"]), len(composition["table_surface"]["rows"]))
         print("web_vitrina_page_composition_error: ok ->", error_payload["meta"]["current_state"])

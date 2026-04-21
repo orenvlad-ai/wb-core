@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import socket
@@ -64,26 +64,19 @@ def main() -> None:
 
         current_state = runtime.load_current_state()
         enabled = [item for item in current_state.config_v2 if item.enabled]
-        runtime.save_sheet_vitrina_ready_snapshot(
-            current_state=current_state,
-            refreshed_at="2026-04-19T09:05:00Z",
-            plan=_build_plan(
-                as_of_date="2026-04-19",
-                first_nm_id=enabled[0].nm_id,
-                second_nm_id=enabled[1].nm_id,
-                first_group=enabled[0].group,
-            ),
-        )
-        runtime.save_sheet_vitrina_ready_snapshot(
-            current_state=current_state,
-            refreshed_at="2026-04-20T09:05:00Z",
-            plan=_build_plan(
-                as_of_date="2026-04-20",
-                first_nm_id=enabled[0].nm_id,
-                second_nm_id=enabled[1].nm_id,
-                first_group=enabled[0].group,
-            ),
-        )
+        start_date = datetime(2026, 4, 14, tzinfo=timezone.utc).date()
+        for offset in range(7):
+            snapshot_date = (start_date + timedelta(days=offset)).isoformat()
+            runtime.save_sheet_vitrina_ready_snapshot(
+                current_state=current_state,
+                refreshed_at=f"{snapshot_date}T09:05:00Z",
+                plan=_build_plan(
+                    as_of_date=snapshot_date,
+                    first_nm_id=enabled[0].nm_id,
+                    second_nm_id=enabled[1].nm_id,
+                    first_group=enabled[0].group,
+                ),
+            )
 
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=runtime_dir,
@@ -120,6 +113,8 @@ def main() -> None:
                 raise AssertionError(f"web-vitrina meta row_count mismatch, got {contract_payload}")
             if contract_payload.get("status_summary", {}).get("read_model") != "persisted_ready_snapshot":
                 raise AssertionError(f"web-vitrina read seam mismatch, got {contract_payload}")
+            if contract_payload.get("meta", {}).get("as_of_date") != "2026-04-19":
+                raise AssertionError(f"web-vitrina default as_of_date mismatch, got {contract_payload}")
             row_ids = [row["row_id"] for row in contract_payload.get("rows") or []]
             if row_ids != [
                 "TOTAL|total_view_count",
@@ -128,6 +123,18 @@ def main() -> None:
                 f"SKU:{enabled[1].nm_id}|orderSum",
             ]:
                 raise AssertionError(f"web-vitrina rows mismatch, got {row_ids}")
+
+            period_status, period_payload = _get_json(
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?date_from=2026-04-18&date_to=2026-04-20"
+            )
+            if period_status != 200:
+                raise AssertionError(f"web-vitrina period route must return 200, got {period_status}")
+            if period_payload.get("status_summary", {}).get("read_model") != "persisted_ready_snapshot_window":
+                raise AssertionError(f"web-vitrina period read seam mismatch, got {period_payload}")
+            if period_payload.get("meta", {}).get("as_of_date") != "2026-04-20":
+                raise AssertionError(f"web-vitrina period as_of_date mismatch, got {period_payload}")
+            if period_payload.get("meta", {}).get("date_columns") != ["2026-04-18", "2026-04-19", "2026-04-20"]:
+                raise AssertionError(f"web-vitrina period date columns mismatch, got {period_payload}")
 
             composition_status, composition_payload = _get_json(
                 f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}"
@@ -143,8 +150,38 @@ def main() -> None:
             historical_access = composition_payload.get("historical_access") or {}
             if historical_access.get("current_mode") != "default":
                 raise AssertionError(f"web-vitrina historical selector mode mismatch, got {composition_payload}")
-            if [item.get("value") for item in historical_access.get("options") or []] != ["2026-04-20", "2026-04-19"]:
+            if historical_access.get("supported_query_mode") != "date_window":
+                raise AssertionError(f"web-vitrina historical query mode mismatch, got {historical_access}")
+            if [item.get("value") for item in historical_access.get("options") or []] != [
+                "2026-04-20",
+                "2026-04-19",
+                "2026-04-18",
+                "2026-04-17",
+                "2026-04-16",
+                "2026-04-15",
+                "2026-04-14",
+            ]:
                 raise AssertionError(f"web-vitrina historical selector options mismatch, got {historical_access}")
+            if [item.get("preset_id") for item in historical_access.get("preset_options") or []] != [
+                "week",
+                "two_weeks",
+                "month",
+                "quarter",
+                "year",
+            ]:
+                raise AssertionError(f"web-vitrina preset options mismatch, got {historical_access}")
+
+            period_composition_status, period_composition_payload = _get_json(
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&date_from=2026-04-18&date_to=2026-04-20"
+            )
+            if period_composition_status != 200:
+                raise AssertionError(f"web-vitrina period page composition must return 200, got {period_composition_status}")
+            if period_composition_payload.get("historical_access", {}).get("current_mode") != "historical_period":
+                raise AssertionError(f"web-vitrina period page composition mode mismatch, got {period_composition_payload}")
+            if period_composition_payload.get("historical_access", {}).get("selected_date_from") != "2026-04-18":
+                raise AssertionError(f"web-vitrina period selected_date_from mismatch, got {period_composition_payload}")
+            if period_composition_payload.get("historical_access", {}).get("selected_date_to") != "2026-04-20":
+                raise AssertionError(f"web-vitrina period selected_date_to mismatch, got {period_composition_payload}")
 
             page_status, page_html = _get_text(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}")
             if page_status != 200:
@@ -159,8 +196,12 @@ def main() -> None:
                 "web_vitrina_view_model",
                 "web_vitrina_gravity_table_adapter",
                 "data-filter-controls",
-                "data-history-date-select",
-                "Вернуться к текущему режиму",
+                "data-history-calendar",
+                "data-history-presets",
+                "data-history-date-from",
+                "data-history-date-to",
+                "Сбросить",
+                "Сохранить",
             ):
                 if expected not in page_html:
                     raise AssertionError(f"web-vitrina page shell must expose {expected!r}")
@@ -172,8 +213,9 @@ def main() -> None:
                 raise AssertionError(f"web-vitrina read route must honor as_of_date, got {dated_status} {dated_payload}")
 
             print("web_vitrina_read_route: ok ->", contract_payload["meta"]["snapshot_id"])
+            print("web_vitrina_period_route: ok ->", period_payload["meta"]["date_columns"])
             print("web_vitrina_page_composition_surface: ok ->", composition_payload["composition_name"], composition_payload["meta"]["current_state"])
-            print("web_vitrina_history_selector_surface: ok ->", historical_access["current_mode"], len(historical_access["options"]))
+            print("web_vitrina_history_selector_surface: ok ->", historical_access["current_mode"], historical_access["supported_query_mode"], len(historical_access["options"]))
             print("web_vitrina_page_route: ok ->", DEFAULT_SHEET_WEB_VITRINA_UI_PATH)
             print("web_vitrina_query_override: ok ->", dated_payload["meta"]["as_of_date"])
         finally:
