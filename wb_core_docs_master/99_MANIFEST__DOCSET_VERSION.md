@@ -20,9 +20,9 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "изменение build metadata pack"
-built_from_commit: "7417fc665cf549082aea155af3233223c162af56"
-docset_version: "wb_core_docs_master_v41"
-built_at: "2026-04-21T15:56:00Z"
+built_from_commit: "65e84e85124e80c4266c7df6a34c1fa6f3f1a071"
+docset_version: "wb_core_docs_master_v42"
+built_at: "2026-04-21T16:51:15Z"
 core_docs_changed:
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "wb_core_docs_master/05_REGISTER__MODULE_STATUS_AND_CHECKPOINTS.md"
