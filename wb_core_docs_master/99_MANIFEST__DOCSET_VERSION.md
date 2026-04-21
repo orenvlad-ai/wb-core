@@ -20,14 +20,17 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "изменение build metadata pack"
-built_from_commit: "bada38de64005b2ec4d0e41f24d90ef02acecd0b"
-docset_version: "wb_core_docs_master_v46"
-built_at: "2026-04-21T21:01:31Z"
+built_from_commit: "6ed7112d7f0cdeff7b0e24a2fc8d0ece9b40c77f"
+docset_version: "wb_core_docs_master_v47"
+built_at: "2026-04-21T22:03:13Z"
 core_docs_changed:
+  - "docs/modules/07_MODULE__STOCKS_BLOCK.md"
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
+  - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "wb_core_docs_master/05_REGISTER__MODULE_STATUS_AND_CHECKPOINTS.md"
+  - "wb_core_docs_master/09_RUNBOOK__COMMON_SMOKE_AND_DEBUG.md"
   - "wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md"
 ---
 

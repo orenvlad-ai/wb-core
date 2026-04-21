@@ -35,6 +35,11 @@ from packages.application.sales_funnel_history_block import SalesFunnelHistoryBl
 from packages.application.seller_funnel_snapshot_block import SellerFunnelSnapshotBlock
 from packages.application.sf_period_block import SfPeriodBlock
 from packages.application.sheet_vitrina_v1 import build_sheet_write_plan
+from packages.application.sheet_vitrina_v1_temporal_policy import (
+    CANONICAL_SOURCE_TEMPORAL_POLICIES,
+    TEMPORAL_POLICY_YESTERDAY_CLOSED_ONLY,
+    source_policy_supports_slot as _canonical_source_policy_supports_slot,
+)
 from packages.application.spp_block import SppBlock
 from packages.application.stocks_block import StocksBlock
 from packages.application.web_source_snapshot_block import WebSourceSnapshotBlock
@@ -121,18 +126,7 @@ CLOSURE_PENDING_STATES = {
 }
 BLOCKED_SOURCE_STATUSES = {}
 SOURCE_TEMPORAL_POLICIES = {
-    "seller_funnel_snapshot": "dual_day_capable",
-    "sales_funnel_history": "dual_day_capable",
-    "web_source_snapshot": "dual_day_capable",
-    "prices_snapshot": "accepted_current_rollover",
-    "sf_period": "dual_day_capable",
-    "spp": "dual_day_capable",
-    "ads_bids": "accepted_current_rollover",
-    "stocks": "dual_day_capable",
-    "ads_compact": "dual_day_capable",
-    "fin_report_daily": "dual_day_capable",
-    "cost_price": "dual_day_capable",
-    "promo_by_price": "dual_day_capable",
+    **CANONICAL_SOURCE_TEMPORAL_POLICIES,
 }
 SOURCE_CLASSIFICATION_GROUPS = {
     "seller_funnel_snapshot": "A_bot_web_source_historical_closed_day_capable",
@@ -2155,7 +2149,7 @@ def _build_temporal_gap_status(
         "source is current-only in the bounded live contour; "
         "yesterday_closed is left blank instead of backfilling current values into a closed-day column"
     )
-    if temporal_policy == "not_available_for_today":
+    if temporal_policy == TEMPORAL_POLICY_YESTERDAY_CLOSED_ONLY:
         gap_note = (
             "source is not available for today_current in the bounded live contour; "
             "today column stays blank instead of inventing fresh values"
@@ -2465,17 +2459,7 @@ def _resolve_freshness(payload: Any) -> str:
 
 
 def _source_policy_supports_slot(temporal_policy: str, temporal_slot: str) -> bool:
-    if temporal_policy == "dual_day_capable":
-        return True
-    if temporal_policy == "accepted_current_rollover":
-        return True
-    if temporal_policy == TEMPORAL_SLOT_YESTERDAY_CLOSED:
-        return temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED
-    if temporal_policy == TEMPORAL_SLOT_TODAY_CURRENT:
-        return temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT
-    if temporal_policy == "not_available_for_today":
-        return temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED
-    return False
+    return _canonical_source_policy_supports_slot(temporal_policy, temporal_slot)
 
 
 def _format_temporal_source_key(source_key: str, temporal_slot: str) -> str:

@@ -7,6 +7,9 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.sheet_vitrina_v1_temporal_policy import (
+    effective_source_temporal_policies,
+)
 from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE_NAME,
     current_business_date_iso,
@@ -161,6 +164,7 @@ class SheetVitrinaV1WebVitrinaBlock:
             config_by_nm_id=config_by_nm_id,
             metrics_by_key=metrics_by_key,
         )
+        source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
 
         return WebVitrinaContractV1(
             contract_name=WEB_VITRINA_CONTRACT_NAME,
@@ -197,8 +201,8 @@ class SheetVitrinaV1WebVitrinaBlock:
                 last_successful_auto_update_at=auto_update_state.last_successful_auto_update_at,
                 last_successful_manual_refresh_at=manual_state.last_successful_manual_refresh_at,
                 last_successful_manual_load_at=manual_state.last_successful_manual_load_at,
-                source_policy_counts=_count_values(snapshot.source_temporal_policies),
-                source_count=len(snapshot.source_temporal_policies),
+                source_policy_counts=_count_values(source_temporal_policies),
+                source_count=len(source_temporal_policies),
                 data_sheet_row_count=data_sheet_row_count or len(rows),
                 refresh_outcome_counts=dict(period_refresh_summary["counts"]),
             ),

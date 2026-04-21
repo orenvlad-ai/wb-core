@@ -183,7 +183,7 @@ Public probe validates:
   - on `200`, root `status` is semantic snapshot outcome (`success / warning / error`), while technical completion stays separated in `technical_status`/derived fields
   - `server_context` / `manual_context` must keep persisted latest semantic result summaries, so restart/reload does not erase warning/error truth
 - `GET /v1/sheet-vitrina-v1/plan` returns JSON with either success shape or truthful `422 {"error": ...}`
-- after the historical stocks checkpoint switch, both `stocks[yesterday_closed]` and `stocks[today_current]` must resolve through exact-date runtime snapshots sourced from Seller Analytics CSV `STOCK_HISTORY_DAILY_CSV`
+- after the current source-aware temporal-policy switch, `stocks[yesterday_closed]` must resolve through exact-date runtime snapshots sourced from Seller Analytics CSV `STOCK_HISTORY_DAILY_CSV`, while `stocks[today_current]` may truthfully stay `not_available`/blank and must not degrade source or aggregate semantic status by itself
 - when strict bot/web-source closed-day acceptance is active, `STATUS` / `plan` / job surfaces must disclose truthful closure states (`closure_pending`, `closure_retrying`, `closure_rate_limited`, `closure_exhausted`, `success`) instead of silently reusing provisional same-day values in `yesterday_closed`
 - when promo live wiring is active, `STATUS` / `plan` surfaces must disclose truthful `promo_by_price[*]` source facts, including `success/incomplete/missing`, collector trace note and accepted-current preservation instead of keeping promo rows as a permanent blocked gap
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/status` returns JSON with dataset states, active SKU count and recommendation path

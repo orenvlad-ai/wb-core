@@ -88,7 +88,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current web-vitrina UX checkpoint: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, default `GET /v1/sheet-vitrina-v1/web-vitrina` по-прежнему materialize-ит stable library-agnostic `web_vitrina_contract` v1, а optional `surface=page_composition` на том же read route теперь отдаёт server-driven page payload поверх `view_model + gravity_table_adapter` для реальной live web-vitrina page без SPA/platform redesign, с human-readable activity items, sanitized short `reason_ru` для warning/error и unified readable freshness timestamp."
+update_note: "Обновлён под current truthful temporal-status checkpoint: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, default `GET /v1/sheet-vitrina-v1/web-vitrina` по-прежнему materialize-ит stable library-agnostic `web_vitrina_contract` v1, а source/reporting semantics теперь учитывают expected temporal model per source family: `stocks` = `yesterday_closed_only`, `spp`/`fin_report_daily` = `dual_day_intraday_tolerant`, strict two-slot bot/web-source families остаются strict, human-readable activity items и unified readable freshness timestamp сохранены."
 ---
 
 # 1. Идентификатор и статус
@@ -216,11 +216,20 @@ update_note: "Обновлён под current web-vitrina UX checkpoint: existin
   - B. WB API historical/date-period capable = `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`
   - C. WB API current-snapshot-only = `prices_snapshot`, `ads_bids`
   - D. other/non-WB/manual/browser-collector = `cost_price`, `promo_by_price`
+- Temporal status policy now stays source-aware inside those groups instead of treating every family as "оба слота обязательны":
+  - `dual_day_capable` = `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `sf_period`, `ads_compact`, `cost_price`, `promo_by_price`
+  - `dual_day_intraday_tolerant` = `spp`, `fin_report_daily`
+  - `yesterday_closed_only` = `stocks`
+  - `accepted_current_rollover` = `prices_snapshot`, `ads_bids`
 - Group A + B используют one-way accepted closed-day contract для `yesterday_closed`:
   - closed slot сначала читает уже сохранённый accepted snapshot/runtime cache;
   - если valid exact-date truth ещё не принят, auto/retry contour создаёт или продолжает persisted retry state `closure_pending / closure_retrying / closure_rate_limited / closure_exhausted`;
   - invalid / missing / incomplete candidate не принимается как final closed truth;
   - already accepted closed snapshot не может быть затёрт later invalid attempt.
+- Source-aware slot reduction now follows the policy tag rather than a coarse worst-slot rule:
+  - `seller_funnel_snapshot` и `web_source_snapshot` остаются полноценными two-slot sources; problematic `today_current` keeps source/card/aggregate yellow or red.
+  - `stocks` still reads authoritative exact-date historical CSV/runtime truth for `yesterday_closed`, but `today_current` is now a truthful non-required `not_available` slot and must not degrade source status or aggregate semantic status.
+  - `spp` и `fin_report_daily` keep `today_current` requestable, but intraday current-day non-yield (`empty`, `zero-like`, `invalid_exact_snapshot`, `no-result`, bounded `429/timeout`, preserved/runtime-cache current fallback) is non-blocking when `yesterday_closed` is confirmed success.
 - Group C использует отдельный non-destructive same-day accepted contract:
   - upstream truth снимается только как current snapshot, но accepted snapshot закрытого business day D обязан materialize-иться как `yesterday_closed=D` на D+1 через persisted accepted-current seam;
   - contour не делает destructive historical refetch для D и не заменяет already accepted snapshot blank/error только потому, что upstream historical path unsupported;
@@ -236,7 +245,7 @@ update_note: "Обновлён под current web-vitrina UX checkpoint: existin
   - `seller_funnel_snapshot`: zero-filled payload plus freshness gate `source_fetched_at >= next business day start in Asia/Yekaterinburg`;
   - `web_source_snapshot`: zero-filled payload plus freshness gate `search_analytics_raw.fetched_at >= next business day start in Asia/Yekaterinburg`;
   - `prices_snapshot` и `ads_bids` не попадают под destructive historical closed-day refetch: `yesterday_closed` читается из accepted current snapshot предыдущего business day, а invalid later candidate не должен перетирать accepted yesterday/current truth;
-  - `stocks` теперь входит именно в WB API date/period-capable group: `sheet_vitrina_v1` получает both `yesterday_closed` и `today_current` через exact-date runtime/cache path `temporal_source_snapshots[source_key=stocks]`, built from Seller Analytics CSV `STOCK_HISTORY_DAILY_CSV`.
+  - `stocks` now stays on the same exact-date Seller Analytics CSV/runtime path, but only `yesterday_closed` is required for semantic green; `today_current` stays truthful `not_available`/blank instead of invented same-day stocks.
 - Repo-owned bounded retry cycle теперь materialize-ится отдельным runner’ом:
   - `apps/sheet_vitrina_v1_temporal_closure_retry_live.py`
   - runner вызывает existing runtime path `run_sheet_temporal_closure_retry_cycle(...)`, выбирает due `yesterday_closed` historical/date-period pairs plus due same-day current-only captures и безопасно reuses existing refresh/load contour вместо нового parallel app.

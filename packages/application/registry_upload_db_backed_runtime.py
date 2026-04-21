@@ -17,6 +17,10 @@ from packages.application.registry_upload_bundle_v1 import (
     parse_registry_upload_bundle_v1_payload,
 )
 from packages.application.sheet_vitrina_v1 import parse_sheet_write_plan_payload
+from packages.application.sheet_vitrina_v1_temporal_policy import (
+    effective_source_temporal_policies,
+    reduce_source_temporal_semantics,
+)
 from packages.contracts.cost_price_upload import (
     CostPriceCurrentState,
     CostPriceRow,
@@ -267,6 +271,7 @@ class RegistryUploadDbBackedRuntime:
             conn.commit()
 
         semantic_summary = _derive_sheet_vitrina_refresh_semantic_summary(plan)
+        effective_policies = effective_source_temporal_policies(plan.source_temporal_policies)
         return SheetVitrinaV1RefreshResult(
             status="success",
             bundle_version=current_state.bundle_version,
@@ -275,7 +280,7 @@ class RegistryUploadDbBackedRuntime:
             as_of_date=plan.as_of_date,
             date_columns=plan.date_columns,
             temporal_slots=plan.temporal_slots,
-            source_temporal_policies=plan.source_temporal_policies,
+            source_temporal_policies=effective_policies,
             snapshot_id=plan.snapshot_id,
             plan_version=plan.plan_version,
             sheet_row_counts=_sheet_row_counts_from_plan(plan),
@@ -382,6 +387,7 @@ class RegistryUploadDbBackedRuntime:
 
             plan = _deserialize_sheet_vitrina_plan(row["plan_json"])
             semantic_summary = _derive_sheet_vitrina_refresh_semantic_summary(plan)
+            effective_policies = effective_source_temporal_policies(plan.source_temporal_policies)
             return SheetVitrinaV1RefreshResult(
                 status="success",
                 bundle_version=current_state.bundle_version,
@@ -390,7 +396,7 @@ class RegistryUploadDbBackedRuntime:
                 as_of_date=row["as_of_date"],
                 date_columns=plan.date_columns,
                 temporal_slots=plan.temporal_slots,
-                source_temporal_policies=plan.source_temporal_policies,
+                source_temporal_policies=effective_policies,
                 snapshot_id=row["snapshot_id"],
                 plan_version=row["plan_version"],
                 sheet_row_counts=_sheet_row_counts_from_plan(plan),
@@ -1782,9 +1788,8 @@ def _derive_sheet_vitrina_refresh_semantic_summary(plan: SheetVitrinaV1Envelope)
             )
         )
 
-    source_order = list(
-        dict.fromkeys([*plan.source_temporal_policies.keys(), *seen_source_order])
-    )
+    effective_policies = effective_source_temporal_policies(plan.source_temporal_policies)
+    source_order = list(dict.fromkeys([*effective_policies.keys(), *seen_source_order]))
     source_outcomes: list[dict[str, Any]] = []
     counts = {"success": 0, "warning": 0, "error": 0}
     for source_key in source_order:
@@ -1792,25 +1797,33 @@ def _derive_sheet_vitrina_refresh_semantic_summary(plan: SheetVitrinaV1Envelope)
             source_slots.get(source_key, []),
             key=lambda item: _slot_sort_key(str(item.get("temporal_slot") or "")),
         )
+        effective_policy = effective_policies.get(source_key, "")
         if not slot_outcomes:
-            source_outcome = {
-                "source_key": source_key,
-                "status": "warning",
-                "tone": "warning",
-                "label": _semantic_label("warning"),
-                "reason": "persisted STATUS не содержит итог по источнику",
-                "slots": [],
-            }
-        else:
-            source_status = _reduce_semantic_status(
-                [str(item.get("status") or "warning") for item in slot_outcomes]
+            reduction = reduce_source_temporal_semantics(
+                source_key=source_key,
+                temporal_policy=effective_policy,
+                slot_outcomes=[],
             )
             source_outcome = {
                 "source_key": source_key,
-                "status": source_status,
-                "tone": source_status,
-                "label": _semantic_label(source_status),
-                "reason": _compose_source_reason(slot_outcomes),
+                "status": str(reduction["status"]),
+                "tone": str(reduction["status"]),
+                "label": _semantic_label(str(reduction["status"])),
+                "reason": str(reduction["reason"] or "persisted STATUS не содержит итог по источнику"),
+                "slots": [],
+            }
+        else:
+            reduction = reduce_source_temporal_semantics(
+                source_key=source_key,
+                temporal_policy=effective_policy,
+                slot_outcomes=slot_outcomes,
+            )
+            source_outcome = {
+                "source_key": source_key,
+                "status": str(reduction["status"]),
+                "tone": str(reduction["status"]),
+                "label": _semantic_label(str(reduction["status"])),
+                "reason": str(reduction["reason"]),
                 "slots": slot_outcomes,
             }
         counts[str(source_outcome["status"])] += 1
@@ -1961,6 +1974,14 @@ def _humanize_status_note(note: str) -> str:
         return ""
     replacements = (
         (
+            "source is not available for today_current in the bounded live contour; today column stays blank instead of inventing fresh values",
+            "текущий день для этого источника не требуется",
+        ),
+        (
+            "source is current-only in the bounded live contour; yesterday_closed is left blank instead of backfilling current values into a closed-day column",
+            "закрытый день для этого источника materialize-ится только через current-rollover",
+        ),
+        (
             "resolution_rule=accepted_closed_preserved_after_invalid_attempt",
             "сохранён ранее принятый closed snapshot после невалидной попытки",
         ),
@@ -2079,7 +2100,7 @@ def _compose_overall_reason(
         )
     if counts.get("warning", 0):
         return f"{counts['warning']} из {total_sources} источников требуют внимания."
-    return f"Все {total_sources} источников подтверждены без warning/error."
+    return f"Все {total_sources} источников соответствуют ожидаемой temporal model."
 
 
 def _coverage_reason(*, requested_count: int, covered_count: int) -> str:
@@ -2207,7 +2228,19 @@ def _deserialize_sheet_vitrina_plan(raw_value: str) -> SheetVitrinaV1Envelope:
         raise ValueError("sheet_vitrina_v1 ready snapshot contains invalid JSON") from exc
     if not isinstance(payload, Mapping):
         raise ValueError("sheet_vitrina_v1 ready snapshot must contain a JSON object")
-    return parse_sheet_write_plan_payload(payload)
+    plan = parse_sheet_write_plan_payload(payload)
+    effective_policies = effective_source_temporal_policies(plan.source_temporal_policies)
+    if effective_policies == plan.source_temporal_policies:
+        return plan
+    return SheetVitrinaV1Envelope(
+        plan_version=plan.plan_version,
+        snapshot_id=plan.snapshot_id,
+        as_of_date=plan.as_of_date,
+        date_columns=plan.date_columns,
+        temporal_slots=plan.temporal_slots,
+        source_temporal_policies=effective_policies,
+        sheets=plan.sheets,
+    )
 
 
 def _serialize_optional_state_payload(payload: Mapping[str, Any] | None) -> str | None:

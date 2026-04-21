@@ -262,12 +262,7 @@ def main() -> None:
             if plan_payload["date_columns"] != [AS_OF_DATE, TODAY_CURRENT_DATE]:
                 raise AssertionError("plan endpoint must expose both materialized dates")
             if any(
-                block.request_dates
-                != (
-                    [TODAY_CURRENT_DATE]
-                    if block.source_key in CURRENT_ONLY_SOURCE_KEYS
-                    else [AS_OF_DATE, TODAY_CURRENT_DATE]
-                )
+                block.request_dates != _expected_request_dates(block.source_key)
                 for block in counters.values()
             ):
                 raise AssertionError("cheap read endpoint must not trigger heavy source blocks after refresh")
@@ -275,8 +270,8 @@ def main() -> None:
             status_rows = {row[0]: row for row in status_sheet["rows"]}
             if status_rows["stocks[yesterday_closed]"][1] != "success":
                 raise AssertionError("stocks yesterday_closed must materialize historical closed-day data")
-            if status_rows["stocks[today_current]"][1] != "success":
-                raise AssertionError("stocks today_current must now materialize exact-date current data")
+            if status_rows["stocks[today_current]"][1] != "not_available":
+                raise AssertionError("stocks today_current must stay truthfully non-required")
             if status_rows["prices_snapshot[yesterday_closed]"][1] != "success":
                 raise AssertionError("prices yesterday_closed must materialize the prior accepted current snapshot")
             if "accepted_closed_from_prior_current_snapshot" not in str(status_rows["prices_snapshot[yesterday_closed]"][10]):
@@ -321,12 +316,7 @@ def main() -> None:
             if load_data_rows["avg_ads_bid_search"][2:] != [10, 12]:
                 raise AssertionError("sheet-side load must not blank-overwrite the rolled-over accepted ads bid")
             if any(
-                block.request_dates
-                != (
-                    [TODAY_CURRENT_DATE]
-                    if block.source_key in CURRENT_ONLY_SOURCE_KEYS
-                    else [AS_OF_DATE, TODAY_CURRENT_DATE]
-                )
+                block.request_dates != _expected_request_dates(block.source_key)
                 for block in counters.values()
             ):
                 raise AssertionError("sheet-side load must not trigger heavy source blocks after refresh")
@@ -401,7 +391,7 @@ def _assert_counting_calls(counters: dict[str, CountingBlock]) -> None:
         "sf_period": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "spp": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "ads_bids": [TODAY_CURRENT_DATE],
-        "stocks": [AS_OF_DATE, TODAY_CURRENT_DATE],
+        "stocks": [AS_OF_DATE],
         "ads_compact": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "fin_report_daily": [AS_OF_DATE, TODAY_CURRENT_DATE],
     }
@@ -411,6 +401,14 @@ def _assert_counting_calls(counters: dict[str, CountingBlock]) -> None:
             raise AssertionError(
                 f"{block.source_key} request_dates mismatch: expected {expected}, got {block.request_dates}"
             )
+
+
+def _expected_request_dates(source_key: str) -> list[str]:
+    if source_key in CURRENT_ONLY_SOURCE_KEYS:
+        return [TODAY_CURRENT_DATE]
+    if source_key == "stocks":
+        return [AS_OF_DATE]
+    return [AS_OF_DATE, TODAY_CURRENT_DATE]
 
 
 def _run_load_harness(endpoint_url: str, as_of_date: str) -> dict[str, object]:

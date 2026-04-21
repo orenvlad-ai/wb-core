@@ -142,7 +142,10 @@ Current repo-owned operator refresh surface:
 - source matrix is now explicit: group A bot/web-source historical, group B WB API historical/date-period capable, group C WB API current-snapshot-only, group D other/manual/browser-collector overlays
 - historical/date-period families (`seller_funnel_snapshot`, `web_source_snapshot`, `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`) now use persisted accepted closed-day semantics for `yesterday_closed`
 - current-snapshot-only families (`prices_snapshot`, `ads_bids`) capture upstream truth only as current snapshot, but an already accepted snapshot for business day D must materialize as `yesterday_closed=D` on D+1; later invalid auto/manual attempts must not blank prior-day accepted truth or already accepted same-day truth
-- `stocks` is now fully in the date/period-capable group inside `sheet_vitrina_v1`: both `yesterday_closed` and `today_current` read authoritative exact-date Seller Analytics CSV snapshots from `temporal_source_snapshots[source_key=stocks]`
+- semantic reduction is now source-aware instead of naive two-slot worst-case:
+  - `stocks` uses `yesterday_closed_only`: required slot = `yesterday_closed`, `today_current` stays truthful `not_available`/blank and does not degrade source or aggregate semantic status by itself;
+  - `spp` and `fin_report_daily` use `dual_day_intraday_tolerant`: intraday current-day non-yield is tolerated when `yesterday_closed` is confirmed;
+  - `seller_funnel_snapshot` and `web_source_snapshot` remain strict two-slot sources.
 - manual operator refresh keeps short retries inside the run but does not create persisted long-retry tails and does not overwrite accepted truth on invalid candidates
 - promo source follows the same accepted-truth norm:
   - invalid current attempt must not overwrite already accepted same-day promo truth
@@ -177,7 +180,7 @@ Current main-confirmed counts для этого flow:
 - current truth / ready snapshot displayed metrics = `95`
 - refresh materialize-ит date-aware ready snapshot `yesterday_closed + today_current`
 - operator-facing `DATA_VITRINA` = server-driven two-day `date_matrix` `1698` rendered rows / `95` metric keys (`1631` source rows, `34` blocks)
-- operator-facing `STATUS` = per-source/per-slot freshness surface; current-snapshot-only sources (`prices_snapshot`, `ads_bids`) now expose `accepted_current_rollover` semantics for `yesterday_closed` and preserve accepted truth across later invalid attempts, `stocks[yesterday_closed]` и `stocks[today_current]` resolve through historical exact-date runtime snapshots, а failed later attempts preserve the last accepted truth instead of blank/zero overwrite
+- operator-facing `STATUS` = per-source/per-slot freshness surface; current-snapshot-only sources (`prices_snapshot`, `ads_bids`) now expose `accepted_current_rollover` semantics for `yesterday_closed` and preserve accepted truth across later invalid attempts, `stocks[yesterday_closed]` resolves through historical exact-date runtime snapshots, `stocks[today_current]` stays truthful `not_available`/blank, а failed later attempts preserve the last accepted truth instead of blank/zero overwrite
 - bot/web-source family (`seller_funnel_snapshot`, `web_source_snapshot`) uses bounded `explicit-date -> latest-if-date-matches` reads for `today_current`; exact-date runtime cache may truthfully surface previous captured day as next `yesterday_closed`, with explicit `STATUS` note instead of slot-copying
 - if exact-date `today_current` snapshot is still missing for bot/web-source family, refresh may bounded-trigger server-local same-day capture in `/opt/wb-web-bot` plus `/opt/wb-ai/run_web_source_handoff.py` before final read-side fetch
 - promo browser-capture family now uses bounded sidecar/workbook mapping server-side: workbook alone is insufficient, and `STATUS.promo_by_price[*].note` exposes collector trace plus current/future/past/ambiguous counts

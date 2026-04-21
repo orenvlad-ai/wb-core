@@ -37,7 +37,7 @@ related_docs:
   - "migration/44_stocks_block_legacy_sample_source.md"
   - "artifacts/stocks_block/evidence/initial__stocks__evidence.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под final temporal classifier: current `wb-warehouses` path сохраняется для supply-контуров и metadata bridge, а `sheet_vitrina_v1` закрепляет `stocks` как WB API date/period-capable family на Seller Analytics CSV path `STOCK_HISTORY_DAILY_CSV` с exact-date runtime cache, `yesterday_closed + today_current` и non-destructive accepted snapshot policy."
+update_note: "Обновлён под final temporal classifier: current `wb-warehouses` path сохраняется для supply-контуров и metadata bridge, а `sheet_vitrina_v1` закрепляет `stocks` на Seller Analytics CSV path `STOCK_HISTORY_DAILY_CSV` как exact-date closed-day source with `yesterday_closed_only` reporting semantics: required slot = `yesterday_closed`, `today_current` stays truthful `not_available`/blank and no longer degrades semantic green by itself."
 ---
 
 # 1. Идентификатор и статус
@@ -60,8 +60,8 @@ update_note: "Обновлён под final temporal classifier: current `wb-war
 - В bounded `sheet_vitrina_v1` contour `stocks` теперь классифицируется как WB API date/period-capable source:
   - `stocks[yesterday_closed]` materialize-ит authoritative exact-date snapshot из `STOCK_HISTORY_DAILY_CSV`;
   - success payload для exact-date closed day сохраняется в `temporal_source_snapshots[source_key=stocks]` и читается runtime-first;
-  - `stocks[today_current]` тоже materialize-ится как exact-date current business day через тот же historical CSV/read-side contour;
-  - later invalid/manual/current attempt не имеет права destructively затереть уже accepted same-day stocks snapshot.
+  - `stocks[today_current]` в current `sheet_vitrina_v1` contour больше не считается required same-day success condition и stays truthful `not_available`/blank instead of invented intraday stocks;
+  - source-level and aggregate semantic status must stay green when `stocks[yesterday_closed]` is confirmed and only non-required `stocks[today_current]` is blank.
 - Ключевая semantics:
   - historical CSV day column считается authoritative stocks truth на закрытые сутки;
   - exact-date `snapshot_date` в success обязан совпадать с requested closed day;
@@ -87,7 +87,7 @@ update_note: "Обновлён под final temporal classifier: current `wb-war
   - `covered_count`
   - `missing_nm_ids`
 - Целевой смысл блока: bounded stocks snapshot с сохранением coverage guard без буквального переноса Apps Script cursor/staging.
-- Для two-day sheet read model блок обязан оставаться честным: `yesterday_closed` и `today_current` читаются только из authoritative exact-date historical path/runtime cache, without slot-copying и without fake-zero overwrite.
+- Для two-day sheet read model блок обязан оставаться честным: required `yesterday_closed` читается только из authoritative exact-date historical path/runtime cache, while `today_current` stays blank/`not_available` and is not filled through surrogate current values.
 
 # 4. Артефакты по модулю
 
@@ -131,8 +131,8 @@ update_note: "Обновлён под final temporal classifier: current `wb-war
 - Parity подтверждена для `normal-case` и `partial-case`.
 - Server-side checkpoint подтверждён как реально рабочий: `normal -> success`, `normal: count -> 2`.
 - Historical CSV path доказан как рабочий official closed-day stocks source для live enabled SKU set.
-- Runtime-backed `sheet_vitrina_v1` contour теперь читает `stocks[yesterday_closed]` и `stocks[today_current]` как exact-date Seller Analytics CSV snapshots и не invent-ит surrogate current values.
-- В date-aware refresh `stocks[yesterday_closed]` materialize-ится как closed-day truth, `stocks[today_current]` materialize-ится как exact-date current-day truth, а later invalid attempt сохраняет уже accepted snapshot вместо destructive clear.
+- Runtime-backed `sheet_vitrina_v1` contour теперь читает required `stocks[yesterday_closed]` как exact-date Seller Analytics CSV snapshot и не invent-ит surrogate current values for `today_current`.
+- В date-aware refresh `stocks[yesterday_closed]` materialize-ится как closed-day truth, `stocks[today_current]` stays truthful `not_available`/blank, а later invalid attempt не имеет права разрушить already accepted closed-day snapshot.
 - Live-shaped region aliases `Южный и Северо-Кавказский` и `Дальневосточный и Сибирский` больше не теряются на application normalization stage: district rows materialize-ятся в `stock_ru_south_caucasus` / `stock_ru_far_siberia`.
 - Если raw payload содержит quantity вне configured district map, эта разница больше не теряется молча: она остаётся внутри `stock_total` и явно попадает в success detail / operator-facing `STATUS` note.
 - Forced/external `429` у current inventory adapter больше не маскируется под заполненные stock values в тех contours, где этот adapter ещё используется.

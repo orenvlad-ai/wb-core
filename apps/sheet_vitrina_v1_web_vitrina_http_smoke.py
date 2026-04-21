@@ -208,7 +208,9 @@ def main() -> None:
                 raise AssertionError(f"update summary status mismatch, got {activity_surface}")
             if upload_items[0].get("label_ru") != "Цены и скидки" or upload_items[0].get("reason_ru") != "данные не получены":
                 raise AssertionError(f"upload summary russian label/reason mismatch, got {activity_surface}")
-            if update_items[1].get("label_ru") != "Поисковая аналитика" or update_items[1].get("reason_ru") != "использована подтверждённая версия из runtime cache":
+            if update_items[1].get("label_ru") != "Поисковая аналитика":
+                raise AssertionError(f"update summary warning reason mismatch, got {activity_surface}")
+            if "использована подтверждённая версия из runtime cache" not in str(update_items[1].get("reason_ru") or ""):
                 raise AssertionError(f"update summary warning reason mismatch, got {activity_surface}")
             if "seller_funnel_snapshot" not in str(update_items[2].get("technical_text") or ""):
                 raise AssertionError(f"activity summary technical id mismatch, got {activity_surface}")
@@ -301,12 +303,25 @@ def _build_plan(
             SheetVitrinaWriteTarget(
                 sheet_name="STATUS",
                 write_start_cell="A1",
-                write_rect="A1:K4",
+                write_rect="A1:K7",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
                 header=STATUS_HEADER,
                 rows=[
+                    [
+                        "seller_funnel_snapshot[yesterday_closed]",
+                        "success",
+                        "2026-04-19",
+                        "2026-04-19",
+                        "2026-04-19",
+                        "",
+                        "",
+                        2,
+                        2,
+                        "",
+                        "",
+                    ],
                     [
                         "seller_funnel_snapshot[today_current]",
                         "success",
@@ -315,6 +330,19 @@ def _build_plan(
                         "2026-04-20",
                         "",
                         "",
+                        2,
+                        2,
+                        "",
+                        "",
+                    ],
+                    [
+                        "web_source_snapshot[yesterday_closed]",
+                        "success",
+                        "2026-04-19",
+                        "2026-04-19",
+                        "",
+                        "2026-04-19",
+                        "2026-04-19",
                         2,
                         2,
                         "",
@@ -334,6 +362,19 @@ def _build_plan(
                         "resolution_rule=accepted_prior_current_runtime_cache",
                     ],
                     [
+                        "prices_snapshot[yesterday_closed]",
+                        "success",
+                        "2026-04-19",
+                        "2026-04-19",
+                        "2026-04-19",
+                        "",
+                        "",
+                        2,
+                        2,
+                        "",
+                        "resolution_rule=accepted_closed_current_attempt",
+                    ],
+                    [
                         "prices_snapshot[today_current]",
                         "error",
                         "2026-04-20",
@@ -347,7 +388,7 @@ def _build_plan(
                         "no payload returned",
                     ],
                 ],
-                row_count=3,
+                row_count=6,
                 column_count=len(STATUS_HEADER),
             ),
         ],

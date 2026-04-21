@@ -104,7 +104,7 @@ related_docs:
   - "docs/modules/29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md"
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current web-vitrina checkpoint: `sheet_vitrina_v1` по-прежнему разделяет group A bot/web-source historical, group B WB API date/period-capable, group C WB API current-snapshot-only и group D other/manual overlays; sibling web-vitrina boundary остаётся fixed как `/sheet-vitrina-v1/vitrina` + `GET /v1/sheet-vitrina-v1/web-vitrina`, phase-2 library-agnostic `web_vitrina_view_model` и phase-3 `web_vitrina_gravity_table_adapter` остаются stable repo-side seams, а phase-4 `web_vitrina_page_composition` теперь materialize-ит реальную live page surface через optional `surface=page_composition` на existing read route с human-readable activity items, sanitized short warning/error reasons и unified readable freshness display."
+update_note: "Обновлён под current truthful temporal-status checkpoint: `sheet_vitrina_v1` по-прежнему разделяет group A bot/web-source historical, group B WB API date/period-capable, group C WB API current-snapshot-only и group D other/manual overlays, но status reduction теперь source-aware: `stocks` = `yesterday_closed_only`, `spp`/`fin_report_daily` = `dual_day_intraday_tolerant`, strict two-slot bot/web-source families и current-only rollover families остаются без смягчения; sibling web-vitrina boundary и page composition stay unchanged."
 ---
 
 # 1. Идентификатор и статус
@@ -278,12 +278,17 @@ update_note: "Обновлён под current web-vitrina checkpoint: `sheet_vit
   - per-source/per-slot `STATUS` rows
 - В bounded live contour используется следующая source-classification и temporal policy matrix:
   - group A `bot/web-source historical / closed-day-capable`: `seller_funnel_snapshot`, `web_source_snapshot`; allowed slots = `yesterday_closed + today_current`
-  - group B `WB API historical/date-period capable`: `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`; allowed slots = `yesterday_closed + today_current`
+  - group B `WB API historical/date-period capable`: `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`; source family stays date/period-capable, but required-slot policy is source-aware
   - group C `WB API current-snapshot-only`: `prices_snapshot`, `ads_bids`; accepted truth is captured only as current snapshot, but the accepted snapshot for closed business day D must materialize as `yesterday_closed=D` on D+1 without historical refetch
   - group D `other/non-WB/manual/browser-collector`: `cost_price`, `promo_by_price`; `cost_price` resolves `yesterday_closed + today_current` by `effective_from <= slot_date`, `promo_by_price` now reads bounded live/current truth from repo-owned promo collector sidecar + workbook seam
-  - `dual_day_capable`: `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`, `cost_price`
+  - `dual_day_capable`: `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `sf_period`, `ads_compact`, `cost_price`, `promo_by_price`
+  - `dual_day_intraday_tolerant`: `spp`, `fin_report_daily`
   - `accepted_current_rollover`: `prices_snapshot`, `ads_bids`
-  - `dual_day_capable`: `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`, `cost_price`, `promo_by_price`
+  - `yesterday_closed_only`: `stocks`
+- Source-aware semantic reduction norm:
+  - `seller_funnel_snapshot` и `web_source_snapshot` remain full two-slot sources; broken `today_current` stays warning/error and must keep top badge/cards degraded.
+  - `stocks[yesterday_closed]` stays authoritative required closed-day truth from exact-date historical CSV/runtime snapshots, while `stocks[today_current]` is a truthful non-required `not_available` slot that no longer counts against source or aggregate semantic status.
+  - `spp` и `fin_report_daily` still request `today_current`, but intraday current-day non-yield (`empty`, `zero-like`, `invalid_exact_snapshot`, `no-result`, bounded `429/timeout`, preserved/runtime-cache current fallback) is tolerated when `yesterday_closed` is confirmed success.
 - Для bot/web-source family (`seller_funnel_snapshot`, `web_source_snapshot`) current server-side read rule теперь bounded и truthful:
   - сначала source adapter пробует explicit requested date/window;
   - при `404` source adapter пробует latest payload без query params;
@@ -317,11 +322,11 @@ update_note: "Обновлён под current web-vitrina checkpoint: `sheet_vit
   - manual invalid run does not blank accepted yesterday/current truth and does not create persisted due retry states.
 - Для `stocks` current checkpoint теперь обязан:
   - materialize-ить `stocks[yesterday_closed]` из Seller Analytics CSV path `STOCK_HISTORY_DAILY_CSV`;
-  - materialize-ить `stocks[today_current]` из того же exact-date historical CSV/runtime path;
+  - surface-ить `stocks[today_current]` как truthful `not_available`/blank non-required slot instead of inventing same-day stocks;
   - сохранять exact-date success payload server-side в `temporal_source_snapshots[source_key=stocks]`;
   - использовать current `wb-warehouses` endpoint только как bounded metadata bridge `OfficeName -> regionName`, а не как active current stocks truth внутри витрины;
   - не терять quantity вне configured district map молча: она остаётся внутри `stock_total` и surface-ится в `STATUS.stocks[yesterday_closed].note`;
-  - later invalid attempt не может destructively очистить already accepted exact-date snapshot ни для `yesterday_closed`, ни для `today_current`.
+  - later invalid attempt не может destructively очистить already accepted exact-date snapshot for the required closed slot.
 - Execution modes теперь разделены явно:
   - `auto_daily` = `11:00, 20:00 Asia/Yekaterinburg`, short retries inside run, persisted long-retry allowed where policy permits
   - `manual_operator` = short retries yes, persisted long-retry no, invalid candidate never overwrites accepted truth
@@ -428,7 +433,7 @@ Bounded допущение:
 - Uploaded `section` dictionary считается authoritative и не remap-ится локально.
 - `CONFIG!H:I` service/status block сохраняется при `prepare`, `upload`, `load`.
 - Для current-snapshot-only sources bounded contour читает `yesterday_closed` из already accepted current snapshot предыдущего business day и не делает destructive historical refetch или blank overwrite accepted truth.
-- Для `stocks` bounded contour теперь применяет task-local classifier norm: both `yesterday_closed` и `today_current` обязаны приходить из authoritative exact-date historical snapshot/runtime cache, а не из intraday surrogate.
+- Для `stocks` bounded contour теперь применяет final classifier norm: only `yesterday_closed` is required and authoritative for semantic green, while `today_current` stays truthful blank/not_available instead of an intraday surrogate.
 
 ## 3.4 Явный live blocker
 

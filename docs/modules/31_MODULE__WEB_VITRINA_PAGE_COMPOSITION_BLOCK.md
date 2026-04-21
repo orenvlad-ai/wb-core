@@ -40,7 +40,7 @@ related_docs:
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Phase 4 live page composition остаётся server-driven, но bounded UX semantics уточнены: existing `/sheet-vitrina-v1/vitrina` по-прежнему читает optional `surface=page_composition` на same read route, `Обновить` остаётся cheap reread текущего page composition, `Загрузить и обновить` reuse-ит canonical `POST /v1/sheet-vitrina-v1/refresh` + reread without Google `/load`, summary разделён на browser-owned `Последнее обновление страницы` и server-owned `Свежесть данных`, а item-ы в `Загрузка данных` / `Обновление данных` теперь server-side materialize-ят human-readable `label_ru / description_ru / reason_ru / technical_text`, сортируются как `error -> warning -> success`, показывают `Свежесть данных` в том же user-facing timestamp format без raw ISO `T/Z` и держат main-card `reason_ru` как короткий sanitized summary without raw JSON/traceback/requestId dumps."
+update_note: "Phase 4 live page composition остаётся server-driven, но current status semantics now stay source-aware instead of naive two-slot worst-case: `stocks[today_current]=not_available` no longer yellows the card by itself, `spp`/`fin_report_daily` tolerate bounded intraday non-yield when `yesterday_closed` is confirmed, strict two-slot bot/web-source families remain strict, while existing human-readable labels/reasons, severity sorting and readable freshness display stay unchanged."
 ---
 
 # 1. Идентификатор и статус
@@ -173,6 +173,10 @@ update_note: "Phase 4 live page composition остаётся server-driven, но
   - yellow = empty/zero/unchanged/stale/not_refreshed/preserved/retrying/not_verified;
   - red = hard source/materialization failure;
   - snapshot row existence alone is never enough for green.
+- source-aware temporal policy is now part of that read-side truth:
+  - `stocks` stays green when only non-required `today_current` is blank/`not_available`;
+  - `spp` / `fin_report_daily` stay green when `yesterday_closed` is confirmed and intraday `today_current` only produced tolerated non-final current-day output;
+  - `seller_funnel_snapshot` / `web_source_snapshot` remain strict two-slot sources and keep the badge/cards degraded on broken `today_current`.
 - `Загрузить и обновить` on the vitrina now reuse-ит the canonical refresh contour and no longer depends on `/load` or Google Sheet auth to refresh the web-vitrina itself.
 - `Лог` / `Загрузка данных` / `Обновление данных` stay server-driven:
   - log preview and `Скачать лог` reuse the existing in-memory job/log contour

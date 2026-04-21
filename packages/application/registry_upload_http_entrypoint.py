@@ -20,6 +20,7 @@ from packages.application.sheet_vitrina_v1_daily_report import SheetVitrinaV1Dai
 from packages.application.sheet_vitrina_v1_load_bridge import load_sheet_vitrina_ready_snapshot_via_clasp
 from packages.application.sheet_vitrina_v1_stock_report import SheetVitrinaV1StockReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import list_active_sku_options
+from packages.application.sheet_vitrina_v1_temporal_policy import reduce_source_temporal_semantics
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
 from packages.application.web_vitrina_gravity_table_adapter import (
     build_web_vitrina_gravity_table_adapter,
@@ -1992,8 +1993,12 @@ def _accumulate_source_record(
     )
     bucket["slot_records"].append(
         {
-            "slot": normalized_slot,
+            "temporal_slot": normalized_slot,
             "status": status,
+            "kind": str(kind or "").strip().lower(),
+            "note": str(note or "").strip(),
+            "requested_count": requested_count,
+            "covered_count": covered_count,
             "reason": _slot_reason_from_log_record(
                 kind=kind,
                 note=note,
@@ -2012,16 +2017,17 @@ def _finalize_source_records(
         slot_records = list(record.get("slot_records") or [])
         if not slot_records:
             continue
-        tone = _worst_tone(str(item.get("status") or "warning") for item in slot_records)
-        detail = " · ".join(
-            f"{_slot_label(str(item.get('slot') or 'snapshot'))}: {str(item.get('reason') or _semantic_status_label(str(item.get('status') or 'warning')))}"
-            for item in sorted(slot_records, key=lambda item: _slot_sort_key(str(item.get("slot") or "")))
+        reduction = reduce_source_temporal_semantics(
+            source_key=source_key,
+            temporal_policy="",
+            slot_outcomes=slot_records,
         )
+        tone = str(reduction["status"])
         finalized[source_key] = {
             "status": tone,
             "tone": tone,
             "status_label": _semantic_status_label(tone),
-            "detail": detail,
+            "detail": str(reduction["reason"]),
             "note": "",
         }
     return finalized
@@ -2136,6 +2142,14 @@ def _humanize_note(note: str) -> str:
     if not normalized:
         return ""
     replacements = (
+        (
+            "source is not available for today_current in the bounded live contour; today column stays blank instead of inventing fresh values",
+            "текущий день для этого источника не требуется",
+        ),
+        (
+            "source is current-only in the bounded live contour; yesterday_closed is left blank instead of backfilling current values into a closed-day column",
+            "закрытый день materialize-ится через current-rollover",
+        ),
         (
             "resolution_rule=accepted_closed_preserved_after_invalid_attempt",
             "использована последняя подтверждённая закрытая версия",

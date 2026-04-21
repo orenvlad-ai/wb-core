@@ -350,7 +350,7 @@ def _assert_counting_calls(counters: dict[str, CountingBlock]) -> None:
         "sf_period": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "spp": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "ads_bids": [TODAY_CURRENT_DATE],
-        "stocks": [AS_OF_DATE, TODAY_CURRENT_DATE],
+        "stocks": [AS_OF_DATE],
         "ads_compact": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "fin_report_daily": [AS_OF_DATE, TODAY_CURRENT_DATE],
     }
