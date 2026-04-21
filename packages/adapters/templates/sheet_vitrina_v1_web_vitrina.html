@@ -155,6 +155,12 @@
       transform: translateY(-1px);
     }
 
+    .button:disabled {
+      cursor: wait;
+      opacity: 0.7;
+      transform: none;
+    }
+
     .status-badge {
       display: inline-flex;
       align-items: center;
@@ -665,6 +671,14 @@
       border-right: 0;
     }
 
+    .table-spacer-cell {
+      width: 28px;
+      min-width: 28px;
+      padding: 0;
+      background: #f8fafc;
+      pointer-events: none;
+    }
+
     .vitrina-table th[data-col-id^="date:"] {
       text-align: center;
     }
@@ -744,6 +758,12 @@
       position: sticky;
       top: 28px;
       z-index: 1;
+    }
+
+    .sku-separator-row td {
+      height: 8px;
+      padding: 0;
+      background: #f3f5f8;
     }
 
     .state-box {
@@ -855,6 +875,7 @@
           <div class="hero-buttons">
             <a class="button primary" data-open-contract href="#">JSON contract</a>
             <a class="button secondary" data-open-operator href="#">Operator</a>
+            <button class="button secondary" type="button" data-load-refresh-button>Загрузить и обновить</button>
             <button class="button secondary" type="button" data-retry-button>Обновить</button>
           </div>
         </div>
@@ -885,7 +906,6 @@
                 загрузка календаря…
               </p>
             </div>
-            <span class="status-badge tone-neutral" data-history-mode-badge>Режим</span>
           </div>
           <div class="history-months" data-history-calendar>
             загрузка календаря…
@@ -999,7 +1019,6 @@
     const historySummaryNode = document.querySelector("[data-history-summary]");
     const historyCalendarNode = document.querySelector("[data-history-calendar]");
     const historyCalendarDetailNode = document.querySelector("[data-history-calendar-detail]");
-    const historyModeBadgeNode = document.querySelector("[data-history-mode-badge]");
     const historyPresetsNode = document.querySelector("[data-history-presets]");
     const historyDateFromNode = document.querySelector("[data-history-date-from]");
     const historyDateToNode = document.querySelector("[data-history-date-to]");
@@ -1021,6 +1040,7 @@
     const columnVisibilityResetButton = document.querySelector("[data-columns-reset]");
     const openContractLink = document.querySelector("[data-open-contract]");
     const openOperatorLink = document.querySelector("[data-open-operator]");
+    const loadRefreshButton = document.querySelector("[data-load-refresh-button]");
     const retryButton = document.querySelector("[data-retry-button]");
     const resetFiltersButton = document.querySelector("[data-reset-filters]");
 
@@ -1031,6 +1051,10 @@
     const state = {
       composition: null,
       requestSequence: 0,
+      actionSequence: 0,
+      page: {
+        lastRenderedAt: null
+      },
       history: {
         availableDates: [],
         availableDateSet: new Set(),
@@ -1064,10 +1088,15 @@
       loadPageComposition();
     });
 
+    loadRefreshButton.addEventListener("click", function() {
+      runSourceRefreshAndReload();
+    });
+
     historyDateFromNode.addEventListener("change", function() {
       state.history.draftDateFrom = normalizeHistoryInputValue(historyDateFromNode.value);
       state.history.awaitingRangeEnd = false;
       syncHistoryFieldValues();
+      renderHistoryCalendar(state.composition);
       renderHistoryStatus(state.composition);
     });
 
@@ -1075,6 +1104,7 @@
       state.history.draftDateTo = normalizeHistoryInputValue(historyDateToNode.value);
       state.history.awaitingRangeEnd = false;
       syncHistoryFieldValues();
+      renderHistoryCalendar(state.composition);
       renderHistoryStatus(state.composition);
     });
 
@@ -1138,10 +1168,20 @@
     }
 
     function setStatusBadge(payload) {
-      const badge = (payload && payload.status_badge) || {label: "Ошибка", tone: "error", detail: "status unavailable"};
+      const badge = normalizeStatusBadgePayload(payload);
       statusBadgeNode.textContent = badge.label;
       statusBadgeNode.className = "status-badge tone-" + normalizeTone(badge.tone);
       statusBadgeNode.title = badge.detail || "";
+    }
+
+    function normalizeStatusBadgePayload(payload) {
+      if (payload && payload.status_badge && typeof payload.status_badge === "object") {
+        return payload.status_badge;
+      }
+      if (payload && typeof payload.label === "string") {
+        return payload;
+      }
+      return {label: "Ошибка", tone: "error", detail: "status unavailable"};
     }
 
     function updatePageHistoryPeriod(payload) {
@@ -1166,6 +1206,11 @@
         return value;
       }
       return "neutral";
+    }
+
+    function setActionButtonsDisabled(disabled) {
+      retryButton.disabled = !!disabled;
+      loadRefreshButton.disabled = !!disabled;
     }
 
     function buildColumnVisibilityStorageKey(payload) {
@@ -1338,15 +1383,48 @@
     }
 
     function renderSummaryCards(cards) {
-      summaryGridNode.innerHTML = cards.map(function(card) {
+      const renderedCards = composeSummaryCards(cards);
+      summaryGridNode.innerHTML = renderedCards.map(function(card) {
         return [
-          '<article class="summary-card">',
-          '<div class="summary-card-label">' + escapeHtml(card.label) + '</div>',
-          '<div class="summary-card-value">' + escapeHtml(card.value) + '</div>',
-          '<div class="summary-card-detail">' + escapeHtml(card.detail || "") + '</div>',
+          '<article class="summary-card tone-' + escapeHtml(normalizeTone(card.tone)) + '" data-summary-card="' + escapeHtml(card.card_id || "") + '"' +
+            (card.updated_at ? ' data-summary-card-updated-at="' + escapeHtml(card.updated_at) + '"' : "") +
+            '>',
+          '<div class="summary-card-label" data-summary-card-label>' + escapeHtml(card.label) + '</div>',
+          '<div class="summary-card-value" data-summary-card-value>' + escapeHtml(card.value) + '</div>',
+          '<div class="summary-card-detail" data-summary-card-detail>' + escapeHtml(card.detail || "") + '</div>',
           "</article>"
         ].join("");
       }).join("");
+    }
+
+    function composeSummaryCards(cards) {
+      const normalizedCards = Array.isArray(cards) ? cards.slice() : [];
+      const pageRefreshCard = buildPageRefreshCard();
+      if (!pageRefreshCard) {
+        return normalizedCards;
+      }
+      return [pageRefreshCard].concat(normalizedCards);
+    }
+
+    function buildPageRefreshCard() {
+      if (!(state.page.lastRenderedAt instanceof Date)) {
+        return null;
+      }
+      return {
+        card_id: "page_refresh",
+        label: "Последнее обновление страницы",
+        value: formatClientTimestamp(state.page.lastRenderedAt),
+        detail: "последний успешный reread page composition в этом браузере",
+        updated_at: state.page.lastRenderedAt.toISOString(),
+        tone: "neutral"
+      };
+    }
+
+    function formatClientTimestamp(dateValue) {
+      return new Intl.DateTimeFormat("ru-RU", {
+        dateStyle: "short",
+        timeStyle: "medium"
+      }).format(dateValue);
     }
 
     function renderFilterControls(payload) {
@@ -1424,8 +1502,6 @@
         valueOrDash(historical.default_as_of_date) +
         " · route state: " +
         valueOrDash(historical.url_state_mode);
-      historyModeBadgeNode.textContent = historyModeLabel(historical.current_mode);
-      historyModeBadgeNode.className = "status-badge tone-" + (historical.current_mode === "default" ? "neutral" : "success");
       historyCalendarDetailNode.textContent =
         historical.status_text +
         " " +
@@ -1445,22 +1521,13 @@
         node.addEventListener("click", function() {
           applyHistoryPreset(String(node.getAttribute("data-history-preset") || ""));
           syncHistoryFieldValues();
+          renderHistoryCalendar(payload);
           renderHistoryStatus(payload);
         });
       });
       syncHistoryFieldValues();
       renderHistoryCalendar(payload);
       renderHistoryStatus(payload);
-    }
-
-    function historyModeLabel(mode) {
-      if (mode === "historical_period") {
-        return "Период";
-      }
-      if (mode === "historical_day") {
-        return "Дата";
-      }
-      return "Текущий";
     }
 
     function resetHistoryDraft(payload) {
@@ -1898,6 +1965,7 @@
 
     function renderPage(payload) {
       state.composition = payload;
+      state.page.lastRenderedAt = new Date();
       formattersById.clear();
       renderersById.clear();
       ((payload.table_surface && payload.table_surface.formatters) || []).forEach(function(item) {
@@ -2040,11 +2108,13 @@
     function renderTableMarkup(payload, visibleRows) {
       const columns = visibleColumns(payload.table_surface.columns || []);
       const stickyOffsets = buildStickyOffsets(columns);
+      const tableColumnCount = columns.length + 1;
       tableHeadNode.innerHTML = [
         "<tr>",
         columns.map(function(column) {
           return buildHeaderCell(column, stickyOffsets[column.id] || 0);
         }).join(""),
+        buildSpacerHeaderCell(),
         "</tr>"
       ].join("");
 
@@ -2067,25 +2137,79 @@
         renderedGroups.add(grouping.grouping_id);
         bodyParts.push(
           '<tr class="group-row"><td colspan="' +
-          columns.length +
+          tableColumnCount +
           '">' +
           escapeHtml(grouping.title) +
           "</td></tr>"
         );
-        groupedRows.forEach(function(row) {
+        groupedRows.forEach(function(row, index) {
+          if (index > 0 && shouldInsertSkuSeparator(groupedRows[index - 1], row)) {
+            bodyParts.push(buildSkuSeparatorRow(tableColumnCount));
+          }
           bodyParts.push(buildDataRow(row, columns, stickyOffsets));
         });
       });
 
+      let previousUngroupedRow = null;
       visibleRows.forEach(function(row) {
         const groupingId = String(row.section_id || "") + "::" + String(row.group_id || "");
         if (renderedGroups.has(groupingId)) {
           return;
         }
+        if (shouldInsertSkuSeparator(previousUngroupedRow, row)) {
+          bodyParts.push(buildSkuSeparatorRow(tableColumnCount));
+        }
         bodyParts.push(buildDataRow(row, columns, stickyOffsets));
+        previousUngroupedRow = row;
       });
 
       tableBodyNode.innerHTML = bodyParts.join("");
+    }
+
+    function buildSpacerHeaderCell() {
+      return '<th class="table-spacer-cell" data-table-spacer-cell="header" aria-hidden="true"></th>';
+    }
+
+    function buildSpacerBodyCell() {
+      return '<td class="table-spacer-cell" data-table-spacer-cell="body" aria-hidden="true"></td>';
+    }
+
+    function buildSkuSeparatorRow(columnCount) {
+      return '<tr class="sku-separator-row" aria-hidden="true"><td colspan="' + columnCount + '"></td></tr>';
+    }
+
+    function shouldInsertSkuSeparator(previousRow, row) {
+      if (!previousRow || !row) {
+        return false;
+      }
+      if (String(previousRow.row_kind || "") !== "sku" || String(row.row_kind || "") !== "sku") {
+        return false;
+      }
+      if (String(previousRow.group_id || "") !== String(row.group_id || "")) {
+        return false;
+      }
+      return skuClusterIdentity(previousRow) !== skuClusterIdentity(row);
+    }
+
+    function skuClusterIdentity(row) {
+      const values = (row && row.values) || {};
+      const nmIdCell = values.nm_id || {};
+      const scopeKeyCell = values.scope_key || {};
+      const scopeLabelCell = values.scope_label || {};
+      const nmIdValue = nmIdCell.value;
+      if (nmIdValue !== null && typeof nmIdValue !== "undefined" && String(nmIdValue) !== "") {
+        return String(nmIdValue);
+      }
+      if (scopeKeyCell.value !== null && typeof scopeKeyCell.value !== "undefined" && String(scopeKeyCell.value) !== "") {
+        return String(scopeKeyCell.value);
+      }
+      if (scopeLabelCell.value !== null && typeof scopeLabelCell.value !== "undefined" && String(scopeLabelCell.value) !== "") {
+        return String(scopeLabelCell.value);
+      }
+      if (scopeLabelCell.display_text) {
+        return String(scopeLabelCell.display_text);
+      }
+      return String((row && row.row_id) || "");
     }
 
     function buildHeaderCell(column, stickyLeft) {
@@ -2121,6 +2245,7 @@
           };
           return buildDataCell(column, row, cell, stickyOffsets[column.id] || 0);
         }).join(""),
+        buildSpacerBodyCell(),
         "</tr>"
       ].join("");
     }
@@ -2285,9 +2410,106 @@
         .replace(/'/g, "&#39;");
     }
 
+    async function readJsonResponse(response, fallbackErrorText) {
+      const text = await response.text();
+      try {
+        return JSON.parse(text);
+      } catch (error) {
+        throw new Error(fallbackErrorText);
+      }
+    }
+
+    function currentActionAsOfDate() {
+      const params = new URLSearchParams(window.location.search);
+      const dateTo = String(params.get("date_to") || "").trim();
+      if (dateTo) {
+        return dateTo;
+      }
+      return String(params.get("as_of_date") || "").trim();
+    }
+
+    async function pollSheetJob(jobPath, actionId) {
+      const resolvedJobPath = String(jobPath || "");
+      if (!resolvedJobPath) {
+        throw new Error("job path is missing for refresh action");
+      }
+      while (true) {
+        const response = await fetch(
+          resolvedJobPath,
+          {
+            method: "GET",
+            headers: {"Accept": "application/json"}
+          }
+        );
+        const payload = await readJsonResponse(response, "non-json response from sheet job route");
+        if (actionId !== state.actionSequence) {
+          return null;
+        }
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "sheet job route returned " + response.status);
+        }
+        if (payload.status !== "running") {
+          return payload;
+        }
+        await new Promise(function(resolve) {
+          window.setTimeout(resolve, 700);
+        });
+      }
+    }
+
+    async function runSourceRefreshAndReload() {
+      const actionId = state.actionSequence + 1;
+      state.actionSequence = actionId;
+      setActionButtonsDisabled(true);
+      setStatusBadge({label: "Загрузка", tone: "warning", detail: "запускаем обновление данных из внешних источников"});
+      try {
+        const requestPayload = {async: true};
+        const asOfDate = currentActionAsOfDate();
+        if (asOfDate) {
+          requestPayload.as_of_date = asOfDate;
+        }
+        const response = await fetch(WEB_VITRINA_CONFIG.refresh_path, {
+          method: "POST",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json; charset=utf-8"
+          },
+          body: JSON.stringify(requestPayload)
+        });
+        const payload = await readJsonResponse(response, "non-json response from sheet refresh route");
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "sheet refresh route returned " + response.status);
+        }
+        const resolvedJobPath = String(
+          (payload && payload.job_path) ||
+          ((payload && payload.job_id) ? (WEB_VITRINA_CONFIG.job_path + "?job_id=" + encodeURIComponent(payload.job_id)) : "")
+        );
+        const finalJob = await pollSheetJob(resolvedJobPath, actionId);
+        if (actionId !== state.actionSequence) {
+          return;
+        }
+        if (!finalJob || finalJob.status !== "success") {
+          throw new Error((finalJob && (finalJob.error || finalJob.status)) || "sheet refresh job failed");
+        }
+        setStatusBadge({label: "Загрузка", tone: "warning", detail: "данные обновлены, перечитываем витрину"});
+        await loadPageComposition();
+      } catch (error) {
+        if (actionId !== state.actionSequence) {
+          return;
+        }
+        const message = String(error && error.message ? error.message : error);
+        setStatusBadge({label: "Ошибка", tone: "error", detail: message});
+      } finally {
+        if (actionId === state.actionSequence) {
+          setActionButtonsDisabled(false);
+        }
+      }
+    }
+
     async function loadPageComposition() {
       const requestId = state.requestSequence + 1;
       state.requestSequence = requestId;
+      setActionButtonsDisabled(true);
       setStatusBadge({label: "Загрузка", tone: "warning", detail: "загрузка page composition"});
       setStateBox(
         "warning",
@@ -2300,13 +2522,7 @@
         const response = await fetch(buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface).toString(), {
           headers: {"Accept": "application/json"}
         });
-        const text = await response.text();
-        let payload = null;
-        try {
-          payload = JSON.parse(text);
-        } catch (error) {
-          throw new Error("non-json response from page composition surface");
-        }
+        const payload = await readJsonResponse(response, "non-json response from page composition surface");
         if (requestId !== state.requestSequence) {
           return;
         }
@@ -2335,8 +2551,6 @@
         historyMetaNode.textContent = "Исторический доступ временно недоступен";
         historySummaryNode.textContent = "Ошибка";
         historyCalendarDetailNode.textContent = message;
-        historyModeBadgeNode.textContent = "Ошибка";
-        historyModeBadgeNode.className = "status-badge tone-error";
         historyDateFromNode.value = "";
         historyDateToNode.value = "";
         historyDateFromNode.disabled = true;
@@ -2355,6 +2569,10 @@
           "source chain: web_vitrina_contract -> web_vitrina_view_model -> web_vitrina_gravity_table_adapter -> web_vitrina_page_composition";
         setStatusBadge({label: "Ошибка", tone: "error", detail: message});
         setStateBox("error", "Не удалось загрузить витрину", escapeHtml(message));
+      } finally {
+        if (requestId === state.requestSequence) {
+          setActionButtonsDisabled(false);
+        }
       }
     }
 
