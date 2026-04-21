@@ -438,6 +438,8 @@ def _build_handler(
                     _render_sheet_vitrina_web_vitrina_ui(
                         read_path=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
                         operator_path=sheet_operator_ui_path,
+                        load_path=sheet_load_path,
+                        job_path=sheet_job_path,
                     ),
                 )
                 return
@@ -1330,11 +1332,15 @@ def _render_sheet_vitrina_web_vitrina_ui(
     *,
     read_path: str,
     operator_path: str,
+    load_path: str,
+    job_path: str,
 ) -> str:
     config_payload = {
         "page_title": "Web-витрина",
         "read_path": read_path,
         "operator_path": operator_path,
+        "load_path": load_path,
+        "job_path": job_path,
         "page_composition_surface": DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
     }
     template = WEB_VITRINA_UI_TEMPLATE_PATH.read_text(encoding="utf-8")

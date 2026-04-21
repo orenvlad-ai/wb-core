@@ -91,12 +91,17 @@ def main() -> None:
     _print_summary({
         "base_url": ready_result["base_url"],
         "table_rendered": ready_result["table_rendered"],
+        "initial_loading_badge": ready_result["initial_loading_badge"],
         "default_total_first": ready_result["default_total_first"],
         "default_sku_metric_cluster": ready_result["default_sku_metric_cluster"],
+        "sku_separators": ready_result["sku_separators"],
         "filter_controls": ready_result["filter_controls"],
         "status_badge": ready_result["status_badge"],
         "compact_widths": ready_result["compact_widths"],
         "percent_formatting": ready_result["percent_formatting"],
+        "refresh_loading_status": ready_result["refresh_loading_status"],
+        "load_refresh_action": ready_result["load_refresh_action"],
+        "right_edge_spacer": ready_result["right_edge_spacer"],
         "column_visibility": ready_result["column_visibility"],
         "horizontal_overscroll_guard": ready_result["horizontal_overscroll_guard"],
         "operator_link": ready_result["operator_link"],
@@ -105,6 +110,7 @@ def main() -> None:
         "reset_restores_table": ready_result["reset_restores_table"],
         "reset_restores_default_order": ready_result["reset_restores_default_order"],
         "historical_selector_present": ready_result["historical_selector_present"],
+        "preset_calendar_sync": ready_result["preset_calendar_sync"],
         "historical_selector_works": ready_result["historical_selector_works"],
         "historical_reset_works": ready_result["historical_reset_works"],
         "error_state": error_result["error_state"],
@@ -149,6 +155,7 @@ class LocalWebVitrinaFixtureServer:
             runtime=runtime,
             activated_at_factory=lambda: "2026-04-21T15:00:00Z",
             now_factory=lambda: NOW,
+            sheet_load_runner=_stub_sheet_load_runner,
         )
         config = RegistryUploadHttpEntrypointConfig(
             host="127.0.0.1",
@@ -201,6 +208,12 @@ def run_browser_checks(
         try:
             page.goto(page_url, wait_until="commit")
             page.wait_for_load_state("domcontentloaded")
+            initial_loading_badge = {
+                "label": page.locator("[data-status-badge]").inner_text().strip(),
+                "class_name": page.locator("[data-status-badge]").get_attribute("class") or "",
+            }
+            if initial_loading_badge["label"] == "Ошибка" or "tone-error" in initial_loading_badge["class_name"]:
+                raise AssertionError(f"initial status badge must not start in an error state, got {initial_loading_badge}")
             page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
             total_rows = page.locator("[data-table-body] tr").count()
             if total_rows <= 0:
@@ -224,6 +237,8 @@ def run_browser_checks(
             preset_count = page.locator("[data-history-preset]").count()
             if preset_count < 5:
                 raise AssertionError(f"historical period presets must be present, got {preset_count}")
+            if page.locator("[data-history-mode-badge]").count() != 0:
+                raise AssertionError("history panel must not keep the extra Период badge")
             initial_meta = page.locator("[data-page-meta]").inner_text().strip()
             initial_order = _extract_visible_row_order(page)
             if not initial_order:
@@ -233,6 +248,8 @@ def run_browser_checks(
             sku_cluster_ok = _has_sku_metric_cluster(initial_order)
             if not sku_cluster_ok:
                 raise AssertionError(f"default order must switch to sku->metrics clustering, got {initial_order[:8]}")
+            sku_separators = _check_sku_separators(page)
+            right_edge_spacer = _check_right_edge_spacer(page)
 
             filter_controls = {
                 "search": page.locator("[data-filter-control='search']").count() == 1,
@@ -246,6 +263,8 @@ def run_browser_checks(
                 raise AssertionError(f"missing filter controls: {filter_controls}")
             compact_widths = _measure_compact_widths(page)
             percent_formatting = _check_percent_formatting(page, expected_rows=expected_percent_rows)
+            refresh_loading_status = _check_refresh_loading_status(page)
+            load_refresh_action = _check_load_refresh_action(page)
 
             metric_select = page.locator("[data-filter-control='metric']")
             metric_options = metric_select.locator("option").evaluate_all(
@@ -299,12 +318,14 @@ def run_browser_checks(
             initial_query = page.evaluate("() => window.location.search")
             historical_selector_works = False
             historical_reset_works = False
+            preset_calendar_sync = False
             if not as_of_date:
                 page.locator("[data-history-preset='week']").click()
                 page.wait_for_function(
                     "() => document.querySelector('[data-history-date-from]').value === '2026-04-14' && document.querySelector('[data-history-date-to]').value === '2026-04-20'",
                     timeout=5000,
                 )
+                preset_calendar_sync = _check_preset_calendar_sync(page)
                 page.locator("[data-history-save]").click()
                 page.wait_for_function(
                     "() => new URL(window.location.href).searchParams.get('date_from') === '2026-04-14' && new URL(window.location.href).searchParams.get('date_to') === '2026-04-20'",
@@ -340,12 +361,17 @@ def run_browser_checks(
         "base_url": base_url,
         "as_of_date": as_of_date,
         "table_rendered": total_rows > 0,
+        "initial_loading_badge": initial_loading_badge,
         "default_total_first": initial_order[0]["scope_label"] == "ИТОГО",
         "default_sku_metric_cluster": sku_cluster_ok,
+        "sku_separators": sku_separators,
+        "right_edge_spacer": right_edge_spacer,
         "filter_controls": filter_controls,
         "status_badge": final_badge,
         "compact_widths": compact_widths,
         "percent_formatting": percent_formatting,
+        "refresh_loading_status": refresh_loading_status,
+        "load_refresh_action": load_refresh_action,
         "column_visibility": column_visibility,
         "horizontal_overscroll_guard": horizontal_overscroll_guard,
         "operator_link": operator_link,
@@ -354,6 +380,7 @@ def run_browser_checks(
         "reset_restores_table": reset_restores_table,
         "reset_restores_default_order": reset_restores_default_order,
         "historical_selector_present": historical_panel_present,
+        "preset_calendar_sync": preset_calendar_sync,
         "historical_selector_works": historical_selector_works,
         "historical_reset_works": historical_reset_works,
     }
@@ -390,9 +417,14 @@ def _print_summary(result: dict[str, object]) -> None:
     if result.get("as_of_date"):
         print("web_vitrina_browser_as_of_date: ok ->", result["as_of_date"])
     print("web_vitrina_browser_table: ok ->", result["table_rendered"])
+    print("web_vitrina_browser_initial_loading_badge: ok ->", result["initial_loading_badge"])
     print("web_vitrina_browser_status_badge: ok ->", result["status_badge"])
     print("web_vitrina_browser_compact_widths: ok ->", result["compact_widths"])
     print("web_vitrina_browser_percent_formatting: ok ->", result["percent_formatting"])
+    print("web_vitrina_browser_refresh_loading_status: ok ->", result["refresh_loading_status"])
+    print("web_vitrina_browser_load_refresh_action: ok ->", result["load_refresh_action"])
+    print("web_vitrina_browser_right_edge_spacer: ok ->", result["right_edge_spacer"])
+    print("web_vitrina_browser_sku_separators: ok ->", result["sku_separators"])
     print("web_vitrina_browser_column_visibility: ok ->", result["column_visibility"])
     print("web_vitrina_browser_horizontal_overscroll_guard: ok ->", result["horizontal_overscroll_guard"])
     print("web_vitrina_browser_operator_link: ok ->", result["operator_link"])
@@ -403,7 +435,7 @@ def _print_summary(result: dict[str, object]) -> None:
     print("web_vitrina_browser_empty_state: ok ->", result["empty_state_after_search"])
     print("web_vitrina_browser_reset: ok ->", result["reset_restores_table"])
     print("web_vitrina_browser_reset_default_order: ok ->", result["reset_restores_default_order"])
-    print("web_vitrina_browser_history_selector: ok ->", result["historical_selector_present"], result["historical_selector_works"])
+    print("web_vitrina_browser_history_selector: ok ->", result["historical_selector_present"], result["historical_selector_works"], result["preset_calendar_sync"])
     print("web_vitrina_browser_history_reset: ok ->", result["historical_reset_works"])
     if "error_state" in result:
         error_state = result["error_state"]
@@ -477,6 +509,64 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
     }
 
 
+def _check_refresh_loading_status(page: object) -> dict[str, str]:
+    page.locator("[data-retry-button]").click()
+    page.wait_for_function(
+        """() => {
+          const badge = document.querySelector('[data-status-badge]');
+          return !!badge && badge.textContent.trim() === 'Загрузка' && badge.className.includes('tone-warning');
+        }""",
+        timeout=5000,
+    )
+    loading_badge = {
+        "label": page.locator("[data-status-badge]").inner_text().strip(),
+        "class_name": page.locator("[data-status-badge]").get_attribute("class") or "",
+    }
+    page.wait_for_function(
+        """() => {
+          const badge = document.querySelector('[data-status-badge]');
+          return !!badge && badge.textContent.trim() === 'Успешно' && badge.className.includes('tone-success');
+        }""",
+        timeout=20000,
+    )
+    return loading_badge
+
+
+def _check_load_refresh_action(page: object) -> dict[str, object]:
+    button = page.locator("[data-load-refresh-button]")
+    if button.count() != 1:
+        raise AssertionError("load+refresh button must be rendered exactly once")
+    with page.expect_response("**/v1/sheet-vitrina-v1/load") as load_response_info:
+        button.click()
+    load_response = load_response_info.value
+    if load_response.request.method != "POST":
+        raise AssertionError(f"load+refresh button must use POST /load, got {load_response.request.method}")
+    page.wait_for_function(
+        """() => {
+          const badge = document.querySelector('[data-status-badge]');
+          return !!badge && badge.textContent.trim() === 'Загрузка' && badge.className.includes('tone-warning');
+        }""",
+        timeout=5000,
+    )
+    page.wait_for_function(
+        """() => {
+          const badge = document.querySelector('[data-status-badge]');
+          const button = document.querySelector('[data-load-refresh-button]');
+          return !!badge && !!button && badge.textContent.trim() === 'Успешно' && badge.className.includes('tone-success') && !button.disabled;
+        }""",
+        timeout=45000,
+    )
+    final_badge = {
+        "label": page.locator("[data-status-badge]").inner_text().strip(),
+        "class_name": page.locator("[data-status-badge]").get_attribute("class") or "",
+    }
+    return {
+        "http_status": load_response.status,
+        "method": load_response.request.method,
+        "final_badge": final_badge,
+    }
+
+
 def _measure_compact_widths(page: object) -> dict[str, int]:
     widths = page.locator("[data-table-head] th").evaluate_all(
         """nodes => Object.fromEntries(nodes.map(node => [
@@ -535,6 +625,54 @@ def _check_percent_formatting(page: object, *, expected_rows: dict[str, str] | N
         "first": first_value,
         "second": second_value,
     }
+
+
+def _check_right_edge_spacer(page: object) -> dict[str, object]:
+    spacer = page.evaluate(
+        """() => {
+          const headers = Array.from(document.querySelectorAll('[data-table-head] th'));
+          const lastHeader = headers[headers.length - 1];
+          const previousHeader = headers[headers.length - 2];
+          return {
+            headerCount: headers.length,
+            lastHeaderIsSpacer: !!lastHeader && lastHeader.hasAttribute('data-table-spacer-cell'),
+            spacerWidth: lastHeader ? Math.round(lastHeader.getBoundingClientRect().width) : 0,
+            previousHeaderId: previousHeader ? (previousHeader.getAttribute('data-col-id') || '') : ''
+          };
+        }"""
+    )
+    if not spacer["lastHeaderIsSpacer"] or int(spacer["spacerWidth"]) < 20:
+        raise AssertionError(f"table must keep a visible right-edge spacer after the last data column, got {spacer}")
+    if not str(spacer["previousHeaderId"]).startswith("date:"):
+        raise AssertionError(f"last useful column before the spacer must stay a real date column, got {spacer}")
+    return spacer
+
+
+def _check_sku_separators(page: object) -> dict[str, int]:
+    separator_count = page.locator(".sku-separator-row").count()
+    if separator_count <= 0:
+        raise AssertionError("table must render gray separator rows between adjacent SKU clusters")
+    return {
+        "separator_count": separator_count,
+    }
+
+
+def _check_preset_calendar_sync(page: object) -> bool:
+    state = page.evaluate(
+        """() => {
+          const start = document.querySelector('[data-history-day="2026-04-14"]');
+          const middle = document.querySelector('[data-history-day="2026-04-17"]');
+          const end = document.querySelector('[data-history-day="2026-04-20"]');
+          return {
+            startEdge: !!start && start.classList.contains('range-edge'),
+            middleInRange: !!middle && middle.classList.contains('in-range'),
+            endEdge: !!end && end.classList.contains('range-edge')
+          };
+        }"""
+    )
+    if not state["startEdge"] or not state["middleInRange"] or not state["endEdge"]:
+        raise AssertionError(f"history preset must sync the calendar highlight with the date fields, got {state}")
+    return True
 
 
 def _build_plan(
@@ -627,6 +765,17 @@ def _has_sku_metric_cluster(rows: list[dict[str, str]]) -> bool:
         sku_rows[0].get("scope_label") == sku_rows[1].get("scope_label")
         and sku_rows[0].get("metric_key") != sku_rows[1].get("metric_key")
     )
+
+
+def _stub_sheet_load_runner(plan, emit):
+    emit(f"load_stub_start snapshot_id={plan.snapshot_id}")
+    time.sleep(0.6)
+    emit(f"load_stub_finish snapshot_id={plan.snapshot_id}")
+    return {
+        "status": "success",
+        "bridge_kind": "stub",
+        "snapshot_id": plan.snapshot_id,
+    }
 
 
 if __name__ == "__main__":
