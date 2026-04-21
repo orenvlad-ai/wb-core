@@ -63,7 +63,13 @@ class SheetVitrinaV1WebVitrinaBlock:
     ) -> WebVitrinaContractV1:
         now = self.now_factory()
         current_state = self.runtime.load_current_state()
-        snapshot = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=as_of_date)
+        requested_as_of_date = as_of_date or default_business_as_of_date(now)
+        try:
+            snapshot = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=requested_as_of_date)
+        except ValueError:
+            if as_of_date:
+                raise
+            snapshot = self.runtime.load_sheet_vitrina_ready_snapshot()
         refresh_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=snapshot.as_of_date)
         auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()
         manual_state = self.runtime.load_sheet_vitrina_manual_operator_state()
