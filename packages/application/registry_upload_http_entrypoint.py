@@ -180,7 +180,7 @@ class RegistryUploadHttpEntrypoint:
         date_to: str | None = None,
     ) -> dict[str, Any]:
         effective_as_of_date = as_of_date or default_business_as_of_date(self.now_factory())
-        available_snapshot_dates = self.runtime.list_sheet_vitrina_ready_snapshot_dates(descending=True)
+        available_snapshot_dates = self.web_vitrina_block.list_readable_dates(descending=True)
         default_as_of_date = default_business_as_of_date(self.now_factory())
         try:
             contract = self.web_vitrina_block.build(

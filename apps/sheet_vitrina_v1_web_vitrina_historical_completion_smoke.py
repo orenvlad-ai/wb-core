@@ -120,6 +120,37 @@ def main() -> None:
                 "default no-query read must stay on current daily default as_of_date after historical import, "
                 f"got {default_contract.meta.as_of_date}"
             )
+        if default_contract.meta.date_columns != ["2026-04-20", "2026-04-21"]:
+            raise AssertionError(
+                "default no-query read must keep the visible today_current tail from the same ready snapshot, "
+                f"got {default_contract.meta.date_columns}"
+            )
+        readable_dates = block.list_readable_dates(descending=True)
+        if readable_dates[:2] != ["2026-04-21", "2026-04-20"]:
+            raise AssertionError(
+                "selector readable dates must expose the same visible current tail as the default web-vitrina, "
+                f"got {readable_dates}"
+            )
+        period_contract = block.build(
+            page_route="/sheet-vitrina-v1/vitrina",
+            read_route="/v1/sheet-vitrina-v1/web-vitrina",
+            date_from="2026-04-20",
+            date_to="2026-04-21",
+        )
+        if period_contract.meta.date_columns != ["2026-04-20", "2026-04-21"]:
+            raise AssertionError(
+                "period read must allow the current visible tail when it is already materialized in the default snapshot, "
+                f"got {period_contract.meta.date_columns}"
+            )
+        current_tail_row = next(
+            row for row in period_contract.rows
+            if row.row_id == "TOTAL|total_view_count"
+        )
+        if current_tail_row.values_by_date != {"2026-04-20": 140, "2026-04-21": 150}:
+            raise AssertionError(
+                "period read must resolve today_current values from the same visible snapshot without inventing dates, "
+                f"got {current_tail_row.values_by_date}"
+            )
         historical_contract = block.build(
             page_route="/sheet-vitrina-v1/vitrina",
             read_route="/v1/sheet-vitrina-v1/web-vitrina",
@@ -134,6 +165,8 @@ def main() -> None:
         print("web_vitrina_historical_import: ok ->", import_summary["saved_snapshot_count"], "saved")
         print("web_vitrina_historical_one_date_snapshot: ok ->", imported_plan.as_of_date, imported_plan.date_columns[0])
         print("web_vitrina_historical_default_daily_mode: ok ->", default_contract.meta.as_of_date)
+        print("web_vitrina_historical_readable_dates: ok ->", readable_dates[:4])
+        print("web_vitrina_historical_current_tail_period: ok ->", current_tail_row.values_by_date)
         print("web_vitrina_historical_read_route: ok ->", historical_contract.meta.as_of_date, historical_contract.meta.row_count)
 
 
