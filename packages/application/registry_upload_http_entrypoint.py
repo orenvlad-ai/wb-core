@@ -2265,65 +2265,396 @@ def _web_vitrina_activity_item_copy(source_key: str) -> dict[str, str]:
 
 
 def _activity_reason_ru(*, tone: str, detail: str, note: str) -> str:
-    if str(tone or "").strip() == "success":
+    normalized_tone = str(tone or "").strip()
+    if normalized_tone == "success":
         return ""
-    candidate = _humanize_activity_reason_text(detail) or _humanize_activity_reason_text(note)
+    candidate = _humanize_activity_reason_text(detail, tone=normalized_tone) or _humanize_activity_reason_text(
+        note,
+        tone=normalized_tone,
+    )
     if candidate:
         return candidate
-    if tone == "error":
-        return "источник завершился ошибкой"
-    if tone == "warning":
-        return "обновление требует проверки"
+    if normalized_tone == "error":
+        return "источник завершился ошибкой, подробности доступны в логе"
+    if normalized_tone == "warning":
+        return "обновление не подтверждено, подробности доступны в логе"
     return ""
 
 
-def _humanize_activity_reason_text(text: str) -> str:
-    normalized = str(text or "").strip()
+def _humanize_activity_reason_text(text: str, *, tone: str = "") -> str:
+    normalized = _normalize_activity_reason_text(text)
     if not normalized:
         return ""
-    parts: list[str] = []
-    for raw_part in normalized.split(" · "):
-        part = raw_part.strip()
-        if not part:
+    parts: list[tuple[int, int, str]] = []
+    for index, raw_part in enumerate(normalized.split(" · ")):
+        prefix, body = _split_activity_reason_part(raw_part)
+        humanized = _summarize_activity_reason_part(body, prefix=prefix)
+        if not humanized:
             continue
-        prefix = ""
-        body = part
-        if ": " in part:
-            prefix_candidate, body_candidate = part.split(": ", 1)
-            if prefix_candidate in {"вчера", "сегодня", "snapshot", "срез"}:
-                prefix = "срез" if prefix_candidate == "snapshot" else prefix_candidate
-                body = body_candidate
-        humanized = body
-        replacements = (
-            ("Persisted STATUS не содержит итог по источнику", "итог по источнику не подтверждён"),
-            ("payload не materialized", "данные не получены"),
-            ("источник не вернул payload", "данные не получены"),
-            ("слот не обновлялся в текущем contour", "источник не обновлялся"),
-            ("источник помечен как blocked в текущем contour", "источник временно недоступен"),
-            ("использован сохранённый current snapshot из runtime cache", "использована подтверждённая версия из runtime cache"),
-            ("использован ранее принятый current snapshot из runtime cache", "использована подтверждённая версия из runtime cache"),
-            ("использован ранее принятый closed-day snapshot", "использована последняя подтверждённая закрытая версия"),
-            ("использована сохранённая закрытая версия из interval replay", "использована сохранённая закрытая версия"),
-            ("closed-day snapshot ещё не готов; ожидается retry", "источник ещё не закрылся на нужную дату"),
-            ("closed-day snapshot ещё не принят; будет retry", "источник ещё не закрылся на нужную дату"),
-            ("retry для closed-day snapshot исчерпан", "повторные попытки исчерпаны"),
-            ("источник ограничил запросы; retry запланирован", "источник ограничил запросы; повторная попытка запланирована"),
-            ("источник не вернул данные на точную дату", "данные на нужную дату не получены"),
-            ("обновление подтверждено", "обновление подтверждено"),
+        parts.append((_activity_reason_part_rank(body, humanized), index, humanized))
+    deduplicated = list(
+        dict.fromkeys(
+            summary
+            for _rank, _index, summary in sorted(parts, key=lambda item: (item[0], item[1], item[2]))
         )
-        for marker, replacement in replacements:
-            if marker in humanized:
-                humanized = replacement
-                break
-        if humanized:
-            parts.append(f"{prefix}: {humanized}" if prefix else humanized)
-    deduplicated = list(dict.fromkeys(parts))
-    if len(deduplicated) == 1:
-        single = deduplicated[0]
-        for prefix in ("сегодня: ", "вчера: ", "срез: "):
-            if single.startswith(prefix):
-                return single[len(prefix):]
-    return " · ".join(deduplicated)
+    )
+    if deduplicated:
+        if len(deduplicated) == 1:
+            single = deduplicated[0]
+            for prefix in ("сегодня ", "вчера ", "за вчера ", "срез "):
+                if single.startswith(prefix):
+                    return _truncate_activity_reason(single[len(prefix) :].strip())
+        return _truncate_activity_reason("; ".join(deduplicated[:2]))
+    if _looks_like_technical_activity_reason_text(normalized):
+        return _activity_reason_fallback(tone)
+    humanized_note = _humanize_note(normalized)
+    if humanized_note and humanized_note != normalized:
+        return _truncate_activity_reason(humanized_note)
+    if normalized == "обновление подтверждено":
+        return ""
+    return _truncate_activity_reason(normalized)
+
+
+def _normalize_activity_reason_text(text: str) -> str:
+    return " ".join(str(text or "").replace("\r", " ").replace("\n", " ").split())
+
+
+def _split_activity_reason_part(part: str) -> tuple[str, str]:
+    normalized = str(part or "").strip()
+    if ": " not in normalized:
+        return "", normalized
+    prefix_candidate, body = normalized.split(": ", 1)
+    if prefix_candidate not in {"вчера", "сегодня", "snapshot", "срез"}:
+        return "", normalized
+    prefix = "срез" if prefix_candidate == "snapshot" else prefix_candidate
+    return prefix, body.strip()
+
+
+def _summarize_activity_reason_part(text: str, *, prefix: str = "") -> str:
+    normalized = _normalize_activity_reason_text(text)
+    if not normalized:
+        return ""
+    lowered = normalized.lower()
+    if _activity_reason_is_success_only(lowered):
+        return ""
+
+    rate_limited = _activity_reason_has_any(
+        lowered,
+        "429",
+        "too many requests",
+        "retry-after",
+        "rate limit",
+        "ограничил запросы",
+        "closure_rate_limited",
+    )
+    sync_failed = _activity_reason_has_any(
+        lowered,
+        "current_day_web_source_sync_failed=",
+        "closed_day_sync_error=",
+        "sync failed",
+    )
+    timeout = _activity_reason_has_any(
+        lowered,
+        "timeout",
+        "timed out",
+        "response not captured",
+        "not captured",
+        "deadline exceeded",
+    )
+    no_data = _activity_reason_has_any(
+        lowered,
+        "no payload returned",
+        "payload не materialized",
+        "payload not materialized",
+        "источник не вернул payload",
+        "данные не получены",
+    )
+    empty = _activity_reason_has_any(
+        lowered,
+        "no compact ads rows returned",
+        "empty result",
+        "empty payload",
+        "пустой результат",
+        "вернул пустой результат",
+    )
+    zero = _activity_reason_has_any(
+        lowered,
+        "zero_filled",
+        "нулев",
+    ) or ("invalid_exact_snapshot" in lowered and "=0" in lowered)
+    incomplete = _activity_reason_has_any(
+        lowered,
+        "promo_live_source_incomplete",
+        "получена неполная версия",
+        "incomplete",
+    )
+    requested_date_mismatch = (
+        ("requested_date=" in lowered and "latest_available_date=" in lowered)
+        or ("requested_window=" in lowered and "latest_available_window=" in lowered)
+    )
+    blocked = _activity_reason_has_any(
+        lowered,
+        "collector_status=blocked",
+        "источник помечен как blocked",
+        "source is blocked",
+    )
+    not_refreshed = _activity_reason_has_any(
+        lowered,
+        "persisted status не содержит итог по источнику",
+        "слот не обновлялся",
+        "not refreshed",
+        "неактуаль",
+        "stale",
+        "invalid_exact_snapshot",
+    )
+    unchanged = _activity_reason_has_any(
+        lowered,
+        "unchanged",
+        "no-op",
+        "not changed",
+        "обновление не изменило",
+    )
+
+    failure_clause = ""
+    if rate_limited and sync_failed and timeout:
+        failure_clause = "источник временно ограничил запросы, а дополнительная синхронизация завершилась по таймауту"
+    elif rate_limited and sync_failed:
+        failure_clause = "источник временно ограничил запросы, а дополнительная синхронизация завершилась с ошибкой"
+    elif rate_limited:
+        failure_clause = "источник временно ограничил запросы"
+    elif sync_failed and timeout:
+        failure_clause = "дополнительная синхронизация завершилась по таймауту"
+    elif sync_failed:
+        failure_clause = "дополнительная синхронизация завершилась с ошибкой"
+    elif timeout:
+        failure_clause = "запрос завершился по таймауту"
+
+    data_clause = ""
+    if no_data:
+        data_clause = "данные не получены"
+    elif empty:
+        data_clause = "источник вернул пустой результат"
+    elif zero:
+        data_clause = "источник вернул нулевые данные, обновление не подтверждено"
+    elif incomplete:
+        data_clause = "получена неполная версия"
+    elif requested_date_mismatch:
+        data_clause = "получены данные за предыдущую доступную дату"
+    elif blocked:
+        data_clause = "источник временно недоступен"
+    elif unchanged:
+        data_clause = "обновление не изменило данные"
+    elif not_refreshed:
+        data_clause = "обновление не подтверждено"
+
+    state_clause = ""
+    if _activity_reason_has_any(lowered, "closure_state=closure_exhausted", "retry для closed-day snapshot исчерпан"):
+        state_clause = "повторные попытки исчерпаны"
+    elif _activity_reason_has_any(
+        lowered,
+        "closure_state=closure_retrying",
+        "closed-day snapshot ещё не принят; будет retry",
+        "closed-day snapshot ещё не готов; ожидается retry",
+    ):
+        state_clause = "повторная попытка уже запланирована"
+    elif "closure_state=closure_pending" in lowered:
+        state_clause = "источник ещё не закрылся на нужную дату"
+    elif _activity_reason_has_any(
+        lowered,
+        "resolution_rule=accepted_closed_from_prior_current_cache",
+        "resolution_rule=accepted_prior_current_runtime_cache",
+        "resolution_rule=exact_date_stocks_history_runtime_cache",
+        "resolution_rule=exact_date_promo_current_runtime_cache",
+        "resolution_rule=exact_date_runtime_cache",
+        "runtime cache",
+    ):
+        state_clause = "использована подтверждённая версия из runtime cache"
+    elif _activity_reason_has_any(
+        lowered,
+        "resolution_rule=accepted_closed_preserved_after_invalid_attempt",
+        "resolution_rule=accepted_current_preserved_after_invalid_attempt",
+        "resolution_rule=accepted_closed_from_prior_current_snapshot",
+        "resolution_rule=accepted_closed_runtime_snapshot",
+        "resolution_rule=accepted_closed_from_interval_replay",
+        "interval_replay",
+        "interval replay",
+        "сохранён ранее принятый closed snapshot после невалидной попытки",
+        "использован ранее принятый current snapshot предыдущего дня",
+        "использована последняя подтверждённая закрытая версия",
+    ):
+        state_clause = "использована последняя подтверждённая версия"
+
+    primary_clause = _join_activity_reason_clauses(data_clause, failure_clause)
+    clauses = [clause for clause in (primary_clause, state_clause) if clause]
+    if not clauses:
+        mapped = _mapped_activity_reason_text(normalized)
+        if not mapped:
+            return ""
+        clauses = [mapped]
+    summary = "; ".join(dict.fromkeys(clauses[:2]))
+    return _apply_activity_reason_prefix(summary, prefix)
+
+
+def _mapped_activity_reason_text(text: str) -> str:
+    replacements = (
+        ("Persisted STATUS не содержит итог по источнику", "итог по источнику не подтверждён"),
+        ("payload не materialized", "данные не получены"),
+        ("источник не вернул payload", "данные не получены"),
+        ("слот не обновлялся в текущем contour", "источник не обновлялся"),
+        ("источник помечен как blocked в текущем contour", "источник временно недоступен"),
+        ("использован сохранённый current snapshot из runtime cache", "использована подтверждённая версия из runtime cache"),
+        ("использован ранее принятый current snapshot из runtime cache", "использована подтверждённая версия из runtime cache"),
+        ("использован ранее принятый closed-day snapshot", "использована последняя подтверждённая версия"),
+        ("использована сохранённая закрытая версия из interval replay", "использована сохранённая закрытая версия"),
+        ("closed-day snapshot ещё не готов; ожидается retry", "источник ещё не закрылся на нужную дату"),
+        ("closed-day snapshot ещё не принят; будет retry", "источник ещё не закрылся на нужную дату"),
+        ("retry для closed-day snapshot исчерпан", "повторные попытки исчерпаны"),
+        ("источник ограничил запросы; retry запланирован", "источник ограничил запросы; повторная попытка запланирована"),
+        ("источник не вернул данные на точную дату", "данные на нужную дату не получены"),
+        ("обновление подтверждено", ""),
+    )
+    for marker, replacement in replacements:
+        if marker in text:
+            return replacement
+    humanized_note = _humanize_note(text)
+    if humanized_note and humanized_note != text:
+        return humanized_note
+    if _looks_like_technical_activity_reason_text(text):
+        return ""
+    return text
+
+
+def _activity_reason_has_any(text: str, *markers: str) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def _activity_reason_part_rank(raw_text: str, humanized: str) -> int:
+    lowered = _normalize_activity_reason_text(raw_text).lower()
+    if _activity_reason_has_any(
+        lowered,
+        "429",
+        "too many requests",
+        "timeout",
+        "timed out",
+        "current_day_web_source_sync_failed=",
+        "closed_day_sync_error=",
+        "no payload returned",
+        "empty result",
+        "zero_filled",
+        "invalid_exact_snapshot",
+        "collector_status=blocked",
+    ):
+        return 0
+    if _activity_reason_has_any(
+        humanized.lower(),
+        "использована",
+        "повторная попытка",
+        "источник ещё не закрылся",
+    ):
+        return 1
+    return 2
+
+
+def _activity_reason_is_success_only(lowered: str) -> bool:
+    success_markers = (
+        "resolution_rule=accepted_closed_current_attempt",
+        "resolution_rule=accepted_current_current_attempt",
+        "resolution_rule=latest_effective_from<=slot_date",
+        "resolution_rule=explicit_or_latest_date_match",
+        "accepted_at=",
+    )
+    if not any(marker in lowered for marker in success_markers):
+        return False
+    non_success_markers = (
+        "invalid_exact_snapshot",
+        "current_day_web_source_sync_failed=",
+        "closed_day_sync_error=",
+        "collector_status=blocked",
+        "429",
+        "too many requests",
+        "timeout",
+        "timed out",
+        "no payload returned",
+        "empty result",
+        "no compact ads rows returned",
+        "runtime cache",
+        "preserved_after_invalid_attempt",
+        "accepted_closed_from_",
+    )
+    return not any(marker in lowered for marker in non_success_markers)
+
+
+def _join_activity_reason_clauses(primary: str, secondary: str) -> str:
+    first = str(primary or "").strip()
+    second = str(secondary or "").strip()
+    if first and second:
+        return f"{first}, а {second}"
+    return first or second
+
+
+def _apply_activity_reason_prefix(reason: str, prefix: str) -> str:
+    normalized = str(reason or "").strip()
+    if not normalized:
+        return ""
+    if prefix == "сегодня":
+        return f"сегодня {normalized}"
+    if prefix == "вчера":
+        if normalized.startswith("использована"):
+            return f"за вчера {normalized}"
+        return f"вчера {normalized}"
+    return normalized
+
+
+def _looks_like_technical_activity_reason_text(text: str) -> bool:
+    lowered = _normalize_activity_reason_text(text).lower()
+    if not lowered:
+        return False
+    markers = (
+        "{",
+        "}",
+        "traceback",
+        "requestid",
+        "statustext",
+        "origin=",
+        "timestamp=",
+        "resolution_rule=",
+        "accepted_at=",
+        "current_day_web_source_sync_failed=",
+        "closed_day_sync_error=",
+        "collector_mode=",
+        "trace_run_dir=",
+        "collector_status=",
+        "archive_reuse_enabled=",
+        "archive_mode=",
+        "archive_scanned=",
+        "archive_created=",
+        "archive_updated=",
+        "archive_unchanged=",
+        "archive_keys=",
+        "covering_campaigns=",
+        "usable_campaigns=",
+        "playwright._impl._errors",
+        "runtimeerror:",
+        "http://",
+        "https://",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _activity_reason_fallback(tone: str) -> str:
+    if str(tone or "").strip() == "error":
+        return "источник завершился ошибкой, подробности доступны в логе"
+    return "обновление не подтверждено, подробности доступны в логе"
+
+
+def _truncate_activity_reason(text: str, *, limit: int = 220) -> str:
+    normalized = str(text or "").strip()
+    if len(normalized) <= limit:
+        return normalized
+    head, _, _tail = normalized.partition("; ")
+    if head and len(head) <= limit:
+        return head
+    return normalized[: max(limit - 1, 0)].rstrip(" ,;:") + "…"
 
 
 def _activity_summary_detail(

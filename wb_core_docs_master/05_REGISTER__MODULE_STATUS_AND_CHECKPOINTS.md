@@ -109,9 +109,10 @@ Current repo-owned operator refresh surface:
   - summary keeps browser-owned `Последнее обновление страницы` separate from server-owned `Свежесть данных` (`refreshed_at / snapshot_id / as_of_date`), but both now use the same readable user-facing timestamp style without raw ISO `T/Z`
   - action-adjacent blocks now stay server-owned too:
     - `Лог` = latest relevant refresh-run tail + `Скачать лог` via existing `GET /v1/sheet-vitrina-v1/job?...format=text&download=1`
-    - `Загрузка данных` = per-source semantic fetch/upload result from the latest relevant refresh job log or persisted exact-snapshot fallback, with Russian primary labels/descriptions, short Russian warning/error reasons and secondary technical source text
+    - `Загрузка данных` = per-source semantic fetch/upload result from the latest relevant refresh job log or persisted exact-snapshot fallback, with Russian primary labels/descriptions, short sanitized warning/error reasons and secondary technical source text
     - `Обновление данных` = per-source semantic materialization result from persisted `STATUS` rows of the current read-side snapshot with the same human-readable item contract
     - both lists are server-side sorted as `error -> warning -> success`
+    - raw STATUS/job note, JSON fragments, traceback text, request ids and similar diagnostics stay only in the existing log/download path and no longer leak into the main summary-card reason
   - cheap `Обновить` may advance only the page reread marker; it must not fabricate a new upload-run state in those blocks
   - top badge and summary cards are no longer allowed to go green from `ready snapshot exists`; they follow semantic `success / warning / error`
 - the same sibling page now exposes a bounded history period chooser:

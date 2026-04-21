@@ -74,6 +74,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py"
+  - "apps/sheet_vitrina_v1_web_vitrina_reason_sanitization_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_integration_smoke.py"
   - "apps/cost_price_upload_http_entrypoint_smoke.py"
@@ -87,7 +88,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current web-vitrina UX checkpoint: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, default `GET /v1/sheet-vitrina-v1/web-vitrina` по-прежнему materialize-ит stable library-agnostic `web_vitrina_contract` v1, а optional `surface=page_composition` на том же read route теперь отдаёт server-driven page payload поверх `view_model + gravity_table_adapter` для реальной live web-vitrina page без SPA/platform redesign, с human-readable activity items и unified readable freshness timestamp."
+update_note: "Обновлён под current web-vitrina UX checkpoint: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, default `GET /v1/sheet-vitrina-v1/web-vitrina` по-прежнему materialize-ит stable library-agnostic `web_vitrina_contract` v1, а optional `surface=page_composition` на том же read route теперь отдаёт server-driven page payload поверх `view_model + gravity_table_adapter` для реальной live web-vitrina page без SPA/platform redesign, с human-readable activity items, sanitized short `reason_ru` для warning/error и unified readable freshness timestamp."
 ---
 
 # 1. Идентификатор и статус
@@ -181,7 +182,8 @@ update_note: "Обновлён под current web-vitrina UX checkpoint: existin
     - one-day historical mode via existing `as_of_date`
     - period mode via existing route `date_from/date_to`
     - repo-owned inline calendar/preset panel with buttons `Сбросить` / `Сохранить`
-    - server-driven blocks `Лог` / `Загрузка данных` / `Обновление данных`, where source items now surface Russian primary labels/descriptions, short Russian warning/error reasons, secondary technical source text and server-side severity sorting `error -> warning -> success`
+    - server-driven blocks `Лог` / `Загрузка данных` / `Обновление данных`, where source items now surface Russian primary labels/descriptions, short sanitized Russian warning/error reasons, secondary technical source text and server-side severity sorting `error -> warning -> success`
+    - raw STATUS/job note, JSON fragments, traceback text, request ids and similar technical payload stay in existing log/download contour and must not leak into the main summary-card reason
     - `Свежесть данных` remains server-owned, but its user-facing value now uses the same readable timestamp formatter as browser-owned `Последнее обновление страницы` instead of raw ISO `T/Z`
     - `export_layer`
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/status` = cheap JSON status surface для bounded factory-order flow
