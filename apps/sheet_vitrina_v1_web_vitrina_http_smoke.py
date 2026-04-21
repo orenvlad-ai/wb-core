@@ -66,8 +66,19 @@ def main() -> None:
         enabled = [item for item in current_state.config_v2 if item.enabled]
         runtime.save_sheet_vitrina_ready_snapshot(
             current_state=current_state,
+            refreshed_at="2026-04-19T09:05:00Z",
+            plan=_build_plan(
+                as_of_date="2026-04-19",
+                first_nm_id=enabled[0].nm_id,
+                second_nm_id=enabled[1].nm_id,
+                first_group=enabled[0].group,
+            ),
+        )
+        runtime.save_sheet_vitrina_ready_snapshot(
+            current_state=current_state,
             refreshed_at="2026-04-20T09:05:00Z",
             plan=_build_plan(
+                as_of_date="2026-04-20",
                 first_nm_id=enabled[0].nm_id,
                 second_nm_id=enabled[1].nm_id,
                 first_group=enabled[0].group,
@@ -129,6 +140,11 @@ def main() -> None:
                 raise AssertionError(f"web-vitrina page composition state mismatch, got {composition_payload}")
             if composition_payload.get("table_surface", {}).get("total_row_count") != 4:
                 raise AssertionError(f"web-vitrina page composition row count mismatch, got {composition_payload}")
+            historical_access = composition_payload.get("historical_access") or {}
+            if historical_access.get("current_mode") != "default":
+                raise AssertionError(f"web-vitrina historical selector mode mismatch, got {composition_payload}")
+            if [item.get("value") for item in historical_access.get("options") or []] != ["2026-04-20", "2026-04-19"]:
+                raise AssertionError(f"web-vitrina historical selector options mismatch, got {historical_access}")
 
             page_status, page_html = _get_text(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}")
             if page_status != 200:
@@ -143,6 +159,8 @@ def main() -> None:
                 "web_vitrina_view_model",
                 "web_vitrina_gravity_table_adapter",
                 "data-filter-controls",
+                "data-history-date-select",
+                "Вернуться к текущему режиму",
             ):
                 if expected not in page_html:
                     raise AssertionError(f"web-vitrina page shell must expose {expected!r}")
@@ -155,6 +173,7 @@ def main() -> None:
 
             print("web_vitrina_read_route: ok ->", contract_payload["meta"]["snapshot_id"])
             print("web_vitrina_page_composition_surface: ok ->", composition_payload["composition_name"], composition_payload["meta"]["current_state"])
+            print("web_vitrina_history_selector_surface: ok ->", historical_access["current_mode"], len(historical_access["options"]))
             print("web_vitrina_page_route: ok ->", DEFAULT_SHEET_WEB_VITRINA_UI_PATH)
             print("web_vitrina_query_override: ok ->", dated_payload["meta"]["as_of_date"])
         finally:
@@ -164,73 +183,52 @@ def main() -> None:
 
 def _build_plan(
     *,
+    as_of_date: str,
     first_nm_id: int,
     second_nm_id: int,
     first_group: str,
 ) -> SheetVitrinaV1Envelope:
     return SheetVitrinaV1Envelope(
         plan_version="delivery_contract_v1__sheet_scaffold_v1",
-        snapshot_id="web-vitrina-http-fixture",
-        as_of_date="2026-04-19",
-        date_columns=["2026-04-19", "2026-04-20"],
+        snapshot_id=f"web-vitrina-http-fixture-{as_of_date}",
+        as_of_date=as_of_date,
+        date_columns=[as_of_date],
         temporal_slots=[
             SheetVitrinaV1TemporalSlot(
-                slot_key="yesterday_closed",
-                slot_label="Yesterday closed",
-                column_date="2026-04-19",
-            ),
-            SheetVitrinaV1TemporalSlot(
-                slot_key="today_current",
-                slot_label="Today current",
-                column_date="2026-04-20",
+                slot_key="historical_import",
+                slot_label="Historical import",
+                column_date=as_of_date,
             ),
         ],
-        source_temporal_policies={
-            "seller_funnel_snapshot": "dual_day_capable",
-            "prices_snapshot": "accepted_current_rollover",
-        },
+        source_temporal_policies={},
         sheets=[
             SheetVitrinaWriteTarget(
                 sheet_name="DATA_VITRINA",
                 write_start_cell="A1",
-                write_rect="A1:D5",
+                write_rect="A1:C5",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
-                header=["label", "key", "2026-04-19", "2026-04-20"],
+                header=["label", "key", as_of_date],
                 rows=[
-                    ["Итого: Показы в воронке", "TOTAL|total_view_count", 100, 140],
-                    [f"Группа {first_group}: Показы в воронке", f"GROUP:{first_group}|view_count", 40, 55],
-                    [f"SKU A: Показы в воронке", f"SKU:{first_nm_id}|view_count", 20, 30],
-                    [f"SKU B: Заказы, шт.", f"SKU:{second_nm_id}|orderSum", 5, 7],
+                    ["Итого: Показы в воронке", "TOTAL|total_view_count", 100],
+                    [f"Группа {first_group}: Показы в воронке", f"GROUP:{first_group}|view_count", 40],
+                    [f"SKU A: Показы в воронке", f"SKU:{first_nm_id}|view_count", 20],
+                    [f"SKU B: Заказы, шт.", f"SKU:{second_nm_id}|orderSum", 5],
                 ],
                 row_count=4,
-                column_count=4,
+                column_count=3,
             ),
             SheetVitrinaWriteTarget(
                 sheet_name="STATUS",
                 write_start_cell="A1",
-                write_rect="A1:K2",
+                write_rect="A1:K1",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
                 header=STATUS_HEADER,
-                rows=[
-                    [
-                        "seller_funnel_snapshot",
-                        "success",
-                        "fresh",
-                        "2026-04-20",
-                        "2026-04-20",
-                        "2026-04-20",
-                        "2026-04-20",
-                        2,
-                        2,
-                        "",
-                        "",
-                    ]
-                ],
-                row_count=1,
+                rows=[],
+                row_count=0,
                 column_count=len(STATUS_HEADER),
             ),
         ],

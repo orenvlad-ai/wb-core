@@ -88,6 +88,9 @@ def main() -> None:
         "empty_state_after_search": ready_result["empty_state_after_search"],
         "reset_restores_table": ready_result["reset_restores_table"],
         "reset_restores_default_order": ready_result["reset_restores_default_order"],
+        "historical_selector_present": ready_result["historical_selector_present"],
+        "historical_selector_works": ready_result["historical_selector_works"],
+        "historical_reset_works": ready_result["historical_reset_works"],
         "error_state": error_result["error_state"],
     })
 
@@ -113,8 +116,19 @@ class LocalWebVitrinaFixtureServer:
         if self.with_ready_snapshot:
             runtime.save_sheet_vitrina_ready_snapshot(
                 current_state=current_state,
+                refreshed_at="2026-04-20T15:05:00Z",
+                plan=_build_plan(
+                    as_of_date="2026-04-19",
+                    first_nm_id=enabled[0].nm_id,
+                    second_nm_id=enabled[1].nm_id,
+                    first_group=enabled[0].group,
+                ),
+            )
+            runtime.save_sheet_vitrina_ready_snapshot(
+                current_state=current_state,
                 refreshed_at="2026-04-21T15:05:00Z",
                 plan=_build_plan(
+                    as_of_date="2026-04-20",
                     first_nm_id=enabled[0].nm_id,
                     second_nm_id=enabled[1].nm_id,
                     first_group=enabled[0].group,
@@ -166,6 +180,12 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool, as_of_date: 
             total_rows = page.locator("[data-table-body] tr").count()
             if total_rows <= 0:
                 raise AssertionError("web-vitrina table must render at least one row")
+            historical_select_present = page.locator("[data-history-date-select]").count() == 1
+            history_open_present = page.locator("[data-history-open]").count() == 1
+            history_reset_present = page.locator("[data-history-reset]").count() == 1
+            if not (historical_select_present and history_open_present and history_reset_present):
+                raise AssertionError("historical selector controls must be present on the page")
+            initial_meta = page.locator("[data-page-meta]").inner_text().strip()
             initial_order = _extract_visible_row_order(page)
             if not initial_order:
                 raise AssertionError("web-vitrina must expose visible data rows")
@@ -208,6 +228,45 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool, as_of_date: 
             reset_restores_default_order = reset_order == initial_order
             if not reset_restores_default_order:
                 raise AssertionError(f"reset must restore canonical default order, got {reset_order[:8]}")
+
+            history_options = page.locator("[data-history-date-select] option").evaluate_all(
+                "nodes => nodes.map(node => node.value)"
+            )
+            initial_query = page.evaluate("() => window.location.search")
+            selected_historical_date = ""
+            for option_value in history_options:
+                if option_value and option_value != (as_of_date or "2026-04-20"):
+                    selected_historical_date = option_value
+                    break
+            historical_selector_works = False
+            historical_reset_works = False
+            if selected_historical_date:
+                page.locator("[data-history-date-select]").select_option(selected_historical_date)
+                page.locator("[data-history-open]").click()
+                page.wait_for_function(
+                    "(expected) => new URL(window.location.href).searchParams.get('as_of_date') === expected",
+                    arg=selected_historical_date,
+                    timeout=5000,
+                )
+                page.wait_for_function(
+                    "(expected) => document.querySelector('[data-page-meta]').textContent.includes('as_of_date ' + expected)",
+                    arg=selected_historical_date,
+                    timeout=5000,
+                )
+                historical_selector_works = page.locator("[data-table-body] tr").count() > 0
+                page.locator("[data-history-reset]").click()
+                page.wait_for_function(
+                    "() => !new URL(window.location.href).searchParams.has('as_of_date')",
+                    timeout=5000,
+                )
+                page.wait_for_function(
+                    "(expected) => document.querySelector('[data-page-meta]').textContent === expected",
+                    arg=initial_meta,
+                    timeout=5000,
+                )
+                historical_reset_works = page.locator("[data-table-body] tr").count() > 0 and page.evaluate(
+                    "() => window.location.search"
+                ) == initial_query
         finally:
             context.close()
             browser.close()
@@ -223,6 +282,9 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool, as_of_date: 
         "empty_state_after_search": empty_state_after_search,
         "reset_restores_table": reset_restores_table,
         "reset_restores_default_order": reset_restores_default_order,
+        "historical_selector_present": historical_select_present,
+        "historical_selector_works": historical_selector_works,
+        "historical_reset_works": historical_reset_works,
     }
 
 
@@ -264,6 +326,8 @@ def _print_summary(result: dict[str, object]) -> None:
     print("web_vitrina_browser_empty_state: ok ->", result["empty_state_after_search"])
     print("web_vitrina_browser_reset: ok ->", result["reset_restores_table"])
     print("web_vitrina_browser_reset_default_order: ok ->", result["reset_restores_default_order"])
+    print("web_vitrina_browser_history_selector: ok ->", result["historical_selector_present"], result["historical_selector_works"])
+    print("web_vitrina_browser_history_reset: ok ->", result["historical_reset_works"])
     if "error_state" in result:
         error_state = result["error_state"]
         print("web_vitrina_browser_error_state: ok ->", error_state["title"])
@@ -271,76 +335,54 @@ def _print_summary(result: dict[str, object]) -> None:
 
 def _build_plan(
     *,
+    as_of_date: str,
     first_nm_id: int,
     second_nm_id: int,
     first_group: str,
 ) -> SheetVitrinaV1Envelope:
     return SheetVitrinaV1Envelope(
         plan_version="delivery_contract_v1__sheet_scaffold_v1",
-        snapshot_id="web-vitrina-browser-fixture",
-        as_of_date="2026-04-20",
-        date_columns=["2026-04-20", "2026-04-21"],
+        snapshot_id=f"web-vitrina-browser-fixture-{as_of_date}",
+        as_of_date=as_of_date,
+        date_columns=[as_of_date],
         temporal_slots=[
             SheetVitrinaV1TemporalSlot(
-                slot_key="yesterday_closed",
-                slot_label="Yesterday closed",
-                column_date="2026-04-20",
-            ),
-            SheetVitrinaV1TemporalSlot(
-                slot_key="today_current",
-                slot_label="Today current",
-                column_date="2026-04-21",
+                slot_key="historical_import",
+                slot_label="Historical import",
+                column_date=as_of_date,
             ),
         ],
-        source_temporal_policies={
-            "seller_funnel_snapshot": "dual_day_capable",
-            "prices_snapshot": "accepted_current_rollover",
-            "cost_price": "manual_overlay",
-        },
+        source_temporal_policies={},
         sheets=[
             SheetVitrinaWriteTarget(
                 sheet_name="DATA_VITRINA",
                 write_start_cell="A1",
-                write_rect="A1:D7",
+                write_rect="A1:C7",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
-                header=["label", "key", "2026-04-20", "2026-04-21"],
+                header=["label", "key", as_of_date],
                 rows=[
-                    ["Итого: Показы в воронке", "TOTAL|total_view_count", 100, 140],
-                    ["Итого: Сумма заказов", "TOTAL|total_orderSum", 1000, 1200],
-                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|avg_price_seller_discounted", 990, 1110],
-                    [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|avg_price_seller_discounted", 1090, 1210],
-                    [f"SKU A: Конверсия в корзину", f"SKU:{first_nm_id}|avg_addToCartConversion", 11.5, 13.0],
-                    [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 10.5, 12.0],
+                    ["Итого: Показы в воронке", "TOTAL|total_view_count", 100],
+                    ["Итого: Сумма заказов", "TOTAL|total_orderSum", 1000],
+                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|avg_price_seller_discounted", 990],
+                    [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|avg_price_seller_discounted", 1090],
+                    [f"SKU A: Конверсия в корзину", f"SKU:{first_nm_id}|avg_addToCartConversion", 11.5],
+                    [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 10.5],
                 ],
                 row_count=6,
-                column_count=4,
+                column_count=3,
             ),
             SheetVitrinaWriteTarget(
                 sheet_name="STATUS",
                 write_start_cell="A1",
-                write_rect="A1:K2",
+                write_rect="A1:K1",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
                 header=STATUS_HEADER,
-                rows=[
-                    [
-                        "seller_funnel_snapshot",
-                        "success",
-                        "fresh",
-                        "2026-04-21",
-                        "2026-04-21",
-                        "2026-04-21",
-                        "2026-04-21",
-                        2,
-                        2,
-                        "",
-                        "",
-                    ]
-                ],
-                row_count=1,
+                rows=[],
+                row_count=0,
                 column_count=len(STATUS_HEADER),
             ),
         ],
