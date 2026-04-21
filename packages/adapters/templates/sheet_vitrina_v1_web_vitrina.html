@@ -240,6 +240,122 @@
       word-break: break-word;
     }
 
+    .activity-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(250px, 0.9fr) minmax(250px, 0.9fr);
+      gap: 8px;
+    }
+
+    .activity-card {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel-subtle);
+      padding: 10px;
+      min-width: 0;
+    }
+
+    .activity-card-header {
+      display: flex;
+      gap: 8px;
+      justify-content: space-between;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+
+    .activity-card-title {
+      margin: 0;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .activity-card-subtitle,
+    .activity-card-detail,
+    .activity-summary-meta,
+    .activity-empty {
+      margin: 0;
+      font-size: 11px;
+      line-height: 1.45;
+      color: var(--muted);
+      word-break: break-word;
+    }
+
+    .activity-card-detail,
+    .activity-summary-meta {
+      margin-top: 6px;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .activity-log-actions {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 8px;
+    }
+
+    .button.is-disabled {
+      pointer-events: none;
+      cursor: default;
+      opacity: 0.55;
+    }
+
+    .activity-log-body {
+      min-height: 12.8em;
+      max-height: 16em;
+      overflow: auto;
+      margin: 0;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #fbfcfe;
+      color: var(--text);
+      font-size: 11px;
+      line-height: 1.42;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: Menlo, Consolas, Monaco, "Liberation Mono", monospace;
+    }
+
+    .activity-summary-list {
+      display: grid;
+      gap: 7px;
+    }
+
+    .activity-summary-item {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #ffffff;
+      padding: 8px 9px;
+    }
+
+    .activity-summary-top {
+      display: flex;
+      gap: 8px;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+
+    .activity-summary-endpoint {
+      margin: 0;
+      font-size: 11px;
+      line-height: 1.45;
+      color: var(--text);
+      word-break: break-word;
+      font-family: Menlo, Consolas, Monaco, "Liberation Mono", monospace;
+    }
+
     .panel {
       padding: 12px 14px;
       margin-bottom: 8px;
@@ -837,6 +953,7 @@
       }
 
       .history-layout,
+      .activity-layout,
       .history-fields {
         grid-template-columns: 1fr;
       }
@@ -883,6 +1000,54 @@
     </section>
 
     <section class="summary-grid" data-summary-grid></section>
+
+    <section class="panel">
+      <div class="panel-top">
+        <div>
+          <h2>Действия и состояние</h2>
+          <p class="panel-note">
+            Этот блок остаётся server-driven: `Обновить` только перечитывает текущий page composition, а `Загрузить и обновить`
+            запускает canonical `POST /refresh` и потом reread-ит уже сохранённый результат.
+          </p>
+        </div>
+      </div>
+      <div class="activity-layout">
+        <section class="activity-card">
+          <div class="activity-card-header">
+            <div>
+              <p class="activity-card-title" data-activity-log-title>Лог</p>
+              <p class="activity-card-subtitle" data-activity-log-subtitle>загрузка лога…</p>
+            </div>
+            <span class="status-pill tone-neutral" data-activity-log-status>Нет данных</span>
+          </div>
+          <p class="activity-card-detail" data-activity-log-detail>Последний релевантный run/log пока не прочитан.</p>
+          <pre class="activity-log-body" data-activity-log-body>Загрузка…</pre>
+          <div class="activity-log-actions">
+            <a class="button secondary is-disabled" data-activity-log-download href="#" download>Скачать лог</a>
+          </div>
+        </section>
+        <section class="activity-card">
+          <div class="activity-card-header">
+            <div>
+              <p class="activity-card-title">Загрузка данных</p>
+              <p class="activity-card-subtitle" data-upload-summary-subtitle>загрузка статусов…</p>
+            </div>
+          </div>
+          <p class="activity-summary-meta" data-upload-summary-meta>Ожидание server summary…</p>
+          <div class="activity-summary-list" data-upload-summary-list>Загрузка…</div>
+        </section>
+        <section class="activity-card">
+          <div class="activity-card-header">
+            <div>
+              <p class="activity-card-title">Обновление данных</p>
+              <p class="activity-card-subtitle" data-update-summary-subtitle>загрузка статусов…</p>
+            </div>
+          </div>
+          <p class="activity-summary-meta" data-update-summary-meta>Ожидание server summary…</p>
+          <div class="activity-summary-list" data-update-summary-list>Загрузка…</div>
+        </section>
+      </div>
+    </section>
 
     <section class="panel">
       <div class="panel-top">
@@ -1024,6 +1189,18 @@
     const historyDateToNode = document.querySelector("[data-history-date-to]");
     const historySaveButton = document.querySelector("[data-history-save]");
     const historyResetButton = document.querySelector("[data-history-reset]");
+    const activityLogTitleNode = document.querySelector("[data-activity-log-title]");
+    const activityLogSubtitleNode = document.querySelector("[data-activity-log-subtitle]");
+    const activityLogStatusNode = document.querySelector("[data-activity-log-status]");
+    const activityLogDetailNode = document.querySelector("[data-activity-log-detail]");
+    const activityLogBodyNode = document.querySelector("[data-activity-log-body]");
+    const activityLogDownloadNode = document.querySelector("[data-activity-log-download]");
+    const uploadSummarySubtitleNode = document.querySelector("[data-upload-summary-subtitle]");
+    const uploadSummaryMetaNode = document.querySelector("[data-upload-summary-meta]");
+    const uploadSummaryListNode = document.querySelector("[data-upload-summary-list]");
+    const updateSummarySubtitleNode = document.querySelector("[data-update-summary-subtitle]");
+    const updateSummaryMetaNode = document.querySelector("[data-update-summary-meta]");
+    const updateSummaryListNode = document.querySelector("[data-update-summary-list]");
     const filterControlsNode = document.querySelector("[data-filter-controls]");
     const filterMetaNode = document.querySelector("[data-filter-meta]");
     const filterSummaryNode = document.querySelector("[data-filter-summary]");
@@ -1404,6 +1581,73 @@
         return normalizedCards;
       }
       return [pageRefreshCard].concat(normalizedCards);
+    }
+
+    function renderActivitySurface(surface) {
+      const normalizedSurface = surface || {};
+      const logBlock = normalizedSurface.log_block || {};
+      activityLogTitleNode.textContent = String(logBlock.title || "Лог");
+      activityLogSubtitleNode.textContent = String(logBlock.subtitle || "");
+      activityLogStatusNode.textContent = String(logBlock.status_label || "Нет данных");
+      activityLogStatusNode.className = "status-pill tone-" + normalizeTone(logBlock.tone);
+      activityLogDetailNode.textContent = String(logBlock.detail || "");
+      const previewLines = Array.isArray(logBlock.preview_lines) ? logBlock.preview_lines : [];
+      activityLogBodyNode.textContent = previewLines.length
+        ? previewLines.join("\n")
+        : String(logBlock.empty_message || "Лог пока недоступен.");
+      const downloadPath = String(logBlock.download_path || "");
+      if (downloadPath) {
+        activityLogDownloadNode.href = downloadPath;
+        activityLogDownloadNode.classList.remove("is-disabled");
+        activityLogDownloadNode.setAttribute("download", String(logBlock.log_filename || "sheet-vitrina-v1-log.txt"));
+        activityLogDownloadNode.removeAttribute("aria-disabled");
+        activityLogDownloadNode.tabIndex = 0;
+      } else {
+        activityLogDownloadNode.href = "#";
+        activityLogDownloadNode.classList.add("is-disabled");
+        activityLogDownloadNode.setAttribute("aria-disabled", "true");
+        activityLogDownloadNode.tabIndex = -1;
+      }
+      renderEndpointSummaryBlock(
+        uploadSummarySubtitleNode,
+        uploadSummaryMetaNode,
+        uploadSummaryListNode,
+        normalizedSurface.upload_summary || {},
+      );
+      renderEndpointSummaryBlock(
+        updateSummarySubtitleNode,
+        updateSummaryMetaNode,
+        updateSummaryListNode,
+        normalizedSurface.update_summary || {},
+      );
+    }
+
+    function renderEndpointSummaryBlock(subtitleNode, metaNode, listNode, block) {
+      subtitleNode.textContent = String(block.subtitle || "");
+      const detailParts = [];
+      if (block.updated_at) {
+        detailParts.push(String(block.updated_at));
+      }
+      if (block.detail) {
+        detailParts.push(String(block.detail));
+      }
+      metaNode.textContent = detailParts.join(" · ") || "Статусы по endpoint-ам пока недоступны.";
+      const items = Array.isArray(block.items) ? block.items : [];
+      if (!items.length) {
+        listNode.innerHTML = '<p class="activity-empty">' + escapeHtml(block.empty_message || "Статусы по endpoint-ам пока недоступны.") + "</p>";
+        return;
+      }
+      listNode.innerHTML = items.map(function(item) {
+        return [
+          '<article class="activity-summary-item" data-activity-summary-item="' + escapeHtml(item.endpoint_id || "") + '">',
+          '<div class="activity-summary-top">',
+          '<p class="activity-summary-endpoint">' + escapeHtml(item.endpoint_label || item.source_key || item.endpoint_id || "") + '</p>',
+          '<span class="status-pill tone-' + escapeHtml(normalizeTone(item.tone)) + '">' + escapeHtml(item.status_label || "") + '</span>',
+          '</div>',
+          '<p class="activity-card-detail">' + escapeHtml(item.detail || item.source_key || "") + '</p>',
+          '</article>'
+        ].join("");
+      }).join("");
     }
 
     function buildPageRefreshCard() {
@@ -1976,6 +2220,7 @@
       });
       setStatusBadge(payload);
       renderSummaryCards(payload.summary_cards || []);
+      renderActivitySurface(payload.activity_surface || {});
       renderHistoricalAccess(payload);
       renderFilterControls(payload);
       initializeColumnVisibility(payload);
@@ -2557,6 +2802,7 @@
         historyDateToNode.disabled = true;
         historySaveButton.disabled = true;
         historyResetButton.disabled = true;
+        renderActivitySurface(null);
         filterControlsNode.innerHTML = "";
         columnManagerNoteNode.textContent = "Управление колонками временно недоступно.";
         columnVisibilityControlsNode.innerHTML = '<p class="filter-summary">Управление колонками временно недоступно.</p>';

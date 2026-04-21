@@ -102,6 +102,7 @@ def main() -> None:
         "sku_separators": ready_result["sku_separators"],
         "filter_controls": ready_result["filter_controls"],
         "status_badge": ready_result["status_badge"],
+        "activity_surface": ready_result["activity_surface"],
         "compact_widths": ready_result["compact_widths"],
         "percent_formatting": ready_result["percent_formatting"],
         "refresh_loading_status": ready_result["refresh_loading_status"],
@@ -180,6 +181,7 @@ class LocalWebVitrinaFixtureServer:
                 ),
             )
         )
+        _start_completed_refresh_job(entrypoint, runtime)
         config = RegistryUploadHttpEntrypointConfig(
             host="127.0.0.1",
             port=_reserve_free_port(),
@@ -255,6 +257,10 @@ def run_browser_checks(
             if final_badge["label"] != "Успешно" or "tone-success" not in final_badge["class_name"]:
                 raise AssertionError(f"status badge must end in Russian success state, got {final_badge}")
             initial_summary_cards = _read_summary_cards(page)
+            initial_activity_surface = _read_activity_surface(
+                page,
+                allow_empty_log=expected_percent_rows is None,
+            )
             historical_panel_present = (
                 page.locator("[data-history-calendar]").count() == 1
                 and page.locator("[data-history-presets]").count() == 1
@@ -297,11 +303,13 @@ def run_browser_checks(
             refresh_loading_status = _check_refresh_loading_status(
                 page,
                 previous_summary_cards=initial_summary_cards,
+                previous_activity_surface=initial_activity_surface,
                 expect_same_freshness=expect_cheap_refresh_same_freshness,
             )
             load_refresh_action = _check_load_refresh_action(
                 page,
                 previous_summary_cards=refresh_loading_status["summary_cards"],
+                previous_activity_surface=refresh_loading_status["activity_surface"],
                 expect_freshness_change=expect_data_refresh_changes_freshness,
             )
 
@@ -408,6 +416,7 @@ def run_browser_checks(
         "filter_controls": filter_controls,
         "status_badge": final_badge,
         "summary_cards": initial_summary_cards,
+        "activity_surface": initial_activity_surface,
         "compact_widths": compact_widths,
         "percent_formatting": percent_formatting,
         "refresh_loading_status": refresh_loading_status,
@@ -459,6 +468,7 @@ def _print_summary(result: dict[str, object]) -> None:
     print("web_vitrina_browser_table: ok ->", result["table_rendered"])
     print("web_vitrina_browser_initial_loading_badge: ok ->", result["initial_loading_badge"])
     print("web_vitrina_browser_status_badge: ok ->", result["status_badge"])
+    print("web_vitrina_browser_activity_surface: ok ->", result["activity_surface"])
     print("web_vitrina_browser_compact_widths: ok ->", result["compact_widths"])
     print("web_vitrina_browser_percent_formatting: ok ->", result["percent_formatting"])
     print("web_vitrina_browser_refresh_loading_status: ok ->", result["refresh_loading_status"])
@@ -552,6 +562,7 @@ def _check_refresh_loading_status(
     page: object,
     *,
     previous_summary_cards: dict[str, dict[str, str]],
+    previous_activity_surface: dict[str, object],
     expect_same_freshness: bool | None,
 ) -> dict[str, object]:
     page.locator("[data-retry-button]").click()
@@ -574,6 +585,7 @@ def _check_refresh_loading_status(
         timeout=20000,
     )
     next_summary_cards = _read_summary_cards(page)
+    next_activity_surface = _read_activity_surface(page)
     _assert_page_refresh_card_changed(previous_summary_cards, next_summary_cards, action_name="cheap refresh")
     freshness_unchanged = _freshness_card_matches(previous_summary_cards, next_summary_cards)
     if expect_same_freshness is True and not freshness_unchanged:
@@ -582,6 +594,14 @@ def _check_refresh_loading_status(
         )
     if expect_same_freshness is False and freshness_unchanged:
         raise AssertionError("cheap refresh was expected to advance data freshness but did not")
+    if not _activity_block_matches(previous_activity_surface["upload"], next_activity_surface["upload"]):
+        raise AssertionError(
+            f"cheap refresh must not overwrite the last upload-run state, got {previous_activity_surface} -> {next_activity_surface}"
+        )
+    if not _activity_block_matches(previous_activity_surface["update"], next_activity_surface["update"]):
+        raise AssertionError(
+            f"cheap refresh must keep persisted update summary unchanged when the snapshot is unchanged, got {previous_activity_surface} -> {next_activity_surface}"
+        )
     return {
         "loading_badge": loading_badge,
         "page_refresh_before": previous_summary_cards["page_refresh"]["updated_at"],
@@ -590,6 +610,7 @@ def _check_refresh_loading_status(
         "freshness_after": next_summary_cards["freshness"]["value"],
         "freshness_unchanged": freshness_unchanged,
         "summary_cards": next_summary_cards,
+        "activity_surface": next_activity_surface,
     }
 
 
@@ -597,6 +618,7 @@ def _check_load_refresh_action(
     page: object,
     *,
     previous_summary_cards: dict[str, dict[str, str]],
+    previous_activity_surface: dict[str, object],
     expect_freshness_change: bool | None,
 ) -> dict[str, object]:
     button = page.locator("[data-load-refresh-button]")
@@ -623,6 +645,7 @@ def _check_load_refresh_action(
         timeout=45000,
     )
     next_summary_cards = _read_summary_cards(page)
+    next_activity_surface = _read_activity_surface(page)
     _assert_page_refresh_card_changed(previous_summary_cards, next_summary_cards, action_name="source refresh")
     freshness_changed = not _freshness_card_matches(previous_summary_cards, next_summary_cards)
     if expect_freshness_change is True and not freshness_changed:
@@ -631,6 +654,14 @@ def _check_load_refresh_action(
         )
     if expect_freshness_change is False and freshness_changed:
         raise AssertionError("source refresh was expected to keep data freshness unchanged")
+    if _activity_block_matches(previous_activity_surface["upload"], next_activity_surface["upload"]):
+        raise AssertionError(
+            f"source refresh must advance upload-run/log state, got {previous_activity_surface} -> {next_activity_surface}"
+        )
+    if _activity_block_matches(previous_activity_surface["update"], next_activity_surface["update"]):
+        raise AssertionError(
+            f"source refresh must advance persisted update summary in the local fixture, got {previous_activity_surface} -> {next_activity_surface}"
+        )
     final_badge = {
         "label": page.locator("[data-status-badge]").inner_text().strip(),
         "class_name": page.locator("[data-status-badge]").get_attribute("class") or "",
@@ -644,6 +675,7 @@ def _check_load_refresh_action(
         "freshness_after": next_summary_cards["freshness"]["value"],
         "freshness_changed": freshness_changed,
         "final_badge": final_badge,
+        "activity_surface": next_activity_surface,
     }
 
 
@@ -709,6 +741,58 @@ def _freshness_card_matches(
     before = previous_summary_cards["freshness"]
     after = next_summary_cards["freshness"]
     return before["value"] == after["value"] and before["detail"] == after["detail"]
+
+
+def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> dict[str, object]:
+    payload = page.evaluate(
+        """() => {
+          const readSummary = selector => {
+            const node = document.querySelector(selector);
+            const items = node
+              ? Array.from(node.querySelectorAll('[data-activity-summary-item]')).map(item => ({
+                  endpoint_id: item.getAttribute('data-activity-summary-item') || '',
+                  status_label: ((item.querySelector('.status-pill') || {}).textContent || '').trim(),
+                  detail: ((item.querySelector('.activity-card-detail') || {}).textContent || '').trim()
+                }))
+              : [];
+            return {
+              meta: ((document.querySelector(selector === '[data-upload-summary-list]' ? '[data-upload-summary-meta]' : '[data-update-summary-meta]') || {}).textContent || '').trim(),
+              subtitle: ((document.querySelector(selector === '[data-upload-summary-list]' ? '[data-upload-summary-subtitle]' : '[data-update-summary-subtitle]') || {}).textContent || '').trim(),
+              items: items
+            };
+          };
+          return {
+            log: {
+              status_label: ((document.querySelector('[data-activity-log-status]') || {}).textContent || '').trim(),
+              detail: ((document.querySelector('[data-activity-log-detail]') || {}).textContent || '').trim(),
+              body: ((document.querySelector('[data-activity-log-body]') || {}).textContent || '').trim(),
+              download_href: (document.querySelector('[data-activity-log-download]') || {}).getAttribute('href') || ''
+            },
+            upload: readSummary('[data-upload-summary-list]'),
+            update: readSummary('[data-update-summary-list]')
+          };
+        }"""
+    )
+    if (
+        not allow_empty_log
+        and (not payload["log"]["download_href"] or "job?job_id=" not in payload["log"]["download_href"])
+    ):
+        raise AssertionError(f"log block must keep a truthful job download path, got {payload}")
+    upload_ids = [item["endpoint_id"] for item in payload["upload"]["items"]]
+    update_ids = [item["endpoint_id"] for item in payload["update"]["items"]]
+    if not upload_ids and allow_empty_log:
+        return payload
+    if not upload_ids or upload_ids != update_ids:
+        raise AssertionError(f"upload/update summary blocks must expose the same endpoint list, got {payload}")
+    return payload
+
+
+def _activity_block_matches(previous_block: dict[str, object], next_block: dict[str, object]) -> bool:
+    return (
+        previous_block.get("meta") == next_block.get("meta")
+        and previous_block.get("subtitle") == next_block.get("subtitle")
+        and previous_block.get("items") == next_block.get("items")
+    )
 
 
 def _measure_compact_widths(page: object) -> dict[str, int]:
@@ -862,13 +946,53 @@ def _build_plan(
             SheetVitrinaWriteTarget(
                 sheet_name="STATUS",
                 write_start_cell="A1",
-                write_rect="A1:K1",
+                write_rect="A1:K4",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
                 header=STATUS_HEADER,
-                rows=[],
-                row_count=0,
+                rows=[
+                    [
+                        "seller_funnel_snapshot[today_current]",
+                        "success",
+                        as_of_date,
+                        as_of_date,
+                        as_of_date,
+                        "",
+                        "",
+                        2,
+                        2,
+                        "",
+                        "",
+                    ],
+                    [
+                        "web_source_snapshot[today_current]",
+                        "success",
+                        as_of_date,
+                        as_of_date,
+                        "",
+                        as_of_date,
+                        as_of_date,
+                        2,
+                        2,
+                        "",
+                        "",
+                    ],
+                    [
+                        "prices_snapshot[today_current]",
+                        "error",
+                        as_of_date,
+                        as_of_date,
+                        as_of_date,
+                        "",
+                        "",
+                        2,
+                        0,
+                        "101,202",
+                        "no payload returned",
+                    ],
+                ],
+                row_count=3,
                 column_count=len(STATUS_HEADER),
             ),
         ],
@@ -928,6 +1052,9 @@ def _stub_sheet_refresh_request(entrypoint, runtime, *, as_of_date=None, log=Non
     current_state = runtime.load_current_state()
     refreshed_at = entrypoint.refreshed_at_factory()
     emit(f"refresh_stub_start snapshot_id={plan.snapshot_id} refreshed_at={refreshed_at}")
+    emit('event=source_step_finish source=seller_funnel_snapshot temporal_slot=today_current endpoint="GET /v1/sales-funnel/daily?date=<YYYY-MM-DD>" kind=success')
+    emit('event=source_step_finish source=web_source_snapshot temporal_slot=today_current endpoint="GET /v1/search-analytics/snapshot?date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>" kind=success')
+    emit('event=source_step_finish source=prices_snapshot temporal_slot=today_current endpoint="POST /api/v2/list/goods/filter" kind=error note="no payload returned"')
     refresh_result = runtime.save_sheet_vitrina_ready_snapshot(
         current_state=current_state,
         refreshed_at=refreshed_at,
@@ -939,6 +1066,15 @@ def _stub_sheet_refresh_request(entrypoint, runtime, *, as_of_date=None, log=Non
     payload["server_context"] = entrypoint.build_sheet_server_context()
     payload["manual_context"] = entrypoint.build_sheet_manual_context()
     return payload
+
+
+def _start_completed_refresh_job(entrypoint, runtime) -> dict[str, object]:
+    job_payload = entrypoint.start_sheet_refresh_job()
+    job_id = str(job_payload["job_id"])
+    while True:
+        snapshot = entrypoint.operator_jobs.get(job_id)
+        if snapshot["status"] != "running":
+            return snapshot
 
 
 if __name__ == "__main__":

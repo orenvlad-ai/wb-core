@@ -95,6 +95,7 @@ def main() -> None:
             selected_as_of_date=None,
             selected_date_from=None,
             selected_date_to=None,
+            activity_surface=_build_activity_surface_fixture(),
         )
 
         if composition["composition_name"] != "web_vitrina_page_composition" or composition["composition_version"] != "v1":
@@ -154,6 +155,15 @@ def main() -> None:
             raise AssertionError(f"freshness summary card detail mismatch, got {summary_cards['freshness']}")
         if "snapshot" in summary_cards:
             raise AssertionError(f"snapshot summary card must be folded into freshness, got {summary_cards}")
+        activity_surface = composition["activity_surface"]
+        if activity_surface["log_block"]["title"] != "Лог" or not activity_surface["log_block"]["download_path"]:
+            raise AssertionError(f"activity log block mismatch, got {activity_surface['log_block']}")
+        upload_items = activity_surface["upload_summary"]["items"]
+        update_items = activity_surface["update_summary"]["items"]
+        if [item["endpoint_id"] for item in upload_items] != [item["endpoint_id"] for item in update_items]:
+            raise AssertionError(f"upload/update endpoint ids must stay aligned, got {activity_surface}")
+        if upload_items[0]["status_label"] != "Успешно" or update_items[1]["status_label"] != "Ошибка":
+            raise AssertionError(f"activity summary items mismatch, got {activity_surface}")
         ordered_row_ids = [row["row_id"] for row in composition["table_surface"]["rows"]]
         expected_row_ids = [
             "TOTAL|total_view_count",
@@ -191,6 +201,7 @@ def main() -> None:
             selected_as_of_date=None,
             selected_date_from="2026-04-18",
             selected_date_to="2026-04-20",
+            activity_surface=_build_activity_surface_fixture(),
         )
         if period_composition["historical_access"]["current_mode"] != "historical_period":
             raise AssertionError(f"period composition mode mismatch, got {period_composition['historical_access']}")
@@ -228,11 +239,14 @@ def main() -> None:
             raise AssertionError(f"error freshness card label mismatch, got {error_summary_cards}")
         if "snapshot unavailable" not in error_summary_cards["freshness"]["detail"]:
             raise AssertionError(f"error freshness card detail mismatch, got {error_summary_cards}")
+        if error_payload["activity_surface"]["log_block"]["title"] != "Лог":
+            raise AssertionError(f"error composition activity surface mismatch, got {error_payload['activity_surface']}")
 
         print("web_vitrina_page_composition_identity: ok ->", composition["composition_name"], composition["composition_version"])
         print("web_vitrina_page_composition_state: ok ->", composition["meta"]["current_state"], composition["status_badge"]["tone"])
         print("web_vitrina_page_composition_history: ok ->", historical_access["current_mode"], historical_access["supported_query_mode"], len(historical_access["options"]))
         print("web_vitrina_page_composition_period: ok ->", period_composition["historical_access"]["selected_date_from"], period_composition["historical_access"]["selected_date_to"])
+        print("web_vitrina_page_composition_activity_surface: ok ->", len(upload_items), len(update_items))
         print("web_vitrina_page_composition_filters: ok ->", ",".join(sorted(controls)))
         print("web_vitrina_page_composition_table: ok ->", len(composition["table_surface"]["columns"]), len(composition["table_surface"]["rows"]))
         print("web_vitrina_page_composition_error: ok ->", error_payload["meta"]["current_state"])
@@ -244,7 +258,7 @@ def _build_plan(
     first_nm_id: int,
     second_nm_id: int,
     first_group: str,
-) -> SheetVitrinaV1Envelope:
+    ) -> SheetVitrinaV1Envelope:
     return SheetVitrinaV1Envelope(
         plan_version="delivery_contract_v1__sheet_scaffold_v1",
         snapshot_id=f"web-vitrina-page-composition-fixture-{as_of_date}",
@@ -291,7 +305,77 @@ def _build_plan(
                 column_count=len(STATUS_HEADER),
             ),
         ],
-    )
+        )
+
+
+def _build_activity_surface_fixture() -> dict[str, object]:
+    return {
+        "log_block": {
+            "title": "Лог",
+            "subtitle": "Последний релевантный refresh-run",
+            "status_label": "Успешно",
+            "tone": "success",
+            "detail": "job fixture-refresh-job-1 · refresh · 2026-04-20T12:05:00Z",
+            "preview_lines": [
+                "2026-04-20T12:04:00Z event=source_step_finish source=seller_funnel_snapshot kind=success",
+                "2026-04-20T12:04:01Z event=source_step_finish source=prices_snapshot kind=error",
+            ],
+            "line_count": 2,
+            "download_path": "/v1/sheet-vitrina-v1/job?job_id=fixture-refresh-job-1&format=text&download=1",
+            "log_filename": "sheet-vitrina-v1-refresh-fixture-refresh-job-1.txt",
+            "empty_message": "",
+        },
+        "upload_summary": {
+            "title": "Загрузка данных",
+            "subtitle": "Последний завершённый refresh-run.",
+            "detail": "job fixture-refresh-job-1 · refresh",
+            "updated_at": "2026-04-20T12:05:00Z",
+            "items": [
+                {
+                    "endpoint_id": "seller_funnel_snapshot",
+                    "endpoint_label": "GET /v1/sales-funnel/daily?date=<YYYY-MM-DD>",
+                    "source_key": "seller_funnel_snapshot",
+                    "status_label": "Успешно",
+                    "tone": "success",
+                    "detail": "сегодня: Успешно",
+                },
+                {
+                    "endpoint_id": "prices_snapshot",
+                    "endpoint_label": "POST /api/v2/list/goods/filter",
+                    "source_key": "prices_snapshot",
+                    "status_label": "Ошибка",
+                    "tone": "error",
+                    "detail": "сегодня: Ошибка",
+                },
+            ],
+            "empty_message": "",
+        },
+        "update_summary": {
+            "title": "Обновление данных",
+            "subtitle": "Persisted STATUS current read-side snapshot.",
+            "detail": "snapshot fixture-2026-04-20 · as_of_date 2026-04-20 · persisted_ready_snapshot",
+            "updated_at": "2026-04-20T12:05:00Z",
+            "items": [
+                {
+                    "endpoint_id": "seller_funnel_snapshot",
+                    "endpoint_label": "GET /v1/sales-funnel/daily?date=<YYYY-MM-DD>",
+                    "source_key": "seller_funnel_snapshot",
+                    "status_label": "Успешно",
+                    "tone": "success",
+                    "detail": "сегодня: Успешно",
+                },
+                {
+                    "endpoint_id": "prices_snapshot",
+                    "endpoint_label": "POST /api/v2/list/goods/filter",
+                    "source_key": "prices_snapshot",
+                    "status_label": "Ошибка",
+                    "tone": "error",
+                    "detail": "сегодня: Ошибка",
+                },
+            ],
+            "empty_message": "",
+        },
+    }
 
 
 if __name__ == "__main__":

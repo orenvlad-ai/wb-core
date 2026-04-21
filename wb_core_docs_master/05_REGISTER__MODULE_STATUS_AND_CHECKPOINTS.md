@@ -107,6 +107,11 @@ Current repo-owned operator refresh surface:
   - `Обновить` = cheap reread of the current page composition/read-side snapshot
   - `Загрузить и обновить` = canonical `POST /v1/sheet-vitrina-v1/refresh` + reread, without mandatory `/load` / Google Sheet write dependency
   - summary keeps browser-owned `Последнее обновление страницы` separate from server-owned `Свежесть данных` (`refreshed_at / snapshot_id / as_of_date`)
+  - action-adjacent blocks now stay server-owned too:
+    - `Лог` = latest relevant refresh-run tail + `Скачать лог` via existing `GET /v1/sheet-vitrina-v1/job?...format=text&download=1`
+    - `Загрузка данных` = binary per-endpoint fetch/upload result from the latest relevant refresh job log
+    - `Обновление данных` = binary per-endpoint materialization result from persisted `STATUS` rows of the current read-side snapshot
+  - cheap `Обновить` may advance only the page reread marker; it must not fabricate a new upload-run state in those blocks
 - the same sibling page now exposes a bounded history period chooser:
   - default/no-query mode stays the cheap daily contour
   - explicit `as_of_date` keeps one-day historical mode

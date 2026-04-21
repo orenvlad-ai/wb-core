@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -84,6 +85,7 @@ def main() -> None:
             activated_at_factory=lambda: "2026-04-20T09:00:00Z",
             now_factory=lambda: NOW,
         )
+        seeded_job = _start_completed_refresh_job(entrypoint, runtime)
         config = RegistryUploadHttpEntrypointConfig(
             host="127.0.0.1",
             port=_reserve_free_port(),
@@ -182,6 +184,18 @@ def main() -> None:
                 raise AssertionError(f"web-vitrina period selected_date_from mismatch, got {period_composition_payload}")
             if period_composition_payload.get("historical_access", {}).get("selected_date_to") != "2026-04-20":
                 raise AssertionError(f"web-vitrina period selected_date_to mismatch, got {period_composition_payload}")
+            activity_surface = composition_payload.get("activity_surface") or {}
+            expected_download_path = f"/v1/sheet-vitrina-v1/job?job_id={seeded_job['job_id']}&format=text&download=1"
+            if activity_surface.get("log_block", {}).get("download_path") != expected_download_path:
+                raise AssertionError(f"web-vitrina log download path mismatch, got {activity_surface}")
+            upload_items = activity_surface.get("upload_summary", {}).get("items") or []
+            update_items = activity_surface.get("update_summary", {}).get("items") or []
+            if [item.get("endpoint_id") for item in upload_items] != [item.get("endpoint_id") for item in update_items]:
+                raise AssertionError(f"web-vitrina activity endpoint ids mismatch, got {activity_surface}")
+            if [item.get("status_label") for item in upload_items] != ["Успешно", "Успешно", "Ошибка"]:
+                raise AssertionError(f"upload summary binary status mismatch, got {activity_surface}")
+            if [item.get("status_label") for item in update_items] != ["Успешно", "Успешно", "Ошибка"]:
+                raise AssertionError(f"update summary binary status mismatch, got {activity_surface}")
 
             page_status, page_html = _get_text(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}")
             if page_status != 200:
@@ -202,6 +216,10 @@ def main() -> None:
                 "data-history-date-to",
                 "Сбросить",
                 "Сохранить",
+                "data-activity-log-body",
+                "data-activity-log-download",
+                "data-upload-summary-list",
+                "data-update-summary-list",
             ):
                 if expected not in page_html:
                     raise AssertionError(f"web-vitrina page shell must expose {expected!r}")
@@ -216,6 +234,7 @@ def main() -> None:
             print("web_vitrina_period_route: ok ->", period_payload["meta"]["date_columns"])
             print("web_vitrina_page_composition_surface: ok ->", composition_payload["composition_name"], composition_payload["meta"]["current_state"])
             print("web_vitrina_history_selector_surface: ok ->", historical_access["current_mode"], historical_access["supported_query_mode"], len(historical_access["options"]))
+            print("web_vitrina_activity_surface: ok ->", len(upload_items), activity_surface["log_block"]["status_label"])
             print("web_vitrina_page_route: ok ->", DEFAULT_SHEET_WEB_VITRINA_UI_PATH)
             print("web_vitrina_query_override: ok ->", dated_payload["meta"]["as_of_date"])
         finally:
@@ -264,13 +283,53 @@ def _build_plan(
             SheetVitrinaWriteTarget(
                 sheet_name="STATUS",
                 write_start_cell="A1",
-                write_rect="A1:K1",
+                write_rect="A1:K4",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
                 header=STATUS_HEADER,
-                rows=[],
-                row_count=0,
+                rows=[
+                    [
+                        "seller_funnel_snapshot[today_current]",
+                        "success",
+                        "2026-04-20",
+                        "2026-04-20",
+                        "2026-04-20",
+                        "",
+                        "",
+                        2,
+                        2,
+                        "",
+                        "",
+                    ],
+                    [
+                        "web_source_snapshot[today_current]",
+                        "success",
+                        "2026-04-20",
+                        "2026-04-20",
+                        "",
+                        "2026-04-20",
+                        "2026-04-20",
+                        2,
+                        2,
+                        "",
+                        "",
+                    ],
+                    [
+                        "prices_snapshot[today_current]",
+                        "error",
+                        "2026-04-20",
+                        "2026-04-20",
+                        "2026-04-20",
+                        "",
+                        "",
+                        2,
+                        0,
+                        "101,202",
+                        "no payload returned",
+                    ],
+                ],
+                row_count=3,
                 column_count=len(STATUS_HEADER),
             ),
         ],
@@ -291,6 +350,44 @@ def _get_json(url: str) -> tuple[int, dict[str, object]]:
 def _get_text(url: str) -> tuple[int, str]:
     with urllib_request.urlopen(url) as response:
         return int(response.status), response.read().decode("utf-8")
+
+
+def _start_completed_refresh_job(
+    entrypoint: RegistryUploadHttpEntrypoint,
+    runtime: RegistryUploadDbBackedRuntime,
+) -> dict[str, object]:
+    job_payload = entrypoint.operator_jobs.start(
+        operation="refresh",
+        runner=lambda log: _stub_refresh_run(entrypoint, runtime, log=log),
+    )
+    job_id = str(job_payload["job_id"])
+    while True:
+        snapshot = entrypoint.operator_jobs.get(job_id)
+        if snapshot["status"] != "running":
+            return snapshot
+
+
+def _stub_refresh_run(
+    entrypoint: RegistryUploadHttpEntrypoint,
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    log,
+) -> dict[str, object]:
+    plan = runtime.load_sheet_vitrina_ready_snapshot()
+    current_state = runtime.load_current_state()
+    refreshed_at = entrypoint.refreshed_at_factory()
+    log('event=source_step_finish source=seller_funnel_snapshot temporal_slot=today_current endpoint="GET /v1/sales-funnel/daily?date=<YYYY-MM-DD>" kind=success')
+    log('event=source_step_finish source=web_source_snapshot temporal_slot=today_current endpoint="GET /v1/search-analytics/snapshot?date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>" kind=success')
+    log('event=source_step_finish source=prices_snapshot temporal_slot=today_current endpoint="POST /api/v2/list/goods/filter" kind=error note="no payload returned"')
+    result = runtime.save_sheet_vitrina_ready_snapshot(
+        current_state=current_state,
+        refreshed_at=refreshed_at,
+        plan=plan,
+    )
+    payload = asdict(result)
+    payload["server_context"] = entrypoint.build_sheet_server_context()
+    payload["manual_context"] = entrypoint.build_sheet_manual_context()
+    return payload
 
 
 if __name__ == "__main__":

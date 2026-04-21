@@ -478,6 +478,7 @@ def _build_handler(
                         page_route=DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
                         read_route=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
                         operator_route=sheet_operator_ui_path,
+                        job_path=sheet_job_path,
                         as_of_date=as_of_date,
                         date_from=date_from,
                         date_to=date_to,

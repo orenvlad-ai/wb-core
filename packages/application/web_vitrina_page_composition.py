@@ -27,6 +27,7 @@ def build_web_vitrina_page_composition(
     selected_as_of_date: str | None,
     selected_date_from: str | None,
     selected_date_to: str | None,
+    activity_surface: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     contract_payload = _to_payload(contract)
     view_model_payload = _to_payload(view_model)
@@ -120,6 +121,7 @@ def build_web_vitrina_page_composition(
                 "tone": "neutral",
             },
         ],
+        "activity_surface": _normalize_activity_surface(activity_surface),
         "filter_surface": {
             "state_namespace": WEB_VITRINA_PAGE_STATE_NAMESPACE,
             "browser_state_persistence": "none",
@@ -205,6 +207,7 @@ def build_web_vitrina_page_error_composition(
     selected_as_of_date: str | None,
     selected_date_from: str | None,
     selected_date_to: str | None,
+    activity_surface: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "composition_name": WEB_VITRINA_PAGE_COMPOSITION_NAME,
@@ -265,6 +268,7 @@ def build_web_vitrina_page_error_composition(
                 "tone": "neutral",
             },
         ],
+        "activity_surface": _normalize_activity_surface(activity_surface),
         "filter_surface": {
             "state_namespace": WEB_VITRINA_PAGE_STATE_NAMESPACE,
             "browser_state_persistence": "none",
@@ -320,6 +324,56 @@ def _count_rows(rows: list[Mapping[str, Any]], *, key: str) -> dict[str, int]:
             continue
         counts[value] = counts.get(value, 0) + 1
     return counts
+
+
+def _normalize_activity_surface(activity_surface: Mapping[str, Any] | None) -> dict[str, Any]:
+    surface = dict(activity_surface or {})
+    return {
+        "log_block": _normalize_log_block(surface.get("log_block")),
+        "upload_summary": _normalize_endpoint_block(surface.get("upload_summary"), default_title="Загрузка данных"),
+        "update_summary": _normalize_endpoint_block(surface.get("update_summary"), default_title="Обновление данных"),
+    }
+
+
+def _normalize_log_block(value: Any) -> dict[str, Any]:
+    payload = dict(value or {})
+    return {
+        "title": str(payload.get("title") or "Лог"),
+        "subtitle": str(payload.get("subtitle") or ""),
+        "status_label": str(payload.get("status_label") or "Нет данных"),
+        "tone": str(payload.get("tone") or "neutral"),
+        "detail": str(payload.get("detail") or ""),
+        "preview_lines": [str(item) for item in (payload.get("preview_lines") or []) if str(item).strip()],
+        "line_count": int(payload.get("line_count") or 0),
+        "download_path": str(payload.get("download_path") or ""),
+        "log_filename": str(payload.get("log_filename") or ""),
+        "empty_message": str(payload.get("empty_message") or "Лог пока недоступен."),
+    }
+
+
+def _normalize_endpoint_block(value: Any, *, default_title: str) -> dict[str, Any]:
+    payload = dict(value or {})
+    items: list[dict[str, Any]] = []
+    for item in payload.get("items") or []:
+        item_payload = dict(item or {})
+        items.append(
+            {
+                "endpoint_id": str(item_payload.get("endpoint_id") or ""),
+                "endpoint_label": str(item_payload.get("endpoint_label") or ""),
+                "source_key": str(item_payload.get("source_key") or ""),
+                "status_label": str(item_payload.get("status_label") or ""),
+                "tone": str(item_payload.get("tone") or "neutral"),
+                "detail": str(item_payload.get("detail") or ""),
+            }
+        )
+    return {
+        "title": str(payload.get("title") or default_title),
+        "subtitle": str(payload.get("subtitle") or ""),
+        "detail": str(payload.get("detail") or ""),
+        "updated_at": str(payload.get("updated_at") or ""),
+        "items": items,
+        "empty_message": str(payload.get("empty_message") or "Статусы по endpoint-ам пока недоступны."),
+    }
 
 
 def _count_metric_rows(rows: list[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
