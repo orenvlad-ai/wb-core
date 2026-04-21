@@ -20,9 +20,9 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "изменение build metadata pack"
-built_from_commit: "4f0bf14fd9a7dca9e4cadcd9f5f15cfddf3ea678"
-docset_version: "wb_core_docs_master_v44"
-built_at: "2026-04-21T19:20:20Z"
+built_from_commit: "91d4d2c4fcba24aea254f0fb94a42cc0141d30c4"
+docset_version: "wb_core_docs_master_v45"
+built_at: "2026-04-21T20:25:45Z"
 core_docs_changed:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
