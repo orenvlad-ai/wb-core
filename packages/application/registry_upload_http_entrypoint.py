@@ -296,7 +296,13 @@ class RegistryUploadHttpEntrypoint:
             runtime=self.runtime,
             snapshot_as_of_date=snapshot_as_of_date,
         )
-        ordered_source_keys = _ordered_activity_source_keys(upload_records, update_records)
+        shared_source_keys = _ordered_activity_source_keys(upload_records, update_records)
+        upload_source_keys = shared_source_keys if latest_job is not None else []
+        update_source_keys = (
+            shared_source_keys
+            if latest_job is not None
+            else _ordered_activity_source_keys({}, update_records)
+        )
         return {
             "log_block": _build_web_vitrina_log_block(
                 latest_job=latest_job,
@@ -309,7 +315,7 @@ class RegistryUploadHttpEntrypoint:
                     "только перечитывает уже сохранённое состояние."
                 ),
                 records=upload_records,
-                ordered_source_keys=ordered_source_keys,
+                ordered_source_keys=upload_source_keys,
                 empty_message=(
                     "Последний завершённый refresh-run в памяти сервиса пока не найден. "
                     "После `Загрузить и обновить` здесь появится truth по endpoint-ам."
@@ -332,7 +338,7 @@ class RegistryUploadHttpEntrypoint:
                     "состояние и не запускает скрытый upstream fetch."
                 ),
                 records=update_records,
-                ordered_source_keys=ordered_source_keys,
+                ordered_source_keys=update_source_keys,
                 empty_message="STATUS-строки для текущего snapshot пока не materialized.",
                 block_updated_at=refreshed_at,
                 block_detail=f"snapshot {snapshot_id} · as_of_date {snapshot_as_of_date} · {read_model}",

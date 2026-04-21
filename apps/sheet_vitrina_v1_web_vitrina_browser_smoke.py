@@ -257,7 +257,10 @@ def run_browser_checks(
             if final_badge["label"] != "Успешно" or "tone-success" not in final_badge["class_name"]:
                 raise AssertionError(f"status badge must end in Russian success state, got {final_badge}")
             initial_summary_cards = _read_summary_cards(page)
-            initial_activity_surface = _read_activity_surface(page)
+            initial_activity_surface = _read_activity_surface(
+                page,
+                allow_empty_log=expected_percent_rows is None,
+            )
             historical_panel_present = (
                 page.locator("[data-history-calendar]").count() == 1
                 and page.locator("[data-history-presets]").count() == 1
@@ -740,7 +743,7 @@ def _freshness_card_matches(
     return before["value"] == after["value"] and before["detail"] == after["detail"]
 
 
-def _read_activity_surface(page: object) -> dict[str, object]:
+def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> dict[str, object]:
     payload = page.evaluate(
         """() => {
           const readSummary = selector => {
@@ -770,10 +773,15 @@ def _read_activity_surface(page: object) -> dict[str, object]:
           };
         }"""
     )
-    if not payload["log"]["download_href"] or "job?job_id=" not in payload["log"]["download_href"]:
+    if (
+        not allow_empty_log
+        and (not payload["log"]["download_href"] or "job?job_id=" not in payload["log"]["download_href"])
+    ):
         raise AssertionError(f"log block must keep a truthful job download path, got {payload}")
     upload_ids = [item["endpoint_id"] for item in payload["upload"]["items"]]
     update_ids = [item["endpoint_id"] for item in payload["update"]["items"]]
+    if not upload_ids and allow_empty_log:
+        return payload
     if not upload_ids or upload_ids != update_ids:
         raise AssertionError(f"upload/update summary blocks must expose the same endpoint list, got {payload}")
     return payload
