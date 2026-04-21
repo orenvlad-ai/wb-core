@@ -44,6 +44,13 @@ class _ScopeDescriptor:
     nm_id: int | None
 
 
+@dataclass(frozen=True)
+class _PeriodDateBinding:
+    requested_date: str
+    snapshot_as_of_date: str
+    column_date: str
+
+
 class SheetVitrinaV1WebVitrinaBlock:
     """Project a stable, grid-library-agnostic contract from the existing ready snapshot."""
 
@@ -55,6 +62,32 @@ class SheetVitrinaV1WebVitrinaBlock:
     ) -> None:
         self.runtime = runtime
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
+
+    def list_readable_dates(
+        self,
+        *,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        descending: bool = False,
+    ) -> list[str]:
+        try:
+            exact_ready_dates = self.runtime.list_sheet_vitrina_ready_snapshot_dates(
+                date_from=date_from,
+                date_to=date_to,
+            )
+        except ValueError:
+            return []
+        default_visible_snapshot = _load_default_visible_snapshot(
+            runtime=self.runtime,
+            default_as_of_date=default_business_as_of_date(self.now_factory()),
+        )
+        return _merge_readable_dates(
+            exact_ready_dates=exact_ready_dates,
+            default_visible_snapshot=default_visible_snapshot,
+            date_from=date_from,
+            date_to=date_to,
+            descending=descending,
+        )
 
     def build(
         self,
@@ -70,27 +103,33 @@ class SheetVitrinaV1WebVitrinaBlock:
         _validate_period_request(as_of_date=as_of_date, date_from=date_from, date_to=date_to)
         read_model = WEB_VITRINA_READ_MODEL
         if date_from and date_to:
-            snapshot = _build_period_snapshot(
+            default_visible_snapshot = _load_default_visible_snapshot(
                 runtime=self.runtime,
-                current_state=current_state,
+                default_as_of_date=default_business_as_of_date(now),
+            )
+            snapshot, period_date_bindings = _build_period_snapshot(
+                runtime=self.runtime,
                 date_from=date_from,
                 date_to=date_to,
+                default_visible_snapshot=default_visible_snapshot,
             )
             refreshed_at = _resolve_period_refreshed_at(
                 runtime=self.runtime,
-                date_columns=snapshot.date_columns,
+                period_date_bindings=period_date_bindings,
             )
             refresh_status_value = "success"
             data_sheet_row_count = len(snapshot.sheets[0].rows) if snapshot.sheets else 0
             read_model = WEB_VITRINA_PERIOD_READ_MODEL
         else:
-            requested_as_of_date = as_of_date or default_business_as_of_date(now)
-            try:
-                snapshot = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=requested_as_of_date)
-            except ValueError:
-                if as_of_date:
-                    raise
-                snapshot = self.runtime.load_sheet_vitrina_ready_snapshot()
+            if as_of_date:
+                snapshot = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=as_of_date)
+            else:
+                snapshot = _load_default_visible_snapshot(
+                    runtime=self.runtime,
+                    default_as_of_date=default_business_as_of_date(now),
+                )
+                if snapshot is None:
+                    raise ValueError("sheet_vitrina_v1 ready snapshot missing: no readable snapshots are materialized")
             refresh_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=snapshot.as_of_date)
             refreshed_at = refresh_status.refreshed_at
             refresh_status_value = refresh_status.status
@@ -187,23 +226,35 @@ def _validate_period_request(
 def _build_period_snapshot(
     *,
     runtime: RegistryUploadDbBackedRuntime,
-    current_state: Any,
     date_from: str,
     date_to: str,
-) -> SheetVitrinaV1Envelope:
-    selected_dates = _resolve_period_dates(runtime=runtime, date_from=date_from, date_to=date_to)
-    snapshots = [
-        runtime.load_sheet_vitrina_ready_snapshot(as_of_date=snapshot_date)
-        for snapshot_date in selected_dates
-    ]
-    template_sheet = _require_data_sheet(snapshots[0])
+    default_visible_snapshot: SheetVitrinaV1Envelope | None,
+) -> tuple[SheetVitrinaV1Envelope, list[_PeriodDateBinding]]:
+    period_date_bindings = _resolve_period_date_bindings(
+        runtime=runtime,
+        date_from=date_from,
+        date_to=date_to,
+        default_visible_snapshot=default_visible_snapshot,
+    )
+    selected_dates = [binding.requested_date for binding in period_date_bindings]
+    snapshots_by_as_of_date: dict[str, SheetVitrinaV1Envelope] = {}
+    if default_visible_snapshot is not None:
+        snapshots_by_as_of_date[default_visible_snapshot.as_of_date] = default_visible_snapshot
+    for binding in period_date_bindings:
+        snapshots_by_as_of_date.setdefault(
+            binding.snapshot_as_of_date,
+            runtime.load_sheet_vitrina_ready_snapshot(as_of_date=binding.snapshot_as_of_date),
+        )
+    template_sheet = _require_data_sheet(
+        snapshots_by_as_of_date[period_date_bindings[0].snapshot_as_of_date]
+    )
     template_rows = list(template_sheet.rows)
     value_maps = {
-        snapshot_date: _extract_snapshot_values_by_row_id(
-            _require_data_sheet(snapshot),
-            expected_date=snapshot_date,
+        binding.requested_date: _extract_snapshot_values_by_row_id(
+            _require_data_sheet(snapshots_by_as_of_date[binding.snapshot_as_of_date]),
+            expected_date=binding.column_date,
         )
-        for snapshot_date, snapshot in zip(selected_dates, snapshots, strict=True)
+        for binding in period_date_bindings
     }
 
     combined_rows: list[list[Any]] = []
@@ -245,28 +296,40 @@ def _build_period_snapshot(
                 column_count=2 + len(selected_dates),
             )
         ],
-    )
+    ), period_date_bindings
 
 
-def _resolve_period_dates(
+def _resolve_period_date_bindings(
     *,
     runtime: RegistryUploadDbBackedRuntime,
     date_from: str,
     date_to: str,
-) -> list[str]:
+    default_visible_snapshot: SheetVitrinaV1Envelope | None,
+) -> list[_PeriodDateBinding]:
     start = date.fromisoformat(date_from)
     end = date.fromisoformat(date_to)
     expected_dates = [
         (start + timedelta(days=offset)).isoformat()
         for offset in range((end - start).days + 1)
     ]
-    available_dates = set(
+    exact_ready_dates = set(
         runtime.list_sheet_vitrina_ready_snapshot_dates(
             date_from=date_from,
             date_to=date_to,
         )
     )
-    missing_dates = [snapshot_date for snapshot_date in expected_dates if snapshot_date not in available_dates]
+    readable_dates = set(exact_ready_dates)
+    if default_visible_snapshot is not None:
+        readable_dates.update(
+            _merge_readable_dates(
+                exact_ready_dates=[],
+                default_visible_snapshot=default_visible_snapshot,
+                date_from=date_from,
+                date_to=date_to,
+                descending=False,
+            )
+        )
+    missing_dates = [snapshot_date for snapshot_date in expected_dates if snapshot_date not in readable_dates]
     if missing_dates:
         if len(missing_dates) == 1:
             detail = missing_dates[0]
@@ -276,7 +339,33 @@ def _resolve_period_dates(
             "web_vitrina period window missing ready snapshots: "
             f"{detail}"
         )
-    return expected_dates
+    period_date_bindings: list[_PeriodDateBinding] = []
+    default_visible_date_set = (
+        {str(value) for value in default_visible_snapshot.date_columns}
+        if default_visible_snapshot is not None
+        else set()
+    )
+    for requested_date in expected_dates:
+        if requested_date in exact_ready_dates:
+            period_date_bindings.append(
+                _PeriodDateBinding(
+                    requested_date=requested_date,
+                    snapshot_as_of_date=requested_date,
+                    column_date=requested_date,
+                )
+            )
+            continue
+        if default_visible_snapshot is not None and requested_date in default_visible_date_set:
+            period_date_bindings.append(
+                _PeriodDateBinding(
+                    requested_date=requested_date,
+                    snapshot_as_of_date=default_visible_snapshot.as_of_date,
+                    column_date=requested_date,
+                )
+            )
+            continue
+        raise ValueError(f"web_vitrina period binding missing for {requested_date}")
+    return period_date_bindings
 
 
 def _extract_snapshot_values_by_row_id(
@@ -302,13 +391,54 @@ def _extract_snapshot_values_by_row_id(
 def _resolve_period_refreshed_at(
     *,
     runtime: RegistryUploadDbBackedRuntime,
-    date_columns: list[str],
+    period_date_bindings: list[_PeriodDateBinding],
 ) -> str:
     refreshed_values = [
-        runtime.load_sheet_vitrina_refresh_status(as_of_date=snapshot_date).refreshed_at
-        for snapshot_date in date_columns
+        runtime.load_sheet_vitrina_refresh_status(as_of_date=snapshot_as_of_date).refreshed_at
+        for snapshot_as_of_date in sorted(
+            {
+                binding.snapshot_as_of_date
+                for binding in period_date_bindings
+            }
+        )
     ]
     return max(refreshed_values)
+
+
+def _load_default_visible_snapshot(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    default_as_of_date: str,
+) -> SheetVitrinaV1Envelope | None:
+    try:
+        return runtime.load_sheet_vitrina_ready_snapshot(as_of_date=default_as_of_date)
+    except ValueError:
+        try:
+            return runtime.load_sheet_vitrina_ready_snapshot()
+        except ValueError:
+            return None
+
+
+def _merge_readable_dates(
+    *,
+    exact_ready_dates: list[str],
+    default_visible_snapshot: SheetVitrinaV1Envelope | None,
+    date_from: str | None,
+    date_to: str | None,
+    descending: bool,
+) -> list[str]:
+    readable_dates = {str(item) for item in exact_ready_dates if item}
+    if default_visible_snapshot is not None:
+        readable_dates.update(str(item) for item in default_visible_snapshot.date_columns if item)
+    filtered_dates = sorted(
+        snapshot_date
+        for snapshot_date in readable_dates
+        if (not date_from or snapshot_date >= date_from)
+        and (not date_to or snapshot_date <= date_to)
+    )
+    if descending:
+        filtered_dates.reverse()
+    return filtered_dates
 
 
 def _build_period_temporal_slot(snapshot_date: str):
