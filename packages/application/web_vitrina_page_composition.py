@@ -25,6 +25,8 @@ def build_web_vitrina_page_composition(
     operator_route: str,
     available_snapshot_dates: list[str],
     selected_as_of_date: str | None,
+    selected_date_from: str | None,
+    selected_date_to: str | None,
 ) -> dict[str, Any]:
     contract_payload = _to_payload(contract)
     view_model_payload = _to_payload(view_model)
@@ -75,6 +77,8 @@ def build_web_vitrina_page_composition(
             default_as_of_date=str(contract_payload["status_summary"]["default_as_of_date"]),
             available_snapshot_dates=available_snapshot_dates,
             selected_as_of_date=selected_as_of_date,
+            selected_date_from=selected_date_from,
+            selected_date_to=selected_date_to,
         ),
         "status_badge": {
             "label": _status_badge_label(current_state=current_state, refresh_status=str(contract_payload["status_summary"]["refresh_status"])),
@@ -203,6 +207,8 @@ def build_web_vitrina_page_error_composition(
     available_snapshot_dates: list[str],
     default_as_of_date: str,
     selected_as_of_date: str | None,
+    selected_date_from: str | None,
+    selected_date_to: str | None,
 ) -> dict[str, Any]:
     return {
         "composition_name": WEB_VITRINA_PAGE_COMPOSITION_NAME,
@@ -232,6 +238,8 @@ def build_web_vitrina_page_error_composition(
             default_as_of_date=default_as_of_date,
             available_snapshot_dates=available_snapshot_dates,
             selected_as_of_date=selected_as_of_date,
+            selected_date_from=selected_date_from,
+            selected_date_to=selected_date_to,
         ),
         "status_badge": {
             "label": "Error",
@@ -450,8 +458,21 @@ def _build_historical_access(
     default_as_of_date: str,
     available_snapshot_dates: list[str],
     selected_as_of_date: str | None,
+    selected_date_from: str | None,
+    selected_date_to: str | None,
 ) -> dict[str, Any]:
     selected_date = str(selected_as_of_date or "").strip()
+    selected_from = str(selected_date_from or "").strip()
+    selected_to = str(selected_date_to or "").strip()
+    explicit_range = bool(selected_from and selected_to)
+    explicit_single_date = bool(selected_date) and not explicit_range
+    if selected_from and not selected_to:
+        selected_to = selected_from
+    if selected_to and not selected_from:
+        selected_from = selected_to
+    if explicit_single_date:
+        selected_from = selected_date
+        selected_to = selected_date
     options = [
         {
             "value": snapshot_date,
@@ -459,9 +480,17 @@ def _build_historical_access(
         }
         for snapshot_date in sorted({str(item) for item in available_snapshot_dates if item}, reverse=True)
     ]
-    current_mode = "historical" if selected_date else "default"
-    active_label = selected_date or default_as_of_date
-    if current_mode == "historical":
+    current_mode = "default"
+    active_label = default_as_of_date
+    if explicit_range:
+        current_mode = "historical_period"
+        active_label = f"{selected_from}..{selected_to}"
+    elif explicit_single_date:
+        current_mode = "historical_day"
+        active_label = selected_date
+    if current_mode == "historical_period":
+        status_text = f"Открыт period window {active_label} через persisted ready snapshots."
+    elif current_mode == "historical_day":
         status_text = f"Открыт historical snapshot на {active_label}."
     else:
         status_text = f"Открыт текущий cheap daily mode на {active_label} без explicit as_of_date."
@@ -469,12 +498,24 @@ def _build_historical_access(
         "state_namespace": WEB_VITRINA_PAGE_STATE_NAMESPACE,
         "browser_state_persistence": "none",
         "url_state_mode": "query_string",
+        "supported_query_mode": "date_window",
         "page_route": page_route,
         "default_as_of_date": default_as_of_date,
         "selected_as_of_date": selected_date,
+        "selected_date_from": selected_from,
+        "selected_date_to": selected_to,
         "current_mode": current_mode,
         "status_text": status_text,
+        "available_date_min": options[-1]["value"] if options else "",
+        "available_date_max": options[0]["value"] if options else "",
         "options": options,
+        "preset_options": [
+            {"preset_id": "week", "label": "Неделя"},
+            {"preset_id": "two_weeks", "label": "2 недели"},
+            {"preset_id": "month", "label": "Месяц"},
+            {"preset_id": "quarter", "label": "Квартал"},
+            {"preset_id": "year", "label": "Год"},
+        ],
         "empty_message": "Исторические ready snapshots пока не materialized.",
     }
 

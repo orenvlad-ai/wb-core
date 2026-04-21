@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "ae486b1ff53136a633fc34389f1c5b025a3d180c"
+built_from_commit: "d9398905d96124d25282db3fe356fbdb8fe46f52"
 ---
 
 # Summary
@@ -103,6 +103,11 @@ Current repo-owned operator refresh surface:
 - phase-2 web-vitrina additionally materializes repo-owned `web_vitrina_view_model` over that stable contract: current schema = `columns + rows + groups + sections + formatters + filters + sorts + state_model`
 - phase-3 web-vitrina additionally materializes repo-owned `web_vitrina_gravity_table_adapter` over that `view_model`: current Gravity-specific surface = `columns + rows + renderers + groupings + filters + sorts + use_table_options + table_props + state_surface`
 - phase-4 web-vitrina additionally materializes repo-owned `web_vitrina_page_composition` on the same read route via optional `surface=page_composition`, while `/sheet-vitrina-v1/vitrina` becomes a real read-only page with summary, filters, table container and truthful loading/empty/error states
+- the same sibling page now exposes a bounded history period chooser:
+  - default/no-query mode stays the cheap daily contour
+  - explicit `as_of_date` keeps one-day historical mode
+  - explicit `date_from/date_to` now opens a bounded ready-snapshot window through the same existing read route
+  - page UX for this mode is repo-owned and narrow: calendar + preset buttons + `Начало периода` / `Конец периода` + `Сбросить` / `Сохранить`
 - `web_vitrina_view_model` remains canonical and library-agnostic, the concrete Gravity-specific adapter stays isolated repo-side, and the page layer stays a page-only consumer instead of a second truth owner
 - current phase-1/2/3/4 scope remains narrow: route fixation, stable read contract, library-agnostic presentation seam, concrete grid adapter and minimal live page composition only; export layer, Google Sheets cutover and broad feature parity stay later
 - page stays intentionally narrow: top-level sections `Обновление данных` / `Расчёт поставок` / `Отчёты`, compact manual block `Ручная загрузка данных` with embedded buttons `Загрузить данные` / `Отправить данные` and only two persisted manual-success fields `Последняя удачная загрузка` / `Последняя удачная отправка`, one compact reports subsection-switch `Ежедневные отчёты` / `Отчёт по остаткам` inside `Отчёты`, separate compact auto block `Автообновления` and one fixed-height scrollable `Лог` block with `Скачать лог`

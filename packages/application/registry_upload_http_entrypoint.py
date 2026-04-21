@@ -156,12 +156,16 @@ class RegistryUploadHttpEntrypoint:
         page_route: str,
         read_route: str,
         as_of_date: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
     ) -> dict[str, Any]:
         return asdict(
             self.web_vitrina_block.build(
                 page_route=page_route,
                 read_route=read_route,
                 as_of_date=as_of_date,
+                date_from=date_from,
+                date_to=date_to,
             )
         )
 
@@ -172,6 +176,8 @@ class RegistryUploadHttpEntrypoint:
         read_route: str,
         operator_route: str,
         as_of_date: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
     ) -> dict[str, Any]:
         effective_as_of_date = as_of_date or default_business_as_of_date(self.now_factory())
         available_snapshot_dates = self.runtime.list_sheet_vitrina_ready_snapshot_dates(descending=True)
@@ -181,6 +187,8 @@ class RegistryUploadHttpEntrypoint:
                 page_route=page_route,
                 read_route=read_route,
                 as_of_date=as_of_date,
+                date_from=date_from,
+                date_to=date_to,
             )
             view_model = build_web_vitrina_view_model(contract)
             adapter = build_web_vitrina_gravity_table_adapter(view_model)
@@ -194,6 +202,8 @@ class RegistryUploadHttpEntrypoint:
                 available_snapshot_dates=available_snapshot_dates,
                 default_as_of_date=default_as_of_date,
                 selected_as_of_date=as_of_date,
+                selected_date_from=date_from,
+                selected_date_to=date_to,
             )
 
         return build_web_vitrina_page_composition(
@@ -205,6 +215,8 @@ class RegistryUploadHttpEntrypoint:
             operator_route=operator_route,
             available_snapshot_dates=available_snapshot_dates,
             selected_as_of_date=as_of_date,
+            selected_date_from=date_from,
+            selected_date_to=date_to,
         )
 
     def handle_sheet_refresh_request(

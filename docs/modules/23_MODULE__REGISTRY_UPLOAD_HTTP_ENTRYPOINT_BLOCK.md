@@ -158,7 +158,9 @@ update_note: "Обновлён под web-vitrina phase-4 checkpoint: existing `
   - route chosen as sibling to `/sheet-vitrina-v1/operator`, not as `/sheet-vitrina-v1/operator/vitrina`, because future web-vitrina is a separate working surface and must not быть вложенной под orchestration-first operator shell
   - sibling read route = `GET /v1/sheet-vitrina-v1/web-vitrina`
   - read route remains server-owned and read-only:
-    - default path builds `web_vitrina_contract` v1 only from existing ready snapshot + current registry truth, accepts optional `as_of_date`, stays truthful `422` on missing ready snapshot and must not trigger refresh/upstream fetch
+    - default path builds `web_vitrina_contract` v1 only from existing ready snapshot + current registry truth, stays truthful `422` on missing ready snapshot and must not trigger refresh/upstream fetch
+    - optional `as_of_date=<YYYY-MM-DD>` keeps bounded one-day historical read on the same route
+    - optional `date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>` now materializes a bounded server-side ready-snapshot window on the same route; browser does not aggregate multi-day truth itself
     - optional `surface=page_composition` on the same route builds server-driven page payload over `contract -> view_model -> gravity_table_adapter` for the live sibling page and still must not trigger refresh/upstream fetch
   - `web_vitrina_contract` v1 is library-agnostic and currently materializes only:
     - `meta` = `snapshot_id`, `bundle_version`, `as_of_date`, `business_timezone`, `date_columns`, `temporal_slots`, `generated_at`, `refreshed_at`, `row_count`
@@ -174,6 +176,11 @@ update_note: "Обновлён под web-vitrina phase-4 checkpoint: existing `
     - `view_model` = current phase-2 repo-owned presentation-domain mapper over that contract, still library-agnostic
     - `web_vitrina_gravity_table_adapter` = current phase-3 concrete grid-adapter layer over `view_model`, still repo-side and still outside canonical route contract
     - `web_vitrina_page_composition` = current phase-4 server-driven page layer and thin HTML/client-shell boundary for `/sheet-vitrina-v1/vitrina`
+  - current bounded live UX on `/sheet-vitrina-v1/vitrina` now includes:
+    - default/no-query cheap daily mode
+    - one-day historical mode via existing `as_of_date`
+    - period mode via existing route `date_from/date_to`
+    - repo-owned inline calendar/preset panel with buttons `Сбросить` / `Сохранить`
     - `export_layer`
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/status` = cheap JSON status surface для bounded factory-order flow
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/*.xlsx` = operator template downloads с русскими headers

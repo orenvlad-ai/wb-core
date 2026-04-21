@@ -463,6 +463,7 @@ def _build_handler(
                 try:
                     surface = _resolve_sheet_web_vitrina_surface_from_query(parsed.query)
                     as_of_date = _resolve_as_of_date_from_query(parsed.query) or None
+                    date_from, date_to = _resolve_web_vitrina_period_window_from_query(parsed.query)
                 except ValueError as exc:
                     _write_json_response(
                         self,
@@ -477,6 +478,8 @@ def _build_handler(
                         read_route=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
                         operator_route=sheet_operator_ui_path,
                         as_of_date=as_of_date,
+                        date_from=date_from,
+                        date_to=date_to,
                     )
                     _write_json_response(
                         self,
@@ -489,6 +492,8 @@ def _build_handler(
                         page_route=DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
                         read_route=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
                         as_of_date=as_of_date,
+                        date_from=date_from,
+                        date_to=date_to,
                     )
                 except ValueError as exc:
                     _write_json_response(
@@ -957,6 +962,19 @@ def _resolve_as_of_date(query_string: str, payload: Mapping[str, Any]) -> str:
 def _resolve_as_of_date_from_query(query_string: str) -> str:
     query = urllib_parse.parse_qs(query_string)
     return str(query.get("as_of_date", [""])[0]).strip()
+
+
+def _resolve_web_vitrina_period_window_from_query(query_string: str) -> tuple[str | None, str | None]:
+    query = urllib_parse.parse_qs(query_string)
+    date_from = str(query.get("date_from", [""])[0]).strip()
+    date_to = str(query.get("date_to", [""])[0]).strip()
+    if bool(date_from) != bool(date_to):
+        raise ValueError("date_from and date_to must be provided together")
+    if date_from and str(query.get("as_of_date", [""])[0]).strip():
+        raise ValueError("as_of_date is mutually exclusive with date_from/date_to")
+    if not date_from:
+        return None, None
+    return date_from, date_to
 
 
 def _resolve_job_id_from_query(query_string: str) -> str:

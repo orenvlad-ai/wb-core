@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
@@ -30,7 +30,9 @@ from packages.contracts.web_vitrina_contract import (
 WEB_VITRINA_CONTRACT_NAME = "web_vitrina_contract"
 WEB_VITRINA_CONTRACT_VERSION = "v1"
 WEB_VITRINA_READ_MODEL = "persisted_ready_snapshot"
+WEB_VITRINA_PERIOD_READ_MODEL = "persisted_ready_snapshot_window"
 WEB_VITRINA_SOURCE_SHEET_NAME = "DATA_VITRINA"
+WEB_VITRINA_PERIOD_PLAN_VERSION = "delivery_contract_v1__web_vitrina_period_window_v1"
 
 
 @dataclass(frozen=True)
@@ -60,17 +62,39 @@ class SheetVitrinaV1WebVitrinaBlock:
         page_route: str,
         read_route: str,
         as_of_date: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
     ) -> WebVitrinaContractV1:
         now = self.now_factory()
         current_state = self.runtime.load_current_state()
-        requested_as_of_date = as_of_date or default_business_as_of_date(now)
-        try:
-            snapshot = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=requested_as_of_date)
-        except ValueError:
-            if as_of_date:
-                raise
-            snapshot = self.runtime.load_sheet_vitrina_ready_snapshot()
-        refresh_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=snapshot.as_of_date)
+        _validate_period_request(as_of_date=as_of_date, date_from=date_from, date_to=date_to)
+        read_model = WEB_VITRINA_READ_MODEL
+        if date_from and date_to:
+            snapshot = _build_period_snapshot(
+                runtime=self.runtime,
+                current_state=current_state,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            refreshed_at = _resolve_period_refreshed_at(
+                runtime=self.runtime,
+                date_columns=snapshot.date_columns,
+            )
+            refresh_status_value = "success"
+            data_sheet_row_count = len(snapshot.sheets[0].rows) if snapshot.sheets else 0
+            read_model = WEB_VITRINA_PERIOD_READ_MODEL
+        else:
+            requested_as_of_date = as_of_date or default_business_as_of_date(now)
+            try:
+                snapshot = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=requested_as_of_date)
+            except ValueError:
+                if as_of_date:
+                    raise
+                snapshot = self.runtime.load_sheet_vitrina_ready_snapshot()
+            refresh_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=snapshot.as_of_date)
+            refreshed_at = refresh_status.refreshed_at
+            refresh_status_value = refresh_status.status
+            data_sheet_row_count = refresh_status.sheet_row_counts.get(WEB_VITRINA_SOURCE_SHEET_NAME, 0)
         auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()
         manual_state = self.runtime.load_sheet_vitrina_manual_operator_state()
         data_sheet = _require_data_sheet(snapshot)
@@ -103,16 +127,16 @@ class SheetVitrinaV1WebVitrinaBlock:
                 date_columns=list(snapshot.date_columns),
                 temporal_slots=list(snapshot.temporal_slots),
                 generated_at=_to_utc_timestamp(now),
-                refreshed_at=refresh_status.refreshed_at,
+                refreshed_at=refreshed_at,
                 row_count=len(rows),
             ),
             status_summary=WebVitrinaContractStatusSummary(
-                refresh_status=refresh_status.status,
-                read_model=WEB_VITRINA_READ_MODEL,
+                refresh_status=refresh_status_value,
+                read_model=read_model,
                 source_sheet_name=WEB_VITRINA_SOURCE_SHEET_NAME,
                 bundle_version=current_state.bundle_version,
                 activated_at=current_state.activated_at,
-                refreshed_at=refresh_status.refreshed_at,
+                refreshed_at=refreshed_at,
                 business_now=to_business_datetime(now).replace(microsecond=0).isoformat(),
                 current_business_date=current_business_date_iso(now),
                 default_as_of_date=default_business_as_of_date(now),
@@ -124,7 +148,7 @@ class SheetVitrinaV1WebVitrinaBlock:
                 last_successful_manual_load_at=manual_state.last_successful_manual_load_at,
                 source_policy_counts=_count_values(snapshot.source_temporal_policies),
                 source_count=len(snapshot.source_temporal_policies),
-                data_sheet_row_count=refresh_status.sheet_row_counts.get(WEB_VITRINA_SOURCE_SHEET_NAME, len(rows)),
+                data_sheet_row_count=data_sheet_row_count or len(rows),
             ),
             schema=_build_schema(snapshot),
             rows=rows,
@@ -137,6 +161,164 @@ class SheetVitrinaV1WebVitrinaBlock:
                 thin_page_shell=True,
             ),
         )
+
+
+def _validate_period_request(
+    *,
+    as_of_date: str | None,
+    date_from: str | None,
+    date_to: str | None,
+) -> None:
+    normalized_as_of_date = str(as_of_date or "").strip()
+    normalized_date_from = str(date_from or "").strip()
+    normalized_date_to = str(date_to or "").strip()
+    if normalized_as_of_date and (normalized_date_from or normalized_date_to):
+        raise ValueError("as_of_date is mutually exclusive with date_from/date_to")
+    if bool(normalized_date_from) != bool(normalized_date_to):
+        raise ValueError("date_from and date_to must be provided together")
+    if not normalized_date_from:
+        return
+    start = date.fromisoformat(normalized_date_from)
+    end = date.fromisoformat(normalized_date_to)
+    if end < start:
+        raise ValueError("date_to must be >= date_from")
+
+
+def _build_period_snapshot(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    current_state: Any,
+    date_from: str,
+    date_to: str,
+) -> SheetVitrinaV1Envelope:
+    selected_dates = _resolve_period_dates(runtime=runtime, date_from=date_from, date_to=date_to)
+    snapshots = [
+        runtime.load_sheet_vitrina_ready_snapshot(as_of_date=snapshot_date)
+        for snapshot_date in selected_dates
+    ]
+    template_sheet = _require_data_sheet(snapshots[0])
+    template_rows = list(template_sheet.rows)
+    value_maps = {
+        snapshot_date: _extract_snapshot_values_by_row_id(
+            _require_data_sheet(snapshot),
+            expected_date=snapshot_date,
+        )
+        for snapshot_date, snapshot in zip(selected_dates, snapshots, strict=True)
+    }
+
+    combined_rows: list[list[Any]] = []
+    for row in template_rows:
+        row_id = str(row[1] or "").strip()
+        if not row_id:
+            continue
+        combined_row = [row[0], row_id]
+        for snapshot_date in selected_dates:
+            values_by_row_id = value_maps[snapshot_date]
+            if row_id not in values_by_row_id:
+                raise ValueError(
+                    f"period window row universe mismatch for {row_id!r} on {snapshot_date}"
+                )
+            combined_row.append(values_by_row_id[row_id])
+        combined_rows.append(combined_row)
+
+    return SheetVitrinaV1Envelope(
+        plan_version=WEB_VITRINA_PERIOD_PLAN_VERSION,
+        snapshot_id=f"{date_from}__{date_to}__web_vitrina_period_window_v1__ready",
+        as_of_date=date_to,
+        date_columns=selected_dates,
+        temporal_slots=[
+            _build_period_temporal_slot(snapshot_date)
+            for snapshot_date in selected_dates
+        ],
+        source_temporal_policies={},
+        sheets=[
+            SheetVitrinaWriteTarget(
+                sheet_name=WEB_VITRINA_SOURCE_SHEET_NAME,
+                write_start_cell=template_sheet.write_start_cell,
+                write_rect=template_sheet.write_rect,
+                clear_range=template_sheet.clear_range,
+                write_mode=template_sheet.write_mode,
+                partial_update_allowed=template_sheet.partial_update_allowed,
+                header=[template_sheet.header[0], template_sheet.header[1], *selected_dates],
+                rows=combined_rows,
+                row_count=len(combined_rows),
+                column_count=2 + len(selected_dates),
+            )
+        ],
+    )
+
+
+def _resolve_period_dates(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    date_from: str,
+    date_to: str,
+) -> list[str]:
+    start = date.fromisoformat(date_from)
+    end = date.fromisoformat(date_to)
+    expected_dates = [
+        (start + timedelta(days=offset)).isoformat()
+        for offset in range((end - start).days + 1)
+    ]
+    available_dates = set(
+        runtime.list_sheet_vitrina_ready_snapshot_dates(
+            date_from=date_from,
+            date_to=date_to,
+        )
+    )
+    missing_dates = [snapshot_date for snapshot_date in expected_dates if snapshot_date not in available_dates]
+    if missing_dates:
+        if len(missing_dates) == 1:
+            detail = missing_dates[0]
+        else:
+            detail = f"{missing_dates[0]}..{missing_dates[-1]} ({len(missing_dates)} days)"
+        raise ValueError(
+            "web_vitrina period window missing ready snapshots: "
+            f"{detail}"
+        )
+    return expected_dates
+
+
+def _extract_snapshot_values_by_row_id(
+    data_sheet: SheetVitrinaWriteTarget,
+    *,
+    expected_date: str,
+) -> dict[str, Any]:
+    try:
+        column_index = data_sheet.header.index(expected_date)
+    except ValueError as exc:
+        raise ValueError(
+            f"ready snapshot DATA_VITRINA does not contain expected date column {expected_date}"
+        ) from exc
+    values_by_row_id: dict[str, Any] = {}
+    for row in data_sheet.rows:
+        row_id = str(row[1] or "").strip() if len(row) > 1 else ""
+        if not row_id:
+            continue
+        values_by_row_id[row_id] = row[column_index] if column_index < len(row) else None
+    return values_by_row_id
+
+
+def _resolve_period_refreshed_at(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    date_columns: list[str],
+) -> str:
+    refreshed_values = [
+        runtime.load_sheet_vitrina_refresh_status(as_of_date=snapshot_date).refreshed_at
+        for snapshot_date in date_columns
+    ]
+    return max(refreshed_values)
+
+
+def _build_period_temporal_slot(snapshot_date: str):
+    from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1TemporalSlot
+
+    return SheetVitrinaV1TemporalSlot(
+        slot_key=f"period_window:{snapshot_date}",
+        slot_label=snapshot_date,
+        column_date=snapshot_date,
+    )
 
 
 def _require_data_sheet(snapshot: SheetVitrinaV1Envelope) -> SheetVitrinaWriteTarget:
