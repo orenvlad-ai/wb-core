@@ -1,6 +1,6 @@
 """Контракты sheet-side scaffold для vitrina v1."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
@@ -55,6 +55,12 @@ class SheetVitrinaV1RefreshResult:
     snapshot_id: str
     plan_version: str
     sheet_row_counts: dict[str, int]
+    semantic_status: str = "warning"
+    semantic_label: str = "Нужно проверить"
+    semantic_tone: str = "warning"
+    semantic_reason: str = ""
+    source_outcome_counts: dict[str, int] = field(default_factory=dict)
+    source_outcomes: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -67,9 +73,12 @@ class SheetVitrinaV1AutoUpdateState:
     last_run_as_of_date: str | None = None
     last_run_refreshed_at: str | None = None
     last_successful_auto_update_at: str | None = None
+    last_run_result: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
 class SheetVitrinaV1ManualOperatorState:
     last_successful_manual_refresh_at: str | None = None
     last_successful_manual_load_at: str | None = None
+    last_manual_refresh_result: dict[str, Any] | None = None
+    last_manual_load_result: dict[str, Any] | None = None

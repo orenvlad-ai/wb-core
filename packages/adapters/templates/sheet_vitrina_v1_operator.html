@@ -1121,6 +1121,8 @@
                 <dd id="manualLastLoad">ещё не выполнялась</dd>
               </div>
             </dl>
+            <p id="manualRefreshResult" class="field-note">Итог последней ручной загрузки пока не зафиксирован.</p>
+            <p id="manualLoadResult" class="field-note">Итог последней ручной отправки пока не зафиксирован.</p>
           </section>
 
           <section class="block" aria-labelledby="server-title">
@@ -1151,6 +1153,7 @@
                 <dd id="serverLastAutoSuccess">-</dd>
               </div>
             </dl>
+            <p id="serverLastAutoResult" class="field-note">Итог последнего автозапуска пока не зафиксирован.</p>
           </section>
 
           <section class="block" aria-labelledby="log-title">
@@ -1575,12 +1578,15 @@
       const loadButton = document.getElementById("loadButton");
       const manualLastRefresh = document.getElementById("manualLastRefresh");
       const manualLastLoad = document.getElementById("manualLastLoad");
+      const manualRefreshResult = document.getElementById("manualRefreshResult");
+      const manualLoadResult = document.getElementById("manualLoadResult");
       const serverTimezone = document.getElementById("serverTimezone");
       const serverNow = document.getElementById("serverNow");
       const serverAutoDescription = document.getElementById("serverAutoDescription");
       const serverLastAutoRun = document.getElementById("serverLastAutoRun");
       const serverLastAutoStatus = document.getElementById("serverLastAutoStatus");
       const serverLastAutoSuccess = document.getElementById("serverLastAutoSuccess");
+      const serverLastAutoResult = document.getElementById("serverLastAutoResult");
       const dailyReportPeriod = document.getElementById("dailyReportPeriod");
       const dailyReportLead = document.getElementById("dailyReportLead");
       const dailyReportStatus = document.getElementById("dailyReportStatus");
@@ -2341,6 +2347,18 @@
         return normalized.replace("T", " ");
       }
 
+      function formatResultSummary(result, emptyLabel) {
+        if (!result || typeof result !== "object") {
+          return emptyLabel || "Итог пока не зафиксирован.";
+        }
+        const statusLabel = valueOrDash(result.semantic_label || result.technical_status || result.semantic_status);
+        const reason = valueOrDash(result.semantic_reason);
+        if (reason === "-") {
+          return statusLabel;
+        }
+        return statusLabel + ": " + reason;
+      }
+
       function renderServerContext(payload) {
         const context = payload && payload.server_context ? payload.server_context : {};
         serverTimezone.textContent = valueOrDash(context.business_timezone);
@@ -2351,6 +2369,10 @@
         serverLastAutoRun.textContent = formatTimestamp(context.last_auto_run_time, "-");
         serverLastAutoStatus.textContent = valueOrDash(context.last_auto_run_status_label);
         serverLastAutoSuccess.textContent = formatTimestamp(context.last_successful_auto_update_at, "-");
+        serverLastAutoResult.textContent = formatResultSummary(
+          context.last_auto_run_result,
+          "Итог последнего автозапуска пока не зафиксирован."
+        );
       }
 
       function renderManualContext(payload) {
@@ -2362,6 +2384,14 @@
         manualLastLoad.textContent = formatTimestamp(
           context.last_successful_manual_load_at,
           "ещё не выполнялась"
+        );
+        manualRefreshResult.textContent = formatResultSummary(
+          context.last_manual_refresh_result,
+          "Итог последней ручной загрузки пока не зафиксирован."
+        );
+        manualLoadResult.textContent = formatResultSummary(
+          context.last_manual_load_result,
+          "Итог последней ручной отправки пока не зафиксирован."
         );
       }
 

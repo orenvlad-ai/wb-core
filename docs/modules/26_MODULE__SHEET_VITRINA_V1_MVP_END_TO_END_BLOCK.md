@@ -146,10 +146,10 @@ update_note: "Обновлён под current web-vitrina checkpoint: `sheet_vit
   - this page intentionally stays orchestration-first control surface and does not become the future web-vitrina container
   - две explicit actions `Загрузить данные` и `Отправить данные`
   - `Загрузить данные` вызывает existing `POST /v1/sheet-vitrina-v1/refresh` и materialize-ит ready snapshot only
-  - `Отправить данные` вызывает `POST /v1/sheet-vitrina-v1/load` и пишет в live sheet только already prepared snapshot
+  - `Отправить данные` вызывает `POST /v1/sheet-vitrina-v1/load` и пишет в live sheet только already prepared snapshot; route не должен claim-ить ordinary green `updated`, если подтверждена только техническая запись без верифицируемого data-change
   - page additionally читает `GET /v1/sheet-vitrina-v1/daily-report` для compact блока `Ежедневные отчёты` внутри отдельного top-level tab `Отчёты`
   - page additionally читает `GET /v1/sheet-vitrina-v1/stock-report` для compact блока `Отчёт по остаткам` внутри того же top-level tab `Отчёты`
-  - page читает `GET /v1/sheet-vitrina-v1/status` для compact manual/auto status surface
+  - page читает `GET /v1/sheet-vitrina-v1/status` для compact manual/auto status surface; root `status` there is semantic snapshot truth, while technical completion stays separated in derived fields
   - page читает `GET /v1/sheet-vitrina-v1/job` для detailed построчного operator log без отдельного audit subsystem
   - тот же `job` route поддерживает text-export конкретного completed run через `format=text&download=1`
   - sibling phase-1 web-vitrina surface is fixed separately:
@@ -188,7 +188,7 @@ update_note: "Обновлён под current web-vitrina checkpoint: `sheet_vit
     - sort = min breached district stock ascending, then breached district breadth descending, then total stock ascending
     - compact district labels remain truthful to current repo buckets: `Центральный ФО`, `Северо-Западный ФО`, `Приволжский ФО`, `Уральский ФО`, `Юг и СКФО`
     - merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь` stays fully excluded from stock-report filter/display because current truth does not split Far East from Siberia
-  - page дополнительно показывает compact manual block `Ручная загрузка данных` с embedded actions `Загрузить данные` / `Отправить данные` и только двумя persisted manual-success fields `Последняя удачная загрузка` / `Последняя удачная отправка`
+  - page дополнительно показывает compact manual block `Ручная загрузка данных` с embedded actions `Загрузить данные` / `Отправить данные`, двумя persisted manual-success fields `Последняя удачная загрузка` / `Последняя удачная отправка` и short persisted summaries of the latest manual refresh/load semantic result
   - эти два manual fields заполняются только из `manual_context`: successful manual `refresh` обновляет только `Последняя удачная загрузка`, successful manual `load` обновляет только `Последняя удачная отправка`, auto path их не трогает
   - reload/page-open state этого manual block truthfully показывает только persisted manual-success facts и не является самостоятельным доказательством успешной последней manual `Отправить данные` без completed job/log
   - page дополнительно показывает compact block `Автообновления`, который заполняется только из server-driven `server_context`
@@ -243,11 +243,11 @@ update_note: "Обновлён под current web-vitrina checkpoint: `sheet_vit
   - response body = `SheetVitrinaV1RefreshResult` со snapshot metadata, `date_columns`, `temporal_slots`, `source_temporal_policies` и row counts
 - Канонический operator load path:
   - `POST /v1/sheet-vitrina-v1/load`
-  - response body = snapshot metadata + thin bridge result для existing bound Apps Script write path
+  - response body = snapshot metadata + thin bridge result для existing bound Apps Script write path + separate semantic fields for `updated / unchanged / not_verified / error`
   - route не триггерит refresh автоматически и truthfully падает при missing/invalid ready snapshot
 - Канонический operator status path:
   - `GET /v1/sheet-vitrina-v1/status`
-  - response body = latest persisted `SheetVitrinaV1RefreshResult`-compatible metadata для current bundle / requested `as_of_date`
+  - response body = latest persisted `SheetVitrinaV1RefreshResult`-compatible metadata для current bundle / requested `as_of_date`, but root `status` is semantic result of the current snapshot rather than mere readiness
   - same response additionally carries `server_context` with business timezone/current time and daily refresh trigger metadata
   - when ready snapshot is still missing, route stays truthful `422`, but error payload still carries `server_context` for the operator page empty state
 - Канонический operator daily-report path:
@@ -340,7 +340,8 @@ update_note: "Обновлён под current web-vitrina checkpoint: `sheet_vit
   - сначала server contour читает уже persisted ready snapshot;
   - затем передаёт его в existing bound Apps Script bridge;
   - same-day `date_matrix` merge treats an explicit blank incoming cell as authoritative clear, so stale live-sheet values and stale zeros are overwritten instead of being silently preserved;
-  - route не rebuild-ит truth и не подмешивает implicit refresh.
+  - route не rebuild-ит truth и не подмешивает implicit refresh;
+  - operator/public wording distinguishes technical write completion from confirmed material update, unchanged/no-op and first-write `not_verified`.
 
 ## 3.1.1 Cost overlay и новые operator-facing metrics
 
@@ -381,7 +382,7 @@ update_note: "Обновлён под current web-vitrina checkpoint: `sheet_vit
   - heavy refresh logic stays in existing `POST /v1/sheet-vitrina-v1/refresh`
   - auto path сначала делает refresh/persist ready snapshot, затем в том же server-owned cycle вызывает existing load bridge и доводит обновление до live sheet
   - refresh/load cycle защищён bounded mutual exclusion lock и не должен destructively смешивать parallel auto/manual/retry writes
-  - runtime/status surface хранит last auto run status / timestamps separately from manual operator jobs, чтобы block `Автообновления` truthfully показывал именно результат daily auto chain
+  - runtime/status surface хранит last auto run status / timestamps separately from manual operator jobs plus latest semantic auto result payload, чтобы block `Автообновления` truthfully показывал именно результат daily auto chain
   - Apps Script remains thin shell and does not own scheduling or date math
 - `Прокси маржинальность всего, %` фиксируется на canonical row `proxy_margin_pct_total`.
 - Расчёт остаётся server-side:
@@ -529,8 +530,9 @@ Bounded допущение:
   - что operator page показывает compact `Ручная загрузка данных` + `Автообновления`, отдельный `Лог`, fixed-height scroll viewport и `Скачать лог`;
   - что `POST /v1/sheet-vitrina-v1/refresh` вызывает heavy source blocks и обновляет persisted date-aware ready snapshot;
   - что `POST /v1/sheet-vitrina-v1/load` пишет в live shell только already prepared snapshot и не триггерит heavy refresh заново;
-  - что `GET /v1/sheet-vitrina-v1/status` возвращает последний persisted refresh result без live fetch и с `date_columns` / `temporal_slots` plus `server_context`;
+  - что `GET /v1/sheet-vitrina-v1/status` возвращает последний persisted refresh result без live fetch и с `date_columns` / `temporal_slots` plus `server_context`, но не называет snapshot existence ordinary green success;
   - что `GET /v1/sheet-vitrina-v1/status` до первого refresh остаётся truthful `422`, но всё равно несёт `server_context`;
+  - что preserved/rollover/first-load/no-baseline paths surfacing warning/error больше не маскируются под plain success;
   - что `GET /v1/sheet-vitrina-v1/job` показывает построчные start / key steps / finish / error для operator actions;
   - что `GET /v1/sheet-vitrina-v1/web-vitrina` возвращает stable library-agnostic contract и honors optional `as_of_date` without refresh/upstream fetch;
   - что `GET /v1/sheet-vitrina-v1/plan` и sheet-side `load` читают только ready snapshot и не делают live fetch;

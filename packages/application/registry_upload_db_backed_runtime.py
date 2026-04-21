@@ -62,6 +62,16 @@ class TemporalSourceClosureState:
     accepted_at: str | None
 
 
+@dataclass(frozen=True)
+class SheetVitrinaV1LoadState:
+    loaded_at: str | None
+    snapshot_id: str | None
+    as_of_date: str | None
+    refreshed_at: str | None
+    plan_fingerprint: str | None
+    result: dict[str, Any] | None
+
+
 class RegistryUploadDbBackedRuntime:
     def __init__(
         self,
@@ -256,6 +266,7 @@ class RegistryUploadDbBackedRuntime:
             )
             conn.commit()
 
+        semantic_summary = _derive_sheet_vitrina_refresh_semantic_summary(plan)
         return SheetVitrinaV1RefreshResult(
             status="success",
             bundle_version=current_state.bundle_version,
@@ -268,6 +279,12 @@ class RegistryUploadDbBackedRuntime:
             snapshot_id=plan.snapshot_id,
             plan_version=plan.plan_version,
             sheet_row_counts=_sheet_row_counts_from_plan(plan),
+            semantic_status=semantic_summary["status"],
+            semantic_label=semantic_summary["label"],
+            semantic_tone=semantic_summary["tone"],
+            semantic_reason=semantic_summary["reason"],
+            source_outcome_counts=dict(semantic_summary["counts"]),
+            source_outcomes=list(semantic_summary["sources"]),
         )
 
     def load_sheet_vitrina_ready_snapshot(self, as_of_date: str | None = None) -> SheetVitrinaV1Envelope:
@@ -364,6 +381,7 @@ class RegistryUploadDbBackedRuntime:
                 raise ValueError(f"sheet_vitrina_v1 ready snapshot missing: {detail}")
 
             plan = _deserialize_sheet_vitrina_plan(row["plan_json"])
+            semantic_summary = _derive_sheet_vitrina_refresh_semantic_summary(plan)
             return SheetVitrinaV1RefreshResult(
                 status="success",
                 bundle_version=current_state.bundle_version,
@@ -376,6 +394,12 @@ class RegistryUploadDbBackedRuntime:
                 snapshot_id=row["snapshot_id"],
                 plan_version=row["plan_version"],
                 sheet_row_counts=_sheet_row_counts_from_plan(plan),
+                semantic_status=semantic_summary["status"],
+                semantic_label=semantic_summary["label"],
+                semantic_tone=semantic_summary["tone"],
+                semantic_reason=semantic_summary["reason"],
+                source_outcome_counts=dict(semantic_summary["counts"]),
+                source_outcomes=list(semantic_summary["sources"]),
             )
 
     def mark_sheet_vitrina_auto_update_started(
@@ -409,9 +433,10 @@ class RegistryUploadDbBackedRuntime:
                     last_run_snapshot_id,
                     last_run_as_of_date,
                     last_run_refreshed_at,
+                    last_run_result_json,
                     last_successful_auto_update_at
                 )
-                VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(slot) DO UPDATE SET
                     last_run_started_at = excluded.last_run_started_at,
                     last_run_finished_at = excluded.last_run_finished_at,
@@ -420,6 +445,7 @@ class RegistryUploadDbBackedRuntime:
                     last_run_snapshot_id = excluded.last_run_snapshot_id,
                     last_run_as_of_date = excluded.last_run_as_of_date,
                     last_run_refreshed_at = excluded.last_run_refreshed_at,
+                    last_run_result_json = excluded.last_run_result_json,
                     last_successful_auto_update_at = excluded.last_successful_auto_update_at
                 """,
                 (
@@ -429,6 +455,7 @@ class RegistryUploadDbBackedRuntime:
                     None,
                     None,
                     as_of_date,
+                    None,
                     None,
                     last_successful_auto_update_at,
                 ),
@@ -445,6 +472,7 @@ class RegistryUploadDbBackedRuntime:
         snapshot_id: str | None,
         refreshed_at: str | None,
         error: str | None,
+        result_payload: Mapping[str, Any] | None = None,
     ) -> None:
         _validate_timestamp(started_at, field_name="started_at")
         _validate_timestamp(finished_at, field_name="finished_at")
@@ -474,9 +502,10 @@ class RegistryUploadDbBackedRuntime:
                     last_run_snapshot_id,
                     last_run_as_of_date,
                     last_run_refreshed_at,
+                    last_run_result_json,
                     last_successful_auto_update_at
                 )
-                VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(slot) DO UPDATE SET
                     last_run_started_at = excluded.last_run_started_at,
                     last_run_finished_at = excluded.last_run_finished_at,
@@ -485,6 +514,7 @@ class RegistryUploadDbBackedRuntime:
                     last_run_snapshot_id = excluded.last_run_snapshot_id,
                     last_run_as_of_date = excluded.last_run_as_of_date,
                     last_run_refreshed_at = excluded.last_run_refreshed_at,
+                    last_run_result_json = excluded.last_run_result_json,
                     last_successful_auto_update_at = excluded.last_successful_auto_update_at
                 """,
                 (
@@ -495,6 +525,7 @@ class RegistryUploadDbBackedRuntime:
                     snapshot_id,
                     as_of_date,
                     refreshed_at,
+                    _serialize_optional_state_payload(result_payload),
                     last_successful_auto_update_at,
                 ),
             )
@@ -513,6 +544,7 @@ class RegistryUploadDbBackedRuntime:
                     last_run_snapshot_id,
                     last_run_as_of_date,
                     last_run_refreshed_at,
+                    last_run_result_json,
                     last_successful_auto_update_at
                 FROM sheet_vitrina_v1_auto_update_state
                 WHERE slot = 1
@@ -529,20 +561,33 @@ class RegistryUploadDbBackedRuntime:
                 last_run_as_of_date=row["last_run_as_of_date"],
                 last_run_refreshed_at=row["last_run_refreshed_at"],
                 last_successful_auto_update_at=row["last_successful_auto_update_at"],
+                last_run_result=_deserialize_optional_state_payload(row["last_run_result_json"]),
             )
 
-    def save_sheet_vitrina_manual_refresh_success(self, *, refreshed_at: str) -> None:
-        _validate_timestamp(refreshed_at, field_name="refreshed_at")
+    def save_sheet_vitrina_manual_refresh_result(
+        self,
+        *,
+        result_payload: Mapping[str, Any] | None,
+        refreshed_at: str | None = None,
+    ) -> None:
+        _validate_optional_timestamp(refreshed_at, field_name="refreshed_at")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
             previous = conn.execute(
                 """
-                SELECT last_successful_manual_load_at
+                SELECT
+                    last_successful_manual_refresh_at,
+                    last_successful_manual_load_at
                 FROM sheet_vitrina_v1_manual_operator_state
                 WHERE slot = 1
                 """
             ).fetchone()
+            last_successful_manual_refresh_at = (
+                refreshed_at
+                if refreshed_at is not None
+                else (previous["last_successful_manual_refresh_at"] if previous is not None else None)
+            )
             last_successful_manual_load_at = (
                 previous["last_successful_manual_load_at"] if previous is not None else None
             )
@@ -551,28 +596,38 @@ class RegistryUploadDbBackedRuntime:
                 INSERT INTO sheet_vitrina_v1_manual_operator_state(
                     slot,
                     last_successful_manual_refresh_at,
-                    last_successful_manual_load_at
+                    last_successful_manual_load_at,
+                    last_manual_refresh_result_json
                 )
-                VALUES(1, ?, ?)
+                VALUES(1, ?, ?, ?)
                 ON CONFLICT(slot) DO UPDATE SET
                     last_successful_manual_refresh_at = excluded.last_successful_manual_refresh_at,
-                    last_successful_manual_load_at = excluded.last_successful_manual_load_at
+                    last_successful_manual_load_at = excluded.last_successful_manual_load_at,
+                    last_manual_refresh_result_json = excluded.last_manual_refresh_result_json
                 """,
                 (
-                    refreshed_at,
+                    last_successful_manual_refresh_at,
                     last_successful_manual_load_at,
+                    _serialize_optional_state_payload(result_payload),
                 ),
             )
             conn.commit()
 
-    def save_sheet_vitrina_manual_load_success(self, *, loaded_at: str) -> None:
-        _validate_timestamp(loaded_at, field_name="loaded_at")
+    def save_sheet_vitrina_manual_load_result(
+        self,
+        *,
+        result_payload: Mapping[str, Any] | None,
+        loaded_at: str | None = None,
+    ) -> None:
+        _validate_optional_timestamp(loaded_at, field_name="loaded_at")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
             previous = conn.execute(
                 """
-                SELECT last_successful_manual_refresh_at
+                SELECT
+                    last_successful_manual_refresh_at,
+                    last_successful_manual_load_at
                 FROM sheet_vitrina_v1_manual_operator_state
                 WHERE slot = 1
                 """
@@ -580,21 +635,29 @@ class RegistryUploadDbBackedRuntime:
             last_successful_manual_refresh_at = (
                 previous["last_successful_manual_refresh_at"] if previous is not None else None
             )
+            last_successful_manual_load_at = (
+                loaded_at
+                if loaded_at is not None
+                else (previous["last_successful_manual_load_at"] if previous is not None else None)
+            )
             conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_manual_operator_state(
                     slot,
                     last_successful_manual_refresh_at,
-                    last_successful_manual_load_at
+                    last_successful_manual_load_at,
+                    last_manual_load_result_json
                 )
-                VALUES(1, ?, ?)
+                VALUES(1, ?, ?, ?)
                 ON CONFLICT(slot) DO UPDATE SET
                     last_successful_manual_refresh_at = excluded.last_successful_manual_refresh_at,
-                    last_successful_manual_load_at = excluded.last_successful_manual_load_at
+                    last_successful_manual_load_at = excluded.last_successful_manual_load_at,
+                    last_manual_load_result_json = excluded.last_manual_load_result_json
                 """,
                 (
                     last_successful_manual_refresh_at,
-                    loaded_at,
+                    last_successful_manual_load_at,
+                    _serialize_optional_state_payload(result_payload),
                 ),
             )
             conn.commit()
@@ -606,7 +669,9 @@ class RegistryUploadDbBackedRuntime:
                 """
                 SELECT
                     last_successful_manual_refresh_at,
-                    last_successful_manual_load_at
+                    last_successful_manual_load_at,
+                    last_manual_refresh_result_json,
+                    last_manual_load_result_json
                 FROM sheet_vitrina_v1_manual_operator_state
                 WHERE slot = 1
                 """
@@ -616,6 +681,87 @@ class RegistryUploadDbBackedRuntime:
             return SheetVitrinaV1ManualOperatorState(
                 last_successful_manual_refresh_at=row["last_successful_manual_refresh_at"],
                 last_successful_manual_load_at=row["last_successful_manual_load_at"],
+                last_manual_refresh_result=_deserialize_optional_state_payload(row["last_manual_refresh_result_json"]),
+                last_manual_load_result=_deserialize_optional_state_payload(row["last_manual_load_result_json"]),
+            )
+
+    def save_sheet_vitrina_load_state(
+        self,
+        *,
+        loaded_at: str,
+        snapshot_id: str | None,
+        as_of_date: str | None,
+        refreshed_at: str | None,
+        plan_fingerprint: str | None,
+        result_payload: Mapping[str, Any] | None,
+    ) -> None:
+        _validate_timestamp(loaded_at, field_name="loaded_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_load_state(
+                    slot,
+                    loaded_at,
+                    snapshot_id,
+                    as_of_date,
+                    refreshed_at,
+                    plan_fingerprint,
+                    result_json
+                )
+                VALUES(1, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(slot) DO UPDATE SET
+                    loaded_at = excluded.loaded_at,
+                    snapshot_id = excluded.snapshot_id,
+                    as_of_date = excluded.as_of_date,
+                    refreshed_at = excluded.refreshed_at,
+                    plan_fingerprint = excluded.plan_fingerprint,
+                    result_json = excluded.result_json
+                """,
+                (
+                    loaded_at,
+                    snapshot_id,
+                    as_of_date,
+                    refreshed_at,
+                    plan_fingerprint,
+                    _serialize_optional_state_payload(result_payload),
+                ),
+            )
+            conn.commit()
+
+    def load_sheet_vitrina_load_state(self) -> SheetVitrinaV1LoadState:
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT
+                    loaded_at,
+                    snapshot_id,
+                    as_of_date,
+                    refreshed_at,
+                    plan_fingerprint,
+                    result_json
+                FROM sheet_vitrina_v1_load_state
+                WHERE slot = 1
+                """
+            ).fetchone()
+            if row is None:
+                return SheetVitrinaV1LoadState(
+                    loaded_at=None,
+                    snapshot_id=None,
+                    as_of_date=None,
+                    refreshed_at=None,
+                    plan_fingerprint=None,
+                    result=None,
+                )
+            return SheetVitrinaV1LoadState(
+                loaded_at=row["loaded_at"],
+                snapshot_id=row["snapshot_id"],
+                as_of_date=row["as_of_date"],
+                refreshed_at=row["refreshed_at"],
+                plan_fingerprint=row["plan_fingerprint"],
+                result=_deserialize_optional_state_payload(row["result_json"]),
             )
 
     def load_persisted_upload_result(self, bundle_version: str) -> RegistryUploadResult:
@@ -1600,6 +1746,426 @@ def _sheet_row_counts_from_plan(plan: SheetVitrinaV1Envelope) -> dict[str, int]:
     return {item.sheet_name: item.row_count for item in plan.sheets}
 
 
+def _derive_sheet_vitrina_refresh_semantic_summary(plan: SheetVitrinaV1Envelope) -> dict[str, Any]:
+    status_sheet = next((item for item in plan.sheets if item.sheet_name == "STATUS"), None)
+    if status_sheet is None:
+        return {
+            "status": "warning",
+            "label": _semantic_label("warning"),
+            "tone": "warning",
+            "reason": "STATUS-таблица в persisted snapshot отсутствует; semantic result не подтверждён.",
+            "counts": {"success": 0, "warning": 1, "error": 0},
+            "sources": [],
+        }
+
+    source_slots: dict[str, list[dict[str, Any]]] = {}
+    seen_source_order: list[str] = []
+    for row in status_sheet.rows:
+        if len(row) < 11:
+            continue
+        raw_source_key = str(row[0] or "").strip()
+        if not raw_source_key or raw_source_key in {
+            "registry_upload_current_state",
+            "sheet_vitrina_v1_temporal_live_v1",
+        }:
+            continue
+        source_key, temporal_slot = _split_temporal_source_key(raw_source_key)
+        if not source_key:
+            continue
+        if source_key not in source_slots:
+            seen_source_order.append(source_key)
+        source_slots.setdefault(source_key, []).append(
+            _derive_sheet_vitrina_source_slot_outcome(
+                source_key=source_key,
+                temporal_slot=temporal_slot,
+                row=row,
+            )
+        )
+
+    source_order = list(
+        dict.fromkeys([*plan.source_temporal_policies.keys(), *seen_source_order])
+    )
+    source_outcomes: list[dict[str, Any]] = []
+    counts = {"success": 0, "warning": 0, "error": 0}
+    for source_key in source_order:
+        slot_outcomes = sorted(
+            source_slots.get(source_key, []),
+            key=lambda item: _slot_sort_key(str(item.get("temporal_slot") or "")),
+        )
+        if not slot_outcomes:
+            source_outcome = {
+                "source_key": source_key,
+                "status": "warning",
+                "tone": "warning",
+                "label": _semantic_label("warning"),
+                "reason": "persisted STATUS не содержит итог по источнику",
+                "slots": [],
+            }
+        else:
+            source_status = _reduce_semantic_status(
+                [str(item.get("status") or "warning") for item in slot_outcomes]
+            )
+            source_outcome = {
+                "source_key": source_key,
+                "status": source_status,
+                "tone": source_status,
+                "label": _semantic_label(source_status),
+                "reason": _compose_source_reason(slot_outcomes),
+                "slots": slot_outcomes,
+            }
+        counts[str(source_outcome["status"])] += 1
+        source_outcomes.append(source_outcome)
+
+    if not source_outcomes:
+        return {
+            "status": "warning",
+            "label": _semantic_label("warning"),
+            "tone": "warning",
+            "reason": "Persisted STATUS не содержит source rows; semantic refresh не подтверждён.",
+            "counts": {"success": 0, "warning": 1, "error": 0},
+            "sources": [],
+        }
+
+    overall_status = _reduce_semantic_status([item["status"] for item in source_outcomes])
+    return {
+        "status": overall_status,
+        "label": _semantic_label(overall_status),
+        "tone": overall_status,
+        "reason": _compose_overall_reason(counts, source_outcomes),
+        "counts": counts,
+        "sources": source_outcomes,
+    }
+
+
+def _derive_sheet_vitrina_source_slot_outcome(
+    *,
+    source_key: str,
+    temporal_slot: str,
+    row: list[Any],
+) -> dict[str, Any]:
+    kind = str(row[1] or "").strip().lower()
+    freshness = str(row[2] or "").strip()
+    snapshot_date = str(row[3] or "").strip()
+    requested_count = _coerce_int(row[7])
+    covered_count = _coerce_int(row[8])
+    raw_note = str(row[10] or "").strip()
+    status = _semantic_status_from_source_slot(
+        kind=kind,
+        requested_count=requested_count,
+        covered_count=covered_count,
+        note=raw_note,
+    )
+    reason = _semantic_reason_from_source_slot(
+        kind=kind,
+        requested_count=requested_count,
+        covered_count=covered_count,
+        note=raw_note,
+        freshness=freshness,
+        snapshot_date=snapshot_date,
+    )
+    return {
+        "source_key": source_key,
+        "temporal_slot": temporal_slot or "snapshot",
+        "status": status,
+        "tone": status,
+        "label": _semantic_label(status),
+        "kind": kind,
+        "freshness": freshness,
+        "snapshot_date": snapshot_date,
+        "date": str(row[4] or "").strip(),
+        "date_from": str(row[5] or "").strip(),
+        "date_to": str(row[6] or "").strip(),
+        "requested_count": requested_count,
+        "covered_count": covered_count,
+        "missing_nm_ids": _parse_missing_nm_ids(row[9]),
+        "note": raw_note,
+        "reason": reason,
+        "status_line": f"{_slot_label(temporal_slot)}: {reason}",
+    }
+
+
+def _semantic_status_from_source_slot(
+    *,
+    kind: str,
+    requested_count: int,
+    covered_count: int,
+    note: str,
+) -> str:
+    if kind in {"error", "closure_exhausted"}:
+        return "error"
+    if kind in {
+        "missing",
+        "incomplete",
+        "not_available",
+        "blocked",
+        "closure_pending",
+        "closure_retrying",
+        "closure_rate_limited",
+        "not_found",
+    }:
+        return "warning"
+    if kind != "success":
+        return "warning"
+    if _note_requires_warning(note):
+        return "warning"
+    if requested_count > 0 and covered_count < requested_count:
+        return "warning"
+    return "success"
+
+
+def _semantic_reason_from_source_slot(
+    *,
+    kind: str,
+    requested_count: int,
+    covered_count: int,
+    note: str,
+    freshness: str,
+    snapshot_date: str,
+) -> str:
+    mapped_reason = _humanize_status_note(note)
+    if kind == "closure_pending":
+        return "closed-day snapshot ещё не готов; ожидается retry"
+    if kind == "closure_retrying":
+        return "closed-day snapshot ещё не принят; будет retry"
+    if kind == "closure_rate_limited":
+        return "источник ограничил запросы; retry запланирован"
+    if kind == "closure_exhausted":
+        return "retry для closed-day snapshot исчерпан"
+    if kind == "blocked":
+        return mapped_reason or "источник помечен как blocked в текущем contour"
+    if kind == "not_available":
+        return mapped_reason or "слот не обновлялся в текущем contour"
+    if kind == "missing":
+        return mapped_reason or "payload не materialized"
+    if kind == "not_found":
+        return mapped_reason or "источник не вернул данные на точную дату"
+    if kind == "incomplete":
+        return _coverage_reason(requested_count=requested_count, covered_count=covered_count)
+    if kind == "error":
+        return mapped_reason or note or "источник завершился ошибкой"
+    if requested_count > 0 and covered_count < requested_count:
+        return mapped_reason or _coverage_reason(
+            requested_count=requested_count,
+            covered_count=covered_count,
+        )
+    if mapped_reason:
+        return mapped_reason
+    if freshness and snapshot_date and freshness != snapshot_date:
+        return f"использована сохранённая дата {freshness}"
+    return "обновлено"
+
+
+def _humanize_status_note(note: str) -> str:
+    normalized = str(note or "").strip()
+    if not normalized:
+        return ""
+    replacements = (
+        (
+            "resolution_rule=accepted_closed_preserved_after_invalid_attempt",
+            "сохранён ранее принятый closed snapshot после невалидной попытки",
+        ),
+        (
+            "resolution_rule=accepted_current_preserved_after_invalid_attempt",
+            "сохранён ранее принятый current snapshot после невалидной попытки",
+        ),
+        (
+            "resolution_rule=accepted_closed_from_prior_current_snapshot",
+            "использован ранее принятый current snapshot предыдущего дня",
+        ),
+        (
+            "resolution_rule=accepted_closed_from_prior_current_cache",
+            "использован ранее принятый current snapshot из runtime cache",
+        ),
+        (
+            "resolution_rule=accepted_closed_runtime_snapshot",
+            "использован ранее принятый closed-day snapshot",
+        ),
+        (
+            "resolution_rule=accepted_closed_from_interval_replay",
+            "использован сохранённый closed-day snapshot из interval replay",
+        ),
+        (
+            "resolution_rule=accepted_prior_current_runtime_cache",
+            "использован сохранённый current snapshot из runtime cache",
+        ),
+        (
+            "resolution_rule=exact_date_stocks_history_runtime_cache",
+            "использован exact-date runtime cache по stocks",
+        ),
+        (
+            "resolution_rule=exact_date_promo_current_runtime_cache",
+            "использован exact-date runtime cache по promo",
+        ),
+        (
+            "resolution_rule=exact_date_runtime_cache",
+            "использован exact-date runtime cache",
+        ),
+        (
+            "invalid_exact_snapshot=zero_filled_seller_funnel_snapshot",
+            "нулевой seller_funnel snapshot отклонён",
+        ),
+        (
+            "invalid_exact_snapshot=zero_filled_web_source_snapshot",
+            "нулевой web_source snapshot отклонён",
+        ),
+        (
+            "invalid_exact_snapshot=zero_filled_prices_snapshot",
+            "нулевой prices snapshot отклонён",
+        ),
+        (
+            "invalid_exact_snapshot=zero_filled_ads_bids_snapshot",
+            "нулевой ads_bids snapshot отклонён",
+        ),
+        (
+            "invalid_exact_snapshot=promo_live_source_incomplete",
+            "promo snapshot отклонён как incomplete",
+        ),
+        ("no payload returned", "источник не вернул payload"),
+        (
+            "resolution_rule=latest_effective_from<=slot_date",
+            "",
+        ),
+    )
+    for marker, message in replacements:
+        if marker in normalized:
+            return message
+    if "closure_state=closure_retrying" in normalized:
+        return "closed-day snapshot ещё не принят; будет retry"
+    if "closure_state=closure_pending" in normalized:
+        return "closed-day snapshot ожидает retry"
+    if "closure_state=closure_rate_limited" in normalized:
+        return "источник ограничил запросы; retry запланирован"
+    if "closure_state=closure_exhausted" in normalized:
+        return "retry для closed-day snapshot исчерпан"
+    return normalized
+
+
+def _note_requires_warning(note: str) -> bool:
+    normalized = str(note or "").strip()
+    if not normalized:
+        return False
+    success_markers = {
+        "resolution_rule=accepted_closed_current_attempt",
+        "resolution_rule=accepted_current_current_attempt",
+        "resolution_rule=latest_effective_from<=slot_date",
+    }
+    if any(marker in normalized for marker in success_markers):
+        return False
+    warning_markers = {
+        "runtime_cache",
+        "preserved_after_invalid_attempt",
+        "resolution_rule=accepted_closed_from_",
+        "resolution_rule=accepted_closed_runtime_snapshot",
+        "resolution_rule=accepted_prior_current_runtime_cache",
+    }
+    return any(marker in normalized for marker in warning_markers)
+
+
+def _compose_source_reason(slot_outcomes: list[dict[str, Any]]) -> str:
+    if not slot_outcomes:
+        return "persisted STATUS не содержит слот-итогов"
+    return " · ".join(str(item["status_line"]) for item in slot_outcomes)
+
+
+def _compose_overall_reason(
+    counts: Mapping[str, int],
+    source_outcomes: list[Mapping[str, Any]],
+) -> str:
+    total_sources = len(source_outcomes)
+    if counts.get("error", 0):
+        return (
+            f"Ошибки по {counts['error']} из {total_sources} источников; "
+            f"ещё {counts.get('warning', 0)} требуют внимания."
+        )
+    if counts.get("warning", 0):
+        return f"{counts['warning']} из {total_sources} источников требуют внимания."
+    return f"Все {total_sources} источников подтверждены без warning/error."
+
+
+def _coverage_reason(*, requested_count: int, covered_count: int) -> str:
+    if requested_count <= 0:
+        return "покрытие не подтверждено"
+    if covered_count <= 0:
+        return f"нет покрытия по {requested_count} позициям"
+    return f"покрыто {covered_count} из {requested_count}"
+
+
+def _semantic_label(status: str) -> str:
+    if status == "success":
+        return "Успешно"
+    if status == "error":
+        return "Ошибка"
+    return "Внимание"
+
+
+def _reduce_semantic_status(statuses: list[str]) -> str:
+    if any(status == "error" for status in statuses):
+        return "error"
+    if any(status == "warning" for status in statuses):
+        return "warning"
+    return "success"
+
+
+def _split_temporal_source_key(source_key: str) -> tuple[str, str]:
+    normalized = str(source_key or "").strip()
+    if normalized.endswith("]") and "[" in normalized:
+        name, slot = normalized[:-1].split("[", 1)
+        return name, slot
+    return normalized, ""
+
+
+def _slot_sort_key(slot: str) -> tuple[int, str]:
+    if slot == "yesterday_closed":
+        return (0, slot)
+    if slot == "today_current":
+        return (1, slot)
+    if slot == "snapshot":
+        return (2, slot)
+    return (3, slot)
+
+
+def _slot_label(slot: str) -> str:
+    if slot == "yesterday_closed":
+        return "вчера"
+    if slot == "today_current":
+        return "сегодня"
+    if slot == "snapshot":
+        return "snapshot"
+    return slot or "snapshot"
+
+
+def _coerce_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    try:
+        return int(text)
+    except ValueError:
+        return 0
+
+
+def _parse_missing_nm_ids(value: Any) -> list[int]:
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    out: list[int] = []
+    for item in raw.split(","):
+        item_text = item.strip()
+        if not item_text:
+            continue
+        try:
+            out.append(int(item_text))
+        except ValueError:
+            continue
+    return out
+
+
 def _serialize_sheet_vitrina_plan(plan: SheetVitrinaV1Envelope) -> str:
     payload = {
         "plan_version": plan.plan_version,
@@ -1642,6 +2208,21 @@ def _deserialize_sheet_vitrina_plan(raw_value: str) -> SheetVitrinaV1Envelope:
     if not isinstance(payload, Mapping):
         raise ValueError("sheet_vitrina_v1 ready snapshot must contain a JSON object")
     return parse_sheet_write_plan_payload(payload)
+
+
+def _serialize_optional_state_payload(payload: Mapping[str, Any] | None) -> str | None:
+    if payload is None:
+        return None
+    return json.dumps(_to_jsonable(dict(payload)), ensure_ascii=False)
+
+
+def _deserialize_optional_state_payload(payload_json: str | None) -> dict[str, Any] | None:
+    if not payload_json:
+        return None
+    payload = json.loads(payload_json)
+    if not isinstance(payload, dict):
+        raise ValueError("state payload must contain a JSON object")
+    return payload
 
 
 def _serialize_temporal_source_payload(payload: Any) -> str:
@@ -1786,13 +2367,26 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             last_run_snapshot_id TEXT,
             last_run_as_of_date TEXT,
             last_run_refreshed_at TEXT,
+            last_run_result_json TEXT,
             last_successful_auto_update_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_manual_operator_state (
             slot INTEGER PRIMARY KEY CHECK (slot = 1),
             last_successful_manual_refresh_at TEXT,
-            last_successful_manual_load_at TEXT
+            last_successful_manual_load_at TEXT,
+            last_manual_refresh_result_json TEXT,
+            last_manual_load_result_json TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_load_state (
+            slot INTEGER PRIMARY KEY CHECK (slot = 1),
+            loaded_at TEXT,
+            snapshot_id TEXT,
+            as_of_date TEXT,
+            refreshed_at TEXT,
+            plan_fingerprint TEXT,
+            result_json TEXT
         );
 
         CREATE TABLE IF NOT EXISTS cost_price_upload_versions (
@@ -1889,6 +2483,24 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             result_json TEXT NOT NULL
         );
         """
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_auto_update_state",
+        column_name="last_run_result_json",
+        column_sql="TEXT",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_manual_operator_state",
+        column_name="last_manual_refresh_result_json",
+        column_sql="TEXT",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_manual_operator_state",
+        column_name="last_manual_load_result_json",
+        column_sql="TEXT",
     )
     _ensure_column(
         conn,

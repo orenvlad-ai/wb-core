@@ -117,7 +117,10 @@ class SheetVitrinaV1WebVitrinaBlock:
                 runtime=self.runtime,
                 period_date_bindings=period_date_bindings,
             )
-            refresh_status_value = "success"
+            period_refresh_summary = _resolve_period_refresh_summary(
+                runtime=self.runtime,
+                period_date_bindings=period_date_bindings,
+            )
             data_sheet_row_count = len(snapshot.sheets[0].rows) if snapshot.sheets else 0
             read_model = WEB_VITRINA_PERIOD_READ_MODEL
         else:
@@ -132,7 +135,13 @@ class SheetVitrinaV1WebVitrinaBlock:
                     raise ValueError("sheet_vitrina_v1 ready snapshot missing: no readable snapshots are materialized")
             refresh_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=snapshot.as_of_date)
             refreshed_at = refresh_status.refreshed_at
-            refresh_status_value = refresh_status.status
+            period_refresh_summary = {
+                "status": refresh_status.semantic_status,
+                "label": refresh_status.semantic_label,
+                "tone": refresh_status.semantic_tone,
+                "reason": refresh_status.semantic_reason,
+                "counts": dict(refresh_status.source_outcome_counts),
+            }
             data_sheet_row_count = refresh_status.sheet_row_counts.get(WEB_VITRINA_SOURCE_SHEET_NAME, 0)
         auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()
         manual_state = self.runtime.load_sheet_vitrina_manual_operator_state()
@@ -170,7 +179,10 @@ class SheetVitrinaV1WebVitrinaBlock:
                 row_count=len(rows),
             ),
             status_summary=WebVitrinaContractStatusSummary(
-                refresh_status=refresh_status_value,
+                refresh_status=str(period_refresh_summary["status"]),
+                refresh_status_label=str(period_refresh_summary["label"]),
+                refresh_status_tone=str(period_refresh_summary["tone"]),
+                refresh_status_reason=str(period_refresh_summary["reason"]),
                 read_model=read_model,
                 source_sheet_name=WEB_VITRINA_SOURCE_SHEET_NAME,
                 bundle_version=current_state.bundle_version,
@@ -188,6 +200,7 @@ class SheetVitrinaV1WebVitrinaBlock:
                 source_policy_counts=_count_values(snapshot.source_temporal_policies),
                 source_count=len(snapshot.source_temporal_policies),
                 data_sheet_row_count=data_sheet_row_count or len(rows),
+                refresh_outcome_counts=dict(period_refresh_summary["counts"]),
             ),
             schema=_build_schema(snapshot),
             rows=rows,
@@ -403,6 +416,46 @@ def _resolve_period_refreshed_at(
         )
     ]
     return max(refreshed_values)
+
+
+def _resolve_period_refresh_summary(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    period_date_bindings: list[_PeriodDateBinding],
+) -> dict[str, Any]:
+    statuses = [
+        runtime.load_sheet_vitrina_refresh_status(as_of_date=snapshot_as_of_date)
+        for snapshot_as_of_date in sorted(
+            {
+                binding.snapshot_as_of_date
+                for binding in period_date_bindings
+            }
+        )
+    ]
+    counts = {"success": 0, "warning": 0, "error": 0}
+    for item in statuses:
+        if item.semantic_status in counts:
+            counts[item.semantic_status] += 1
+    if any(item.semantic_status == "error" for item in statuses):
+        status = "error"
+        reason = (
+            f"В выбранном периоде {counts['error']} snapshot с ошибками; "
+            f"ещё {counts['warning']} требуют внимания."
+        )
+    elif any(item.semantic_status == "warning" for item in statuses):
+        status = "warning"
+        reason = f"В выбранном периоде {counts['warning']} snapshot требуют внимания."
+    else:
+        status = "success"
+        reason = f"Все {len(statuses)} snapshot в выбранном периоде подтверждены без warning/error."
+    label = "Успешно" if status == "success" else ("Ошибка" if status == "error" else "Внимание")
+    return {
+        "status": status,
+        "label": label,
+        "tone": status,
+        "reason": reason,
+        "counts": counts,
+    }
 
 
 def _load_default_visible_snapshot(

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import shlex
 import threading
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 from uuid import uuid4
 
 from packages.application.factory_order_supply import FactoryOrderSupplyBlock
@@ -141,8 +143,13 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_sheet_status_request(self, as_of_date: str | None = None) -> dict[str, Any]:
         payload = asdict(self.runtime.load_sheet_vitrina_refresh_status(as_of_date=as_of_date))
+        payload["technical_status"] = payload["status"]
+        payload["status"] = payload["semantic_status"]
+        payload["status_label"] = payload["semantic_label"]
+        payload["status_reason"] = payload["semantic_reason"]
         payload["server_context"] = self.build_sheet_server_context()
         payload["manual_context"] = self.build_sheet_manual_context()
+        payload["load_context"] = self.build_sheet_load_context()
         return payload
 
     def handle_sheet_daily_report_request(self) -> dict[str, Any]:
@@ -287,48 +294,49 @@ class RegistryUploadHttpEntrypoint:
         read_model: str,
         job_path: str,
     ) -> dict[str, Any]:
+        refresh_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=snapshot_as_of_date)
         latest_job = self.operator_jobs.latest_relevant_job(
             operations=("refresh", "auto_update"),
             preferred_as_of_date=snapshot_as_of_date,
+            strict_preferred_as_of_date=True,
         )
-        upload_records = _extract_upload_source_records_from_job(latest_job)
-        update_records = _extract_update_source_records_from_snapshot(
-            runtime=self.runtime,
-            snapshot_as_of_date=snapshot_as_of_date,
-        )
-        shared_source_keys = _ordered_activity_source_keys(upload_records, update_records)
-        upload_source_keys = shared_source_keys if latest_job is not None else []
-        update_source_keys = (
-            shared_source_keys
+        upload_records = (
+            _extract_upload_source_records_from_job(latest_job)
             if latest_job is not None
-            else _ordered_activity_source_keys({}, update_records)
+            else _extract_source_records_from_outcomes(refresh_status.source_outcomes)
         )
+        update_records = _extract_source_records_from_outcomes(refresh_status.source_outcomes)
+        shared_source_keys = _ordered_activity_source_keys(upload_records, update_records)
+        upload_source_keys = shared_source_keys if upload_records else []
+        update_source_keys = shared_source_keys if update_records else []
         return {
             "log_block": _build_web_vitrina_log_block(
                 latest_job=latest_job,
                 job_path=job_path,
+                persisted_refresh_status=refresh_status,
             ),
             "upload_summary": _build_web_vitrina_endpoint_summary_block(
                 title="Загрузка данных",
                 subtitle=(
-                    "Последний завершённый refresh-run. Cheap reread не создаёт новый upload-run и "
-                    "только перечитывает уже сохранённое состояние."
+                    "Последний завершённый refresh-run."
+                    if latest_job is not None
+                    else "Transient refresh-run log недоступен; показываем persisted outcome текущего snapshot."
                 ),
                 records=upload_records,
                 ordered_source_keys=upload_source_keys,
                 empty_message=(
                     "Последний завершённый refresh-run в памяти сервиса пока не найден. "
-                    "После `Загрузить и обновить` здесь появится truth по endpoint-ам."
+                    "Показываем только persisted source truth текущего snapshot."
                 ),
                 block_updated_at=(
                     str(latest_job.get("finished_at") or latest_job.get("started_at") or "")
                     if latest_job
-                    else ""
+                    else refreshed_at
                 ),
                 block_detail=(
                     f"job {latest_job.get('job_id', '')} · {str(latest_job.get('operation', 'refresh'))}"
                     if latest_job
-                    else ""
+                    else f"snapshot {snapshot_id} · as_of_date {snapshot_as_of_date} · {read_model}"
                 ),
             ),
             "update_summary": _build_web_vitrina_endpoint_summary_block(
@@ -535,6 +543,7 @@ class RegistryUploadHttpEntrypoint:
                 )
             )
             refresh_payload: dict[str, Any] | None = None
+            load_payload: dict[str, Any] | None = None
             try:
                 refresh_payload = self._run_sheet_refresh(
                     as_of_date=as_of_date,
@@ -548,6 +557,13 @@ class RegistryUploadHttpEntrypoint:
                 )
             except Exception as exc:
                 finished_at = self.activated_at_factory()
+                auto_result = _build_auto_update_result_payload(
+                    refresh_payload=refresh_payload,
+                    load_payload=load_payload,
+                    technical_status="error",
+                    finished_at=finished_at,
+                    error=str(exc),
+                )
                 self.runtime.save_sheet_vitrina_auto_update_result(
                     started_at=started_at,
                     finished_at=finished_at,
@@ -568,12 +584,15 @@ class RegistryUploadHttpEntrypoint:
                         else None
                     ),
                     error=str(exc),
+                    result_payload=auto_result,
                 )
                 emit(
                     _format_log_event(
                         "cycle_finish",
                         cycle="auto_update",
                         status="error",
+                        semantic_status=auto_result.get("semantic_status"),
+                        semantic_reason=auto_result.get("semantic_reason"),
                         route=SHEET_VITRINA_REFRESH_ROUTE,
                         error=str(exc),
                     )
@@ -581,6 +600,13 @@ class RegistryUploadHttpEntrypoint:
                 raise
 
             finished_at = self.activated_at_factory()
+            auto_result = _build_auto_update_result_payload(
+                refresh_payload=refresh_payload,
+                load_payload=load_payload,
+                technical_status="success",
+                finished_at=finished_at,
+                error=None,
+            )
             self.runtime.save_sheet_vitrina_auto_update_result(
                 started_at=started_at,
                 finished_at=finished_at,
@@ -589,22 +615,35 @@ class RegistryUploadHttpEntrypoint:
                 snapshot_id=str(load_payload["snapshot_id"]),
                 refreshed_at=str(load_payload["refreshed_at"]),
                 error=None,
+                result_payload=auto_result,
             )
             emit(
                 _format_log_event(
                     "cycle_finish",
                     cycle="auto_update",
                     status="success",
+                    semantic_status=auto_result.get("semantic_status"),
+                    semantic_reason=auto_result.get("semantic_reason"),
                     route=SHEET_VITRINA_REFRESH_ROUTE,
                     snapshot_id=load_payload["snapshot_id"],
                 )
             )
             payload = dict(load_payload)
+            payload["technical_status"] = str(payload.get("technical_status") or payload.get("status") or "success")
+            payload["status"] = str(auto_result.get("semantic_status") or "warning")
+            payload["status_label"] = str(auto_result.get("semantic_label") or "")
+            payload["status_reason"] = str(auto_result.get("semantic_reason") or "")
+            payload["semantic_status"] = str(auto_result.get("semantic_status") or "warning")
+            payload["semantic_label"] = str(auto_result.get("semantic_label") or "")
+            payload["semantic_tone"] = str(auto_result.get("semantic_tone") or "warning")
+            payload["semantic_reason"] = str(auto_result.get("semantic_reason") or "")
+            payload["auto_result"] = auto_result
             payload["operation"] = "auto_update"
             payload["auto_update_started_at"] = started_at
             payload["auto_update_finished_at"] = finished_at
             payload["server_context"] = self.build_sheet_server_context()
             payload["manual_context"] = self.build_sheet_manual_context()
+            payload["load_context"] = self.build_sheet_load_context()
             return payload
 
     def _run_sheet_refresh(
@@ -616,91 +655,124 @@ class RegistryUploadHttpEntrypoint:
     ) -> dict[str, Any]:
         emit = log or _noop_log
         with self._sheet_cycle_lock:
-            current_state = self.runtime.load_current_state()
-            emit(
-                _format_log_event(
-                    "cycle_start",
-                    cycle="refresh",
-                    route=SHEET_VITRINA_REFRESH_ROUTE,
-                    requested_as_of_date=as_of_date or "default",
-                    action="build_ready_snapshot_only",
+            try:
+                current_state = self.runtime.load_current_state()
+                emit(
+                    _format_log_event(
+                        "cycle_start",
+                        cycle="refresh",
+                        route=SHEET_VITRINA_REFRESH_ROUTE,
+                        requested_as_of_date=as_of_date or "default",
+                        action="build_ready_snapshot_only",
+                        execution_mode=execution_mode,
+                    )
+                )
+                emit(
+                    _format_log_event(
+                        "bundle_selected",
+                        cycle="refresh",
+                        bundle_version=current_state.bundle_version,
+                        activated_at=current_state.activated_at,
+                    )
+                )
+                emit(
+                    _format_log_event(
+                        "refresh_build_start",
+                        cycle="refresh",
+                        route=SHEET_VITRINA_REFRESH_ROUTE,
+                        step="server_build_plan",
+                    )
+                )
+                plan = self.sheet_plan_block.build_plan(
+                    as_of_date=as_of_date,
+                    log=emit,
                     execution_mode=execution_mode,
                 )
-            )
-            emit(
-                _format_log_event(
-                    "bundle_selected",
-                    cycle="refresh",
-                    bundle_version=current_state.bundle_version,
-                    activated_at=current_state.activated_at,
+                row_counts = _sheet_row_counts(plan)
+                emit(
+                    _format_log_event(
+                        "refresh_snapshot_ready",
+                        cycle="refresh",
+                        snapshot_id=plan.snapshot_id,
+                        plan_version=plan.plan_version,
+                        as_of_date=plan.as_of_date,
+                        date_columns=",".join(plan.date_columns),
+                        data_rows=row_counts.get("DATA_VITRINA"),
+                        status_rows=row_counts.get("STATUS"),
+                    )
                 )
-            )
-            emit(
-                _format_log_event(
-                    "refresh_build_start",
-                    cycle="refresh",
-                    route=SHEET_VITRINA_REFRESH_ROUTE,
-                    step="server_build_plan",
+                emit(
+                    _format_log_event(
+                        "refresh_runtime_save_start",
+                        cycle="refresh",
+                        runtime_store="sheet_vitrina_ready_snapshot",
+                        snapshot_id=plan.snapshot_id,
+                    )
                 )
-            )
-            plan = self.sheet_plan_block.build_plan(
-                as_of_date=as_of_date,
-                log=emit,
-                execution_mode=execution_mode,
-            )
-            row_counts = _sheet_row_counts(plan)
-            emit(
-                _format_log_event(
-                    "refresh_snapshot_ready",
-                    cycle="refresh",
-                    snapshot_id=plan.snapshot_id,
-                    plan_version=plan.plan_version,
-                    as_of_date=plan.as_of_date,
-                    date_columns=",".join(plan.date_columns),
-                    data_rows=row_counts.get("DATA_VITRINA"),
-                    status_rows=row_counts.get("STATUS"),
+                refresh_result = self.runtime.save_sheet_vitrina_ready_snapshot(
+                    current_state=current_state,
+                    refreshed_at=self.refreshed_at_factory(),
+                    plan=plan,
                 )
-            )
-            emit(
-                _format_log_event(
-                    "refresh_runtime_save_start",
-                    cycle="refresh",
-                    runtime_store="sheet_vitrina_ready_snapshot",
-                    snapshot_id=plan.snapshot_id,
+                refresh_outcome = _build_refresh_result_payload(refresh_result)
+                if execution_mode == EXECUTION_MODE_MANUAL_OPERATOR:
+                    self.runtime.save_sheet_vitrina_manual_refresh_result(
+                        result_payload=refresh_outcome,
+                        refreshed_at=refresh_result.refreshed_at,
+                    )
+                payload = asdict(refresh_result)
+                payload["technical_status"] = payload["status"]
+                payload["status_label"] = payload["semantic_label"]
+                payload["status_reason"] = payload["semantic_reason"]
+                payload["server_context"] = self.build_sheet_server_context()
+                payload["manual_context"] = self.build_sheet_manual_context()
+                payload["load_context"] = self.build_sheet_load_context()
+                emit(
+                    _format_log_event(
+                        "refresh_runtime_save_finish",
+                        cycle="refresh",
+                        snapshot_id=refresh_result.snapshot_id,
+                        refreshed_at=refresh_result.refreshed_at,
+                        data_rows=refresh_result.sheet_row_counts.get("DATA_VITRINA"),
+                        status_rows=refresh_result.sheet_row_counts.get("STATUS"),
+                        semantic_status=refresh_result.semantic_status,
+                        semantic_reason=refresh_result.semantic_reason,
+                    )
                 )
-            )
-            refresh_result = self.runtime.save_sheet_vitrina_ready_snapshot(
-                current_state=current_state,
-                refreshed_at=self.refreshed_at_factory(),
-                plan=plan,
-            )
-            if execution_mode == EXECUTION_MODE_MANUAL_OPERATOR:
-                self.runtime.save_sheet_vitrina_manual_refresh_success(
-                    refreshed_at=refresh_result.refreshed_at,
+                emit(
+                    _format_log_event(
+                        "cycle_finish",
+                        cycle="refresh",
+                        status="success",
+                        semantic_status=refresh_result.semantic_status,
+                        semantic_reason=refresh_result.semantic_reason,
+                        route=SHEET_VITRINA_REFRESH_ROUTE,
+                        snapshot_id=refresh_result.snapshot_id,
+                    )
                 )
-            payload = asdict(refresh_result)
-            payload["server_context"] = self.build_sheet_server_context()
-            payload["manual_context"] = self.build_sheet_manual_context()
-            emit(
-                _format_log_event(
-                    "refresh_runtime_save_finish",
-                    cycle="refresh",
-                    snapshot_id=refresh_result.snapshot_id,
-                    refreshed_at=refresh_result.refreshed_at,
-                    data_rows=refresh_result.sheet_row_counts.get("DATA_VITRINA"),
-                    status_rows=refresh_result.sheet_row_counts.get("STATUS"),
+                return payload
+            except Exception as exc:
+                finished_at = self.activated_at_factory()
+                if execution_mode == EXECUTION_MODE_MANUAL_OPERATOR:
+                    self.runtime.save_sheet_vitrina_manual_refresh_result(
+                        result_payload=_build_refresh_error_payload(
+                            requested_as_of_date=as_of_date,
+                            finished_at=finished_at,
+                            error=str(exc),
+                        ),
+                        refreshed_at=None,
+                    )
+                emit(
+                    _format_log_event(
+                        "cycle_finish",
+                        cycle="refresh",
+                        status="error",
+                        semantic_status="error",
+                        semantic_reason=str(exc),
+                        route=SHEET_VITRINA_REFRESH_ROUTE,
+                    )
                 )
-            )
-            emit(
-                _format_log_event(
-                    "cycle_finish",
-                    cycle="refresh",
-                    status="success",
-                    route=SHEET_VITRINA_REFRESH_ROUTE,
-                    snapshot_id=refresh_result.snapshot_id,
-                )
-            )
-            return payload
+                raise
 
     def _run_sheet_load(
         self,
@@ -711,97 +783,170 @@ class RegistryUploadHttpEntrypoint:
     ) -> dict[str, Any]:
         emit = log or _noop_log
         with self._sheet_cycle_lock:
-            current_state = self.runtime.load_current_state()
-            emit(
-                _format_log_event(
-                    "cycle_start",
-                    cycle="load",
-                    route=SHEET_VITRINA_LOAD_ROUTE,
-                    requested_as_of_date=as_of_date or "latest_bundle_snapshot",
-                    action="write_prepared_snapshot_only",
-                    execution_mode=execution_mode,
+            previous_load_state = self.runtime.load_sheet_vitrina_load_state()
+            plan: SheetVitrinaV1Envelope | None = None
+            refresh_status = None
+            row_counts: dict[str, int] = {}
+            plan_fingerprint: str | None = None
+            try:
+                current_state = self.runtime.load_current_state()
+                emit(
+                    _format_log_event(
+                        "cycle_start",
+                        cycle="load",
+                        route=SHEET_VITRINA_LOAD_ROUTE,
+                        requested_as_of_date=as_of_date or "latest_bundle_snapshot",
+                        action="write_prepared_snapshot_only",
+                        execution_mode=execution_mode,
+                    )
                 )
-            )
-            emit(
-                _format_log_event(
-                    "bundle_selected",
-                    cycle="load",
-                    bundle_version=current_state.bundle_version,
-                    activated_at=current_state.activated_at,
+                emit(
+                    _format_log_event(
+                        "bundle_selected",
+                        cycle="load",
+                        bundle_version=current_state.bundle_version,
+                        activated_at=current_state.activated_at,
+                    )
                 )
-            )
-            emit(
-                _format_log_event(
-                    "snapshot_lookup_start",
-                    cycle="load",
-                    route=SHEET_VITRINA_LOAD_ROUTE,
-                    requested_as_of_date=as_of_date or "latest",
+                emit(
+                    _format_log_event(
+                        "snapshot_lookup_start",
+                        cycle="load",
+                        route=SHEET_VITRINA_LOAD_ROUTE,
+                        requested_as_of_date=as_of_date or "latest",
+                    )
                 )
-            )
-            plan = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=as_of_date)
-            refresh_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=plan.as_of_date)
-            row_counts = _sheet_row_counts(plan)
-            emit(
-                _format_log_event(
-                    "snapshot_lookup_finish",
-                    cycle="load",
+                plan = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=as_of_date)
+                refresh_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=plan.as_of_date)
+                row_counts = _sheet_row_counts(plan)
+                plan_fingerprint = _plan_fingerprint(plan)
+                emit(
+                    _format_log_event(
+                        "snapshot_lookup_finish",
+                        cycle="load",
+                        snapshot_id=plan.snapshot_id,
+                        plan_version=plan.plan_version,
+                        as_of_date=plan.as_of_date,
+                        date_columns=",".join(plan.date_columns),
+                        refreshed_at=refresh_status.refreshed_at,
+                        data_rows=row_counts.get("DATA_VITRINA"),
+                        status_rows=row_counts.get("STATUS"),
+                        semantic_status=refresh_status.semantic_status,
+                        semantic_reason=refresh_status.semantic_reason,
+                    )
+                )
+                _emit_plan_status_sheet_log(plan, emit, cycle="load")
+                _emit_plan_metric_sheet_log(plan, emit, cycle="load")
+                emit(
+                    _format_log_event(
+                        "bridge_start",
+                        cycle="load",
+                        snapshot_id=plan.snapshot_id,
+                        bridge_runner=getattr(self.sheet_load_runner, "__name__", self.sheet_load_runner.__class__.__name__),
+                    )
+                )
+                bridge_result = self.sheet_load_runner(plan, emit)
+                finished_at = self.activated_at_factory()
+                load_outcome = _build_load_result_payload(
+                    plan=plan,
+                    refresh_status=refresh_status,
+                    bridge_result=bridge_result,
+                    previous_load_state=previous_load_state,
+                    finished_at=finished_at,
+                )
+                self.runtime.save_sheet_vitrina_load_state(
+                    loaded_at=finished_at,
                     snapshot_id=plan.snapshot_id,
-                    plan_version=plan.plan_version,
                     as_of_date=plan.as_of_date,
-                    date_columns=",".join(plan.date_columns),
                     refreshed_at=refresh_status.refreshed_at,
-                    data_rows=row_counts.get("DATA_VITRINA"),
-                    status_rows=row_counts.get("STATUS"),
+                    plan_fingerprint=plan_fingerprint,
+                    result_payload=load_outcome,
                 )
-            )
-            _emit_plan_status_sheet_log(plan, emit, cycle="load")
-            _emit_plan_metric_sheet_log(plan, emit, cycle="load")
-            emit(
-                _format_log_event(
-                    "bridge_start",
-                    cycle="load",
-                    snapshot_id=plan.snapshot_id,
-                    bridge_runner=getattr(self.sheet_load_runner, "__name__", self.sheet_load_runner.__class__.__name__),
+                if execution_mode == EXECUTION_MODE_MANUAL_OPERATOR:
+                    self.runtime.save_sheet_vitrina_manual_load_result(
+                        result_payload=load_outcome,
+                        loaded_at=finished_at,
+                    )
+                _emit_bridge_result_log(bridge_result, emit, cycle="load")
+                emit(
+                    _format_log_event(
+                        "cycle_finish",
+                        cycle="load",
+                        status="success",
+                        semantic_status=load_outcome.get("semantic_status"),
+                        semantic_reason=load_outcome.get("semantic_reason"),
+                        route=SHEET_VITRINA_LOAD_ROUTE,
+                        snapshot_id=plan.snapshot_id,
+                        data_rows=row_counts.get("DATA_VITRINA"),
+                        status_rows=row_counts.get("STATUS"),
+                    )
                 )
-            )
-            bridge_result = self.sheet_load_runner(plan, emit)
-            finished_at = self.activated_at_factory()
-            if execution_mode == EXECUTION_MODE_MANUAL_OPERATOR:
-                self.runtime.save_sheet_vitrina_manual_load_success(loaded_at=finished_at)
-            _emit_bridge_result_log(bridge_result, emit, cycle="load")
-            emit(
-                _format_log_event(
-                    "cycle_finish",
-                    cycle="load",
-                    status="success",
-                    route=SHEET_VITRINA_LOAD_ROUTE,
-                    snapshot_id=plan.snapshot_id,
-                    data_rows=row_counts.get("DATA_VITRINA"),
-                    status_rows=row_counts.get("STATUS"),
+                payload = {
+                    "status": "success",
+                    "technical_status": "success",
+                    "status_label": str(load_outcome.get("semantic_label") or ""),
+                    "status_reason": str(load_outcome.get("semantic_reason") or ""),
+                    "semantic_status": str(load_outcome.get("semantic_status") or "warning"),
+                    "semantic_label": str(load_outcome.get("semantic_label") or ""),
+                    "semantic_tone": str(load_outcome.get("semantic_tone") or "warning"),
+                    "semantic_reason": str(load_outcome.get("semantic_reason") or ""),
+                    "operation": "load",
+                    "bundle_version": current_state.bundle_version,
+                    "activated_at": current_state.activated_at,
+                    "refreshed_at": refresh_status.refreshed_at,
+                    "as_of_date": plan.as_of_date,
+                    "date_columns": plan.date_columns,
+                    "temporal_slots": [asdict(item) for item in plan.temporal_slots],
+                    "snapshot_id": plan.snapshot_id,
+                    "plan_version": plan.plan_version,
+                    "sheet_row_counts": row_counts,
+                    "bridge_result": bridge_result,
+                    "load_result": load_outcome,
+                }
+                payload["server_context"] = self.build_sheet_server_context()
+                payload["manual_context"] = self.build_sheet_manual_context()
+                payload["load_context"] = self.build_sheet_load_context()
+                return payload
+            except Exception as exc:
+                finished_at = self.activated_at_factory()
+                load_error = _build_load_error_payload(
+                    requested_as_of_date=as_of_date,
+                    plan=plan,
+                    refresh_status=refresh_status,
+                    finished_at=finished_at,
+                    error=str(exc),
                 )
-            )
-            payload = {
-                "status": "success",
-                "operation": "load",
-                "bundle_version": current_state.bundle_version,
-                "activated_at": current_state.activated_at,
-                "refreshed_at": refresh_status.refreshed_at,
-                "as_of_date": plan.as_of_date,
-                "date_columns": plan.date_columns,
-                "temporal_slots": [asdict(item) for item in plan.temporal_slots],
-                "snapshot_id": plan.snapshot_id,
-                "plan_version": plan.plan_version,
-                "sheet_row_counts": row_counts,
-                "bridge_result": bridge_result,
-            }
-            payload["server_context"] = self.build_sheet_server_context()
-            payload["manual_context"] = self.build_sheet_manual_context()
-            return payload
+                self.runtime.save_sheet_vitrina_load_state(
+                    loaded_at=finished_at,
+                    snapshot_id=plan.snapshot_id if plan is not None else None,
+                    as_of_date=(plan.as_of_date if plan is not None else as_of_date),
+                    refreshed_at=(refresh_status.refreshed_at if refresh_status is not None else None),
+                    plan_fingerprint=plan_fingerprint,
+                    result_payload=load_error,
+                )
+                if execution_mode == EXECUTION_MODE_MANUAL_OPERATOR:
+                    self.runtime.save_sheet_vitrina_manual_load_result(
+                        result_payload=load_error,
+                        loaded_at=None,
+                    )
+                emit(
+                    _format_log_event(
+                        "cycle_finish",
+                        cycle="load",
+                        status="error",
+                        semantic_status="error",
+                        semantic_reason=str(exc),
+                        route=SHEET_VITRINA_LOAD_ROUTE,
+                        snapshot_id=plan.snapshot_id if plan is not None else None,
+                    )
+                )
+                raise
 
-    def build_sheet_server_context(self) -> dict[str, str]:
+    def build_sheet_server_context(self) -> dict[str, Any]:
         now = self.now_factory()
         business_now = to_business_datetime(now).replace(microsecond=0).isoformat()
         auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()
+        auto_result = _format_operator_result_payload(auto_update_state.last_run_result)
         return {
             "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
             "business_now": business_now,
@@ -816,16 +961,27 @@ class RegistryUploadHttpEntrypoint:
             "daily_auto_trigger_description": SHEET_VITRINA_DAILY_TRIGGER_DESCRIPTION,
             "retry_runner_description": SHEET_VITRINA_RETRY_RUNNER_DESCRIPTION,
             "last_auto_run_status": auto_update_state.last_run_status or "never",
-            "last_auto_run_status_label": _auto_update_status_label(auto_update_state.last_run_status),
+            "last_auto_run_status_label": (
+                str(auto_result.get("semantic_label") or "")
+                if auto_result
+                else _auto_update_status_label(auto_update_state.last_run_status)
+            ),
+            "last_auto_run_status_reason": (
+                str(auto_result.get("semantic_reason") or "")
+                if auto_result
+                else (auto_update_state.last_run_error or "")
+            ),
+            "last_auto_run_technical_status_label": _auto_update_status_label(auto_update_state.last_run_status),
             "last_auto_run_time": _format_optional_business_timestamp(auto_update_state.last_run_started_at),
             "last_auto_run_finished_at": _format_optional_business_timestamp(auto_update_state.last_run_finished_at),
             "last_successful_auto_update_at": _format_optional_business_timestamp(
                 auto_update_state.last_successful_auto_update_at
             ),
             "last_auto_run_error": auto_update_state.last_run_error or "",
+            "last_auto_run_result": auto_result,
         }
 
-    def build_sheet_manual_context(self) -> dict[str, str]:
+    def build_sheet_manual_context(self) -> dict[str, Any]:
         manual_state = self.runtime.load_sheet_vitrina_manual_operator_state()
         return {
             "last_successful_manual_refresh_at": _format_optional_business_timestamp(
@@ -834,12 +990,28 @@ class RegistryUploadHttpEntrypoint:
             "last_successful_manual_load_at": _format_optional_business_timestamp(
                 manual_state.last_successful_manual_load_at
             ),
+            "last_manual_refresh_result": _format_operator_result_payload(
+                manual_state.last_manual_refresh_result
+            ),
+            "last_manual_load_result": _format_operator_result_payload(
+                manual_state.last_manual_load_result
+            ),
+        }
+
+    def build_sheet_load_context(self) -> dict[str, Any]:
+        load_state = self.runtime.load_sheet_vitrina_load_state()
+        return {
+            "last_finished_at": _format_optional_business_timestamp(load_state.loaded_at),
+            "last_snapshot_id": load_state.snapshot_id or "",
+            "last_as_of_date": load_state.as_of_date or "",
+            "last_refreshed_at": load_state.refreshed_at or "",
+            "last_result": _format_operator_result_payload(load_state.result),
         }
 
     def build_sheet_operator_ui_context(self) -> dict[str, Any]:
         try:
             current_state = self.runtime.load_current_state()
-        except ValueError:
+        except (ValueError, sqlite3.Error):
             active_skus: list[dict[str, Any]] = []
         else:
             active_skus = list_active_sku_options(current_state.config_v2)
@@ -871,6 +1043,193 @@ def _format_optional_business_timestamp(value: str | None) -> str:
     except ValueError:
         return value
     return to_business_datetime(instant).replace(microsecond=0).isoformat()
+
+
+def _format_operator_result_payload(result_payload: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(result_payload, Mapping):
+        return None
+    payload = dict(result_payload)
+    for field_name in ("finished_at", "loaded_at", "refreshed_at", "last_loaded_at"):
+        if field_name in payload:
+            payload[field_name] = _format_optional_business_timestamp(str(payload.get(field_name) or "") or None)
+    return payload
+
+
+def _build_refresh_result_payload(refresh_result: Any) -> dict[str, Any]:
+    return {
+        "technical_status": "success",
+        "semantic_status": str(getattr(refresh_result, "semantic_status", "") or "warning"),
+        "semantic_label": str(getattr(refresh_result, "semantic_label", "") or "Внимание"),
+        "semantic_tone": str(getattr(refresh_result, "semantic_tone", "") or "warning"),
+        "semantic_reason": str(getattr(refresh_result, "semantic_reason", "") or ""),
+        "snapshot_id": str(getattr(refresh_result, "snapshot_id", "") or ""),
+        "as_of_date": str(getattr(refresh_result, "as_of_date", "") or ""),
+        "refreshed_at": str(getattr(refresh_result, "refreshed_at", "") or ""),
+    }
+
+
+def _build_refresh_error_payload(
+    *,
+    requested_as_of_date: str | None,
+    finished_at: str,
+    error: str,
+) -> dict[str, Any]:
+    return {
+        "technical_status": "error",
+        "semantic_status": "error",
+        "semantic_label": "Ошибка",
+        "semantic_tone": "error",
+        "semantic_reason": str(error or "").strip() or "refresh завершился ошибкой",
+        "snapshot_id": "",
+        "as_of_date": requested_as_of_date or "",
+        "finished_at": finished_at,
+    }
+
+
+def _build_load_result_payload(
+    *,
+    plan: SheetVitrinaV1Envelope,
+    refresh_status: Any,
+    bridge_result: Mapping[str, Any],
+    previous_load_state: Any,
+    finished_at: str,
+) -> dict[str, Any]:
+    previous_fingerprint = str(getattr(previous_load_state, "plan_fingerprint", "") or "").strip()
+    current_fingerprint = _plan_fingerprint(plan)
+    sheet_verified = _bridge_result_has_sheet_verification(bridge_result)
+    if not sheet_verified:
+        change_status = "not_verified"
+        semantic_status = "warning"
+        semantic_reason = "sheet bridge завершился, но не вернул верифицируемое состояние листов"
+    elif not previous_fingerprint:
+        change_status = "not_verified"
+        semantic_status = "warning"
+        semantic_reason = "sheet bridge завершился, но предыдущая отправка для сравнения отсутствует"
+    elif previous_fingerprint == current_fingerprint:
+        change_status = "unchanged"
+        semantic_status = "warning"
+        semantic_reason = "sheet bridge завершился, но snapshot совпадает с последней отправкой"
+    else:
+        change_status = "updated"
+        semantic_status = "success"
+        semantic_reason = "sheet bridge завершился; данные изменились относительно последней отправки"
+    return {
+        "technical_status": "success",
+        "semantic_status": semantic_status,
+        "semantic_label": _semantic_status_label(semantic_status),
+        "semantic_tone": semantic_status,
+        "semantic_reason": semantic_reason,
+        "change_status": change_status,
+        "change_label": _load_change_label(change_status),
+        "change_verified": change_status == "updated",
+        "snapshot_id": plan.snapshot_id,
+        "as_of_date": plan.as_of_date,
+        "refreshed_at": str(getattr(refresh_status, "refreshed_at", "") or ""),
+        "finished_at": finished_at,
+        "plan_fingerprint": current_fingerprint,
+        "last_loaded_at": str(getattr(previous_load_state, "loaded_at", "") or ""),
+    }
+
+
+def _build_load_error_payload(
+    *,
+    requested_as_of_date: str | None,
+    plan: SheetVitrinaV1Envelope | None,
+    refresh_status: Any | None,
+    finished_at: str,
+    error: str,
+) -> dict[str, Any]:
+    return {
+        "technical_status": "error",
+        "semantic_status": "error",
+        "semantic_label": "Ошибка",
+        "semantic_tone": "error",
+        "semantic_reason": str(error or "").strip() or "load завершился ошибкой",
+        "change_status": "error",
+        "change_label": _load_change_label("error"),
+        "change_verified": False,
+        "snapshot_id": plan.snapshot_id if plan is not None else "",
+        "as_of_date": plan.as_of_date if plan is not None else (requested_as_of_date or ""),
+        "refreshed_at": str(getattr(refresh_status, "refreshed_at", "") or "") if refresh_status is not None else "",
+        "finished_at": finished_at,
+        "plan_fingerprint": _plan_fingerprint(plan) if plan is not None else "",
+        "last_loaded_at": "",
+    }
+
+
+def _build_auto_update_result_payload(
+    *,
+    refresh_payload: Mapping[str, Any] | None,
+    load_payload: Mapping[str, Any] | None,
+    technical_status: str,
+    finished_at: str,
+    error: str | None,
+) -> dict[str, Any]:
+    refresh_semantic = str((refresh_payload or {}).get("semantic_status") or "warning")
+    load_semantic = str((load_payload or {}).get("semantic_status") or "warning")
+    semantic_status = (
+        "error"
+        if technical_status == "error"
+        else _worst_tone([refresh_semantic, load_semantic])
+    )
+    semantic_reason = (
+        str(error or "").strip()
+        if technical_status == "error"
+        else " | ".join(
+            part
+            for part in [
+                f"refresh: {str((refresh_payload or {}).get('semantic_reason') or '').strip()}",
+                f"load: {str((load_payload or {}).get('semantic_reason') or '').strip()}",
+            ]
+            if not part.endswith(": ")
+        )
+    )
+    return {
+        "technical_status": technical_status,
+        "semantic_status": semantic_status,
+        "semantic_label": _semantic_status_label(semantic_status),
+        "semantic_tone": semantic_status,
+        "semantic_reason": semantic_reason or ("auto_update завершился" if technical_status == "success" else "auto_update завершился ошибкой"),
+        "snapshot_id": str((load_payload or refresh_payload or {}).get("snapshot_id") or ""),
+        "as_of_date": str((load_payload or refresh_payload or {}).get("as_of_date") or ""),
+        "refreshed_at": str((load_payload or refresh_payload or {}).get("refreshed_at") or ""),
+        "finished_at": finished_at,
+    }
+
+
+def _bridge_result_has_sheet_verification(bridge_result: Mapping[str, Any]) -> bool:
+    write_result = bridge_result.get("write_result")
+    sheet_state = bridge_result.get("sheet_state")
+    if not isinstance(write_result, Mapping) or not isinstance(sheet_state, Mapping):
+        return False
+    written_sheets = write_result.get("sheets")
+    state_sheets = sheet_state.get("sheets")
+    return isinstance(written_sheets, list) and bool(written_sheets) and isinstance(state_sheets, list) and bool(state_sheets)
+
+
+def _plan_fingerprint(plan: SheetVitrinaV1Envelope | None) -> str:
+    if plan is None:
+        return ""
+    payload = json.dumps(asdict(plan), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _semantic_status_label(status: str) -> str:
+    if status == "success":
+        return "Успешно"
+    if status == "error":
+        return "Ошибка"
+    return "Внимание"
+
+
+def _load_change_label(change_status: str) -> str:
+    if change_status == "updated":
+        return "Данные изменились"
+    if change_status == "unchanged":
+        return "Без изменений"
+    if change_status == "error":
+        return "Ошибка"
+    return "Не подтверждено"
 
 
 def _auto_update_status_label(value: str | None) -> str:
@@ -965,6 +1324,7 @@ class SheetVitrinaV1OperatorJobStore:
         *,
         operations: tuple[str, ...],
         preferred_as_of_date: str | None = None,
+        strict_preferred_as_of_date: bool = False,
     ) -> dict[str, Any] | None:
         normalized_operations = {str(value).strip() for value in operations if str(value).strip()}
         normalized_as_of_date = str(preferred_as_of_date or "").strip()
@@ -986,6 +1346,8 @@ class SheetVitrinaV1OperatorJobStore:
             ]
             if preferred:
                 candidates = preferred
+            elif strict_preferred_as_of_date:
+                return None
         selected = max(
             enumerate(candidates),
             key=lambda item: (
@@ -1303,11 +1665,43 @@ def _build_web_vitrina_log_block(
     *,
     latest_job: Mapping[str, Any] | None,
     job_path: str,
+    persisted_refresh_status: Any | None = None,
 ) -> dict[str, Any]:
     if latest_job is None:
-        return _empty_web_vitrina_activity_surface()["log_block"]
+        semantic_label = (
+            str(getattr(persisted_refresh_status, "semantic_label", "") or "Нет transient-лога")
+            if persisted_refresh_status is not None
+            else "Нет данных"
+        )
+        semantic_tone = (
+            str(getattr(persisted_refresh_status, "semantic_tone", "") or "neutral")
+            if persisted_refresh_status is not None
+            else "neutral"
+        )
+        semantic_reason = (
+            str(getattr(persisted_refresh_status, "semantic_reason", "") or "")
+            if persisted_refresh_status is not None
+            else ""
+        )
+        return {
+            "title": "Лог",
+            "subtitle": "Transient refresh-log для текущего snapshot недоступен",
+            "status_label": semantic_label,
+            "tone": semantic_tone,
+            "detail": semantic_reason,
+            "preview_lines": [],
+            "line_count": 0,
+            "download_path": "",
+            "log_filename": "",
+            "empty_message": "Persisted snapshot truth сохранён, но transient refresh-log для этого snapshot недоступен.",
+        }
     job_payload = _with_job_urls_from_job_snapshot(latest_job, job_path)
-    tone = "success" if str(job_payload.get("status", "")) == "success" else "error"
+    semantic_status = str(((job_payload.get("result") or {}).get("semantic_status")) or "").strip()
+    tone = semantic_status if semantic_status in {"success", "warning", "error"} else (
+        "success" if str(job_payload.get("status", "")) == "success" else "error"
+    )
+    status_label = str(((job_payload.get("result") or {}).get("semantic_label")) or "").strip()
+    detail_reason = str(((job_payload.get("result") or {}).get("semantic_reason")) or "").strip()
     preview_lines = [str(line) for line in (job_payload.get("log_lines") or []) if str(line).strip()]
     line_limit = 240
     truncated = len(preview_lines) > line_limit
@@ -1318,12 +1712,14 @@ def _build_web_vitrina_log_block(
         str(job_payload.get("operation", "")),
         str(job_payload.get("finished_at") or job_payload.get("started_at") or ""),
     ]
+    if detail_reason:
+        detail_parts.append(detail_reason)
     if truncated:
         detail_parts.append(f"показаны последние {line_limit} строк")
     return {
         "title": "Лог",
         "subtitle": "Последний релевантный refresh-run",
-        "status_label": "Успешно" if tone == "success" else "Ошибка",
+        "status_label": status_label or _semantic_status_label(tone),
         "tone": tone,
         "detail": " · ".join(part for part in detail_parts if part),
         "preview_lines": preview_lines,
@@ -1396,21 +1792,21 @@ def _build_endpoint_summary_item(
             "endpoint_id": source_key,
             "endpoint_label": endpoint_label,
             "source_key": source_key,
-            "status_label": "Ошибка",
-            "tone": "error",
+            "status_label": "Внимание",
+            "tone": "warning",
             "detail": "нет подтверждённой записи по endpoint в server-owned state",
         }
-    tone = "success" if bool(record.get("success")) else "error"
-    detail_parts = [str(record.get("slot_summary") or "").strip()]
+    tone = str(record.get("tone") or "warning")
+    detail_parts = [str(record.get("detail") or "").strip()]
     note = str(record.get("note") or "").strip()
-    if note and tone == "error":
+    if note and note not in detail_parts:
         detail_parts.append(note)
     detail = " · ".join(part for part in detail_parts if part)
     return {
         "endpoint_id": source_key,
         "endpoint_label": endpoint_label,
         "source_key": source_key,
-        "status_label": "Успешно" if tone == "success" else "Ошибка",
+        "status_label": str(record.get("status_label") or _semantic_status_label(tone)),
         "tone": tone,
         "detail": detail,
     }
@@ -1421,6 +1817,10 @@ def _extract_upload_source_records_from_job(
 ) -> dict[str, dict[str, Any]]:
     if latest_job is None:
         return {}
+    result_payload = latest_job.get("result") or {}
+    source_outcomes = result_payload.get("source_outcomes")
+    if isinstance(source_outcomes, list) and source_outcomes:
+        return _extract_source_records_from_outcomes(source_outcomes)
     records: dict[str, dict[str, Any]] = {}
     for line in latest_job.get("log_lines") or []:
         parsed = _parse_log_event_line(str(line))
@@ -1438,40 +1838,28 @@ def _extract_upload_source_records_from_job(
             temporal_slot=str(fields.get("temporal_slot") or ""),
             kind=str(fields.get("kind") or ""),
             note=str(fields.get("note") or ""),
+            requested_count=_coerce_int(fields.get("requested_count")),
+            covered_count=_coerce_int(fields.get("covered_count")),
         )
     return _finalize_source_records(records)
 
 
-def _extract_update_source_records_from_snapshot(
-    *,
-    runtime: RegistryUploadDbBackedRuntime,
-    snapshot_as_of_date: str,
+def _extract_source_records_from_outcomes(
+    source_outcomes: list[Mapping[str, Any]] | None,
 ) -> dict[str, dict[str, Any]]:
-    try:
-        plan = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=snapshot_as_of_date)
-    except ValueError:
-        return {}
-    status_sheet = _find_sheet(plan, "STATUS")
-    if status_sheet is None:
-        return {}
     records: dict[str, dict[str, Any]] = {}
-    for row in status_sheet.rows:
-        if len(row) < 11:
+    for outcome in source_outcomes or []:
+        source_key = str(outcome.get("source_key") or "").strip()
+        if not source_key:
             continue
-        source_key = str(row[0] or "")
-        if source_key in {"registry_upload_current_state", DELIVERY_CONTRACT_VERSION}:
-            continue
-        source_name, temporal_slot = _split_temporal_source_key(source_key)
-        if not source_name:
-            continue
-        _accumulate_source_record(
-            records=records,
-            source_key=source_name,
-            temporal_slot=temporal_slot,
-            kind=str(row[1] or ""),
-            note=str(row[10] or ""),
-        )
-    return _finalize_source_records(records)
+        records[source_key] = {
+            "status": str(outcome.get("status") or "warning"),
+            "tone": str(outcome.get("tone") or outcome.get("status") or "warning"),
+            "status_label": str(outcome.get("label") or _semantic_status_label(str(outcome.get("status") or "warning"))),
+            "detail": str(outcome.get("reason") or "").strip(),
+            "note": "",
+        }
+    return records
 
 
 def _ordered_activity_source_keys(
@@ -1491,18 +1879,34 @@ def _accumulate_source_record(
     temporal_slot: str,
     kind: str,
     note: str,
+    requested_count: int = 0,
+    covered_count: int = 0,
 ) -> None:
     bucket = records.setdefault(
         source_key,
         {
-            "slot_statuses": {},
-            "notes": [],
+            "slot_records": [],
         },
     )
     normalized_slot = temporal_slot or "snapshot"
-    bucket["slot_statuses"][normalized_slot] = _binary_status_from_kind(kind)
-    if note:
-        bucket["notes"].append(str(note))
+    status = _semantic_status_from_kind(
+        kind=kind,
+        note=note,
+        requested_count=requested_count,
+        covered_count=covered_count,
+    )
+    bucket["slot_records"].append(
+        {
+            "slot": normalized_slot,
+            "status": status,
+            "reason": _slot_reason_from_log_record(
+                kind=kind,
+                note=note,
+                requested_count=requested_count,
+                covered_count=covered_count,
+            ),
+        }
+    )
 
 
 def _finalize_source_records(
@@ -1510,30 +1914,82 @@ def _finalize_source_records(
 ) -> dict[str, dict[str, Any]]:
     finalized: dict[str, dict[str, Any]] = {}
     for source_key, record in records.items():
-        slot_statuses = {
-            str(slot): str(status)
-            for slot, status in (record.get("slot_statuses") or {}).items()
-        }
-        if not slot_statuses:
+        slot_records = list(record.get("slot_records") or [])
+        if not slot_records:
             continue
+        tone = _worst_tone(str(item.get("status") or "warning") for item in slot_records)
+        detail = " · ".join(
+            f"{_slot_label(str(item.get('slot') or 'snapshot'))}: {str(item.get('reason') or _semantic_status_label(str(item.get('status') or 'warning')))}"
+            for item in sorted(slot_records, key=lambda item: _slot_sort_key(str(item.get("slot") or "")))
+        )
         finalized[source_key] = {
-            "success": all(status == "success" for status in slot_statuses.values()),
-            "slot_summary": _format_slot_summary(slot_statuses),
-            "note": _first_distinct_note(record.get("notes") or []),
+            "status": tone,
+            "tone": tone,
+            "status_label": _semantic_status_label(tone),
+            "detail": detail,
+            "note": "",
         }
     return finalized
 
 
-def _binary_status_from_kind(kind: str) -> str:
-    return "success" if str(kind).strip().lower() == "success" else "error"
+def _semantic_status_from_kind(
+    *,
+    kind: str,
+    note: str,
+    requested_count: int,
+    covered_count: int,
+) -> str:
+    normalized_kind = str(kind).strip().lower()
+    if normalized_kind in {"error", "closure_exhausted"}:
+        return "error"
+    if normalized_kind in {
+        "missing",
+        "incomplete",
+        "not_available",
+        "blocked",
+        "closure_pending",
+        "closure_retrying",
+        "closure_rate_limited",
+        "not_found",
+    }:
+        return "warning"
+    if normalized_kind != "success":
+        return "warning"
+    if _note_requires_warning(note):
+        return "warning"
+    if requested_count > 0 and covered_count < requested_count:
+        return "warning"
+    return "success"
 
 
-def _format_slot_summary(slot_statuses: Mapping[str, str]) -> str:
-    ordered_slots = sorted(slot_statuses.items(), key=lambda item: _slot_sort_key(item[0]))
-    return " · ".join(
-        f"{_slot_label(slot)}: {'Успешно' if status == 'success' else 'Ошибка'}"
-        for slot, status in ordered_slots
-    )
+def _slot_reason_from_log_record(
+    *,
+    kind: str,
+    note: str,
+    requested_count: int,
+    covered_count: int,
+) -> str:
+    normalized_kind = str(kind).strip().lower()
+    human_note = _humanize_note(note)
+    if normalized_kind == "success" and requested_count > 0 and covered_count < requested_count:
+        return _coverage_reason(requested_count=requested_count, covered_count=covered_count)
+    if normalized_kind == "incomplete":
+        return _coverage_reason(requested_count=requested_count, covered_count=covered_count)
+    if normalized_kind in {"closure_pending", "closure_retrying", "closure_rate_limited"} and human_note:
+        return human_note
+    if normalized_kind == "closure_exhausted":
+        return human_note or "retry исчерпан"
+    if human_note:
+        return human_note
+    if normalized_kind == "success":
+        return "обновлено"
+    if normalized_kind == "missing":
+        return "payload не materialized"
+    if normalized_kind == "not_available":
+        return "слот не обновлялся"
+    if normalized_kind == "not_found":
+        return "источник не вернул данные"
+    return normalized_kind or "нужна проверка"
 
 
 def _slot_sort_key(slot: str) -> tuple[int, str]:
@@ -1554,6 +2010,143 @@ def _slot_label(slot: str) -> str:
     if slot == "snapshot":
         return "snapshot"
     return slot
+
+
+def _coverage_reason(*, requested_count: int, covered_count: int) -> str:
+    if requested_count <= 0:
+        return "покрытие не подтверждено"
+    if covered_count <= 0:
+        return f"нет покрытия по {requested_count} позициям"
+    return f"покрыто {covered_count} из {requested_count}"
+
+
+def _coerce_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    try:
+        return int(text)
+    except ValueError:
+        return 0
+
+
+def _humanize_note(note: str) -> str:
+    normalized = str(note or "").strip()
+    if not normalized:
+        return ""
+    replacements = (
+        (
+            "resolution_rule=accepted_closed_preserved_after_invalid_attempt",
+            "сохранён ранее принятый closed snapshot после невалидной попытки",
+        ),
+        (
+            "resolution_rule=accepted_current_preserved_after_invalid_attempt",
+            "сохранён ранее принятый current snapshot после невалидной попытки",
+        ),
+        (
+            "resolution_rule=accepted_closed_from_prior_current_snapshot",
+            "использован ранее принятый current snapshot предыдущего дня",
+        ),
+        (
+            "resolution_rule=accepted_closed_from_prior_current_cache",
+            "использован ранее принятый current snapshot из runtime cache",
+        ),
+        (
+            "resolution_rule=accepted_closed_runtime_snapshot",
+            "использован ранее принятый closed-day snapshot",
+        ),
+        (
+            "resolution_rule=accepted_closed_from_interval_replay",
+            "использован сохранённый closed-day snapshot из interval replay",
+        ),
+        (
+            "resolution_rule=accepted_prior_current_runtime_cache",
+            "использован сохранённый current snapshot из runtime cache",
+        ),
+        (
+            "resolution_rule=exact_date_stocks_history_runtime_cache",
+            "использован exact-date runtime cache по stocks",
+        ),
+        (
+            "resolution_rule=exact_date_promo_current_runtime_cache",
+            "использован exact-date runtime cache по promo",
+        ),
+        (
+            "resolution_rule=exact_date_runtime_cache",
+            "использован exact-date runtime cache",
+        ),
+        (
+            "invalid_exact_snapshot=zero_filled_seller_funnel_snapshot",
+            "нулевой seller_funnel snapshot отклонён",
+        ),
+        (
+            "invalid_exact_snapshot=zero_filled_web_source_snapshot",
+            "нулевой web_source snapshot отклонён",
+        ),
+        (
+            "invalid_exact_snapshot=zero_filled_prices_snapshot",
+            "нулевой prices snapshot отклонён",
+        ),
+        (
+            "invalid_exact_snapshot=zero_filled_ads_bids_snapshot",
+            "нулевой ads_bids snapshot отклонён",
+        ),
+        (
+            "invalid_exact_snapshot=promo_live_source_incomplete",
+            "promo snapshot отклонён как incomplete",
+        ),
+        ("no payload returned", "источник не вернул payload"),
+    )
+    for marker, message in replacements:
+        if marker in normalized:
+            return message
+    if "closure_state=closure_retrying" in normalized:
+        return "closed-day snapshot ещё не принят; будет retry"
+    if "closure_state=closure_pending" in normalized:
+        return "closed-day snapshot ожидает retry"
+    if "closure_state=closure_rate_limited" in normalized:
+        return "источник ограничил запросы; retry запланирован"
+    if "closure_state=closure_exhausted" in normalized:
+        return "retry для closed-day snapshot исчерпан"
+    if "resolution_rule=latest_effective_from<=slot_date" in normalized:
+        return ""
+    return normalized
+
+
+def _note_requires_warning(note: str) -> bool:
+    normalized = str(note or "").strip()
+    if not normalized:
+        return False
+    success_markers = {
+        "resolution_rule=accepted_closed_current_attempt",
+        "resolution_rule=accepted_current_current_attempt",
+        "resolution_rule=latest_effective_from<=slot_date",
+    }
+    if any(marker in normalized for marker in success_markers):
+        return False
+    warning_markers = {
+        "runtime_cache",
+        "preserved_after_invalid_attempt",
+        "resolution_rule=accepted_closed_from_",
+        "resolution_rule=accepted_closed_runtime_snapshot",
+        "resolution_rule=accepted_prior_current_runtime_cache",
+    }
+    return any(marker in normalized for marker in warning_markers)
+
+
+def _worst_tone(statuses: Iterable[str]) -> str:
+    values = [str(item or "").strip() for item in statuses]
+    if any(item == "error" for item in values):
+        return "error"
+    if any(item == "warning" for item in values):
+        return "warning"
+    return "success"
 
 
 def _first_distinct_note(notes: list[str]) -> str:

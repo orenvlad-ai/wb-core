@@ -84,8 +84,14 @@ def main() -> None:
         if [slot.slot_key for slot in payload.meta.temporal_slots] != ["yesterday_closed", "today_current"]:
             raise AssertionError(f"meta temporal slots mismatch, got {payload.meta}")
 
-        if payload.status_summary.refresh_status != "success":
+        if payload.status_summary.refresh_status != "warning":
             raise AssertionError(f"status_summary.refresh_status mismatch, got {payload.status_summary}")
+        if payload.status_summary.refresh_status_label != "Внимание":
+            raise AssertionError(f"status_summary.refresh_status_label mismatch, got {payload.status_summary}")
+        if payload.status_summary.refresh_status_tone != "warning":
+            raise AssertionError(f"status_summary.refresh_status_tone mismatch, got {payload.status_summary}")
+        if "требуют внимания" not in payload.status_summary.refresh_status_reason:
+            raise AssertionError(f"status_summary.refresh_status_reason mismatch, got {payload.status_summary}")
         if payload.status_summary.read_model != "persisted_ready_snapshot":
             raise AssertionError(f"status_summary.read_model mismatch, got {payload.status_summary}")
         if payload.status_summary.source_policy_counts != {
@@ -94,6 +100,12 @@ def main() -> None:
             "manual_overlay": 1,
         }:
             raise AssertionError(f"status_summary.source_policy_counts mismatch, got {payload.status_summary}")
+        if payload.status_summary.refresh_outcome_counts != {
+            "success": 1,
+            "warning": 2,
+            "error": 0,
+        }:
+            raise AssertionError(f"status_summary.refresh_outcome_counts mismatch, got {payload.status_summary}")
 
         schema_columns = {column.column_id: column for column in payload.schema.columns}
         for required_column in ("scope_kind", "scope_label", "metric_key", "section", "date:2026-04-19", "date:2026-04-20"):

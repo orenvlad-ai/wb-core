@@ -177,8 +177,10 @@ def main() -> None:
                 raise AssertionError(f"auto update must return 200, got {refresh_status}")
             if refresh_payload.get("operation") != "auto_update":
                 raise AssertionError("auto update must expose the combined operation")
-            if refresh_payload.get("status") != "success":
-                raise AssertionError("auto update must finish successfully")
+            if refresh_payload.get("technical_status") != "success":
+                raise AssertionError("auto update must keep the technical completion flag")
+            if refresh_payload.get("status") != "error" or refresh_payload.get("semantic_status") != "error":
+                raise AssertionError("auto update must expose the semantic failure on the combined route")
             if refresh_payload.get("auto_update_started_at") != AUTO_STARTED_AT:
                 raise AssertionError("auto update must expose the start timestamp")
             if refresh_payload.get("auto_update_finished_at") != AUTO_FINISHED_AT:
@@ -189,6 +191,8 @@ def main() -> None:
                 raise AssertionError("auto update must run the sheet bridge")
             if refresh_payload.get("manual_context") != _expected_manual_context():
                 raise AssertionError("auto update must not pollute manual operator timestamps")
+            if refresh_payload.get("semantic_status") != "error":
+                raise AssertionError(f"auto update must surface semantic error when upstream sources are materially bad, got {refresh_payload}")
             if load_runner.calls != [str(refresh_payload["snapshot_id"])]:
                 raise AssertionError("auto update must write the prepared snapshot exactly once")
             _assert_counting_calls(counters)
@@ -198,8 +202,19 @@ def main() -> None:
                 raise AssertionError(f"status must return 200 after auto update, got {status_code}")
             if status_payload.get("snapshot_id") != refresh_payload.get("snapshot_id"):
                 raise AssertionError("status must point to the persisted snapshot created by auto update")
-            if status_payload.get("server_context") != _expected_server_context():
-                raise AssertionError("status must surface the persisted auto-update metadata")
+            server_context = status_payload.get("server_context") or {}
+            if server_context.get("last_auto_run_status") != "success":
+                raise AssertionError("status must keep the technical auto-run state")
+            if server_context.get("last_auto_run_status_label") != "Ошибка":
+                raise AssertionError(f"status must surface the semantic auto-run label, got {server_context}")
+            if server_context.get("last_auto_run_technical_status_label") != "успех":
+                raise AssertionError(f"status must keep the technical auto-run label separately, got {server_context}")
+            if "предыдущая отправка для сравнения отсутствует" not in str(server_context.get("last_auto_run_status_reason", "")):
+                raise AssertionError(f"status must explain why auto-run is warning, got {server_context}")
+            if "Ошибки по" not in str(server_context.get("last_auto_run_status_reason", "")):
+                raise AssertionError(f"status must explain the upstream source failures, got {server_context}")
+            if (server_context.get("last_auto_run_result") or {}).get("semantic_status") != "error":
+                raise AssertionError(f"status must persist the semantic auto-run result, got {server_context}")
             if status_payload.get("manual_context") != _expected_manual_context():
                 raise AssertionError("status must keep manual timestamps empty after auto update")
 
@@ -212,39 +227,12 @@ def main() -> None:
             thread.join(timeout=5)
 
 
-def _expected_server_context() -> dict[str, str]:
-    return {
-        "business_timezone": "Asia/Yekaterinburg",
-        "business_now": "2026-04-13T13:00:00+05:00",
-        "default_as_of_date": AS_OF_DATE,
-        "today_current_date": TODAY_CURRENT_DATE,
-        "daily_refresh_business_time": "11:00, 20:00 Asia/Yekaterinburg",
-        "daily_refresh_systemd_time": "06:00:00 UTC, 15:00:00 UTC",
-        "daily_refresh_systemd_oncalendar": "*-*-* 06:00:00 UTC; *-*-* 15:00:00 UTC",
-        "daily_auto_action": "загрузка данных + отправка данных в таблицу",
-        "daily_auto_description": "Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу",
-        "daily_auto_trigger_name": "wb-core-sheet-vitrina-refresh.timer",
-        "daily_auto_trigger_description": (
-            "wb-core-sheet-vitrina-refresh.timer -> POST /v1/sheet-vitrina-v1/refresh "
-            "(auto_load=true) в 11:00, 20:00 Asia/Yekaterinburg"
-        ),
-        "retry_runner_description": (
-            "Persisted retry runner: дожимает due yesterday_closed для historical/date-period families "
-            "и same-day today_current только для WB API current-snapshot-only families; manual refresh такие хвосты не создаёт."
-        ),
-        "last_auto_run_status": "success",
-        "last_auto_run_status_label": "успех",
-        "last_auto_run_time": "2026-04-13T17:06:00+05:00",
-        "last_auto_run_finished_at": "2026-04-13T17:07:10+05:00",
-        "last_successful_auto_update_at": "2026-04-13T17:07:10+05:00",
-        "last_auto_run_error": "",
-    }
-
-
-def _expected_manual_context() -> dict[str, str]:
+def _expected_manual_context() -> dict[str, object]:
     return {
         "last_successful_manual_refresh_at": "",
         "last_successful_manual_load_at": "",
+        "last_manual_refresh_result": None,
+        "last_manual_load_result": None,
     }
 
 

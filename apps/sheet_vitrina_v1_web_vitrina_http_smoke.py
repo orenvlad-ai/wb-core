@@ -185,9 +185,13 @@ def main() -> None:
             if period_composition_payload.get("historical_access", {}).get("selected_date_to") != "2026-04-20":
                 raise AssertionError(f"web-vitrina period selected_date_to mismatch, got {period_composition_payload}")
             activity_surface = composition_payload.get("activity_surface") or {}
-            expected_download_path = f"/v1/sheet-vitrina-v1/job?job_id={seeded_job['job_id']}&format=text&download=1"
-            if activity_surface.get("log_block", {}).get("download_path") != expected_download_path:
-                raise AssertionError(f"web-vitrina log download path mismatch, got {activity_surface}")
+            log_block = activity_surface.get("log_block", {})
+            if log_block.get("download_path") != "":
+                raise AssertionError(f"web-vitrina log block must not fake a stale job download path, got {activity_surface}")
+            if log_block.get("tone") != "error":
+                raise AssertionError(f"web-vitrina log block must surface persisted warning/error fallback, got {activity_surface}")
+            if "Transient refresh-log" not in str(log_block.get("subtitle", "")):
+                raise AssertionError(f"web-vitrina log block subtitle mismatch, got {activity_surface}")
             upload_items = activity_surface.get("upload_summary", {}).get("items") or []
             update_items = activity_surface.get("update_summary", {}).get("items") or []
             if [item.get("endpoint_id") for item in upload_items] != [item.get("endpoint_id") for item in update_items]:
@@ -196,6 +200,8 @@ def main() -> None:
                 raise AssertionError(f"upload summary binary status mismatch, got {activity_surface}")
             if [item.get("status_label") for item in update_items] != ["Успешно", "Успешно", "Ошибка"]:
                 raise AssertionError(f"update summary binary status mismatch, got {activity_surface}")
+            if composition_payload.get("status_badge", {}).get("tone") != "error":
+                raise AssertionError(f"web-vitrina page composition must reflect semantic error tone, got {composition_payload}")
 
             page_status, page_html = _get_text(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}")
             if page_status != 200:

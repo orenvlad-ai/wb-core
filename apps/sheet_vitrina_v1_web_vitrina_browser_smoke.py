@@ -1060,7 +1060,19 @@ def _stub_sheet_refresh_request(entrypoint, runtime, *, as_of_date=None, log=Non
         refreshed_at=refreshed_at,
         plan=plan,
     )
-    runtime.save_sheet_vitrina_manual_refresh_success(refreshed_at=refresh_result.refreshed_at)
+    runtime.save_sheet_vitrina_manual_refresh_result(
+        result_payload={
+            "technical_status": "success",
+            "semantic_status": refresh_result.semantic_status,
+            "semantic_label": refresh_result.semantic_label,
+            "semantic_tone": refresh_result.semantic_tone,
+            "semantic_reason": refresh_result.semantic_reason,
+            "snapshot_id": refresh_result.snapshot_id,
+            "as_of_date": refresh_result.as_of_date,
+            "refreshed_at": refresh_result.refreshed_at,
+        },
+        refreshed_at=refresh_result.refreshed_at,
+    )
     emit(f"refresh_stub_finish snapshot_id={refresh_result.snapshot_id} refreshed_at={refresh_result.refreshed_at}")
     payload = asdict(refresh_result)
     payload["server_context"] = entrypoint.build_sheet_server_context()

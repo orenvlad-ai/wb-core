@@ -24,6 +24,9 @@ class WebVitrinaContractMeta:
 @dataclass(frozen=True)
 class WebVitrinaContractStatusSummary:
     refresh_status: str
+    refresh_status_label: str
+    refresh_status_tone: str
+    refresh_status_reason: str
     read_model: str
     source_sheet_name: str
     bundle_version: str
@@ -41,6 +44,7 @@ class WebVitrinaContractStatusSummary:
     source_policy_counts: dict[str, int]
     source_count: int
     data_sheet_row_count: int
+    refresh_outcome_counts: dict[str, int]
 
 
 @dataclass(frozen=True)

@@ -146,11 +146,11 @@ update_note: "Обновлён под web-vitrina phase-4 checkpoint: existing `
   - `422` для contract-level rejection после parse/validation
 - Для `sheet_vitrina_v1` тот же entrypoint обслуживает narrow operator surface в двух блоках:
   - `POST /v1/sheet-vitrina-v1/refresh` = existing heavy server-side action
-  - `POST /v1/sheet-vitrina-v1/load` = thin operator action, который пишет уже готовый snapshot в live sheet через existing bound Apps Script bridge
+  - `POST /v1/sheet-vitrina-v1/load` = thin operator action, который пишет уже готовый snapshot в live sheet через existing bound Apps Script bridge, но operator-facing result отдельно distinguishes technical bridge completion from confirmed sheet update
   - `GET /v1/sheet-vitrina-v1/daily-report` = cheap read-only JSON summary для compact блока `Ежедневные отчёты`
   - `GET /v1/sheet-vitrina-v1/stock-report` = cheap read-only JSON summary для compact блока `Отчёт по остаткам`
   - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
-  - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result
+  - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result, where root `status` is semantic snapshot outcome rather than mere ready-snapshot existence
   - `GET /v1/sheet-vitrina-v1/job` = cheap poll/read surface для live operator log и async action state
 - `GET /sheet-vitrina-v1/operator` = simple repo-owned page с top-level tabs `Обновление данных` / `Расчёт поставок` / `Отчёты`
   - route intentionally остаётся orchestration-first control surface и не получает новый heavy web-vitrina block внутрь existing HTML shell
@@ -237,6 +237,11 @@ update_note: "Обновлён под web-vitrina phase-4 checkpoint: existing `
   - `apps/sheet_vitrina_v1_temporal_closure_retry_live.py`
   - runner вызывает existing runtime path `run_sheet_temporal_closure_retry_cycle(...)`, выбирает due `yesterday_closed` historical/date-period pairs plus due same-day current-only captures и безопасно reuses existing refresh/load contour вместо нового parallel app.
 - Operator page не invent-ит новый heavy route: UI запускает existing heavy `POST /v1/sheet-vitrina-v1/refresh` отдельно от narrow `POST /v1/sheet-vitrina-v1/load`, а live progress читает только через cheap poll surface `GET /v1/sheet-vitrina-v1/job`.
+- Truth taxonomy на этом HTTP boundary теперь intentionally split:
+  - `technical_status` = completed/failed orchestration step;
+  - `semantic_status` = `success / warning / error` for what really refreshed/updated;
+  - `warning` covers empty/zero/unchanged/stale/not_refreshed/preserved/cache-derived/retrying/not_verified outcomes and must not be collapsed into ordinary green success;
+  - final reporting truth lives in persisted ready-snapshot semantic summary plus persisted manual/auto/load result state, not only in transient in-memory jobs.
 - Browser-side operator state remains strictly page-owned and non-persistent on the server:
   - top-level tab, `Отчёты` / `Расчёт поставок` subsection and stock-report SKU selection are stored only in namespaced `localStorage`;
   - broken, outdated or foreign storage payload must fall back to the same default UI state without breaking the page;
@@ -275,7 +280,7 @@ update_note: "Обновлён под web-vitrina phase-4 checkpoint: existing `
   - server хранит и публикует отдельный XLSX на каждый округ, а не один общий recommendation workbook;
   - district XLSX содержит district identification + compact operator rows `nmId / SKU / Количество к поставке` именно по фактически аллоцированному количеству после ограничения `stock_ff`.
 - Current repo state не имел другого authoritative source для legacy parity term `FO_INBOUND_FF_TO_WB`, поэтому entrypoint получил narrow explicit upload contract `Товары в пути от ФФ на Wildberries`; silent drop этого члена формулы считается некорректным.
-- Operator page keeps narrow Russian chrome for operator-visible labels: compact manual block `Ручная загрузка данных` with embedded actions `Загрузить данные` / `Отправить данные` plus only two truthful persisted manual-success fields `Последняя удачная загрузка` / `Последняя удачная отправка`, separate `Лог` block and separate compact auto block `Автообновления`; page reload must not present persisted refresh metadata as standalone proof of the last manual sheet write.
+- Operator page keeps narrow Russian chrome for operator-visible labels: compact manual block `Ручная загрузка данных` with embedded actions `Загрузить данные` / `Отправить данные`, two persisted manual-success timestamp fields `Последняя удачная загрузка` / `Последняя удачная отправка` plus short persisted semantic summaries for the latest manual refresh/load result, separate `Лог` block and separate compact auto block `Автообновления`; page reload must not present persisted refresh metadata as standalone proof of the last manual sheet write.
 - Operator page добавляет отдельный top-level tab `Отчёты` с одним sibling selector по образцу supply tab:
   - `Ежедневные отчёты`
   - `Отчёт по остаткам`
@@ -405,11 +410,15 @@ update_note: "Обновлён под web-vitrina phase-4 checkpoint: existing `
   - `retry_runner_description`
   - `last_auto_run_status`
   - `last_auto_run_status_label`
+  - `last_auto_run_status_reason`
+  - `last_auto_run_technical_status_label`
   - `last_auto_run_time`
   - `last_auto_run_finished_at`
   - `last_successful_auto_update_at`
   - `last_auto_run_error`
+  - `last_auto_run_result`
 - Если ready snapshot ещё не materialized, `GET /v1/sheet-vitrina-v1/status` сохраняет truthful `422`, но error payload всё равно обязан нести `server_context`, чтобы operator page могла показать актуальные server/timezone/scheduler facts уже на empty state.
+- `manual_context` теперь хранит не только timestamps, но и latest persisted semantic summaries `last_manual_refresh_result / last_manual_load_result`, so previous warning/error truth survives page reload and process restart.
 - Это нужно, чтобы public/runtime/operator contour не маскировал `today_current` values под surrogate `as_of_date`.
 - Canonical business timezone для server-side default-date semantics = `Asia/Yekaterinburg`:
   - default `as_of_date` = previous business day in `Asia/Yekaterinburg`;
@@ -541,7 +550,7 @@ update_note: "Обновлён под web-vitrina phase-4 checkpoint: existing `
 - Existing live daily refresh scheduler materialize-ится как external systemd timer `wb-core-sheet-vitrina-refresh.timer`, который вызывает тот же existing `POST /v1/sheet-vitrina-v1/refresh` ежедневно в `11:00` и `20:00 Asia/Yekaterinburg` (`06:00 UTC` и `15:00 UTC` на current host), но теперь делает это в `auto_load=true` режиме:
   - server contour сначала materialize-ит ready snapshot тем же heavy refresh path;
   - затем в том же auto cycle вызывает existing load bridge и доводит результат до live sheet;
-  - итоговый auto result persist-ится в runtime/status surface как last auto run status / timestamps, чтобы operator page не маскировала refresh-only под sheet-complete.
+  - итоговый auto result persist-ится в runtime/status surface как last auto run status / timestamps plus semantic result payload, чтобы operator page не маскировала refresh-only под sheet-complete и не теряла combined-cycle warning/error outcome.
 - Existing live contour также допускает отдельный bounded retry timer `wb-core-sheet-vitrina-closure-retry.timer`, который вызывает repo-owned runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py`:
   - timer не делает tight loop и может запускаться чаще, чем real retry cadence, потому что due/backoff decision already lives in persisted runtime state;
   - retry runner дожимает due `yesterday_closed` для всей historical/date-period matrix и same-day `today_current` only for current-snapshot-only group;

@@ -217,8 +217,18 @@ def main() -> None:
                 raise AssertionError("refresh_result date_columns mismatch")
             if refresh_payload["server_context"] != _expected_server_context():
                 raise AssertionError("refresh_result must expose the same server_context block")
-            if refresh_payload.get("manual_context") != _expected_manual_context(refresh_at="2026-04-13T17:05:00+05:00"):
+            refresh_manual_context = refresh_payload.get("manual_context") or {}
+            if refresh_manual_context.get("last_successful_manual_refresh_at") != "2026-04-13T17:05:00+05:00":
                 raise AssertionError("refresh_result must expose the updated manual refresh timestamp")
+            if refresh_manual_context.get("last_successful_manual_load_at") != "":
+                raise AssertionError("refresh_result must keep manual load timestamp empty")
+            refresh_manual_result = refresh_manual_context.get("last_manual_refresh_result") or {}
+            if refresh_manual_result.get("technical_status") != "success":
+                raise AssertionError("refresh_result must persist technical refresh completion")
+            if refresh_manual_result.get("semantic_status") != "warning":
+                raise AssertionError(f"refresh_result must persist semantic warning for preserved sources, got {refresh_manual_context}")
+            if refresh_manual_context.get("last_manual_load_result") is not None:
+                raise AssertionError("refresh_result must not invent a manual load result")
             if [slot["slot_key"] for slot in refresh_payload["temporal_slots"]] != [
                 "yesterday_closed",
                 "today_current",
@@ -235,6 +245,8 @@ def main() -> None:
                 raise AssertionError("status endpoint refreshed_at mismatch")
             if status_payload["sheet_row_counts"] != refresh_payload["sheet_row_counts"]:
                 raise AssertionError("status endpoint row counts must match refresh result")
+            if status_payload["status"] != "warning" or status_payload.get("technical_status") != "success":
+                raise AssertionError(f"status endpoint must separate semantic warning from technical success, got {status_payload}")
             if status_payload["date_columns"] != [AS_OF_DATE, TODAY_CURRENT_DATE]:
                 raise AssertionError("status endpoint must expose both materialized dates")
             if status_payload["server_context"] != refresh_payload["server_context"]:
@@ -488,17 +500,28 @@ def _expected_server_context() -> dict[str, str]:
         ),
         "last_auto_run_status": "never",
         "last_auto_run_status_label": "ещё не выполнялся",
+        "last_auto_run_status_reason": "",
+        "last_auto_run_technical_status_label": "ещё не выполнялся",
         "last_auto_run_time": "",
         "last_auto_run_finished_at": "",
         "last_successful_auto_update_at": "",
         "last_auto_run_error": "",
+        "last_auto_run_result": None,
     }
 
 
-def _expected_manual_context(*, refresh_at: str = "", load_at: str = "") -> dict[str, str]:
+def _expected_manual_context(
+    *,
+    refresh_at: str = "",
+    load_at: str = "",
+    refresh_result: dict[str, object] | None = None,
+    load_result: dict[str, object] | None = None,
+) -> dict[str, object]:
     return {
         "last_successful_manual_refresh_at": refresh_at,
         "last_successful_manual_load_at": load_at,
+        "last_manual_refresh_result": refresh_result,
+        "last_manual_load_result": load_result,
     }
 
 

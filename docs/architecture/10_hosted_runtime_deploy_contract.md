@@ -163,6 +163,8 @@ Public probe validates:
 - `GET /sheet-vitrina-v1/operator` returns `200` + `text/html` and still contains the compact operator tokens for the three top-level sections, separated refresh/load, truthful manual-vs-auto blocks and both bounded supply subsections (`Обновление данных`, `Ручная загрузка данных`, `Расчёт поставок`, `Отчёты`, `Загрузить данные`, `Отправить данные`, `Последняя удачная загрузка`, `Последняя удачная отправка`, `Ежедневные отчёты`, `Отчёт по остаткам`, `Total Order Sum`, `Негативные факторы`, `Позитивные факторы`, `Скачать лог`, `Лог`, `Автообновления`, `Часовой пояс`, `Автоцепочка`, `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление`, `Общий вход для двух расчётов`, `Заказ на фабрике`, `Поставка на Wildberries`, `Цикл заказов`, `Цикл поставок`)
 - `GET /sheet-vitrina-v1/vitrina` returns `200` + `text/html` as a real sibling page shell: page must contain `Phase 4 Web-Vitrina Page Composition`, `Web-витрина`, canonical JSON route token `/v1/sheet-vitrina-v1/web-vitrina`, explicit `surface=page_composition` wiring and the current seam names `web_vitrina_page_composition / web_vitrina_view_model / web_vitrina_gravity_table_adapter`
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition` returns `200` + JSON `web_vitrina_page_composition` v1 with `meta`, `summary_cards`, `filter_surface`, `table_surface`, `status_summary`, `capabilities`; route stays read-only and must not trigger refresh/upstream fetch from the public read path
+  - top badge / summary tone must follow semantic source truth of the visible snapshot or selected period, not mere snapshot existence
+  - `Лог` / `Загрузка данных` / `Обновление данных` must expose green/yellow/red semantic states and must not fabricate stale-job success when exact transient log association is unavailable
 - `GET /v1/sheet-vitrina-v1/web-vitrina` returns either:
   - `200` + JSON `web_vitrina_contract` v1 when a ready snapshot is present, with root fields `contract_name`, `contract_version`, `page_route`, `read_route`, `meta`, `status_summary`, `schema`, `rows`, `capabilities`
   - truthful `422 {"error": ...}` when the ready snapshot is absent
@@ -176,6 +178,8 @@ Public probe validates:
   - `status=unavailable` with truthful `reason` when the current ready snapshot or `yesterday_closed` slot is missing/stale;
   - route stays read-only and must not trigger refresh/upstream fetch from the public read path
 - `GET /v1/sheet-vitrina-v1/status` returns JSON with either success shape including `server_context` + `manual_context` or truthful `422 {"error": ..., "server_context": ..., "manual_context": ...}`
+  - on `200`, root `status` is semantic snapshot outcome (`success / warning / error`), while technical completion stays separated in `technical_status`/derived fields
+  - `server_context` / `manual_context` must keep persisted latest semantic result summaries, so restart/reload does not erase warning/error truth
 - `GET /v1/sheet-vitrina-v1/plan` returns JSON with either success shape or truthful `422 {"error": ...}`
 - after the historical stocks checkpoint switch, both `stocks[yesterday_closed]` and `stocks[today_current]` must resolve through exact-date runtime snapshots sourced from Seller Analytics CSV `STOCK_HISTORY_DAILY_CSV`
 - when strict bot/web-source closed-day acceptance is active, `STATUS` / `plan` / job surfaces must disclose truthful closure states (`closure_pending`, `closure_retrying`, `closure_rate_limited`, `closure_exhausted`, `success`) instead of silently reusing provisional same-day values in `yesterday_closed`
@@ -189,7 +193,9 @@ Public probe validates:
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx` returns either `200` + XLSX after calculation or truthful `422 {"error": ...}` before the first successful calculation
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx` returns either `200` + XLSX after regional calculation or truthful `422 {"error": ...}` before the first successful calculation
 - `POST /v1/sheet-vitrina-v1/refresh` returns JSON with either success shape including `server_context` or truthful `422 {"error": ...}`
+  - refresh completion must separate `ready snapshot persisted` from semantic source health via explicit semantic fields
 - `POST /v1/sheet-vitrina-v1/load` and `GET /v1/sheet-vitrina-v1/job` are operator-facing live/write routes and therefore are verified as part of task-level GAS/sheet closure, not by default public probe
+  - load completion must not claim ordinary `updated` success when only bridge completion is known; first write / no baseline / unchanged snapshot stay warning until data change is actually verifiable
 
 If the task changes operator upload/calculate write paths inside this contour, live closure additionally requires one controlled end-to-end HTTP scenario on the hosted runtime:
 - download the relevant operator templates;

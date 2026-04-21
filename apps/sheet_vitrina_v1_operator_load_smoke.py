@@ -200,10 +200,21 @@ def main() -> None:
                     raise AssertionError(f"refresh live-log must contain {expected!r}")
             if refresh_job["result"]["date_columns"] != [AS_OF_DATE, TODAY_CURRENT_DATE]:
                 raise AssertionError("async refresh result must keep dual-date snapshot semantics")
-            if refresh_job["result"].get("manual_context") != _expected_manual_context(
-                refresh_at="2026-04-13T17:05:00+05:00"
-            ):
-                raise AssertionError("async refresh result must update only the manual refresh timestamp")
+            refresh_manual_context = refresh_job["result"].get("manual_context") or {}
+            if refresh_manual_context.get("last_successful_manual_refresh_at") != "2026-04-13T17:05:00+05:00":
+                raise AssertionError("async refresh result must update the manual refresh timestamp")
+            if refresh_manual_context.get("last_successful_manual_load_at") != "":
+                raise AssertionError("async refresh result must keep manual load timestamp empty")
+            refresh_manual_result = refresh_manual_context.get("last_manual_refresh_result") or {}
+            if not isinstance(refresh_manual_context.get("last_manual_refresh_result"), dict):
+                raise AssertionError("async refresh result must persist the semantic refresh result")
+            if refresh_manual_result.get("technical_status") != "success":
+                raise AssertionError("async refresh result must keep the technical refresh result")
+            prior_load_result = refresh_manual_context.get("last_manual_load_result") or {}
+            if prior_load_result.get("semantic_status") != "error":
+                raise AssertionError(
+                    "async refresh result must preserve the last failed manual load until a new load finishes"
+                )
             _assert_counting_calls(counters)
 
             before_load_requests = {key: list(block.request_dates) for key, block in counters.items()}
@@ -256,11 +267,16 @@ def main() -> None:
                 raise AssertionError("load result must surface bridge payload")
             if load_job["result"]["refreshed_at"] != REFRESHED_AT:
                 raise AssertionError("load result must keep the persisted refresh timestamp")
-            if load_job["result"].get("manual_context") != _expected_manual_context(
-                refresh_at="2026-04-13T17:05:00+05:00",
-                load_at="2026-04-13T17:00:03+05:00",
-            ):
-                raise AssertionError("async load result must expose both persisted manual success timestamps")
+            load_manual_context = load_job["result"].get("manual_context") or {}
+            if load_manual_context.get("last_successful_manual_refresh_at") != "2026-04-13T17:05:00+05:00":
+                raise AssertionError("async load result must keep the persisted manual refresh timestamp")
+            if load_manual_context.get("last_successful_manual_load_at") != "2026-04-13T17:00:03+05:00":
+                raise AssertionError("async load result must expose the persisted manual load timestamp")
+            load_manual_result = load_manual_context.get("last_manual_load_result") or {}
+            if load_manual_result.get("semantic_status") != "warning":
+                raise AssertionError(f"async load result must persist not-verified warning on first write, got {load_manual_context}")
+            if load_manual_result.get("change_status") != "not_verified":
+                raise AssertionError(f"async load result must explain missing comparison baseline, got {load_manual_context}")
             if int(load_job.get("log_line_count", 0)) < 10:
                 raise AssertionError("load job must expose detailed diagnostic log with multiple lines")
             if load_runner.calls != [refresh_job["result"]["snapshot_id"]]:
@@ -400,10 +416,18 @@ def _get_text_with_headers(url: str) -> tuple[int, str, dict[str, str]]:
         return exc.code, exc.read().decode("utf-8"), dict(exc.headers.items())
 
 
-def _expected_manual_context(*, refresh_at: str = "", load_at: str = "") -> dict[str, str]:
+def _expected_manual_context(
+    *,
+    refresh_at: str = "",
+    load_at: str = "",
+    refresh_result: dict[str, object] | None = None,
+    load_result: dict[str, object] | None = None,
+) -> dict[str, object]:
     return {
         "last_successful_manual_refresh_at": refresh_at,
         "last_successful_manual_load_at": load_at,
+        "last_manual_refresh_result": refresh_result,
+        "last_manual_load_result": load_result,
     }
 
 

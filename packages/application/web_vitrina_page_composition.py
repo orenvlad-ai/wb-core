@@ -49,6 +49,10 @@ def build_web_vitrina_page_composition(
         str(column["id"]): str(column["header"])
         for column in columns
     }
+    status_badge = _build_status_badge(
+        current_state=current_state,
+        status_summary=contract_payload["status_summary"],
+    )
 
     return {
         "composition_name": WEB_VITRINA_PAGE_COMPOSITION_NAME,
@@ -81,30 +85,14 @@ def build_web_vitrina_page_composition(
             selected_date_from=selected_date_from,
             selected_date_to=selected_date_to,
         ),
-        "status_badge": {
-            "label": _status_status_label(current_state=current_state, refresh_status=str(contract_payload["status_summary"]["refresh_status"])),
-            "tone": _status_tone(current_state=current_state, refresh_status=str(contract_payload["status_summary"]["refresh_status"])),
-            "detail": (
-                f"{contract_payload['status_summary']['read_model']} / "
-                f"{contract_payload['status_summary']['source_sheet_name']}"
-            ),
-        },
+        "status_badge": status_badge,
         "summary_cards": [
             {
                 "card_id": "status",
                 "label": "Статус",
-                "value": _status_status_label(
-                    current_state=current_state,
-                    refresh_status=str(contract_payload["status_summary"]["refresh_status"]),
-                ),
-                "detail": (
-                    f"{contract_payload['status_summary']['read_model']} / "
-                    f"{contract_payload['status_summary']['source_sheet_name']}"
-                ),
-                "tone": _status_tone(
-                    current_state=current_state,
-                    refresh_status=str(contract_payload["status_summary"]["refresh_status"]),
-                ),
+                "value": status_badge["label"],
+                "detail": status_badge["detail"],
+                "tone": status_badge["tone"],
             },
             {
                 "card_id": "rows",
@@ -585,29 +573,45 @@ def _freshness_detail(contract_payload: Mapping[str, Any]) -> str:
     )
 
 
-def _status_status_label(*, current_state: str, refresh_status: str) -> str:
+def _build_status_badge(*, current_state: str, status_summary: Mapping[str, Any]) -> dict[str, str]:
     if current_state == "ready":
-        normalized = refresh_status.strip().lower()
-        if normalized == "success":
-            return "Успешно"
-        if normalized in {"running", "pending", "loading"}:
-            return "Загрузка"
-        return "Ошибка"
+        status = str(status_summary.get("refresh_status") or "").strip().lower()
+        tone = str(status_summary.get("refresh_status_tone") or status or "warning").strip().lower()
+        label = str(status_summary.get("refresh_status_label") or "").strip() or _semantic_label(tone)
+        detail_parts = [
+            str(status_summary.get("refresh_status_reason") or "").strip(),
+            f"{status_summary['read_model']} / {status_summary['source_sheet_name']}",
+        ]
+        return {
+            "label": label,
+            "tone": tone if tone in {"success", "warning", "error"} else "warning",
+            "detail": " · ".join(part for part in detail_parts if part),
+        }
     if current_state == "empty":
-        return "Нет данных"
+        return {
+            "label": "Нет данных",
+            "tone": "warning",
+            "detail": "read-side payload пуст; semantic success не подтверждён",
+        }
     if current_state == "loading":
-        return "Загрузка"
-    return "Ошибка"
+        return {
+            "label": "Загрузка",
+            "tone": "warning",
+            "detail": "page composition загружается",
+        }
+    return {
+        "label": "Ошибка",
+        "tone": "error",
+        "detail": "page composition недоступен",
+    }
 
 
-def _status_tone(*, current_state: str, refresh_status: str) -> str:
-    if current_state == "error":
-        return "error"
-    if current_state == "empty":
-        return "warning"
-    if refresh_status == "success":
-        return "success"
-    return "warning"
+def _semantic_label(status: str) -> str:
+    if status == "success":
+        return "Успешно"
+    if status == "error":
+        return "Ошибка"
+    return "Внимание"
 
 
 def _scope_kind_label(value: str) -> str:

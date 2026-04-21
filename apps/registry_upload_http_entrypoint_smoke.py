@@ -301,6 +301,8 @@ def main() -> None:
             if missing_status_payload.get("manual_context") != {
                 "last_successful_manual_refresh_at": "",
                 "last_successful_manual_load_at": "",
+                "last_manual_refresh_result": None,
+                "last_manual_load_result": None,
             }:
                 raise AssertionError("status read before refresh must expose empty manual operator timestamps")
 
