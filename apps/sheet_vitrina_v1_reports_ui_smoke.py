@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_DAILY_REPORT_PATH,
     DEFAULT_SHEET_STOCK_REPORT_PATH,
+    DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
     _render_sheet_vitrina_operator_ui,
 )
 
@@ -53,6 +54,7 @@ def main() -> None:
         'data-report-section-button="stock"',
         'data-report-section-panel="daily"',
         'data-report-section-panel="stock" hidden',
+        'href="' + DEFAULT_SHEET_WEB_VITRINA_UI_PATH + '"',
         'id="dailyReportPeriod"',
         'id="stockReportPeriod"',
         'id="stockReportSkuSelector"',

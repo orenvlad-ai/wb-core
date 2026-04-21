@@ -10,6 +10,7 @@ import socket
 import sys
 from tempfile import TemporaryDirectory
 import threading
+import time
 
 from playwright.sync_api import sync_playwright
 
@@ -70,12 +71,21 @@ def main() -> None:
             args.base_url.rstrip("/"),
             ignore_https_errors=args.ignore_https_errors,
             as_of_date=args.as_of_date.strip(),
+            expected_percent_rows=None,
         )
         _print_summary(result)
         return
 
     with LocalWebVitrinaFixtureServer(with_ready_snapshot=True) as ready_base_url:
-        ready_result = run_browser_checks(ready_base_url, ignore_https_errors=False, as_of_date="")
+        ready_result = run_browser_checks(
+            ready_base_url,
+            ignore_https_errors=False,
+            as_of_date="",
+            expected_percent_rows={
+                "avg_addToCartConversion#1": "11,50%",
+                "avg_addToCartConversion#2": "10,50%",
+            },
+        )
     with LocalWebVitrinaFixtureServer(with_ready_snapshot=False) as error_base_url:
         error_result = run_error_state_check(error_base_url, ignore_https_errors=False)
     _print_summary({
@@ -84,6 +94,12 @@ def main() -> None:
         "default_total_first": ready_result["default_total_first"],
         "default_sku_metric_cluster": ready_result["default_sku_metric_cluster"],
         "filter_controls": ready_result["filter_controls"],
+        "status_badge": ready_result["status_badge"],
+        "compact_widths": ready_result["compact_widths"],
+        "percent_formatting": ready_result["percent_formatting"],
+        "column_visibility": ready_result["column_visibility"],
+        "horizontal_overscroll_guard": ready_result["horizontal_overscroll_guard"],
+        "operator_link": ready_result["operator_link"],
         "metric_filter_applied": ready_result["metric_filter_applied"],
         "empty_state_after_search": ready_result["empty_state_after_search"],
         "reset_restores_table": ready_result["reset_restores_table"],
@@ -159,20 +175,42 @@ class LocalWebVitrinaFixtureServer:
         self.runtime_dir_obj.cleanup()
 
 
-def run_browser_checks(base_url: str, *, ignore_https_errors: bool, as_of_date: str = "") -> dict[str, object]:
+def run_browser_checks(
+    base_url: str,
+    *,
+    ignore_https_errors: bool,
+    as_of_date: str = "",
+    expected_percent_rows: dict[str, str] | None = None,
+) -> dict[str, object]:
     page_url = base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     if as_of_date:
         page_url = f"{page_url}?as_of_date={as_of_date}"
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
-        context = browser.new_context(ignore_https_errors=ignore_https_errors)
+        context = browser.new_context(
+            ignore_https_errors=ignore_https_errors,
+            viewport={"width": 1100, "height": 900},
+        )
+        context.route(
+            "**/v1/sheet-vitrina-v1/web-vitrina*",
+            lambda route: _route_page_composition_with_delay(route),
+        )
+        operator_page = context.new_page()
+        operator_link = _check_operator_link(operator_page, base_url)
         page = context.new_page()
         try:
             page.goto(page_url, wait_until="commit")
+            page.wait_for_load_state("domcontentloaded")
             page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
             total_rows = page.locator("[data-table-body] tr").count()
             if total_rows <= 0:
                 raise AssertionError("web-vitrina table must render at least one row")
+            final_badge = {
+                "label": page.locator("[data-status-badge]").inner_text().strip(),
+                "class_name": page.locator("[data-status-badge]").get_attribute("class") or "",
+            }
+            if final_badge["label"] != "Успешно" or "tone-success" not in final_badge["class_name"]:
+                raise AssertionError(f"status badge must end in Russian success state, got {final_badge}")
             historical_panel_present = (
                 page.locator("[data-history-calendar]").count() == 1
                 and page.locator("[data-history-presets]").count() == 1
@@ -206,6 +244,8 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool, as_of_date: 
             }
             if not all(filter_controls.values()):
                 raise AssertionError(f"missing filter controls: {filter_controls}")
+            compact_widths = _measure_compact_widths(page)
+            percent_formatting = _check_percent_formatting(page, expected_rows=expected_percent_rows)
 
             metric_select = page.locator("[data-filter-control='metric']")
             metric_options = metric_select.locator("option").evaluate_all(
@@ -229,6 +269,32 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool, as_of_date: 
             reset_restores_default_order = reset_order == initial_order
             if not reset_restores_default_order:
                 raise AssertionError(f"reset must restore canonical default order, got {reset_order[:8]}")
+
+            column_visibility = _check_column_visibility_controls(page)
+            horizontal_overscroll_guard = page.evaluate(
+                """() => {
+                  const node = document.querySelector('[data-table-scroll]');
+                  if (!node) {
+                    return {overscrollBehaviorX: '', leftPrevented: false, rightPrevented: false, maxScrollLeft: 0};
+                  }
+                  node.scrollLeft = 0;
+                  const leftEvent = new WheelEvent('wheel', {deltaX: -120, deltaY: 0, cancelable: true});
+                  const leftPrevented = !node.dispatchEvent(leftEvent);
+                  node.scrollLeft = Math.max(0, node.scrollWidth - node.clientWidth);
+                  const rightEvent = new WheelEvent('wheel', {deltaX: 120, deltaY: 0, cancelable: true});
+                  const rightPrevented = !node.dispatchEvent(rightEvent);
+                  return {
+                    overscrollBehaviorX: getComputedStyle(node).overscrollBehaviorX || '',
+                    leftPrevented: leftPrevented,
+                    rightPrevented: rightPrevented,
+                    maxScrollLeft: Math.max(0, node.scrollWidth - node.clientWidth)
+                  };
+                }"""
+            )
+            if horizontal_overscroll_guard["overscrollBehaviorX"] not in {"contain", "none"}:
+                raise AssertionError(f"table scroll must keep horizontal overscroll contained, got {horizontal_overscroll_guard}")
+            if not horizontal_overscroll_guard["leftPrevented"] or not horizontal_overscroll_guard["rightPrevented"]:
+                raise AssertionError(f"table scroll must block browser-back overscroll at both edges, got {horizontal_overscroll_guard}")
 
             initial_query = page.evaluate("() => window.location.search")
             historical_selector_works = False
@@ -266,6 +332,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool, as_of_date: 
                     "() => window.location.search"
                 ) == initial_query
         finally:
+            operator_page.close()
             context.close()
             browser.close()
 
@@ -276,6 +343,12 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool, as_of_date: 
         "default_total_first": initial_order[0]["scope_label"] == "ИТОГО",
         "default_sku_metric_cluster": sku_cluster_ok,
         "filter_controls": filter_controls,
+        "status_badge": final_badge,
+        "compact_widths": compact_widths,
+        "percent_formatting": percent_formatting,
+        "column_visibility": column_visibility,
+        "horizontal_overscroll_guard": horizontal_overscroll_guard,
+        "operator_link": operator_link,
         "metric_filter_applied": metric_filter_applied,
         "empty_state_after_search": empty_state_after_search,
         "reset_restores_table": reset_restores_table,
@@ -317,6 +390,12 @@ def _print_summary(result: dict[str, object]) -> None:
     if result.get("as_of_date"):
         print("web_vitrina_browser_as_of_date: ok ->", result["as_of_date"])
     print("web_vitrina_browser_table: ok ->", result["table_rendered"])
+    print("web_vitrina_browser_status_badge: ok ->", result["status_badge"])
+    print("web_vitrina_browser_compact_widths: ok ->", result["compact_widths"])
+    print("web_vitrina_browser_percent_formatting: ok ->", result["percent_formatting"])
+    print("web_vitrina_browser_column_visibility: ok ->", result["column_visibility"])
+    print("web_vitrina_browser_horizontal_overscroll_guard: ok ->", result["horizontal_overscroll_guard"])
+    print("web_vitrina_browser_operator_link: ok ->", result["operator_link"])
     print("web_vitrina_browser_default_total_first: ok ->", result["default_total_first"])
     print("web_vitrina_browser_default_sku_metric_cluster: ok ->", result["default_sku_metric_cluster"])
     print("web_vitrina_browser_filters: ok ->", result["filter_controls"])
@@ -329,6 +408,133 @@ def _print_summary(result: dict[str, object]) -> None:
     if "error_state" in result:
         error_state = result["error_state"]
         print("web_vitrina_browser_error_state: ok ->", error_state["title"])
+
+
+def _route_page_composition_with_delay(route: object) -> None:
+    time.sleep(0.8)
+    route.continue_()
+
+
+def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
+    page.goto(base_url + DEFAULT_SHEET_OPERATOR_UI_PATH, wait_until="domcontentloaded")
+    link = page.locator('[data-tab-panel="vitrina"] .eyebrow-link').first
+    href = link.get_attribute("href") or ""
+    if href != DEFAULT_SHEET_WEB_VITRINA_UI_PATH:
+        raise AssertionError(f"operator eyebrow link must target the new vitrina route, got {href!r}")
+    with page.context.expect_page() as popup_info:
+        link.click()
+    popup_page = popup_info.value
+    try:
+        popup_page.wait_for_url("**" + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, timeout=5000)
+        target_url = popup_page.url
+    finally:
+        popup_page.close()
+    return {
+        "href": href,
+        "target_url": target_url,
+    }
+
+
+def _check_column_visibility_controls(page: object) -> dict[str, object]:
+    manager = page.locator("[data-column-manager]")
+    if manager.count() != 1:
+        raise AssertionError("column visibility manager must be rendered once")
+    page.evaluate("() => { const node = document.querySelector('[data-column-manager]'); if (node) { node.open = true; } }")
+    page.locator('[data-column-visibility-id="metric_key"]').uncheck()
+    page.locator('[data-column-visibility-id="scope_kind"]').uncheck()
+    page.wait_for_function(
+        """() =>
+          document.querySelectorAll('[data-table-head] [data-col-id="metric_key"]').length === 0 &&
+          document.querySelectorAll('[data-table-head] [data-col-id="scope_kind"]').length === 0
+        """,
+        timeout=5000,
+    )
+    page.reload(wait_until="commit")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    page.evaluate("() => { const node = document.querySelector('[data-column-manager]'); if (node) { node.open = true; } }")
+    metric_hidden_after_reload = page.locator('[data-table-head] [data-col-id="metric_key"]').count() == 0
+    scope_kind_hidden_after_reload = page.locator('[data-table-head] [data-col-id="scope_kind"]').count() == 0
+    if not metric_hidden_after_reload or not scope_kind_hidden_after_reload:
+        raise AssertionError("column visibility must persist across reload for optional columns")
+    page.locator("[data-columns-reset]").click()
+    page.wait_for_function(
+        """() =>
+          document.querySelectorAll('[data-table-head] [data-col-id="metric_key"]').length === 1 &&
+          document.querySelectorAll('[data-table-head] [data-col-id="scope_kind"]').length === 1
+        """,
+        timeout=5000,
+    )
+    metric_checkbox_checked = page.locator('[data-column-visibility-id="metric_key"]').is_checked()
+    scope_checkbox_checked = page.locator('[data-column-visibility-id="scope_kind"]').is_checked()
+    if not metric_checkbox_checked or not scope_checkbox_checked:
+        raise AssertionError("column visibility reset must restore optional column checkboxes")
+    return {
+        "persisted_hidden_columns": ["metric_key", "scope_kind"],
+        "metric_hidden_after_reload": metric_hidden_after_reload,
+        "scope_kind_hidden_after_reload": scope_kind_hidden_after_reload,
+        "metric_checkbox_checked_after_reset": metric_checkbox_checked,
+        "scope_checkbox_checked_after_reset": scope_checkbox_checked,
+    }
+
+
+def _measure_compact_widths(page: object) -> dict[str, int]:
+    widths = page.locator("[data-table-head] th").evaluate_all(
+        """nodes => Object.fromEntries(nodes.map(node => [
+          node.getAttribute('data-col-id'),
+          Math.round(node.getBoundingClientRect().width)
+        ]).filter(item => item[0]))"""
+    )
+    required = {
+        "row_order": 52,
+        "scope_label": 145,
+        "metric_key": 160,
+        "metric_label": 156,
+    }
+    for column_id, max_width in required.items():
+        if int(widths.get(column_id, 0)) <= 0:
+            raise AssertionError(f"missing width measurement for {column_id!r}: {widths}")
+        if int(widths[column_id]) > max_width:
+            raise AssertionError(f"{column_id} must stay compact in browser render, got {widths}")
+    for column_id in [key for key in widths if key.startswith("date:")]:
+        if int(widths[column_id]) > 94:
+            raise AssertionError(f"date column must stay narrow in browser render, got {widths}")
+    return {
+        "row_order": int(widths["row_order"]),
+        "scope_label": int(widths["scope_label"]),
+        "metric_key": int(widths["metric_key"]),
+        "metric_label": int(widths["metric_label"]),
+        "date": int(next(widths[key] for key in widths if key.startswith("date:"))),
+    }
+
+
+def _check_percent_formatting(page: object, *, expected_rows: dict[str, str] | None) -> dict[str, str]:
+    percent_rows = page.locator("[data-table-body] tr").evaluate_all(
+        """rows => rows
+          .map(row => {
+            const metricNode = row.querySelector('td[data-col-id="metric_key"]');
+            const valueNode = row.querySelector('td[data-col-id^="date:"]');
+            if (!metricNode || !valueNode) {
+              return null;
+            }
+            return {
+              metric_key: (metricNode.getAttribute('title') || metricNode.textContent || '').trim(),
+              value: (valueNode.getAttribute('title') || valueNode.textContent || '').trim()
+            };
+          })
+          .filter(Boolean)
+          .filter(item => item.metric_key === 'avg_addToCartConversion')"""
+    )
+    if len(percent_rows) < 2:
+        raise AssertionError(f"percent metric rows must be visible in browser smoke, got {percent_rows}")
+    first_value = str(percent_rows[0]["value"])
+    second_value = str(percent_rows[1]["value"])
+    if expected_rows is not None:
+        if first_value != expected_rows["avg_addToCartConversion#1"] or second_value != expected_rows["avg_addToCartConversion#2"]:
+            raise AssertionError(f"fractional percent rows must render as scaled percents, got {percent_rows}")
+    return {
+        "first": first_value,
+        "second": second_value,
+    }
 
 
 def _build_plan(
@@ -365,8 +571,8 @@ def _build_plan(
                     ["Итого: Сумма заказов", "TOTAL|total_orderSum", 1000],
                     [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|avg_price_seller_discounted", 990],
                     [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|avg_price_seller_discounted", 1090],
-                    [f"SKU A: Конверсия в корзину", f"SKU:{first_nm_id}|avg_addToCartConversion", 11.5],
-                    [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 10.5],
+                    [f"SKU A: Конверсия в корзину", f"SKU:{first_nm_id}|avg_addToCartConversion", 0.115],
+                    [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 0.105],
                 ],
                 row_count=6,
                 column_count=3,

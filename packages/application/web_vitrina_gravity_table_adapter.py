@@ -162,14 +162,14 @@ def _build_columns(
             raise ValueError(f"renderer {renderer_id!r} was not materialized for column {item['id']!r}")
         filter_binding = filters_by_column.get(item["id"])
         sort_binding = sorts_by_column.get(item["id"])
-        width_hint = item.get("width_hint")
+        resolved_width = _resolve_column_width(item, rows=payload["rows"])
         columns.append(
             WebVitrinaGravityTableColumn(
                 id=str(item["id"]),
                 accessor_key=str(item["id"]),
                 header=str(item["label"]),
-                size=(int(width_hint) if width_hint is not None else None),
-                min_size=_min_size(int(width_hint)) if width_hint is not None else None,
+                size=resolved_width,
+                min_size=_min_size(resolved_width) if resolved_width is not None else None,
                 enable_sorting=bool(item["sortable"]),
                 enable_column_filters=bool(item["filterable"]),
                 enable_resizing=True,
@@ -342,8 +342,132 @@ def _pin_value(sticky: str) -> str | None:
     return None
 
 
+def _resolve_column_width(
+    column: Mapping[str, Any],
+    *,
+    rows: list[Mapping[str, Any]],
+) -> int | None:
+    width_hint = column.get("width_hint")
+    if width_hint is None:
+        return None
+    column_id = str(column["id"])
+    width_cap = int(width_hint)
+    observed_width = _observed_column_width(column, rows=rows)
+    return max(_column_floor_width(column_id), min(width_cap, observed_width))
+
+
+def _observed_column_width(
+    column: Mapping[str, Any],
+    *,
+    rows: list[Mapping[str, Any]],
+) -> int:
+    column_id = str(column["id"])
+    header_text = str(column["label"])
+    value_type = str(column.get("value_type") or "")
+    max_text_length = _header_measure_length(column_id, header_text)
+    for row in rows:
+        for cell in row["cells"]:
+            if str(cell["column_id"]) != column_id:
+                continue
+            max_text_length = max(
+                max_text_length,
+                len(_observed_cell_text(cell, value_type=value_type)),
+            )
+            break
+    return int(max_text_length * _column_char_width(column_id, value_type=value_type) + _column_horizontal_padding(column_id))
+
+
+def _column_floor_width(column_id: str) -> int:
+    if column_id == "row_order":
+        return 40
+    if column_id.startswith("date:"):
+        return 84
+    if column_id in {"scope_kind", "section"}:
+        return 76
+    if column_id == "group":
+        return 72
+    if column_id == "nm_id":
+        return 82
+    if column_id == "scope_key":
+        return 90
+    if column_id == "scope_label":
+        return 110
+    if column_id == "metric_key":
+        return 108
+    if column_id == "metric_label":
+        return 122
+    return 72
+
+
 def _min_size(width_hint: int) -> int:
-    return max(72, min(width_hint, 120))
+    return max(44, min(width_hint, 84))
+
+
+def _header_measure_length(column_id: str, header_text: str) -> int:
+    header_length = len(header_text)
+    if column_id == "row_order":
+        return min(header_length, 4)
+    if column_id.startswith("date:"):
+        return header_length
+    if column_id in {"scope_kind", "section"}:
+        return min(header_length, 8)
+    if column_id in {"group", "nm_id"}:
+        return min(header_length, 7)
+    if column_id in {"scope_key", "metric_key"}:
+        return min(header_length, 12)
+    if column_id in {"scope_label", "metric_label"}:
+        return min(header_length, 14)
+    return min(header_length, 12)
+
+
+def _observed_cell_text(cell: Mapping[str, Any], *, value_type: str) -> str:
+    display_text = str(cell.get("display_text") or "")
+    number_value = _coerce_number(cell.get("value"))
+    if number_value is None:
+        return display_text
+    cell_kind = str(cell.get("cell_kind") or "")
+    if cell_kind == "percent":
+        return _estimate_number_text(number_value * 100.0, decimals=2, use_grouping=False, suffix="%")
+    if cell_kind == "money":
+        return _estimate_number_text(number_value, decimals=0, use_grouping=True, suffix=" ₽")
+    if cell_kind == "number" or value_type.startswith("integer") or value_type.startswith("number") or value_type == "decimal":
+        return _estimate_number_text(number_value, decimals=0, use_grouping=True, suffix="")
+    return display_text
+
+
+def _coerce_number(value: Any) -> float | None:
+    try:
+        number_value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number_value if number_value == number_value and number_value not in {float("inf"), float("-inf")} else None
+
+
+def _estimate_number_text(
+    value: float,
+    *,
+    decimals: int,
+    use_grouping: bool,
+    suffix: str,
+) -> str:
+    number_pattern = f",.{decimals}f" if use_grouping else f".{decimals}f"
+    return format(value, number_pattern) + suffix
+
+
+def _column_char_width(column_id: str, *, value_type: str) -> float:
+    if column_id.startswith("date:"):
+        return 5.8
+    if value_type.startswith("integer") or value_type.startswith("number") or value_type == "decimal":
+        return 5.8
+    return 5.9
+
+
+def _column_horizontal_padding(column_id: str) -> int:
+    if column_id == "row_order":
+        return 10
+    if column_id.startswith("date:"):
+        return 14
+    return 16
 
 
 def _group_order(group_by_id: Mapping[str, Mapping[str, Any]], group_id: str) -> int:

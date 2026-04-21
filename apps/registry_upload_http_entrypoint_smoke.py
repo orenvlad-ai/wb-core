@@ -43,6 +43,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_STOCK_REPORT_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
+    DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
     DEFAULT_UPLOAD_PATH,
     DEFAULT_WB_REGIONAL_CALCULATE_PATH,
     DEFAULT_WB_REGIONAL_STATUS_PATH,
@@ -132,6 +133,8 @@ def main() -> None:
                 or "Отправить данные" not in operator_ui_html
             ):
                 raise AssertionError("operator UI must expose the expected minimal page")
+            if 'href="' + DEFAULT_SHEET_WEB_VITRINA_UI_PATH + '"' not in operator_ui_html:
+                raise AssertionError("operator UI eyebrow link must target the new web-vitrina route")
             if (
                 "Отчёты" not in operator_ui_html
                 or "Ежедневные отчёты" not in operator_ui_html
@@ -195,9 +198,8 @@ def main() -> None:
             if (
                 "Цикл заказов, дней" not in operator_ui_html
                 or "Цикл поставок, дней" not in operator_ui_html
-                or "https://docs.google.com/spreadsheets/d/" not in operator_ui_html
             ):
-                raise AssertionError("operator UI must expose unified cycle vocabulary and a live sheet link")
+                raise AssertionError("operator UI must expose unified cycle vocabulary")
             if (
                 "value=\"30\"" not in operator_ui_html
                 or "value=\"15\"" not in operator_ui_html

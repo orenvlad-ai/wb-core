@@ -29,8 +29,10 @@ def main() -> None:
     money_column = columns["date:2026-04-20"]
     if money_column.accessor_key != "date:2026-04-20" or money_column.meta.align != "end":
         raise AssertionError(f"temporal column mapping mismatch, got {money_column}")
-    if columns["scope_label"].meta.pin != "left" or columns["scope_label"].size != 280:
+    if columns["scope_label"].meta.pin != "left" or columns["scope_label"].size != 110:
         raise AssertionError(f"sticky column mapping mismatch, got {columns['scope_label']}")
+    if columns["row_order"].size != 40 or money_column.size != 84 or columns["metric_key"].size != 140:
+        raise AssertionError(f"compact width sizing mismatch, got {columns['row_order']} / {money_column} / {columns['metric_key']}")
     if columns["section"].meta.default_cell_renderer_id != "renderer:badge:badge_default":
         raise AssertionError(f"badge renderer binding mismatch, got {columns['section']}")
     if columns["date:2026-04-20"].meta.uses_row_cell_renderers is not True:
@@ -95,17 +97,17 @@ def _build_view_model_payload() -> dict[str, object]:
             "section_count": 2,
         },
         "columns": [
-            {"id": "row_order", "label": "Row order", "kind": "identity", "value_type": "integer", "align": "end", "sticky": "left", "width_hint": 96, "sortable": True, "filterable": False, "sort_key": "row_order", "filter_key": None},
-            {"id": "scope_kind", "label": "Scope kind", "kind": "dimension", "value_type": "string", "align": "center", "sticky": "none", "width_hint": 132, "sortable": True, "filterable": True, "sort_key": None, "filter_key": "scope_kind"},
-            {"id": "scope_key", "label": "Scope key", "kind": "dimension", "value_type": "string", "align": "start", "sticky": "none", "width_hint": 180, "sortable": True, "filterable": True, "sort_key": None, "filter_key": None},
-            {"id": "scope_label", "label": "Scope label", "kind": "dimension", "value_type": "string", "align": "start", "sticky": "left", "width_hint": 280, "sortable": True, "filterable": True, "sort_key": "scope_label", "filter_key": None},
-            {"id": "group", "label": "Group", "kind": "dimension", "value_type": "string_or_null", "align": "start", "sticky": "none", "width_hint": 160, "sortable": True, "filterable": True, "sort_key": None, "filter_key": "group"},
-            {"id": "nm_id", "label": "nmId", "kind": "dimension", "value_type": "integer_or_null", "align": "end", "sticky": "none", "width_hint": 160, "sortable": True, "filterable": True, "sort_key": None, "filter_key": "nm_id"},
-            {"id": "metric_key", "label": "Metric key", "kind": "dimension", "value_type": "string", "align": "start", "sticky": "none", "width_hint": 180, "sortable": True, "filterable": True, "sort_key": None, "filter_key": "metric_key"},
-            {"id": "metric_label", "label": "Metric label", "kind": "dimension", "value_type": "string", "align": "start", "sticky": "left", "width_hint": 220, "sortable": True, "filterable": True, "sort_key": "metric_label", "filter_key": None},
-            {"id": "section", "label": "Section", "kind": "dimension", "value_type": "string", "align": "center", "sticky": "none", "width_hint": 132, "sortable": True, "filterable": True, "sort_key": None, "filter_key": "section"},
-            {"id": "date:2026-04-19", "label": "2026-04-19", "kind": "temporal_measure", "value_type": "number_or_blank", "align": "end", "sticky": "none", "width_hint": 120, "sortable": True, "filterable": False, "sort_key": "date:2026-04-19", "filter_key": None},
-            {"id": "date:2026-04-20", "label": "2026-04-20", "kind": "temporal_measure", "value_type": "number_or_blank", "align": "end", "sticky": "none", "width_hint": 120, "sortable": True, "filterable": False, "sort_key": "date:2026-04-20", "filter_key": None},
+            {"id": "row_order", "label": "Row order", "kind": "identity", "value_type": "integer", "align": "end", "sticky": "left", "width_hint": 52, "sortable": True, "filterable": False, "sort_key": "row_order", "filter_key": None},
+            {"id": "scope_kind", "label": "Scope kind", "kind": "dimension", "value_type": "string", "align": "center", "sticky": "none", "width_hint": 92, "sortable": True, "filterable": True, "sort_key": None, "filter_key": "scope_kind"},
+            {"id": "scope_key", "label": "Scope key", "kind": "dimension", "value_type": "string", "align": "start", "sticky": "none", "width_hint": 140, "sortable": True, "filterable": True, "sort_key": None, "filter_key": None},
+            {"id": "scope_label", "label": "Scope label", "kind": "dimension", "value_type": "string", "align": "start", "sticky": "left", "width_hint": 208, "sortable": True, "filterable": True, "sort_key": "scope_label", "filter_key": None},
+            {"id": "group", "label": "Group", "kind": "dimension", "value_type": "string_or_null", "align": "start", "sticky": "none", "width_hint": 112, "sortable": True, "filterable": True, "sort_key": None, "filter_key": "group"},
+            {"id": "nm_id", "label": "nmId", "kind": "dimension", "value_type": "integer_or_null", "align": "end", "sticky": "none", "width_hint": 112, "sortable": True, "filterable": True, "sort_key": None, "filter_key": "nm_id"},
+            {"id": "metric_key", "label": "Metric key", "kind": "dimension", "value_type": "string", "align": "start", "sticky": "none", "width_hint": 140, "sortable": True, "filterable": True, "sort_key": None, "filter_key": "metric_key"},
+            {"id": "metric_label", "label": "Metric label", "kind": "dimension", "value_type": "string", "align": "start", "sticky": "left", "width_hint": 176, "sortable": True, "filterable": True, "sort_key": "metric_label", "filter_key": None},
+            {"id": "section", "label": "Section", "kind": "dimension", "value_type": "string", "align": "center", "sticky": "none", "width_hint": 92, "sortable": True, "filterable": True, "sort_key": None, "filter_key": "section"},
+            {"id": "date:2026-04-19", "label": "2026-04-19", "kind": "temporal_measure", "value_type": "number_or_blank", "align": "end", "sticky": "none", "width_hint": 88, "sortable": True, "filterable": False, "sort_key": "date:2026-04-19", "filter_key": None},
+            {"id": "date:2026-04-20", "label": "2026-04-20", "kind": "temporal_measure", "value_type": "number_or_blank", "align": "end", "sticky": "none", "width_hint": 88, "sortable": True, "filterable": False, "sort_key": "date:2026-04-20", "filter_key": None},
         ],
         "sections": [
             {"section_id": "section:Воронка", "label": "Воронка", "order": 1, "collapsed_by_default": False},
@@ -174,9 +176,9 @@ def _build_view_model_payload() -> dict[str, object]:
                     {"column_id": "metric_label", "cell_kind": "text", "value_type": "string", "value": "Конверсия в корзину", "display_text": "Конверсия в корзину", "formatter_id": "text_default"},
                     {"column_id": "section", "cell_kind": "badge", "value_type": "string", "value": "Воронка", "display_text": "Воронка", "formatter_id": "badge_default"},
                     {"column_id": "date:2026-04-19", "cell_kind": "empty", "value_type": "number_or_blank", "value": "", "display_text": "—", "formatter_id": "empty_default"},
-                    {"column_id": "date:2026-04-20", "cell_kind": "percent", "value_type": "number_or_blank", "value": 12.5, "display_text": "12.5", "formatter_id": "percent_default"},
+                    {"column_id": "date:2026-04-20", "cell_kind": "percent", "value_type": "number_or_blank", "value": 0.125, "display_text": "0.125", "formatter_id": "percent_default"},
                 ],
-                "search_text": "SKU Чехол 101 Конверсия в корзину Чехлы Воронка 101 12.5",
+                "search_text": "SKU Чехол 101 Конверсия в корзину Чехлы Воронка 101 0.125",
                 "filter_tokens": {"scope_kind": ["SKU"], "group": ["Чехлы"], "nm_id": ["101"], "section": ["Воронка"], "metric_key": ["avg_addToCartConversion"], "row_kind": ["sku"], "group_id": ["group:Чехлы"], "section_id": ["section:Воронка"]},
             },
         ],
@@ -195,13 +197,13 @@ def _build_view_model_payload() -> dict[str, object]:
             {"sort_id": "date:2026-04-20", "field": "date:2026-04-20", "label": "2026-04-20", "directions": ["asc", "desc"], "default_direction": None},
         ],
         "formatters": [
-            {"formatter_id": "badge_default", "cell_kind": "badge", "rule_kind": "badge", "decimals": None, "thousands_separator": False, "prefix": None, "suffix": None, "null_display": "—", "date_pattern": None},
-            {"formatter_id": "empty_default", "cell_kind": "empty", "rule_kind": "empty", "decimals": None, "thousands_separator": False, "prefix": None, "suffix": None, "null_display": "—", "date_pattern": None},
-            {"formatter_id": "money_rub", "cell_kind": "money", "rule_kind": "money", "decimals": 0, "thousands_separator": True, "prefix": None, "suffix": " ₽", "null_display": "—", "date_pattern": None},
-            {"formatter_id": "number_default", "cell_kind": "number", "rule_kind": "number", "decimals": 0, "thousands_separator": True, "prefix": None, "suffix": None, "null_display": "—", "date_pattern": None},
-            {"formatter_id": "percent_default", "cell_kind": "percent", "rule_kind": "percent", "decimals": 2, "thousands_separator": False, "prefix": None, "suffix": "%", "null_display": "—", "date_pattern": None},
-            {"formatter_id": "text_default", "cell_kind": "text", "rule_kind": "text", "decimals": None, "thousands_separator": False, "prefix": None, "suffix": None, "null_display": "—", "date_pattern": None},
-            {"formatter_id": "unknown_default", "cell_kind": "unknown", "rule_kind": "unknown", "decimals": None, "thousands_separator": False, "prefix": None, "suffix": None, "null_display": "—", "date_pattern": None},
+            {"formatter_id": "badge_default", "cell_kind": "badge", "rule_kind": "badge", "decimals": None, "thousands_separator": False, "prefix": None, "suffix": None, "null_display": "—", "date_pattern": None, "value_multiplier": None},
+            {"formatter_id": "empty_default", "cell_kind": "empty", "rule_kind": "empty", "decimals": None, "thousands_separator": False, "prefix": None, "suffix": None, "null_display": "—", "date_pattern": None, "value_multiplier": None},
+            {"formatter_id": "money_rub", "cell_kind": "money", "rule_kind": "money", "decimals": 0, "thousands_separator": True, "prefix": None, "suffix": " ₽", "null_display": "—", "date_pattern": None, "value_multiplier": None},
+            {"formatter_id": "number_default", "cell_kind": "number", "rule_kind": "number", "decimals": 0, "thousands_separator": True, "prefix": None, "suffix": None, "null_display": "—", "date_pattern": None, "value_multiplier": None},
+            {"formatter_id": "percent_default", "cell_kind": "percent", "rule_kind": "percent", "decimals": 2, "thousands_separator": False, "prefix": None, "suffix": "%", "null_display": "—", "date_pattern": None, "value_multiplier": 100.0},
+            {"formatter_id": "text_default", "cell_kind": "text", "rule_kind": "text", "decimals": None, "thousands_separator": False, "prefix": None, "suffix": None, "null_display": "—", "date_pattern": None, "value_multiplier": None},
+            {"formatter_id": "unknown_default", "cell_kind": "unknown", "rule_kind": "unknown", "decimals": None, "thousands_separator": False, "prefix": None, "suffix": None, "null_display": "—", "date_pattern": None, "value_multiplier": None},
         ],
         "state_model": {
             "namespace": "web_vitrina.view_model",

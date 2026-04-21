@@ -81,7 +81,7 @@ def build_web_vitrina_page_composition(
             selected_date_to=selected_date_to,
         ),
         "status_badge": {
-            "label": _status_badge_label(current_state=current_state, refresh_status=str(contract_payload["status_summary"]["refresh_status"])),
+            "label": _status_status_label(current_state=current_state, refresh_status=str(contract_payload["status_summary"]["refresh_status"])),
             "tone": _status_tone(current_state=current_state, refresh_status=str(contract_payload["status_summary"]["refresh_status"])),
             "detail": (
                 f"{contract_payload['status_summary']['read_model']} / "
@@ -92,7 +92,10 @@ def build_web_vitrina_page_composition(
             {
                 "card_id": "status",
                 "label": "Статус",
-                "value": str(contract_payload["status_summary"]["refresh_status"]),
+                "value": _status_status_label(
+                    current_state=current_state,
+                    refresh_status=str(contract_payload["status_summary"]["refresh_status"]),
+                ),
                 "detail": (
                     f"{contract_payload['status_summary']['read_model']} / "
                     f"{contract_payload['status_summary']['source_sheet_name']}"
@@ -242,7 +245,7 @@ def build_web_vitrina_page_error_composition(
             selected_date_to=selected_date_to,
         ),
         "status_badge": {
-            "label": "Error",
+            "label": "Ошибка",
             "tone": "error",
             "detail": error_message,
         },
@@ -250,7 +253,7 @@ def build_web_vitrina_page_error_composition(
             {
                 "card_id": "status",
                 "label": "Статус",
-                "value": "error",
+                "value": "Ошибка",
                 "detail": error_message,
                 "tone": "error",
             },
@@ -532,14 +535,19 @@ def _resolve_ready_state_message(adapter_payload: Mapping[str, Any]) -> str:
     return str(state_surface["error_message"])
 
 
-def _status_badge_label(*, current_state: str, refresh_status: str) -> str:
+def _status_status_label(*, current_state: str, refresh_status: str) -> str:
     if current_state == "ready":
-        return refresh_status.capitalize()
+        normalized = refresh_status.strip().lower()
+        if normalized == "success":
+            return "Успешно"
+        if normalized in {"running", "pending", "loading"}:
+            return "Загрузка"
+        return "Ошибка"
     if current_state == "empty":
-        return "Empty"
+        return "Нет данных"
     if current_state == "loading":
-        return "Loading"
-    return "Error"
+        return "Загрузка"
+    return "Ошибка"
 
 
 def _status_tone(*, current_state: str, refresh_status: str) -> str:
