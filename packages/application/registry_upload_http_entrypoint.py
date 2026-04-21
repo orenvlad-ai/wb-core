@@ -2649,6 +2649,9 @@ def _activity_reason_fallback(tone: str) -> str:
 
 def _truncate_activity_reason(text: str, *, limit: int = 220) -> str:
     normalized = str(text or "").strip()
+    clauses = [clause.strip() for clause in normalized.split("; ") if clause.strip()]
+    if len(clauses) > 2:
+        normalized = "; ".join(clauses[:2])
     if len(normalized) <= limit:
         return normalized
     head, _, _tail = normalized.partition("; ")
