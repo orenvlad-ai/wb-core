@@ -11,10 +11,12 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, Callable
 from urllib import error as urllib_error
@@ -50,6 +52,8 @@ DEFAULT_SELLER_URL = "https://seller.wildberries.ru"
 DEFAULT_NOVNC_WEB_DIR = Path("/usr/share/novnc")
 DEFAULT_CANONICAL_SUPPLIER_ID = ""
 DEFAULT_CANONICAL_SUPPLIER_LABEL = ""
+DEFAULT_VISUAL_READY_TIMEOUT_SEC = 20.0
+DEFAULT_VISUAL_READY_POLL_SEC = 0.5
 
 
 @dataclass(frozen=True)
@@ -192,7 +196,7 @@ def start_relogin_session(config: ReloginSessionConfig, *, replace: bool = False
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         status = read_session_status(config, with_probe=False)
-        if status.get("status") in {"awaiting_login", "auth_confirmed", "success", "timeout", "error", "refresh_failed"}:
+        if status.get("status") in {"starting_visual_session", "awaiting_login", "auth_confirmed", "success", "timeout", "error", "refresh_failed"}:
             return status
         time.sleep(0.5)
     return read_session_status(config, with_probe=False)
@@ -319,8 +323,8 @@ def supervise_relogin_session(config: ReloginSessionConfig) -> int:
         _write_status(
             config,
             {
-                "status": "awaiting_login",
-                "message": "open the temporary localhost-only noVNC session and log in to seller portal; storage_state.json will be saved automatically",
+                "status": "starting_visual_session",
+                "message": "starting headed Chromium in the temporary localhost-only noVNC session",
                 "started_at": _iso_now(),
                 "deadline_at": _iso_at(_utc_now() + timedelta(seconds=config.timeout_sec)),
                 "novnc_url": config.novnc_url,
@@ -381,21 +385,33 @@ def run_login_capture(
     playwright_factory: Callable[[], Any] = sync_playwright,
     sleep_fn: Callable[[float], None] = time.sleep,
     monotonic_fn: Callable[[], float] = time.monotonic,
+    visual_ready_fn: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
     probe = probe_fn or (lambda path: probe_storage_state(path, wb_bot_python=config.wb_bot_python))
+    visual_ready = visual_ready_fn or _display_has_visible_content
     deadline = monotonic_fn() + config.timeout_sec
-    context_kwargs: dict[str, Any] = {}
-    if config.storage_state_path.exists():
-        context_kwargs["storage_state"] = str(config.storage_state_path)
+    profile_dir = Path(tempfile.mkdtemp(prefix="seller-relogin-profile-", dir=str(config.state_dir)))
     previous_display = os.environ.get("DISPLAY")
     os.environ["DISPLAY"] = config.display
     try:
         with playwright_factory() as playwright:
-            browser = playwright.chromium.launch(headless=False)
+            context = playwright.chromium.launch_persistent_context(
+                str(profile_dir),
+                headless=False,
+                viewport={"width": 1440, "height": 900},
+                args=["--start-maximized"],
+            )
             try:
-                context = browser.new_context(**context_kwargs)
-                page = context.new_page()
+                _hydrate_persistent_context_from_storage_state(context, config.storage_state_path)
+                page = context.pages[0] if getattr(context, "pages", None) else context.new_page()
                 page.goto(config.seller_url, wait_until="domcontentloaded", timeout=60000)
+                page.bring_to_front()
+                _wait_for_visual_materialization(
+                    config.display,
+                    sleep_fn=sleep_fn,
+                    monotonic_fn=monotonic_fn,
+                    visual_ready_fn=visual_ready,
+                )
                 while monotonic_fn() < deadline:
                     context.storage_state(path=str(config.candidate_state_path))
                     organization_switch_applied = False
@@ -491,8 +507,9 @@ def run_login_capture(
                     )
                     sleep_fn(config.poll_sec)
             finally:
-                browser.close()
+                context.close()
     finally:
+        shutil.rmtree(profile_dir, ignore_errors=True)
         if previous_display is None:
             os.environ.pop("DISPLAY", None)
         else:
@@ -611,6 +628,87 @@ def build_macos_launcher_archive(
         info.external_attr = 0o755 << 16
         archive.writestr(info, script_body)
     return archive_buffer.getvalue(), "seller-portal-relogin-macos.zip"
+
+
+def _hydrate_persistent_context_from_storage_state(context: Any, storage_state_path: Path) -> None:
+    if not storage_state_path.exists():
+        return
+    try:
+        payload = json.loads(storage_state_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(payload, dict):
+        return
+
+    cookies = [item for item in (payload.get("cookies") or []) if isinstance(item, dict)]
+    if cookies:
+        try:
+            context.add_cookies(cookies)
+        except Exception:
+            pass
+
+    origins = [item for item in (payload.get("origins") or []) if isinstance(item, dict)]
+    if not origins:
+        return
+
+    page = context.pages[0] if getattr(context, "pages", None) else context.new_page()
+    for origin_payload in origins:
+        origin = str(origin_payload.get("origin") or "").strip()
+        if not origin:
+            continue
+        local_storage = []
+        for item in origin_payload.get("localStorage") or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            local_storage.append(
+                {
+                    "name": name,
+                    "value": str(item.get("value") or ""),
+                }
+            )
+        if not local_storage:
+            continue
+        try:
+            page.goto(origin, wait_until="domcontentloaded", timeout=30000)
+            page.evaluate(
+                """(items) => {
+                    for (const item of items) {
+                        window.localStorage.setItem(item.name, item.value);
+                    }
+                }""",
+                local_storage,
+            )
+        except Exception:
+            continue
+
+
+def _wait_for_visual_materialization(
+    display: str,
+    *,
+    sleep_fn: Callable[[float], None],
+    monotonic_fn: Callable[[], float],
+    visual_ready_fn: Callable[[str], bool],
+    timeout_sec: float = DEFAULT_VISUAL_READY_TIMEOUT_SEC,
+) -> None:
+    deadline = monotonic_fn() + timeout_sec
+    while monotonic_fn() < deadline:
+        if visual_ready_fn(display):
+            return
+        sleep_fn(DEFAULT_VISUAL_READY_POLL_SEC)
+    raise RuntimeError("headed Chromium did not materialize a visible X11 window in time")
+
+
+def _display_has_visible_content(display: str) -> bool:
+    try:
+        from PIL import ImageGrab
+    except Exception:
+        return True
+    image = ImageGrab.grab(xdisplay=display)
+    extrema = image.convert("L").getextrema()
+    return bool(extrema) and int(extrema[1]) > 0
 
 
 def trigger_refresh_and_wait(config: ReloginSessionConfig) -> dict[str, Any]:

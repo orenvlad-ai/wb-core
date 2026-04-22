@@ -111,7 +111,7 @@ related_docs:
   - "docs/modules/29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md"
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current seller-session recovery checkpoint: `sheet_vitrina_v1` по-прежнему разделяет group A bot/web-source historical, group B WB API date/period-capable, group C WB API current-snapshot-only и group D other/manual overlays, status reduction остаётся source-aware, а bot-backed current-day sync теперь делает explicit seller-portal session probe и materialize-ит permanent operator-facing seller recovery block with start/status/stop/launcher flow plus canonical supplier enforcement instead of ad-hoc headed-X11 recovery."
+update_note: "Обновлён под current seller-session recovery checkpoint: `sheet_vitrina_v1` по-прежнему разделяет group A bot/web-source historical, group B WB API date/period-capable, group C WB API current-snapshot-only и group D other/manual overlays, status reduction остаётся source-aware, а bot-backed current-day sync теперь делает explicit seller-portal session probe и materialize-ит permanent operator-facing seller recovery block with start/status/stop/launcher flow, canonical supplier enforcement и truthful visual-start lifecycle instead of ad-hoc headed-X11 recovery."
 ---
 
 # 1. Идентификатор и статус
@@ -201,7 +201,8 @@ update_note: "Обновлён под current seller-session recovery checkpoint
     - `Восстановить Seller-сессию` стартует repo-owned recovery lifecycle
     - `Скачать launcher для Mac` отдаёт reusable `.command`, который сам поднимает SSH tunnel к localhost-only noVNC и открывает browser
     - `Остановить recovery` cleanup-ит temporary contour
-    - badge/summary/instruction remain server-driven and truthfully show `awaiting_login / wrong_organization / refresh_failed / success / stopped / error`
+    - badge/summary/instruction remain server-driven and truthfully show `starting_visual_session / awaiting_login / wrong_organization / refresh_failed / success / stopped / error`
+    - `starting_visual_session` means the temporary noVNC contour is already up, but the visible remote Chromium window is still materializing; launcher/login readiness moves to `awaiting_login` only after the browser is actually visible instead of leaving the operator on a black canvas
   - эти два manual fields заполняются только из `manual_context`: successful manual `refresh` обновляет только `Последняя удачная загрузка`, successful manual `load` обновляет только `Последняя удачная отправка`, auto path их не трогает
   - reload/page-open state этого manual block truthfully показывает только persisted manual-success facts и не является самостоятельным доказательством успешной последней manual `Отправить данные` без completed job/log
   - page дополнительно показывает compact block `Автообновления`, который заполняется только из server-driven `server_context`
@@ -309,7 +310,7 @@ update_note: "Обновлён под current seller-session recovery checkpoint
 - Для `today_current` тот же refresh contour теперь может bounded-materialize-ить missing web-source snapshot перед read-side fetch:
   - refresh сначала проверяет local `wb-ai` exact-date availability;
   - если local exact-date snapshot отсутствует, contour сначала проверяет текущий seller-portal browser state в `/opt/wb-web-bot/storage_state.json`; login redirect / auth `401` materialize-ится как `seller_portal_session_invalid` и останавливает bot run до `runner_day` / `runner_sales_funnel_day`;
-  - repo-owned recovery path for this barrier remains `apps/seller_portal_relogin_session.py`, but current steady operator flow wraps it behind `start/status/stop/launcher` HTTP routes and the compact operator block; the tool must confirm the canonical supplier/org, safe-switch to it when available, only then save refreshed `storage_state.json`, auto-trigger loopback refresh and cleanup the temporary contour;
+  - repo-owned recovery path for this barrier remains `apps/seller_portal_relogin_session.py`, but current steady operator flow wraps it behind `start/status/stop/launcher` HTTP routes and the compact operator block; the tool must first materialize a visible headed Chromium window on Xvfb/noVNC, then confirm the canonical supplier/org, safe-switch to it when available, only then save refreshed `storage_state.json`, auto-trigger loopback refresh and cleanup the temporary contour;
   - при miss он вызывает server-local owner path `/opt/wb-web-bot` same-day runners и затем `/opt/wb-ai/run_web_source_handoff.py`;
   - после successful handoff refresh читает уже materialized exact-date local snapshot;
   - если sync path падает, `STATUS.web_source_snapshot[today_current].note` / `STATUS.seller_funnel_snapshot[today_current].note` получают `current_day_web_source_sync_failed=...`; invalidated seller session now surfaces there as explicit `seller_portal_session_invalid`, а values остаются truthful blank вместо invented fill.

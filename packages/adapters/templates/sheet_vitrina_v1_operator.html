@@ -2512,7 +2512,7 @@
         sellerRecoveryTechnical.textContent = technical;
         sellerRecoveryTechnical.hidden = !technical;
         updateSellerRecoveryButtons();
-        if (normalized.running || ["starting", "awaiting_login", "auth_confirmed"].includes(String(normalized.status || ""))) {
+        if (normalized.running || ["starting", "starting_visual_session", "awaiting_login", "auth_confirmed"].includes(String(normalized.status || ""))) {
           scheduleSellerRecoveryPoll();
         } else {
           clearSellerRecoveryPoll();
@@ -2520,7 +2520,7 @@
         if (
           sellerRecoveryCycleActive
           && !normalized.running
-          && !["starting", "awaiting_login", "auth_confirmed"].includes(String(normalized.status || ""))
+          && !["starting", "starting_visual_session", "awaiting_login", "auth_confirmed"].includes(String(normalized.status || ""))
         ) {
           sellerRecoveryCycleActive = false;
           Promise.all([loadStatus(), loadDailyReport(), loadStockReport()]).catch(() => {});
@@ -2976,10 +2976,13 @@
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
           renderSellerRecovery(payload);
+          const recoveryStatus = String(payload.status || "");
           setSellerRecoveryMessage(
-            String(payload.status || "") === "awaiting_login"
-              ? "Recovery session запущена. Скачайте launcher и войдите в seller portal."
-              : "Recovery request обработан.",
+            recoveryStatus === "starting_visual_session"
+              ? "Recovery session запущена. Ждём materialization удалённого браузера..."
+              : (recoveryStatus === "awaiting_login"
+                ? "Recovery session запущена. Скачайте launcher и войдите в seller portal."
+                : "Recovery request обработан."),
             "success"
           );
         } catch (error) {

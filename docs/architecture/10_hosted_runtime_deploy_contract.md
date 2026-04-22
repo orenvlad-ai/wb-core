@@ -141,7 +141,7 @@ Current promo live-wiring note:
   - `novnc`
   - `websockify`
   - `openbox`
-- these packages are used only by the repo-owned seller-session recovery contour `apps/seller_portal_relogin_session.py`; it binds noVNC to `127.0.0.1` on the host, writes updated `storage_state.json` only after validated auth plus canonical supplier confirmation/safe switch, and is intended for temporary auth recovery rather than for the steady-state ingest path.
+- these packages are used only by the repo-owned seller-session recovery contour `apps/seller_portal_relogin_session.py`; it binds noVNC to `127.0.0.1` on the host, must materialize a real visible headed Chromium window before surfacing `awaiting_login`, writes updated `storage_state.json` only after validated auth plus canonical supplier confirmation/safe switch, and is intended for temporary auth recovery rather than for the steady-state ingest path.
 - current steady operator path over that tool is bounded and HTTP-owned:
   - `POST /v1/sheet-vitrina-v1/seller-portal-recovery/start`
   - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/status`

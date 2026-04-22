@@ -33,11 +33,27 @@ from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHtt
 class _FakeSellerRecoveryController:
     def __init__(self) -> None:
         self.running = False
+        self.visual_ready = False
         self.calls: list[str] = []
 
     def read_status(self, *, launcher_download_path: str) -> dict[str, object]:
         self.calls.append("status")
         if self.running:
+            if not self.visual_ready:
+                self.visual_ready = True
+                return {
+                    "status": "starting_visual_session",
+                    "status_label": "Запускаем браузер",
+                    "status_tone": "loading",
+                    "summary": "Запускаем удалённый браузер seller portal.",
+                    "instruction": "Дождитесь статуса «Ожидается вход».",
+                    "technical_line": "Нужный кабинет: ИП Сагитов В. Р. · supplier canonical-supplier-id",
+                    "running": True,
+                    "can_start": False,
+                    "can_stop": True,
+                    "launcher_enabled": False,
+                    "launcher_download_path": launcher_download_path,
+                }
             return {
                 "status": "awaiting_login",
                 "status_label": "Ожидается вход",
@@ -68,11 +84,13 @@ class _FakeSellerRecoveryController:
     def start(self, *, replace: bool, launcher_download_path: str) -> dict[str, object]:
         self.calls.append(f"start:{replace}")
         self.running = True
+        self.visual_ready = False
         return self.read_status(launcher_download_path=launcher_download_path)
 
     def stop(self, *, launcher_download_path: str) -> dict[str, object]:
         self.calls.append("stop")
         self.running = False
+        self.visual_ready = False
         return {
             "status": "stopped",
             "status_label": "Остановлено",
@@ -150,14 +168,16 @@ def main() -> None:
                 raise AssertionError(f"initial recovery status must surface invalid session, got {status_code} / {status_payload}")
 
             start_code, start_payload = _post_json(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH, {"replace": True})
-            if start_code != 200 or start_payload.get("status") != "awaiting_login":
-                raise AssertionError(f"start must move recovery into awaiting_login, got {start_code} / {start_payload}")
-            if start_payload.get("launcher_enabled") is not True:
-                raise AssertionError("awaiting_login payload must enable launcher download")
+            if start_code != 200 or start_payload.get("status") != "starting_visual_session":
+                raise AssertionError(f"start must surface visual-session startup before awaiting_login, got {start_code} / {start_payload}")
+            if start_payload.get("launcher_enabled") is not False:
+                raise AssertionError("starting_visual_session must keep launcher disabled until browser window is ready")
 
             status_code, status_payload = _get_json(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH)
             if status_code != 200 or status_payload.get("status") != "awaiting_login":
                 raise AssertionError(f"status after start must stay awaiting_login, got {status_code} / {status_payload}")
+            if status_payload.get("launcher_enabled") is not True:
+                raise AssertionError("awaiting_login payload must enable launcher download once the browser window is visible")
 
             launcher_request = urllib_request.Request(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH, method="GET")
             with urllib_request.urlopen(launcher_request, timeout=15) as response:

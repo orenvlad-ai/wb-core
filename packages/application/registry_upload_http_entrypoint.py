@@ -1268,13 +1268,13 @@ def _build_seller_portal_recovery_payload(
             expected_supplier_id=expected_supplier_id,
             expected_supplier_label=expected_supplier_label,
             supplier_context=supplier_context,
-            launcher_ready=bool(raw.get("running")),
+            launcher_ready=effective_status in {"awaiting_login", "auth_confirmed"},
         ),
         "raw_status": str(raw.get("status") or "").strip(),
         "running": bool(raw.get("running")),
         "can_start": (not bool(raw.get("running"))) and canonical_configured,
         "can_stop": bool(raw.get("running")),
-        "launcher_enabled": bool(raw.get("running")) or str(raw.get("status") or "").strip() in {"starting", "awaiting_login", "auth_confirmed"},
+        "launcher_enabled": effective_status in {"awaiting_login", "auth_confirmed"},
         "launcher_download_path": launcher_download_path,
         "updated_at": _format_optional_business_timestamp(str(raw.get("updated_at") or "") or None),
         "started_at": _format_optional_business_timestamp(str(raw.get("started_at") or "") or None),
@@ -1339,7 +1339,7 @@ def _seller_portal_recovery_effective_status(
     organization_confirmed: bool,
 ) -> str:
     raw_status = str(raw.get("status") or "").strip()
-    if raw_status in {"starting", "awaiting_login", "auth_confirmed", "refresh_failed", "timeout", "error", "wrong_organization", "stopped"}:
+    if raw_status in {"starting", "starting_visual_session", "awaiting_login", "auth_confirmed", "refresh_failed", "timeout", "error", "wrong_organization", "stopped"}:
         return raw_status
     if not canonical_configured:
         return "not_configured"
@@ -1373,6 +1373,7 @@ def _seller_portal_recovery_status_label(status: str) -> str:
     labels = {
         "idle": "Готово",
         "starting": "Запускаем",
+        "starting_visual_session": "Запускаем браузер",
         "awaiting_login": "Ожидается вход",
         "auth_confirmed": "Обновляем",
         "success": "Готово",
@@ -1391,7 +1392,7 @@ def _seller_portal_recovery_status_label(status: str) -> str:
 def _seller_portal_recovery_status_tone(status: str) -> str:
     if status in {"success", "idle"}:
         return "success" if status == "success" else "idle"
-    if status in {"starting", "auth_confirmed"}:
+    if status in {"starting", "starting_visual_session", "auth_confirmed"}:
         return "loading"
     if status in {"awaiting_login", "timeout", "refresh_failed"}:
         return "warning"
@@ -1414,6 +1415,11 @@ def _seller_portal_recovery_copy(
         return (
             "Поднимаем временный recovery-сеанс на host.",
             "Когда статус сменится на «Ожидается вход», скачайте launcher и войдите в seller portal.",
+        )
+    if status == "starting_visual_session":
+        return (
+            "Запускаем удалённый браузер seller portal.",
+            "Дождитесь статуса «Ожидается вход»: launcher станет полезен только после materialization окна.",
         )
     if status == "awaiting_login":
         return (

@@ -26,13 +26,27 @@ class _FakePage:
     def goto(self, *_args, **_kwargs) -> None:
         return
 
+    def bring_to_front(self) -> None:
+        return
+
+    def evaluate(self, *_args, **_kwargs) -> None:
+        return
+
 
 class _FakeContext:
     def __init__(self) -> None:
         self.storage_state_calls = 0
+        self.cookies: list[dict[str, object]] = []
+        self.pages = [_FakePage()]
+        self.closed = False
 
     def new_page(self) -> _FakePage:
-        return _FakePage()
+        page = _FakePage()
+        self.pages.append(page)
+        return page
+
+    def add_cookies(self, cookies: list[dict[str, object]]) -> None:
+        self.cookies.extend(cookies)
 
     def storage_state(self, *, path: str) -> None:
         self.storage_state_calls += 1
@@ -77,13 +91,16 @@ class _FakeContext:
         }
         Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    def close(self) -> None:
+        self.closed = True
+
 
 class _FakeBrowser:
     def __init__(self) -> None:
         self.context = _FakeContext()
         self.closed = False
 
-    def new_context(self, **_kwargs) -> _FakeContext:
+    def launch_persistent_context(self, *_args, **_kwargs) -> _FakeContext:
         return self.context
 
     def close(self) -> None:
@@ -104,8 +121,8 @@ class _FakePlaywright:
     def chromium(self) -> "_FakePlaywright":
         return self
 
-    def launch(self, **_kwargs) -> _FakeBrowser:
-        return self.browser
+    def launch_persistent_context(self, *_args, **_kwargs) -> _FakeContext:
+        return self.browser.launch_persistent_context(*_args, **_kwargs)
 
 
 def main() -> None:
@@ -122,6 +139,24 @@ def main() -> None:
             canonical_supplier_label="ИП Сагитов В. Р.",
         )
         config.state_dir.mkdir(parents=True, exist_ok=True)
+        config.storage_state_path.write_text(
+            json.dumps(
+                {
+                    "cookies": [
+                        {
+                            "name": "existing-session-cookie",
+                            "value": "seed",
+                            "domain": "seller.wildberries.ru",
+                            "path": "/",
+                        }
+                    ],
+                    "origins": [],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         fake_playwright = _FakePlaywright()
         probe_calls = {"count": 0}
 
@@ -142,6 +177,7 @@ def main() -> None:
             probe_fn=fake_probe,
             playwright_factory=lambda: fake_playwright,
             sleep_fn=lambda _seconds: None,
+            visual_ready_fn=lambda _display: True,
         )
 
         if result.get("status") != "auth_confirmed":
@@ -150,8 +186,10 @@ def main() -> None:
             raise AssertionError("storage_state.json must be written after auth is confirmed")
         if probe_calls["count"] < 2:
             raise AssertionError(f"probe must be retried until auth succeeds, got {probe_calls}")
-        if not fake_playwright.browser.closed:
-            raise AssertionError("browser must be closed after auto-capture")
+        if not fake_playwright.browser.context.cookies:
+            raise AssertionError("persistent context must receive cookies from existing storage state when available")
+        if not fake_playwright.browser.context.closed:
+            raise AssertionError("persistent context must be closed after auto-capture")
         if result.get("organization_confirmed") is not True:
             raise AssertionError(f"canonical supplier must be confirmed, got {result}")
         if result.get("organization_switch_applied") is not True:
