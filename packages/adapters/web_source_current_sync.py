@@ -105,6 +105,7 @@ class ShellBackedWebSourceCurrentSync:
         seller_ready = self._has_sales_funnel_snapshot(snapshot_date)
         if search_ready and seller_ready:
             return
+        self._ensure_seller_portal_session_ready()
 
         bot_python = self.config.wb_web_bot_dir / "venv" / "bin" / "python"
         ai_python = self.config.wb_ai_dir / "venv" / "bin" / "python"
@@ -167,6 +168,7 @@ class ShellBackedWebSourceCurrentSync:
     def ensure_closed_day_snapshot(self, *, source_key: str, snapshot_date: str) -> None:
         if not self._is_enabled():
             raise RuntimeError("closed-day web-source sync is disabled in current runtime")
+        self._ensure_seller_portal_session_ready()
         if source_key == "web_source_snapshot":
             self._materialize_search_analytics(snapshot_date)
             self._ensure_closed_day_source_freshness(source_key=source_key, snapshot_date=snapshot_date)
@@ -346,6 +348,70 @@ class ShellBackedWebSourceCurrentSync:
             fetched_at=str(payload.get("fetched_at", "") or "") or None,
         )
 
+    def _ensure_seller_portal_session_ready(self) -> None:
+        storage_state_path = self.config.wb_web_bot_dir / "storage_state.json"
+        if not storage_state_path.exists():
+            raise RuntimeError(
+                "seller_portal_session_missing: "
+                "storage_state.json is missing; manual seller portal login is required"
+            )
+
+        bot_python = self.config.wb_web_bot_dir / "venv" / "bin" / "python"
+        bot_env = _build_env(self.config.wb_web_bot_dir / ".env")
+        probe = subprocess.run(
+            [
+                str(bot_python),
+                "-c",
+                _SELLER_PORTAL_SESSION_PROBE_SCRIPT,
+                str(storage_state_path),
+            ],
+            cwd=str(self.config.wb_web_bot_dir),
+            env=bot_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=min(self.config.timeout_sec, 45),
+        )
+        if probe.returncode != 0:
+            stderr_tail = probe.stderr.strip()[-800:]
+            stdout_tail = probe.stdout.strip()[-800:]
+            details = "; ".join(
+                part
+                for part in [
+                    f"stdout={stdout_tail}" if stdout_tail else "",
+                    f"stderr={stderr_tail}" if stderr_tail else "",
+                ]
+                if part
+            )
+            raise RuntimeError(
+                "seller_portal_session_probe_failed"
+                f"{': ' + details if details else ''}"
+            )
+
+        try:
+            payload = json.loads(probe.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "seller_portal_session_probe_failed: invalid probe JSON output"
+            ) from exc
+
+        if bool(payload.get("ok")):
+            return
+
+        status = str(payload.get("status") or "").strip() or "seller_portal_session_invalid"
+        final_url = str(payload.get("final_url") or "").strip()
+        title = str(payload.get("title") or "").strip()
+        details = "; ".join(
+            part
+            for part in [
+                f"final_url={final_url}" if final_url else "",
+                f"title={title}" if title else "",
+                "manual_relogin_required=login_and_save_state",
+            ]
+            if part
+        )
+        raise RuntimeError(f"{status}: {details}")
+
 
 def _build_env(env_path: Path) -> dict[str, str]:
     env = os.environ.copy()
@@ -495,4 +561,75 @@ with conn:
 row_count = int(row[0] or 0) if row else 0
 fetched_at = row[1].isoformat() if row and row[1] is not None else ""
 print(json.dumps({"row_count": row_count, "fetched_at": fetched_at}))
+"""
+
+_SELLER_PORTAL_SESSION_PROBE_SCRIPT = r"""
+import json
+import sys
+from pathlib import Path
+
+from playwright.sync_api import sync_playwright
+
+
+storage_state_path = Path(sys.argv[1])
+if not storage_state_path.exists():
+    print(json.dumps({"ok": False, "status": "seller_portal_session_missing"}))
+    raise SystemExit(0)
+
+auth_validate_statuses = []
+body_text = ""
+final_url = ""
+title = ""
+
+with sync_playwright() as playwright:
+    browser = playwright.chromium.launch(headless=True)
+    context = browser.new_context(storage_state=str(storage_state_path))
+    page = context.new_page()
+
+    def on_response(response):
+        url = response.url
+        if (
+            "seller.wildberries.ru/ns/passport-portal/" in url
+            and "/validate" in url
+        ):
+            auth_validate_statuses.append(response.status)
+
+    page.on("response", on_response)
+    page.goto(
+        "https://seller.wildberries.ru/search-analytics/my-search-queries",
+        wait_until="domcontentloaded",
+        timeout=30000,
+    )
+    page.wait_for_timeout(3000)
+    final_url = page.url
+    title = page.title()
+    try:
+        body_text = " ".join(page.locator("body").inner_text().split()).lower()
+    except Exception:
+        body_text = ""
+    browser.close()
+
+login_redirect = "seller-auth.wildberries.ru" in final_url
+has_validate_401 = 401 in auth_validate_statuses
+login_markers = any(
+    marker in body_text
+    for marker in (
+        "вход в wb партнёры",
+        "введите номер телефона",
+        "войти",
+        "seller-auth",
+    )
+)
+ok = not login_redirect and not has_validate_401 and not login_markers
+print(
+    json.dumps(
+        {
+            "ok": ok,
+            "status": "ok" if ok else "seller_portal_session_invalid",
+            "final_url": final_url,
+            "title": title,
+            "has_validate_401": has_validate_401,
+        }
+    )
+)
 """

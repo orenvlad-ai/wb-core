@@ -71,9 +71,30 @@ def main() -> None:
     if "prices_snapshot" not in str(success_marker_warning.get("technical_text") or ""):
         raise AssertionError(f"technical line must stay available, got {success_marker_warning}")
 
+    session_invalid_error = _build_endpoint_summary_item(
+        source_key="web_source_snapshot",
+        record={
+            "tone": "error",
+            "status_label": "Ошибка",
+            "detail": (
+                "сегодня: current_day_web_source_sync_failed=seller_portal_session_invalid:"
+                " final_url=https://seller-auth.wildberries.ru/ru/?redirect_url=..."
+                " title=Вход на Портал поставщиков Wildberries"
+                " manual_relogin_required=login_and_save_state"
+            ),
+            "note": "",
+        },
+        source_order=3,
+    )
+    if session_invalid_error.get("reason_ru") != "сессия seller portal больше не действует; требуется повторный вход":
+        raise AssertionError(f"seller-session invalid reason must be humanized, got {session_invalid_error}")
+    _assert_reason_is_sanitized(str(session_invalid_error.get("reason_ru") or ""))
+    _assert_reason_is_sanitized(str(session_invalid_error.get("detail") or ""))
+
     print("web_vitrina_reason_sanitization: ok ->", preserved_warning["reason_ru"])
     print("web_vitrina_zero_warning_reason: ok ->", zero_warning["reason_ru"])
     print("web_vitrina_success_marker_sanitization: ok ->", success_marker_warning["reason_ru"])
+    print("web_vitrina_session_invalid_reason: ok ->", session_invalid_error["reason_ru"])
 
 
 def _assert_reason_is_sanitized(text: str) -> None:
@@ -87,6 +108,8 @@ def _assert_reason_is_sanitized(text: str) -> None:
         "resolution_rule=",
         "accepted_at=",
         "current_day_web_source_sync_failed=",
+        "manual_relogin_required=",
+        "final_url=",
     )
     for marker in markers:
         if marker in text:

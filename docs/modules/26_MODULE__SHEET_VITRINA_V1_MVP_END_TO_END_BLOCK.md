@@ -104,7 +104,7 @@ related_docs:
   - "docs/modules/29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md"
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current truthful temporal-status checkpoint: `sheet_vitrina_v1` по-прежнему разделяет group A bot/web-source historical, group B WB API date/period-capable, group C WB API current-snapshot-only и group D other/manual overlays, но status reduction теперь source-aware: `stocks` = `yesterday_closed_only`, `spp`/`fin_report_daily` = `dual_day_intraday_tolerant`, strict two-slot bot/web-source families и current-only rollover families остаются без смягчения; sibling web-vitrina boundary и page composition stay unchanged."
+update_note: "Обновлён под current truthful temporal-status checkpoint: `sheet_vitrina_v1` по-прежнему разделяет group A bot/web-source historical, group B WB API date/period-capable, group C WB API current-snapshot-only и group D other/manual overlays, status reduction остаётся source-aware, а bot-backed current-day sync теперь делает explicit seller-portal session probe и surface-ит `seller_portal_session_invalid` как human-only auth barrier вместо generic Playwright timeout."
 ---
 
 # 1. Идентификатор и статус
@@ -296,9 +296,10 @@ update_note: "Обновлён под current truthful temporal-status checkpoin
   - если source latest уже уехал дальше requested slot date, STATUS surface остаётся truthful `not_found` с `resolution_rule=explicit_or_latest_date_match`.
 - Для `today_current` тот же refresh contour теперь может bounded-materialize-ить missing web-source snapshot перед read-side fetch:
   - refresh сначала проверяет local `wb-ai` exact-date availability;
+  - если local exact-date snapshot отсутствует, contour сначала проверяет текущий seller-portal browser state в `/opt/wb-web-bot/storage_state.json`; login redirect / auth `401` materialize-ится как `seller_portal_session_invalid` и останавливает bot run до `runner_day` / `runner_sales_funnel_day`;
   - при miss он вызывает server-local owner path `/opt/wb-web-bot` same-day runners и затем `/opt/wb-ai/run_web_source_handoff.py`;
   - после successful handoff refresh читает уже materialized exact-date local snapshot;
-  - если sync path падает, `STATUS.web_source_snapshot[today_current].note` / `STATUS.seller_funnel_snapshot[today_current].note` получают `current_day_web_source_sync_failed=...`, а values остаются truthful blank вместо invented fill.
+  - если sync path падает, `STATUS.web_source_snapshot[today_current].note` / `STATUS.seller_funnel_snapshot[today_current].note` получают `current_day_web_source_sync_failed=...`; invalidated seller session now surfaces there as explicit `seller_portal_session_invalid`, а values остаются truthful blank вместо invented fill.
 - Для тех же bot/web-source sources current checkpoint теперь запрещает silent provisional inheritance в closed slot:
   - `today_current` хранится как `provisional_current_snapshot`;
   - explicit closure attempt для завершённого дня может временно сохранить `closed_day_candidate_snapshot`;

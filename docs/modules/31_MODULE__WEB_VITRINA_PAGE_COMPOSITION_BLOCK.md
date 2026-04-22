@@ -40,7 +40,7 @@ related_docs:
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Phase 4 live page composition остаётся server-driven, но current status semantics now stay source-aware instead of naive two-slot worst-case: `stocks[today_current]=not_available` no longer yellows the card by itself, `spp`/`fin_report_daily` tolerate bounded intraday non-yield when `yesterday_closed` is confirmed, strict two-slot bot/web-source families remain strict, while existing human-readable labels/reasons, severity sorting and readable freshness display stay unchanged."
+update_note: "Phase 4 live page composition остаётся server-driven, current status semantics stay source-aware instead of naive two-slot worst-case, а bot-backed auth barrier теперь humanize-ится explicitly: invalid seller-portal browser session surfaces as short Russian reason about required re-login instead of raw Playwright timeout/traceback."
 ---
 
 # 1. Идентификатор и статус
@@ -185,6 +185,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, но
   - both blocks now sort item-ы server-side as `error -> warning -> success` while preserving canonical source order inside each severity bucket
   - primary text is human Russian copy; technical source key / endpoint text stays secondary and muted
   - warning/error `reason_ru` is now strictly summarized on the backend: raw STATUS/job note, JSON blobs, traceback text, request ids and similar technical payload stay only in the existing log/download surface
+  - for bot-backed families an invalidated seller session is surfaced as short human reason (`сессия seller portal больше не действует; требуется повторный вход`) instead of generic `Template request ... was not captured`
 - Historical period UX is intentionally thin:
   - calendar/preset panel lives in the same server template
   - `Сохранить` only rewrites query string and re-reads server payload

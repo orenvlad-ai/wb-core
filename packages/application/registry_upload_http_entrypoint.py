@@ -2143,6 +2143,14 @@ def _humanize_note(note: str) -> str:
         return ""
     replacements = (
         (
+            "seller_portal_session_invalid",
+            "сессия seller portal больше не действует; требуется повторный вход",
+        ),
+        (
+            "seller_portal_session_missing",
+            "сессия seller portal отсутствует; требуется повторный вход",
+        ),
+        (
             "source is not available for today_current in the bounded live contour; today column stays blank instead of inventing fresh values",
             "текущий день для этого источника не требуется",
         ),
@@ -2361,6 +2369,12 @@ def _summarize_activity_reason_part(text: str, *, prefix: str = "") -> str:
         "ограничил запросы",
         "closure_rate_limited",
     )
+    session_invalid = _activity_reason_has_any(
+        lowered,
+        "seller_portal_session_invalid",
+        "seller_portal_session_missing",
+        "manual_relogin_required=login_and_save_state",
+    )
     sync_failed = _activity_reason_has_any(
         lowered,
         "current_day_web_source_sync_failed=",
@@ -2430,7 +2444,9 @@ def _summarize_activity_reason_part(text: str, *, prefix: str = "") -> str:
     )
 
     failure_clause = ""
-    if rate_limited and sync_failed and timeout:
+    if session_invalid:
+        failure_clause = "сессия seller portal больше не действует; требуется повторный вход"
+    elif rate_limited and sync_failed and timeout:
         failure_clause = "источник временно ограничил запросы, а дополнительная синхронизация завершилась по таймауту"
     elif rate_limited and sync_failed:
         failure_clause = "источник временно ограничил запросы, а дополнительная синхронизация завершилась с ошибкой"
@@ -2511,6 +2527,8 @@ def _summarize_activity_reason_part(text: str, *, prefix: str = "") -> str:
 
 def _mapped_activity_reason_text(text: str) -> str:
     replacements = (
+        ("seller_portal_session_invalid", "сессия seller portal больше не действует; требуется повторный вход"),
+        ("seller_portal_session_missing", "сессия seller portal отсутствует; требуется повторный вход"),
         ("Persisted STATUS не содержит итог по источнику", "итог по источнику не подтверждён"),
         ("payload не materialized", "данные не получены"),
         ("источник не вернул payload", "данные не получены"),
@@ -2638,6 +2656,8 @@ def _looks_like_technical_activity_reason_text(text: str) -> bool:
         "collector_mode=",
         "trace_run_dir=",
         "collector_status=",
+        "manual_relogin_required=",
+        "final_url=",
         "archive_reuse_enabled=",
         "archive_mode=",
         "archive_scanned=",

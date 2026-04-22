@@ -31,6 +31,9 @@ class _NoopMaterializeSync(ShellBackedWebSourceCurrentSync):
         )
         self.materialized: list[tuple[str, str]] = []
 
+    def _ensure_seller_portal_session_ready(self) -> None:
+        return
+
     def _materialize_search_analytics(self, snapshot_date: str) -> None:
         self.materialized.append(("web_source_snapshot", snapshot_date))
 

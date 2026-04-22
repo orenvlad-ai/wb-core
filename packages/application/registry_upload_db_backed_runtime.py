@@ -1974,6 +1974,14 @@ def _humanize_status_note(note: str) -> str:
         return ""
     replacements = (
         (
+            "seller_portal_session_invalid",
+            "сессия seller portal больше не действует; требуется повторный вход",
+        ),
+        (
+            "seller_portal_session_missing",
+            "сессия seller portal отсутствует; требуется повторный вход",
+        ),
+        (
             "source is not available for today_current in the bounded live contour; today column stays blank instead of inventing fresh values",
             "текущий день для этого источника не требуется",
         ),
