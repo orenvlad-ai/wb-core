@@ -180,8 +180,8 @@ def main() -> None:
             visual_ready_fn=lambda _display: True,
         )
 
-        if result.get("status") != "auth_confirmed":
-            raise AssertionError(f"expected auth_confirmed, got {result}")
+        if result.get("status") != "capture_completed":
+            raise AssertionError(f"expected capture_completed, got {result}")
         if not config.storage_state_path.exists():
             raise AssertionError("storage_state.json must be written after auth is confirmed")
         if probe_calls["count"] < 2:
@@ -197,14 +197,27 @@ def main() -> None:
         final_supplier_context = MODULE.read_storage_state_supplier_context(config.storage_state_path)
         if final_supplier_context.get("current_supplier_id") != "canonical-supplier-id":
             raise AssertionError(f"storage_state.json must be rewritten to canonical supplier, got {final_supplier_context}")
-        status_payload = MODULE.read_session_status(config, with_probe=False)
-        if status_payload.get("status") != "awaiting_login":
-            raise AssertionError(f"intermediate awaiting_login status must be persisted, got {status_payload}")
+        status_payload = MODULE._read_status(config.status_path)  # type: ignore[attr-defined]
+        if status_payload.get("status") != "checking_canonical_supplier":
+            raise AssertionError(f"intermediate checking_canonical_supplier status must be persisted, got {status_payload}")
+        MODULE._write_status(  # type: ignore[attr-defined]
+            config,
+            {
+                "run_id": "seller-recovery-test-run",
+                "status": "awaiting_login",
+                "message": "temporary noVNC session is ready for login",
+                "started_at": "2026-04-23T00:00:00Z",
+            },
+        )
+        config.pid_path.write_text("4242", encoding="utf-8")
+        original_pid_is_running = MODULE._pid_is_running  # type: ignore[attr-defined]
+        MODULE._pid_is_running = lambda _pid: True  # type: ignore[assignment]
         archive_bytes, archive_name = MODULE.build_macos_launcher_archive(
             config,
             public_status_url="https://api.selleros.pro/v1/sheet-vitrina-v1/seller-portal-recovery/status",
             public_operator_url="https://api.selleros.pro/sheet-vitrina-v1/operator",
         )
+        MODULE._pid_is_running = original_pid_is_running  # type: ignore[assignment]
         if archive_name != "seller-portal-relogin-macos.zip":
             raise AssertionError(f"unexpected launcher archive name: {archive_name}")
         with zipfile.ZipFile(io.BytesIO(archive_bytes), "r") as archive:
@@ -214,12 +227,16 @@ def main() -> None:
             launcher_text = archive.read("seller-portal-relogin.command").decode("utf-8")
         required_fragments = [
             "selleros-root",
+            "RUN_ID=seller-recovery-test-run",
             "${STATUS}",
             "python3 -c",
             'json.loads(raw).get("status", "")',
+            'json.loads(raw).get("summary", "")',
             "https://api.selleros.pro/v1/sheet-vitrina-v1/seller-portal-recovery/status",
+            "run_id=seller-recovery-test-run",
             "https://api.selleros.pro/sheet-vitrina-v1/operator",
             "/vnc.html?autoconnect=1&resize=remote&path=websockify&reconnect=1",
+            "Восстановление завершено: ${STATUS:-unknown}",
         ]
         missing_fragments = [item for item in required_fragments if item not in launcher_text]
         if missing_fragments:
@@ -227,7 +244,7 @@ def main() -> None:
         if "sed -n 's/.*\"status\"" in launcher_text or 'sed -n \'s/.*"status"' in launcher_text:
             raise AssertionError("launcher script must not parse nested JSON status fields via greedy sed")
 
-        print("seller_portal_relogin_session_capture: ok -> auth_confirmed after browser login")
+        print("seller_portal_relogin_session_capture: ok -> capture_completed after browser login")
         print("seller_portal_relogin_session_supplier_switch: ok -> canonical supplier enforced before final save")
         print("seller_portal_relogin_session_launcher: ok -> archive contains reusable Mac launcher script")
         print("smoke-check passed")

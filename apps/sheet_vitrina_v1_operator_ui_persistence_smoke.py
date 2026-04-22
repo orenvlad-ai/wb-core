@@ -104,10 +104,13 @@ class LocalOperatorFixtureServer:
                 "application/json; charset=utf-8",
                 json.dumps(
                     {
-                        "status": "session_invalid",
-                        "status_label": "Нужен вход",
-                        "status_tone": "error",
-                        "summary": "Сохранённая seller-сессия больше не действует.",
+                        "status": "idle",
+                        "status_label": "Не запущено",
+                        "status_tone": "idle",
+                        "run_status": "idle",
+                        "run_status_label": "Не запущено",
+                        "run_status_tone": "idle",
+                        "summary": "Новый запуск восстановления сейчас не выполняется. Сохранённая seller-сессия больше не действует.",
                         "instruction": "Нажмите «Восстановить сессию» и войдите через launcher для Mac.",
                         "technical_line": "Нужный кабинет: ИП Сагитов В. Р. · supplier canonical-supplier-id",
                         "running": False,
@@ -115,6 +118,13 @@ class LocalOperatorFixtureServer:
                         "can_stop": False,
                         "launcher_enabled": False,
                         "launcher_download_path": DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+                        "run_id": "",
+                        "run_is_final": False,
+                        "run_final_status": "",
+                        "run_final_label": "",
+                        "session_status": "session_invalid",
+                        "session_status_label": "Нужен вход",
+                        "session_status_tone": "error",
                     },
                     ensure_ascii=False,
                 ).encode("utf-8"),
@@ -240,6 +250,9 @@ class LocalOperatorFixtureServer:
                         "status": "awaiting_login",
                         "status_label": "Нужно войти",
                         "status_tone": "warning",
+                        "run_status": "awaiting_login",
+                        "run_status_label": "Нужно войти",
+                        "run_status_tone": "warning",
                         "summary": "Откройте launcher и войдите в seller portal.",
                         "instruction": "После входа система сама проверит кабинет, сохранит storage_state.json и закроет временное окно входа.",
                         "technical_line": "Нужный кабинет: ИП Сагитов В. Р. · supplier canonical-supplier-id",
@@ -248,6 +261,13 @@ class LocalOperatorFixtureServer:
                         "can_stop": True,
                         "launcher_enabled": True,
                         "launcher_download_path": DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+                        "run_id": "seller-recovery-run-1",
+                        "run_is_final": False,
+                        "run_final_status": "",
+                        "run_final_label": "",
+                        "session_status": "session_invalid",
+                        "session_status_label": "Нужен вход",
+                        "session_status_tone": "error",
                     },
                     ensure_ascii=False,
                 ).encode("utf-8"),
@@ -258,9 +278,12 @@ class LocalOperatorFixtureServer:
                 json.dumps(
                     {
                         "status": "stopped",
-                        "status_label": "Окно входа закрыто",
+                        "status_label": "Остановлено",
                         "status_tone": "idle",
-                        "summary": "Временное окно входа закрыто. Сохранённая seller-сессия и бот не изменены.",
+                        "run_status": "stopped",
+                        "run_status_label": "Остановлено",
+                        "run_status_tone": "idle",
+                        "summary": "Восстановление остановлено: временное окно входа закрыто. Сохранённая seller-сессия и бот не изменены.",
                         "instruction": "Кнопка «Остановить восстановление» закрывает только временное окно входа.",
                         "technical_line": "Нужный кабинет: ИП Сагитов В. Р. · supplier canonical-supplier-id",
                         "running": False,
@@ -268,6 +291,13 @@ class LocalOperatorFixtureServer:
                         "can_stop": False,
                         "launcher_enabled": False,
                         "launcher_download_path": DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+                        "run_id": "seller-recovery-run-1",
+                        "run_is_final": True,
+                        "run_final_status": "stopped",
+                        "run_final_label": "Восстановление остановлено",
+                        "session_status": "session_invalid",
+                        "session_status_label": "Нужен вход",
+                        "session_status_tone": "error",
                     },
                     ensure_ascii=False,
                 ).encode("utf-8"),
@@ -371,8 +401,12 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         raise AssertionError("operator UI must render the seller session-check action")
     if page.locator("#sellerRecoveryStartButton").count() != 1:
         raise AssertionError("operator UI must render the seller recovery start action")
-    if page.locator("#sellerRecoverySummary").inner_text().strip() != "Сохранённая seller-сессия больше не действует.":
+    if page.locator("#sellerRecoverySummary").inner_text().strip() != "Новый запуск восстановления сейчас не выполняется. Сохранённая seller-сессия больше не действует.":
         raise AssertionError("operator UI must hydrate the seller recovery summary from server-side status")
+    if page.locator("#sellerRecoveryRunStatus").inner_text().strip() != "Не запущено":
+        raise AssertionError("operator UI must show the current recovery run status separately from the session state")
+    if page.locator("#sellerRecoverySessionState").inner_text().strip() != "Нужен вход":
+        raise AssertionError("operator UI must show the current session state separately from the run lifecycle")
     page.click("#sellerSessionCheckButton")
     page.wait_for_function(
         "() => document.getElementById('sellerRecoverySummary') && document.getElementById('sellerRecoverySummary').textContent.includes('не тот кабинет')"

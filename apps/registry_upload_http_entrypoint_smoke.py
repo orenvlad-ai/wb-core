@@ -188,6 +188,9 @@ def main() -> None:
                 or "Восстановить сессию" not in operator_ui_html
                 or "Скачать launcher для Mac" not in operator_ui_html
                 or "Остановить восстановление" not in operator_ui_html
+                or "Текущий запуск" not in operator_ui_html
+                or "Финал запуска" not in operator_ui_html
+                or "Статус сессии" not in operator_ui_html
             ):
                 raise AssertionError("operator UI must expose the bounded seller recovery block and launcher actions")
             if "Скачать лог" not in operator_ui_html or "max-height: 420px" not in operator_ui_html:

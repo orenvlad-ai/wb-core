@@ -522,8 +522,10 @@ def _build_handler(
 
             if parsed.path == DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH:
                 try:
+                    run_id = _resolve_single_query_param(parsed.query, "run_id")
                     payload = entrypoint.handle_seller_portal_recovery_status_request(
                         launcher_download_path=DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+                        run_id=run_id or None,
                     )
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -1064,6 +1066,11 @@ def _resolve_as_of_date(query_string: str, payload: Mapping[str, Any]) -> str:
 def _resolve_as_of_date_from_query(query_string: str) -> str:
     query = urllib_parse.parse_qs(query_string)
     return str(query.get("as_of_date", [""])[0]).strip()
+
+
+def _resolve_single_query_param(query_string: str, name: str) -> str:
+    query = urllib_parse.parse_qs(query_string)
+    return str(query.get(name, [""])[0]).strip()
 
 
 def _resolve_web_vitrina_period_window_from_query(query_string: str) -> tuple[str | None, str | None]:

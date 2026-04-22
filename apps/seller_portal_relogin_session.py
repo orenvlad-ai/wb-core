@@ -22,6 +22,7 @@ from typing import Any, Callable
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
+from uuid import uuid4
 import zipfile
 
 
@@ -54,6 +55,29 @@ DEFAULT_CANONICAL_SUPPLIER_ID = ""
 DEFAULT_CANONICAL_SUPPLIER_LABEL = ""
 DEFAULT_VISUAL_READY_TIMEOUT_SEC = 20.0
 DEFAULT_VISUAL_READY_POLL_SEC = 0.5
+RECOVERY_RUN_ACTIVE_STATUSES = {
+    "starting",
+    "awaiting_login",
+    "saving_session",
+    "validating_session",
+    "checking_canonical_supplier",
+    "triggering_refresh",
+}
+RECOVERY_RUN_FINAL_STATUSES = {
+    "completed",
+    "not_needed",
+    "stopped",
+    "timeout",
+    "error",
+}
+RECOVERY_RUN_KNOWN_STATUSES = RECOVERY_RUN_ACTIVE_STATUSES | RECOVERY_RUN_FINAL_STATUSES | {"idle"}
+LEGACY_RECOVERY_STATUS_MAP = {
+    "starting_visual_session": "starting",
+    "auth_confirmed": "triggering_refresh",
+    "success": "completed",
+    "refresh_failed": "error",
+    "wrong_organization": "error",
+}
 
 
 @dataclass(frozen=True)
@@ -147,6 +171,7 @@ def main() -> None:
             sub.add_argument("--replace", action="store_true", help="Stop an existing relogin session before starting a new one.")
         if command_name == "status":
             sub.add_argument("--probe", action="store_true", help="Run a fresh seller-session probe against the current storage state.")
+            sub.add_argument("--run-id", default="", help="Read status for a specific recovery run id.")
 
     args = parser.parse_args()
     config = _config_from_args(args)
@@ -156,7 +181,8 @@ def main() -> None:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
     if args.command == "status":
-        payload = read_session_status(config, with_probe=args.probe)
+        requested_run_id = str(args.run_id or "").strip() or None
+        payload = read_session_status(config, with_probe=args.probe, requested_run_id=requested_run_id)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
     if args.command == "stop":
@@ -177,17 +203,53 @@ def start_relogin_session(config: ReloginSessionConfig, *, replace: bool = False
             return current
         stop_relogin_session(config)
 
+    run_id = _new_recovery_run_id()
+    started_at = _iso_now()
+    current_probe = probe_storage_state(config.storage_state_path, wb_bot_python=config.wb_bot_python)
+    if not config.canonical_supplier_configured:
+        _write_status(
+            config,
+            {
+                "run_id": run_id,
+                "status": "error",
+                "run_failure_code": "canonical_supplier_not_configured",
+                "message": "canonical supplier is not configured; recovery run cannot start",
+                "started_at": started_at,
+                "finished_at": started_at,
+                "current_storage_probe": current_probe,
+                "supplier_context": _probe_supplier_context(current_probe),
+            },
+        )
+        return read_session_status(config, with_probe=True)
+    if bool(current_probe.get("ok")) and _probe_matches_canonical_supplier(current_probe, config):
+        _write_status(
+            config,
+            {
+                "run_id": run_id,
+                "status": "not_needed",
+                "message": "saved seller session is already valid and canonical; recovery run completed without opening noVNC",
+                "started_at": started_at,
+                "finished_at": started_at,
+                "current_storage_probe": current_probe,
+                "supplier_context": _probe_supplier_context(current_probe),
+            },
+        )
+        return read_session_status(config, with_probe=True)
+
     _write_status(
         config,
         {
+            "run_id": run_id,
             "status": "starting",
             "message": "server-side seller relogin session is starting",
-            "started_at": _iso_now(),
+            "started_at": started_at,
             "novnc_url": config.novnc_url,
             "ssh_tunnel_command": config.ssh_tunnel_command,
             "human_step": _build_macos_human_step(config),
             "storage_state_path": str(config.storage_state_path),
             "state_dir": str(config.state_dir),
+            "current_storage_probe": current_probe,
+            "supplier_context": _probe_supplier_context(current_probe),
         },
     )
 
@@ -204,7 +266,7 @@ def start_relogin_session(config: ReloginSessionConfig, *, replace: bool = False
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         status = read_session_status(config, with_probe=False)
-        if status.get("status") in {"starting_visual_session", "awaiting_login", "auth_confirmed", "success", "timeout", "error", "refresh_failed"}:
+        if status.get("status") in RECOVERY_RUN_ACTIVE_STATUSES | RECOVERY_RUN_FINAL_STATUSES:
             return status
         time.sleep(0.5)
     return read_session_status(config, with_probe=False)
@@ -225,16 +287,26 @@ def stop_relogin_session(config: ReloginSessionConfig) -> dict[str, Any]:
     if config.pid_path.exists():
         config.pid_path.unlink()
     payload = read_session_status(config, with_probe=False)
+    if str(payload.get("status") or "").strip() in RECOVERY_RUN_FINAL_STATUSES:
+        return payload
     payload["status"] = "stopped"
     payload["running"] = False
     payload["message"] = "seller relogin session stopped"
+    payload["finished_at"] = _iso_now()
     _write_status(config, payload)
     return payload
 
 
-def read_session_status(config: ReloginSessionConfig, *, with_probe: bool) -> dict[str, Any]:
+def read_session_status(
+    config: ReloginSessionConfig,
+    *,
+    with_probe: bool,
+    requested_run_id: str | None = None,
+) -> dict[str, Any]:
     payload = _read_status(config.status_path)
     pid = _read_pid(config.pid_path)
+    requested_run_id = str(requested_run_id or "").strip() or None
+    current_run_id = str(payload.get("run_id") or "").strip()
     payload.setdefault("storage_state_path", str(config.storage_state_path))
     payload.setdefault("state_dir", str(config.state_dir))
     payload.setdefault("novnc_url", config.novnc_url)
@@ -246,8 +318,26 @@ def read_session_status(config: ReloginSessionConfig, *, with_probe: bool) -> di
     payload.setdefault("supplier_context", read_storage_state_supplier_context(config.storage_state_path))
     payload["supervisor_pid"] = pid
     payload["running"] = bool(pid and _pid_is_running(pid))
+    payload["requested_run_id"] = requested_run_id or ""
+    if not payload["running"] and str(payload.get("status") or "").strip() in RECOVERY_RUN_ACTIVE_STATUSES:
+        payload["status"] = "error"
+        payload["run_failure_code"] = str(payload.get("run_failure_code") or "").strip() or "unexpected_exit"
+        payload["message"] = (
+            str(payload.get("message") or "").strip()
+            or "seller relogin supervisor exited before the recovery run reached a final status"
+        )
+        payload.setdefault("finished_at", _iso_now())
     if with_probe:
         payload["current_storage_probe"] = probe_storage_state(config.storage_state_path, wb_bot_python=config.wb_bot_python)
+    if requested_run_id and requested_run_id != current_run_id:
+        payload = _build_requested_run_mismatch_payload(payload, requested_run_id=requested_run_id)
+    payload["run_id"] = str(payload.get("run_id") or "")
+    payload["run_is_final"] = str(payload.get("status") or "").strip() in RECOVERY_RUN_FINAL_STATUSES
+    payload["run_final_status"] = (
+        str(payload.get("status") or "").strip()
+        if payload["run_is_final"]
+        else ""
+    )
     return payload
 
 
@@ -262,8 +352,7 @@ def supervise_relogin_session(config: ReloginSessionConfig) -> int:
             config,
             {
                 "status": "starting",
-                "message": "starting virtual display and temporary localhost-only noVNC access",
-                "started_at": _iso_now(),
+                "message": "starting virtual display, localhost-only noVNC access, and the temporary headed browser",
                 "deadline_at": _iso_at(_utc_now() + timedelta(seconds=config.timeout_sec)),
                 "novnc_url": config.novnc_url,
                 "ssh_tunnel_command": config.ssh_tunnel_command,
@@ -332,9 +421,8 @@ def supervise_relogin_session(config: ReloginSessionConfig) -> int:
         _write_status(
             config,
             {
-                "status": "starting_visual_session",
-                "message": "starting headed Chromium in the temporary localhost-only noVNC session",
-                "started_at": _iso_now(),
+                "status": "starting",
+                "message": "temporary noVNC session is ready; starting headed Chromium",
                 "deadline_at": _iso_at(_utc_now() + timedelta(seconds=config.timeout_sec)),
                 "novnc_url": config.novnc_url,
                 "ssh_tunnel_command": config.ssh_tunnel_command,
@@ -346,29 +434,38 @@ def supervise_relogin_session(config: ReloginSessionConfig) -> int:
         )
 
         capture_result = run_login_capture(config)
-        if capture_result["status"] != "auth_confirmed":
+        if capture_result["status"] != "capture_completed":
             _write_status(config, capture_result)
             return 1
-        _write_status(config, capture_result)
+        _write_status(
+            config,
+            {
+                **capture_result,
+                "status": "triggering_refresh",
+                "message": "seller session saved and validated; post-login refresh is starting",
+            },
+        )
 
         refresh_result = trigger_refresh_and_wait(config)
-        final_status = "success" if refresh_result["status"] == "success" else "refresh_failed"
+        final_status = "completed" if refresh_result["status"] == "success" else "error"
         _write_status(
             config,
             {
                 **capture_result,
                 "status": final_status,
+                "run_failure_code": "" if final_status == "completed" else "refresh_failed",
                 "message": refresh_result["message"],
                 "refresh_result": refresh_result,
                 "finished_at": _iso_now(),
             },
         )
-        return 0 if final_status == "success" else 1
+        return 0 if final_status == "completed" else 1
     except Exception as exc:
         _write_status(
             config,
             {
                 "status": "error",
+                "run_failure_code": "runtime_error",
                 "message": str(exc),
                 "finished_at": _iso_now(),
                 "supervisor_pid": os.getpid(),
@@ -437,7 +534,8 @@ def run_login_capture(
                         organization_confirmed = _probe_matches_canonical_supplier(probe_payload, config)
                         if config.canonical_supplier_configured and not organization_confirmed:
                             return {
-                                "status": "wrong_organization",
+                                "status": "error",
+                                "run_failure_code": "wrong_organization",
                                 "message": _wrong_organization_message(config, probe_payload),
                                 "authenticated_at": _iso_now(),
                                 "storage_state_path": str(config.storage_state_path),
@@ -451,6 +549,15 @@ def run_login_capture(
                                 "ssh_tunnel_command": config.ssh_tunnel_command,
                                 "human_step": _build_macos_human_step(config),
                             }
+                        _write_status(
+                            config,
+                            {
+                                "status": "saving_session",
+                                "message": "seller login confirmed; saving updated storage_state.json",
+                                "last_probe": probe_payload,
+                                "supplier_context": read_storage_state_supplier_context(config.candidate_state_path),
+                            },
+                        )
                         if config.storage_state_path.exists():
                             config.storage_state_path.replace(config.backup_state_path)
                         context.storage_state(path=str(config.storage_state_path))
@@ -459,15 +566,33 @@ def run_login_capture(
                                 config.storage_state_path,
                                 supplier_id=str(config.canonical_supplier_id or "").strip(),
                             )
+                        _write_status(
+                            config,
+                            {
+                                "status": "validating_session",
+                                "message": "seller storage_state.json saved; validating the updated seller session",
+                                "supplier_context": read_storage_state_supplier_context(config.storage_state_path),
+                            },
+                        )
                         validated_payload = probe(config.storage_state_path)
                         if not bool(validated_payload.get("ok")):
                             raise RuntimeError(
                                 "saved seller storage_state.json did not pass validation after relogin"
                             )
+                        _write_status(
+                            config,
+                            {
+                                "status": "checking_canonical_supplier",
+                                "message": "seller session is valid; checking canonical supplier before finishing the recovery run",
+                                "last_probe": validated_payload,
+                                "supplier_context": read_storage_state_supplier_context(config.storage_state_path),
+                            },
+                        )
                         organization_confirmed = _probe_matches_canonical_supplier(validated_payload, config)
                         if config.canonical_supplier_configured and not organization_confirmed:
                             return {
-                                "status": "wrong_organization",
+                                "status": "error",
+                                "run_failure_code": "wrong_organization",
                                 "message": _wrong_organization_message(config, validated_payload),
                                 "authenticated_at": _iso_now(),
                                 "storage_state_path": str(config.storage_state_path),
@@ -482,11 +607,11 @@ def run_login_capture(
                                 "human_step": _build_macos_human_step(config),
                             }
                         return {
-                            "status": "auth_confirmed",
+                            "status": "capture_completed",
                             "message": (
-                                "seller portal session updated, canonical organization confirmed, and refresh is starting"
+                                "seller portal session updated and canonical organization confirmed"
                                 if config.canonical_supplier_configured
-                                else "seller portal session updated and validated; refresh is starting"
+                                else "seller portal session updated and validated"
                             ),
                             "authenticated_at": _iso_now(),
                             "storage_state_path": str(config.storage_state_path),
@@ -505,7 +630,6 @@ def run_login_capture(
                         {
                             "status": "awaiting_login",
                             "message": "log in to seller portal in the temporary noVNC session; storage_state.json will be saved automatically",
-                            "started_at": _iso_now(),
                             "deadline_at": _iso_at(_utc_now() + timedelta(seconds=max(0, int(deadline - monotonic_fn())))),
                             "last_probe": probe_payload,
                             "novnc_url": config.novnc_url,
@@ -526,6 +650,7 @@ def run_login_capture(
 
     return {
         "status": "timeout",
+        "run_failure_code": "timeout",
         "message": "seller portal relogin timed out before authentication was confirmed",
         "finished_at": _iso_now(),
         "novnc_url": config.novnc_url,
@@ -626,8 +751,18 @@ def build_macos_launcher_archive(
     public_status_url: str,
     public_operator_url: str,
 ) -> tuple[bytes, str]:
+    current_status = read_session_status(config, with_probe=False)
+    run_id = str(current_status.get("run_id") or "").strip()
+    current_run_status = str(current_status.get("status") or "").strip()
+    if not run_id:
+        raise RuntimeError("seller recovery launcher is unavailable because the current recovery run has no run_id")
+    if current_run_status != "awaiting_login":
+        raise RuntimeError(
+            "seller recovery launcher is only available while the current recovery run is awaiting login"
+        )
     script_body = _build_macos_launcher_script(
         config,
+        run_id=run_id,
         public_status_url=public_status_url,
         public_operator_url=public_operator_url,
     )
@@ -917,8 +1052,71 @@ def _compact_page_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return compact
 
 
+def _new_recovery_run_id() -> str:
+    return f"seller-recovery-{_utc_now().strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}"
+
+
+def _normalize_recovery_status(status: str) -> str:
+    normalized = str(status or "").strip()
+    if normalized in RECOVERY_RUN_KNOWN_STATUSES:
+        return normalized
+    mapped = LEGACY_RECOVERY_STATUS_MAP.get(normalized)
+    if mapped:
+        return mapped
+    return normalized
+
+
+def _probe_supplier_context(probe_payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    payload = probe_payload or {}
+    supplier_context = payload.get("supplier_context")
+    if isinstance(supplier_context, dict):
+        return dict(supplier_context)
+    return {}
+
+
+def _build_requested_run_mismatch_payload(
+    payload: Mapping[str, Any],
+    *,
+    requested_run_id: str,
+) -> dict[str, Any]:
+    current_payload = dict(payload)
+    current_run_id = str(current_payload.get("run_id") or "").strip()
+    return {
+        **current_payload,
+        "run_id": requested_run_id,
+        "current_run_id": current_run_id,
+        "status": "error",
+        "run_failure_code": "run_replaced",
+        "message": (
+            f"requested recovery run {requested_run_id} is no longer current"
+            if current_run_id
+            else f"requested recovery run {requested_run_id} is unavailable"
+        ),
+        "running": False,
+        "finished_at": str(current_payload.get("finished_at") or _iso_now()),
+    }
+
+
 def _write_status(config: ReloginSessionConfig, payload: dict[str, Any]) -> None:
+    existing = _read_status(config.status_path)
     payload = dict(payload)
+    payload["status"] = _normalize_recovery_status(str(payload.get("status") or ""))
+    if not str(payload.get("run_id") or "").strip():
+        payload["run_id"] = str(existing.get("run_id") or "").strip()
+    if not str(payload.get("started_at") or "").strip():
+        payload["started_at"] = str(existing.get("started_at") or "").strip()
+    if (
+        str(existing.get("run_id") or "").strip()
+        and str(existing.get("run_id") or "").strip() == str(payload.get("run_id") or "").strip()
+        and not str(payload.get("deadline_at") or "").strip()
+    ):
+        payload["deadline_at"] = str(existing.get("deadline_at") or "").strip()
+    payload["run_is_final"] = str(payload.get("status") or "").strip() in RECOVERY_RUN_FINAL_STATUSES
+    payload["run_final_status"] = (
+        str(payload.get("status") or "").strip()
+        if payload["run_is_final"]
+        else ""
+    )
     payload.setdefault("novnc_url", config.novnc_url)
     payload.setdefault("ssh_tunnel_command", config.ssh_tunnel_command)
     payload.setdefault("human_step", _build_macos_human_step(config))
@@ -941,7 +1139,13 @@ def _read_status(path: Path) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {"status": "error", "message": "status file is not valid JSON"}
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    payload = dict(payload)
+    payload["status"] = _normalize_recovery_status(str(payload.get("status") or ""))
+    if str(payload.get("status") or "").strip() == "error":
+        payload["run_failure_code"] = str(payload.get("run_failure_code") or "").strip()
+    return payload
 
 
 def _spawn(args: list[str], *, log_path: Path, env: dict[str, str] | None = None) -> subprocess.Popen[Any]:
@@ -1022,10 +1226,17 @@ def _build_macos_human_step(config: ReloginSessionConfig) -> str:
 def _build_macos_launcher_script(
     config: ReloginSessionConfig,
     *,
+    run_id: str,
     public_status_url: str,
     public_operator_url: str,
 ) -> str:
-    final_statuses = "success refresh_failed wrong_organization timeout error stopped"
+    public_status_query = urllib_parse.urlencode({"run_id": run_id})
+    run_status_url = (
+        f"{public_status_url}&{public_status_query}"
+        if "?" in public_status_url
+        else f"{public_status_url}?{public_status_query}"
+    )
+    final_statuses = "completed not_needed stopped timeout error"
     return "\n".join(
         [
             "#!/bin/bash",
@@ -1033,9 +1244,11 @@ def _build_macos_launcher_script(
             f"WEB_PORT={config.web_port}",
             f"SSH_DESTINATION={shlex.quote(config.ssh_destination)}",
             f"NOVNC_URL={shlex.quote(config.novnc_url)}",
-            f"STATUS_URL={shlex.quote(public_status_url)}",
+            f"RUN_ID={shlex.quote(run_id)}",
+            f"STATUS_URL={shlex.quote(run_status_url)}",
             f"OPERATOR_URL={shlex.quote(public_operator_url)}",
             'SSH_LOG="${TMPDIR:-/tmp}/seller-portal-relogin-ssh.log"',
+            'LAST_STATUS=""',
             "",
             "cleanup() {",
             '  if [[ -n "${SSH_PID:-}" ]]; then',
@@ -1055,14 +1268,33 @@ def _build_macos_launcher_script(
             "  sleep 1",
             "done",
             'open "${NOVNC_URL}"',
-            'echo "Окно noVNC открыто. Войдите в seller portal и дождитесь завершения восстановления."',
+            'echo "Окно noVNC открыто для запуска ${RUN_ID}. Войдите в seller portal и дождитесь финального статуса."',
             "",
             "while true; do",
             '  STATUS_JSON="$(curl -fsS "${STATUS_URL}" 2>/dev/null || true)"',
             "  STATUS=\"$(printf '%s' \"${STATUS_JSON}\" | python3 -c 'import json, sys; raw = sys.stdin.read().strip(); "
             "print((json.loads(raw).get(\"status\", \"\") if raw else \"\"), end=\"\")' 2>/dev/null || true)\"",
+            "  SUMMARY=\"$(printf '%s' \"${STATUS_JSON}\" | python3 -c 'import json, sys; raw = sys.stdin.read().strip(); "
+            "print((json.loads(raw).get(\"summary\", \"\") if raw else \"\"), end=\"\")' 2>/dev/null || true)\"",
+            '  if [[ -n "${STATUS}" && "${STATUS}" != "${LAST_STATUS}" ]]; then',
+            '    case "${STATUS}" in',
+            '      starting) echo "Шаг: запускаем временное окно входа..." ;;',
+            '      awaiting_login) echo "Шаг: окно входа готово. Выполните вход в seller portal." ;;',
+            '      saving_session) echo "Шаг: сохраняем обновлённую seller-сессию..." ;;',
+            '      validating_session) echo "Шаг: проверяем сохранённый storage_state.json..." ;;',
+            '      checking_canonical_supplier) echo "Шаг: подтверждаем нужный кабинет..." ;;',
+            '      triggering_refresh) echo "Шаг: запускаем post-login refresh..." ;;',
+            '    esac',
+            '    if [[ -n "${SUMMARY}" ]]; then',
+            '      echo "${SUMMARY}"',
+            "    fi",
+            '    LAST_STATUS="${STATUS}"',
+            "  fi",
             f'  if [[ " {final_statuses} " == *" ${{STATUS}} "* ]]; then',
-            '    echo "Seller recovery завершился со статусом: ${STATUS:-unknown}"',
+            '    echo "Восстановление завершено: ${STATUS:-unknown}"',
+            '    if [[ -n "${SUMMARY}" ]]; then',
+            '      echo "${SUMMARY}"',
+            "    fi",
             '    open "${OPERATOR_URL}" >/dev/null 2>&1 || true',
             "    break",
             "  fi",

@@ -65,7 +65,7 @@ Primary canonical docs остаются в:
 - Pack не включает полный legacy-корпус.
 - Upload в внешний ChatGPT Project остаётся отдельным human-only шагом после merge, если менялись primary docs или pack.
 - Этот index даёт только navigation pointer и не должен сам становиться carrier operational upload rules.
-- Hosted runtime deploy/probe contract теперь materialized в primary docs и отражается в pack как compact navigation/runbook knowledge, включая seller-session session-check, safe stop semantics и hardened noVNC/launcher path, а не как hidden operational memory.
+- Hosted runtime deploy/probe contract теперь materialized в primary docs и отражается в pack как compact navigation/runbook knowledge, включая seller-session session-check, safe stop semantics, per-run completion markers и hardened noVNC/launcher path, а не как hidden operational memory.
 
 # Not in scope
 
