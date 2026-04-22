@@ -1390,7 +1390,7 @@ def _seller_portal_recovery_status_label(status: str) -> str:
 
 
 def _seller_portal_recovery_status_tone(status: str) -> str:
-    if status in {"success", "idle"}:
+    if status in {"success", "idle", "stopped"}:
         return "success" if status == "success" else "idle"
     if status in {"starting", "starting_visual_session", "auth_confirmed"}:
         return "loading"
