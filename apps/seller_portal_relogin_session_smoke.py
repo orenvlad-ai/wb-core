@@ -215,13 +215,17 @@ def main() -> None:
         required_fragments = [
             "selleros-root",
             "${STATUS}",
+            "python3 -c",
+            'json.loads(raw).get("status", "")',
             "https://api.selleros.pro/v1/sheet-vitrina-v1/seller-portal-recovery/status",
             "https://api.selleros.pro/sheet-vitrina-v1/operator",
-            "/vnc.html?autoconnect=1&resize=remote",
+            "/vnc.html?autoconnect=1&resize=remote&path=websockify&reconnect=1",
         ]
         missing_fragments = [item for item in required_fragments if item not in launcher_text]
         if missing_fragments:
             raise AssertionError(f"launcher script is missing required fragments: {missing_fragments}")
+        if "sed -n 's/.*\"status\"" in launcher_text or 'sed -n \'s/.*"status"' in launcher_text:
+            raise AssertionError("launcher script must not parse nested JSON status fields via greedy sed")
 
         print("seller_portal_relogin_session_capture: ok -> auth_confirmed after browser login")
         print("seller_portal_relogin_session_supplier_switch: ok -> canonical supplier enforced before final save")

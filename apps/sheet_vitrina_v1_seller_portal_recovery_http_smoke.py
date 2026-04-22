@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
     DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
     DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
     DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
@@ -36,6 +37,22 @@ class _FakeSellerRecoveryController:
         self.visual_ready = False
         self.calls: list[str] = []
 
+    def check_session(self, *, launcher_download_path: str) -> dict[str, object]:
+        self.calls.append("check")
+        return {
+            "status": "session_invalid",
+            "status_label": "Нужен вход",
+            "status_tone": "error",
+            "summary": "Сохранённая seller-сессия больше не действует.",
+            "instruction": "Нажмите «Восстановить сессию» и войдите через launcher для Mac.",
+            "technical_line": "Нужный кабинет: ИП Сагитов В. Р. · supplier canonical-supplier-id",
+            "running": False,
+            "can_start": True,
+            "can_stop": False,
+            "launcher_enabled": False,
+            "launcher_download_path": launcher_download_path,
+        }
+
     def read_status(self, *, launcher_download_path: str) -> dict[str, object]:
         self.calls.append("status")
         if self.running:
@@ -43,10 +60,10 @@ class _FakeSellerRecoveryController:
                 self.visual_ready = True
                 return {
                     "status": "starting_visual_session",
-                    "status_label": "Запускаем браузер",
+                    "status_label": "Готовим окно входа",
                     "status_tone": "loading",
-                    "summary": "Запускаем удалённый браузер seller portal.",
-                    "instruction": "Дождитесь статуса «Ожидается вход».",
+                    "summary": "Готовим удалённый браузер seller portal.",
+                    "instruction": "Дождитесь статуса «Нужно войти».",
                     "technical_line": "Нужный кабинет: ИП Сагитов В. Р. · supplier canonical-supplier-id",
                     "running": True,
                     "can_start": False,
@@ -56,10 +73,10 @@ class _FakeSellerRecoveryController:
                 }
             return {
                 "status": "awaiting_login",
-                "status_label": "Ожидается вход",
+                "status_label": "Нужно войти",
                 "status_tone": "warning",
                 "summary": "Откройте launcher и войдите в seller portal.",
-                "instruction": "После входа система сама завершит recovery.",
+                "instruction": "После входа система сама проверит кабинет и закроет временное окно входа.",
                 "technical_line": "Нужный кабинет: ИП Сагитов В. Р. · supplier canonical-supplier-id",
                 "running": True,
                 "can_start": False,
@@ -69,10 +86,10 @@ class _FakeSellerRecoveryController:
             }
         return {
             "status": "session_invalid",
-            "status_label": "Требуется вход",
+            "status_label": "Нужен вход",
             "status_tone": "error",
-            "summary": "Сессия seller portal больше не действует; запустите восстановление.",
-            "instruction": "Нажмите «Восстановить Seller-сессию», затем скачайте launcher.",
+            "summary": "Сохранённая seller-сессия больше не действует.",
+            "instruction": "Нажмите «Восстановить сессию» и войдите через launcher для Mac.",
             "technical_line": "Нужный кабинет: ИП Сагитов В. Р. · supplier canonical-supplier-id",
             "running": False,
             "can_start": True,
@@ -93,10 +110,10 @@ class _FakeSellerRecoveryController:
         self.visual_ready = False
         return {
             "status": "stopped",
-            "status_label": "Остановлено",
+            "status_label": "Окно входа закрыто",
             "status_tone": "idle",
-            "summary": "Временный recovery-сеанс остановлен.",
-            "instruction": "При необходимости можно запустить recovery заново.",
+            "summary": "Временное окно входа закрыто. Сохранённая seller-сессия и бот не изменены.",
+            "instruction": "Кнопка «Остановить восстановление» закрывает только временное окно входа.",
             "technical_line": "Нужный кабинет: ИП Сагитов В. Р. · supplier canonical-supplier-id",
             "running": False,
             "can_start": True,
@@ -116,8 +133,12 @@ class _FakeSellerRecoveryController:
                 "\n".join(
                     [
                         "#!/bin/bash",
+                        "set -euo pipefail",
                         f'STATUS_URL="{public_status_url}"',
                         f'OPERATOR_URL="{public_operator_url}"',
+                        'STATUS_JSON="$(curl -fsS "${STATUS_URL}" 2>/dev/null || true)"',
+                        "STATUS=\"$(printf '%s' \"${STATUS_JSON}\" | python3 -c 'import json, sys; raw = sys.stdin.read().strip(); print((json.loads(raw).get(\"status\", \"\") if raw else \"\"), end=\"\")' 2>/dev/null || true)\"",
+                        'echo "${STATUS}"',
                     ]
                 ),
             )
@@ -151,10 +172,11 @@ def main() -> None:
             operator_status, operator_html = _get_text(base_url + DEFAULT_SHEET_OPERATOR_UI_PATH)
             if operator_status != 200:
                 raise AssertionError(f"operator UI must return 200, got {operator_status}")
-            if "Восстановление Seller-сессии" not in operator_html:
+            if "Проверка и восстановление Seller-сессии" not in operator_html or "Проверить сессию" not in operator_html:
                 raise AssertionError("operator UI must render the seller recovery block")
             config_payload = _extract_operator_ui_config(operator_html)
             for key, expected in {
+                "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
                 "seller_recovery_status_path": DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
                 "seller_recovery_start_path": DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
                 "seller_recovery_stop_path": DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH,
@@ -162,6 +184,10 @@ def main() -> None:
             }.items():
                 if config_payload.get(key) != expected:
                     raise AssertionError(f"operator UI config must expose {key}, got {config_payload.get(key)!r}")
+
+            check_code, check_payload = _get_json(base_url + DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH)
+            if check_code != 200 or check_payload.get("status") != "session_invalid":
+                raise AssertionError(f"session-check must surface invalid session, got {check_code} / {check_payload}")
 
             status_code, status_payload = _get_json(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH)
             if status_code != 200 or status_payload.get("status") != "session_invalid":
@@ -193,13 +219,16 @@ def main() -> None:
                 launcher_text = archive.read("seller-portal-relogin.command").decode("utf-8")
                 if DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH not in launcher_text or DEFAULT_SHEET_OPERATOR_UI_PATH not in launcher_text:
                     raise AssertionError("launcher script must poll recovery status and reopen operator UI")
+                if "python3 -c" not in launcher_text or 'json.loads(raw).get("status", "")' not in launcher_text:
+                    raise AssertionError("launcher script must parse the root recovery status via JSON, not regex")
 
             stop_code, stop_payload = _post_json(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH, {})
             if stop_code != 200 or stop_payload.get("status") != "stopped":
                 raise AssertionError(f"stop must cleanup recovery contour, got {stop_code} / {stop_payload}")
-            if controller.calls != ["status", "start:True", "status", "status", "launcher", "stop"]:
+            if controller.calls != ["check", "status", "start:True", "status", "status", "launcher", "stop"]:
                 raise AssertionError(f"unexpected recovery controller lifecycle, got {controller.calls}")
 
+            print("seller_portal_session_check_http: ok -> lightweight session-check route is wired")
             print("seller_portal_recovery_http_operator: ok -> operator UI exposes recovery block and config")
             print("seller_portal_recovery_http_lifecycle: ok -> start/status/stop lifecycle is wired")
             print("seller_portal_recovery_launcher_download: ok -> downloadable Mac launcher is attached")

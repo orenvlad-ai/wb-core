@@ -40,6 +40,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_LOAD_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_REFRESH_PATH,
+    DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
     DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
     DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
     DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
@@ -182,10 +183,11 @@ def main() -> None:
             ):
                 raise AssertionError("operator UI must keep the compact manual/log chrome")
             if (
-                "Восстановление Seller-сессии" not in operator_ui_html
-                or "Восстановить Seller-сессию" not in operator_ui_html
+                "Проверка и восстановление Seller-сессии" not in operator_ui_html
+                or "Проверить сессию" not in operator_ui_html
+                or "Восстановить сессию" not in operator_ui_html
                 or "Скачать launcher для Mac" not in operator_ui_html
-                or "Остановить recovery" not in operator_ui_html
+                or "Остановить восстановление" not in operator_ui_html
             ):
                 raise AssertionError("operator UI must expose the bounded seller recovery block and launcher actions")
             if "Скачать лог" not in operator_ui_html or "max-height: 420px" not in operator_ui_html:
@@ -258,6 +260,7 @@ def main() -> None:
                 "load_path": DEFAULT_SHEET_LOAD_PATH,
                 "status_path": config.sheet_status_path,
                 "job_path": DEFAULT_SHEET_JOB_PATH,
+                "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
                 "seller_recovery_status_path": DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
                 "seller_recovery_start_path": DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
                 "seller_recovery_stop_path": DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH,

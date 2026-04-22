@@ -43,6 +43,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/load"
   - "POST /v1/sheet-vitrina-v1/seller-portal-recovery/start"
   - "POST /v1/sheet-vitrina-v1/seller-portal-recovery/stop"
+  - "GET /v1/sheet-vitrina-v1/seller-portal-session/check"
   - "GET /v1/sheet-vitrina-v1/daily-report"
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
@@ -95,7 +96,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current seller-session recovery checkpoint: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, default `GET /v1/sheet-vitrina-v1/web-vitrina` по-прежнему materialize-ит stable library-agnostic `web_vitrina_contract` v1, source/reporting semantics учитывают expected temporal model per source family, а bot-backed current-day sync теперь имеет permanent operator-facing seller recovery flow (`start/status/stop/launcher`) поверх repo-owned localhost-only noVNC/Xvfb relogin tool с canonical supplier enforcement и truthful visual-start lifecycle вместо разовой host-side X11 рутины."
+update_note: "Обновлён под current seller-session operator checkpoint: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, default `GET /v1/sheet-vitrina-v1/web-vitrina` по-прежнему materialize-ит stable library-agnostic `web_vitrina_contract` v1, source/reporting semantics учитывают expected temporal model per source family, а bot-backed current-day sync теперь имеет permanent operator-facing seller-session block (`session-check/start/status/stop/launcher`) поверх repo-owned localhost-only noVNC/Xvfb relogin tool с canonical supplier enforcement, safe stop semantics и hardened launcher/noVNC path вместо разовой host-side X11 рутины."
 ---
 
 # 1. Идентификатор и статус
@@ -162,12 +163,14 @@ update_note: "Обновлён под current seller-session recovery checkpoint
   - `GET /v1/sheet-vitrina-v1/job` = cheap poll/read surface для live operator log и async action state
 - `GET /sheet-vitrina-v1/operator` = simple repo-owned page с top-level tabs `Обновление данных` / `Расчёт поставок` / `Отчёты`
   - route intentionally остаётся orchestration-first control surface и не получает новый heavy web-vitrina block внутрь existing HTML shell
-  - block `Восстановление Seller-сессии` внутри `Обновление данных` остаётся таким же bounded operator seam, а не отдельной инженерной консолью:
+  - block `Проверка и восстановление Seller-сессии` внутри `Обновление данных` остаётся таким же bounded operator seam, а не отдельной инженерной консолью:
+    - `GET /v1/sheet-vitrina-v1/seller-portal-session/check` читает current seller storage state, запускает current session probe, проверяет canonical supplier/org и возвращает truthful short result (`session_valid_canonical / session_valid_wrong_org / session_invalid / session_missing / session_probe_error`) без запуска Xvfb/noVNC
     - `POST /v1/sheet-vitrina-v1/seller-portal-recovery/start` стартует repo-owned recovery lifecycle поверх existing `apps/seller_portal_relogin_session.py`
     - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/status` отдаёт cheap truthful status surface (`idle / starting_visual_session / awaiting_login / wrong_organization / refresh_failed / success / stopped / error`)
-    - `POST /v1/sheet-vitrina-v1/seller-portal-recovery/stop` cleanup-ит temporary noVNC/Xvfb contour
-    - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip` отдаёт reusable macOS `.command` launcher, который поднимает SSH tunnel к localhost-only noVNC, открывает browser и затем poll-ит recovery status/operator page without manual command editing
+    - `POST /v1/sheet-vitrina-v1/seller-portal-recovery/stop` cleanup-ит только temporary noVNC/Xvfb contour и возвращает page в нейтральный idle summary; сохранённый `storage_state.json` и steady seller session не удаляются
+    - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip` отдаёт reusable macOS `.command` launcher, который поднимает SSH tunnel к localhost-only noVNC, ждёт local HTTP-ready, открывает browser по explicit `path=websockify&reconnect=1` URL и затем poll-ит recovery status/operator page without manual command editing
     - `starting_visual_session` truthfully означает, что localhost-only visual contour уже поднят, но remote Chromium ещё materialize-ится; launcher/button login readiness должны показываться только после перехода в `awaiting_login`, когда headed browser уже видим на Xvfb/noVNC, а не на одном только факте готовности canvas
+    - host-side VNC path is additionally hardened with `x11vnc -noxdamage`, because the real operator source-of-truth path is the SSH-tunneled noVNC canvas rather than a host-side screenshot
   - operator-facing recovery success не materialize-ится только из `session ok`: same lifecycle additionally confirms the canonical supplier/org and only after that keeps the saved session as a truthful success
   - chosen page route for web-vitrina = `GET /sheet-vitrina-v1/vitrina`
   - route chosen as sibling to `/sheet-vitrina-v1/operator`, not as `/sheet-vitrina-v1/operator/vitrina`, because future web-vitrina is a separate working surface and must not быть вложенной под orchestration-first operator shell

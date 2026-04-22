@@ -116,7 +116,15 @@ class ReloginSessionConfig:
 
     @property
     def novnc_url(self) -> str:
-        return f"http://127.0.0.1:{self.web_port}/vnc.html?autoconnect=1&resize=remote"
+        query = urllib_parse.urlencode(
+            {
+                "autoconnect": "1",
+                "resize": "remote",
+                "path": "websockify",
+                "reconnect": "1",
+            }
+        )
+        return f"http://127.0.0.1:{self.web_port}/vnc.html?{query}"
 
     @property
     def ssh_tunnel_command(self) -> str:
@@ -299,6 +307,7 @@ def supervise_relogin_session(config: ReloginSessionConfig) -> int:
                 "-shared",
                 "-forever",
                 "-nopw",
+                "-noxdamage",
                 "-rfbport",
                 str(config.vnc_port),
             ],
@@ -1005,7 +1014,8 @@ def _terminate_process(process: subprocess.Popen[Any]) -> None:
 def _build_macos_human_step(config: ReloginSessionConfig) -> str:
     return (
         f"ssh -L {config.web_port}:127.0.0.1:{config.web_port} {config.ssh_destination} -N >/tmp/seller-portal-relogin-ssh.log 2>&1 & "
-        f"sleep 2; open '{config.novnc_url}'"
+        f"for i in $(seq 1 20); do curl -fsS --max-time 2 '{config.novnc_url}' >/dev/null 2>&1 && break; sleep 1; done; "
+        f"open '{config.novnc_url}'"
     )
 
 
@@ -1037,13 +1047,20 @@ def _build_macos_launcher_script(
             'echo "Поднимаем SSH tunnel к seller recovery session..."',
             'ssh -o ExitOnForwardFailure=yes -L "${WEB_PORT}:127.0.0.1:${WEB_PORT}" "${SSH_DESTINATION}" -N >"${SSH_LOG}" 2>&1 &',
             "SSH_PID=$!",
-            "sleep 2",
+            "",
+            "for attempt in $(seq 1 20); do",
+            '  if curl -fsS --max-time 2 "${NOVNC_URL}" >/dev/null 2>&1; then',
+            "    break",
+            "  fi",
+            "  sleep 1",
+            "done",
             'open "${NOVNC_URL}"',
             'echo "Окно noVNC открыто. Войдите в seller portal и дождитесь завершения восстановления."',
             "",
             "while true; do",
             '  STATUS_JSON="$(curl -fsS "${STATUS_URL}" 2>/dev/null || true)"',
-            '  STATUS="$(printf "%s" "${STATUS_JSON}" | tr -d "\\n" | sed -n \'s/.*"status"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p\')"',
+            "  STATUS=\"$(printf '%s' \"${STATUS_JSON}\" | python3 -c 'import json, sys; raw = sys.stdin.read().strip(); "
+            "print((json.loads(raw).get(\"status\", \"\") if raw else \"\"), end=\"\")' 2>/dev/null || true)\"",
             f'  if [[ " {final_statuses} " == *" ${{STATUS}} "* ]]; then',
             '    echo "Seller recovery завершился со статусом: ${STATUS:-unknown}"',
             '    open "${OPERATOR_URL}" >/dev/null 2>&1 || true',

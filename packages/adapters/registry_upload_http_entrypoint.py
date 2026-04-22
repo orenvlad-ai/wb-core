@@ -38,6 +38,7 @@ DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_SHEET_LOAD_PATH = "/v1/sheet-vitrina-v1/load"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
 DEFAULT_SHEET_JOB_PATH = "/v1/sheet-vitrina-v1/job"
+DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH = "/v1/sheet-vitrina-v1/seller-portal-session/check"
 DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH = "/v1/sheet-vitrina-v1/seller-portal-recovery/status"
 DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH = "/v1/sheet-vitrina-v1/seller-portal-recovery/start"
 DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH = "/v1/sheet-vitrina-v1/seller-portal-recovery/stop"
@@ -502,6 +503,21 @@ def _build_handler(
                         operator_context=entrypoint.build_sheet_operator_ui_context(),
                     ),
                 )
+                return
+
+            if parsed.path == DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH:
+                try:
+                    payload = entrypoint.handle_seller_portal_session_check_request(
+                        launcher_download_path=DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+                    )
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"seller portal session check failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
             if parsed.path == DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH:
@@ -1408,6 +1424,7 @@ def _render_sheet_vitrina_operator_ui(
         "load_path": load_path,
         "status_path": status_path,
         "job_path": job_path,
+        "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
         "seller_recovery_status_path": DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
         "seller_recovery_start_path": DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
         "seller_recovery_stop_path": DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH,
