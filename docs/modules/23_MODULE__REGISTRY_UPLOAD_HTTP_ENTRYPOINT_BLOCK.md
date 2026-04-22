@@ -88,7 +88,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current truthful temporal-status checkpoint: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, default `GET /v1/sheet-vitrina-v1/web-vitrina` по-прежнему materialize-ит stable library-agnostic `web_vitrina_contract` v1, source/reporting semantics учитывают expected temporal model per source family, а bot-backed current-day sync теперь перед запуском раннеров делает явный seller-portal session probe и surface-ит explicit auth barrier (`seller_portal_session_invalid`) вместо глухого Playwright timeout."
+update_note: "Обновлён под current truthful temporal-status checkpoint: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, default `GET /v1/sheet-vitrina-v1/web-vitrina` по-прежнему materialize-ит stable library-agnostic `web_vitrina_contract` v1, source/reporting semantics учитывают expected temporal model per source family, а bot-backed current-day sync теперь перед запуском раннеров делает явный seller-portal session probe, surface-ит explicit auth barrier (`seller_portal_session_invalid`) и использует repo-owned localhost-only noVNC/Xvfb relogin path вместо host-side X11 guesswork."
 ---
 
 # 1. Идентификатор и статус
@@ -204,6 +204,7 @@ update_note: "Обновлён под current truthful temporal-status checkpoin
 - Внутри existing `POST /v1/sheet-vitrina-v1/refresh` live contour теперь допускает bounded server-local sync для `seller_funnel_snapshot` и `web_source_snapshot`:
   - сначала refresh проверяет, materialized ли exact-date `today_current` snapshot в local `wb-ai` read-side;
   - перед запуском `/opt/wb-web-bot` runners contour делает explicit seller-portal session probe against current `storage_state.json`; если сохранённая browser session уже редиректит на `seller-auth`/даёт auth `401`, refresh падает быстро и truthfully с `seller_portal_session_invalid`, а не маскируется generic `Template request ... was not captured`;
+  - bounded recovery path для такого auth barrier теперь repo-owned: `python3 apps/seller_portal_relogin_session.py start` на selleros host поднимает localhost-only `Xvfb + x11vnc + websockify/noVNC`, открывает seller portal в headed Playwright browser, автоматически сохраняет обновлённый `/opt/wb-web-bot/storage_state.json` после подтверждённого входа и затем loopback-trigger'ит refresh без дополнительного terminal `Enter`;
   - если exact-date snapshot отсутствует, refresh может вызвать server-local owner path `/opt/wb-web-bot` (`bot.runner_day`, `bot.runner_sales_funnel_day`) и затем `/opt/wb-ai/run_web_source_handoff.py`;
   - для `seller_funnel_snapshot` и `web_source_snapshot` refresh additionally rejects zero-filled exact-date current-day snapshots: такой payload не считается готовым `today_current` state и bounded-trigger'ит retry вместо залипания ложных нулей;
   - после этого refresh повторно валидирует exact-date local API availability и только потом читает live sources;

@@ -128,6 +128,13 @@ Current promo live-wiring note:
   - current canonical packages = `openpyxl==3.1.5`, `playwright==1.58.0`
   - deploy runner installs them on host before restart if they are still missing;
   - browser binaries themselves stay outside `wb-core` deploy contract and are expected to come from the existing seller-site contour already present on the selleros host.
+- current seller-portal relogin recovery on selleros also expects host OS packages outside the Python contract:
+  - `xvfb`
+  - `x11vnc`
+  - `novnc`
+  - `websockify`
+  - `openbox`
+- these packages are used only by the repo-owned temporary relogin tool `apps/seller_portal_relogin_session.py`; it binds noVNC to `127.0.0.1` on the host, writes updated `storage_state.json` only after a validated login, and is intended for temporary auth recovery rather than for the steady-state ingest path.
 
 Secrets stay outside Git. Repo stores only env names and target shape.
 

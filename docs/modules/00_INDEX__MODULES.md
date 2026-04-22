@@ -72,7 +72,7 @@ related_docs:
   - "29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md"
   - "30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён под current `main`: индекс отражает комплект модулей `01–30`, где `promo_xlsx_collector_block` остаётся browser-capture precursor, `promo_live_source_wiring_block` materialize-ит truthful `promo_by_price` live rows внутри existing refresh/runtime contour, `web_vitrina_view_model_block` фиксирует phase-2 library-agnostic presentation-domain слой, `web_vitrina_gravity_table_adapter_block` фиксирует phase-3 concrete adapter над этим seam, а current bot-backed refresh contour now explicitly surfaces invalid seller-portal session as an auth barrier instead of a generic timeout."
+update_note: "Обновлён под current `main`: индекс отражает комплект модулей `01–30`, где `promo_xlsx_collector_block` остаётся browser-capture precursor, `promo_live_source_wiring_block` materialize-ит truthful `promo_by_price` live rows внутри existing refresh/runtime contour, `web_vitrina_view_model_block` фиксирует phase-2 library-agnostic presentation-domain слой, `web_vitrina_gravity_table_adapter_block` фиксирует phase-3 concrete adapter над этим seam, а current bot-backed refresh contour now explicitly surfaces invalid seller-portal session as an auth barrier and uses a repo-owned localhost-only noVNC/Xvfb recovery path instead of a generic timeout or host-side X11 guesswork."
 ---
 
 # 1. Назначение индекса
