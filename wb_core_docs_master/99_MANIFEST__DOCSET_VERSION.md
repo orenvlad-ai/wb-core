@@ -20,9 +20,9 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "изменение build metadata pack"
-built_from_commit: "955f9d80d742b46f87cebd7711db8d87f123d75d"
+built_from_commit: "bcb44c28e34803a55a00c8ffa773e978bbfc538a"
 docset_version: "wb_core_docs_master_v48"
-built_at: "2026-04-22T10:53:08Z"
+built_at: "2026-04-22T10:59:36Z"
 core_docs_changed:
   - "docs/modules/00_INDEX__MODULES.md"
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
