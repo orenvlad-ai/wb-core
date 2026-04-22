@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import base64
+import io
 from importlib import util
 import json
 from pathlib import Path
 import sys
 import tempfile
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -160,9 +162,32 @@ def main() -> None:
         status_payload = MODULE.read_session_status(config, with_probe=False)
         if status_payload.get("status") != "awaiting_login":
             raise AssertionError(f"intermediate awaiting_login status must be persisted, got {status_payload}")
+        archive_bytes, archive_name = MODULE.build_macos_launcher_archive(
+            config,
+            public_status_url="https://api.selleros.pro/v1/sheet-vitrina-v1/seller-portal-recovery/status",
+            public_operator_url="https://api.selleros.pro/sheet-vitrina-v1/operator",
+        )
+        if archive_name != "seller-portal-relogin-macos.zip":
+            raise AssertionError(f"unexpected launcher archive name: {archive_name}")
+        with zipfile.ZipFile(io.BytesIO(archive_bytes), "r") as archive:
+            names = archive.namelist()
+            if names != ["seller-portal-relogin.command"]:
+                raise AssertionError(f"unexpected launcher archive entries: {names}")
+            launcher_text = archive.read("seller-portal-relogin.command").decode("utf-8")
+        required_fragments = [
+            "selleros-root",
+            "${STATUS}",
+            "https://api.selleros.pro/v1/sheet-vitrina-v1/seller-portal-recovery/status",
+            "https://api.selleros.pro/sheet-vitrina-v1/operator",
+            "/vnc.html?autoconnect=1&resize=remote",
+        ]
+        missing_fragments = [item for item in required_fragments if item not in launcher_text]
+        if missing_fragments:
+            raise AssertionError(f"launcher script is missing required fragments: {missing_fragments}")
 
         print("seller_portal_relogin_session_capture: ok -> auth_confirmed after browser login")
         print("seller_portal_relogin_session_supplier_switch: ok -> canonical supplier enforced before final save")
+        print("seller_portal_relogin_session_launcher: ok -> archive contains reusable Mac launcher script")
         print("smoke-check passed")
 
 

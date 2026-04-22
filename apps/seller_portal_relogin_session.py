@@ -946,7 +946,7 @@ def _build_macos_launcher_script(
             "while true; do",
             '  STATUS_JSON="$(curl -fsS "${STATUS_URL}" 2>/dev/null || true)"',
             '  STATUS="$(printf "%s" "${STATUS_JSON}" | tr -d "\\n" | sed -n \'s/.*"status"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p\')"',
-            f'  if [[ " {final_statuses} " == *" ${STATUS} "* ]]; then',
+            f'  if [[ " {final_statuses} " == *" ${{STATUS}} "* ]]; then',
             '    echo "Seller recovery завершился со статусом: ${STATUS:-unknown}"',
             '    open "${OPERATOR_URL}" >/dev/null 2>&1 || true',
             "    break",
