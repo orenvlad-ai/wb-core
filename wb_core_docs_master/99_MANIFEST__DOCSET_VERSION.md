@@ -20,9 +20,9 @@ update_triggers:
   - "любое изменение pack"
   - "любое изменение primary docs, влияющее на pack"
   - "изменение build metadata pack"
-built_from_commit: "78bb9b9ddbb788fefe84d3d25462d5029442d979"
-docset_version: "wb_core_docs_master_v49"
-built_at: "2026-04-22T15:44:37Z"
+built_from_commit: "20dcc774a8729d11f35bcfe4e7ae373d7783579e"
+docset_version: "wb_core_docs_master_v50"
+built_at: "2026-04-22T18:14:49Z"
 core_docs_changed:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/00_INDEX__MODULES.md"
