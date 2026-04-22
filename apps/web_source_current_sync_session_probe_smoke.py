@@ -25,6 +25,8 @@ class _InvalidSessionSync(ShellBackedWebSourceCurrentSync):
                 wb_ai_dir=Path("/tmp/nonexistent-wb-ai"),
                 api_base_url="http://127.0.0.1:8000",
                 timeout_sec=5,
+                canonical_supplier_id="canonical-supplier-id",
+                canonical_supplier_label="ИП Сагитов В. Р.",
             )
         )
         self.probe_calls = 0
@@ -54,6 +56,17 @@ class _InvalidSessionSync(ShellBackedWebSourceCurrentSync):
         raise AssertionError("seller materialization must not start after an invalid session probe")
 
 
+class _WrongSupplierSync(_InvalidSessionSync):
+    def _ensure_seller_portal_session_ready(self) -> None:
+        self.probe_calls += 1
+        raise RuntimeError(
+            "seller_portal_wrong_supplier: "
+            "expected_supplier_id=canonical-supplier-id; "
+            "expected_supplier_label=ИП Сагитов В. Р.; "
+            "current_supplier_id=wrong-supplier-id"
+        )
+
+
 def main() -> None:
     sync = _InvalidSessionSync()
 
@@ -76,8 +89,19 @@ def main() -> None:
     if sync.materialize_calls:
         raise AssertionError(f"materialization must not start on invalid session, got {sync.materialize_calls}")
 
+    wrong_supplier_sync = _WrongSupplierSync()
+    _assert_invalid_session(
+        action=lambda: wrong_supplier_sync.ensure_snapshot("2026-04-22"),
+        expected_fragment="seller_portal_wrong_supplier",
+    )
+    if wrong_supplier_sync.materialize_calls:
+        raise AssertionError(
+            "materialization must not start when a valid session points to the wrong supplier"
+        )
+
     print("current_day_session_probe: ok -> explicit invalid-session blocker surfaced before bot run")
     print("closed_day_session_probe: ok -> explicit invalid-session blocker surfaced before bot run")
+    print("wrong_supplier_probe: ok -> explicit wrong-supplier blocker surfaced before bot run")
     print("smoke-check passed")
 
 
@@ -88,7 +112,7 @@ def _assert_invalid_session(*, action, expected_fragment: str) -> None:
         message = str(exc)
         if expected_fragment not in message:
             raise AssertionError(f"unexpected invalid-session message: {message}")
-        if "seller-auth.wildberries.ru" not in message:
+        if expected_fragment != "seller_portal_wrong_supplier" and "seller-auth.wildberries.ru" not in message:
             raise AssertionError(f"invalid-session message must mention login redirect, got {message}")
     else:
         raise AssertionError("invalid seller portal session must abort before bot materialization")

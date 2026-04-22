@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import sqlite3
 from dataclasses import asdict, dataclass, field
@@ -137,6 +138,114 @@ WEB_VITRINA_ACTIVITY_ITEM_COPY = {
 }
 
 
+class SellerPortalRecoveryController:
+    """Thin wrapper around the repo-owned seller relogin tool."""
+
+    def __init__(
+        self,
+        *,
+        config_factory: Callable[[], Any] | None = None,
+        start_runner: Callable[[Any, bool], dict[str, Any]] | None = None,
+        status_reader: Callable[[Any, bool], dict[str, Any]] | None = None,
+        stop_runner: Callable[[Any], dict[str, Any]] | None = None,
+        launcher_builder: Callable[[Any, str, str], tuple[bytes, str]] | None = None,
+    ) -> None:
+        self._config_factory = config_factory
+        self._start_runner = start_runner
+        self._status_reader = status_reader
+        self._stop_runner = stop_runner
+        self._launcher_builder = launcher_builder
+
+    def _tool(self) -> Any:
+        return importlib.import_module("apps.seller_portal_relogin_session")
+
+    def _config(self) -> Any:
+        if self._config_factory is not None:
+            return self._config_factory()
+        tool = self._tool()
+        return tool.load_relogin_session_config_from_env()
+
+    def read_status(
+        self,
+        *,
+        launcher_download_path: str,
+    ) -> dict[str, Any]:
+        config = self._config()
+        raw = (
+            self._status_reader(config, False)
+            if self._status_reader is not None
+            else self._tool().read_session_status(config, with_probe=False)
+        )
+        running = bool(raw.get("running"))
+        if not running:
+            raw = (
+                self._status_reader(config, True)
+                if self._status_reader is not None
+                else self._tool().read_session_status(config, with_probe=True)
+            )
+        return _build_seller_portal_recovery_payload(
+            raw,
+            config=config,
+            launcher_download_path=launcher_download_path,
+        )
+
+    def start(
+        self,
+        *,
+        replace: bool,
+        launcher_download_path: str,
+    ) -> dict[str, Any]:
+        config = self._config()
+        raw = (
+            self._start_runner(config, replace)
+            if self._start_runner is not None
+            else self._tool().start_relogin_session(config, replace=replace)
+        )
+        if not bool(raw.get("running")):
+            raw = (
+                self._status_reader(config, True)
+                if self._status_reader is not None
+                else self._tool().read_session_status(config, with_probe=True)
+            )
+        return _build_seller_portal_recovery_payload(
+            raw,
+            config=config,
+            launcher_download_path=launcher_download_path,
+        )
+
+    def stop(
+        self,
+        *,
+        launcher_download_path: str,
+    ) -> dict[str, Any]:
+        config = self._config()
+        raw = (
+            self._stop_runner(config)
+            if self._stop_runner is not None
+            else self._tool().stop_relogin_session(config)
+        )
+        return _build_seller_portal_recovery_payload(
+            raw,
+            config=config,
+            launcher_download_path=launcher_download_path,
+        )
+
+    def build_launcher_archive(
+        self,
+        *,
+        public_status_url: str,
+        public_operator_url: str,
+    ) -> tuple[bytes, str]:
+        config = self._config()
+        if self._launcher_builder is not None:
+            return self._launcher_builder(config, public_status_url, public_operator_url)
+        return self._tool().build_macos_launcher_archive(
+            config,
+            public_status_url=public_status_url,
+            public_operator_url=public_operator_url,
+        )
+
+
 class RegistryUploadHttpEntrypoint:
     """Тонкий entrypoint: ingest/update current truth, heavy refresh и cheap read готового snapshot."""
 
@@ -148,6 +257,7 @@ class RegistryUploadHttpEntrypoint:
         refreshed_at_factory: Callable[[], str] | None = None,
         now_factory: Callable[[], datetime] | None = None,
         sheet_load_runner: SheetLoadRunner | None = None,
+        seller_portal_recovery_controller: SellerPortalRecoveryController | None = None,
     ) -> None:
         self.runtime = runtime or RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
         self.activated_at_factory = activated_at_factory or _default_activated_at_factory
@@ -172,6 +282,7 @@ class RegistryUploadHttpEntrypoint:
         )
         self.sheet_load_runner = sheet_load_runner or load_sheet_vitrina_ready_snapshot_via_clasp
         self.operator_jobs = SheetVitrinaV1OperatorJobStore(timestamp_factory=self.activated_at_factory)
+        self.seller_portal_recovery = seller_portal_recovery_controller or SellerPortalRecoveryController()
         self.factory_order_supply_block = FactoryOrderSupplyBlock(
             runtime=self.runtime,
             now_factory=self.now_factory,
@@ -341,6 +452,46 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_sheet_operator_job_text_request(self, job_id: str) -> tuple[str, str]:
         return self.operator_jobs.get_text(job_id)
+
+    def handle_seller_portal_recovery_status_request(
+        self,
+        *,
+        launcher_download_path: str,
+    ) -> dict[str, Any]:
+        return self.seller_portal_recovery.read_status(
+            launcher_download_path=launcher_download_path,
+        )
+
+    def handle_seller_portal_recovery_start_request(
+        self,
+        *,
+        launcher_download_path: str,
+        replace: bool = True,
+    ) -> dict[str, Any]:
+        return self.seller_portal_recovery.start(
+            replace=replace,
+            launcher_download_path=launcher_download_path,
+        )
+
+    def handle_seller_portal_recovery_stop_request(
+        self,
+        *,
+        launcher_download_path: str,
+    ) -> dict[str, Any]:
+        return self.seller_portal_recovery.stop(
+            launcher_download_path=launcher_download_path,
+        )
+
+    def handle_seller_portal_recovery_launcher_request(
+        self,
+        *,
+        public_status_url: str,
+        public_operator_url: str,
+    ) -> tuple[bytes, str]:
+        return self.seller_portal_recovery.build_launcher_archive(
+            public_status_url=public_status_url,
+            public_operator_url=public_operator_url,
+        )
 
     def _build_web_vitrina_activity_surface(
         self,
@@ -1077,6 +1228,283 @@ class RegistryUploadHttpEntrypoint:
             "stock_report_active_sku_count": len(active_skus),
             "stock_report_active_sku_source": "current_registry_config_v2",
         }
+
+
+def _build_seller_portal_recovery_payload(
+    raw_payload: Mapping[str, Any] | None,
+    *,
+    config: Any,
+    launcher_download_path: str,
+) -> dict[str, Any]:
+    raw = dict(raw_payload or {})
+    current_probe = raw.get("current_storage_probe")
+    supplier_context = _seller_portal_recovery_supplier_context(raw)
+    expected_supplier_id = str(getattr(config, "canonical_supplier_id", "") or "").strip()
+    expected_supplier_label = str(getattr(config, "canonical_supplier_label", "") or "").strip()
+    canonical_configured = bool(expected_supplier_id)
+    organization_confirmed = _seller_portal_recovery_context_matches_expected(
+        supplier_context,
+        expected_supplier_id=expected_supplier_id,
+    )
+    effective_status = _seller_portal_recovery_effective_status(
+        raw,
+        current_probe=current_probe if isinstance(current_probe, Mapping) else None,
+        canonical_configured=canonical_configured,
+        organization_confirmed=organization_confirmed,
+    )
+    summary, instruction = _seller_portal_recovery_copy(
+        effective_status,
+        raw=raw,
+        canonical_configured=canonical_configured,
+        organization_confirmed=organization_confirmed,
+    )
+    return {
+        "status": effective_status,
+        "status_label": _seller_portal_recovery_status_label(effective_status),
+        "status_tone": _seller_portal_recovery_status_tone(effective_status),
+        "summary": summary,
+        "instruction": instruction,
+        "technical_line": _seller_portal_recovery_technical_line(
+            expected_supplier_id=expected_supplier_id,
+            expected_supplier_label=expected_supplier_label,
+            supplier_context=supplier_context,
+            launcher_ready=bool(raw.get("running")),
+        ),
+        "raw_status": str(raw.get("status") or "").strip(),
+        "running": bool(raw.get("running")),
+        "can_start": (not bool(raw.get("running"))) and canonical_configured,
+        "can_stop": bool(raw.get("running")),
+        "launcher_enabled": bool(raw.get("running")) or str(raw.get("status") or "").strip() in {"starting", "awaiting_login", "auth_confirmed"},
+        "launcher_download_path": launcher_download_path,
+        "updated_at": _format_optional_business_timestamp(str(raw.get("updated_at") or "") or None),
+        "started_at": _format_optional_business_timestamp(str(raw.get("started_at") or "") or None),
+        "deadline_at": _format_optional_business_timestamp(str(raw.get("deadline_at") or "") or None),
+        "finished_at": _format_optional_business_timestamp(str(raw.get("finished_at") or "") or None),
+        "organization_confirmed": organization_confirmed if canonical_configured else None,
+        "organization_switch_applied": bool(raw.get("organization_switch_applied")),
+        "expected_supplier_id": expected_supplier_id,
+        "expected_supplier_label": expected_supplier_label,
+        "current_supplier_id": str(
+            supplier_context.get("current_supplier_id")
+            or supplier_context.get("analytics_supplier_id")
+            or ""
+        ),
+        "current_supplier_external_id": str(supplier_context.get("current_supplier_external_id") or ""),
+        "current_storage_probe": dict(current_probe) if isinstance(current_probe, Mapping) else None,
+        "message": str(raw.get("message") or "").strip(),
+    }
+
+
+def _seller_portal_recovery_supplier_context(raw: Mapping[str, Any]) -> dict[str, Any]:
+    for value in (
+        raw.get("current_storage_probe"),
+        raw.get("last_probe"),
+        raw.get("supplier_context"),
+    ):
+        if isinstance(value, Mapping) and isinstance(value.get("supplier_context"), Mapping):
+            return dict(value.get("supplier_context") or {})
+        if isinstance(value, Mapping) and any(
+            key in value
+            for key in ("current_supplier_id", "current_supplier_external_id", "analytics_supplier_id")
+        ):
+            return dict(value)
+    return {}
+
+
+def _seller_portal_recovery_context_matches_expected(
+    supplier_context: Mapping[str, Any],
+    *,
+    expected_supplier_id: str,
+) -> bool:
+    expected = str(expected_supplier_id or "").strip()
+    if not expected:
+        return False
+    unique_ids = {
+        str(value or "").strip()
+        for value in (
+            supplier_context.get("current_supplier_id"),
+            supplier_context.get("current_supplier_external_id"),
+            supplier_context.get("analytics_supplier_id"),
+        )
+        if str(value or "").strip()
+    }
+    return bool(unique_ids) and unique_ids == {expected}
+
+
+def _seller_portal_recovery_effective_status(
+    raw: Mapping[str, Any],
+    *,
+    current_probe: Mapping[str, Any] | None,
+    canonical_configured: bool,
+    organization_confirmed: bool,
+) -> str:
+    raw_status = str(raw.get("status") or "").strip()
+    if raw_status in {"starting", "awaiting_login", "auth_confirmed", "refresh_failed", "timeout", "error", "wrong_organization", "stopped"}:
+        return raw_status
+    if not canonical_configured:
+        return "not_configured"
+    if raw_status == "success":
+        if isinstance(current_probe, Mapping) and not bool(current_probe.get("ok")):
+            return _seller_portal_recovery_probe_status(current_probe)
+        if not organization_confirmed:
+            return "wrong_organization"
+        return "success"
+    if isinstance(current_probe, Mapping):
+        if not bool(current_probe.get("ok")):
+            return _seller_portal_recovery_probe_status(current_probe)
+        if not organization_confirmed:
+            return "wrong_organization"
+        return "success"
+    return "idle"
+
+
+def _seller_portal_recovery_probe_status(probe_payload: Mapping[str, Any]) -> str:
+    normalized = str(probe_payload.get("status") or "").strip()
+    if normalized == "seller_portal_session_missing":
+        return "session_missing"
+    if normalized == "seller_portal_session_invalid":
+        return "session_invalid"
+    if normalized == "seller_portal_session_probe_failed":
+        return "error"
+    return "error"
+
+
+def _seller_portal_recovery_status_label(status: str) -> str:
+    labels = {
+        "idle": "Готово",
+        "starting": "Запускаем",
+        "awaiting_login": "Ожидается вход",
+        "auth_confirmed": "Обновляем",
+        "success": "Готово",
+        "session_invalid": "Требуется вход",
+        "session_missing": "Сессия отсутствует",
+        "wrong_organization": "Не тот кабинет",
+        "refresh_failed": "Refresh не завершён",
+        "timeout": "Время истекло",
+        "stopped": "Остановлено",
+        "not_configured": "Не настроено",
+        "error": "Ошибка",
+    }
+    return labels.get(str(status or "").strip(), "Внимание")
+
+
+def _seller_portal_recovery_status_tone(status: str) -> str:
+    if status in {"success", "idle"}:
+        return "success" if status == "success" else "idle"
+    if status in {"starting", "auth_confirmed"}:
+        return "loading"
+    if status in {"awaiting_login", "timeout", "refresh_failed"}:
+        return "warning"
+    return "error"
+
+
+def _seller_portal_recovery_copy(
+    status: str,
+    *,
+    raw: Mapping[str, Any],
+    canonical_configured: bool,
+    organization_confirmed: bool,
+) -> tuple[str, str]:
+    if status == "not_configured":
+        return (
+            "На хосте не настроен canonical supplier для seller recovery.",
+            "Добавьте canonical supplier в runtime env и перезапустите сервис.",
+        )
+    if status == "starting":
+        return (
+            "Поднимаем временный recovery-сеанс на host.",
+            "Когда статус сменится на «Ожидается вход», скачайте launcher и войдите в seller portal.",
+        )
+    if status == "awaiting_login":
+        return (
+            "Откройте launcher и войдите в seller portal.",
+            "После входа система сама проверит кабинет, при необходимости переключит supplier, сохранит storage_state.json, запустит refresh и очистит временный contour.",
+        )
+    if status == "auth_confirmed":
+        return (
+            "Вход подтверждён; проверяем кабинет и обновляем данные.",
+            "Launcher можно не закрывать до финального статуса.",
+        )
+    if status == "success":
+        if str(raw.get("status") or "").strip() == "success":
+            return (
+                "Seller-сессия восстановлена, нужный кабинет подтверждён, refresh завершён.",
+                "Блок recovery готов к следующему logout/session drop инциденту.",
+            )
+        return (
+            "Сессия seller portal активна, нужный кабинет подтверждён.",
+            "При следующем logout нажмите «Восстановить Seller-сессию» и откройте launcher для Mac.",
+        )
+    if status == "session_invalid":
+        return (
+            "Сессия seller portal больше не действует; запустите восстановление.",
+            "Нажмите «Восстановить Seller-сессию», затем скачайте launcher и выполните вход.",
+        )
+    if status == "session_missing":
+        return (
+            "Сохранённая seller-сессия отсутствует; запустите восстановление.",
+            "Нажмите «Восстановить Seller-сессию», затем скачайте launcher и выполните вход.",
+        )
+    if status == "wrong_organization":
+        return (
+            (
+                "Вход выполнен, но подтверждён не тот кабинет."
+                if str(raw.get("status") or "").strip() == "wrong_organization"
+                else "Сессия активна, но выбран не тот кабинет."
+            ),
+            (
+                "Запустите recovery снова: система повторно проверит supplier и автоматически переключит кабинет перед сохранением state."
+                if canonical_configured
+                else "Нужный кабинет пока не настроен в runtime."
+            ),
+        )
+    if status == "refresh_failed":
+        return (
+            "Вход выполнен и кабинет подтверждён, но post-login refresh завершился с ошибкой.",
+            "Запустите recovery повторно; если ошибка повторится, смотрите лог recovery и refresh.",
+        )
+    if status == "timeout":
+        return (
+            "Временный recovery-сеанс истёк до подтверждения входа.",
+            "Запустите recovery снова и войдите в seller portal.",
+        )
+    if status == "stopped":
+        return (
+            "Временный recovery-сеанс остановлен."
+            if not organization_confirmed
+            else "Временный recovery-сеанс остановлен; текущая seller-сессия остаётся валидной.",
+            "При необходимости можно сразу запустить recovery заново.",
+        )
+    return (
+        "Recovery seller-сессии завершился ошибкой.",
+        "Запустите recovery снова. Если ошибка повторится, проверьте host-side лог relogin tool.",
+    )
+
+
+def _seller_portal_recovery_technical_line(
+    *,
+    expected_supplier_id: str,
+    expected_supplier_label: str,
+    supplier_context: Mapping[str, Any],
+    launcher_ready: bool,
+) -> str:
+    parts = []
+    if expected_supplier_id:
+        expected_line = (
+            f"Нужный кабинет: {expected_supplier_label} · supplier {expected_supplier_id}"
+            if expected_supplier_label
+            else f"Нужный supplier: {expected_supplier_id}"
+        )
+        parts.append(expected_line)
+    current_supplier_id = (
+        str(supplier_context.get("current_supplier_id") or "").strip()
+        or str(supplier_context.get("analytics_supplier_id") or "").strip()
+    )
+    if current_supplier_id and current_supplier_id != expected_supplier_id:
+        parts.append(f"Сейчас выбран supplier {current_supplier_id}")
+    if launcher_ready:
+        parts.append("Launcher открывает localhost-only noVNC через SSH tunnel; XQuartz не нужен")
+    return " · ".join(part for part in parts if part)
 
 
 def _default_activated_at_factory() -> str:
@@ -2151,6 +2579,10 @@ def _humanize_note(note: str) -> str:
             "сессия seller portal отсутствует; требуется повторный вход",
         ),
         (
+            "seller_portal_wrong_supplier",
+            "после входа выбран не тот кабинет; требуется recovery с переключением supplier",
+        ),
+        (
             "source is not available for today_current in the bounded live contour; today column stays blank instead of inventing fresh values",
             "текущий день для этого источника не требуется",
         ),
@@ -2373,6 +2805,7 @@ def _summarize_activity_reason_part(text: str, *, prefix: str = "") -> str:
         lowered,
         "seller_portal_session_invalid",
         "seller_portal_session_missing",
+        "seller_portal_wrong_supplier",
         "manual_relogin_required=login_and_save_state",
     )
     sync_failed = _activity_reason_has_any(
@@ -2445,7 +2878,11 @@ def _summarize_activity_reason_part(text: str, *, prefix: str = "") -> str:
 
     failure_clause = ""
     if session_invalid:
-        failure_clause = "сессия seller portal больше не действует; требуется повторный вход"
+        failure_clause = (
+            "после входа выбран не тот кабинет; требуется повторный recovery"
+            if "seller_portal_wrong_supplier" in lowered
+            else "сессия seller portal больше не действует; требуется повторный вход"
+        )
     elif rate_limited and sync_failed and timeout:
         failure_clause = "источник временно ограничил запросы, а дополнительная синхронизация завершилась по таймауту"
     elif rate_limited and sync_failed:
@@ -2529,6 +2966,7 @@ def _mapped_activity_reason_text(text: str) -> str:
     replacements = (
         ("seller_portal_session_invalid", "сессия seller portal больше не действует; требуется повторный вход"),
         ("seller_portal_session_missing", "сессия seller portal отсутствует; требуется повторный вход"),
+        ("seller_portal_wrong_supplier", "после входа выбран не тот кабинет; требуется recovery с переключением supplier"),
         ("Persisted STATUS не содержит итог по источнику", "итог по источнику не подтверждён"),
         ("payload не materialized", "данные не получены"),
         ("источник не вернул payload", "данные не получены"),

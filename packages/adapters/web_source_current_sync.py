@@ -28,6 +28,8 @@ class WebSourceCurrentSyncConfig:
     wb_ai_dir: Path
     api_base_url: str
     timeout_sec: int
+    canonical_supplier_id: str
+    canonical_supplier_label: str
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,8 @@ def load_web_source_current_sync_config() -> WebSourceCurrentSyncConfig:
         ).strip()
         or DEFAULT_API_BASE_URL,
         timeout_sec=timeout_sec,
+        canonical_supplier_id=str(os.environ.get("SELLER_PORTAL_CANONICAL_SUPPLIER_ID", "")).strip(),
+        canonical_supplier_label=str(os.environ.get("SELLER_PORTAL_CANONICAL_SUPPLIER_LABEL", "")).strip(),
     )
 
 
@@ -396,6 +400,38 @@ class ShellBackedWebSourceCurrentSync:
             ) from exc
 
         if bool(payload.get("ok")):
+            expected_supplier_id = str(self.config.canonical_supplier_id or "").strip()
+            if expected_supplier_id:
+                supplier_context = payload.get("supplier_context")
+                current_supplier_id = ""
+                if isinstance(supplier_context, dict):
+                    current_supplier_id = (
+                        str(supplier_context.get("current_supplier_id") or "").strip()
+                        or str(supplier_context.get("analytics_supplier_id") or "").strip()
+                    )
+                    unique_supplier_ids = {
+                        str(value or "").strip()
+                        for value in (
+                            supplier_context.get("current_supplier_id"),
+                            supplier_context.get("current_supplier_external_id"),
+                            supplier_context.get("analytics_supplier_id"),
+                        )
+                        if str(value or "").strip()
+                    }
+                else:
+                    unique_supplier_ids = set()
+                if unique_supplier_ids and unique_supplier_ids != {expected_supplier_id}:
+                    expected_label = str(self.config.canonical_supplier_label or "").strip()
+                    details = "; ".join(
+                        part
+                        for part in [
+                            f"expected_supplier_id={expected_supplier_id}",
+                            f"expected_supplier_label={expected_label}" if expected_label else "",
+                            f"current_supplier_id={current_supplier_id}" if current_supplier_id else "",
+                        ]
+                        if part
+                    )
+                    raise RuntimeError(f"seller_portal_wrong_supplier: {details}")
             return
 
         status = str(payload.get("status") or "").strip() or "seller_portal_session_invalid"
@@ -566,6 +602,7 @@ print(json.dumps({"row_count": row_count, "fetched_at": fetched_at}))
 _SELLER_PORTAL_SESSION_PROBE_SCRIPT = r"""
 import json
 import sys
+import base64
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -580,6 +617,10 @@ auth_validate_statuses = []
 body_text = ""
 final_url = ""
 title = ""
+current_supplier_id = ""
+current_supplier_external_id = ""
+analytics_supplier_id = ""
+analytics_user_id = ""
 
 with sync_playwright() as playwright:
     browser = playwright.chromium.launch(headless=True)
@@ -607,6 +648,27 @@ with sync_playwright() as playwright:
         body_text = " ".join(page.locator("body").inner_text().split()).lower()
     except Exception:
         body_text = ""
+    try:
+        cookies = context.cookies(["https://seller.wildberries.ru"])
+    except Exception:
+        cookies = []
+    for cookie in cookies:
+        name = str(cookie.get("name") or "").strip()
+        if name == "x-supplier-id":
+            current_supplier_id = str(cookie.get("value") or "").strip()
+        if name == "x-supplier-id-external":
+            current_supplier_external_id = str(cookie.get("value") or "").strip()
+    try:
+        raw_analytics = page.evaluate("() => window.localStorage.getItem('analytics-external-data') || ''")
+    except Exception:
+        raw_analytics = ""
+    if raw_analytics:
+        try:
+            decoded = json.loads(base64.b64decode(raw_analytics).decode("utf-8"))
+        except Exception:
+            decoded = {}
+        analytics_supplier_id = str(decoded.get("idSupplier") or "").strip()
+        analytics_user_id = str(decoded.get("idUser") or "").strip()
     browser.close()
 
 login_redirect = "seller-auth.wildberries.ru" in final_url
@@ -629,6 +691,23 @@ print(
             "final_url": final_url,
             "title": title,
             "has_validate_401": has_validate_401,
+            "supplier_context": {
+                "current_supplier_id": current_supplier_id,
+                "current_supplier_external_id": current_supplier_external_id,
+                "analytics_supplier_id": analytics_supplier_id,
+                "analytics_user_id": analytics_user_id,
+                "unique_supplier_ids": [
+                    value
+                    for value in dict.fromkeys(
+                        [
+                            current_supplier_id,
+                            current_supplier_external_id,
+                            analytics_supplier_id,
+                        ]
+                    )
+                    if value
+                ],
+            },
         }
     )
 )

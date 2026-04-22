@@ -40,6 +40,10 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_LOAD_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_REFRESH_PATH,
+    DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+    DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
+    DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
+    DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH,
     DEFAULT_SHEET_STOCK_REPORT_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
@@ -177,6 +181,13 @@ def main() -> None:
                 or "Последняя удачная отправка" not in operator_ui_html
             ):
                 raise AssertionError("operator UI must keep the compact manual/log chrome")
+            if (
+                "Восстановление Seller-сессии" not in operator_ui_html
+                or "Восстановить Seller-сессию" not in operator_ui_html
+                or "Скачать launcher для Mac" not in operator_ui_html
+                or "Остановить recovery" not in operator_ui_html
+            ):
+                raise AssertionError("operator UI must expose the bounded seller recovery block and launcher actions")
             if "Скачать лог" not in operator_ui_html or "max-height: 420px" not in operator_ui_html:
                 raise AssertionError("operator UI must expose log download control and fixed-height log viewport")
             if (
@@ -247,6 +258,10 @@ def main() -> None:
                 "load_path": DEFAULT_SHEET_LOAD_PATH,
                 "status_path": config.sheet_status_path,
                 "job_path": DEFAULT_SHEET_JOB_PATH,
+                "seller_recovery_status_path": DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
+                "seller_recovery_start_path": DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
+                "seller_recovery_stop_path": DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH,
+                "seller_recovery_launcher_path": DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
                 "daily_report_path": DEFAULT_SHEET_DAILY_REPORT_PATH,
                 "stock_report_path": DEFAULT_SHEET_STOCK_REPORT_PATH,
                 "factory_order_status_path": DEFAULT_FACTORY_ORDER_STATUS_PATH,

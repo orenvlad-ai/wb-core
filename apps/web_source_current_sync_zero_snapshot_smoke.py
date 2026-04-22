@@ -24,6 +24,11 @@ TARGET_DATE = "2026-04-19"
 REQUESTED_NM_IDS = [210183919, 210184534]
 
 
+class _NoopSessionSync(ShellBackedWebSourceCurrentSync):
+    def _ensure_seller_portal_session_ready(self) -> None:
+        return
+
+
 def main() -> None:
     with TemporaryDirectory(prefix="web-source-current-sync-zero-") as tmp:
         tmp_path = Path(tmp)
@@ -42,13 +47,15 @@ def main() -> None:
         with _MockSellerosApi(state_path=state_path, requested_nm_ids=REQUESTED_NM_IDS) as api:
             bot_dir = _build_fake_bot_dir(tmp_path / "wb-web-bot", state_path=state_path)
             ai_dir = _build_fake_ai_dir(tmp_path / "wb-ai", state_path=state_path)
-            sync = ShellBackedWebSourceCurrentSync(
+            sync = _NoopSessionSync(
                 WebSourceCurrentSyncConfig(
                     mode="force",
                     wb_web_bot_dir=bot_dir,
                     wb_ai_dir=ai_dir,
                     api_base_url=api.base_url,
                     timeout_sec=30,
+                    canonical_supplier_id="",
+                    canonical_supplier_label="",
                 )
             )
 

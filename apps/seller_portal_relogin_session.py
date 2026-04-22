@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+import io
 import json
 import os
 from pathlib import Path
@@ -18,6 +20,7 @@ from typing import Any, Callable
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +48,8 @@ DEFAULT_STATUS_URL = "http://127.0.0.1:8765/v1/sheet-vitrina-v1/status"
 DEFAULT_PAGE_URL = "http://127.0.0.1:8765/v1/sheet-vitrina-v1/web-vitrina?surface=page_composition"
 DEFAULT_SELLER_URL = "https://seller.wildberries.ru"
 DEFAULT_NOVNC_WEB_DIR = Path("/usr/share/novnc")
+DEFAULT_CANONICAL_SUPPLIER_ID = ""
+DEFAULT_CANONICAL_SUPPLIER_LABEL = ""
 
 
 @dataclass(frozen=True)
@@ -65,6 +70,8 @@ class ReloginSessionConfig:
     seller_url: str = DEFAULT_SELLER_URL
     ssh_destination: str = "selleros-root"
     novnc_web_dir: Path = DEFAULT_NOVNC_WEB_DIR
+    canonical_supplier_id: str = DEFAULT_CANONICAL_SUPPLIER_ID
+    canonical_supplier_label: str = DEFAULT_CANONICAL_SUPPLIER_LABEL
 
     @property
     def status_path(self) -> Path:
@@ -111,14 +118,19 @@ class ReloginSessionConfig:
     def ssh_tunnel_command(self) -> str:
         return f"ssh -L {self.web_port}:127.0.0.1:{self.web_port} {self.ssh_destination}"
 
+    @property
+    def canonical_supplier_configured(self) -> bool:
+        return bool(str(self.canonical_supplier_id or "").strip())
+
 
 def main() -> None:
+    default_config = load_relogin_session_config_from_env()
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     for command_name in ("start", "status", "stop", "supervise"):
         sub = subparsers.add_parser(command_name)
-        _add_common_args(sub)
+        _add_common_args(sub, default_config=default_config)
         if command_name == "start":
             sub.add_argument("--replace", action="store_true", help="Stop an existing relogin session before starting a new one.")
         if command_name == "status":
@@ -216,6 +228,10 @@ def read_session_status(config: ReloginSessionConfig, *, with_probe: bool) -> di
     payload.setdefault("novnc_url", config.novnc_url)
     payload.setdefault("ssh_tunnel_command", config.ssh_tunnel_command)
     payload.setdefault("human_step", _build_macos_human_step(config))
+    payload.setdefault("canonical_supplier_id", str(config.canonical_supplier_id or ""))
+    payload.setdefault("canonical_supplier_label", str(config.canonical_supplier_label or ""))
+    payload.setdefault("canonical_supplier_configured", config.canonical_supplier_configured)
+    payload.setdefault("supplier_context", read_storage_state_supplier_context(config.storage_state_path))
     payload["supervisor_pid"] = pid
     payload["running"] = bool(pid and _pid_is_running(pid))
     if with_probe:
@@ -382,22 +398,79 @@ def run_login_capture(
                 page.goto(config.seller_url, wait_until="domcontentloaded", timeout=60000)
                 while monotonic_fn() < deadline:
                     context.storage_state(path=str(config.candidate_state_path))
+                    organization_switch_applied = False
+                    if config.canonical_supplier_configured:
+                        supplier_context = read_storage_state_supplier_context(config.candidate_state_path)
+                        if not _supplier_context_matches_canonical_supplier(supplier_context, config):
+                            _rewrite_storage_state_supplier(
+                                config.candidate_state_path,
+                                supplier_id=str(config.canonical_supplier_id or "").strip(),
+                            )
+                            organization_switch_applied = True
                     probe_payload = probe(config.candidate_state_path)
                     if bool(probe_payload.get("ok")):
+                        organization_confirmed = _probe_matches_canonical_supplier(probe_payload, config)
+                        if config.canonical_supplier_configured and not organization_confirmed:
+                            return {
+                                "status": "wrong_organization",
+                                "message": _wrong_organization_message(config, probe_payload),
+                                "authenticated_at": _iso_now(),
+                                "storage_state_path": str(config.storage_state_path),
+                                "last_probe": probe_payload,
+                                "supplier_context": read_storage_state_supplier_context(config.candidate_state_path),
+                                "organization_confirmed": False,
+                                "organization_switch_applied": organization_switch_applied,
+                                "canonical_supplier_id": str(config.canonical_supplier_id or ""),
+                                "canonical_supplier_label": str(config.canonical_supplier_label or ""),
+                                "novnc_url": config.novnc_url,
+                                "ssh_tunnel_command": config.ssh_tunnel_command,
+                                "human_step": _build_macos_human_step(config),
+                            }
                         if config.storage_state_path.exists():
                             config.storage_state_path.replace(config.backup_state_path)
                         context.storage_state(path=str(config.storage_state_path))
+                        if organization_switch_applied:
+                            _rewrite_storage_state_supplier(
+                                config.storage_state_path,
+                                supplier_id=str(config.canonical_supplier_id or "").strip(),
+                            )
                         validated_payload = probe(config.storage_state_path)
                         if not bool(validated_payload.get("ok")):
                             raise RuntimeError(
                                 "saved seller storage_state.json did not pass validation after relogin"
                             )
+                        organization_confirmed = _probe_matches_canonical_supplier(validated_payload, config)
+                        if config.canonical_supplier_configured and not organization_confirmed:
+                            return {
+                                "status": "wrong_organization",
+                                "message": _wrong_organization_message(config, validated_payload),
+                                "authenticated_at": _iso_now(),
+                                "storage_state_path": str(config.storage_state_path),
+                                "last_probe": validated_payload,
+                                "supplier_context": read_storage_state_supplier_context(config.storage_state_path),
+                                "organization_confirmed": False,
+                                "organization_switch_applied": organization_switch_applied,
+                                "canonical_supplier_id": str(config.canonical_supplier_id or ""),
+                                "canonical_supplier_label": str(config.canonical_supplier_label or ""),
+                                "novnc_url": config.novnc_url,
+                                "ssh_tunnel_command": config.ssh_tunnel_command,
+                                "human_step": _build_macos_human_step(config),
+                            }
                         return {
                             "status": "auth_confirmed",
-                            "message": "seller portal session updated and validated; refresh is starting",
+                            "message": (
+                                "seller portal session updated, canonical organization confirmed, and refresh is starting"
+                                if config.canonical_supplier_configured
+                                else "seller portal session updated and validated; refresh is starting"
+                            ),
                             "authenticated_at": _iso_now(),
                             "storage_state_path": str(config.storage_state_path),
                             "last_probe": validated_payload,
+                            "supplier_context": read_storage_state_supplier_context(config.storage_state_path),
+                            "organization_confirmed": organization_confirmed,
+                            "organization_switch_applied": organization_switch_applied,
+                            "canonical_supplier_id": str(config.canonical_supplier_id or ""),
+                            "canonical_supplier_label": str(config.canonical_supplier_label or ""),
                             "novnc_url": config.novnc_url,
                             "ssh_tunnel_command": config.ssh_tunnel_command,
                             "human_step": _build_macos_human_step(config),
@@ -469,7 +542,75 @@ def probe_storage_state(storage_state_path: Path, *, wb_bot_python: Path) -> dic
     payload["returncode"] = probe.returncode
     if stderr:
         payload["stderr_tail"] = stderr[-1000:]
+    payload.setdefault("supplier_context", read_storage_state_supplier_context(storage_state_path))
     return payload
+
+
+def load_relogin_session_config_from_env() -> ReloginSessionConfig:
+    return ReloginSessionConfig(
+        state_dir=Path(
+            str(os.environ.get("SELLER_PORTAL_RELOGIN_STATE_DIR", DEFAULT_STATE_DIR)).strip()
+            or str(DEFAULT_STATE_DIR)
+        ).expanduser(),
+        storage_state_path=Path(
+            str(os.environ.get("SELLER_PORTAL_RELOGIN_STORAGE_STATE_PATH", DEFAULT_STORAGE_STATE_PATH)).strip()
+            or str(DEFAULT_STORAGE_STATE_PATH)
+        ).expanduser(),
+        wb_bot_python=Path(
+            str(os.environ.get("SELLER_PORTAL_RELOGIN_WB_BOT_PYTHON", DEFAULT_WB_BOT_PYTHON)).strip()
+            or str(DEFAULT_WB_BOT_PYTHON)
+        ).expanduser(),
+        display=str(os.environ.get("SELLER_PORTAL_RELOGIN_DISPLAY", DEFAULT_DISPLAY)).strip() or DEFAULT_DISPLAY,
+        vnc_port=int(str(os.environ.get("SELLER_PORTAL_RELOGIN_VNC_PORT", DEFAULT_VNC_PORT)).strip() or DEFAULT_VNC_PORT),
+        web_port=int(str(os.environ.get("SELLER_PORTAL_RELOGIN_WEB_PORT", DEFAULT_WEB_PORT)).strip() or DEFAULT_WEB_PORT),
+        timeout_sec=int(str(os.environ.get("SELLER_PORTAL_RELOGIN_TIMEOUT_SEC", DEFAULT_TIMEOUT_SEC)).strip() or DEFAULT_TIMEOUT_SEC),
+        poll_sec=float(str(os.environ.get("SELLER_PORTAL_RELOGIN_POLL_SEC", DEFAULT_POLL_SEC)).strip() or DEFAULT_POLL_SEC),
+        refresh_timeout_sec=int(
+            str(os.environ.get("SELLER_PORTAL_RELOGIN_REFRESH_TIMEOUT_SEC", DEFAULT_REFRESH_TIMEOUT_SEC)).strip()
+            or DEFAULT_REFRESH_TIMEOUT_SEC
+        ),
+        refresh_url=str(os.environ.get("SELLER_PORTAL_RELOGIN_REFRESH_URL", DEFAULT_REFRESH_URL)).strip() or DEFAULT_REFRESH_URL,
+        job_url=str(os.environ.get("SELLER_PORTAL_RELOGIN_JOB_URL", DEFAULT_JOB_URL)).strip() or DEFAULT_JOB_URL,
+        status_url=str(os.environ.get("SELLER_PORTAL_RELOGIN_STATUS_URL", DEFAULT_STATUS_URL)).strip() or DEFAULT_STATUS_URL,
+        page_composition_url=(
+            str(os.environ.get("SELLER_PORTAL_RELOGIN_PAGE_COMPOSITION_URL", DEFAULT_PAGE_URL)).strip()
+            or DEFAULT_PAGE_URL
+        ),
+        seller_url=str(os.environ.get("SELLER_PORTAL_RELOGIN_SELLER_URL", DEFAULT_SELLER_URL)).strip() or DEFAULT_SELLER_URL,
+        ssh_destination=(
+            str(os.environ.get("SELLER_PORTAL_RELOGIN_SSH_DESTINATION", "selleros-root")).strip()
+            or "selleros-root"
+        ),
+        novnc_web_dir=Path(
+            str(os.environ.get("SELLER_PORTAL_RELOGIN_NOVNC_WEB_DIR", DEFAULT_NOVNC_WEB_DIR)).strip()
+            or str(DEFAULT_NOVNC_WEB_DIR)
+        ).expanduser(),
+        canonical_supplier_id=(
+            str(os.environ.get("SELLER_PORTAL_CANONICAL_SUPPLIER_ID", DEFAULT_CANONICAL_SUPPLIER_ID)).strip()
+        ),
+        canonical_supplier_label=(
+            str(os.environ.get("SELLER_PORTAL_CANONICAL_SUPPLIER_LABEL", DEFAULT_CANONICAL_SUPPLIER_LABEL)).strip()
+        ),
+    )
+
+
+def build_macos_launcher_archive(
+    config: ReloginSessionConfig,
+    *,
+    public_status_url: str,
+    public_operator_url: str,
+) -> tuple[bytes, str]:
+    script_body = _build_macos_launcher_script(
+        config,
+        public_status_url=public_status_url,
+        public_operator_url=public_operator_url,
+    )
+    archive_buffer = io.BytesIO()
+    with zipfile.ZipFile(archive_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        info = zipfile.ZipInfo("seller-portal-relogin.command")
+        info.external_attr = 0o755 << 16
+        archive.writestr(info, script_body)
+    return archive_buffer.getvalue(), "seller-portal-relogin-macos.zip"
 
 
 def trigger_refresh_and_wait(config: ReloginSessionConfig) -> dict[str, Any]:
@@ -552,26 +693,34 @@ def _config_from_args(args: argparse.Namespace) -> ReloginSessionConfig:
         seller_url=str(args.seller_url).strip(),
         ssh_destination=str(args.ssh_destination).strip(),
         novnc_web_dir=Path(args.novnc_web_dir).expanduser(),
+        canonical_supplier_id=str(args.canonical_supplier_id).strip(),
+        canonical_supplier_label=str(args.canonical_supplier_label).strip(),
     )
 
 
-def _add_common_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--state-dir", default=str(DEFAULT_STATE_DIR))
-    parser.add_argument("--storage-state-path", default=str(DEFAULT_STORAGE_STATE_PATH))
-    parser.add_argument("--wb-bot-python", default=str(DEFAULT_WB_BOT_PYTHON))
-    parser.add_argument("--display", default=DEFAULT_DISPLAY)
-    parser.add_argument("--vnc-port", default=str(DEFAULT_VNC_PORT))
-    parser.add_argument("--web-port", default=str(DEFAULT_WEB_PORT))
-    parser.add_argument("--timeout-sec", default=str(DEFAULT_TIMEOUT_SEC))
-    parser.add_argument("--poll-sec", default=str(DEFAULT_POLL_SEC))
-    parser.add_argument("--refresh-timeout-sec", default=str(DEFAULT_REFRESH_TIMEOUT_SEC))
-    parser.add_argument("--refresh-url", default=DEFAULT_REFRESH_URL)
-    parser.add_argument("--job-url", default=DEFAULT_JOB_URL)
-    parser.add_argument("--status-url", default=DEFAULT_STATUS_URL)
-    parser.add_argument("--page-composition-url", default=DEFAULT_PAGE_URL)
-    parser.add_argument("--seller-url", default=DEFAULT_SELLER_URL)
-    parser.add_argument("--ssh-destination", default="selleros-root")
-    parser.add_argument("--novnc-web-dir", default=str(DEFAULT_NOVNC_WEB_DIR))
+def _add_common_args(
+    parser: argparse.ArgumentParser,
+    *,
+    default_config: ReloginSessionConfig,
+) -> None:
+    parser.add_argument("--state-dir", default=str(default_config.state_dir))
+    parser.add_argument("--storage-state-path", default=str(default_config.storage_state_path))
+    parser.add_argument("--wb-bot-python", default=str(default_config.wb_bot_python))
+    parser.add_argument("--display", default=default_config.display)
+    parser.add_argument("--vnc-port", default=str(default_config.vnc_port))
+    parser.add_argument("--web-port", default=str(default_config.web_port))
+    parser.add_argument("--timeout-sec", default=str(default_config.timeout_sec))
+    parser.add_argument("--poll-sec", default=str(default_config.poll_sec))
+    parser.add_argument("--refresh-timeout-sec", default=str(default_config.refresh_timeout_sec))
+    parser.add_argument("--refresh-url", default=default_config.refresh_url)
+    parser.add_argument("--job-url", default=default_config.job_url)
+    parser.add_argument("--status-url", default=default_config.status_url)
+    parser.add_argument("--page-composition-url", default=default_config.page_composition_url)
+    parser.add_argument("--seller-url", default=default_config.seller_url)
+    parser.add_argument("--ssh-destination", default=default_config.ssh_destination)
+    parser.add_argument("--novnc-web-dir", default=str(default_config.novnc_web_dir))
+    parser.add_argument("--canonical-supplier-id", default=default_config.canonical_supplier_id)
+    parser.add_argument("--canonical-supplier-label", default=default_config.canonical_supplier_label)
 
 
 def _build_supervisor_command(config: ReloginSessionConfig) -> list[str]:
@@ -611,6 +760,10 @@ def _build_supervisor_command(config: ReloginSessionConfig) -> list[str]:
         config.ssh_destination,
         "--novnc-web-dir",
         str(config.novnc_web_dir),
+        "--canonical-supplier-id",
+        str(config.canonical_supplier_id or ""),
+        "--canonical-supplier-label",
+        str(config.canonical_supplier_label or ""),
     ]
 
 
@@ -664,6 +817,10 @@ def _write_status(config: ReloginSessionConfig, payload: dict[str, Any]) -> None
     payload.setdefault("human_step", _build_macos_human_step(config))
     payload.setdefault("storage_state_path", str(config.storage_state_path))
     payload.setdefault("state_dir", str(config.state_dir))
+    payload.setdefault("canonical_supplier_id", str(config.canonical_supplier_id or ""))
+    payload.setdefault("canonical_supplier_label", str(config.canonical_supplier_label or ""))
+    payload.setdefault("canonical_supplier_configured", config.canonical_supplier_configured)
+    payload.setdefault("supplier_context", read_storage_state_supplier_context(config.storage_state_path))
     payload.setdefault("updated_at", _iso_now())
     temp_path = config.status_path.with_suffix(".tmp")
     temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -751,6 +908,221 @@ def _build_macos_human_step(config: ReloginSessionConfig) -> str:
     return (
         f"ssh -L {config.web_port}:127.0.0.1:{config.web_port} {config.ssh_destination} -N >/tmp/seller-portal-relogin-ssh.log 2>&1 & "
         f"sleep 2; open '{config.novnc_url}'"
+    )
+
+
+def _build_macos_launcher_script(
+    config: ReloginSessionConfig,
+    *,
+    public_status_url: str,
+    public_operator_url: str,
+) -> str:
+    final_statuses = "success refresh_failed wrong_organization timeout error stopped"
+    return "\n".join(
+        [
+            "#!/bin/bash",
+            "set -euo pipefail",
+            f"WEB_PORT={config.web_port}",
+            f"SSH_DESTINATION={shlex.quote(config.ssh_destination)}",
+            f"NOVNC_URL={shlex.quote(config.novnc_url)}",
+            f"STATUS_URL={shlex.quote(public_status_url)}",
+            f"OPERATOR_URL={shlex.quote(public_operator_url)}",
+            'SSH_LOG="${TMPDIR:-/tmp}/seller-portal-relogin-ssh.log"',
+            "",
+            "cleanup() {",
+            '  if [[ -n "${SSH_PID:-}" ]]; then',
+            '    kill "${SSH_PID}" >/dev/null 2>&1 || true',
+            "  fi",
+            "}",
+            "trap cleanup EXIT",
+            "",
+            'echo "Поднимаем SSH tunnel к seller recovery session..."',
+            'ssh -o ExitOnForwardFailure=yes -L "${WEB_PORT}:127.0.0.1:${WEB_PORT}" "${SSH_DESTINATION}" -N >"${SSH_LOG}" 2>&1 &',
+            "SSH_PID=$!",
+            "sleep 2",
+            'open "${NOVNC_URL}"',
+            'echo "Окно noVNC открыто. Войдите в seller portal и дождитесь завершения восстановления."',
+            "",
+            "while true; do",
+            '  STATUS_JSON="$(curl -fsS "${STATUS_URL}" 2>/dev/null || true)"',
+            '  STATUS="$(printf "%s" "${STATUS_JSON}" | tr -d "\\n" | sed -n \'s/.*"status"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p\')"',
+            f'  if [[ " {final_statuses} " == *" ${STATUS} "* ]]; then',
+            '    echo "Seller recovery завершился со статусом: ${STATUS:-unknown}"',
+            '    open "${OPERATOR_URL}" >/dev/null 2>&1 || true',
+            "    break",
+            "  fi",
+            "  sleep 3",
+            "done",
+            "",
+        ]
+    )
+
+
+def read_storage_state_supplier_context(storage_state_path: Path) -> dict[str, Any]:
+    if not storage_state_path.exists():
+        return {}
+    try:
+        payload = json.loads(storage_state_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    cookies = payload.get("cookies") or []
+    origins = payload.get("origins") or []
+    current_supplier_id = ""
+    current_supplier_external_id = ""
+    for cookie in cookies:
+        if not isinstance(cookie, dict):
+            continue
+        name = str(cookie.get("name") or "").strip()
+        if name == "x-supplier-id":
+            current_supplier_id = str(cookie.get("value") or "").strip()
+        if name == "x-supplier-id-external":
+            current_supplier_external_id = str(cookie.get("value") or "").strip()
+    analytics_supplier_id = ""
+    analytics_user_id = ""
+    for origin in origins:
+        if not isinstance(origin, dict):
+            continue
+        if str(origin.get("origin") or "").strip() != "https://seller.wildberries.ru":
+            continue
+        for item in origin.get("localStorage") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("name") or "").strip() != "analytics-external-data":
+                continue
+            raw_value = str(item.get("value") or "")
+            try:
+                decoded = base64.b64decode(raw_value).decode("utf-8")
+                decoded_payload = json.loads(decoded)
+            except Exception:
+                decoded_payload = {}
+            analytics_supplier_id = str(decoded_payload.get("idSupplier") or "").strip()
+            analytics_user_id = str(decoded_payload.get("idUser") or "").strip()
+            break
+    unique_supplier_ids = sorted(
+        {
+            value
+            for value in (
+                current_supplier_id,
+                current_supplier_external_id,
+                analytics_supplier_id,
+            )
+            if value
+        }
+    )
+    return {
+        "current_supplier_id": current_supplier_id,
+        "current_supplier_external_id": current_supplier_external_id,
+        "analytics_supplier_id": analytics_supplier_id,
+        "analytics_user_id": analytics_user_id,
+        "unique_supplier_ids": unique_supplier_ids,
+    }
+
+
+def _rewrite_storage_state_supplier(storage_state_path: Path, *, supplier_id: str) -> None:
+    payload = json.loads(storage_state_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError("storage_state.json must contain a JSON object")
+    supplier_id = str(supplier_id or "").strip()
+    if not supplier_id:
+        raise RuntimeError("canonical supplier id is empty")
+    cookies = payload.get("cookies") or []
+    cookie_names = {"x-supplier-id", "x-supplier-id-external"}
+    for cookie in cookies:
+        if not isinstance(cookie, dict):
+            continue
+        if str(cookie.get("name") or "").strip() in cookie_names:
+            cookie["value"] = supplier_id
+    origins = payload.get("origins") or []
+    for origin in origins:
+        if not isinstance(origin, dict):
+            continue
+        if str(origin.get("origin") or "").strip() != "https://seller.wildberries.ru":
+            continue
+        local_storage = origin.get("localStorage") or []
+        analytics_item: dict[str, Any] | None = None
+        for item in local_storage:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("name") or "").strip() != "analytics-external-data":
+                continue
+            analytics_item = item
+            decoded_payload: dict[str, Any]
+            try:
+                decoded_payload = json.loads(base64.b64decode(str(item.get("value") or "")).decode("utf-8"))
+            except Exception:
+                decoded_payload = {}
+            decoded_payload["idSupplier"] = supplier_id
+            item["value"] = base64.b64encode(
+                json.dumps(decoded_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            ).decode("utf-8")
+            break
+        if analytics_item is None:
+            local_storage.append(
+                {
+                    "name": "analytics-external-data",
+                    "value": base64.b64encode(
+                        json.dumps({"idSupplier": supplier_id}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                    ).decode("utf-8"),
+                }
+            )
+    storage_state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _supplier_context_matches_canonical_supplier(
+    supplier_context: dict[str, Any] | None,
+    config: ReloginSessionConfig,
+) -> bool:
+    if not config.canonical_supplier_configured:
+        return True
+    supplier_context = supplier_context or {}
+    expected = str(config.canonical_supplier_id or "").strip()
+    unique_ids = {
+        str(value or "").strip()
+        for value in (
+            supplier_context.get("current_supplier_id"),
+            supplier_context.get("current_supplier_external_id"),
+            supplier_context.get("analytics_supplier_id"),
+        )
+        if str(value or "").strip()
+    }
+    return bool(unique_ids) and unique_ids == {expected}
+
+
+def _probe_matches_canonical_supplier(
+    probe_payload: dict[str, Any] | None,
+    config: ReloginSessionConfig,
+) -> bool:
+    if not config.canonical_supplier_configured:
+        return True
+    payload = probe_payload or {}
+    supplier_context = payload.get("supplier_context")
+    if isinstance(supplier_context, dict):
+        return _supplier_context_matches_canonical_supplier(supplier_context, config)
+    return _supplier_context_matches_canonical_supplier(read_storage_state_supplier_context(config.storage_state_path), config)
+
+
+def _wrong_organization_message(config: ReloginSessionConfig, probe_payload: dict[str, Any] | None) -> str:
+    supplier_context = {}
+    if isinstance(probe_payload, dict) and isinstance(probe_payload.get("supplier_context"), dict):
+        supplier_context = dict(probe_payload.get("supplier_context") or {})
+    current_supplier_id = (
+        str(supplier_context.get("current_supplier_id") or "").strip()
+        or str(supplier_context.get("analytics_supplier_id") or "").strip()
+        or "unknown"
+    )
+    expected_supplier_id = str(config.canonical_supplier_id or "").strip() or "unknown"
+    expected_label = str(config.canonical_supplier_label or "").strip()
+    if expected_label:
+        return (
+            "seller portal session is authenticated, but canonical supplier was not confirmed: "
+            f"expected_supplier_id={expected_supplier_id}; expected_supplier_label={expected_label}; "
+            f"current_supplier_id={current_supplier_id}"
+        )
+    return (
+        "seller portal session is authenticated, but canonical supplier was not confirmed: "
+        f"expected_supplier_id={expected_supplier_id}; current_supplier_id={current_supplier_id}"
     )
 
 

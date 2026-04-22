@@ -120,10 +120,17 @@ Optional runtime overrides remain the same as in current official-api boundary:
 - `WB_SELLER_ANALYTICS_API_BASE_URL`
 - `WB_STATISTICS_API_BASE_URL`
 - `PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH`
+- `SELLER_PORTAL_CANONICAL_SUPPLIER_ID`
+- `SELLER_PORTAL_CANONICAL_SUPPLIER_LABEL`
+- `SELLER_PORTAL_RELOGIN_SSH_DESTINATION`
 
 Current promo live-wiring note:
 - if hosted runtime uses the repo-owned `promo_by_price` live seam, service env must expose a valid seller session state path for the bounded browser collector;
 - canonical selleros host default = `/opt/wb-web-bot/storage_state.json`, but runtime may override it explicitly via `PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH`.
+- when the hosted operator contour exposes permanent seller-session recovery, the same env also defines canonical organization truth and reusable launcher metadata:
+  - `SELLER_PORTAL_CANONICAL_SUPPLIER_ID` = authoritative supplier that the saved seller session must target before recovery is considered successful;
+  - `SELLER_PORTAL_CANONICAL_SUPPLIER_LABEL` = operator-facing org label for the same supplier;
+  - `SELLER_PORTAL_RELOGIN_SSH_DESTINATION` = SSH host alias baked into the downloadable macOS launcher for localhost-only noVNC tunneling.
 - hosted deploy contract must also materialize the bounded workbook parser dependency on the remote system python:
   - current canonical packages = `openpyxl==3.1.5`, `playwright==1.58.0`
   - deploy runner installs them on host before restart if they are still missing;
@@ -134,7 +141,13 @@ Current promo live-wiring note:
   - `novnc`
   - `websockify`
   - `openbox`
-- these packages are used only by the repo-owned temporary relogin tool `apps/seller_portal_relogin_session.py`; it binds noVNC to `127.0.0.1` on the host, writes updated `storage_state.json` only after a validated login, and is intended for temporary auth recovery rather than for the steady-state ingest path.
+- these packages are used only by the repo-owned seller-session recovery contour `apps/seller_portal_relogin_session.py`; it binds noVNC to `127.0.0.1` on the host, writes updated `storage_state.json` only after validated auth plus canonical supplier confirmation/safe switch, and is intended for temporary auth recovery rather than for the steady-state ingest path.
+- current steady operator path over that tool is bounded and HTTP-owned:
+  - `POST /v1/sheet-vitrina-v1/seller-portal-recovery/start`
+  - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/status`
+  - `POST /v1/sheet-vitrina-v1/seller-portal-recovery/stop`
+  - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip`
+- the downloadable launcher stays Mac-only and does not expose noVNC publicly: it opens a SSH tunnel to the localhost-only host port, launches `http://127.0.0.1:<port>/vnc.html?...` locally and polls recovery status until the flow reaches a final state.
 
 Secrets stay outside Git. Repo stores only env names and target shape.
 
@@ -167,7 +180,7 @@ If any of these steps are unavailable or unsafe, execution must return incomplet
 Loopback/runtime probe validates the hosted process behind the reverse proxy or equivalent publish layer.
 
 Public probe validates:
-- `GET /sheet-vitrina-v1/operator` returns `200` + `text/html` and still contains the compact operator tokens for the three top-level sections, separated refresh/load, truthful manual-vs-auto blocks and both bounded supply subsections (`Обновление данных`, `Ручная загрузка данных`, `Расчёт поставок`, `Отчёты`, `Загрузить данные`, `Отправить данные`, `Последняя удачная загрузка`, `Последняя удачная отправка`, `Ежедневные отчёты`, `Отчёт по остаткам`, `Total Order Sum`, `Негативные факторы`, `Позитивные факторы`, `Скачать лог`, `Лог`, `Автообновления`, `Часовой пояс`, `Автоцепочка`, `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление`, `Общий вход для двух расчётов`, `Заказ на фабрике`, `Поставка на Wildberries`, `Цикл заказов`, `Цикл поставок`)
+- `GET /sheet-vitrina-v1/operator` returns `200` + `text/html` and still contains the compact operator tokens for the three top-level sections, separated refresh/load, truthful manual-vs-auto blocks, bounded seller-session recovery block and both bounded supply subsections (`Обновление данных`, `Ручная загрузка данных`, `Восстановление Seller-сессии`, `Скачать launcher для Mac`, `Расчёт поставок`, `Отчёты`, `Загрузить данные`, `Отправить данные`, `Последняя удачная загрузка`, `Последняя удачная отправка`, `Ежедневные отчёты`, `Отчёт по остаткам`, `Total Order Sum`, `Негативные факторы`, `Позитивные факторы`, `Скачать лог`, `Лог`, `Автообновления`, `Часовой пояс`, `Автоцепочка`, `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление`, `Общий вход для двух расчётов`, `Заказ на фабрике`, `Поставка на Wildberries`, `Цикл заказов`, `Цикл поставок`)
 - `GET /sheet-vitrina-v1/vitrina` returns `200` + `text/html` as a real sibling page shell: page must contain `Phase 4 Web-Vitrina Page Composition`, `Web-витрина`, canonical JSON route token `/v1/sheet-vitrina-v1/web-vitrina`, explicit `surface=page_composition` wiring and the current seam names `web_vitrina_page_composition / web_vitrina_view_model / web_vitrina_gravity_table_adapter`
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition` returns `200` + JSON `web_vitrina_page_composition` v1 with `meta`, `summary_cards`, `filter_surface`, `table_surface`, `status_summary`, `capabilities`; route stays read-only and must not trigger refresh/upstream fetch from the public read path
   - top badge / summary tone must follow semantic source truth of the visible snapshot or selected period, not mere snapshot existence

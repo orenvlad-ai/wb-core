@@ -26,6 +26,8 @@ class _NoopMaterializeSync(ShellBackedWebSourceCurrentSync):
                 wb_ai_dir=Path("/tmp/nonexistent-wb-ai"),
                 api_base_url="http://127.0.0.1:8000",
                 timeout_sec=5,
+                canonical_supplier_id="",
+                canonical_supplier_label="",
             ),
             closed_day_source_state_loader=lambda source_key, snapshot_date: states.get((source_key, snapshot_date)),
         )

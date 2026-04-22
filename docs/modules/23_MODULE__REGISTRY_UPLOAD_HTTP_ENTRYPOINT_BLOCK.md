@@ -41,10 +41,14 @@ related_endpoints:
   - "POST /v1/cost-price/upload"
   - "POST /v1/sheet-vitrina-v1/refresh"
   - "POST /v1/sheet-vitrina-v1/load"
+  - "POST /v1/sheet-vitrina-v1/seller-portal-recovery/start"
+  - "POST /v1/sheet-vitrina-v1/seller-portal-recovery/stop"
   - "GET /v1/sheet-vitrina-v1/daily-report"
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
   - "GET /v1/sheet-vitrina-v1/job"
+  - "GET /v1/sheet-vitrina-v1/seller-portal-recovery/status"
+  - "GET /v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip"
   - "GET /sheet-vitrina-v1/operator"
   - "GET /sheet-vitrina-v1/vitrina"
   - "GET /v1/sheet-vitrina-v1/web-vitrina"
@@ -58,10 +62,13 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/supply/factory-order/calculate"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
 related_runners:
+  - "apps/seller_portal_relogin_session.py"
+  - "apps/seller_portal_relogin_session_smoke.py"
   - "apps/registry_upload_http_entrypoint_live.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime.py"
   - "apps/registry_upload_http_entrypoint_smoke.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"
+  - "apps/sheet_vitrina_v1_seller_portal_recovery_http_smoke.py"
   - "apps/sheet_vitrina_v1_operator_ui_persistence_smoke.py"
   - "apps/factory_order_sales_history_smoke.py"
   - "apps/factory_order_sales_history_reconcile.py"
@@ -88,7 +95,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current truthful temporal-status checkpoint: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, default `GET /v1/sheet-vitrina-v1/web-vitrina` по-прежнему materialize-ит stable library-agnostic `web_vitrina_contract` v1, source/reporting semantics учитывают expected temporal model per source family, а bot-backed current-day sync теперь перед запуском раннеров делает явный seller-portal session probe, surface-ит explicit auth barrier (`seller_portal_session_invalid`) и использует repo-owned localhost-only noVNC/Xvfb relogin path вместо host-side X11 guesswork."
+update_note: "Обновлён под current seller-session recovery checkpoint: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, default `GET /v1/sheet-vitrina-v1/web-vitrina` по-прежнему materialize-ит stable library-agnostic `web_vitrina_contract` v1, source/reporting semantics учитывают expected temporal model per source family, а bot-backed current-day sync теперь имеет permanent operator-facing seller recovery flow (`start/status/stop/launcher`) поверх repo-owned localhost-only noVNC/Xvfb relogin tool с canonical supplier enforcement вместо разовой host-side X11 рутины."
 ---
 
 # 1. Идентификатор и статус
@@ -155,6 +162,12 @@ update_note: "Обновлён под current truthful temporal-status checkpoin
   - `GET /v1/sheet-vitrina-v1/job` = cheap poll/read surface для live operator log и async action state
 - `GET /sheet-vitrina-v1/operator` = simple repo-owned page с top-level tabs `Обновление данных` / `Расчёт поставок` / `Отчёты`
   - route intentionally остаётся orchestration-first control surface и не получает новый heavy web-vitrina block внутрь existing HTML shell
+  - block `Восстановление Seller-сессии` внутри `Обновление данных` остаётся таким же bounded operator seam, а не отдельной инженерной консолью:
+    - `POST /v1/sheet-vitrina-v1/seller-portal-recovery/start` стартует repo-owned recovery lifecycle поверх existing `apps/seller_portal_relogin_session.py`
+    - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/status` отдаёт cheap truthful status surface (`idle / awaiting_login / wrong_organization / refresh_failed / success / stopped / error`)
+    - `POST /v1/sheet-vitrina-v1/seller-portal-recovery/stop` cleanup-ит temporary noVNC/Xvfb contour
+    - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip` отдаёт reusable macOS `.command` launcher, который поднимает SSH tunnel к localhost-only noVNC, открывает browser и затем poll-ит recovery status/operator page without manual command editing
+  - operator-facing recovery success не materialize-ится только из `session ok`: same lifecycle additionally confirms the canonical supplier/org and only after that keeps the saved session as a truthful success
   - chosen page route for web-vitrina = `GET /sheet-vitrina-v1/vitrina`
   - route chosen as sibling to `/sheet-vitrina-v1/operator`, not as `/sheet-vitrina-v1/operator/vitrina`, because future web-vitrina is a separate working surface and must not быть вложенной под orchestration-first operator shell
   - sibling read route = `GET /v1/sheet-vitrina-v1/web-vitrina`
@@ -204,7 +217,7 @@ update_note: "Обновлён под current truthful temporal-status checkpoin
 - Внутри existing `POST /v1/sheet-vitrina-v1/refresh` live contour теперь допускает bounded server-local sync для `seller_funnel_snapshot` и `web_source_snapshot`:
   - сначала refresh проверяет, materialized ли exact-date `today_current` snapshot в local `wb-ai` read-side;
   - перед запуском `/opt/wb-web-bot` runners contour делает explicit seller-portal session probe against current `storage_state.json`; если сохранённая browser session уже редиректит на `seller-auth`/даёт auth `401`, refresh падает быстро и truthfully с `seller_portal_session_invalid`, а не маскируется generic `Template request ... was not captured`;
-  - bounded recovery path для такого auth barrier теперь repo-owned: `python3 apps/seller_portal_relogin_session.py start` на selleros host поднимает localhost-only `Xvfb + x11vnc + websockify/noVNC`, открывает seller portal в headed Playwright browser, автоматически сохраняет обновлённый `/opt/wb-web-bot/storage_state.json` после подтверждённого входа и затем loopback-trigger'ит refresh без дополнительного terminal `Enter`;
+  - bounded recovery path для такого auth barrier теперь permanent operator-facing, но source-of-truth у него всё равно один: existing `apps/seller_portal_relogin_session.py` на selleros host поднимает localhost-only `Xvfb + x11vnc + websockify/noVNC`, ждёт owner login, подтверждает canonical supplier/org, при необходимости safe-switch'ит supplier внутри сохранённого browser state, только после этого сохраняет обновлённый `/opt/wb-web-bot/storage_state.json`, loopback-trigger'ит refresh и затем cleanup-ит temporary contour;
   - если exact-date snapshot отсутствует, refresh может вызвать server-local owner path `/opt/wb-web-bot` (`bot.runner_day`, `bot.runner_sales_funnel_day`) и затем `/opt/wb-ai/run_web_source_handoff.py`;
   - для `seller_funnel_snapshot` и `web_source_snapshot` refresh additionally rejects zero-filled exact-date current-day snapshots: такой payload не считается готовым `today_current` state и bounded-trigger'ит retry вместо залипания ложных нулей;
   - после этого refresh повторно валидирует exact-date local API availability и только потом читает live sources;

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 from importlib import util
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -32,7 +34,46 @@ class _FakeContext:
 
     def storage_state(self, *, path: str) -> None:
         self.storage_state_calls += 1
-        Path(path).write_text('{"cookies": [], "origins": []}', encoding="utf-8")
+        wrong_supplier_id = "wrong-supplier-id"
+        payload = {
+            "cookies": [
+                {
+                    "name": "x-supplier-id",
+                    "value": wrong_supplier_id,
+                    "domain": "seller.wildberries.ru",
+                    "path": "/",
+                    "secure": True,
+                    "httpOnly": False,
+                    "sameSite": "Lax",
+                },
+                {
+                    "name": "x-supplier-id-external",
+                    "value": wrong_supplier_id,
+                    "domain": ".wildberries.ru",
+                    "path": "/",
+                    "secure": True,
+                    "httpOnly": False,
+                    "sameSite": "Lax",
+                },
+            ],
+            "origins": [
+                {
+                    "origin": "https://seller.wildberries.ru",
+                    "localStorage": [
+                        {
+                            "name": "analytics-external-data",
+                            "value": base64.b64encode(
+                                json.dumps(
+                                    {"idSupplier": wrong_supplier_id, "idUser": 51178567},
+                                    ensure_ascii=False,
+                                ).encode("utf-8")
+                            ).decode("utf-8"),
+                        }
+                    ],
+                }
+            ],
+        }
+        Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 class _FakeBrowser:
@@ -75,6 +116,8 @@ def main() -> None:
             timeout_sec=30,
             poll_sec=0.0,
             ssh_destination="selleros-root",
+            canonical_supplier_id="canonical-supplier-id",
+            canonical_supplier_label="ИП Сагитов В. Р.",
         )
         config.state_dir.mkdir(parents=True, exist_ok=True)
         fake_playwright = _FakePlaywright()
@@ -84,10 +127,12 @@ def main() -> None:
             probe_calls["count"] += 1
             if probe_calls["count"] == 1:
                 return {"ok": False, "status": "seller_portal_session_invalid"}
+            supplier_context = MODULE.read_storage_state_supplier_context(_path)
             return {
                 "ok": True,
                 "status": "ok",
                 "final_url": "https://seller.wildberries.ru/search-analytics/my-search-queries",
+                "supplier_context": supplier_context,
             }
 
         result = MODULE.run_login_capture(
@@ -105,11 +150,19 @@ def main() -> None:
             raise AssertionError(f"probe must be retried until auth succeeds, got {probe_calls}")
         if not fake_playwright.browser.closed:
             raise AssertionError("browser must be closed after auto-capture")
+        if result.get("organization_confirmed") is not True:
+            raise AssertionError(f"canonical supplier must be confirmed, got {result}")
+        if result.get("organization_switch_applied") is not True:
+            raise AssertionError(f"run_login_capture must auto-switch to canonical supplier, got {result}")
+        final_supplier_context = MODULE.read_storage_state_supplier_context(config.storage_state_path)
+        if final_supplier_context.get("current_supplier_id") != "canonical-supplier-id":
+            raise AssertionError(f"storage_state.json must be rewritten to canonical supplier, got {final_supplier_context}")
         status_payload = MODULE.read_session_status(config, with_probe=False)
         if status_payload.get("status") != "awaiting_login":
             raise AssertionError(f"intermediate awaiting_login status must be persisted, got {status_payload}")
 
         print("seller_portal_relogin_session_capture: ok -> auth_confirmed after browser login")
+        print("seller_portal_relogin_session_supplier_switch: ok -> canonical supplier enforced before final save")
         print("smoke-check passed")
 
 

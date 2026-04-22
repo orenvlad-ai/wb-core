@@ -38,6 +38,10 @@ DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_SHEET_LOAD_PATH = "/v1/sheet-vitrina-v1/load"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
 DEFAULT_SHEET_JOB_PATH = "/v1/sheet-vitrina-v1/job"
+DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH = "/v1/sheet-vitrina-v1/seller-portal-recovery/status"
+DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH = "/v1/sheet-vitrina-v1/seller-portal-recovery/start"
+DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH = "/v1/sheet-vitrina-v1/seller-portal-recovery/stop"
+DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH = "/v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip"
 DEFAULT_SHEET_OPERATOR_UI_PATH = "/sheet-vitrina-v1/operator"
 DEFAULT_SHEET_WEB_VITRINA_UI_PATH = "/sheet-vitrina-v1/vitrina"
 DEFAULT_FACTORY_ORDER_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/status"
@@ -349,6 +353,46 @@ def _build_handler(
                 )
                 return
 
+            if parsed.path == DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH:
+                try:
+                    payload = _load_optional_request_payload(self)
+                    replace = _resolve_replace_requested(payload)
+                    recovery_payload = entrypoint.handle_seller_portal_recovery_start_request(
+                        launcher_download_path=DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+                        replace=replace,
+                    )
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"seller portal recovery start failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, recovery_payload)
+                return
+
+            if parsed.path == DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH:
+                try:
+                    recovery_payload = entrypoint.handle_seller_portal_recovery_stop_request(
+                        launcher_download_path=DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+                    )
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"seller portal recovery stop failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, recovery_payload)
+                return
+
             if parsed.path in {
                 DEFAULT_FACTORY_ORDER_UPLOAD_STOCK_FF_PATH,
                 DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FACTORY_PATH,
@@ -457,6 +501,45 @@ def _build_handler(
                         job_path=sheet_job_path,
                         operator_context=entrypoint.build_sheet_operator_ui_context(),
                     ),
+                )
+                return
+
+            if parsed.path == DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH:
+                try:
+                    payload = entrypoint.handle_seller_portal_recovery_status_request(
+                        launcher_download_path=DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+                    )
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"seller portal recovery status failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH:
+                try:
+                    request_origin = _request_origin(self)
+                    archive_bytes, filename = entrypoint.handle_seller_portal_recovery_launcher_request(
+                        public_status_url=f"{request_origin}{DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH}",
+                        public_operator_url=f"{request_origin}{sheet_operator_ui_path}",
+                    )
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"seller portal recovery launcher failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    archive_bytes,
+                    content_type="application/zip",
+                    filename=filename,
+                    as_attachment=True,
                 )
                 return
 
@@ -1027,6 +1110,15 @@ def _resolve_auto_load_requested(payload: Mapping[str, Any]) -> bool:
     return raw
 
 
+def _resolve_replace_requested(payload: Mapping[str, Any]) -> bool:
+    if "replace" not in payload:
+        return True
+    raw = payload["replace"]
+    if not isinstance(raw, bool):
+        raise ValueError("replace must be boolean when provided")
+    return raw
+
+
 def _resolve_factory_order_dataset_type_from_template_path(path: str) -> str:
     mapping = {
         DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH: DATASET_STOCK_FF,
@@ -1116,6 +1208,17 @@ def _write_json_response(
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def _request_origin(handler: BaseHTTPRequestHandler) -> str:
+    forwarded_proto = str(handler.headers.get("X-Forwarded-Proto", "") or "").strip()
+    forwarded_host = str(handler.headers.get("X-Forwarded-Host", "") or "").strip()
+    host = forwarded_host or str(handler.headers.get("Host", "") or "").strip()
+    if not host:
+        server_host, server_port = handler.server.server_address[:2]
+        host = f"{server_host}:{server_port}"
+    scheme = forwarded_proto or ("http" if host.startswith(("127.0.0.1", "localhost")) else "https")
+    return f"{scheme}://{host}"
 
 
 def _write_html_response(
@@ -1305,6 +1408,10 @@ def _render_sheet_vitrina_operator_ui(
         "load_path": load_path,
         "status_path": status_path,
         "job_path": job_path,
+        "seller_recovery_status_path": DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
+        "seller_recovery_start_path": DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
+        "seller_recovery_stop_path": DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH,
+        "seller_recovery_launcher_path": DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
         "factory_order_status_path": DEFAULT_FACTORY_ORDER_STATUS_PATH,
         "factory_order_template_stock_ff_path": DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
         "factory_order_template_inbound_factory_path": DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
