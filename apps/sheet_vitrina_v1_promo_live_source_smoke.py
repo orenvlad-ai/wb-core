@@ -119,7 +119,14 @@ def _assert_promo_source_runtime_mapping(bundle: dict[str, Any], requested_nm_id
 
         entrypoint = _build_entrypoint(
             runtime=runtime,
-            promo_source_block=_SyntheticPromoSourceBlock(mode="success", snapshot_items=today_items),
+            promo_source_block=_SyntheticPromoSourceBlock(
+                mode="success",
+                snapshot_items=today_items,
+                snapshot_items_by_date={
+                    AS_OF_DATE: yesterday_items,
+                    CURRENT_DATE: today_items,
+                },
+            ),
             now_factory=_MutableNowFactory("2026-04-20T08:00:00+00:00"),
         )
         refresh_payload = entrypoint._run_sheet_refresh(
@@ -135,9 +142,9 @@ def _assert_promo_source_runtime_mapping(bundle: dict[str, Any], requested_nm_id
         yesterday_status = status_rows["promo_by_price[yesterday_closed]"]
         today_status = status_rows["promo_by_price[today_current]"]
         if yesterday_status[1] != "success":
-            raise AssertionError(f"promo yesterday_closed must materialize from prior current cache, got {yesterday_status}")
-        if "accepted_closed_from_prior_current_cache" not in str(yesterday_status[10]):
-            raise AssertionError(f"promo yesterday_closed note must expose cache-based closed semantics, got {yesterday_status}")
+            raise AssertionError(f"promo yesterday_closed must materialize from corrective replay, got {yesterday_status}")
+        if "accepted_closed_from_interval_replay" not in str(yesterday_status[10]):
+            raise AssertionError(f"promo yesterday_closed note must expose interval replay semantics, got {yesterday_status}")
         if today_status[1] != "success":
             raise AssertionError(f"promo today_current must be success, got {today_status}")
         if "trace_run_dir=/tmp/promo-today" not in str(today_status[10]):
@@ -270,6 +277,39 @@ def _assert_historical_interval_replay_cache_fill(requested_nm_ids: list[int]) -
             json.dumps(metadata.__dict__, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        runtime.save_temporal_source_slot_snapshot(
+            source_key="promo_by_price",
+            snapshot_date=INTERVAL_REPLAY_DATE,
+            snapshot_role="accepted_closed_day_snapshot",
+            captured_at="2026-04-16T18:00:00Z",
+            payload=PromoLiveSourceSuccess(
+                kind="success",
+                snapshot_date=INTERVAL_REPLAY_DATE,
+                date_from=INTERVAL_REPLAY_DATE,
+                date_to=INTERVAL_REPLAY_DATE,
+                requested_count=len(requested_nm_ids),
+                covered_count=len(requested_nm_ids),
+                items=[
+                    PromoLiveSourceItem(
+                        snapshot_date=INTERVAL_REPLAY_DATE,
+                        nm_id=nm_id,
+                        promo_count_by_price=9.0,
+                        promo_entry_price_best=9999.0,
+                        promo_participation=1.0,
+                    )
+                    for nm_id in requested_nm_ids
+                ],
+                detail="stale accepted closed promo snapshot",
+                trace_run_dir="/tmp/stale-promo-accepted",
+                current_promos=0,
+                current_promos_downloaded=0,
+                current_promos_blocked=0,
+                future_promos=0,
+                skipped_past_promos=0,
+                ambiguous_promos=0,
+                current_download_export_kinds=[],
+            ),
+        )
 
         plan_block = SheetVitrinaV1LivePlanBlock(
             runtime=runtime,
@@ -322,6 +362,9 @@ def _assert_historical_interval_replay_cache_fill(requested_nm_ids: list[int]) -
         )
         if accepted_payload is None:
             raise AssertionError("interval replay must accept closed-day slot snapshot")
+        accepted_items = {item.nm_id: item for item in accepted_payload.items}
+        if accepted_items[requested_nm_ids[0]].promo_entry_price_best != 1000.0:
+            raise AssertionError("interval replay must overwrite stale accepted closed snapshot")
         probe = payload_items[requested_nm_ids[0]]
         return (
             f"date={INTERVAL_REPLAY_DATE} "
@@ -726,12 +769,20 @@ class _SyntheticSuccessBlock:
 
 
 class _SyntheticPromoSourceBlock:
-    def __init__(self, *, mode: str, snapshot_items: list[PromoLiveSourceItem]) -> None:
+    def __init__(
+        self,
+        *,
+        mode: str,
+        snapshot_items: list[PromoLiveSourceItem],
+        snapshot_items_by_date: dict[str, list[PromoLiveSourceItem]] | None = None,
+    ) -> None:
         self.mode = mode
         self.snapshot_items = snapshot_items
+        self.snapshot_items_by_date = dict(snapshot_items_by_date or {})
         self.detail = "trace_run_dir=/tmp/promo-today; current_promos=2; current_promos_downloaded=2; current_promos_blocked=0"
 
     def execute(self, request: PromoLiveSourceRequest) -> PromoLiveSourceEnvelope:
+        items = self.snapshot_items_by_date.get(request.snapshot_date, self.snapshot_items)
         if self.mode == "success":
             return PromoLiveSourceEnvelope(
                 result=PromoLiveSourceSuccess(
@@ -741,7 +792,7 @@ class _SyntheticPromoSourceBlock:
                     date_to=request.snapshot_date,
                     requested_count=len(request.nm_ids),
                     covered_count=len(request.nm_ids),
-                    items=self.snapshot_items,
+                    items=items,
                     detail=self.detail,
                     trace_run_dir="/tmp/promo-today",
                     current_promos=2,

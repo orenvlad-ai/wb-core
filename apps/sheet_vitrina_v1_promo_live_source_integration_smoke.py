@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 from packages.application.promo_live_source import PromoLiveSourceBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock
+from packages.contracts.promo_live_source import PromoLiveSourceItem, PromoLiveSourceSuccess
 from packages.contracts.promo_xlsx_collector_block import PromoMetadata
 
 
@@ -65,6 +66,39 @@ def main() -> None:
         )
 
         for column_date in CHECK_DATES:
+            runtime.save_temporal_source_slot_snapshot(
+                source_key="promo_by_price",
+                snapshot_date=column_date,
+                snapshot_role="accepted_closed_day_snapshot",
+                captured_at=f"{column_date}T07:00:00Z",
+                payload=PromoLiveSourceSuccess(
+                    kind="success",
+                    snapshot_date=column_date,
+                    date_from=column_date,
+                    date_to=column_date,
+                    requested_count=len(requested_nm_ids),
+                    covered_count=len(requested_nm_ids),
+                    items=[
+                        PromoLiveSourceItem(
+                            snapshot_date=column_date,
+                            nm_id=nm_id,
+                            promo_count_by_price=9.0,
+                            promo_entry_price_best=9999.0,
+                            promo_participation=1.0,
+                        )
+                        for nm_id in requested_nm_ids
+                    ],
+                    detail="stale accepted closed promo snapshot",
+                    trace_run_dir="/tmp/stale-promo-accepted",
+                    current_promos=0,
+                    current_promos_downloaded=0,
+                    current_promos_blocked=0,
+                    future_promos=0,
+                    skipped_past_promos=0,
+                    ambiguous_promos=0,
+                    current_download_export_kinds=[],
+                ),
+            )
             status, payload = plan_block._capture_promo_closed_day_from_cache(
                 source_key="promo_by_price",
                 temporal_slot="yesterday_closed",
@@ -106,6 +140,11 @@ def main() -> None:
             )
             if accepted_payload is None:
                 raise AssertionError(f"{column_date}: accepted closed-day payload missing")
+            accepted_probe = {item.nm_id: item for item in accepted_payload.items}[requested_nm_ids[0]]
+            if accepted_probe.promo_entry_price_best != expected["beneficial_entry_price"]:
+                raise AssertionError(
+                    f"{column_date}: corrective replay must overwrite stale accepted snapshot, got {accepted_probe}"
+                )
             print(
                 f"{column_date}: "
                 f"SKU={requested_nm_ids[0]} "

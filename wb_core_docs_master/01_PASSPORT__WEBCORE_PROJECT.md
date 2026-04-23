@@ -83,8 +83,8 @@ Confirmed contour на текущем `main`:
   - workbook inspection and export-kind classification for downloaded/reused promo XLSX.
 - repo-owned bounded `promo_live_source_wiring_block`:
   - `promo_by_price[today_current]` materialize-ится через repo-owned archive-first collector run
-  - `promo_by_price[yesterday_closed]` по-прежнему читается только из accepted/runtime-cached exact-date promo truth
-  - exact-date promo truth now may be populated server-side from archived campaign interval replay on cache miss
+  - `promo_by_price[yesterday_closed]` на corrective refresh сначала пересчитывается server-side interval replay из archived campaign artifacts
+  - accepted/runtime-cached exact-date promo truth используется только как fallback, если replay не дал exact `success`
   - invalid later attempts do not overwrite accepted current/closed promo truth
   - low-confidence cross-year labels keep `promo_start_at/end_at = null`
 

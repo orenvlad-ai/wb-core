@@ -72,8 +72,8 @@ update_note: "Обновлён под archive-first / interval-based promo seman
   - after archive sync materialize-ит exact-date current payload из covering archived campaign artifacts;
   - future promo не попадают в current numeric fill.
 - `promo_by_price[yesterday_closed]`:
-  - read-side по-прежнему читает только accepted/runtime-cached promo truth;
-  - но cache miss теперь может truthfully закрываться server-side interval replay из archived campaign artifacts для exact requested date;
+  - corrective refresh сначала обязан попытаться server-side interval replay из archived campaign artifacts для exact requested date и overwrite-ить stale accepted closed snapshot, если replay дал exact `success`;
+  - только если interval replay не дал exact `success`, read-side может fallback-нуться к already accepted/runtime-cached promo truth;
   - invalid later attempt не может destructively overwrite accepted closed/current truth.
 
 `STATUS` для promo source обязан surface-ить:
@@ -95,7 +95,7 @@ update_note: "Обновлён под archive-first / interval-based promo seman
 
 - `promo_by_price` теперь относится к `dual_day_capable` группе read-side, но с asymmetric capture semantics:
   - `today_current` = archive-first live collector attempt for the current business day, followed by archive-based exact-date materialization
-  - `yesterday_closed` = accepted/runtime-cached exact-date truth, which may be initially populated by interval replay on cache miss
+  - `yesterday_closed` = corrective interval replay first, then accepted/runtime cache only as bounded fallback when replay is unavailable or non-exact
 - exact promo dates materialize-ятся только при reliable parse and only inside authoritative campaign interval.
 - Для cross-year short labels:
   - `promo_period_text` остаётся authoritative raw field

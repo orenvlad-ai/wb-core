@@ -163,7 +163,7 @@ Current promo collector norm:
 Current promo live-source wiring norm:
 - authoritative live source key = `promo_by_price`
 - `today_current` runs bounded repo-owned promo collector server-side inside refresh contour
-- `yesterday_closed` reads only accepted/runtime-cached promo truth
+- `yesterday_closed` attempts corrective interval replay first and falls back to accepted/runtime-cached promo truth only when replay is unavailable or non-exact
 - invalid later attempt must not overwrite accepted current/closed promo truth
 
 ## Hosted runtime contract

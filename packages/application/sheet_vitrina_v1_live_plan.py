@@ -900,6 +900,42 @@ class SheetVitrinaV1LivePlanBlock:
         column_date: str,
         requested_nm_ids: list[int],
     ) -> tuple[LiveSourceStatus, Any | None]:
+        replay_status, replay_payload = _capture_live_source(
+            source_key=source_key,
+            temporal_slot=temporal_slot,
+            temporal_policy=temporal_policy,
+            column_date=column_date,
+            requested_nm_ids=requested_nm_ids,
+            loader=lambda: self.promo_live_source_block.execute(
+                PromoLiveSourceRequest(
+                    snapshot_date=column_date,
+                    nm_ids=requested_nm_ids,
+                )
+            ).result,
+        )
+        if replay_payload is not None and _is_exact_snapshot_payload(replay_payload, column_date):
+            accepted_at = _format_runtime_timestamp(self.now_factory())
+            self.runtime.save_temporal_source_snapshot(
+                source_key=source_key,
+                snapshot_date=column_date,
+                captured_at=accepted_at,
+                payload=replay_payload,
+            )
+            self.runtime.save_temporal_source_slot_snapshot(
+                source_key=source_key,
+                snapshot_date=column_date,
+                snapshot_role=TEMPORAL_ROLE_ACCEPTED_CLOSED,
+                captured_at=accepted_at,
+                payload=replay_payload,
+            )
+            return (
+                _append_status_note(
+                    replay_status,
+                    f"resolution_rule=accepted_closed_from_interval_replay; accepted_at={accepted_at}",
+                ),
+                replay_payload,
+            )
+
         accepted_snapshot = self._load_slot_snapshot_status(
             source_key=source_key,
             temporal_slot=temporal_slot,
@@ -941,42 +977,7 @@ class SheetVitrinaV1LivePlanBlock:
                 cached_payload,
             )
 
-        replay_status, replay_payload = _capture_live_source(
-            source_key=source_key,
-            temporal_slot=temporal_slot,
-            temporal_policy=temporal_policy,
-            column_date=column_date,
-            requested_nm_ids=requested_nm_ids,
-            loader=lambda: self.promo_live_source_block.execute(
-                PromoLiveSourceRequest(
-                    snapshot_date=column_date,
-                    nm_ids=requested_nm_ids,
-                )
-            ).result,
-        )
-        if replay_payload is None or not _is_exact_snapshot_payload(replay_payload, column_date):
-            return replay_status, replay_payload
-        accepted_at = _format_runtime_timestamp(self.now_factory())
-        self.runtime.save_temporal_source_snapshot(
-            source_key=source_key,
-            snapshot_date=column_date,
-            captured_at=accepted_at,
-            payload=replay_payload,
-        )
-        self.runtime.save_temporal_source_slot_snapshot(
-            source_key=source_key,
-            snapshot_date=column_date,
-            snapshot_role=TEMPORAL_ROLE_ACCEPTED_CLOSED,
-            captured_at=accepted_at,
-            payload=replay_payload,
-        )
-        return (
-            _append_status_note(
-                replay_status,
-                f"resolution_rule=accepted_closed_from_interval_replay; accepted_at={accepted_at}",
-            ),
-            replay_payload,
-        )
+        return replay_status, replay_payload
 
     def _capture_current_snapshot_closed_day_from_accepted_current(
         self,

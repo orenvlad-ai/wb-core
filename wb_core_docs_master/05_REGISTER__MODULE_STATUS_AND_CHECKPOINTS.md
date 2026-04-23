@@ -90,8 +90,8 @@ Current sibling local promo collector precursor flow:
 Current live promo source flow:
 - `POST /v1/sheet-vitrina-v1/refresh`
 - contour now invokes repo-owned archive-first promo collector server-side for `promo_by_price[today_current]`
-- `promo_by_price[yesterday_closed]` still reads only accepted/runtime-cached exact-date promo truth
-- cache miss on `promo_by_price[yesterday_closed]` may be filled server-side by interval replay from archived campaign artifacts when authoritative coverage exists
+- `promo_by_price[yesterday_closed]` now attempts corrective interval replay first on every refresh
+- accepted/runtime-cached exact-date promo truth stays only as bounded fallback when replay is unavailable or non-exact
 - `STATUS` and ready snapshot now expose truthful promo source facts instead of a permanent blocked gap
 
 Current repo-owned operator refresh surface:
@@ -152,7 +152,7 @@ Current repo-owned operator refresh surface:
 - manual operator refresh keeps short retries inside the run but does not create persisted long-retry tails and does not overwrite accepted truth on invalid candidates
 - promo source follows the same accepted-truth norm:
   - invalid current attempt must not overwrite already accepted same-day promo truth
-  - `yesterday_closed` must read only accepted/runtime-cached promo truth
+  - `yesterday_closed` must first try corrective interval replay and may fall back to accepted/runtime cache only when replay is unavailable or non-exact
   - low-confidence cross-year labels keep null exact dates instead of invented dates
 - live retry completion is bounded by repo-owned runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py` plus repo-owned artifacts `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.{service,timer}` installed on host as `wb-core-sheet-vitrina-closure-retry.timer`; the runner covers due `yesterday_closed` for the full historical/date-period matrix and same-day current-only capture retries only within the current business day
 
