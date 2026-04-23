@@ -36,7 +36,6 @@ ARCHIVE_WORKBOOK_FILENAME = "workbook.xlsx"
 ARCHIVE_WORKBOOK_INSPECTION_FILENAME = "workbook_inspection.json"
 PRICES_SOURCE_KEY = "prices_snapshot"
 PRICES_ACCEPTED_CURRENT_ROLE = "accepted_current_snapshot"
-PRICES_PROVISIONAL_CURRENT_ROLE = "provisional_current_snapshot"
 
 
 @dataclass(frozen=True)
@@ -502,32 +501,13 @@ def _load_daily_price_truth(
     requested_nm_ids: Iterable[int],
 ) -> DailyPriceTruthResolution:
     runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
-    for snapshot_role, note in [
-        (PRICES_ACCEPTED_CURRENT_ROLE, "daily_price_source=prices_snapshot.accepted_current_snapshot"),
-        (PRICES_PROVISIONAL_CURRENT_ROLE, "daily_price_source=prices_snapshot.provisional_current_snapshot"),
-    ]:
-        payload, captured_at = runtime.load_temporal_source_slot_snapshot(
-            source_key=PRICES_SOURCE_KEY,
-            snapshot_date=snapshot_date,
-            snapshot_role=snapshot_role,
-        )
-        if _is_exact_prices_payload(payload, snapshot_date):
-            if captured_at:
-                note = f"{note}; daily_price_captured_at={captured_at}"
-            return DailyPriceTruthResolution(
-                price_by_nm_id=_extract_price_by_nm_id(
-                    payload=payload,
-                    requested_nm_ids=requested_nm_ids,
-                ),
-                source_note=note,
-            )
-
-    payload, captured_at = runtime.load_temporal_source_snapshot(
+    payload, captured_at = runtime.load_temporal_source_slot_snapshot(
         source_key=PRICES_SOURCE_KEY,
         snapshot_date=snapshot_date,
+        snapshot_role=PRICES_ACCEPTED_CURRENT_ROLE,
     )
     if _is_exact_prices_payload(payload, snapshot_date):
-        note = "daily_price_source=prices_snapshot.exact_date_runtime_cache"
+        note = "daily_price_source=prices_snapshot.accepted_current_snapshot"
         if captured_at:
             note = f"{note}; daily_price_captured_at={captured_at}"
         return DailyPriceTruthResolution(
