@@ -60,7 +60,8 @@ update_note: "Обновлён под archive-first / interval-based promo seman
   - `promo_entry_price_best`
 - Historical truth generation теперь тоже server-owned:
   - campaign metadata задаёт authoritative interval `promo_start_at..promo_end_at`
-  - archived workbook задаёт SKU + price fields
+  - archived workbook задаёт SKU + `Плановая цена для акции`
+  - daily metric truth задаёт `price_seller_discounted` через runtime `prices_snapshot[accepted_current_snapshot]` для exact requested date
   - interval replay materialize-ит exact-date payload в existing runtime seam `temporal_source_snapshots[source_key=promo_by_price]`
 
 # 3. Target contract и смысл результата
@@ -110,15 +111,16 @@ update_note: "Обновлён под archive-first / interval-based promo seman
 
 - Numeric mapping живёт server-side и не переносится в Apps Script:
   - сначала строится один общий eligible set из covering campaign participations для `SKU + date`
-  - row считается eligible, если row-level цена продавца со скидкой из этой строки `< Плановая цена для акции`
-  - если workbook даёт `Текущая розничная цена` + row-level discount columns, server-side truth path derive-ит discounted seller price из этих же row fields
+  - campaign interval / identity / `Плановая цена для акции` берутся из archived promo workbook + metadata
+  - `price_seller_discounted` берётся как уже materialized daily metric truth для exact date из runtime `prices_snapshot`
+  - row считается eligible, если `price_seller_discounted < Плановая цена для акции`
   - `promo_entry_price_best` = max(`Плановая цена для акции`) среди eligible rows; при пустом eligible set остаётся truthful empty
   - `promo_count_by_price` = count of eligible rows
   - `promo_participation` = `1` when `promo_count_by_price > 0`, else `0`
 - overlap rule is deterministic and additive across covering campaigns for the same SKU/date.
 - Workbook alone не считается sufficient:
   - promo title / period / promo status / promo_id / period_id идут из sidecar/card truth
-  - workbook inspection нужен для row-level numeric fill и export-kind reporting
+  - workbook inspection нужен для export-kind reporting и artifact debugging, но не для вычисления seller discounted price
   - workbook reuse is preferred over redundant repeated downloads when metadata/content did not change
 
 # 6. Кодовые части

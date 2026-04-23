@@ -15,9 +15,12 @@ from typing import Iterable
 from openpyxl import load_workbook
 
 from packages.application.promo_metric_truth import (
+    PromoCandidateRow,
+    evaluate_candidate_rows,
     find_workbook_data_sheet,
-    iter_eligible_workbook_rows,
+    iter_workbook_plan_rows,
 )
+from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.contracts.promo_live_source import (
     PromoLiveSourceIncomplete,
     PromoLiveSourceItem,
@@ -31,6 +34,9 @@ ARCHIVE_RECORD_FILENAME = "archive_record.json"
 ARCHIVE_METADATA_FILENAME = "metadata.json"
 ARCHIVE_WORKBOOK_FILENAME = "workbook.xlsx"
 ARCHIVE_WORKBOOK_INSPECTION_FILENAME = "workbook_inspection.json"
+PRICES_SOURCE_KEY = "prices_snapshot"
+PRICES_ACCEPTED_CURRENT_ROLE = "accepted_current_snapshot"
+PRICES_PROVISIONAL_CURRENT_ROLE = "provisional_current_snapshot"
 
 
 @dataclass(frozen=True)
@@ -61,6 +67,12 @@ class PromoCampaignArchiveSyncSummary:
             f"archive_updated={self.updated_records}; "
             f"archive_unchanged={self.unchanged_records}"
         )
+
+
+@dataclass(frozen=True)
+class DailyPriceTruthResolution:
+    price_by_nm_id: dict[int, float]
+    source_note: str
 
 
 def promo_campaign_archive_root(runtime_dir: Path) -> Path:
@@ -202,16 +214,6 @@ def materialize_promo_result_from_archive(
     if detail_prefix:
         detail_parts.insert(0, detail_prefix)
 
-    if not covering:
-        return PromoLiveSourceIncomplete(
-            kind="incomplete",
-            covered_count=0,
-            items=[],
-            missing_nm_ids=requested,
-            detail="; ".join(detail_parts + [f"no_covering_campaign_artifacts_for_date={snapshot_date}"]),
-            **common,
-        )
-
     if missing_artifacts:
         missing_keys = ",".join(record.archive_key for record in missing_artifacts[:8])
         return PromoLiveSourceIncomplete(
@@ -223,28 +225,79 @@ def materialize_promo_result_from_archive(
             **common,
         )
 
-    accumulator = {
-        nm_id: {"promo_count_by_price": 0.0, "promo_entry_price_best": 0.0}
+    candidate_rows_by_nm_id: dict[int, list[PromoCandidateRow]] = {
+        nm_id: []
         for nm_id in requested
     }
+    candidate_row_count = 0
     for record in usable:
-        _merge_archive_workbook_rows(
-            accumulator=accumulator,
+        candidate_row_count += _merge_archive_workbook_rows(
+            candidate_rows_by_nm_id=candidate_rows_by_nm_id,
             workbook_path=Path(str(record.workbook_path)),
             requested_nm_ids=requested,
+            campaign_identity=_campaign_identity(record),
+        )
+    detail_parts.append(f"requested_candidate_rows={candidate_row_count}")
+
+    requested_nm_ids_with_candidates = sorted(
+        nm_id
+        for nm_id, candidate_rows in candidate_rows_by_nm_id.items()
+        if candidate_rows
+    )
+    if not requested_nm_ids_with_candidates:
+        return PromoLiveSourceSuccess(
+            kind="success",
+            covered_count=len(requested),
+            items=_build_zero_items(snapshot_date=snapshot_date, requested_nm_ids=requested),
+            detail="; ".join(
+                detail_parts
+                + [
+                    "daily_price_source=not_needed",
+                    "no_covering_campaign_rows_for_requested_nm_ids=true",
+                ]
+            ),
+            **common,
         )
 
+    price_truth = _load_daily_price_truth(
+        runtime_dir=runtime_dir,
+        snapshot_date=snapshot_date,
+        requested_nm_ids=requested_nm_ids_with_candidates,
+    )
+    detail_parts.append(price_truth.source_note)
+    missing_price_truth_nm_ids = sorted(
+        nm_id
+        for nm_id in requested_nm_ids_with_candidates
+        if nm_id not in price_truth.price_by_nm_id
+    )
+
     items = [
-        PromoLiveSourceItem(
+        _build_item_from_candidate_rows(
             snapshot_date=snapshot_date,
             nm_id=nm_id,
-            promo_count_by_price=round(values["promo_count_by_price"], 6),
-            promo_entry_price_best=round(values["promo_entry_price_best"], 6),
-            promo_participation=1.0 if values["promo_count_by_price"] > 0 else 0.0,
+            candidate_rows=candidate_rows_by_nm_id[nm_id],
+            price_seller_discounted=price_truth.price_by_nm_id.get(nm_id),
         )
-        for nm_id, values in sorted(accumulator.items())
+        for nm_id in requested
     ]
     archive_keys = ",".join(record.archive_key for record in usable[:8])
+    if missing_price_truth_nm_ids:
+        return PromoLiveSourceIncomplete(
+            kind="incomplete",
+            covered_count=len(requested) - len(missing_price_truth_nm_ids),
+            items=items,
+            missing_nm_ids=missing_price_truth_nm_ids,
+            detail="; ".join(
+                detail_parts
+                + [
+                    "daily_price_truth_required=true",
+                    "missing_daily_price_truth_nm_ids="
+                    + ",".join(str(nm_id) for nm_id in missing_price_truth_nm_ids),
+                    f"archive_keys={archive_keys}",
+                ]
+            ),
+            **common,
+        )
     return PromoLiveSourceSuccess(
         kind="success",
         covered_count=len(requested),
@@ -414,26 +467,153 @@ def _record_matches_live_metadata(
 
 def _merge_archive_workbook_rows(
     *,
-    accumulator: dict[int, dict[str, float]],
+    candidate_rows_by_nm_id: dict[int, list[PromoCandidateRow]],
     workbook_path: Path,
     requested_nm_ids: Iterable[int],
-) -> None:
+    campaign_identity: str,
+) -> int:
     requested = {int(nm_id) for nm_id in requested_nm_ids}
     workbook = load_workbook(filename=str(workbook_path), read_only=False, data_only=True)
+    row_count = 0
     try:
         sheet, header_row_index = find_workbook_data_sheet(workbook)
-        for nm_id, plan_price in iter_eligible_workbook_rows(
+        for row in iter_workbook_plan_rows(
             sheet=sheet,
             header_row_index=header_row_index,
             requested_nm_ids=requested,
         ):
-            accumulator[nm_id]["promo_count_by_price"] += 1.0
-            accumulator[nm_id]["promo_entry_price_best"] = max(
-                accumulator[nm_id]["promo_entry_price_best"],
-                plan_price,
+            candidate_rows_by_nm_id.setdefault(row.nm_id, []).append(
+                PromoCandidateRow(
+                    nm_id=row.nm_id,
+                    campaign_identity=campaign_identity,
+                    plan_price=row.plan_price,
+                )
             )
+            row_count += 1
     finally:
         workbook.close()
+    return row_count
+
+
+def _load_daily_price_truth(
+    *,
+    runtime_dir: Path,
+    snapshot_date: str,
+    requested_nm_ids: Iterable[int],
+) -> DailyPriceTruthResolution:
+    runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+    for snapshot_role, note in [
+        (PRICES_ACCEPTED_CURRENT_ROLE, "daily_price_source=prices_snapshot.accepted_current_snapshot"),
+        (PRICES_PROVISIONAL_CURRENT_ROLE, "daily_price_source=prices_snapshot.provisional_current_snapshot"),
+    ]:
+        payload, captured_at = runtime.load_temporal_source_slot_snapshot(
+            source_key=PRICES_SOURCE_KEY,
+            snapshot_date=snapshot_date,
+            snapshot_role=snapshot_role,
+        )
+        if _is_exact_prices_payload(payload, snapshot_date):
+            if captured_at:
+                note = f"{note}; daily_price_captured_at={captured_at}"
+            return DailyPriceTruthResolution(
+                price_by_nm_id=_extract_price_by_nm_id(
+                    payload=payload,
+                    requested_nm_ids=requested_nm_ids,
+                ),
+                source_note=note,
+            )
+
+    payload, captured_at = runtime.load_temporal_source_snapshot(
+        source_key=PRICES_SOURCE_KEY,
+        snapshot_date=snapshot_date,
+    )
+    if _is_exact_prices_payload(payload, snapshot_date):
+        note = "daily_price_source=prices_snapshot.exact_date_runtime_cache"
+        if captured_at:
+            note = f"{note}; daily_price_captured_at={captured_at}"
+        return DailyPriceTruthResolution(
+            price_by_nm_id=_extract_price_by_nm_id(
+                payload=payload,
+                requested_nm_ids=requested_nm_ids,
+            ),
+            source_note=note,
+        )
+
+    return DailyPriceTruthResolution(
+        price_by_nm_id={},
+        source_note="daily_price_source=missing",
+    )
+
+
+def _extract_price_by_nm_id(
+    *,
+    payload: object,
+    requested_nm_ids: Iterable[int],
+) -> dict[int, float]:
+    requested = {int(nm_id) for nm_id in requested_nm_ids}
+    price_by_nm_id: dict[int, float] = {}
+    for item in list(getattr(payload, "items", []) or []):
+        nm_id = getattr(item, "nm_id", None)
+        price = getattr(item, "price_seller_discounted", None)
+        if not isinstance(nm_id, int) or nm_id not in requested:
+            continue
+        if not isinstance(price, (int, float)):
+            continue
+        price_by_nm_id[nm_id] = float(price)
+    return price_by_nm_id
+
+
+def _is_exact_prices_payload(payload: object | None, snapshot_date: str) -> bool:
+    if payload is None:
+        return False
+    if str(getattr(payload, "snapshot_date", "") or "") != snapshot_date:
+        return False
+    items = getattr(payload, "items", None)
+    return isinstance(items, list)
+
+
+def _campaign_identity(record: PromoCampaignArchiveRecord) -> str:
+    if record.metadata.promo_id is not None and record.metadata.period_id is not None:
+        return f"{record.metadata.promo_id}:{record.metadata.period_id}"
+    if record.metadata.promo_id is not None:
+        return str(record.metadata.promo_id)
+    return record.archive_key
+
+
+def _build_zero_items(
+    *,
+    snapshot_date: str,
+    requested_nm_ids: Iterable[int],
+) -> list[PromoLiveSourceItem]:
+    return [
+        PromoLiveSourceItem(
+            snapshot_date=snapshot_date,
+            nm_id=nm_id,
+            promo_count_by_price=0.0,
+            promo_entry_price_best=0.0,
+            promo_participation=0.0,
+        )
+        for nm_id in sorted({int(nm_id) for nm_id in requested_nm_ids})
+    ]
+
+
+def _build_item_from_candidate_rows(
+    *,
+    snapshot_date: str,
+    nm_id: int,
+    candidate_rows: list[PromoCandidateRow],
+    price_seller_discounted: float | None,
+) -> PromoLiveSourceItem:
+    evaluation = evaluate_candidate_rows(
+        candidate_rows=candidate_rows,
+        price_seller_discounted=price_seller_discounted,
+    )
+    return PromoLiveSourceItem(
+        snapshot_date=snapshot_date,
+        nm_id=nm_id,
+        promo_count_by_price=round(evaluation.promo_count_by_price, 6),
+        promo_entry_price_best=round(evaluation.promo_entry_price_best, 6),
+        promo_participation=round(evaluation.promo_participation, 6),
+    )
 
 
 def _metadata_fingerprint(metadata: PromoMetadata) -> str:

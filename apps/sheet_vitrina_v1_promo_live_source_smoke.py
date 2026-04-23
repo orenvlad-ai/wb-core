@@ -42,6 +42,7 @@ AS_OF_DATE = "2026-04-19"
 CURRENT_DATE = "2026-04-20"
 ACTIVATED_AT = "2026-04-20T06:00:00Z"
 INTERVAL_REPLAY_DATE = "2026-04-17"
+PRICES_ACCEPTED_CURRENT_ROLE = "accepted_current_snapshot"
 
 
 def main() -> None:
@@ -226,6 +227,15 @@ def _assert_historical_interval_replay_cache_fill(requested_nm_ids: list[int]) -
         promo_run_dir.mkdir(parents=True, exist_ok=True)
         workbook_path = promo_run_dir / "workbook.xlsx"
         _write_interval_fixture_workbook(workbook_path, requested_nm_ids)
+        _seed_daily_price_truth(
+            runtime=runtime,
+            snapshot_date=INTERVAL_REPLAY_DATE,
+            price_by_nm_id={
+                requested_nm_ids[0]: 900.0,
+                requested_nm_ids[1]: 1000.0,
+                requested_nm_ids[2]: 1700.0,
+            },
+        )
         metadata = PromoMetadata(
             collected_at="2026-04-20T08:00:00+05:00",
             trace_run_dir=str(runtime_dir / "promo_xlsx_collector_runs" / "2026-04-20__fixture"),
@@ -251,8 +261,8 @@ def _assert_historical_interval_replay_cache_fill(requested_nm_ids: list[int]) -
             saved_path=str(workbook_path),
             workbook_sheet_names=["Promo"],
             workbook_row_count=4,
-            workbook_col_count=3,
-            workbook_header_summary=["Артикул WB", "Плановая цена для акции", "Текущая розничная цена"],
+            workbook_col_count=2,
+            workbook_header_summary=["Артикул WB", "Плановая цена для акции"],
             workbook_has_date_fields=False,
             workbook_item_status_distinct_values=[],
         )
@@ -312,13 +322,25 @@ def _assert_historical_interval_replay_cache_fill(requested_nm_ids: list[int]) -
         )
         if accepted_payload is None:
             raise AssertionError("interval replay must accept closed-day slot snapshot")
-        return str(status.note)
+        probe = payload_items[requested_nm_ids[0]]
+        return (
+            f"date={INTERVAL_REPLAY_DATE} "
+            f"SKU={requested_nm_ids[0]} "
+            f"price_seller_discounted=900.0 "
+            f"eligible_campaigns=['2287:2236'] "
+            f"eligible_plan_prices=[1000.0] "
+            f"participation={probe.promo_participation} "
+            f"count_by_plan_price={probe.promo_count_by_price} "
+            f"beneficial_entry_price={probe.promo_entry_price_best}"
+        )
 
 
 def _assert_canonical_eligible_set_cases(requested_nm_ids: list[int]) -> str:
     with TemporaryDirectory(prefix="sheet-vitrina-promo-canonical-cases-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
         _seed_neighbor_date_archive(runtime_dir, requested_nm_ids)
+        diagnostics_by_date = _seed_neighbor_date_price_truth(runtime, requested_nm_ids)
         block = PromoLiveSourceBlock(
             runtime_dir=runtime_dir,
             now_factory=_MutableNowFactory("2026-04-24T08:00:00+00:00"),
@@ -343,8 +365,8 @@ def _assert_canonical_eligible_set_cases(requested_nm_ids: list[int]) -> str:
             raise AssertionError(f"multiple eligible case must be success, got {multiple_result}")
         if next_day_result.kind != "success":
             raise AssertionError(f"neighbor-day replay must be success, got {next_day_result}")
-        if outside_result.kind != "incomplete":
-            raise AssertionError(f"outside-interval case must stay truthful empty/incomplete, got {outside_result}")
+        if outside_result.kind != "success":
+            raise AssertionError(f"outside-interval case must stay truthful empty success, got {outside_result}")
 
         single_items = {item.nm_id: item for item in single_result.items}
         multiple_items = {item.nm_id: item for item in multiple_result.items}
@@ -382,10 +404,44 @@ def _assert_canonical_eligible_set_cases(requested_nm_ids: list[int]) -> str:
         ):
             raise AssertionError(f"neighbor date replay mismatch, got {next_day_probe}")
 
-        if "no_covering_campaign_artifacts_for_date=2026-04-23" not in outside_result.detail:
+        outside_items = {item.nm_id: item for item in outside_result.items}
+        outside_probe = outside_items[requested_nm_ids[0]]
+        if (
+            outside_probe.promo_participation,
+            outside_probe.promo_count_by_price,
+            outside_probe.promo_entry_price_best,
+        ) != (0.0, 0.0, 0.0):
+            raise AssertionError(f"outside-interval case must be truthful empty, got {outside_probe}")
+        if "no_covering_campaign_rows_for_requested_nm_ids=true" not in outside_result.detail:
             raise AssertionError(f"outside-interval detail mismatch, got {outside_result.detail}")
 
-        return "2026-04-20=1/1/1000; 2026-04-21=1/2/1200; 2026-04-22=1/2/1200; 2026-04-23=incomplete"
+        return "; ".join(
+            [
+                (
+                    f"date={date} "
+                    f"SKU={requested_nm_ids[0]} "
+                    f"price_seller_discounted={diagnostics_by_date[date]['price_seller_discounted']} "
+                    f"eligible_campaigns={diagnostics_by_date[date]['eligible_campaigns']} "
+                    f"eligible_plan_prices={diagnostics_by_date[date]['eligible_plan_prices']} "
+                    f"participation={diagnostics_by_date[date]['participation']} "
+                    f"count_by_plan_price={diagnostics_by_date[date]['count_by_plan_price']} "
+                    f"beneficial_entry_price={diagnostics_by_date[date]['beneficial_entry_price']}"
+                )
+                for date in ("2026-04-20", "2026-04-21", "2026-04-22")
+            ]
+            + [
+                (
+                    f"date=2026-04-23 "
+                    f"SKU={requested_nm_ids[0]} "
+                    f"price_seller_discounted=not_needed "
+                    f"eligible_campaigns=[] "
+                    f"eligible_plan_prices=[] "
+                    f"participation={outside_probe.promo_participation} "
+                    f"count_by_plan_price={outside_probe.promo_count_by_price} "
+                    f"beneficial_entry_price={outside_probe.promo_entry_price_best}"
+                )
+            ]
+        )
 
 
 def _seed_neighbor_date_archive(runtime_dir: Path, requested_nm_ids: list[int]) -> None:
@@ -403,22 +459,20 @@ def _seed_neighbor_date_archive(runtime_dir: Path, requested_nm_ids: list[int]) 
             {
                 "nm_id": requested_nm_ids[0],
                 "plan_price": 1000.0,
-                "current_price": 900.0,
             },
             {
                 "nm_id": requested_nm_ids[1],
                 "plan_price": 1000.0,
-                "current_price": 1000.0,
             },
         ],
     )
     _write_promo_run_fixture(
         runtime_dir=runtime_dir,
         run_name="2026-04-21__fixture",
-        promo_folder="2288__2237__discount-aware-a",
+        promo_folder="2288__2237__multi-eligible-a",
         promo_id=2288,
         period_id=2237,
-        promo_title="Discount aware promo A",
+        promo_title="Multi eligible promo A",
         promo_period_text="21 апреля 02:00 → 22 апреля 23:59",
         promo_start_at="2026-04-21T02:00",
         promo_end_at="2026-04-22T23:59",
@@ -426,24 +480,20 @@ def _seed_neighbor_date_archive(runtime_dir: Path, requested_nm_ids: list[int]) 
             {
                 "nm_id": requested_nm_ids[0],
                 "plan_price": 1000.0,
-                "current_price": 1500.0,
-                "uploadable_discount": 40.0,
             },
             {
                 "nm_id": requested_nm_ids[1],
                 "plan_price": 1100.0,
-                "current_price": 1500.0,
-                "uploadable_discount": 20.0,
             },
         ],
     )
     _write_promo_run_fixture(
         runtime_dir=runtime_dir,
         run_name="2026-04-21__fixture",
-        promo_folder="2289__2238__discount-aware-b",
+        promo_folder="2289__2238__multi-eligible-b",
         promo_id=2289,
         period_id=2238,
-        promo_title="Discount aware promo B",
+        promo_title="Multi eligible promo B",
         promo_period_text="21 апреля 02:00 → 22 апреля 23:59",
         promo_start_at="2026-04-21T02:00",
         promo_end_at="2026-04-22T23:59",
@@ -451,15 +501,93 @@ def _seed_neighbor_date_archive(runtime_dir: Path, requested_nm_ids: list[int]) 
             {
                 "nm_id": requested_nm_ids[0],
                 "plan_price": 1200.0,
-                "current_price": 1500.0,
-                "current_discount": 25.0,
             },
             {
                 "nm_id": requested_nm_ids[2],
                 "plan_price": 1500.0,
-                "current_price": 1700.0,
             },
         ],
+    )
+
+
+def _seed_neighbor_date_price_truth(
+    runtime: RegistryUploadDbBackedRuntime,
+    requested_nm_ids: list[int],
+) -> dict[str, dict[str, object]]:
+    price_truth_by_date = {
+        "2026-04-20": {
+            requested_nm_ids[0]: 900.0,
+            requested_nm_ids[1]: 1000.0,
+            requested_nm_ids[2]: 1700.0,
+        },
+        "2026-04-21": {
+            requested_nm_ids[0]: 950.0,
+            requested_nm_ids[1]: 1110.0,
+            requested_nm_ids[2]: 1700.0,
+        },
+        "2026-04-22": {
+            requested_nm_ids[0]: 950.0,
+            requested_nm_ids[1]: 1110.0,
+            requested_nm_ids[2]: 1700.0,
+        },
+    }
+    for snapshot_date, price_by_nm_id in price_truth_by_date.items():
+        _seed_daily_price_truth(
+            runtime=runtime,
+            snapshot_date=snapshot_date,
+            price_by_nm_id=price_by_nm_id,
+        )
+    return {
+        "2026-04-20": {
+            "price_seller_discounted": 900.0,
+            "eligible_campaigns": ["2287:2236"],
+            "eligible_plan_prices": [1000.0],
+            "participation": 1.0,
+            "count_by_plan_price": 1.0,
+            "beneficial_entry_price": 1000.0,
+        },
+        "2026-04-21": {
+            "price_seller_discounted": 950.0,
+            "eligible_campaigns": ["2288:2237", "2289:2238"],
+            "eligible_plan_prices": [1000.0, 1200.0],
+            "participation": 1.0,
+            "count_by_plan_price": 2.0,
+            "beneficial_entry_price": 1200.0,
+        },
+        "2026-04-22": {
+            "price_seller_discounted": 950.0,
+            "eligible_campaigns": ["2288:2237", "2289:2238"],
+            "eligible_plan_prices": [1000.0, 1200.0],
+            "participation": 1.0,
+            "count_by_plan_price": 2.0,
+            "beneficial_entry_price": 1200.0,
+        },
+    }
+
+
+def _seed_daily_price_truth(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    snapshot_date: str,
+    price_by_nm_id: dict[int, float],
+) -> None:
+    runtime.save_temporal_source_slot_snapshot(
+        source_key="prices_snapshot",
+        snapshot_date=snapshot_date,
+        snapshot_role=PRICES_ACCEPTED_CURRENT_ROLE,
+        captured_at=f"{snapshot_date}T18:00:00Z",
+        payload=SimpleNamespace(
+            kind="success",
+            snapshot_date=snapshot_date,
+            items=[
+                SimpleNamespace(
+                    nm_id=nm_id,
+                    price_seller=price_seller_discounted,
+                    price_seller_discounted=price_seller_discounted,
+                )
+                for nm_id, price_seller_discounted in sorted(price_by_nm_id.items())
+            ],
+        ),
     )
 
 
@@ -479,7 +607,7 @@ def _write_promo_run_fixture(
     promo_run_dir = runtime_dir / "promo_xlsx_collector_runs" / run_name / "promos" / promo_folder
     promo_run_dir.mkdir(parents=True, exist_ok=True)
     workbook_path = promo_run_dir / "workbook.xlsx"
-    _write_discount_aware_fixture_workbook(workbook_path, workbook_rows)
+    _write_plan_price_fixture_workbook(workbook_path, workbook_rows)
     metadata = PromoMetadata(
         collected_at=f"{run_name[:10]}T08:00:00+05:00",
         trace_run_dir=str(runtime_dir / "promo_xlsx_collector_runs" / run_name),
@@ -505,13 +633,10 @@ def _write_promo_run_fixture(
         saved_path=str(workbook_path),
         workbook_sheet_names=["Promo"],
         workbook_row_count=len(workbook_rows) + 1,
-        workbook_col_count=5,
+        workbook_col_count=2,
         workbook_header_summary=[
             "Артикул WB",
             "Плановая цена для акции",
-            "Текущая розничная цена",
-            "Текущая скидка на сайте, %",
-            "Загружаемая скидка для участия в акции",
         ],
         workbook_has_date_fields=False,
         workbook_item_status_distinct_values=[],
@@ -522,29 +647,13 @@ def _write_promo_run_fixture(
     )
 
 
-def _write_discount_aware_fixture_workbook(path: Path, rows: list[dict[str, float]]) -> None:
+def _write_plan_price_fixture_workbook(path: Path, rows: list[dict[str, float]]) -> None:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Promo"
-    sheet.append(
-        [
-            "Артикул WB",
-            "Плановая цена для акции",
-            "Текущая розничная цена",
-            "Текущая скидка на сайте, %",
-            "Загружаемая скидка для участия в акции",
-        ]
-    )
+    sheet.append(["Артикул WB", "Плановая цена для акции"])
     for row in rows:
-        sheet.append(
-            [
-                row["nm_id"],
-                row["plan_price"],
-                row["current_price"],
-                row.get("current_discount"),
-                row.get("uploadable_discount"),
-            ]
-        )
+        sheet.append([row["nm_id"], row["plan_price"]])
     workbook.save(path)
 
 
@@ -552,10 +661,10 @@ def _write_interval_fixture_workbook(path: Path, requested_nm_ids: list[int]) ->
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Promo"
-    sheet.append(["Артикул WB", "Плановая цена для акции", "Текущая розничная цена"])
-    sheet.append([requested_nm_ids[0], 1000.0, 900.0])
-    sheet.append([requested_nm_ids[1], 1000.0, 1000.0])
-    sheet.append([requested_nm_ids[2], 1500.0, 1700.0])
+    sheet.append(["Артикул WB", "Плановая цена для акции"])
+    sheet.append([requested_nm_ids[0], 1000.0])
+    sheet.append([requested_nm_ids[1], 1000.0])
+    sheet.append([requested_nm_ids[2], 1500.0])
     workbook.save(path)
 
 

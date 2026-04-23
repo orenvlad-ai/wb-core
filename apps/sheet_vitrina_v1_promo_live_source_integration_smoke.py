@@ -26,6 +26,7 @@ INPUT_BUNDLE_FIXTURE = (
 )
 ACTIVATED_AT = "2026-04-23T06:00:00Z"
 CHECK_DATES = ("2026-04-20", "2026-04-21", "2026-04-22")
+PRICES_ACCEPTED_CURRENT_ROLE = "accepted_current_snapshot"
 
 
 def main() -> None:
@@ -41,6 +42,7 @@ def main() -> None:
         if result.status != "accepted":
             raise AssertionError(f"fixture ingest must be accepted, got {result}")
         _seed_neighbor_date_archive(runtime_dir, requested_nm_ids)
+        diagnostics_by_date = _seed_neighbor_date_price_truth(runtime, requested_nm_ids)
 
         plan_block = SheetVitrinaV1LivePlanBlock(
             runtime=runtime,
@@ -62,11 +64,6 @@ def main() -> None:
             fin_report_daily_block=_SyntheticSuccessBlock("fin_report_daily"),
         )
 
-        expected = {
-            "2026-04-20": (1.0, 1.0, 1000.0),
-            "2026-04-21": (1.0, 2.0, 1200.0),
-            "2026-04-22": (1.0, 2.0, 1200.0),
-        }
         for column_date in CHECK_DATES:
             status, payload = plan_block._capture_promo_closed_day_from_cache(
                 source_key="promo_by_price",
@@ -81,11 +78,12 @@ def main() -> None:
                 raise AssertionError(f"{column_date}: expected payload")
             item_index = {item.nm_id: item for item in payload.items}
             probe = item_index[requested_nm_ids[0]]
-            if (
-                probe.promo_participation,
-                probe.promo_count_by_price,
-                probe.promo_entry_price_best,
-            ) != expected[column_date]:
+            expected = diagnostics_by_date[column_date]
+            if probe.promo_participation != expected["participation"]:
+                raise AssertionError(f"{column_date}: participation mismatch, got {probe}")
+            if probe.promo_count_by_price != expected["count_by_plan_price"]:
+                raise AssertionError(f"{column_date}: count mismatch, got {probe}")
+            if probe.promo_entry_price_best != expected["beneficial_entry_price"]:
                 raise AssertionError(f"{column_date}: probe mismatch, got {probe}")
             ineligible = item_index[requested_nm_ids[1]]
             if (
@@ -109,8 +107,14 @@ def main() -> None:
             if accepted_payload is None:
                 raise AssertionError(f"{column_date}: accepted closed-day payload missing")
             print(
-                f"{column_date}: ok -> "
-                f"{probe.promo_participation}/{probe.promo_count_by_price}/{probe.promo_entry_price_best}"
+                f"{column_date}: "
+                f"SKU={requested_nm_ids[0]} "
+                f"price_seller_discounted={expected['price_seller_discounted']} "
+                f"eligible_campaigns={expected['eligible_campaigns']} "
+                f"eligible_plan_prices={expected['eligible_plan_prices']} "
+                f"participation={probe.promo_participation} "
+                f"count_by_plan_price={probe.promo_count_by_price} "
+                f"beneficial_entry_price={probe.promo_entry_price_best}"
             )
         print("integration-smoke passed")
 
@@ -160,40 +164,108 @@ def _seed_neighbor_date_archive(runtime_dir: Path, requested_nm_ids: list[int]) 
         promo_start_at="2026-04-20T02:00",
         promo_end_at="2026-04-20T23:59",
         workbook_rows=[
-            {"nm_id": requested_nm_ids[0], "plan_price": 1000.0, "current_price": 900.0},
-            {"nm_id": requested_nm_ids[1], "plan_price": 1000.0, "current_price": 1000.0},
+            {"nm_id": requested_nm_ids[0], "plan_price": 1000.0},
+            {"nm_id": requested_nm_ids[1], "plan_price": 1000.0},
         ],
     )
     _write_promo_run_fixture(
         runtime_dir=runtime_dir,
         run_name="2026-04-21__fixture",
-        promo_folder="2288__2237__discount-aware-a",
+        promo_folder="2288__2237__multi-eligible-a",
         promo_id=2288,
         period_id=2237,
-        promo_title="Discount aware promo A",
+        promo_title="Multi eligible promo A",
         promo_period_text="21 апреля 02:00 → 22 апреля 23:59",
         promo_start_at="2026-04-21T02:00",
         promo_end_at="2026-04-22T23:59",
         workbook_rows=[
-            {"nm_id": requested_nm_ids[0], "plan_price": 1000.0, "current_price": 1500.0, "uploadable_discount": 40.0},
-            {"nm_id": requested_nm_ids[1], "plan_price": 1100.0, "current_price": 1500.0, "uploadable_discount": 20.0},
+            {"nm_id": requested_nm_ids[0], "plan_price": 1000.0},
+            {"nm_id": requested_nm_ids[1], "plan_price": 1100.0},
         ],
     )
     _write_promo_run_fixture(
         runtime_dir=runtime_dir,
         run_name="2026-04-21__fixture",
-        promo_folder="2289__2238__discount-aware-b",
+        promo_folder="2289__2238__multi-eligible-b",
         promo_id=2289,
         period_id=2238,
-        promo_title="Discount aware promo B",
+        promo_title="Multi eligible promo B",
         promo_period_text="21 апреля 02:00 → 22 апреля 23:59",
         promo_start_at="2026-04-21T02:00",
         promo_end_at="2026-04-22T23:59",
         workbook_rows=[
-            {"nm_id": requested_nm_ids[0], "plan_price": 1200.0, "current_price": 1500.0, "current_discount": 25.0},
-            {"nm_id": requested_nm_ids[2], "plan_price": 1500.0, "current_price": 1700.0},
+            {"nm_id": requested_nm_ids[0], "plan_price": 1200.0},
+            {"nm_id": requested_nm_ids[2], "plan_price": 1500.0},
         ],
     )
+
+
+def _seed_neighbor_date_price_truth(
+    runtime: RegistryUploadDbBackedRuntime,
+    requested_nm_ids: list[int],
+) -> dict[str, dict[str, object]]:
+    price_truth_by_date = {
+        "2026-04-20": {
+            requested_nm_ids[0]: 900.0,
+            requested_nm_ids[1]: 1000.0,
+            requested_nm_ids[2]: 1700.0,
+        },
+        "2026-04-21": {
+            requested_nm_ids[0]: 950.0,
+            requested_nm_ids[1]: 1110.0,
+            requested_nm_ids[2]: 1700.0,
+        },
+        "2026-04-22": {
+            requested_nm_ids[0]: 950.0,
+            requested_nm_ids[1]: 1110.0,
+            requested_nm_ids[2]: 1700.0,
+        },
+    }
+    for snapshot_date, price_by_nm_id in price_truth_by_date.items():
+        runtime.save_temporal_source_slot_snapshot(
+            source_key="prices_snapshot",
+            snapshot_date=snapshot_date,
+            snapshot_role=PRICES_ACCEPTED_CURRENT_ROLE,
+            captured_at=f"{snapshot_date}T18:00:00Z",
+            payload=SimpleNamespace(
+                kind="success",
+                snapshot_date=snapshot_date,
+                items=[
+                    SimpleNamespace(
+                        nm_id=nm_id,
+                        price_seller=price_seller_discounted,
+                        price_seller_discounted=price_seller_discounted,
+                    )
+                    for nm_id, price_seller_discounted in sorted(price_by_nm_id.items())
+                ],
+            ),
+        )
+    return {
+        "2026-04-20": {
+            "price_seller_discounted": 900.0,
+            "eligible_campaigns": ["2287:2236"],
+            "eligible_plan_prices": [1000.0],
+            "participation": 1.0,
+            "count_by_plan_price": 1.0,
+            "beneficial_entry_price": 1000.0,
+        },
+        "2026-04-21": {
+            "price_seller_discounted": 950.0,
+            "eligible_campaigns": ["2288:2237", "2289:2238"],
+            "eligible_plan_prices": [1000.0, 1200.0],
+            "participation": 1.0,
+            "count_by_plan_price": 2.0,
+            "beneficial_entry_price": 1200.0,
+        },
+        "2026-04-22": {
+            "price_seller_discounted": 950.0,
+            "eligible_campaigns": ["2288:2237", "2289:2238"],
+            "eligible_plan_prices": [1000.0, 1200.0],
+            "participation": 1.0,
+            "count_by_plan_price": 2.0,
+            "beneficial_entry_price": 1200.0,
+        },
+    }
 
 
 def _write_promo_run_fixture(
@@ -212,7 +284,7 @@ def _write_promo_run_fixture(
     promo_run_dir = runtime_dir / "promo_xlsx_collector_runs" / run_name / "promos" / promo_folder
     promo_run_dir.mkdir(parents=True, exist_ok=True)
     workbook_path = promo_run_dir / "workbook.xlsx"
-    _write_discount_aware_fixture_workbook(workbook_path, workbook_rows)
+    _write_plan_price_fixture_workbook(workbook_path, workbook_rows)
     metadata = PromoMetadata(
         collected_at=f"{run_name[:10]}T08:00:00+05:00",
         trace_run_dir=str(runtime_dir / "promo_xlsx_collector_runs" / run_name),
@@ -238,13 +310,10 @@ def _write_promo_run_fixture(
         saved_path=str(workbook_path),
         workbook_sheet_names=["Promo"],
         workbook_row_count=len(workbook_rows) + 1,
-        workbook_col_count=5,
+        workbook_col_count=2,
         workbook_header_summary=[
             "Артикул WB",
             "Плановая цена для акции",
-            "Текущая розничная цена",
-            "Текущая скидка на сайте, %",
-            "Загружаемая скидка для участия в акции",
         ],
         workbook_has_date_fields=False,
         workbook_item_status_distinct_values=[],
@@ -255,29 +324,13 @@ def _write_promo_run_fixture(
     )
 
 
-def _write_discount_aware_fixture_workbook(path: Path, rows: list[dict[str, float]]) -> None:
+def _write_plan_price_fixture_workbook(path: Path, rows: list[dict[str, float]]) -> None:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Promo"
-    sheet.append(
-        [
-            "Артикул WB",
-            "Плановая цена для акции",
-            "Текущая розничная цена",
-            "Текущая скидка на сайте, %",
-            "Загружаемая скидка для участия в акции",
-        ]
-    )
+    sheet.append(["Артикул WB", "Плановая цена для акции"])
     for row in rows:
-        sheet.append(
-            [
-                row["nm_id"],
-                row["plan_price"],
-                row["current_price"],
-                row.get("current_discount"),
-                row.get("uploadable_discount"),
-            ]
-        )
+        sheet.append([row["nm_id"], row["plan_price"]])
     workbook.save(path)
 
 
