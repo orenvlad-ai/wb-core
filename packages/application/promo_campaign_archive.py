@@ -14,6 +14,10 @@ from typing import Iterable
 
 from openpyxl import load_workbook
 
+from packages.application.promo_metric_truth import (
+    find_workbook_data_sheet,
+    iter_eligible_workbook_rows,
+)
 from packages.contracts.promo_live_source import (
     PromoLiveSourceIncomplete,
     PromoLiveSourceItem,
@@ -27,10 +31,6 @@ ARCHIVE_RECORD_FILENAME = "archive_record.json"
 ARCHIVE_METADATA_FILENAME = "metadata.json"
 ARCHIVE_WORKBOOK_FILENAME = "workbook.xlsx"
 ARCHIVE_WORKBOOK_INSPECTION_FILENAME = "workbook_inspection.json"
-
-HEADER_NM_ID = "Артикул WB"
-HEADER_PLAN_PRICE = "Плановая цена для акции"
-HEADER_CURRENT_PRICE = "Текущая розничная цена"
 
 
 @dataclass(frozen=True)
@@ -418,53 +418,22 @@ def _merge_archive_workbook_rows(
     workbook_path: Path,
     requested_nm_ids: Iterable[int],
 ) -> None:
-    requested = set(requested_nm_ids)
+    requested = {int(nm_id) for nm_id in requested_nm_ids}
     workbook = load_workbook(filename=str(workbook_path), read_only=False, data_only=True)
     try:
-        sheet, header_row_index = _find_workbook_data_sheet(workbook)
-        header = list(next(sheet.iter_rows(min_row=header_row_index, max_row=header_row_index, values_only=True)))
-        header_index = {str(name).strip(): idx for idx, name in enumerate(header) if name not in (None, "")}
-        for required in (HEADER_NM_ID, HEADER_PLAN_PRICE, HEADER_CURRENT_PRICE):
-            if required not in header_index:
-                raise ValueError(f"promo archive workbook missing required header: {required}")
-        for row in sheet.iter_rows(min_row=header_row_index + 1, values_only=True):
-            nm_id = _parse_int(row[header_index[HEADER_NM_ID]])
-            if nm_id is None or nm_id not in requested:
-                continue
-            plan_price = _parse_float(row[header_index[HEADER_PLAN_PRICE]])
-            current_price = _parse_float(row[header_index[HEADER_CURRENT_PRICE]])
-            if plan_price is None:
-                continue
+        sheet, header_row_index = find_workbook_data_sheet(workbook)
+        for nm_id, plan_price in iter_eligible_workbook_rows(
+            sheet=sheet,
+            header_row_index=header_row_index,
+            requested_nm_ids=requested,
+        ):
+            accumulator[nm_id]["promo_count_by_price"] += 1.0
             accumulator[nm_id]["promo_entry_price_best"] = max(
                 accumulator[nm_id]["promo_entry_price_best"],
                 plan_price,
             )
-            if current_price is None:
-                continue
-            if current_price < plan_price:
-                accumulator[nm_id]["promo_count_by_price"] += 1.0
     finally:
         workbook.close()
-
-
-def _find_workbook_data_sheet(workbook) -> tuple[object, int]:
-    for sheet_name in workbook.sheetnames:
-        sheet = workbook[sheet_name]
-        row_index = _find_workbook_header_row_index(sheet)
-        if row_index is not None:
-            return sheet, row_index
-    first_sheet = workbook[workbook.sheetnames[0]]
-    row_index = _find_workbook_header_row_index(first_sheet)
-    return first_sheet, row_index or 1
-
-
-def _find_workbook_header_row_index(sheet) -> int | None:
-    for row_index, row in enumerate(sheet.iter_rows(min_row=1, max_row=min(sheet.max_row, 10), values_only=True), start=1):
-        header = [value for value in row if value not in (None, "")]
-        normalized = {str(value).strip() for value in header}
-        if {HEADER_NM_ID, HEADER_PLAN_PRICE, HEADER_CURRENT_PRICE}.issubset(normalized):
-            return row_index
-    return None
 
 
 def _metadata_fingerprint(metadata: PromoMetadata) -> str:
@@ -509,27 +478,6 @@ def _sha256_path(path: Path) -> str:
         for chunk in iter(lambda: handle.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _parse_float(value: object) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value).strip().replace("\xa0", "").replace("%", "").replace(",", ".")
-    if not text:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
-def _parse_int(value: object) -> int | None:
-    numeric = _parse_float(value)
-    if numeric is None:
-        return None
-    return int(numeric)
 
 
 def _normalize_optional_text(value: object) -> str | None:

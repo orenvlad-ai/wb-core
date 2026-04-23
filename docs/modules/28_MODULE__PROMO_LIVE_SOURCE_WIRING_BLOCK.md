@@ -109,8 +109,11 @@ update_note: "Обновлён под archive-first / interval-based promo seman
 # 5. Source -> runtime mapping
 
 - Numeric mapping живёт server-side и не переносится в Apps Script:
-  - `promo_entry_price_best` = best applicable `Плановая цена для акции`
-  - `promo_count_by_price` = count of covering campaign rows where `Текущая розничная цена < Плановая цена для акции`
+  - сначала строится один общий eligible set из covering campaign participations для `SKU + date`
+  - row считается eligible, если row-level цена продавца со скидкой из этой строки `< Плановая цена для акции`
+  - если workbook даёт `Текущая розничная цена` + row-level discount columns, server-side truth path derive-ит discounted seller price из этих же row fields
+  - `promo_entry_price_best` = max(`Плановая цена для акции`) среди eligible rows; при пустом eligible set остаётся truthful empty
+  - `promo_count_by_price` = count of eligible rows
   - `promo_participation` = `1` when `promo_count_by_price > 0`, else `0`
 - overlap rule is deterministic and additive across covering campaigns for the same SKU/date.
 - Workbook alone не считается sufficient:

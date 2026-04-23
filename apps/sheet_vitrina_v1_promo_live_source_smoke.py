@@ -51,11 +51,13 @@ def main() -> None:
         raise AssertionError("fixture bundle must expose at least three enabled nm_ids")
 
     _assert_cross_year_parse_rule()
+    canonical_note = _assert_canonical_eligible_set_cases(requested_nm_ids)
     _assert_promo_source_runtime_mapping(bundle, requested_nm_ids)
     preserved_note = _assert_accepted_current_preserved_after_invalid_attempt(bundle, requested_nm_ids)
     replay_note = _assert_historical_interval_replay_cache_fill(requested_nm_ids)
 
     print("cross_year_parse_rule: ok -> low-confidence period keeps null exact dates")
+    print(f"canonical_eligible_set: ok -> {canonical_note}")
     print("promo_source_runtime_mapping: ok -> promo metrics reach STATUS and DATA_VITRINA via runtime source")
     print(f"accepted_current_preservation: ok -> {preserved_note}")
     print(f"historical_interval_replay: ok -> {replay_note}")
@@ -311,6 +313,239 @@ def _assert_historical_interval_replay_cache_fill(requested_nm_ids: list[int]) -
         if accepted_payload is None:
             raise AssertionError("interval replay must accept closed-day slot snapshot")
         return str(status.note)
+
+
+def _assert_canonical_eligible_set_cases(requested_nm_ids: list[int]) -> str:
+    with TemporaryDirectory(prefix="sheet-vitrina-promo-canonical-cases-") as tmp:
+        runtime_dir = Path(tmp) / "runtime"
+        _seed_neighbor_date_archive(runtime_dir, requested_nm_ids)
+        block = PromoLiveSourceBlock(
+            runtime_dir=runtime_dir,
+            now_factory=_MutableNowFactory("2026-04-24T08:00:00+00:00"),
+        )
+
+        single_result = block.execute(
+            PromoLiveSourceRequest(snapshot_date="2026-04-20", nm_ids=requested_nm_ids)
+        ).result
+        multiple_result = block.execute(
+            PromoLiveSourceRequest(snapshot_date="2026-04-21", nm_ids=requested_nm_ids)
+        ).result
+        next_day_result = block.execute(
+            PromoLiveSourceRequest(snapshot_date="2026-04-22", nm_ids=requested_nm_ids)
+        ).result
+        outside_result = block.execute(
+            PromoLiveSourceRequest(snapshot_date="2026-04-23", nm_ids=requested_nm_ids)
+        ).result
+
+        if single_result.kind != "success":
+            raise AssertionError(f"single eligible case must be success, got {single_result}")
+        if multiple_result.kind != "success":
+            raise AssertionError(f"multiple eligible case must be success, got {multiple_result}")
+        if next_day_result.kind != "success":
+            raise AssertionError(f"neighbor-day replay must be success, got {next_day_result}")
+        if outside_result.kind != "incomplete":
+            raise AssertionError(f"outside-interval case must stay truthful empty/incomplete, got {outside_result}")
+
+        single_items = {item.nm_id: item for item in single_result.items}
+        multiple_items = {item.nm_id: item for item in multiple_result.items}
+        next_day_items = {item.nm_id: item for item in next_day_result.items}
+
+        single_probe = single_items[requested_nm_ids[0]]
+        if (single_probe.promo_participation, single_probe.promo_count_by_price, single_probe.promo_entry_price_best) != (
+            1.0,
+            1.0,
+            1000.0,
+        ):
+            raise AssertionError(f"single eligible case mismatch, got {single_probe}")
+
+        multiple_probe = multiple_items[requested_nm_ids[0]]
+        if (multiple_probe.promo_participation, multiple_probe.promo_count_by_price, multiple_probe.promo_entry_price_best) != (
+            1.0,
+            2.0,
+            1200.0,
+        ):
+            raise AssertionError(f"multiple eligible case mismatch, got {multiple_probe}")
+
+        ineligible_probe = multiple_items[requested_nm_ids[1]]
+        if (ineligible_probe.promo_participation, ineligible_probe.promo_count_by_price, ineligible_probe.promo_entry_price_best) != (
+            0.0,
+            0.0,
+            0.0,
+        ):
+            raise AssertionError(f"in-interval non-eligible case must stay empty, got {ineligible_probe}")
+
+        next_day_probe = next_day_items[requested_nm_ids[0]]
+        if (next_day_probe.promo_participation, next_day_probe.promo_count_by_price, next_day_probe.promo_entry_price_best) != (
+            1.0,
+            2.0,
+            1200.0,
+        ):
+            raise AssertionError(f"neighbor date replay mismatch, got {next_day_probe}")
+
+        if "no_covering_campaign_artifacts_for_date=2026-04-23" not in outside_result.detail:
+            raise AssertionError(f"outside-interval detail mismatch, got {outside_result.detail}")
+
+        return "2026-04-20=1/1/1000; 2026-04-21=1/2/1200; 2026-04-22=1/2/1200; 2026-04-23=incomplete"
+
+
+def _seed_neighbor_date_archive(runtime_dir: Path, requested_nm_ids: list[int]) -> None:
+    _write_promo_run_fixture(
+        runtime_dir=runtime_dir,
+        run_name="2026-04-20__fixture",
+        promo_folder="2287__2236__single-eligible",
+        promo_id=2287,
+        period_id=2236,
+        promo_title="Single eligible promo",
+        promo_period_text="20 апреля 02:00 → 20 апреля 23:59",
+        promo_start_at="2026-04-20T02:00",
+        promo_end_at="2026-04-20T23:59",
+        workbook_rows=[
+            {
+                "nm_id": requested_nm_ids[0],
+                "plan_price": 1000.0,
+                "current_price": 900.0,
+            },
+            {
+                "nm_id": requested_nm_ids[1],
+                "plan_price": 1000.0,
+                "current_price": 1000.0,
+            },
+        ],
+    )
+    _write_promo_run_fixture(
+        runtime_dir=runtime_dir,
+        run_name="2026-04-21__fixture",
+        promo_folder="2288__2237__discount-aware-a",
+        promo_id=2288,
+        period_id=2237,
+        promo_title="Discount aware promo A",
+        promo_period_text="21 апреля 02:00 → 22 апреля 23:59",
+        promo_start_at="2026-04-21T02:00",
+        promo_end_at="2026-04-22T23:59",
+        workbook_rows=[
+            {
+                "nm_id": requested_nm_ids[0],
+                "plan_price": 1000.0,
+                "current_price": 1500.0,
+                "uploadable_discount": 40.0,
+            },
+            {
+                "nm_id": requested_nm_ids[1],
+                "plan_price": 1100.0,
+                "current_price": 1500.0,
+                "uploadable_discount": 20.0,
+            },
+        ],
+    )
+    _write_promo_run_fixture(
+        runtime_dir=runtime_dir,
+        run_name="2026-04-21__fixture",
+        promo_folder="2289__2238__discount-aware-b",
+        promo_id=2289,
+        period_id=2238,
+        promo_title="Discount aware promo B",
+        promo_period_text="21 апреля 02:00 → 22 апреля 23:59",
+        promo_start_at="2026-04-21T02:00",
+        promo_end_at="2026-04-22T23:59",
+        workbook_rows=[
+            {
+                "nm_id": requested_nm_ids[0],
+                "plan_price": 1200.0,
+                "current_price": 1500.0,
+                "current_discount": 25.0,
+            },
+            {
+                "nm_id": requested_nm_ids[2],
+                "plan_price": 1500.0,
+                "current_price": 1700.0,
+            },
+        ],
+    )
+
+
+def _write_promo_run_fixture(
+    *,
+    runtime_dir: Path,
+    run_name: str,
+    promo_folder: str,
+    promo_id: int,
+    period_id: int,
+    promo_title: str,
+    promo_period_text: str,
+    promo_start_at: str,
+    promo_end_at: str,
+    workbook_rows: list[dict[str, float]],
+) -> None:
+    promo_run_dir = runtime_dir / "promo_xlsx_collector_runs" / run_name / "promos" / promo_folder
+    promo_run_dir.mkdir(parents=True, exist_ok=True)
+    workbook_path = promo_run_dir / "workbook.xlsx"
+    _write_discount_aware_fixture_workbook(workbook_path, workbook_rows)
+    metadata = PromoMetadata(
+        collected_at=f"{run_name[:10]}T08:00:00+05:00",
+        trace_run_dir=str(runtime_dir / "promo_xlsx_collector_runs" / run_name),
+        source_tab="Доступные",
+        source_filter_code="AVAILABLE",
+        calendar_url=f"https://seller.wildberries.ru/dp-promo-calendar?action={promo_id}",
+        promo_id=promo_id,
+        period_id=period_id,
+        promo_title=promo_title,
+        promo_period_text=promo_period_text,
+        promo_start_at=promo_start_at,
+        promo_end_at=promo_end_at,
+        period_parse_confidence="high",
+        temporal_classification="current",
+        promo_status="Акция идёт",
+        promo_status_text="Автоакция: участие подтверждено",
+        eligible_count=len(workbook_rows),
+        participating_count=len(workbook_rows),
+        excluded_count=0,
+        export_kind="eligible_items_report",
+        original_suggested_filename=f"{promo_folder}.xlsx",
+        saved_filename="workbook.xlsx",
+        saved_path=str(workbook_path),
+        workbook_sheet_names=["Promo"],
+        workbook_row_count=len(workbook_rows) + 1,
+        workbook_col_count=5,
+        workbook_header_summary=[
+            "Артикул WB",
+            "Плановая цена для акции",
+            "Текущая розничная цена",
+            "Текущая скидка на сайте, %",
+            "Загружаемая скидка для участия в акции",
+        ],
+        workbook_has_date_fields=False,
+        workbook_item_status_distinct_values=[],
+    )
+    (promo_run_dir / "metadata.json").write_text(
+        json.dumps(metadata.__dict__, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _write_discount_aware_fixture_workbook(path: Path, rows: list[dict[str, float]]) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Promo"
+    sheet.append(
+        [
+            "Артикул WB",
+            "Плановая цена для акции",
+            "Текущая розничная цена",
+            "Текущая скидка на сайте, %",
+            "Загружаемая скидка для участия в акции",
+        ]
+    )
+    for row in rows:
+        sheet.append(
+            [
+                row["nm_id"],
+                row["plan_price"],
+                row["current_price"],
+                row.get("current_discount"),
+                row.get("uploadable_discount"),
+            ]
+        )
+    workbook.save(path)
 
 
 def _write_interval_fixture_workbook(path: Path, requested_nm_ids: list[int]) -> None:

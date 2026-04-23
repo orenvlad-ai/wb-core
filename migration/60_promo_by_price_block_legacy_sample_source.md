@@ -26,8 +26,9 @@
   - `end_date`;
 - `nmId` берётся из active SKU set и rule rows по `Артикул WB`;
 - для каждой даты внутри окна выбираются только active rules, где `start_date <= date <= end_date`;
-- `promo_entry_price_best` считается как `max(plan_price)` по active rules на дату;
-- `promo_count_by_price` считается как число active rules, для которых `price_seller_discounted < plan_price + 0.5`;
+- eligible rule set строится из active rules, где `price_seller_discounted < plan_price`;
+- `promo_entry_price_best` считается как `max(plan_price)` по eligible rules на дату, иначе truthful empty `0`;
+- `promo_count_by_price` считается как число eligible rules;
 - `promo_participation` считается как `1`, если `promo_count_by_price > 0`, иначе `0`;
 - если валидных rules для requested `nmId` нет, возникает natural empty/no-rule case.
 

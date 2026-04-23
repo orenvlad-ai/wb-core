@@ -45,6 +45,14 @@ def main() -> None:
     if probe["promo_participation"] != 1.0:
         raise AssertionError("expected promo_participation=1.0 for 2026-04-03/210184534")
 
+    empty_probe = items[("2026-04-02", 210183919)]
+    if empty_probe["promo_count_by_price"] != 0.0:
+        raise AssertionError("expected promo_count_by_price=0.0 for 2026-04-02/210183919")
+    if empty_probe["promo_entry_price_best"] != 0.0:
+        raise AssertionError("expected promo_entry_price_best=0.0 for 2026-04-02/210183919 when no eligible promos")
+    if empty_probe["promo_participation"] != 0.0:
+        raise AssertionError("expected promo_participation=0.0 for 2026-04-02/210183919")
+
     print("normal: ok -> success")
     print("normal: count -> 8")
     print("rule-smoke-check passed")

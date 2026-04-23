@@ -1,16 +1,15 @@
-"""Bounded integration smoke for live-wired promo source inside refresh/runtime/read-side contour."""
+"""Bounded integration smoke for archive-first promo runtime across neighbor dates."""
 
 from __future__ import annotations
 
 from datetime import datetime
 import json
 from pathlib import Path
-import re
 import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from typing import Any
 
+from openpyxl import Workbook
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -18,23 +17,22 @@ if str(ROOT) not in sys.path:
 
 from packages.application.promo_live_source import PromoLiveSourceBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
-from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock
+from packages.contracts.promo_xlsx_collector_block import PromoMetadata
 
 
 INPUT_BUNDLE_FIXTURE = (
     ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
 )
-AS_OF_DATE = "2026-04-19"
-CURRENT_DATE = "2026-04-20"
-ACTIVATED_AT = "2026-04-20T06:00:00Z"
+ACTIVATED_AT = "2026-04-23T06:00:00Z"
+CHECK_DATES = ("2026-04-20", "2026-04-21", "2026-04-22")
 
 
 def main() -> None:
     bundle = json.loads(INPUT_BUNDLE_FIXTURE.read_text(encoding="utf-8"))
-    requested_nm_ids = [int(item["nm_id"]) for item in bundle["config_v2"] if item["enabled"]]
-    if not requested_nm_ids:
-        raise AssertionError("fixture bundle must contain enabled nm_ids")
+    requested_nm_ids = [int(item["nm_id"]) for item in bundle["config_v2"] if item["enabled"]][:3]
+    if len(requested_nm_ids) < 3:
+        raise AssertionError("fixture bundle must contain at least three enabled nm_ids")
 
     with TemporaryDirectory(prefix="sheet-vitrina-promo-live-source-integration-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
@@ -42,21 +40,14 @@ def main() -> None:
         result = runtime.ingest_bundle(bundle, activated_at=ACTIVATED_AT)
         if result.status != "accepted":
             raise AssertionError(f"fixture ingest must be accepted, got {result}")
+        _seed_neighbor_date_archive(runtime_dir, requested_nm_ids)
 
-        entrypoint = RegistryUploadHttpEntrypoint(
-            runtime_dir=runtime_dir,
+        plan_block = SheetVitrinaV1LivePlanBlock(
             runtime=runtime,
-            activated_at_factory=lambda: ACTIVATED_AT,
-            refreshed_at_factory=lambda: "2026-04-20T06:05:00Z",
-            now_factory=lambda: datetime.fromisoformat("2026-04-20T06:00:00+05:00"),
-        )
-        entrypoint.sheet_plan_block = SheetVitrinaV1LivePlanBlock(
-            runtime=runtime,
-            now_factory=lambda: datetime.fromisoformat("2026-04-20T06:00:00+05:00"),
+            now_factory=_MutableNowFactory("2026-04-23T08:00:00+00:00"),
             promo_live_source_block=PromoLiveSourceBlock(
                 runtime_dir=runtime_dir,
-                max_candidates=8,
-                max_downloads=5,
+                now_factory=_MutableNowFactory("2026-04-23T08:00:00+00:00"),
             ),
             current_web_source_sync=_NoopCurrentWebSourceSync(),
             seller_funnel_block=_SyntheticSuccessBlock("seller_funnel_snapshot"),
@@ -71,42 +62,56 @@ def main() -> None:
             fin_report_daily_block=_SyntheticSuccessBlock("fin_report_daily"),
         )
 
-        refresh = entrypoint._run_sheet_refresh(as_of_date=AS_OF_DATE, log=None)
-        if refresh["status"] != "success":
-            raise AssertionError(f"promo live-wired refresh must succeed, got {refresh}")
+        expected = {
+            "2026-04-20": (1.0, 1.0, 1000.0),
+            "2026-04-21": (1.0, 2.0, 1200.0),
+            "2026-04-22": (1.0, 2.0, 1200.0),
+        }
+        for column_date in CHECK_DATES:
+            status, payload = plan_block._capture_promo_closed_day_from_cache(
+                source_key="promo_by_price",
+                temporal_slot="yesterday_closed",
+                temporal_policy="dual_day_capable",
+                column_date=column_date,
+                requested_nm_ids=requested_nm_ids,
+            )
+            if status.kind != "success":
+                raise AssertionError(f"{column_date}: expected success status, got {status}")
+            if payload is None:
+                raise AssertionError(f"{column_date}: expected payload")
+            item_index = {item.nm_id: item for item in payload.items}
+            probe = item_index[requested_nm_ids[0]]
+            if (
+                probe.promo_participation,
+                probe.promo_count_by_price,
+                probe.promo_entry_price_best,
+            ) != expected[column_date]:
+                raise AssertionError(f"{column_date}: probe mismatch, got {probe}")
+            ineligible = item_index[requested_nm_ids[1]]
+            if (
+                ineligible.promo_participation,
+                ineligible.promo_count_by_price,
+                ineligible.promo_entry_price_best,
+            ) != (0.0, 0.0, 0.0):
+                raise AssertionError(f"{column_date}: ineligible row must stay empty, got {ineligible}")
 
-        plan = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=AS_OF_DATE)
-        status_rows = _status_rows(plan)
-        promo_status = status_rows["promo_by_price[today_current]"]
-        if promo_status[1] != "success":
-            raise AssertionError(f"promo source must materialize success in STATUS, got {promo_status}")
-        note = str(promo_status[10])
-        if "trace_run_dir=" not in note or "current_promos_downloaded=" not in note:
-            raise AssertionError(f"promo STATUS note must expose collector trace and download count, got {promo_status}")
-        trace_run_dir = _extract_note_value(note, "trace_run_dir")
-        if not trace_run_dir:
-            raise AssertionError(f"failed to extract trace_run_dir from promo status note: {promo_status}")
-        trace_path = Path(trace_run_dir)
-        if not trace_path.exists():
-            raise AssertionError(f"promo collector trace_run_dir missing on disk: {trace_run_dir}")
-
-        rows = _data_rows(plan)
-        row_keys = [key for key in rows if key.endswith("|promo_count_by_price")]
-        if not row_keys:
-            raise AssertionError("DATA_VITRINA must contain promo_count_by_price rows")
-        if not any(_to_float(rows[key][3]) > 0 for key in row_keys):
-            raise AssertionError("today_current promo_count_by_price must contain at least one positive value")
-
-        downloaded_folders = sorted(path.parent for path in trace_path.glob("promos/*/workbook.xlsx"))
-        if not downloaded_folders:
-            raise AssertionError(f"trace run must contain at least one downloaded workbook, got {trace_run_dir}")
-        first_metadata = downloaded_folders[0] / "metadata.json"
-        if not first_metadata.exists():
-            raise AssertionError(f"downloaded promo folder missing metadata.json: {downloaded_folders[0]}")
-
-        print(f"trace_run_dir: {trace_run_dir}")
-        print(f"downloaded_promos: {len(downloaded_folders)}")
-        print(f"first_downloaded_folder: {downloaded_folders[0]}")
+            exact_payload, _ = runtime.load_temporal_source_snapshot(
+                source_key="promo_by_price",
+                snapshot_date=column_date,
+            )
+            if exact_payload is None:
+                raise AssertionError(f"{column_date}: exact-date runtime payload missing")
+            accepted_payload, _ = runtime.load_temporal_source_slot_snapshot(
+                source_key="promo_by_price",
+                snapshot_date=column_date,
+                snapshot_role="accepted_closed_day_snapshot",
+            )
+            if accepted_payload is None:
+                raise AssertionError(f"{column_date}: accepted closed-day payload missing")
+            print(
+                f"{column_date}: ok -> "
+                f"{probe.promo_participation}/{probe.promo_count_by_price}/{probe.promo_entry_price_best}"
+            )
         print("integration-smoke passed")
 
 
@@ -143,25 +148,145 @@ def _request_date(request: object) -> str:
     raise AssertionError("synthetic request must carry a date field")
 
 
-def _status_rows(plan) -> dict[str, list[Any]]:
-    status_sheet = next(sheet for sheet in plan.sheets if sheet.sheet_name == "STATUS")
-    return {row[0]: row for row in status_sheet.rows}
+def _seed_neighbor_date_archive(runtime_dir: Path, requested_nm_ids: list[int]) -> None:
+    _write_promo_run_fixture(
+        runtime_dir=runtime_dir,
+        run_name="2026-04-20__fixture",
+        promo_folder="2287__2236__single-eligible",
+        promo_id=2287,
+        period_id=2236,
+        promo_title="Single eligible promo",
+        promo_period_text="20 апреля 02:00 → 20 апреля 23:59",
+        promo_start_at="2026-04-20T02:00",
+        promo_end_at="2026-04-20T23:59",
+        workbook_rows=[
+            {"nm_id": requested_nm_ids[0], "plan_price": 1000.0, "current_price": 900.0},
+            {"nm_id": requested_nm_ids[1], "plan_price": 1000.0, "current_price": 1000.0},
+        ],
+    )
+    _write_promo_run_fixture(
+        runtime_dir=runtime_dir,
+        run_name="2026-04-21__fixture",
+        promo_folder="2288__2237__discount-aware-a",
+        promo_id=2288,
+        period_id=2237,
+        promo_title="Discount aware promo A",
+        promo_period_text="21 апреля 02:00 → 22 апреля 23:59",
+        promo_start_at="2026-04-21T02:00",
+        promo_end_at="2026-04-22T23:59",
+        workbook_rows=[
+            {"nm_id": requested_nm_ids[0], "plan_price": 1000.0, "current_price": 1500.0, "uploadable_discount": 40.0},
+            {"nm_id": requested_nm_ids[1], "plan_price": 1100.0, "current_price": 1500.0, "uploadable_discount": 20.0},
+        ],
+    )
+    _write_promo_run_fixture(
+        runtime_dir=runtime_dir,
+        run_name="2026-04-21__fixture",
+        promo_folder="2289__2238__discount-aware-b",
+        promo_id=2289,
+        period_id=2238,
+        promo_title="Discount aware promo B",
+        promo_period_text="21 апреля 02:00 → 22 апреля 23:59",
+        promo_start_at="2026-04-21T02:00",
+        promo_end_at="2026-04-22T23:59",
+        workbook_rows=[
+            {"nm_id": requested_nm_ids[0], "plan_price": 1200.0, "current_price": 1500.0, "current_discount": 25.0},
+            {"nm_id": requested_nm_ids[2], "plan_price": 1500.0, "current_price": 1700.0},
+        ],
+    )
 
 
-def _data_rows(plan) -> dict[str, list[Any]]:
-    data_sheet = next(sheet for sheet in plan.sheets if sheet.sheet_name == "DATA_VITRINA")
-    return {row[1]: row for row in data_sheet.rows}
+def _write_promo_run_fixture(
+    *,
+    runtime_dir: Path,
+    run_name: str,
+    promo_folder: str,
+    promo_id: int,
+    period_id: int,
+    promo_title: str,
+    promo_period_text: str,
+    promo_start_at: str,
+    promo_end_at: str,
+    workbook_rows: list[dict[str, float]],
+) -> None:
+    promo_run_dir = runtime_dir / "promo_xlsx_collector_runs" / run_name / "promos" / promo_folder
+    promo_run_dir.mkdir(parents=True, exist_ok=True)
+    workbook_path = promo_run_dir / "workbook.xlsx"
+    _write_discount_aware_fixture_workbook(workbook_path, workbook_rows)
+    metadata = PromoMetadata(
+        collected_at=f"{run_name[:10]}T08:00:00+05:00",
+        trace_run_dir=str(runtime_dir / "promo_xlsx_collector_runs" / run_name),
+        source_tab="Доступные",
+        source_filter_code="AVAILABLE",
+        calendar_url=f"https://seller.wildberries.ru/dp-promo-calendar?action={promo_id}",
+        promo_id=promo_id,
+        period_id=period_id,
+        promo_title=promo_title,
+        promo_period_text=promo_period_text,
+        promo_start_at=promo_start_at,
+        promo_end_at=promo_end_at,
+        period_parse_confidence="high",
+        temporal_classification="current",
+        promo_status="Акция идёт",
+        promo_status_text="Автоакция: участие подтверждено",
+        eligible_count=len(workbook_rows),
+        participating_count=len(workbook_rows),
+        excluded_count=0,
+        export_kind="eligible_items_report",
+        original_suggested_filename=f"{promo_folder}.xlsx",
+        saved_filename="workbook.xlsx",
+        saved_path=str(workbook_path),
+        workbook_sheet_names=["Promo"],
+        workbook_row_count=len(workbook_rows) + 1,
+        workbook_col_count=5,
+        workbook_header_summary=[
+            "Артикул WB",
+            "Плановая цена для акции",
+            "Текущая розничная цена",
+            "Текущая скидка на сайте, %",
+            "Загружаемая скидка для участия в акции",
+        ],
+        workbook_has_date_fields=False,
+        workbook_item_status_distinct_values=[],
+    )
+    (promo_run_dir / "metadata.json").write_text(
+        json.dumps(metadata.__dict__, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
-def _extract_note_value(note: str, key: str) -> str | None:
-    match = re.search(rf"{re.escape(key)}=([^;]+)", note)
-    return match.group(1).strip() if match else None
+def _write_discount_aware_fixture_workbook(path: Path, rows: list[dict[str, float]]) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Promo"
+    sheet.append(
+        [
+            "Артикул WB",
+            "Плановая цена для акции",
+            "Текущая розничная цена",
+            "Текущая скидка на сайте, %",
+            "Загружаемая скидка для участия в акции",
+        ]
+    )
+    for row in rows:
+        sheet.append(
+            [
+                row["nm_id"],
+                row["plan_price"],
+                row["current_price"],
+                row.get("current_discount"),
+                row.get("uploadable_discount"),
+            ]
+        )
+    workbook.save(path)
 
 
-def _to_float(value: Any) -> float:
-    if isinstance(value, (int, float)):
-        return float(value)
-    return 0.0
+class _MutableNowFactory:
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+    def __call__(self) -> datetime:
+        return datetime.fromisoformat(self.value)
 
 
 if __name__ == "__main__":
