@@ -163,6 +163,13 @@ For live/public tasks affecting this contour `repo-only` does not count as compl
 6. verify the installed repo-owned systemd units via `systemctl cat` / `systemctl list-timers` when the task depends on scheduler truth;
 7. if the task changes bound Apps Script or live sheet behavior, finish the corresponding `clasp`/sheet verify path.
 
+For current web-vitrina work, final verification is the server/public web surface:
+- `GET /v1/sheet-vitrina-v1/web-vitrina`
+- `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition`
+- `GET /sheet-vitrina-v1/vitrina`
+
+Google Sheets, GAS, `clasp` and `invalid_grant` are not active blockers for web-vitrina completion unless the change explicitly touches bound Apps Script or the live sheet write path.
+
 `deploy-and-verify` may be used as one combined step when access is already safe and available.
 
 Current deploy contract note:
@@ -173,7 +180,7 @@ Current deploy contract note:
   - restart runtime;
   - only after that run loopback/public verification.
 
-If deploy / publish / restart / probe / `clasp` / verify steps are safe and available, Codex обязана выполнить их в том же bounded execution.
+If deploy / publish / restart / probe / required verify steps are safe and available, Codex обязана выполнить их в том же bounded execution. `clasp` is part of this list only for bound Apps Script/live sheet scope.
 If any of these steps are unavailable or unsafe, execution must return incomplete with an exact blocker instead of a vague ops-gap.
 
 ## Probe Norm
@@ -245,7 +252,7 @@ This fallback is only for local diagnostic reachability. It is not a statement t
 One minimal human-only step remains allowed only when repo-owned contract still cannot execute due missing access:
 - grant deploy access for `selleros-root` / `api.selleros.pro`
 
-Without that step a live/public/GAS task stays `live-complete = blocked`; reporting only `repo-complete` is insufficient.
+Without that step a live/public task stays `live-complete = blocked`; reporting only `repo-complete` is insufficient. For GAS/sheet-only scope the blocker is tracked as `sheet-complete = blocked`.
 The blocker must name the concrete missing access/value and must not be phrased as unspecified operational uncertainty.
 
 For server/operator-only changes that do not touch bound Apps Script or live sheet writes, `Sheet verify result` must stay `not in scope` rather than being filled with fake closure activity.

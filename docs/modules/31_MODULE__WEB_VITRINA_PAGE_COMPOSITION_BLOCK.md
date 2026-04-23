@@ -164,6 +164,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
 - `/sheet-vitrina-v1/vitrina` is no longer a placeholder shell.
 - Existing stable seams are now used end-to-end in a live read-only surface.
 - The chosen client path stays intentionally minimal and repo-owned.
+- Web-vitrina completion is verified through the server/public web surface (`/v1/sheet-vitrina-v1/web-vitrina`, optional `surface=page_composition`, and `/sheet-vitrina-v1/vitrina`); Google Sheets / GAS / `clasp` are not active verification targets for this surface.
 - `Свежесть данных` stays server-owned and comes from the current read-side snapshot metadata (`refreshed_at / snapshot_id / as_of_date`), while `Последнее обновление страницы` is only the browser reread marker and is intentionally separate.
 - user-facing timestamp render is unified:
   - `Свежесть данных` now reuses the same client formatter as `Последнее обновление страницы`
@@ -198,6 +199,6 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
 - real bundled `@gravity-ui/table` package/runtime integration
 - export layer
 - grid virtualization / advanced resizing UX
-- Google Sheets cutover
+- legacy Google Sheets/export contour migration
 - broad parity campaign with every operator/report/supply surface
 - any browser-side business truth assembly

@@ -18,7 +18,7 @@
 - `registry/`
 - `wb_core_docs_master/`
 
-Дополнительно в корне присутствует `.clasp.json` для bound Apps Script wiring новой витрины.
+Дополнительно в корне присутствует `.clasp.json` для legacy bound Apps Script / sheet-export wiring. Текущая web-витрина не использует его как production surface или completion target.
 
 На текущем `main` не найдены как материализованные каталоги:
 - `packages/domain/`

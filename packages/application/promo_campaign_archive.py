@@ -16,6 +16,7 @@ from openpyxl import load_workbook
 
 from packages.application.promo_metric_truth import (
     PromoCandidateRow,
+    PromoEligibilityEvaluation,
     evaluate_candidate_rows,
     find_workbook_data_sheet,
     iter_workbook_plan_rows,
@@ -270,21 +271,42 @@ def materialize_promo_result_from_archive(
         if nm_id not in price_truth.price_by_nm_id
     )
 
-    items = [
-        _build_item_from_candidate_rows(
+    materialized_items: list[PromoLiveSourceItem] = []
+    truthful_zero_no_candidate_nm_ids: list[int] = []
+    truthful_zero_ineligible_nm_ids: list[int] = []
+    eligible_nm_ids: list[int] = []
+    for nm_id in requested:
+        candidate_rows = candidate_rows_by_nm_id[nm_id]
+        if candidate_rows and nm_id in missing_price_truth_nm_ids:
+            continue
+        item, evaluation = _build_item_from_candidate_rows(
             snapshot_date=snapshot_date,
             nm_id=nm_id,
-            candidate_rows=candidate_rows_by_nm_id[nm_id],
+            candidate_rows=candidate_rows,
             price_seller_discounted=price_truth.price_by_nm_id.get(nm_id),
         )
-        for nm_id in requested
-    ]
+        materialized_items.append(item)
+        if not candidate_rows:
+            truthful_zero_no_candidate_nm_ids.append(nm_id)
+        elif evaluation.eligible_campaign_identities:
+            eligible_nm_ids.append(nm_id)
+        else:
+            truthful_zero_ineligible_nm_ids.append(nm_id)
+
+    detail_parts.extend(
+        _promo_metric_coverage_detail_parts(
+            eligible_nm_ids=eligible_nm_ids,
+            truthful_zero_no_candidate_nm_ids=truthful_zero_no_candidate_nm_ids,
+            truthful_zero_ineligible_nm_ids=truthful_zero_ineligible_nm_ids,
+            missing_price_truth_nm_ids=missing_price_truth_nm_ids,
+        )
+    )
     archive_keys = ",".join(record.archive_key for record in usable[:8])
     if missing_price_truth_nm_ids:
         return PromoLiveSourceIncomplete(
             kind="incomplete",
             covered_count=len(requested) - len(missing_price_truth_nm_ids),
-            items=items,
+            items=materialized_items,
             missing_nm_ids=missing_price_truth_nm_ids,
             detail="; ".join(
                 detail_parts
@@ -300,7 +322,7 @@ def materialize_promo_result_from_archive(
     return PromoLiveSourceSuccess(
         kind="success",
         covered_count=len(requested),
-        items=items,
+        items=materialized_items,
         detail="; ".join(detail_parts + [f"archive_keys={archive_keys}"]),
         **common,
     )
@@ -582,18 +604,55 @@ def _build_item_from_candidate_rows(
     nm_id: int,
     candidate_rows: list[PromoCandidateRow],
     price_seller_discounted: float | None,
-) -> PromoLiveSourceItem:
+) -> tuple[PromoLiveSourceItem, PromoEligibilityEvaluation]:
     evaluation = evaluate_candidate_rows(
         candidate_rows=candidate_rows,
         price_seller_discounted=price_seller_discounted,
     )
-    return PromoLiveSourceItem(
-        snapshot_date=snapshot_date,
-        nm_id=nm_id,
-        promo_count_by_price=round(evaluation.promo_count_by_price, 6),
-        promo_entry_price_best=round(evaluation.promo_entry_price_best, 6),
-        promo_participation=round(evaluation.promo_participation, 6),
+    return (
+        PromoLiveSourceItem(
+            snapshot_date=snapshot_date,
+            nm_id=nm_id,
+            promo_count_by_price=round(evaluation.promo_count_by_price, 6),
+            promo_entry_price_best=round(evaluation.promo_entry_price_best, 6),
+            promo_participation=round(evaluation.promo_participation, 6),
+        ),
+        evaluation,
     )
+
+
+def _promo_metric_coverage_detail_parts(
+    *,
+    eligible_nm_ids: list[int],
+    truthful_zero_no_candidate_nm_ids: list[int],
+    truthful_zero_ineligible_nm_ids: list[int],
+    missing_price_truth_nm_ids: list[int],
+) -> list[str]:
+    return [
+        f"promo_metric_eligible_nm_ids={_format_nm_id_sample(eligible_nm_ids)}",
+        (
+            "promo_metric_truthful_zero_no_candidate_nm_ids="
+            f"{_format_nm_id_sample(truthful_zero_no_candidate_nm_ids)}"
+        ),
+        (
+            "promo_metric_truthful_zero_ineligible_nm_ids="
+            f"{_format_nm_id_sample(truthful_zero_ineligible_nm_ids)}"
+        ),
+        (
+            "promo_metric_missing_price_truth_nm_ids="
+            f"{_format_nm_id_sample(missing_price_truth_nm_ids)}"
+        ),
+    ]
+
+
+def _format_nm_id_sample(nm_ids: list[int], *, limit: int = 20) -> str:
+    unique = sorted({int(nm_id) for nm_id in nm_ids})
+    if not unique:
+        return ""
+    sample = ",".join(str(nm_id) for nm_id in unique[:limit])
+    if len(unique) > limit:
+        sample = f"{sample},...(+{len(unique) - limit})"
+    return sample
 
 
 def _metadata_fingerprint(metadata: PromoMetadata) -> str:

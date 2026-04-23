@@ -53,12 +53,14 @@ def main() -> None:
 
     _assert_cross_year_parse_rule()
     canonical_note = _assert_canonical_eligible_set_cases(requested_nm_ids)
+    web_vitrina_note = _assert_web_vitrina_period_payload_for_promo_dates(bundle, requested_nm_ids)
     _assert_promo_source_runtime_mapping(bundle, requested_nm_ids)
     preserved_note = _assert_accepted_current_preserved_after_invalid_attempt(bundle, requested_nm_ids)
     replay_note = _assert_historical_interval_replay_cache_fill(requested_nm_ids)
 
     print("cross_year_parse_rule: ok -> low-confidence period keeps null exact dates")
     print(f"canonical_eligible_set: ok -> {canonical_note}")
+    print(f"web_vitrina_period_payload: ok -> {web_vitrina_note}")
     print("promo_source_runtime_mapping: ok -> promo metrics reach STATUS and DATA_VITRINA via runtime source")
     print(f"accepted_current_preservation: ok -> {preserved_note}")
     print(f"historical_interval_replay: ok -> {replay_note}")
@@ -386,7 +388,7 @@ def _assert_canonical_eligible_set_cases(requested_nm_ids: list[int]) -> str:
         diagnostics_by_date = _seed_neighbor_date_price_truth(runtime, requested_nm_ids)
         block = PromoLiveSourceBlock(
             runtime_dir=runtime_dir,
-            now_factory=_MutableNowFactory("2026-04-24T08:00:00+00:00"),
+            now_factory=_MutableNowFactory("2026-04-25T08:00:00+00:00"),
         )
 
         single_result = block.execute(
@@ -401,6 +403,9 @@ def _assert_canonical_eligible_set_cases(requested_nm_ids: list[int]) -> str:
         outside_result = block.execute(
             PromoLiveSourceRequest(snapshot_date="2026-04-23", nm_ids=requested_nm_ids)
         ).result
+        missing_price_result = block.execute(
+            PromoLiveSourceRequest(snapshot_date="2026-04-24", nm_ids=requested_nm_ids)
+        ).result
 
         if single_result.kind != "success":
             raise AssertionError(f"single eligible case must be success, got {single_result}")
@@ -410,10 +415,13 @@ def _assert_canonical_eligible_set_cases(requested_nm_ids: list[int]) -> str:
             raise AssertionError(f"neighbor-day replay must be success, got {next_day_result}")
         if outside_result.kind != "success":
             raise AssertionError(f"outside-interval case must stay truthful empty success, got {outside_result}")
+        if missing_price_result.kind != "incomplete":
+            raise AssertionError(f"missing price truth case must be incomplete, got {missing_price_result}")
 
         single_items = {item.nm_id: item for item in single_result.items}
         multiple_items = {item.nm_id: item for item in multiple_result.items}
         next_day_items = {item.nm_id: item for item in next_day_result.items}
+        missing_price_items = {item.nm_id: item for item in missing_price_result.items}
 
         single_probe = single_items[requested_nm_ids[0]]
         if (single_probe.promo_participation, single_probe.promo_count_by_price, single_probe.promo_entry_price_best) != (
@@ -458,6 +466,22 @@ def _assert_canonical_eligible_set_cases(requested_nm_ids: list[int]) -> str:
         if "no_covering_campaign_rows_for_requested_nm_ids=true" not in outside_result.detail:
             raise AssertionError(f"outside-interval detail mismatch, got {outside_result.detail}")
 
+        missing_price_probe = missing_price_items[requested_nm_ids[0]]
+        if (
+            missing_price_probe.promo_participation,
+            missing_price_probe.promo_count_by_price,
+            missing_price_probe.promo_entry_price_best,
+        ) != (1.0, 1.0, 1000.0):
+            raise AssertionError(f"covered price truth case mismatch, got {missing_price_probe}")
+        if requested_nm_ids[2] in missing_price_items:
+            raise AssertionError(
+                "SKU with campaign rows but missing price truth must not be materialized as zero"
+            )
+        if missing_price_result.missing_nm_ids != [requested_nm_ids[2]]:
+            raise AssertionError(f"missing price truth ids mismatch, got {missing_price_result.missing_nm_ids}")
+        if "promo_metric_missing_price_truth_nm_ids" not in missing_price_result.detail:
+            raise AssertionError(f"missing price truth detail must be surfaced, got {missing_price_result.detail}")
+
         return "; ".join(
             [
                 (
@@ -484,6 +508,113 @@ def _assert_canonical_eligible_set_cases(requested_nm_ids: list[int]) -> str:
                     f"beneficial_entry_price={outside_probe.promo_entry_price_best}"
                 )
             ]
+            + [
+                (
+                    f"date=2026-04-24 "
+                    f"SKU={requested_nm_ids[2]} "
+                    f"price_seller_discounted=missing "
+                    f"candidate_campaigns=['2290:2239'] "
+                    f"candidate_plan_prices=[1300.0] "
+                    f"eligible_campaigns=unknown_missing_price_truth "
+                    f"eligible_plan_prices=unknown_missing_price_truth "
+                    f"participation=blank "
+                    f"count_by_plan_price=blank "
+                    f"beneficial_entry_price=blank"
+                )
+            ]
+        )
+
+
+def _assert_web_vitrina_period_payload_for_promo_dates(
+    bundle: dict[str, Any],
+    requested_nm_ids: list[int],
+) -> str:
+    with TemporaryDirectory(prefix="sheet-vitrina-promo-web-vitrina-period-") as tmp:
+        runtime_dir = Path(tmp) / "runtime"
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+        result = runtime.ingest_bundle(bundle, activated_at=ACTIVATED_AT)
+        if result.status != "accepted":
+            raise AssertionError(f"fixture ingest must be accepted, got {result}")
+        _seed_neighbor_date_archive(runtime_dir, requested_nm_ids)
+        _seed_neighbor_date_price_truth(runtime, requested_nm_ids)
+        now_factory = _MutableNowFactory("2026-04-25T08:00:00+00:00")
+        entrypoint = _build_entrypoint(
+            runtime=runtime,
+            promo_source_block=PromoLiveSourceBlock(
+                runtime_dir=runtime_dir,
+                now_factory=_MutableNowFactory("2099-01-01T08:00:00+00:00"),
+            ),
+            now_factory=now_factory,
+        )
+
+        for snapshot_date in ("2026-04-20", "2026-04-21", "2026-04-22", "2026-04-23", "2026-04-24"):
+            refresh_payload = entrypoint._run_sheet_refresh(
+                as_of_date=snapshot_date,
+                log=None,
+                execution_mode=EXECUTION_MODE_AUTO_DAILY,
+            )
+            if refresh_payload["status"] not in {"success", "warning"}:
+                raise AssertionError(f"refresh for {snapshot_date} must materialize, got {refresh_payload}")
+
+        contract_payload = entrypoint.handle_sheet_web_vitrina_request(
+            page_route="/sheet-vitrina-v1/vitrina",
+            read_route="/v1/sheet-vitrina-v1/web-vitrina",
+            date_from="2026-04-20",
+            date_to="2026-04-24",
+        )
+        if contract_payload["meta"]["date_columns"] != [
+            "2026-04-20",
+            "2026-04-21",
+            "2026-04-22",
+            "2026-04-23",
+            "2026-04-24",
+        ]:
+            raise AssertionError(f"web-vitrina period dates mismatch, got {contract_payload['meta']}")
+        rows = {row["row_id"]: row for row in contract_payload["rows"]}
+        positive_row = rows[f"SKU:{requested_nm_ids[0]}|promo_participation"]
+        truthful_zero_row = rows[f"SKU:{requested_nm_ids[1]}|promo_participation"]
+        missing_price_row = rows[f"SKU:{requested_nm_ids[2]}|promo_participation"]
+        positive_values = positive_row["values_by_date"]
+        if positive_values != {
+            "2026-04-20": 1.0,
+            "2026-04-21": 1.0,
+            "2026-04-22": 1.0,
+            "2026-04-23": 0.0,
+            "2026-04-24": 1.0,
+        }:
+            raise AssertionError(f"positive promo row mismatch, got {positive_values}")
+        truthful_zero_values = truthful_zero_row["values_by_date"]
+        if any(value != 0.0 for value in truthful_zero_values.values()):
+            raise AssertionError(f"truthful zero promo row mismatch, got {truthful_zero_values}")
+        missing_price_values = missing_price_row["values_by_date"]
+        if missing_price_values["2026-04-24"] != "":
+            raise AssertionError(
+                f"missing price truth must be blank in web-vitrina payload, got {missing_price_values}"
+            )
+
+        composition_payload = entrypoint.handle_sheet_web_vitrina_page_composition_request(
+            page_route="/sheet-vitrina-v1/vitrina",
+            read_route="/v1/sheet-vitrina-v1/web-vitrina",
+            operator_route="/sheet-vitrina-v1/operator",
+            date_from="2026-04-20",
+            date_to="2026-04-24",
+        )
+        if composition_payload.get("composition_name") != "web_vitrina_page_composition":
+            raise AssertionError(f"page composition identity mismatch, got {composition_payload}")
+        if composition_payload.get("table_surface", {}).get("total_row_count") != contract_payload["meta"]["row_count"]:
+            raise AssertionError(f"page composition row count mismatch, got {composition_payload['table_surface']}")
+        status_rows = _status_rows(runtime.load_sheet_vitrina_ready_snapshot(as_of_date="2026-04-24"))
+        promo_status = status_rows["promo_by_price[yesterday_closed]"]
+        if promo_status[1] != "incomplete" or str(requested_nm_ids[2]) not in str(promo_status[9]):
+            raise AssertionError(f"missing price truth must surface in STATUS, got {promo_status}")
+        if "promo_metric_missing_price_truth_nm_ids" not in str(promo_status[10]):
+            raise AssertionError(f"missing price detail must surface in STATUS note, got {promo_status}")
+
+        return (
+            "dates=2026-04-20..2026-04-24 "
+            f"nonzero_SKU={requested_nm_ids[0]} "
+            f"truthful_zero_SKU={requested_nm_ids[1]} "
+            f"missing_price_blank_SKU={requested_nm_ids[2]}"
         )
 
 
@@ -532,6 +663,27 @@ def _seed_neighbor_date_archive(runtime_dir: Path, requested_nm_ids: list[int]) 
     )
     _write_promo_run_fixture(
         runtime_dir=runtime_dir,
+        run_name="2026-04-24__fixture",
+        promo_folder="2290__2239__missing-price-truth",
+        promo_id=2290,
+        period_id=2239,
+        promo_title="Missing price truth promo",
+        promo_period_text="24 апреля 02:00 → 24 апреля 23:59",
+        promo_start_at="2026-04-24T02:00",
+        promo_end_at="2026-04-24T23:59",
+        workbook_rows=[
+            {
+                "nm_id": requested_nm_ids[0],
+                "plan_price": 1000.0,
+            },
+            {
+                "nm_id": requested_nm_ids[2],
+                "plan_price": 1300.0,
+            },
+        ],
+    )
+    _write_promo_run_fixture(
+        runtime_dir=runtime_dir,
         run_name="2026-04-21__fixture",
         promo_folder="2289__2238__multi-eligible-b",
         promo_id=2289,
@@ -572,6 +724,9 @@ def _seed_neighbor_date_price_truth(
             requested_nm_ids[0]: 950.0,
             requested_nm_ids[1]: 1110.0,
             requested_nm_ids[2]: 1700.0,
+        },
+        "2026-04-24": {
+            requested_nm_ids[0]: 900.0,
         },
     }
     for snapshot_date, price_by_nm_id in price_truth_by_date.items():
