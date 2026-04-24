@@ -22,8 +22,8 @@
       --warning-text: #92400e;
       --error-bg: #fdf0ef;
       --error-text: #b42318;
-      --shadow: none;
-      --radius: 8px;
+      --shadow: 0 14px 34px rgba(17, 24, 39, 0.07);
+      --radius: 12px;
       --sticky-shadow: inset -1px 0 0 rgba(199, 207, 217, 0.95);
       --table-font-size: 10.5px;
       font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
@@ -46,6 +46,62 @@
       margin: 0 auto;
       padding: 18px 18px 24px;
       overscroll-behavior-x: none;
+    }
+
+    .unified-tab-strip {
+      display: flex;
+      gap: 10px;
+      margin: 0 0 10px 8px;
+      flex-wrap: wrap;
+    }
+
+    .unified-tab-button {
+      appearance: none;
+      border: 1px solid var(--border-strong);
+      border-bottom: 0;
+      border-radius: 14px 14px 0 0;
+      background: #f8fbff;
+      color: var(--muted);
+      font: inherit;
+      font-size: 14px;
+      font-weight: 700;
+      padding: 12px 18px;
+      cursor: pointer;
+      transition: background-color 120ms ease, color 120ms ease, transform 120ms ease;
+    }
+
+    .unified-tab-button:hover {
+      background: #eef4ff;
+      color: var(--text);
+      transform: translateY(-1px);
+    }
+
+    .unified-tab-button.is-active {
+      background: var(--panel-bg);
+      color: var(--text);
+      border-color: var(--border);
+      box-shadow: 0 -8px 18px rgba(17, 24, 39, 0.04);
+    }
+
+    .unified-tab-panel[hidden] {
+      display: none;
+    }
+
+    .operator-embed-panel {
+      background: var(--panel-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 18px;
+      min-height: 520px;
+    }
+
+    .operator-embed-frame {
+      display: block;
+      width: 100%;
+      min-height: 900px;
+      border: 0;
+      background: transparent;
     }
 
     .top-panel,
@@ -72,6 +128,12 @@
       gap: 16px;
       align-items: center;
       flex-wrap: wrap;
+    }
+
+    .site-kicker {
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 800;
     }
 
     .operator-site-link {
@@ -1115,9 +1177,16 @@
 </head>
 <body>
   <main class="page" data-web-vitrina-page="web_vitrina_page_composition">
+    <nav class="unified-tab-strip" role="tablist" aria-label="Разделы sheet_vitrina_v1">
+      <button class="unified-tab-button is-active" type="button" data-unified-tab-button="vitrina" role="tab" aria-selected="true">Витрина</button>
+      <button class="unified-tab-button" type="button" data-unified-tab-button="factory-order" role="tab" aria-selected="false">Расчет поставок</button>
+      <button class="unified-tab-button" type="button" data-unified-tab-button="reports" role="tab" aria-selected="false">Отчеты</button>
+    </nav>
+
+    <section class="unified-tab-panel" data-unified-tab-panel="vitrina">
     <section class="top-panel" data-top-panel>
       <div class="top-panel-left">
-        <a class="operator-site-link" data-open-operator href="#" target="_blank" rel="noopener noreferrer">Операторский сайт</a>
+        <span class="site-kicker">sheet_vitrina_v1</span>
         <p class="meta-line" data-page-meta>Загрузка page composition…</p>
       </div>
       <div class="top-panel-actions">
@@ -1301,10 +1370,22 @@
         </section>
       </div>
     </section>
+    </section>
+
+    <section class="unified-tab-panel operator-embed-panel" data-unified-tab-panel="factory-order" hidden>
+      <iframe class="operator-embed-frame" title="Расчет поставок" data-operator-embed-frame="factory-order"></iframe>
+    </section>
+
+    <section class="unified-tab-panel operator-embed-panel" data-unified-tab-panel="reports" hidden>
+      <iframe class="operator-embed-frame" title="Отчеты" data-operator-embed-frame="reports"></iframe>
+    </section>
   </main>
 
   <script>
     const WEB_VITRINA_CONFIG = __SHEET_VITRINA_V1_WEB_VITRINA_CONFIG_JSON__;
+    const unifiedTabButtons = Array.from(document.querySelectorAll("[data-unified-tab-button]"));
+    const unifiedTabPanels = Array.from(document.querySelectorAll("[data-unified-tab-panel]"));
+    const operatorEmbedFrames = Array.from(document.querySelectorAll("[data-operator-embed-frame]"));
     const summaryGridNode = document.querySelector("[data-summary-grid]");
     const pageMetaNode = document.querySelector("[data-page-meta]");
     const globalProgressNode = document.querySelector("[data-global-progress]");
@@ -1352,6 +1433,8 @@
     const resetFiltersButton = document.querySelector("[data-reset-filters]");
 
     const ALL_VALUE = "__all__";
+    const DEFAULT_UNIFIED_TAB = "vitrina";
+    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports"]);
     const formattersById = new Map();
     const renderersById = new Map();
     const sortOptionsByValue = new Map();
@@ -1396,9 +1479,11 @@
       sessionHighlights: {}
     };
 
-    openOperatorLink.href = WEB_VITRINA_CONFIG.operator_path;
-    openOperatorLink.target = "_blank";
-    openOperatorLink.rel = "noopener noreferrer";
+    if (openOperatorLink) {
+      openOperatorLink.href = WEB_VITRINA_CONFIG.operator_path;
+      openOperatorLink.target = "_blank";
+      openOperatorLink.rel = "noopener noreferrer";
+    }
     if (openContractLink) {
       openContractLink.href = buildReadUrl("contract").toString();
     }
@@ -1406,6 +1491,13 @@
     loadRefreshButton.addEventListener("click", function() {
       runSourceRefreshAndReload();
     });
+
+    unifiedTabButtons.forEach(function(button) {
+      button.addEventListener("click", function() {
+        activateUnifiedTab(button.getAttribute("data-unified-tab-button") || DEFAULT_UNIFIED_TAB);
+      });
+    });
+    window.addEventListener("message", handleOperatorEmbedMessage);
 
     loadingTableBodyNode.addEventListener("click", function(event) {
       const groupButton = event.target.closest("[data-refresh-source-group]");
@@ -1508,6 +1600,80 @@
         url.searchParams.set("surface", surface);
       }
       return url;
+    }
+
+    function normalizeUnifiedTab(value) {
+      const normalized = String(value || "").trim();
+      return VALID_UNIFIED_TABS.has(normalized) ? normalized : DEFAULT_UNIFIED_TAB;
+    }
+
+    function initialUnifiedTab() {
+      const params = new URLSearchParams(window.location.search);
+      const queryTab = normalizeUnifiedTab(params.get("tab"));
+      if (queryTab !== DEFAULT_UNIFIED_TAB) {
+        return queryTab;
+      }
+      const hashTab = normalizeUnifiedTab(String(window.location.hash || "").replace(/^#/, ""));
+      return hashTab;
+    }
+
+    function activateUnifiedTab(tabName, options) {
+      const activeTab = normalizeUnifiedTab(tabName);
+      unifiedTabButtons.forEach(function(button) {
+        const selected = button.getAttribute("data-unified-tab-button") === activeTab;
+        button.classList.toggle("is-active", selected);
+        button.setAttribute("aria-selected", selected ? "true" : "false");
+      });
+      unifiedTabPanels.forEach(function(panel) {
+        panel.hidden = panel.getAttribute("data-unified-tab-panel") !== activeTab;
+      });
+      if (activeTab !== DEFAULT_UNIFIED_TAB) {
+        ensureOperatorEmbed(activeTab);
+      }
+      if (!options || options.persist !== false) {
+        const url = new URL(window.location.href);
+        if (activeTab === DEFAULT_UNIFIED_TAB) {
+          url.searchParams.delete("tab");
+          if (url.hash === "#vitrina") {
+            url.hash = "";
+          }
+        } else {
+          url.searchParams.set("tab", activeTab);
+          url.hash = "";
+        }
+        window.history.replaceState({}, "", url.toString());
+      }
+      return activeTab;
+    }
+
+    function ensureOperatorEmbed(tabName) {
+      const frame = operatorEmbedFrames.find(function(candidate) {
+        return candidate.getAttribute("data-operator-embed-frame") === tabName;
+      });
+      if (!frame || frame.getAttribute("src")) {
+        return;
+      }
+      const url = new URL(WEB_VITRINA_CONFIG.operator_path, window.location.origin);
+      url.searchParams.set("embedded_tab", tabName);
+      frame.setAttribute("src", url.toString());
+    }
+
+    function handleOperatorEmbedMessage(event) {
+      if (event.origin !== window.location.origin) {
+        return;
+      }
+      const payload = event.data || {};
+      if (!payload || payload.type !== "sheet_vitrina_v1_operator_embed_height") {
+        return;
+      }
+      const tabName = normalizeUnifiedTab(payload.tab);
+      const frame = operatorEmbedFrames.find(function(candidate) {
+        return candidate.getAttribute("data-operator-embed-frame") === tabName;
+      });
+      const height = Math.max(640, Math.min(5000, Number(payload.height) || 0));
+      if (frame && height) {
+        frame.style.height = height + "px";
+      }
     }
 
     function setStatusBadge(_payload) {
@@ -3647,6 +3813,7 @@
       }
     }
 
+    activateUnifiedTab(initialUnifiedTab(), {persist: false});
     loadPageComposition();
   </script>
 </body>

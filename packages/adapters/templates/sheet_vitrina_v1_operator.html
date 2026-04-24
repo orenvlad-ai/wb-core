@@ -49,6 +49,32 @@
       padding: 72px 24px;
     }
 
+    body.is-embedded {
+      background: transparent;
+    }
+
+    body.is-embedded .page {
+      max-width: none;
+      padding: 0;
+    }
+
+    body.is-embedded .tab-strip {
+      display: none;
+    }
+
+    body.is-embedded .panel {
+      border: 0;
+      border-radius: 0;
+      box-shadow: none;
+      padding: 0;
+      background: transparent;
+    }
+
+    body.is-embedded .operator-panel > .eyebrow,
+    body.is-embedded .operator-panel > .section-lead {
+      display: none;
+    }
+
     .tab-strip {
       display: flex;
       gap: 12px;
@@ -1229,7 +1255,7 @@
     }
   </style>
 </head>
-<body>
+<body class="__SHEET_VITRINA_V1_OPERATOR_BODY_CLASS__">
   <main class="page">
     <div class="tab-strip" role="tablist" aria-label="Операторские вкладки">
       <button class="tab-button is-active" type="button" data-tab-button="vitrina" role="tab" aria-selected="true">Обновление данных</button>
@@ -2022,6 +2048,8 @@
       const VALID_TABS = new Set(["vitrina", "factory-order", "reports"]);
       const VALID_REPORT_SECTIONS = new Set(["daily", "stock", "plan"]);
       const VALID_SUPPLY_SECTIONS = new Set(["factory", "regional"]);
+      const isEmbeddedMode = Boolean(config.embedded);
+      const configuredInitialTab = normalizePersistedSectionName(config.initial_tab, VALID_TABS, DEFAULT_ACTIVE_TAB);
       let activeJobId = null;
       let completedJob = null;
       let sellerRecoveryAction = null;
@@ -2145,6 +2173,7 @@
         if (!options || options.persist !== false) {
           writePersistedOperatorUiState({ active_tab: activeTabName });
         }
+        scheduleEmbeddedHeightPost();
         return activeTabName;
       }
 
@@ -2161,6 +2190,7 @@
         if (!options || options.persist !== false) {
           writePersistedOperatorUiState({ supply_section: activeSectionName });
         }
+        scheduleEmbeddedHeightPost();
         return activeSectionName;
       }
 
@@ -2177,7 +2207,48 @@
         if (!options || options.persist !== false) {
           writePersistedOperatorUiState({ report_section: activeSectionName });
         }
+        scheduleEmbeddedHeightPost();
         return activeSectionName;
+      }
+
+      function postEmbeddedHeight() {
+        if (!isEmbeddedMode || !window.parent || window.parent === window) {
+          return;
+        }
+        const height = Math.max(
+          document.body ? document.body.scrollHeight : 0,
+          document.documentElement ? document.documentElement.scrollHeight : 0
+        );
+        window.parent.postMessage(
+          {
+            type: "sheet_vitrina_v1_operator_embed_height",
+            tab: configuredInitialTab,
+            height
+          },
+          window.location.origin
+        );
+      }
+
+      function scheduleEmbeddedHeightPost() {
+        if (!isEmbeddedMode) {
+          return;
+        }
+        window.requestAnimationFrame(() => {
+          postEmbeddedHeight();
+        });
+      }
+
+      function setupEmbeddedHeightObserver() {
+        if (!isEmbeddedMode) {
+          return;
+        }
+        scheduleEmbeddedHeightPost();
+        if ("ResizeObserver" in window && document.body) {
+          const observer = new ResizeObserver(() => scheduleEmbeddedHeightPost());
+          observer.observe(document.body);
+        } else {
+          window.setInterval(scheduleEmbeddedHeightPost, 1200);
+        }
       }
 
       tabButtons.forEach((button) => {
@@ -4026,9 +4097,19 @@
         });
       });
 
-      activateTab(persistedOperatorUiState.active_tab || DEFAULT_ACTIVE_TAB);
-      activateReportSection(persistedOperatorUiState.report_section || DEFAULT_REPORT_SECTION);
-      activateSupplySection(persistedOperatorUiState.supply_section || DEFAULT_SUPPLY_SECTION);
+      activateTab(
+        isEmbeddedMode ? configuredInitialTab : (persistedOperatorUiState.active_tab || DEFAULT_ACTIVE_TAB),
+        { persist: !isEmbeddedMode }
+      );
+      activateReportSection(
+        persistedOperatorUiState.report_section || DEFAULT_REPORT_SECTION,
+        { persist: !isEmbeddedMode }
+      );
+      activateSupplySection(
+        persistedOperatorUiState.supply_section || DEFAULT_SUPPLY_SECTION,
+        { persist: !isEmbeddedMode }
+      );
+      setupEmbeddedHeightObserver();
       setActionState(null);
       setCompletedJob(null);
       renderSellerRecovery({

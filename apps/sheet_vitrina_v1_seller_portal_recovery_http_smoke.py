@@ -263,7 +263,7 @@ def main() -> None:
         thread.start()
         try:
             base_url = f"http://127.0.0.1:{port}"
-            operator_status, operator_html = _get_text(base_url + DEFAULT_SHEET_OPERATOR_UI_PATH)
+            operator_status, operator_html = _get_text(base_url + DEFAULT_SHEET_OPERATOR_UI_PATH + "?embedded_tab=vitrina")
             if operator_status != 200:
                 raise AssertionError(f"operator UI must return 200, got {operator_status}")
             if "Проверка и восстановление Seller-сессии" not in operator_html or "Проверить сессию" not in operator_html:

@@ -107,7 +107,7 @@ def main() -> None:
                     },
                 )
 
-            operator_status, operator_html = _get_text(f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}")
+            operator_status, operator_html = _get_text(f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}?embedded_tab=reports")
             if operator_status != 200:
                 raise AssertionError(f"operator page must return 200, got {operator_status}")
             for expected in (

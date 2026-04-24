@@ -153,7 +153,7 @@ def main() -> None:
             entrypoint.factory_order_supply_block.sales_funnel_history_block = fake_history_block
             entrypoint.factory_order_supply_block.sales_history.sales_funnel_history_block = fake_history_block
 
-            operator_status, operator_html = _get_text(f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}")
+            operator_status, operator_html = _get_text(f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}?embedded_tab=factory-order")
             if operator_status != 200:
                 raise AssertionError(f"operator page must return 200, got {operator_status}")
             for expected in (
@@ -168,8 +168,8 @@ def main() -> None:
             ):
                 if expected not in operator_html:
                     raise AssertionError(f"operator page must expose {expected!r}")
-            if "https://docs.google.com/spreadsheets/d/" not in operator_html:
-                raise AssertionError("operator page must expose the live sheet link")
+            if "https://docs.google.com/spreadsheets/d/" in operator_html:
+                raise AssertionError("factory-order operator surface must not expose legacy Google Sheets as an active link")
             if (
                 "Загрузить остатки ФФ" in operator_html
                 or "Загрузить товары в пути от фабрики" in operator_html

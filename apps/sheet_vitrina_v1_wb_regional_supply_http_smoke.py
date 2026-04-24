@@ -114,7 +114,7 @@ def main() -> None:
             entrypoint.wb_regional_supply_block.sales_funnel_history_block = NoopSalesHistoryBlock()
             entrypoint.wb_regional_supply_block.sales_history.sales_funnel_history_block = NoopSalesHistoryBlock()
 
-            operator_status, operator_html = _get_text(f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}")
+            operator_status, operator_html = _get_text(f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}?embedded_tab=factory-order")
             if operator_status != 200:
                 raise AssertionError(f"operator page must return 200, got {operator_status}")
             for expected in (
@@ -128,8 +128,8 @@ def main() -> None:
             ):
                 if expected not in operator_html:
                     raise AssertionError(f"operator page must expose {expected!r}")
-            if "https://docs.google.com/spreadsheets/d/" not in operator_html:
-                raise AssertionError("operator page must expose a clickable live sheet link")
+            if "https://docs.google.com/spreadsheets/d/" in operator_html:
+                raise AssertionError("wb-regional supply surface must not expose legacy Google Sheets as an active link")
             if "value=\"14\"" not in operator_html or "value=\"15\"" not in operator_html or "value=\"250\"" not in operator_html:
                 raise AssertionError("operator page must prefill the WB defaults directly in the form")
 

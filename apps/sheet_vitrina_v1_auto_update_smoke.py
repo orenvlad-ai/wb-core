@@ -155,7 +155,7 @@ def main() -> None:
             base_url = f"http://127.0.0.1:{config.port}"
             refresh_url = f"{base_url}{config.sheet_refresh_path}"
             status_url = f"{base_url}{config.sheet_status_path}"
-            operator_url = f"{base_url}{config.sheet_operator_ui_path}"
+            operator_url = f"{base_url}{config.sheet_operator_ui_path}?embedded_tab=vitrina"
 
             operator_status, operator_html = _get_text(operator_url)
             if operator_status != 200:

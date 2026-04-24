@@ -237,7 +237,14 @@ def main() -> None:
                 raise AssertionError(f"web-vitrina page route must return 200, got {page_status}")
             for expected in (
                 "Web-витрина",
-                "Операторский сайт",
+                "Витрина",
+                "Расчет поставок",
+                "Отчеты",
+                'data-unified-tab-button="vitrina"',
+                'data-unified-tab-button="factory-order"',
+                'data-unified-tab-button="reports"',
+                'data-operator-embed-frame="factory-order"',
+                'data-operator-embed-frame="reports"',
                 DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
                 DEFAULT_SHEET_OPERATOR_UI_PATH,
                 "surface=page_composition",
@@ -267,10 +274,23 @@ def main() -> None:
                     raise AssertionError(f"web-vitrina page shell must expose {expected!r}")
             if "data-retry-button" in page_html:
                 raise AssertionError("web-vitrina page must not render the removed refresh button")
-            if "Обновление данных" in page_html or "data-update-summary" in page_html:
+            if 'data-unified-tab-button="update"' in page_html or ">Обновление данных</button>" in page_html or "data-update-summary" in page_html:
                 raise AssertionError("web-vitrina page must not render the removed update data block")
             if page_html.index("data-loading-table") > page_html.index("data-activity-log-body"):
                 raise AssertionError("loading table must be rendered before the secondary log block")
+
+            operator_status, operator_html = _get_text(f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}")
+            if operator_status != 200:
+                raise AssertionError(f"operator compat route must return 200, got {operator_status}")
+            for expected in (
+                'data-unified-tab-button="vitrina"',
+                'data-unified-tab-button="factory-order"',
+                'data-unified-tab-button="reports"',
+            ):
+                if expected not in operator_html:
+                    raise AssertionError(f"operator compat route must expose unified token {expected!r}")
+            if ">Обновление данных</button>" in operator_html:
+                raise AssertionError("operator compat route must not expose the old update-data top tab")
 
             dated_status, dated_payload = _get_json(
                 f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?as_of_date=2026-04-19"

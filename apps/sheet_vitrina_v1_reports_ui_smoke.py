@@ -101,11 +101,11 @@ def main() -> None:
         raise AssertionError("operator page must restore persisted UI state from browser storage")
     if "window.localStorage.setItem(OPERATOR_UI_STORAGE_KEY" not in html:
         raise AssertionError("operator page must persist tab/subsection/SKU state into browser storage")
-    if 'activateTab(persistedOperatorUiState.active_tab || DEFAULT_ACTIVE_TAB);' not in html:
+    if "isEmbeddedMode ? configuredInitialTab : (persistedOperatorUiState.active_tab || DEFAULT_ACTIVE_TAB)" not in html:
         raise AssertionError("top-level tab must restore from persisted browser state")
-    if 'activateReportSection(persistedOperatorUiState.report_section || DEFAULT_REPORT_SECTION);' not in html:
+    if "persistedOperatorUiState.report_section || DEFAULT_REPORT_SECTION" not in html:
         raise AssertionError("reports subsection must restore from persisted browser state")
-    if 'activateSupplySection(persistedOperatorUiState.supply_section || DEFAULT_SUPPLY_SECTION);' not in html:
+    if "persistedOperatorUiState.supply_section || DEFAULT_SUPPLY_SECTION" not in html:
         raise AssertionError("supply subsection must restore from persisted browser state")
     if 'setStockReportValidation("Выберите хотя бы один SKU");' not in html:
         raise AssertionError("stock-report selector must reject empty SKU selection before recalculation")
