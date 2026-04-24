@@ -870,25 +870,30 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
     if route == "web_vitrina_page":
         body = str(result.get("body_excerpt", ""))
         tokens = [
-            "Phase 4 Web-Vitrina Page Composition",
             "Web-витрина",
+            "Операторский сайт",
+            "Загрузить и обновить",
             DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
             route_paths["SHEET_VITRINA_OPERATOR_UI_PATH"],
             "surface=page_composition",
             "web_vitrina_page_composition",
-            "web_vitrina_view_model",
-            "web_vitrina_gravity_table_adapter",
+            "data-top-panel",
             "data-filter-controls",
             "data-loading-table",
             "data-loading-table-head",
             "data-loading-table-body",
+            "Действия и состояния",
             "Загрузка данных",
+            "Обновить группу",
+            "Проверить сессию",
+            "Восстановить сессию",
+            "Скачать лаунчер",
             "Лог",
         ]
         missing_tokens = [token for token in tokens if token not in body]
         removed_tokens = [
             token
-            for token in ("data-update-summary",)
+            for token in ("data-update-summary", "data-retry-button", "Обновление данных")
             if token in body
         ]
         evaluation["ok"] = (
