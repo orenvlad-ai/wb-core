@@ -53,7 +53,8 @@ def main() -> None:
             )
             if route_hits["count"] != 0:
                 raise AssertionError(f"unsupported date must fail client-side before POST, got {route_hits}")
-            page.locator("[data-refresh-source-group-date='wb_api']").fill("2026-04-21")
+            valid_refresh_date = "2026-04-20"
+            page.locator("[data-refresh-source-group-date='wb_api']").fill(valid_refresh_date)
             with page.expect_response("**/v1/sheet-vitrina-v1/web-vitrina/group-refresh") as response_info:
                 group_button.click()
             response = response_info.value
@@ -63,7 +64,7 @@ def main() -> None:
                     f"{response.request.method} {response.status}"
                 )
             request_payload = json.loads(response.request.post_data or "{}")
-            if request_payload != {"async": True, "source_group_id": "wb_api", "as_of_date": "2026-04-21"}:
+            if request_payload != {"async": True, "source_group_id": "wb_api", "as_of_date": valid_refresh_date}:
                 raise AssertionError(f"group refresh must send date-scoped payload, got {request_payload}")
             page.wait_for_function(
                 """() => {
@@ -71,7 +72,7 @@ def main() -> None:
                   const log = document.querySelector('[data-activity-log-body]');
                   return !!group && !!log
                     && group.textContent.includes('Ошибка запуска')
-                    && log.textContent.includes('Не удалось запустить обновление группы WB API за 2026-04-21: HTTP 404 route not found');
+                    && log.textContent.includes('Не удалось запустить обновление группы WB API за 2026-04-20: HTTP 404 route not found');
                 }""",
                 timeout=5000,
             )
