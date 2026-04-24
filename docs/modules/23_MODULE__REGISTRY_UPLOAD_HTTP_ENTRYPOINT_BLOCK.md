@@ -204,7 +204,7 @@ update_note: "Обновлён под current operator report checkpoint: existi
     - one-day historical mode via existing `as_of_date`
     - period mode via existing route `date_from/date_to`
     - repo-owned inline calendar/preset panel with buttons `Сбросить` / `Сохранить`
-    - server-driven blocks `Лог` / `Загрузка данных` / `Обновление данных`, where source items now surface Russian primary labels/descriptions, short sanitized Russian warning/error reasons, secondary technical source text and server-side severity sorting `error -> warning -> success`
+    - server-driven activity surface now renders `Загрузка данных` first as a full-width compact table over the same truthful source outcomes, with server/business today/yesterday status columns, reason columns, Russian metric labels and secondary technical endpoint text; `Лог` renders below it and keeps the existing job/log download contour; the former `Обновление данных` activity block is not an active page-composition surface
     - raw STATUS/job note, JSON fragments, traceback text, request ids and similar technical payload stay in existing log/download contour and must not leak into the main summary-card reason
     - `Свежесть данных` remains server-owned, but its user-facing value now uses the same readable timestamp formatter as browser-owned `Последнее обновление страницы` instead of raw ISO `T/Z`
     - `export_layer`

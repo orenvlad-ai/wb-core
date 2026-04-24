@@ -879,13 +879,31 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "web_vitrina_view_model",
             "web_vitrina_gravity_table_adapter",
             "data-filter-controls",
+            "data-loading-table",
+            "data-loading-table-head",
+            "data-loading-table-body",
+            "Загрузка данных",
+            "Лог",
         ]
         missing_tokens = [token for token in tokens if token not in body]
-        evaluation["ok"] = status == 200 and "text/html" in content_type and not missing_tokens
+        removed_tokens = [
+            token
+            for token in ("data-update-summary",)
+            if token in body
+        ]
+        evaluation["ok"] = (
+            status == 200
+            and "text/html" in content_type
+            and not missing_tokens
+            and not removed_tokens
+        )
         evaluation["detail"] = (
             "web-vitrina page composition shell ok"
             if evaluation["ok"]
-            else f"expected 200 text/html with web-vitrina page tokens, missing={missing_tokens}"
+            else (
+                "expected 200 text/html with web-vitrina page tokens, "
+                f"missing={missing_tokens}, removed_tokens_present={removed_tokens}"
+            )
         )
         return evaluation
 
@@ -903,6 +921,8 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
                 and json_body.get("composition_name") == "web_vitrina_page_composition"
                 and json_body.get("composition_version") == "v1"
                 and isinstance(json_body.get("table_surface"), dict)
+                and isinstance((json_body.get("activity_surface") or {}).get("loading_table"), dict)
+                and "update_summary" not in (json_body.get("activity_surface") or {})
             )
             evaluation["detail"] = (
                 "web-vitrina page composition surface ok"

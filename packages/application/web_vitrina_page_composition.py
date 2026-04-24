@@ -318,10 +318,14 @@ def _count_rows(rows: list[Mapping[str, Any]], *, key: str) -> dict[str, int]:
 
 def _normalize_activity_surface(activity_surface: Mapping[str, Any] | None) -> dict[str, Any]:
     surface = dict(activity_surface or {})
+    upload_summary = _normalize_endpoint_block(surface.get("upload_summary"), default_title="Загрузка данных")
     return {
         "log_block": _normalize_log_block(surface.get("log_block")),
-        "upload_summary": _normalize_endpoint_block(surface.get("upload_summary"), default_title="Загрузка данных"),
-        "update_summary": _normalize_endpoint_block(surface.get("update_summary"), default_title="Обновление данных"),
+        "upload_summary": upload_summary,
+        "loading_table": _normalize_loading_table(
+            surface.get("loading_table"),
+            upload_summary=upload_summary,
+        ),
     }
 
 
@@ -370,6 +374,21 @@ def _normalize_endpoint_block(value: Any, *, default_title: str) -> dict[str, An
                 "status_label": str(item_payload.get("status_label") or ""),
                 "tone": str(item_payload.get("tone") or "neutral"),
                 "detail": str(item_payload.get("detail") or ""),
+                "slot_statuses": [
+                    {
+                        "temporal_slot": str(slot_payload.get("temporal_slot") or ""),
+                        "status": str(slot_payload.get("status") or ""),
+                        "tone": str(slot_payload.get("tone") or "neutral"),
+                        "status_label": str(slot_payload.get("status_label") or ""),
+                        "reason": str(slot_payload.get("reason") or ""),
+                        "snapshot_date": str(slot_payload.get("snapshot_date") or ""),
+                        "date": str(slot_payload.get("date") or ""),
+                        "date_from": str(slot_payload.get("date_from") or ""),
+                        "date_to": str(slot_payload.get("date_to") or ""),
+                    }
+                    for slot_payload in (item_payload.get("slot_statuses") or [])
+                    if isinstance(slot_payload, Mapping)
+                ],
                 "severity_rank": int(item_payload.get("severity_rank") or 0),
                 "source_order": int(item_payload.get("source_order") or 0),
             }
@@ -381,6 +400,72 @@ def _normalize_endpoint_block(value: Any, *, default_title: str) -> dict[str, An
         "updated_at": str(payload.get("updated_at") or ""),
         "items": items,
         "empty_message": str(payload.get("empty_message") or "Статусы по источникам пока недоступны."),
+    }
+
+
+def _normalize_loading_table(value: Any, *, upload_summary: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(value or {})
+    today_date = str(payload.get("today_date") or "")
+    yesterday_date = str(payload.get("yesterday_date") or "")
+    columns = [
+        {
+            "id": str(column_payload.get("id") or ""),
+            "label": str(column_payload.get("label") or ""),
+        }
+        for column_payload in (payload.get("columns") or [])
+        if isinstance(column_payload, Mapping)
+    ]
+    if not columns:
+        columns = [
+            {"id": "source", "label": "Источник"},
+            {"id": "today_status", "label": f"Сегодня: {today_date}".strip()},
+            {"id": "today_reason", "label": "Причина сегодня"},
+            {"id": "yesterday_status", "label": f"Вчера: {yesterday_date}".strip()},
+            {"id": "yesterday_reason", "label": "Причина вчера"},
+            {"id": "metrics", "label": "Метрики"},
+            {"id": "technical_endpoint", "label": "Технический endpoint"},
+        ]
+    rows: list[dict[str, Any]] = []
+    for row in payload.get("rows") or []:
+        row_payload = dict(row or {})
+        rows.append(
+            {
+                "source_key": str(row_payload.get("source_key") or ""),
+                "source_label": str(row_payload.get("source_label") or row_payload.get("source_key") or ""),
+                "today": _normalize_loading_table_status(row_payload.get("today"), date=today_date),
+                "today_reason": str(row_payload.get("today_reason") or ""),
+                "yesterday": _normalize_loading_table_status(row_payload.get("yesterday"), date=yesterday_date),
+                "yesterday_reason": str(row_payload.get("yesterday_reason") or ""),
+                "metric_labels": [str(item) for item in (row_payload.get("metric_labels") or []) if str(item)],
+                "technical_endpoint": str(row_payload.get("technical_endpoint") or ""),
+            }
+        )
+    return {
+        "title": str(payload.get("title") or "Загрузка данных"),
+        "subtitle": str(payload.get("subtitle") or upload_summary.get("subtitle") or ""),
+        "detail": str(payload.get("detail") or upload_summary.get("detail") or ""),
+        "updated_at": str(payload.get("updated_at") or upload_summary.get("updated_at") or ""),
+        "today_date": today_date,
+        "yesterday_date": yesterday_date,
+        "columns": columns,
+        "rows": rows,
+        "empty_message": str(
+            payload.get("empty_message")
+            or upload_summary.get("empty_message")
+            or "Статусы по источникам пока недоступны."
+        ),
+    }
+
+
+def _normalize_loading_table_status(value: Any, *, date: str) -> dict[str, Any]:
+    payload = dict(value or {})
+    ok = bool(payload.get("ok"))
+    return {
+        "date": str(payload.get("date") or date),
+        "ok": ok,
+        "label": str(payload.get("label") or ("OK" if ok else "не OK")),
+        "tone": str(payload.get("tone") or ("success" if ok else "error")),
+        "reason": str(payload.get("reason") or ("Готово" if ok else "нет подтверждённого статуса за дату")),
     }
 
 

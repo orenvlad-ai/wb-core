@@ -162,10 +162,34 @@ def main() -> None:
         activity_surface = composition["activity_surface"]
         if activity_surface["log_block"]["title"] != "Лог" or not activity_surface["log_block"]["download_path"]:
             raise AssertionError(f"activity log block mismatch, got {activity_surface['log_block']}")
+        if "update_summary" in activity_surface:
+            raise AssertionError(f"page composition must not expose the removed update block, got {activity_surface}")
+        loading_table = activity_surface["loading_table"]
         upload_items = activity_surface["upload_summary"]["items"]
-        update_items = activity_surface["update_summary"]["items"]
-        if [item["endpoint_id"] for item in upload_items] != [item["endpoint_id"] for item in update_items]:
-            raise AssertionError(f"upload/update endpoint ids must stay aligned, got {activity_surface}")
+        loading_rows = loading_table["rows"]
+        loading_columns = {item["id"]: item for item in loading_table["columns"]}
+        if [row["source_key"] for row in loading_rows] != [item["source_key"] for item in upload_items]:
+            raise AssertionError(f"loading table rows must follow the upload source truth, got {activity_surface}")
+        if loading_table["today_date"] != "2026-04-21" or loading_table["yesterday_date"] != "2026-04-20":
+            raise AssertionError(f"loading table dates must be server/business dates, got {loading_table}")
+        if loading_columns["today_status"]["label"] != "Сегодня: 2026-04-21":
+            raise AssertionError(f"today loading column mismatch, got {loading_columns}")
+        if loading_columns["yesterday_status"]["label"] != "Вчера: 2026-04-20":
+            raise AssertionError(f"yesterday loading column mismatch, got {loading_columns}")
+        for required_column in ("today_reason", "yesterday_reason", "metrics", "technical_endpoint"):
+            if required_column not in loading_columns:
+                raise AssertionError(f"loading table missing column {required_column!r}: {loading_columns}")
+        first_loading_row = loading_rows[0]
+        if first_loading_row["source_label"] != "Цены и скидки":
+            raise AssertionError(f"loading table source labels must stay Russian, got {loading_table}")
+        if first_loading_row["today"]["label"] != "не OK" or first_loading_row["today_reason"] != "данные не получены":
+            raise AssertionError(f"loading table today status/reason mismatch, got {loading_table}")
+        if first_loading_row["yesterday"]["label"] != "OK" or first_loading_row["yesterday_reason"] != "Готово":
+            raise AssertionError(f"loading table yesterday status/reason mismatch, got {loading_table}")
+        if "Цена со скидкой (₽)" not in first_loading_row["metric_labels"]:
+            raise AssertionError(f"loading table must expose Russian metric labels, got {first_loading_row}")
+        if first_loading_row["technical_endpoint"] != "POST /api/v2/list/goods/filter":
+            raise AssertionError(f"loading table technical endpoint mismatch, got {first_loading_row}")
         if [item["status_label"] for item in upload_items] != ["Ошибка", "Внимание", "Успешно"]:
             raise AssertionError(f"upload activity summary statuses mismatch, got {activity_surface}")
         if [item["label_ru"] for item in upload_items] != ["Цены и скидки", "Поисковая аналитика", "Воронка продавца"]:
@@ -174,8 +198,6 @@ def main() -> None:
             raise AssertionError(f"upload activity reason mismatch, got {activity_surface}")
         if "web_source_snapshot" not in upload_items[1]["technical_text"]:
             raise AssertionError(f"upload activity technical text mismatch, got {activity_surface}")
-        if update_items[1]["status_label"] != "Внимание" or update_items[1]["reason_ru"] != "использована подтверждённая версия из runtime cache":
-            raise AssertionError(f"activity summary items mismatch, got {activity_surface}")
         ordered_row_ids = [row["row_id"] for row in composition["table_surface"]["rows"]]
         expected_row_ids = [
             "TOTAL|total_view_count",
@@ -258,7 +280,7 @@ def main() -> None:
         print("web_vitrina_page_composition_state: ok ->", composition["meta"]["current_state"], composition["status_badge"]["tone"])
         print("web_vitrina_page_composition_history: ok ->", historical_access["current_mode"], historical_access["supported_query_mode"], len(historical_access["options"]))
         print("web_vitrina_page_composition_period: ok ->", period_composition["historical_access"]["selected_date_from"], period_composition["historical_access"]["selected_date_to"])
-        print("web_vitrina_page_composition_activity_surface: ok ->", len(upload_items), len(update_items))
+        print("web_vitrina_page_composition_activity_surface: ok ->", len(upload_items), len(loading_rows))
         print("web_vitrina_page_composition_filters: ok ->", ",".join(sorted(controls)))
         print("web_vitrina_page_composition_table: ok ->", len(composition["table_surface"]["columns"]), len(composition["table_surface"]["rows"]))
         print("web_vitrina_page_composition_error: ok ->", error_payload["meta"]["current_state"])
@@ -434,6 +456,92 @@ def _build_activity_surface_fixture() -> dict[str, object]:
                     "status_label": "Успешно",
                     "tone": "success",
                     "detail": "Показы карточки, открытия и базовая конверсия за дату.",
+                },
+            ],
+            "empty_message": "",
+        },
+        "loading_table": {
+            "title": "Загрузка данных",
+            "subtitle": "Последний завершённый refresh-run.",
+            "detail": "job fixture-refresh-job-1 · refresh",
+            "updated_at": "2026-04-20T12:05:00Z",
+            "today_date": "2026-04-21",
+            "yesterday_date": "2026-04-20",
+            "columns": [
+                {"id": "source", "label": "Источник"},
+                {"id": "today_status", "label": "Сегодня: 2026-04-21"},
+                {"id": "today_reason", "label": "Причина сегодня"},
+                {"id": "yesterday_status", "label": "Вчера: 2026-04-20"},
+                {"id": "yesterday_reason", "label": "Причина вчера"},
+                {"id": "metrics", "label": "Метрики"},
+                {"id": "technical_endpoint", "label": "Технический endpoint"},
+            ],
+            "rows": [
+                {
+                    "source_key": "prices_snapshot",
+                    "source_label": "Цены и скидки",
+                    "today": {
+                        "date": "2026-04-21",
+                        "ok": False,
+                        "label": "не OK",
+                        "tone": "error",
+                        "reason": "данные не получены",
+                    },
+                    "today_reason": "данные не получены",
+                    "yesterday": {
+                        "date": "2026-04-20",
+                        "ok": True,
+                        "label": "OK",
+                        "tone": "success",
+                        "reason": "Готово",
+                    },
+                    "yesterday_reason": "Готово",
+                    "metric_labels": ["Цена со скидкой (₽)", "Цена продавца (₽)"],
+                    "technical_endpoint": "POST /api/v2/list/goods/filter",
+                },
+                {
+                    "source_key": "web_source_snapshot",
+                    "source_label": "Поисковая аналитика",
+                    "today": {
+                        "date": "2026-04-21",
+                        "ok": False,
+                        "label": "не OK",
+                        "tone": "error",
+                        "reason": "использована подтверждённая версия из runtime cache",
+                    },
+                    "today_reason": "использована подтверждённая версия из runtime cache",
+                    "yesterday": {
+                        "date": "2026-04-20",
+                        "ok": False,
+                        "label": "не OK",
+                        "tone": "error",
+                        "reason": "использована подтверждённая версия из runtime cache",
+                    },
+                    "yesterday_reason": "использована подтверждённая версия из runtime cache",
+                    "metric_labels": ["Показы в поиске", "CTR в поиске"],
+                    "technical_endpoint": "GET /v1/search-analytics/snapshot?date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>",
+                },
+                {
+                    "source_key": "seller_funnel_snapshot",
+                    "source_label": "Воронка продавца",
+                    "today": {
+                        "date": "2026-04-21",
+                        "ok": True,
+                        "label": "OK",
+                        "tone": "success",
+                        "reason": "Готово",
+                    },
+                    "today_reason": "Готово",
+                    "yesterday": {
+                        "date": "2026-04-20",
+                        "ok": True,
+                        "label": "OK",
+                        "tone": "success",
+                        "reason": "Готово",
+                    },
+                    "yesterday_reason": "Готово",
+                    "metric_labels": ["Показы в воронке", "Открытия карточки"],
+                    "technical_endpoint": "GET /v1/sales-funnel/daily?date=<YYYY-MM-DD>",
                 },
             ],
             "empty_message": "",

@@ -242,7 +242,7 @@
 
     .activity-layout {
       display: grid;
-      grid-template-columns: minmax(0, 1.2fr) minmax(250px, 0.9fr) minmax(250px, 0.9fr);
+      grid-template-columns: minmax(0, 1fr);
       gap: 8px;
     }
 
@@ -252,6 +252,10 @@
       background: var(--panel-subtle);
       padding: 10px;
       min-width: 0;
+    }
+
+    .activity-card.is-secondary {
+      background: #ffffff;
     }
 
     .activity-card-header {
@@ -331,6 +335,54 @@
     .activity-summary-list {
       display: grid;
       gap: 7px;
+    }
+
+    .activity-loading-table {
+      margin-top: 8px;
+    }
+
+    .activity-loading-table .table-scroll {
+      max-height: 420px;
+    }
+
+    .activity-loading-table .vitrina-table {
+      width: 100%;
+      min-width: 980px;
+    }
+
+    .activity-loading-table .vitrina-table th,
+    .activity-loading-table .vitrina-table td {
+      white-space: normal;
+      vertical-align: top;
+    }
+
+    .activity-loading-table .vitrina-table th[data-col-id="today_status"],
+    .activity-loading-table .vitrina-table th[data-col-id="yesterday_status"],
+    .activity-loading-table .vitrina-table td[data-col-id="today_status"],
+    .activity-loading-table .vitrina-table td[data-col-id="yesterday_status"] {
+      width: 112px;
+      text-align: center;
+    }
+
+    .activity-loading-table .vitrina-table td[data-col-id="source"],
+    .activity-loading-table .vitrina-table td[data-col-id="technical_endpoint"] {
+      font-weight: 600;
+    }
+
+    .activity-loading-table .vitrina-table td[data-col-id="metrics"] {
+      max-width: 360px;
+    }
+
+    .activity-status-cell {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 54px;
+    }
+
+    .activity-metric-list {
+      display: block;
+      max-width: 360px;
     }
 
     .activity-summary-item {
@@ -1015,6 +1067,24 @@
         <section class="activity-card">
           <div class="activity-card-header">
             <div>
+              <p class="activity-card-title" data-loading-table-title>Загрузка данных</p>
+              <p class="activity-card-subtitle" data-loading-table-subtitle>загрузка статусов…</p>
+            </div>
+          </div>
+          <p class="activity-summary-meta" data-loading-table-meta>Ожидание server summary…</p>
+          <div class="table-shell activity-loading-table" data-loading-table-shell>
+            <div class="table-scroll">
+              <table class="vitrina-table" data-loading-table>
+                <thead data-loading-table-head></thead>
+                <tbody data-loading-table-body></tbody>
+              </table>
+            </div>
+          </div>
+          <p class="activity-empty is-hidden" data-loading-table-empty>Статусы по источникам пока недоступны.</p>
+        </section>
+        <section class="activity-card is-secondary">
+          <div class="activity-card-header">
+            <div>
               <p class="activity-card-title" data-activity-log-title>Лог</p>
               <p class="activity-card-subtitle" data-activity-log-subtitle>загрузка лога…</p>
             </div>
@@ -1025,26 +1095,6 @@
           <div class="activity-log-actions">
             <a class="button secondary is-disabled" data-activity-log-download href="#" download>Скачать лог</a>
           </div>
-        </section>
-        <section class="activity-card">
-          <div class="activity-card-header">
-            <div>
-              <p class="activity-card-title">Загрузка данных</p>
-              <p class="activity-card-subtitle" data-upload-summary-subtitle>загрузка статусов…</p>
-            </div>
-          </div>
-          <p class="activity-summary-meta" data-upload-summary-meta>Ожидание server summary…</p>
-          <div class="activity-summary-list" data-upload-summary-list>Загрузка…</div>
-        </section>
-        <section class="activity-card">
-          <div class="activity-card-header">
-            <div>
-              <p class="activity-card-title">Обновление данных</p>
-              <p class="activity-card-subtitle" data-update-summary-subtitle>загрузка статусов…</p>
-            </div>
-          </div>
-          <p class="activity-summary-meta" data-update-summary-meta>Ожидание server summary…</p>
-          <div class="activity-summary-list" data-update-summary-list>Загрузка…</div>
         </section>
       </div>
     </section>
@@ -1195,12 +1245,13 @@
     const activityLogDetailNode = document.querySelector("[data-activity-log-detail]");
     const activityLogBodyNode = document.querySelector("[data-activity-log-body]");
     const activityLogDownloadNode = document.querySelector("[data-activity-log-download]");
-    const uploadSummarySubtitleNode = document.querySelector("[data-upload-summary-subtitle]");
-    const uploadSummaryMetaNode = document.querySelector("[data-upload-summary-meta]");
-    const uploadSummaryListNode = document.querySelector("[data-upload-summary-list]");
-    const updateSummarySubtitleNode = document.querySelector("[data-update-summary-subtitle]");
-    const updateSummaryMetaNode = document.querySelector("[data-update-summary-meta]");
-    const updateSummaryListNode = document.querySelector("[data-update-summary-list]");
+    const loadingTableTitleNode = document.querySelector("[data-loading-table-title]");
+    const loadingTableSubtitleNode = document.querySelector("[data-loading-table-subtitle]");
+    const loadingTableMetaNode = document.querySelector("[data-loading-table-meta]");
+    const loadingTableShellNode = document.querySelector("[data-loading-table-shell]");
+    const loadingTableHeadNode = document.querySelector("[data-loading-table-head]");
+    const loadingTableBodyNode = document.querySelector("[data-loading-table-body]");
+    const loadingTableEmptyNode = document.querySelector("[data-loading-table-empty]");
     const filterControlsNode = document.querySelector("[data-filter-controls]");
     const filterMetaNode = document.querySelector("[data-filter-meta]");
     const filterSummaryNode = document.querySelector("[data-filter-summary]");
@@ -1609,22 +1660,12 @@
         activityLogDownloadNode.setAttribute("aria-disabled", "true");
         activityLogDownloadNode.tabIndex = -1;
       }
-      renderEndpointSummaryBlock(
-        uploadSummarySubtitleNode,
-        uploadSummaryMetaNode,
-        uploadSummaryListNode,
-        normalizedSurface.upload_summary || {},
-      );
-      renderEndpointSummaryBlock(
-        updateSummarySubtitleNode,
-        updateSummaryMetaNode,
-        updateSummaryListNode,
-        normalizedSurface.update_summary || {},
-      );
+      renderLoadingTable(normalizedSurface.loading_table || {});
     }
 
-    function renderEndpointSummaryBlock(subtitleNode, metaNode, listNode, block) {
-      subtitleNode.textContent = String(block.subtitle || "");
+    function renderLoadingTable(block) {
+      loadingTableTitleNode.textContent = String(block.title || "Загрузка данных");
+      loadingTableSubtitleNode.textContent = String(block.subtitle || "");
       const detailParts = [];
       if (block.updated_at) {
         detailParts.push(formatTimestampDisplay(block.updated_at));
@@ -1632,31 +1673,79 @@
       if (block.detail) {
         detailParts.push(String(block.detail));
       }
-      metaNode.textContent = detailParts.join(" · ") || "Статусы по источникам пока недоступны.";
+      loadingTableMetaNode.textContent = detailParts.join(" · ") || "Статусы по источникам пока недоступны.";
+      const columns = Array.isArray(block.columns) ? block.columns : [];
       const items = Array.isArray(block.items) ? block.items : [];
-      if (!items.length) {
-        listNode.innerHTML = '<p class="activity-empty">' + escapeHtml(block.empty_message || "Статусы по источникам пока недоступны.") + "</p>";
+      const rows = Array.isArray(block.rows) ? block.rows : items.map(itemToLegacyLoadingRow);
+      if (!rows.length || !columns.length) {
+        loadingTableShellNode.classList.add("is-hidden");
+        loadingTableEmptyNode.classList.remove("is-hidden");
+        loadingTableEmptyNode.textContent = String(block.empty_message || "Статусы по источникам пока недоступны.");
         return;
       }
-      listNode.innerHTML = items.map(function(item) {
-        const title = String(item.label_ru || item.endpoint_label || item.source_key || item.endpoint_id || "");
-        const description = String(item.description_ru || "");
-        const reason = String(item.reason_ru || "");
-        const technicalText = String(item.technical_text || item.technical_key || item.source_key || item.endpoint_id || "");
-        const detail = description && reason
-          ? description + " Причина: " + reason
-          : (description || reason || String(item.detail || item.source_key || ""));
-        return [
-          '<article class="activity-summary-item" data-activity-summary-item="' + escapeHtml(item.endpoint_id || "") + '">',
-          '<div class="activity-summary-top">',
-          '<p class="activity-summary-endpoint">' + escapeHtml(title) + '</p>',
-          '<span class="status-pill tone-' + escapeHtml(normalizeTone(item.tone)) + '">' + escapeHtml(item.status_label || "") + '</span>',
-          '</div>',
-          '<p class="activity-card-detail">' + escapeHtml(detail) + '</p>',
-          (technicalText ? '<p class="activity-summary-meta">' + escapeHtml(technicalText) + '</p>' : ''),
-          '</article>'
-        ].join("");
+      loadingTableShellNode.classList.remove("is-hidden");
+      loadingTableEmptyNode.classList.add("is-hidden");
+      loadingTableHeadNode.innerHTML = "<tr>" + columns.map(function(column) {
+        return '<th data-col-id="' + escapeHtml(column.id || "") + '">' + escapeHtml(column.label || "") + "</th>";
+      }).join("") + "</tr>";
+      loadingTableBodyNode.innerHTML = rows.map(function(row) {
+        return '<tr data-loading-source="' + escapeHtml(row.source_key || "") + '">' + columns.map(function(column) {
+          return '<td data-col-id="' + escapeHtml(column.id || "") + '">' + renderLoadingTableCell(column.id, row) + "</td>";
+        }).join("") + "</tr>";
       }).join("");
+    }
+
+    function itemToLegacyLoadingRow(item) {
+      const fallbackStatus = {
+        label: item.status_label || "",
+        tone: item.tone || "neutral",
+        reason: item.reason_ru || item.detail || ""
+      };
+      return {
+        source_key: item.source_key || item.endpoint_id || "",
+        source_label: item.label_ru || item.endpoint_label || item.source_key || item.endpoint_id || "",
+        today: fallbackStatus,
+        today_reason: fallbackStatus.reason,
+        yesterday: fallbackStatus,
+        yesterday_reason: fallbackStatus.reason,
+        metric_labels: [],
+        technical_endpoint: item.endpoint_label || item.technical_text || item.technical_key || item.source_key || ""
+      };
+    }
+
+    function renderLoadingTableCell(columnId, row) {
+      if (columnId === "source") {
+        return escapeHtml(row.source_label || row.source_key || "");
+      }
+      if (columnId === "today_status") {
+        return renderLoadingStatusCell(row.today || {});
+      }
+      if (columnId === "today_reason") {
+        return escapeHtml(row.today_reason || (row.today && row.today.reason) || "");
+      }
+      if (columnId === "yesterday_status") {
+        return renderLoadingStatusCell(row.yesterday || {});
+      }
+      if (columnId === "yesterday_reason") {
+        return escapeHtml(row.yesterday_reason || (row.yesterday && row.yesterday.reason) || "");
+      }
+      if (columnId === "metrics") {
+        const labels = Array.isArray(row.metric_labels) ? row.metric_labels : [];
+        return '<span class="activity-metric-list">' + escapeHtml(labels.join(", ") || "—") + "</span>";
+      }
+      if (columnId === "technical_endpoint") {
+        return escapeHtml(row.technical_endpoint || "");
+      }
+      return "";
+    }
+
+    function renderLoadingStatusCell(status) {
+      const tone = normalizeTone(status.tone || (status.ok ? "success" : "error"));
+      return [
+        '<span class="activity-status-cell status-pill tone-' + escapeHtml(tone) + '">',
+        escapeHtml(status.label || (status.ok ? "OK" : "не OK")),
+        '</span>'
+      ].join("");
     }
 
     function buildPageRefreshCard() {

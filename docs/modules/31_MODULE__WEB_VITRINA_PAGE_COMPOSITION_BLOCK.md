@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-31-WEB-VITRINA-PAGE-COMPOSITION-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded phase-4 слою `web_vitrina_page_composition_block`."
-scope: "Real page composition для `GET /sheet-vitrina-v1/vitrina`: separate sibling page shell, split page-refresh/data-freshness summary, server-driven blocks `Лог` / `Загрузка данных` / `Обновление данных`, semantic green/yellow/red truth taxonomy, bounded `Обновить` vs `Загрузить и обновить` action semantics, filters area, table container, truthful loading/empty/error states и minimal inline client island поверх stable server seams `web_vitrina_contract -> web_vitrina_view_model -> web_vitrina_gravity_table_adapter` без SPA/platform redesign."
+scope: "Real page composition для `GET /sheet-vitrina-v1/vitrina`: separate sibling page shell, split page-refresh/data-freshness summary, server-driven full-width table `Загрузка данных`, secondary block `Лог`, semantic green/red truth taxonomy for today/yesterday source status, bounded `Обновить` vs `Загрузить и обновить` action semantics, filters area, table container, truthful loading/empty/error states и minimal inline client island поверх stable server seams `web_vitrina_contract -> web_vitrina_view_model -> web_vitrina_gravity_table_adapter` без SPA/platform redesign."
 source_basis:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
@@ -69,10 +69,10 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - two truthful actions:
     - `Обновить` = cheap reread текущего page composition/current server-side snapshot
     - `Загрузить и обновить` = canonical server-side refresh from external sources + page reread, without Google Sheet write path
-  - three server-driven action-adjacent information blocks:
-    - `Лог` = compact fixed-height tail of the last relevant refresh-run plus `Скачать лог` via existing job/log contour; if exact transient job for the visible snapshot is unavailable, block must show persisted semantic fallback instead of stale green success
-    - `Загрузка данных` = per-source semantic upload/fetch result from the last relevant refresh-run log or, when exact job association is unavailable, from persisted source outcomes of the visible snapshot; each item keeps Russian primary label/description, short sanitized Russian warning/error reason and only secondary technical source/endpoint text
-    - `Обновление данных` = per-source semantic materialization/update result from the persisted `STATUS` rows of the current read-side snapshot with the same human-readable item contract and server-side severity sorting `error -> warning -> success`
+  - two server-driven action-adjacent information blocks:
+    - `Загрузка данных` = main full-width compact table derived from the same per-source upload/fetch truth: rows are human source groups, columns show server/business today and yesterday statuses, reason text, Russian metric labels and the secondary technical endpoint
+    - `Лог` = compact fixed-height tail below the loading table plus `Скачать лог` via existing job/log contour; if exact transient job for the visible snapshot is unavailable, block must show persisted semantic fallback instead of stale green success
+    - former `Обновление данных` is not rendered as a page-composition activity block; persisted `STATUS` rows remain internal truth for status/read contracts
   - filters area
   - table container
   - truthful `loading / empty / error` states
@@ -90,7 +90,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - render the received page payload
   - keep only local filter/search/sort state
   - keep only browser-owned page reread timestamp for `Последнее обновление страницы`
-  - keep zero ownership over job/log/status truth for `Лог`, `Загрузка данных` or `Обновление данных`
+  - keep zero ownership over job/log/status truth for `Лог` or `Загрузка данных`
   - never assemble canonical truth
   - never compute business metrics
   - never replace the server contract/view-model/adapter owner
@@ -179,13 +179,13 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - `spp` / `fin_report_daily` stay green when `yesterday_closed` is confirmed and intraday `today_current` only produced tolerated non-final current-day output;
   - `seller_funnel_snapshot` / `web_source_snapshot` remain strict two-slot sources and keep the badge/cards degraded on broken `today_current`.
 - `Загрузить и обновить` on the vitrina now reuse-ит the canonical refresh contour and no longer depends on `/load` or Google Sheet auth to refresh the web-vitrina itself.
-- `Лог` / `Загрузка данных` / `Обновление данных` stay server-driven:
-  - log preview and `Скачать лог` reuse the existing in-memory job/log contour
-  - upload summary is derived from the last relevant refresh job log and is not overwritten by cheap reread; if exact job association is unavailable, page shows persisted-source fallback with warning/error tone rather than unrelated stale run
-  - update summary is derived from persisted `STATUS` rows of the current read-side snapshot and therefore may change only when the snapshot truth changes
-  - both blocks now sort item-ы server-side as `error -> warning -> success` while preserving canonical source order inside each severity bucket
-  - primary text is human Russian copy; technical source key / endpoint text stays secondary and muted
-  - warning/error `reason_ru` is now strictly summarized on the backend: raw STATUS/job note, JSON blobs, traceback text, request ids and similar technical payload stay only in the existing log/download surface
+- `Загрузка данных` and `Лог` stay server-driven:
+  - loading table is derived from the last relevant refresh job log and is not overwritten by cheap reread; if exact job association is unavailable, page shows persisted-source fallback with truthful non-OK status rather than unrelated stale run
+  - loading table rows keep server-side severity ordering while preserving canonical source order inside each severity bucket
+  - loading table uses server/business `Сегодня: <YYYY-MM-DD>` and `Вчера: <YYYY-MM-DD>` dates, short OK/not-OK cells, reason columns, Russian metric labels from the existing metric registry and secondary technical endpoint text
+  - log preview and `Скачать лог` reuse the existing in-memory job/log contour and render below the loading table
+  - former `Обновление данных` is not an active page-composition activity block; persisted `STATUS` rows remain the underlying read-side truth for status contracts and fallback source outcomes
+  - warning/error reasons are strictly summarized on the backend: raw STATUS/job note, JSON blobs, traceback text, request ids and similar technical payload stay only in the existing log/download surface
   - for bot-backed families an invalidated seller session is surfaced as short human reason (`сессия seller portal больше не действует; требуется повторный вход`) instead of generic `Template request ... was not captured`
 - Historical period UX is intentionally thin:
   - calendar/preset panel lives in the same server template
