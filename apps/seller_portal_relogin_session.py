@@ -1034,19 +1034,20 @@ def _compact_status_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _compact_page_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
     surface = payload.get("activity_surface") or {}
-    update = surface.get("update_summary") or {}
-    items = update.get("items") or []
+    loading_table = surface.get("loading_table") or {}
+    items = loading_table.get("rows") or []
     compact = []
     for item in items:
         if not isinstance(item, dict):
             continue
         if str(item.get("source_key") or "") not in {"seller_funnel_snapshot", "web_source_snapshot"}:
             continue
+        today = item.get("today") if isinstance(item.get("today"), dict) else {}
         compact.append(
             {
                 "source_key": item.get("source_key"),
-                "tone": item.get("tone"),
-                "reason_ru": item.get("reason_ru"),
+                "tone": today.get("tone"),
+                "reason_ru": item.get("today_reason") or today.get("reason"),
             }
         )
     return compact

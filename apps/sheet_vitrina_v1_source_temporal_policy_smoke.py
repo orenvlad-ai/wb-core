@@ -122,27 +122,27 @@ def main() -> None:
         )
         if composition_payload["status_badge"]["tone"] != "error":
             raise AssertionError(f"top badge must follow required-slot failures only, got {composition_payload['status_badge']}")
-        update_items = composition_payload["activity_surface"]["update_summary"]["items"]
-        if [item["endpoint_id"] for item in update_items[:2]] != [
+        loading_rows = composition_payload["activity_surface"]["loading_table"]["rows"]
+        if [item["source_key"] for item in loading_rows[:2]] != [
             "seller_funnel_snapshot",
             "web_source_snapshot",
         ]:
-            raise AssertionError(f"activity order must stay error -> warning -> success, got {update_items}")
-        item_by_source = {item["endpoint_id"]: item for item in update_items}
-        if item_by_source["stocks"]["tone"] != "success":
+            raise AssertionError(f"activity order must stay error -> warning -> success, got {loading_rows}")
+        item_by_source = {item["source_key"]: item for item in loading_rows}
+        if item_by_source["stocks"]["yesterday"]["tone"] != "success":
             raise AssertionError(f"stocks card must stay green, got {item_by_source['stocks']}")
-        if item_by_source["fin_report_daily"]["tone"] != "success":
+        if item_by_source["fin_report_daily"]["yesterday"]["tone"] != "success":
             raise AssertionError(f"fin_report_daily card must stay green, got {item_by_source['fin_report_daily']}")
-        if item_by_source["spp"]["tone"] != "success":
-            raise AssertionError(f"spp card must stay green, got {item_by_source['spp']}")
-        if item_by_source["seller_funnel_snapshot"]["tone"] != "error":
+        if item_by_source["spp"]["yesterday"]["tone"] != "success":
+            raise AssertionError(f"spp yesterday cell must stay green, got {item_by_source['spp']}")
+        if _loading_row_tone(item_by_source["seller_funnel_snapshot"]) != "error":
             raise AssertionError(f"seller_funnel_snapshot card must stay red, got {item_by_source['seller_funnel_snapshot']}")
-        if item_by_source["web_source_snapshot"]["tone"] != "warning":
-            raise AssertionError(f"web_source_snapshot card must stay yellow, got {item_by_source['web_source_snapshot']}")
-        if item_by_source["prices_snapshot"]["tone"] != "warning":
-            raise AssertionError(f"prices_snapshot current-only rollover card must stay yellow, got {item_by_source['prices_snapshot']}")
-        if item_by_source["ads_bids"]["tone"] != "warning":
-            raise AssertionError(f"ads_bids current-only rollover card must stay yellow, got {item_by_source['ads_bids']}")
+        if _loading_row_tone(item_by_source["web_source_snapshot"]) != "error":
+            raise AssertionError(f"web_source_snapshot loading row must show non-OK, got {item_by_source['web_source_snapshot']}")
+        if _loading_row_tone(item_by_source["prices_snapshot"]) != "error":
+            raise AssertionError(f"prices_snapshot current-only rollover row must show non-OK, got {item_by_source['prices_snapshot']}")
+        if _loading_row_tone(item_by_source["ads_bids"]) != "error":
+            raise AssertionError(f"ads_bids current-only rollover row must show non-OK, got {item_by_source['ads_bids']}")
 
         print("source_temporal_policy_counts: ok ->", refresh_status.source_outcome_counts)
         print("stocks_policy_overlay: ok ->", refresh_status.source_temporal_policies["stocks"])
@@ -383,6 +383,19 @@ def _status_row(
         "",
         note,
     ]
+
+
+def _loading_row_tone(row: dict[str, object]) -> str:
+    tones = []
+    for key in ("today", "yesterday"):
+        status = row.get(key)
+        if isinstance(status, dict):
+            tones.append(str(status.get("tone") or "warning"))
+    if "error" in tones:
+        return "error"
+    if any(tone != "success" for tone in tones):
+        return "warning"
+    return "success"
 
 
 if __name__ == "__main__":

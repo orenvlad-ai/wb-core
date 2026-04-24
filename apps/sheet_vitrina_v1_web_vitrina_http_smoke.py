@@ -193,9 +193,20 @@ def main() -> None:
             if "Лог последнего refresh" not in str(log_block.get("subtitle", "")):
                 raise AssertionError(f"web-vitrina log block subtitle mismatch, got {activity_surface}")
             upload_items = activity_surface.get("upload_summary", {}).get("items") or []
-            update_items = activity_surface.get("update_summary", {}).get("items") or []
-            if [item.get("endpoint_id") for item in upload_items] != [item.get("endpoint_id") for item in update_items]:
-                raise AssertionError(f"web-vitrina activity endpoint ids mismatch, got {activity_surface}")
+            if "update_summary" in activity_surface:
+                raise AssertionError(f"web-vitrina activity surface must not expose the removed update block, got {activity_surface}")
+            loading_table = activity_surface.get("loading_table", {})
+            loading_rows = loading_table.get("rows") or []
+            loading_columns = {item.get("id"): item for item in loading_table.get("columns") or []}
+            if [row.get("source_key") for row in loading_rows] != [item.get("source_key") for item in upload_items]:
+                raise AssertionError(f"web-vitrina loading table must follow upload source truth, got {activity_surface}")
+            if not str((loading_columns.get("today_status") or {}).get("label") or "").startswith("Сегодня: "):
+                raise AssertionError(f"web-vitrina loading table today column mismatch, got {loading_table}")
+            if not str((loading_columns.get("yesterday_status") or {}).get("label") or "").startswith("Вчера: "):
+                raise AssertionError(f"web-vitrina loading table yesterday column mismatch, got {loading_table}")
+            for required_column in ("today_reason", "yesterday_reason", "metrics", "technical_endpoint"):
+                if required_column not in loading_columns:
+                    raise AssertionError(f"web-vitrina loading table missing {required_column}, got {loading_table}")
             if [item.get("endpoint_id") for item in upload_items] != [
                 "prices_snapshot",
                 "web_source_snapshot",
@@ -204,16 +215,15 @@ def main() -> None:
                 raise AssertionError(f"upload summary must be sorted error -> warning -> success, got {activity_surface}")
             if [item.get("status_label") for item in upload_items] != ["Ошибка", "Внимание", "Успешно"]:
                 raise AssertionError(f"upload summary status mismatch, got {activity_surface}")
-            if [item.get("status_label") for item in update_items] != ["Ошибка", "Внимание", "Успешно"]:
-                raise AssertionError(f"update summary status mismatch, got {activity_surface}")
             if upload_items[0].get("label_ru") != "Цены и скидки" or upload_items[0].get("reason_ru") != "данные не получены":
                 raise AssertionError(f"upload summary russian label/reason mismatch, got {activity_surface}")
-            if update_items[1].get("label_ru") != "Поисковая аналитика":
-                raise AssertionError(f"update summary warning reason mismatch, got {activity_surface}")
-            if "использована подтверждённая версия из runtime cache" not in str(update_items[1].get("reason_ru") or ""):
-                raise AssertionError(f"update summary warning reason mismatch, got {activity_surface}")
-            if "seller_funnel_snapshot" not in str(update_items[2].get("technical_text") or ""):
-                raise AssertionError(f"activity summary technical id mismatch, got {activity_surface}")
+            first_loading_row = loading_rows[0]
+            if first_loading_row.get("source_label") != "Цены и скидки":
+                raise AssertionError(f"loading table source label mismatch, got {loading_table}")
+            if "Цена со скидкой (₽)" not in (first_loading_row.get("metric_labels") or []):
+                raise AssertionError(f"loading table must expose Russian metric labels, got {first_loading_row}")
+            if first_loading_row.get("technical_endpoint") != "POST /api/v2/list/goods/filter":
+                raise AssertionError(f"loading table technical endpoint mismatch, got {first_loading_row}")
             if composition_payload.get("status_badge", {}).get("tone") != "error":
                 raise AssertionError(f"web-vitrina page composition must reflect semantic error tone, got {composition_payload}")
 
@@ -238,11 +248,18 @@ def main() -> None:
                 "Сохранить",
                 "data-activity-log-body",
                 "data-activity-log-download",
-                "data-upload-summary-list",
-                "data-update-summary-list",
+                "data-loading-table",
+                "data-loading-table-head",
+                "data-loading-table-body",
+                "Загрузка данных",
+                "Лог",
             ):
                 if expected not in page_html:
                     raise AssertionError(f"web-vitrina page shell must expose {expected!r}")
+            if "Обновление данных" in page_html or "data-update-summary" in page_html:
+                raise AssertionError("web-vitrina page must not render the removed update data block")
+            if page_html.index("data-loading-table") > page_html.index("data-activity-log-body"):
+                raise AssertionError("loading table must be rendered before the secondary log block")
 
             dated_status, dated_payload = _get_json(
                 f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?as_of_date=2026-04-19"

@@ -276,15 +276,17 @@ def run_browser_checks(
                 page,
                 allow_empty_log=expected_percent_rows is None,
             )
-            first_upload_item = (initial_activity_surface["upload"]["items"] or [None])[0]
-            if not isinstance(first_upload_item, dict):
-                raise AssertionError(f"activity surface must expose at least one upload item, got {initial_activity_surface}")
-            if first_upload_item.get("title") != "Цены и скидки":
+            first_loading_row = (initial_activity_surface["loading"]["rows"] or [None])[0]
+            if not isinstance(first_loading_row, dict):
+                raise AssertionError(f"activity surface must expose at least one loading row, got {initial_activity_surface}")
+            if first_loading_row.get("source") != "Цены и скидки":
                 raise AssertionError(f"activity titles must prefer human Russian labels, got {initial_activity_surface}")
-            if "Причина:" not in str(first_upload_item.get("detail") or ""):
+            if not first_loading_row.get("today_reason") or not first_loading_row.get("yesterday_reason"):
                 raise AssertionError(f"warning/error activity items must explain the reason in Russian, got {initial_activity_surface}")
-            if "prices_snapshot" not in str(first_upload_item.get("technical") or ""):
-                raise AssertionError(f"activity items must keep the technical id only as secondary text, got {initial_activity_surface}")
+            if "Цена со скидкой" not in str(first_loading_row.get("metrics") or ""):
+                raise AssertionError(f"activity rows must expose Russian metric labels, got {initial_activity_surface}")
+            if "POST /api/v2/list/goods/filter" not in str(first_loading_row.get("technical") or ""):
+                raise AssertionError(f"activity rows must keep the technical endpoint, got {initial_activity_surface}")
             historical_panel_present = (
                 page.locator("[data-history-calendar]").count() == 1
                 and page.locator("[data-history-presets]").count() == 1
@@ -615,13 +617,9 @@ def _check_refresh_loading_status(
         )
     if expect_same_freshness is False and freshness_unchanged:
         raise AssertionError("cheap refresh was expected to advance data freshness but did not")
-    if not _activity_block_matches(previous_activity_surface["upload"], next_activity_surface["upload"]):
+    if not _activity_block_matches(previous_activity_surface["loading"], next_activity_surface["loading"]):
         raise AssertionError(
-            f"cheap refresh must not overwrite the last upload-run state, got {previous_activity_surface} -> {next_activity_surface}"
-        )
-    if not _activity_block_matches(previous_activity_surface["update"], next_activity_surface["update"]):
-        raise AssertionError(
-            f"cheap refresh must keep persisted update summary unchanged when the snapshot is unchanged, got {previous_activity_surface} -> {next_activity_surface}"
+            f"cheap refresh must not overwrite the last loading table state, got {previous_activity_surface} -> {next_activity_surface}"
         )
     return {
         "loading_badge": loading_badge,
@@ -674,13 +672,9 @@ def _check_load_refresh_action(
         )
     if expect_freshness_change is False and freshness_changed:
         raise AssertionError("source refresh was expected to keep data freshness unchanged")
-    if _activity_block_matches(previous_activity_surface["upload"], next_activity_surface["upload"]):
+    if _activity_block_matches(previous_activity_surface["loading"], next_activity_surface["loading"]):
         raise AssertionError(
-            f"source refresh must advance upload-run/log state, got {previous_activity_surface} -> {next_activity_surface}"
-        )
-    if _activity_block_matches(previous_activity_surface["update"], next_activity_surface["update"]):
-        raise AssertionError(
-            f"source refresh must advance persisted update summary in the local fixture, got {previous_activity_surface} -> {next_activity_surface}"
+            f"source refresh must advance loading table/log state, got {previous_activity_surface} -> {next_activity_surface}"
         )
     final_badge = {
         "label": page.locator("[data-status-badge]").inner_text().strip(),
@@ -768,21 +762,26 @@ def _freshness_card_matches(
 def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> dict[str, object]:
     payload = page.evaluate(
         """() => {
-          const readSummary = selector => {
-            const node = document.querySelector(selector);
-            const items = node
-              ? Array.from(node.querySelectorAll('[data-activity-summary-item]')).map(item => ({
-                  endpoint_id: item.getAttribute('data-activity-summary-item') || '',
-                  title: ((item.querySelector('.activity-summary-endpoint') || {}).textContent || '').trim(),
-                  status_label: ((item.querySelector('.status-pill') || {}).textContent || '').trim(),
-                  detail: ((item.querySelector('.activity-card-detail') || {}).textContent || '').trim(),
-                  technical: ((item.querySelector('.activity-summary-meta') || {}).textContent || '').trim()
-                }))
-              : [];
+          const readLoadingTable = () => {
+            const rows = Array.from(document.querySelectorAll('[data-loading-source]')).map(row => ({
+              source_key: row.getAttribute('data-loading-source') || '',
+              source: ((row.querySelector('[data-col-id="source"]') || {}).textContent || '').trim(),
+              today_status: ((row.querySelector('[data-col-id="today_status"]') || {}).textContent || '').trim(),
+              today_reason: ((row.querySelector('[data-col-id="today_reason"]') || {}).textContent || '').trim(),
+              yesterday_status: ((row.querySelector('[data-col-id="yesterday_status"]') || {}).textContent || '').trim(),
+              yesterday_reason: ((row.querySelector('[data-col-id="yesterday_reason"]') || {}).textContent || '').trim(),
+              metrics: ((row.querySelector('[data-col-id="metrics"]') || {}).textContent || '').trim(),
+              technical: ((row.querySelector('[data-col-id="technical_endpoint"]') || {}).textContent || '').trim()
+            }));
+            const headers = Array.from(document.querySelectorAll('[data-loading-table-head] th')).map(node => ({
+              id: node.getAttribute('data-col-id') || '',
+              label: (node.textContent || '').trim()
+            }));
             return {
-              meta: ((document.querySelector(selector === '[data-upload-summary-list]' ? '[data-upload-summary-meta]' : '[data-update-summary-meta]') || {}).textContent || '').trim(),
-              subtitle: ((document.querySelector(selector === '[data-upload-summary-list]' ? '[data-upload-summary-subtitle]' : '[data-update-summary-subtitle]') || {}).textContent || '').trim(),
-              items: items
+              meta: ((document.querySelector('[data-loading-table-meta]') || {}).textContent || '').trim(),
+              subtitle: ((document.querySelector('[data-loading-table-subtitle]') || {}).textContent || '').trim(),
+              headers: headers,
+              rows: rows
             };
           };
           return {
@@ -792,8 +791,8 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
               body: ((document.querySelector('[data-activity-log-body]') || {}).textContent || '').trim(),
               download_href: (document.querySelector('[data-activity-log-download]') || {}).getAttribute('href') || ''
             },
-            upload: readSummary('[data-upload-summary-list]'),
-            update: readSummary('[data-update-summary-list]')
+            loading: readLoadingTable(),
+            update_block_present: !!document.querySelector('[data-update-summary-list]')
           };
         }"""
     )
@@ -802,12 +801,17 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
         and (not payload["log"]["download_href"] or "job?job_id=" not in payload["log"]["download_href"])
     ):
         raise AssertionError(f"log block must keep a truthful job download path, got {payload}")
-    upload_ids = [item["endpoint_id"] for item in payload["upload"]["items"]]
-    update_ids = [item["endpoint_id"] for item in payload["update"]["items"]]
-    if not upload_ids and allow_empty_log:
+    loading_ids = [item["source_key"] for item in payload["loading"]["rows"]]
+    if payload.get("update_block_present"):
+        raise AssertionError(f"removed update summary block must not be present, got {payload}")
+    if not loading_ids and allow_empty_log:
         return payload
-    if not upload_ids or sorted(upload_ids) != sorted(update_ids):
-        raise AssertionError(f"upload/update summary blocks must expose the same endpoint set, got {payload}")
+    if not loading_ids:
+        raise AssertionError(f"loading table must expose source rows, got {payload}")
+    header_labels = [item["label"] for item in payload["loading"]["headers"]]
+    for expected in ("Источник", "Причина сегодня", "Причина вчера", "Метрики", "Технический endpoint"):
+        if expected not in header_labels:
+            raise AssertionError(f"loading table missing header {expected!r}, got {payload}")
     return payload
 
 
@@ -853,7 +857,10 @@ def _activity_block_matches(previous_block: dict[str, object], next_block: dict[
     return (
         previous_block.get("meta") == next_block.get("meta")
         and previous_block.get("subtitle") == next_block.get("subtitle")
-        and previous_block.get("items") == next_block.get("items")
+        and (
+            previous_block.get("items") == next_block.get("items")
+            or previous_block.get("rows") == next_block.get("rows")
+        )
     )
 
 

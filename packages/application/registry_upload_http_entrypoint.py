@@ -142,6 +142,127 @@ WEB_VITRINA_ACTIVITY_ITEM_COPY = {
         "description_ru": "Промо-показатели из browser-collected promo source.",
     },
 }
+WEB_VITRINA_SOURCE_METRIC_KEYS = {
+    "seller_funnel_snapshot": (
+        "total_view_count",
+        "total_open_card_count",
+        "view_count",
+        "ctr",
+        "open_card_count",
+    ),
+    "sales_funnel_history": (
+        "total_orderCount",
+        "total_orderSum",
+        "total_openCount",
+        "avg_addToCartConversion",
+        "total_cartCount",
+        "avg_cartToOrderConversion",
+        "total_addToWishlistCount",
+        "avg_buyoutPercent",
+        "orderCount",
+        "orderSum",
+        "openCount",
+        "addToCartConversion",
+        "cartCount",
+        "cartToOrderConversion",
+        "addToWishlistCount",
+        "buyoutPercent",
+    ),
+    "web_source_snapshot": (
+        "total_views_current",
+        "avg_ctr_current",
+        "total_orders_current",
+        "avg_position_avg",
+        "views_current",
+        "ctr_current",
+        "orders_current",
+        "position_avg",
+    ),
+    "prices_snapshot": (
+        "avg_price_seller_discounted",
+        "price_seller_discounted",
+        "price_seller",
+    ),
+    "sf_period": (
+        "avg_localizationPercent",
+        "localizationPercent",
+        "feedbackRating",
+    ),
+    "spp": (
+        "avg_spp",
+        "spp",
+    ),
+    "ads_bids": (
+        "avg_ads_bid_search",
+        "ads_bid_search",
+        "ads_bid_recommendations",
+    ),
+    "stocks": (
+        "total_stock_total",
+        "total_stock_ru_central",
+        "total_stock_ru_northwest",
+        "total_stock_ru_volga",
+        "total_stock_ru_south_caucasus",
+        "total_stock_ru_ural",
+        "total_stock_ru_far_siberia",
+        "stock_total",
+        "stock_ru_central",
+        "stock_ru_northwest",
+        "stock_ru_volga",
+        "stock_ru_south_caucasus",
+        "stock_ru_ural",
+        "stock_ru_far_siberia",
+    ),
+    "ads_compact": (
+        "ads_drr_total",
+        "ads_drr_attributed_total",
+        "avg_ads_cpc",
+        "avg_ads_ctr",
+        "avg_ads_cr",
+        "total_ads_views",
+        "total_ads_clicks",
+        "total_ads_atbs",
+        "total_ads_orders",
+        "total_ads_sum",
+        "total_ads_sum_price",
+        "ads_drr",
+        "ads_drr_attributed",
+        "ads_cpc",
+        "ads_ctr",
+        "ads_cr",
+        "ads_views",
+        "ads_clicks",
+        "ads_atbs",
+        "ads_orders",
+        "ads_sum",
+        "ads_sum_price",
+    ),
+    "fin_report_daily": (
+        "total_fin_buyout_rub",
+        "total_fin_delivery_rub",
+        "total_fin_commission_wb_portal",
+        "total_fin_acquiring_fee",
+        "total_fin_loyalty_rub",
+        "fin_storage_fee_total",
+        "fin_buyout_rub",
+        "fin_delivery_rub",
+        "fin_commission_wb_portal",
+        "fin_acquiring_fee",
+        "fin_loyalty_rub",
+    ),
+    "cost_price": (
+        "avg_cost_price_rub",
+        "cost_price_rub",
+    ),
+    "promo_by_price": (
+        "total_promo_participation",
+        "total_promo_count_by_price",
+        "avg_promo_entry_price_best",
+        "promo_participation",
+        "promo_count_by_price",
+        "promo_entry_price_best",
+    ),
+}
 
 
 class SellerPortalRecoveryController:
@@ -592,35 +713,47 @@ class RegistryUploadHttpEntrypoint:
         shared_source_keys = _collect_activity_source_keys(upload_records, update_records)
         upload_source_keys = _ordered_activity_source_keys(shared_source_keys, upload_records)
         update_source_keys = _ordered_activity_source_keys(shared_source_keys, update_records)
+        current_business_date = current_business_date_iso(self.now_factory())
+        previous_business_date = default_business_as_of_date(self.now_factory())
+        metric_labels_by_source = _build_activity_metric_labels_by_source(
+            getattr(self.runtime.load_current_state(), "metrics_v2", [])
+        )
+        upload_summary = _build_web_vitrina_endpoint_summary_block(
+            title="Загрузка данных",
+            subtitle=(
+                "Что вернули источники в последнем завершённом refresh."
+                if latest_job is not None
+                else "Transient refresh-log недоступен; показываем сохранённый итог по текущему срезу."
+            ),
+            records=upload_records,
+            ordered_source_keys=upload_source_keys,
+            empty_message=(
+                "Последний завершённый refresh-run в памяти сервиса пока не найден. "
+                "Показываем только сохранённый итог по текущему срезу."
+            ),
+            block_updated_at=(
+                str(latest_job.get("finished_at") or latest_job.get("started_at") or "")
+                if latest_job
+                else refreshed_at
+            ),
+            block_detail=(
+                f"job {latest_job.get('job_id', '')} · {str(latest_job.get('operation', 'refresh'))}"
+                if latest_job
+                else f"snapshot {snapshot_id} · as_of_date {snapshot_as_of_date} · {read_model}"
+            ),
+        )
         return {
             "log_block": _build_web_vitrina_log_block(
                 latest_job=latest_job,
                 job_path=job_path,
                 persisted_refresh_status=refresh_status,
             ),
-            "upload_summary": _build_web_vitrina_endpoint_summary_block(
-                title="Загрузка данных",
-                subtitle=(
-                    "Что вернули источники в последнем завершённом refresh."
-                    if latest_job is not None
-                    else "Transient refresh-log недоступен; показываем сохранённый итог по текущему срезу."
-                ),
-                records=upload_records,
-                ordered_source_keys=upload_source_keys,
-                empty_message=(
-                    "Последний завершённый refresh-run в памяти сервиса пока не найден. "
-                    "Показываем только сохранённый итог по текущему срезу."
-                ),
-                block_updated_at=(
-                    str(latest_job.get("finished_at") or latest_job.get("started_at") or "")
-                    if latest_job
-                    else refreshed_at
-                ),
-                block_detail=(
-                    f"job {latest_job.get('job_id', '')} · {str(latest_job.get('operation', 'refresh'))}"
-                    if latest_job
-                    else f"snapshot {snapshot_id} · as_of_date {snapshot_as_of_date} · {read_model}"
-                ),
+            "upload_summary": upload_summary,
+            "loading_table": _build_web_vitrina_loading_table(
+                upload_summary=upload_summary,
+                today_date=current_business_date,
+                yesterday_date=previous_business_date,
+                metric_labels_by_source=metric_labels_by_source,
             ),
             "update_summary": _build_web_vitrina_endpoint_summary_block(
                 title="Обновление данных",
@@ -2416,6 +2549,8 @@ def _empty_web_vitrina_activity_surface(
     upload_message: str = "Последний upload-run по источникам пока недоступен.",
     update_message: str = "Сохранённый итог по текущему срезу пока недоступен.",
 ) -> dict[str, Any]:
+    current_business_date = current_business_date_iso()
+    previous_business_date = default_business_as_of_date()
     return {
         "log_block": {
             "title": "Лог",
@@ -2435,6 +2570,20 @@ def _empty_web_vitrina_activity_surface(
             "detail": "",
             "updated_at": "",
             "items": [],
+            "empty_message": upload_message,
+        },
+        "loading_table": {
+            "title": "Загрузка данных",
+            "subtitle": "",
+            "detail": "",
+            "updated_at": "",
+            "today_date": current_business_date,
+            "yesterday_date": previous_business_date,
+            "columns": _web_vitrina_loading_table_columns(
+                today_date=current_business_date,
+                yesterday_date=previous_business_date,
+            ),
+            "rows": [],
             "empty_message": upload_message,
         },
         "update_summary": {
@@ -2569,6 +2718,106 @@ def _build_web_vitrina_endpoint_summary_block(
     }
 
 
+def _build_web_vitrina_loading_table(
+    *,
+    upload_summary: Mapping[str, Any],
+    today_date: str,
+    yesterday_date: str,
+    metric_labels_by_source: Mapping[str, list[str]],
+) -> dict[str, Any]:
+    items = list(upload_summary.get("items") or [])
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        item_payload = dict(item or {})
+        source_key = str(item_payload.get("source_key") or item_payload.get("endpoint_id") or "").strip()
+        today_status = _loading_table_status_for_slot(
+            item_payload,
+            target_date=today_date,
+            temporal_slot=TEMPORAL_SLOT_TODAY_CURRENT,
+        )
+        yesterday_status = _loading_table_status_for_slot(
+            item_payload,
+            target_date=yesterday_date,
+            temporal_slot=TEMPORAL_SLOT_YESTERDAY_CLOSED,
+        )
+        rows.append(
+            {
+                "source_key": source_key,
+                "source_label": str(
+                    item_payload.get("label_ru")
+                    or item_payload.get("endpoint_label")
+                    or source_key
+                ),
+                "today": today_status,
+                "today_reason": str(today_status["reason"]),
+                "yesterday": yesterday_status,
+                "yesterday_reason": str(yesterday_status["reason"]),
+                "metric_labels": list(metric_labels_by_source.get(source_key) or []),
+                "technical_endpoint": str(
+                    item_payload.get("endpoint_label")
+                    or item_payload.get("technical_text")
+                    or item_payload.get("technical_key")
+                    or source_key
+                ),
+            }
+        )
+    return {
+        "title": "Загрузка данных",
+        "subtitle": str(upload_summary.get("subtitle") or ""),
+        "detail": str(upload_summary.get("detail") or ""),
+        "updated_at": str(upload_summary.get("updated_at") or ""),
+        "today_date": today_date,
+        "yesterday_date": yesterday_date,
+        "columns": _web_vitrina_loading_table_columns(
+            today_date=today_date,
+            yesterday_date=yesterday_date,
+        ),
+        "rows": rows,
+        "empty_message": str(
+            upload_summary.get("empty_message")
+            or "Статусы по источникам пока недоступны."
+        ),
+    }
+
+
+def _web_vitrina_loading_table_columns(
+    *,
+    today_date: str,
+    yesterday_date: str,
+) -> list[dict[str, str]]:
+    return [
+        {"id": "source", "label": "Источник"},
+        {"id": "today_status", "label": f"Сегодня: {today_date}"},
+        {"id": "today_reason", "label": "Причина сегодня"},
+        {"id": "yesterday_status", "label": f"Вчера: {yesterday_date}"},
+        {"id": "yesterday_reason", "label": "Причина вчера"},
+        {"id": "metrics", "label": "Метрики"},
+        {"id": "technical_endpoint", "label": "Технический endpoint"},
+    ]
+
+
+def _build_activity_metric_labels_by_source(metrics: Iterable[Any]) -> dict[str, list[str]]:
+    labels_by_key: dict[str, str] = {}
+    for item in metrics:
+        metric_key = str(getattr(item, "metric_key", "") or "").strip()
+        label = str(getattr(item, "label_ru", "") or "").strip()
+        enabled = bool(getattr(item, "enabled", True))
+        if metric_key and label and enabled:
+            labels_by_key[metric_key] = label
+    result: dict[str, list[str]] = {}
+    for source_key, metric_keys in WEB_VITRINA_SOURCE_METRIC_KEYS.items():
+        labels: list[str] = []
+        seen: set[str] = set()
+        for metric_key in metric_keys:
+            label = labels_by_key.get(metric_key)
+            if not label or label in seen:
+                continue
+            labels.append(label)
+            seen.add(label)
+        result[source_key] = labels
+    return result
+
+
 def _build_endpoint_summary_item(
     *,
     source_key: str,
@@ -2592,6 +2841,7 @@ def _build_endpoint_summary_item(
             "status_label": "Внимание",
             "tone": "warning",
             "detail": "обновление не подтверждено",
+            "slot_statuses": [],
             "severity_rank": _activity_tone_rank("warning"),
             "source_order": source_order,
         }
@@ -2617,9 +2867,85 @@ def _build_endpoint_summary_item(
         "status_label": status_label,
         "tone": tone,
         "detail": detail,
+        "slot_statuses": _activity_slot_statuses(record),
         "severity_rank": severity_rank,
         "source_order": source_order,
     }
+
+
+def _activity_slot_statuses(record: Mapping[str, Any]) -> list[dict[str, str]]:
+    statuses: list[dict[str, str]] = []
+    for raw_slot in record.get("slots") or []:
+        slot = dict(raw_slot or {})
+        tone = str(slot.get("tone") or slot.get("status") or "warning").strip() or "warning"
+        reason = _activity_reason_ru(
+            tone=tone,
+            detail=str(slot.get("reason") or ""),
+            note=str(slot.get("note") or ""),
+        )
+        statuses.append(
+            {
+                "temporal_slot": str(slot.get("temporal_slot") or "snapshot"),
+                "status": str(slot.get("status") or tone),
+                "tone": tone,
+                "status_label": str(slot.get("label") or _semantic_status_label(tone)),
+                "reason": reason or ("Готово" if tone == "success" else _activity_reason_fallback(tone)),
+                "snapshot_date": str(slot.get("snapshot_date") or ""),
+                "date": str(slot.get("date") or ""),
+                "date_from": str(slot.get("date_from") or ""),
+                "date_to": str(slot.get("date_to") or ""),
+            }
+        )
+    return statuses
+
+
+def _loading_table_status_for_slot(
+    item: Mapping[str, Any],
+    *,
+    target_date: str,
+    temporal_slot: str,
+) -> dict[str, str]:
+    matching_slots = [
+        dict(slot)
+        for slot in (item.get("slot_statuses") or [])
+        if _activity_slot_matches_date_or_slot(slot, target_date=target_date, temporal_slot=temporal_slot)
+    ]
+    if not matching_slots:
+        fallback_reason = str(item.get("reason_ru") or item.get("detail") or "").strip()
+        return {
+            "date": target_date,
+            "ok": False,
+            "label": "не OK",
+            "tone": "error",
+            "reason": fallback_reason or "нет подтверждённого статуса за дату",
+        }
+    worst_slot = sorted(
+        matching_slots,
+        key=lambda slot: _activity_tone_rank(str(slot.get("tone") or "warning")),
+    )[0]
+    tone = str(worst_slot.get("tone") or "warning")
+    ok = tone == "success"
+    return {
+        "date": target_date,
+        "ok": ok,
+        "label": "OK" if ok else "не OK",
+        "tone": "success" if ok else "error",
+        "reason": "Готово" if ok else str(worst_slot.get("reason") or _activity_reason_fallback(tone)),
+    }
+
+
+def _activity_slot_matches_date_or_slot(
+    slot: Mapping[str, Any],
+    *,
+    target_date: str,
+    temporal_slot: str,
+) -> bool:
+    if str(slot.get("temporal_slot") or "") == temporal_slot:
+        return True
+    for key in ("snapshot_date", "date", "date_from", "date_to"):
+        if str(slot.get(key) or "") == target_date:
+            return True
+    return False
 
 
 def _extract_upload_source_records_from_job(
@@ -2668,6 +2994,7 @@ def _extract_source_records_from_outcomes(
             "status_label": str(outcome.get("label") or _semantic_status_label(str(outcome.get("status") or "warning"))),
             "detail": str(outcome.get("reason") or "").strip(),
             "note": "",
+            "slots": list(outcome.get("slots") or []),
         }
     return records
 
@@ -2759,6 +3086,7 @@ def _finalize_source_records(
             "status_label": _semantic_status_label(tone),
             "detail": str(reduction["reason"]),
             "note": "",
+            "slots": slot_records,
         }
     return finalized
 
