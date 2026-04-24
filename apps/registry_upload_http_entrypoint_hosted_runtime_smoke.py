@@ -199,6 +199,8 @@ def main() -> None:
                 raise AssertionError("daily-report route must be publicly readable")
             if route_map["stock_report"]["http_status"] != 200:
                 raise AssertionError("stock-report route must be publicly readable")
+            if route_map["plan_report"]["http_status"] != 200:
+                raise AssertionError("plan-report route must be publicly readable")
             if route_map["plan"]["http_status"] != 200:
                 raise AssertionError("plan with seeded snapshot must be publicly readable")
             if route_map["factory_order_status"]["http_status"] != 200:
@@ -240,6 +242,8 @@ def main() -> None:
                 raise AssertionError("daily-report route must stay 200")
             if loopback_routes["stock_report"]["http_status"] != 200:
                 raise AssertionError("stock-report route must stay 200")
+            if loopback_routes["plan_report"]["http_status"] != 200:
+                raise AssertionError("plan-report route must stay 200")
             if loopback_routes["plan"]["http_status"] != 200:
                 raise AssertionError("plan with seeded snapshot must stay 200")
 
@@ -257,6 +261,7 @@ def main() -> None:
                 f"{route_map['web_vitrina_page_composition']['http_status']}"
             )
             print(f"public_probe_stock_report: ok -> {route_map['stock_report']['http_status']}")
+            print(f"public_probe_plan_report: ok -> {route_map['plan_report']['http_status']}")
             print(f"factory_order_status: ok -> {route_map['factory_order_status']['http_status']}")
             print(f"wb_regional_status: ok -> {route_map['wb_regional_status']['http_status']}")
             print(f"loopback_probe_status: ok -> {loopback_routes['status']['http_status']}")
