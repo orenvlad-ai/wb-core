@@ -1119,7 +1119,7 @@
               <h2 id="status-title" class="block-title">Ручная загрузка данных</h2>
               <div class="block-actions">
                 <button id="refreshButton" class="action-button primary-button" type="button">Загрузить данные</button>
-                <button id="loadButton" class="action-button secondary-button" type="button">Отправить данные</button>
+                <button id="loadButton" class="action-button secondary-button" type="button" disabled hidden>Google Sheets архивирован</button>
               </div>
             </div>
             <dl class="meta-grid">
@@ -1128,12 +1128,12 @@
                 <dd id="manualLastRefresh">ещё не выполнялась</dd>
               </div>
               <div>
-                <dt>Последняя удачная отправка</dt>
+                <dt>Legacy Google Sheets</dt>
                 <dd id="manualLastLoad">ещё не выполнялась</dd>
               </div>
             </dl>
             <p id="manualRefreshResult" class="field-note">Итог последней ручной загрузки пока не зафиксирован.</p>
-            <p id="manualLoadResult" class="field-note">Итог последней ручной отправки пока не зафиксирован.</p>
+            <p id="manualLoadResult" class="field-note">Legacy Google Sheets contour архивирован и не используется.</p>
           </section>
 
           <section class="block" aria-labelledby="sellerRecoveryTitle">
@@ -1764,8 +1764,8 @@
           loading: "Загружаем..."
         },
         load: {
-          idle: "Отправить данные",
-          loading: "Отправляем..."
+          idle: "Google Sheets архивирован",
+          loading: "Google Sheets архивирован"
         }
       };
       const numberFormatter = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 });
@@ -1951,7 +1951,7 @@
         const refreshLoading = activeAction === "refresh";
         const loadLoading = activeAction === "load";
         refreshButton.disabled = Boolean(activeAction);
-        loadButton.disabled = Boolean(activeAction);
+        loadButton.disabled = true;
         refreshButton.textContent = refreshLoading ? actionLabels.refresh.loading : actionLabels.refresh.idle;
         loadButton.textContent = loadLoading ? actionLabels.load.loading : actionLabels.load.idle;
       }
@@ -2482,16 +2482,13 @@
         );
         manualLastLoad.textContent = formatTimestamp(
           context.last_successful_manual_load_at,
-          "ещё не выполнялась"
+          "архивирован"
         );
         manualRefreshResult.textContent = formatResultSummary(
           context.last_manual_refresh_result,
           "Итог последней ручной загрузки пока не зафиксирован."
         );
-        manualLoadResult.textContent = formatResultSummary(
-          context.last_manual_load_result,
-          "Итог последней ручной отправки пока не зафиксирован."
-        );
+        manualLoadResult.textContent = "Legacy Google Sheets contour архивирован и не используется.";
       }
 
       function renderStatusContexts(payload) {
@@ -3160,6 +3157,13 @@
       }
 
       async function runAction(actionName) {
+        if (actionName === "load") {
+          renderError(
+            "Legacy Google Sheets contour архивирован.",
+            "Используйте web-витрину/operator surface; отправка в Google Sheets отключена."
+          );
+          return;
+        }
         const path = actionName === "refresh" ? config.refresh_path : config.load_path;
         const startMessage = actionName === "refresh"
           ? "Запускаем refresh ready snapshot..."

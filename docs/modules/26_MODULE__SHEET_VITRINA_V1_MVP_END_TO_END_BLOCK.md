@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-26-SHEET-VITRINA-V1-MVP-END-TO-END-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `sheet_vitrina_v1_mvp_end_to_end_block`."
-scope: "Первый bounded end-to-end alignment для `sheet_vitrina_v1`: uploaded compact bootstrap `CONFIG / METRICS / FORMULAS`, sibling `COST_PRICE` upload contour, сохранённый upload trigger, explicit refresh в repo-owned date-aware ready snapshot, separate load этого snapshot в live sheet, server-side cost overlay в operator-facing rows, cheap read этого snapshot в `DATA_VITRINA`, compact daily-report read model for two latest closed business days, narrow server-side orchestration-first operator page, sibling web-vitrina route/contract fixation, phase-2 library-agnostic `view_model` seam, phase-3 concrete `@gravity-ui/table` adapter seam и phase-4 real page composition/live read-only page без возврата heavy logic в Google Sheets, дополненная bounded factory-order supply tab без переноса расчётной логики в Apps Script."
+scope: "Current website/operator `sheet_vitrina_v1` contour: server-side refresh/runtime ready snapshots, public web-vitrina JSON/page composition, operator refresh/status/report/supply flows, and archived former Google Sheets load/upload/write contour. Google Sheets is not an active runtime/update/write/load/verify target."
 source_basis:
   - "migration/90_registry_upload_http_entrypoint.md"
   - "migration/91_sheet_vitrina_v1_registry_upload_trigger.md"
@@ -112,7 +112,7 @@ related_docs:
   - "docs/modules/29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md"
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current seller-session operator checkpoint: `sheet_vitrina_v1` по-прежнему разделяет group A bot/web-source historical, group B WB API date/period-capable, group C WB API current-snapshot-only и group D other/manual overlays, status reduction остаётся source-aware, а bot-backed current-day sync теперь делает explicit seller-portal session probe и materialize-ит permanent operator-facing seller-session block with session-check/start/status/stop/launcher flow, canonical supplier enforcement, safe stop semantics, per-run `run_id` / final outcome semantics и hardened noVNC/launcher path instead of ad-hoc headed-X11 recovery."
+update_note: "Обновлён под Google Sheets decommission: active contour is website/operator/public web-vitrina; former Apps Script load/upload/write path is archived/do-not-use."
 ---
 
 # 1. Идентификатор и статус
@@ -123,6 +123,7 @@ update_note: "Обновлён под current seller-session operator checkpoint
 - `status_verification`: prepare-to-upload-to-refresh-to-load smoke подтверждён
 - `status_checkpoint`: рабочий checkpoint подтверждён
 - `status_main`: модуль смёржен в `main`
+- `status_current`: active website/operator/web-vitrina; legacy Google Sheets contour = `ARCHIVED / DO NOT USE`
 
 # 2. Upstream/source basis и semantics
 
@@ -134,27 +135,29 @@ update_note: "Обновлён под current seller-session operator checkpoint
   - `migration/91_sheet_vitrina_v1_registry_upload_trigger.md`
   - `migration/92_sheet_vitrina_v1_registry_seed_v3_bootstrap.md`
   - `migration/93_sheet_vitrina_v1_mvp_end_to_end.md`
-- Семантика блока: не строить новый parallel server contour и не возвращать full legacy 1:1, а замкнуть практический `prepare -> upload -> refresh -> load` сценарий на uploaded compact package, repo-owned ready snapshot и уже существующих bounded server-side модулях.
+- Historical semantics of this checkpoint: it proved a practical `prepare -> upload -> refresh -> load` scenario on the uploaded compact package, repo-owned ready snapshot and existing bounded server-side modules. Current active semantics are server-side refresh/runtime ready snapshots plus website/operator/public web-vitrina read surfaces; the Google Sheets leg is archived.
 
 # 3. Target contract и смысл результата
 
-- Канонический operator flow:
-  - `Подготовить листы CONFIG / METRICS / FORMULAS`
-  - `Отправить реестры на сервер`
+- Канонический current operator flow:
   - `POST /v1/sheet-vitrina-v1/refresh`
-  - `Загрузить таблицу`
-- Канонический sibling operator input flow для себестоимостей:
-  - `Подготовить лист COST_PRICE`
-  - `Отправить себестоимости`
-  - separate server-side current state updates `COST_PRICE` dataset
-  - existing refresh/read contour затем подключает этот dataset server-side в `DATA_VITRINA` и `STATUS`
+  - `GET /v1/sheet-vitrina-v1/status`
+  - `GET /v1/sheet-vitrina-v1/web-vitrina`
+  - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition`
+  - `GET /sheet-vitrina-v1/operator`
+  - `GET /sheet-vitrina-v1/vitrina`
+- Former Google Sheets operator flow `prepare/upload/refresh/load DATA_VITRINA` is archived:
+  - GAS functions fail fast through `ArchiveGuard.gs`;
+  - `POST /v1/sheet-vitrina-v1/load` returns archived/gone in the current default runtime;
+  - `auto_load=true` is rejected; daily timer performs server-side refresh only.
+- Канонический sibling cost-price flow is server-side `POST /v1/cost-price/upload`; the former `COST_PRICE` sheet/menu path is archived.
 - Канонический operator-facing refresh surface:
   - `GET /sheet-vitrina-v1/operator`
   - top-level tabs = `Обновление данных`, `Расчёт поставок`, `Отчёты`
   - this page intentionally stays orchestration-first control surface and does not become the future web-vitrina container
-  - две explicit actions `Загрузить данные` и `Отправить данные`
+  - explicit action `Загрузить данные`
   - `Загрузить данные` вызывает existing `POST /v1/sheet-vitrina-v1/refresh` и materialize-ит ready snapshot only
-  - `Отправить данные` вызывает `POST /v1/sheet-vitrina-v1/load` и пишет в live sheet только already prepared snapshot; route не должен claim-ить ordinary green `updated`, если подтверждена только техническая запись без верифицируемого data-change
+  - former `Отправить данные`/`POST /v1/sheet-vitrina-v1/load` path is archived and must not write Google Sheets
   - page additionally читает `GET /v1/sheet-vitrina-v1/daily-report` для compact блока `Ежедневные отчёты` внутри отдельного top-level tab `Отчёты`
   - page additionally читает `GET /v1/sheet-vitrina-v1/stock-report` для compact блока `Отчёт по остаткам` внутри того же top-level tab `Отчёты`
   - page читает `GET /v1/sheet-vitrina-v1/status` для compact manual/auto status surface; root `status` there is semantic snapshot truth, while technical completion stays separated in derived fields
@@ -197,7 +200,7 @@ update_note: "Обновлён под current seller-session operator checkpoint
     - sort = min breached district stock ascending, then breached district breadth descending, then total stock ascending
     - compact district labels remain truthful to current repo buckets: `Центральный ФО`, `Северо-Западный ФО`, `Приволжский ФО`, `Уральский ФО`, `Юг и СКФО`
     - merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь` stays fully excluded from stock-report filter/display because current truth does not split Far East from Siberia
-  - page дополнительно показывает compact manual block `Ручная загрузка данных` с embedded actions `Загрузить данные` / `Отправить данные`, двумя persisted manual-success fields `Последняя удачная загрузка` / `Последняя удачная отправка` и short persisted summaries of the latest manual refresh/load semantic result
+  - page дополнительно показывает compact manual block `Ручная загрузка данных` с active action `Загрузить данные`; former Google Sheets action `Отправить данные` is archived/disabled, не является active runtime/update/write/load/verify target, and appears only as archived/manual-context history
   - в том же `Обновление данных` current operator page additionally показывает compact block `Проверка и восстановление Seller-сессии`:
     - `Проверить сессию` выполняет cheap probe against saved `storage_state.json` и truthfully различает `session_valid_canonical / session_valid_wrong_org / session_invalid / session_missing / session_probe_error`
     - `Восстановить сессию` стартует repo-owned recovery lifecycle и немедленно создаёт текущий `run_id`
@@ -206,10 +209,10 @@ update_note: "Обновлён под current seller-session operator checkpoint
     - operator UI одновременно показывает отдельно session state и run state: `Текущий запуск / Статус запуска / Финал запуска / Статус сессии / Старт / Завершение`
     - recovery run truthfully проходит through `starting / awaiting_login / saving_session / validating_session / checking_canonical_supplier / triggering_refresh` and must end as one explicit final outcome: `completed / not_needed / stopped / timeout / error`
     - host-side VNC contour is additionally hardened with `x11vnc -noxdamage`, because user-facing truth here is the noVNC canvas rather than host-side local screenshots
-  - эти два manual fields заполняются только из `manual_context`: successful manual `refresh` обновляет только `Последняя удачная загрузка`, successful manual `load` обновляет только `Последняя удачная отправка`, auto path их не трогает
-  - reload/page-open state этого manual block truthfully показывает только persisted manual-success facts и не является самостоятельным доказательством успешной последней manual `Отправить данные` без completed job/log
+  - эти два manual fields заполняются только из `manual_context`: successful manual `refresh` обновляет только `Последняя удачная загрузка`; current Google Sheets `load` archived, so `Последняя удачная отправка` is historical state and must not be used as completion proof
+  - reload/page-open state этого manual block truthfully показывает только persisted manual-success facts и не является доказательством Google Sheets write
   - page дополнительно показывает compact block `Автообновления`, который заполняется только из server-driven `server_context`
-  - `Автоцепочка` в этом block должна описывать полный daily auto cycle, а не только schedule time: current truthful wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
+  - `Автоцепочка` в этом block должна описывать current daily cycle, а не legacy sheet write: current truthful wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: server-side refresh ready snapshot for website/operator web-vitrina`
   - тот же auto block additionally показывает `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление` из backend/status surface
   - log block остаётся fixed-height scrollable viewport с title `Лог` и одной bounded action `Скачать лог`
 - Канонический operator-facing supply surface в том же repo-owned page:
@@ -380,7 +383,7 @@ update_note: "Обновлён под current seller-session operator checkpoint
 ## 3.1.2 Daily live refresh scheduling
 
 - Daily auto-refresh materialize-ится поверх existing heavy route, а не через новый scheduler contour:
-  - timer target = `POST /v1/sheet-vitrina-v1/refresh` with payload flag `auto_load=true`
+  - timer target = `POST /v1/sheet-vitrina-v1/refresh` with payload `{"auto_refresh": true}`
   - schedule = `11:00, 20:00 Asia/Yekaterinburg`
   - current live host keeps `Etc/UTC`, поэтому systemd timer stores `OnCalendar=*-*-* 06:00:00 UTC; *-*-* 15:00:00 UTC`
 - Schedule storage is repo-owned and deploys into live systemd units:
@@ -478,20 +481,20 @@ Bounded допущение:
 
 ## 3.6 Completion semantics для execution handoff
 
-- Канонический product flow по-прежнему остаётся `prepare -> upload -> refresh -> load`.
-- Для задач, которые меняют bound Apps Script, sheet-side live behavior, operator UI или другой live operator surface вокруг `sheet_vitrina_v1`, `repo-complete` и local smokes недостаточны.
+- Канонический current product flow = server-side `refresh -> web-vitrina read`; former Google Sheets `prepare -> upload -> refresh -> load` is archived/migration-only.
+- Для задач, которые меняют archived bound Apps Script guard, operator UI или другой live operator surface вокруг `sheet_vitrina_v1`, `repo-complete` и local smokes недостаточны.
 - Default completion для таких задач включает:
-  - `clasp push` для bound GAS/sheet changes или equivalent publish step для другого live contour, если это безопасно и доступно;
+  - `clasp push` только для archived bound GAS guard changes или equivalent publish step для другого live contour, если это безопасно и доступно;
   - минимальный live verify по затронутому surface;
-  - явную фиксацию, достигнуты ли `live-complete` и `sheet-complete`.
-- Если изменение затрагивает registry/upload/current bundle/readiness semantics, done criteria должны проверять не только local smokes, но и связку `refresh -> load` для текущего bundle/date.
+  - явную фиксацию, достигнуты ли `live-complete` и guard-only `sheet-complete`, если GAS guard входил в scope.
+- Если изменение затрагивает registry/upload/current bundle/readiness semantics, done criteria должны проверять local smokes плюс active website/operator/public web-vitrina surfaces; legacy Google Sheets `load` не является valid completion target.
 - Если изменение затрагивает public operator route или runtime publish, done criteria должны включать и public route probe, а не только router code в repo.
 - Для hosted runtime/publish closure canonical repo-owned path теперь фиксирован:
   - `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py deploy`
   - `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py loopback-probe`
   - `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py public-probe`
 - Этот runner применим и к current branch/PR without merge-before-verify, потому что деплоит current checked-out worktree, а не требует сначала merge в `main`.
-- Если `clasp` credentials, spreadsheet access, live runtime access или publish rights недоступны, final handoff обязан явно назвать blocker и не маркировать задачу как fully complete.
+- Если `clasp` credentials для archived guard publish, live runtime access или publish rights недоступны, final handoff обязан явно назвать blocker и не маркировать задачу как fully complete.
 
 # 4. Артефакты и wiring по модулю
 
@@ -575,7 +578,7 @@ Bounded допущение:
 
 - В `wb-core` появился первый bounded end-to-end MVP для `VB-Core Витрина V1`.
 - Sheet-side upload registry больше не обрезает `METRICS` до subset: current truth хранит полный uploaded compact dictionary `102` rows.
-- Таблица больше не заканчивается на upload-only flow: появился explicit refresh/build action и cheap read path из repo-owned ready snapshot обратно в `DATA_VITRINA`.
+- Historical table flow больше не является active contour: current path has explicit refresh/build action and cheap web-vitrina read path from repo-owned ready snapshot; reverse-load обратно в Google Sheets `DATA_VITRINA` archived.
 - У explicit refresh появился отдельный repo-owned operator page, поэтому нормальный operator path больше не зависит от ручного `curl`.
 - Read path больше не строит live plan on-demand: heavy fetch живёт только в explicit refresh action, а `load` читает persisted date-aware snapshot из current runtime contour.
 - При missing current-day bot/web-source snapshot refresh больше не ограничен pure read-side fallback: он может bounded-trigger'ить same-day capture/handoff на server host и затем materialize-ить truthful `today_current` values в том же operator flow.

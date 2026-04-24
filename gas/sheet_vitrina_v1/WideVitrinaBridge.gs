@@ -372,6 +372,7 @@ function parsePlan_(planJson) {
 }
 
 function getTargetSpreadsheet_() {
+  assertLegacyGoogleSheetsContourActive_();
   const spreadsheet = SpreadsheetApp.openById(TARGET_SPREADSHEET_ID);
   if (spreadsheet.getId() !== TARGET_SPREADSHEET_ID) {
     throw new Error('unexpected spreadsheet id');

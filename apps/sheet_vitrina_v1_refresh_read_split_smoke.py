@@ -130,6 +130,7 @@ def main() -> None:
         try:
             upload_url = f"http://127.0.0.1:{config.port}{config.upload_path}"
             plan_url = f"http://127.0.0.1:{config.port}{config.sheet_plan_path}"
+            load_url = f"http://127.0.0.1:{config.port}{DEFAULT_SHEET_LOAD_PATH}"
             operator_ui_url = f"http://127.0.0.1:{config.port}{config.sheet_operator_ui_path}"
 
             operator_ui_status, operator_ui_html = _get_text(operator_ui_url)
@@ -138,14 +139,15 @@ def main() -> None:
             if (
                 "Обновление данных" not in operator_ui_html
                 or "Загрузить данные" not in operator_ui_html
-                or "Отправить данные" not in operator_ui_html
+                or "Legacy Google Sheets" not in operator_ui_html
+                or "архивирован" not in operator_ui_html
             ):
                 raise AssertionError("operator UI must expose the expected operator controls")
             if (
                 "Ручная загрузка данных" not in operator_ui_html
                 or "Лог" not in operator_ui_html
                 or "Последняя удачная загрузка" not in operator_ui_html
-                or "Последняя удачная отправка" not in operator_ui_html
+                or "Legacy Google Sheets" not in operator_ui_html
             ):
                 raise AssertionError("operator UI must keep the compact manual/log chrome")
             if "Скачать лог" not in operator_ui_html or "max-height: 420px" not in operator_ui_html:
@@ -186,11 +188,11 @@ def main() -> None:
             if upload_status != 200 or upload_payload["status"] != "accepted":
                 raise AssertionError(f"fixture upload must be accepted, got {upload_status} {upload_payload}")
 
-            missing_load = _run_load_harness(upload_url, as_of_date=AS_OF_DATE)
-            if "ready snapshot missing" not in missing_load["load_error"]:
-                raise AssertionError(f"load must surface ready-snapshot miss, got {missing_load['load_error']!r}")
+            missing_load_status, missing_load_payload = _post_json(load_url, {"as_of_date": AS_OF_DATE})
+            if missing_load_status != 410 or missing_load_payload.get("status") != "archived":
+                raise AssertionError(f"legacy load must be archived before refresh, got {missing_load_status} {missing_load_payload}")
             if any(block.request_dates for block in counters.values()):
-                raise AssertionError("missing snapshot read path must not trigger heavy source blocks")
+                raise AssertionError("archived load path must not trigger heavy source blocks")
 
             missing_status, missing_payload = _get_json(f"{plan_url}?{urllib_parse.urlencode({'as_of_date': AS_OF_DATE})}")
             if missing_status != 422 or "ready snapshot missing" not in str(missing_payload.get("error", "")):
@@ -301,32 +303,21 @@ def main() -> None:
                     "DATA_VITRINA must keep prior accepted ads bid in yesterday_closed and current bid in today_current"
                 )
 
-            ready_load = _run_load_harness(upload_url, as_of_date=AS_OF_DATE)
-            if ready_load["load_error"]:
-                raise AssertionError(f"sheet-side load must succeed after refresh, got {ready_load['load_error']!r}")
-            if ready_load["load_result"]["http_status"] != 200:
-                raise AssertionError("sheet-side load must receive 200 from cheap read endpoint")
-            if ready_load["sheets"]["DATA_VITRINA"]["values"][0] != ["дата", "key", AS_OF_DATE, TODAY_CURRENT_DATE]:
-                raise AssertionError("sheet-side load must materialize yesterday + today")
-            if ready_load["sheets"]["STATUS"]["values"][1][0] != "registry_upload_current_state":
-                raise AssertionError("STATUS sheet must be materialized from ready snapshot")
-            load_data_rows = {row[1]: row for row in ready_load["sheets"]["DATA_VITRINA"]["values"][1:] if len(row) > 1}
-            if load_data_rows["avg_price_seller_discounted"][2:] != [189, 199]:
-                raise AssertionError("sheet-side load must not blank-overwrite the rolled-over accepted price")
-            if load_data_rows["avg_ads_bid_search"][2:] != [10, 12]:
-                raise AssertionError("sheet-side load must not blank-overwrite the rolled-over accepted ads bid")
+            archived_load_status, archived_load_payload = _post_json(load_url, {"as_of_date": AS_OF_DATE})
+            if archived_load_status != 410 or archived_load_payload.get("status") != "archived":
+                raise AssertionError(f"legacy load must stay archived after refresh, got {archived_load_status} {archived_load_payload}")
             if any(
                 block.request_dates != _expected_request_dates(block.source_key)
                 for block in counters.values()
             ):
-                raise AssertionError("sheet-side load must not trigger heavy source blocks after refresh")
+                raise AssertionError("archived load must not trigger heavy source blocks after refresh")
 
-            print(f"missing_snapshot: ok -> {missing_load['load_error']}")
+            print(f"legacy_load_archived_before_refresh: ok -> {missing_load_status}")
             print(f"operator_page: ok -> {config.sheet_operator_ui_path}")
             print(f"refresh_endpoint: ok -> {refresh_payload['snapshot_id']}")
             print(f"status_endpoint: ok -> {status_payload['snapshot_id']}")
             print(f"cheap_read_endpoint: ok -> {plan_payload['snapshot_id']}")
-            print("sheet_load: ok -> ready snapshot only")
+            print(f"legacy_load_archived_after_refresh: ok -> {archived_load_status}")
             print("smoke-check passed")
         finally:
             server.shutdown()
@@ -485,12 +476,15 @@ def _expected_server_context() -> dict[str, str]:
         "daily_refresh_business_time": "11:00, 20:00 Asia/Yekaterinburg",
         "daily_refresh_systemd_time": "06:00:00 UTC, 15:00:00 UTC",
         "daily_refresh_systemd_oncalendar": "*-*-* 06:00:00 UTC; *-*-* 15:00:00 UTC",
-        "daily_auto_action": "загрузка данных + отправка данных в таблицу",
-        "daily_auto_description": "Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу",
+        "daily_auto_action": "server-side refresh ready snapshot for website/operator web-vitrina",
+        "daily_auto_description": (
+            "Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: "
+            "server-side refresh ready snapshot for website/operator web-vitrina"
+        ),
         "daily_auto_trigger_name": "wb-core-sheet-vitrina-refresh.timer",
         "daily_auto_trigger_description": (
             "wb-core-sheet-vitrina-refresh.timer -> POST /v1/sheet-vitrina-v1/refresh "
-            "(auto_load=true) в 11:00, 20:00 Asia/Yekaterinburg"
+            "(auto_refresh=true) в 11:00, 20:00 Asia/Yekaterinburg"
         ),
         "retry_runner_description": (
             "Persisted retry runner: дожимает due yesterday_closed для historical/date-period families "

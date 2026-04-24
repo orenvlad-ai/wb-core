@@ -161,14 +161,14 @@ For live/public tasks affecting this contour `repo-only` does not count as compl
 4. `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py loopback-probe`;
 5. `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py public-probe`;
 6. verify the installed repo-owned systemd units via `systemctl cat` / `systemctl list-timers` when the task depends on scheduler truth;
-7. if the task changes bound Apps Script or live sheet behavior, finish the corresponding `clasp`/sheet verify path.
+7. if the task changes archived Apps Script guard code, finish `clasp push` plus guard-only verify.
 
 For current web-vitrina work, final verification is the server/public web surface:
 - `GET /v1/sheet-vitrina-v1/web-vitrina`
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition`
 - `GET /sheet-vitrina-v1/vitrina`
 
-Google Sheets, GAS, `clasp` and `invalid_grant` are not active blockers for web-vitrina completion unless the change explicitly touches bound Apps Script or the live sheet write path.
+Google Sheets, GAS, `clasp`, `/v1/sheet-vitrina-v1/load` and `invalid_grant` are not active blockers for web-vitrina completion. If a task explicitly changes archived Apps Script guard code, verify blocked/archived behavior only.
 
 `deploy-and-verify` may be used as one combined step when access is already safe and available.
 
@@ -180,7 +180,7 @@ Current deploy contract note:
   - restart runtime;
   - only after that run loopback/public verification.
 
-If deploy / publish / restart / probe / required verify steps are safe and available, Codex обязана выполнить их в том же bounded execution. `clasp` is part of this list only for bound Apps Script/live sheet scope.
+If deploy / publish / restart / probe / required verify steps are safe and available, Codex обязана выполнить их в том же bounded execution. `clasp` is part of this list only for archived Apps Script guard changes.
 If any of these steps are unavailable or unsafe, execution must return incomplete with an exact blocker instead of a vague ops-gap.
 
 ## Probe Norm
@@ -188,7 +188,7 @@ If any of these steps are unavailable or unsafe, execution must return incomplet
 Loopback/runtime probe validates the hosted process behind the reverse proxy or equivalent publish layer.
 
 Public probe validates:
-- `GET /sheet-vitrina-v1/operator` returns `200` + `text/html` and still contains the compact operator tokens for the three top-level sections, separated refresh/load, truthful manual-vs-auto blocks, bounded seller-session block and both bounded supply subsections (`Обновление данных`, `Ручная загрузка данных`, `Проверка и восстановление Seller-сессии`, `Проверить сессию`, `Восстановить сессию`, `Скачать launcher для Mac`, `Остановить восстановление`, `Текущий запуск`, `Финал запуска`, `Статус сессии`, `Расчёт поставок`, `Отчёты`, `Загрузить данные`, `Отправить данные`, `Последняя удачная загрузка`, `Последняя удачная отправка`, `Ежедневные отчёты`, `Отчёт по остаткам`, `Total Order Sum`, `Негативные факторы`, `Позитивные факторы`, `Скачать лог`, `Лог`, `Автообновления`, `Часовой пояс`, `Автоцепочка`, `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление`, `Общий вход для двух расчётов`, `Заказ на фабрике`, `Поставка на Wildberries`, `Цикл заказов`, `Цикл поставок`)
+- `GET /sheet-vitrina-v1/operator` returns `200` + `text/html` and still contains the compact operator tokens for the three top-level sections, server refresh, truthful manual-vs-auto blocks, bounded seller-session block and both bounded supply subsections (`Обновление данных`, `Ручная загрузка данных`, `Проверка и восстановление Seller-сессии`, `Проверить сессию`, `Восстановить сессию`, `Скачать launcher для Mac`, `Остановить восстановление`, `Текущий запуск`, `Финал запуска`, `Статус сессии`, `Расчёт поставок`, `Отчёты`, `Загрузить данные`, `Legacy Google Sheets`, `Ежедневные отчёты`, `Отчёт по остаткам`, `Total Order Sum`, `Негативные факторы`, `Позитивные факторы`, `Скачать лог`, `Лог`, `Автообновления`, `Часовой пояс`, `Автоцепочка`, `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление`, `Общий вход для двух расчётов`, `Заказ на фабрике`, `Поставка на Wildberries`, `Цикл заказов`, `Цикл поставок`)
 - `GET /v1/sheet-vitrina-v1/seller-portal-session/check` returns `200` + JSON with one truthful status from `session_valid_canonical / session_valid_wrong_org / session_invalid / session_missing / session_probe_error`
 - `GET /sheet-vitrina-v1/vitrina` returns `200` + `text/html` as a real sibling page shell: page must contain `Phase 4 Web-Vitrina Page Composition`, `Web-витрина`, canonical JSON route token `/v1/sheet-vitrina-v1/web-vitrina`, explicit `surface=page_composition` wiring and the current seam names `web_vitrina_page_composition / web_vitrina_view_model / web_vitrina_gravity_table_adapter`
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition` returns `200` + JSON `web_vitrina_page_composition` v1 with `meta`, `summary_cards`, `filter_surface`, `table_surface`, `status_summary`, `capabilities`; route stays read-only and must not trigger refresh/upstream fetch from the public read path
@@ -225,8 +225,7 @@ Public probe validates:
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx` returns either `200` + XLSX after regional calculation or truthful `422 {"error": ...}` before the first successful calculation
 - `POST /v1/sheet-vitrina-v1/refresh` returns JSON with either success shape including `server_context` or truthful `422 {"error": ...}`
   - refresh completion must separate `ready snapshot persisted` from semantic source health via explicit semantic fields
-- `POST /v1/sheet-vitrina-v1/load` and `GET /v1/sheet-vitrina-v1/job` are operator-facing live/write routes and therefore are verified as part of task-level GAS/sheet closure, not by default public probe
-  - load completion must not claim ordinary `updated` success when only bridge completion is known; first write / no baseline / unchanged snapshot stay warning until data change is actually verifiable
+- `POST /v1/sheet-vitrina-v1/load` is archived and must return blocked/archived behavior; `GET /v1/sheet-vitrina-v1/job` remains a current operator log route for refresh/supply jobs
 
 If the task changes operator upload/calculate write paths inside this contour, live closure additionally requires one controlled end-to-end HTTP scenario on the hosted runtime:
 - download the relevant operator templates;
@@ -255,4 +254,4 @@ One minimal human-only step remains allowed only when repo-owned contract still 
 Without that step a live/public task stays `live-complete = blocked`; reporting only `repo-complete` is insufficient. For GAS/sheet-only scope the blocker is tracked as `sheet-complete = blocked`.
 The blocker must name the concrete missing access/value and must not be phrased as unspecified operational uncertainty.
 
-For server/operator-only changes that do not touch bound Apps Script or live sheet writes, `Sheet verify result` must stay `not in scope` rather than being filled with fake closure activity.
+For server/operator-only changes that do not touch archived bound Apps Script guard code, `Sheet verify result` must stay `not in scope` rather than being filled with fake closure activity.

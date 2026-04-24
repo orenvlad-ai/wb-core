@@ -15,6 +15,8 @@ from typing import Any, Mapping
 from urllib import parse as urllib_parse
 
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.application.sheet_vitrina_v1_load_bridge import LegacyGoogleSheetsContourArchivedError
+from packages.application.sheet_vitrina_v1_load_bridge import legacy_google_sheets_archive_context
 from packages.contracts.factory_order_supply import (
     DATASET_INBOUND_FACTORY_TO_FF,
     DATASET_INBOUND_FF_TO_WB,
@@ -243,6 +245,7 @@ def _build_handler(
                     as_of_date = _resolve_as_of_date(parsed.query, payload)
                     async_requested = _resolve_async_requested(payload)
                     auto_load_requested = _resolve_auto_load_requested(payload)
+                    auto_refresh_requested = _resolve_auto_refresh_requested(payload)
                 except ValueError as exc:
                     _write_json_response(
                         self,
@@ -255,7 +258,7 @@ def _build_handler(
                     try:
                         job_payload = entrypoint.start_sheet_refresh_job(
                             as_of_date=as_of_date or None,
-                            auto_load=auto_load_requested,
+                            auto_load=auto_refresh_requested,
                         )
                     except Exception as exc:  # pragma: no cover - bounded fallback
                         _write_json_response(
@@ -275,13 +278,24 @@ def _build_handler(
                 try:
                     refresh_result = entrypoint.handle_sheet_refresh_request(
                         as_of_date=as_of_date or None,
-                        auto_load=auto_load_requested,
+                        auto_load=auto_refresh_requested,
                     )
                 except ValueError as exc:
                     _write_json_response(
                         self,
                         HTTPStatus.UNPROCESSABLE_ENTITY,
                         {"error": str(exc)},
+                    )
+                    return
+                except LegacyGoogleSheetsContourArchivedError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.GONE,
+                        {
+                            "error": str(exc),
+                            "status": "archived",
+                            "target": "legacy_google_sheets_contour",
+                        },
                     )
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
@@ -315,6 +329,17 @@ def _build_handler(
                 if async_requested:
                     try:
                         job_payload = entrypoint.start_sheet_load_job(as_of_date=as_of_date or None)
+                    except LegacyGoogleSheetsContourArchivedError as exc:
+                        _write_json_response(
+                            self,
+                            HTTPStatus.GONE,
+                            {
+                                "error": str(exc),
+                                "status": "archived",
+                                "target": "legacy_google_sheets_contour",
+                            },
+                        )
+                        return
                     except Exception as exc:  # pragma: no cover - bounded fallback
                         _write_json_response(
                             self,
@@ -332,6 +357,17 @@ def _build_handler(
 
                 try:
                     load_result = entrypoint.handle_sheet_load_request(as_of_date=as_of_date or None)
+                except LegacyGoogleSheetsContourArchivedError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.GONE,
+                        {
+                            "error": str(exc),
+                            "status": "archived",
+                            "target": "legacy_google_sheets_contour",
+                        },
+                    )
+                    return
                 except ValueError as exc:
                     _write_json_response(
                         self,
@@ -1130,6 +1166,17 @@ def _resolve_auto_load_requested(payload: Mapping[str, Any]) -> bool:
     raw = payload["auto_load"]
     if not isinstance(raw, bool):
         raise ValueError("auto_load must be boolean when provided")
+    if raw:
+        raise ValueError("auto_load targets the archived legacy Google Sheets contour; use refresh only")
+    return raw
+
+
+def _resolve_auto_refresh_requested(payload: Mapping[str, Any]) -> bool:
+    if "auto_refresh" not in payload:
+        return False
+    raw = payload["auto_refresh"]
+    if not isinstance(raw, bool):
+        raise ValueError("auto_refresh must be boolean when provided")
     return raw
 
 
@@ -1429,6 +1476,7 @@ def _render_sheet_vitrina_operator_ui(
         "stock_report_path": stock_report_path,
         "refresh_path": refresh_path,
         "load_path": load_path,
+        "legacy_google_sheets_contour": legacy_google_sheets_archive_context(),
         "status_path": status_path,
         "job_path": job_path,
         "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,

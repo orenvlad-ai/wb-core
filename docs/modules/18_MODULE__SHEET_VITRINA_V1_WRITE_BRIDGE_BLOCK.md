@@ -2,9 +2,9 @@
 title: "Модуль: sheet_vitrina_v1_write_bridge_block"
 doc_id: "WB-CORE-MODULE-18-SHEET-VITRINA-V1-WRITE-BRIDGE-BLOCK"
 doc_type: "module"
-status: "active"
-purpose: "Зафиксировать канонический модульный reference по уже смёрженному шагу `sheet_vitrina_v1_write_bridge_block`."
-scope: "Bound Apps Script bridge, local live-write runner, full-overwrite запись листов `DATA_VITRINA` и `STATUS`, подтверждённый ручной live smoke и границы первого реального live write шага новой витрины."
+status: "archived"
+purpose: "Зафиксировать archive/migration reference по уже смёрженному шагу `sheet_vitrina_v1_write_bridge_block`."
+scope: "Archived bound Apps Script bridge and local live-write runner for former Google Sheets contour. This module is not an active runtime/write/load/verify target."
 source_basis:
   - "migration/83_sheet_vitrina_v1_scaffold.md"
   - "artifacts/sheet_vitrina_v1/evidence/initial__sheet-vitrina-v1__evidence.md"
@@ -25,7 +25,7 @@ related_docs:
   - "migration/83_sheet_vitrina_v1_scaffold.md"
   - "artifacts/sheet_vitrina_v1/evidence/initial__sheet-vitrina-v1__evidence.md"
 source_of_truth_level: "module_canonical"
-update_note: "Создан как канонический модульный документ post-merge для первого подтверждённого live write bridge новой Google Sheets-витрины."
+update_note: "Архивирован: legacy Google Sheets write bridge remains only as migration evidence; current active contour is website/operator web-vitrina."
 ---
 
 # 1. Идентификатор и статус
@@ -36,6 +36,13 @@ update_note: "Создан как канонический модульный д
 - `status_verification`: ручной live smoke подтверждён
 - `status_checkpoint`: bridge checkpoint подтверждён
 - `status_main`: модуль смёржен в `main`
+- `status_current`: `ARCHIVED / DO NOT USE`
+
+Current norm:
+- `apps/sheet_vitrina_v1_live_write.py` is a fail-fast archived runner.
+- `gas/sheet_vitrina_v1/WideVitrinaBridge.gs` is guarded by `ArchiveGuard.gs`.
+- `POST /v1/sheet-vitrina-v1/load` must not be used for current completion.
+- Verification target is website/operator/public web-vitrina, not Google Sheets.
 
 # 2. Upstream/source basis и semantics
 

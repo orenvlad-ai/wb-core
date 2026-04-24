@@ -35,6 +35,8 @@ function main() {
         ? runLoadOnlyMode({ context, spreadsheet, options })
       : options.mode === 'server_driven_materialization'
         ? runServerDrivenMaterializationMode({ context, spreadsheet })
+      : options.mode === 'archived_guard'
+        ? runArchivedGuardMode({ context, spreadsheet })
       : runBundleUploadMode({ context, spreadsheet, options });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
@@ -51,7 +53,7 @@ function parseArgs(argv) {
   }
   options.mode = options.mode || 'bundle_upload';
   const requiredKeys = ['scriptPath'];
-  if (!['server_driven_materialization', 'load_only', 'cost_price_upload'].includes(options.mode)) {
+  if (!['server_driven_materialization', 'load_only', 'cost_price_upload', 'archived_guard'].includes(options.mode)) {
     requiredKeys.push('endpointUrl', 'bundleVersion', 'uploadedAt');
   }
   if (options.mode === 'bundle_upload') {
@@ -282,6 +284,32 @@ function runServerDrivenMaterializationMode({ context, spreadsheet }) {
       same_day_blank_overwrite: sameDayBlankPresentation,
       next_day_overwrite: nextDayPresentation,
     },
+  };
+}
+
+function runArchivedGuardMode({ context, spreadsheet }) {
+  const status = parseJsonString(context.getLegacyGoogleSheetsArchiveStatus());
+  const probes = [
+    ['prepareRegistryUploadOperatorSheets', () => context.prepareRegistryUploadOperatorSheets()],
+    ['prepareCostPriceSheet', () => context.prepareCostPriceSheet()],
+    ['uploadRegistryUploadBundle', () => context.uploadRegistryUploadBundle()],
+    ['uploadCostPriceSheet', () => context.uploadCostPriceSheet()],
+    ['loadSheetVitrinaTable', () => context.loadSheetVitrinaTable()],
+    ['writeSheetVitrinaV1Plan', () => context.writeSheetVitrinaV1Plan(JSON.stringify(buildSyntheticSheetVitrinaPlan('2026-04-12', 0)))],
+    ['applySheetVitrinaV1PresentationPass', () => context.applySheetVitrinaV1PresentationPass()],
+  ];
+  const blocked = probes.map(([name, call]) => {
+    try {
+      call();
+      return { name, blocked: false, message: '' };
+    } catch (error) {
+      return { name, blocked: true, message: String(error && error.message ? error.message : error) };
+    }
+  });
+  return {
+    status,
+    blocked,
+    sheet_count: spreadsheet.getSheets().length,
   };
 }
 

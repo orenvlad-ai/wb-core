@@ -116,7 +116,6 @@ def main() -> None:
             activated_at_factory=lambda: ACTIVATED_AT,
             refreshed_at_factory=lambda: REFRESHED_AT,
             now_factory=lambda: SERVER_NOW,
-            sheet_load_runner=load_runner,
         )
         entrypoint.sheet_plan_block = SheetVitrinaV1LivePlanBlock(
             runtime=runtime,
@@ -151,12 +150,13 @@ def main() -> None:
                 raise AssertionError(f"operator UI must return 200, got {operator_status}")
             for expected in (
                 "Ручная загрузка данных",
-                "Отправить данные",
+                "Legacy Google Sheets",
+                "архивирован",
                 "Скачать лог",
                 "Лог",
                 "Автообновления",
                 "Последняя удачная загрузка",
-                "Последняя удачная отправка",
+                "Legacy Google Sheets",
                 "Последний автозапуск",
                 "Статус последнего автозапуска",
                 "Последнее успешное автообновление",
@@ -171,10 +171,10 @@ def main() -> None:
                 raise AssertionError(f"fixture upload must be accepted, got {upload_status} {upload_payload}")
 
             missing_load_status, missing_load_payload = _post_json(load_url, {"as_of_date": AS_OF_DATE})
-            if missing_load_status != 422:
-                raise AssertionError(f"load before refresh must return 422, got {missing_load_status}")
-            if "ready snapshot missing" not in str(missing_load_payload.get("error", "")):
-                raise AssertionError("load before refresh must truthfully surface missing ready snapshot")
+            if missing_load_status != 410:
+                raise AssertionError(f"load before refresh must return 410 archived, got {missing_load_status}")
+            if missing_load_payload.get("status") != "archived":
+                raise AssertionError(f"load before refresh must surface archived legacy contour, got {missing_load_payload}")
             if any(block.request_dates for block in counters.values()):
                 raise AssertionError("load before refresh must not trigger heavy source blocks")
 
@@ -211,9 +211,9 @@ def main() -> None:
             if refresh_manual_result.get("technical_status") != "success":
                 raise AssertionError("async refresh result must keep the technical refresh result")
             prior_load_result = refresh_manual_context.get("last_manual_load_result") or {}
-            if prior_load_result.get("semantic_status") != "error":
+            if prior_load_result:
                 raise AssertionError(
-                    "async refresh result must preserve the last failed manual load until a new load finishes"
+                    "async refresh result must not create a fake manual load result for archived Google Sheets"
                 )
             _assert_counting_calls(counters)
 
@@ -223,94 +223,31 @@ def main() -> None:
                 load_url,
                 {"as_of_date": AS_OF_DATE, "async": True},
             )
-            if load_start_status != 202:
-                raise AssertionError(f"async load must return 202, got {load_start_status}")
-            if load_start_payload.get("operation") != "load":
-                raise AssertionError("async load must expose load operation metadata")
-            if "download_path" not in load_start_payload or "log_filename" not in load_start_payload:
-                raise AssertionError("async load start payload must expose per-run log download metadata")
-
-            time.sleep(0.1)
-            running_load_status, running_load_payload = _get_json(
-                f"{job_url}?{urllib_parse.urlencode({'job_id': load_start_payload['job_id']})}"
-            )
-            if running_load_status != 200:
-                raise AssertionError(f"job route must return 200 while load is running, got {running_load_status}")
-            if running_load_payload.get("status") != "running":
-                raise AssertionError("load job must stay running long enough for live-log polling")
-            running_logs = "\n".join(running_load_payload.get("log_lines", []))
-            for expected in (
-                "event=cycle_start cycle=load",
-                "event=snapshot_lookup_finish cycle=load",
-                "event=bridge_start cycle=load",
-                "Тестовый sheet bridge принял ready snapshot.",
-            ):
-                if expected not in running_logs:
-                    raise AssertionError(f"running load live-log must contain {expected!r}")
-            if "event=cycle_finish cycle=load" in running_logs:
-                raise AssertionError("running load live-log must not jump to final success before completion")
-
-            load_job = _wait_for_job(job_url, str(load_start_payload["job_id"]))
-            if load_job["status"] != "success":
-                raise AssertionError(f"async load job must succeed, got {load_job}")
-            load_logs = "\n".join(load_job.get("log_lines", []))
-            for expected in (
-                "event=snapshot_source_status cycle=load",
-                "event=metric_batch_result cycle=load",
-                "Тестовый sheet bridge записал данные в live shell.",
-                "event=bridge_sheet_state cycle=load",
-                "event=cycle_finish cycle=load",
-            ):
-                if expected not in load_logs:
-                    raise AssertionError(f"load live-log must contain {expected!r}")
-            if load_job["result"]["bridge_result"]["bridge"] != "fake":
-                raise AssertionError("load result must surface bridge payload")
-            if load_job["result"]["refreshed_at"] != REFRESHED_AT:
-                raise AssertionError("load result must keep the persisted refresh timestamp")
-            load_manual_context = load_job["result"].get("manual_context") or {}
-            if load_manual_context.get("last_successful_manual_refresh_at") != "2026-04-13T17:05:00+05:00":
-                raise AssertionError("async load result must keep the persisted manual refresh timestamp")
-            if load_manual_context.get("last_successful_manual_load_at") != "2026-04-13T17:00:03+05:00":
-                raise AssertionError("async load result must expose the persisted manual load timestamp")
-            load_manual_result = load_manual_context.get("last_manual_load_result") or {}
-            if load_manual_result.get("semantic_status") != "warning":
-                raise AssertionError(f"async load result must persist not-verified warning on first write, got {load_manual_context}")
-            if load_manual_result.get("change_status") != "not_verified":
-                raise AssertionError(f"async load result must explain missing comparison baseline, got {load_manual_context}")
-            if int(load_job.get("log_line_count", 0)) < 10:
-                raise AssertionError("load job must expose detailed diagnostic log with multiple lines")
-            if load_runner.calls != [refresh_job["result"]["snapshot_id"]]:
-                raise AssertionError("load bridge must run exactly once on the prepared ready snapshot")
+            if load_start_status != 410:
+                raise AssertionError(f"async load must be denied as archived, got {load_start_status}")
+            if load_start_payload.get("status") != "archived":
+                raise AssertionError(f"async load must expose archived status, got {load_start_payload}")
+            if load_runner.calls:
+                raise AssertionError("archived async load must not call the sheet bridge")
             if {
                 key: block.request_dates
                 for key, block in counters.items()
             } != before_load_requests:
-                raise AssertionError("load must not trigger heavy source blocks or implicit refresh")
-            download_status, download_text, download_headers = _get_text_with_headers(
-                f"{job_url}?{urllib_parse.urlencode({'job_id': load_job['job_id'], 'format': 'text', 'download': '1'})}"
-            )
-            if download_status != 200:
-                raise AssertionError(f"log text download must return 200, got {download_status}")
-            content_disposition = download_headers.get("Content-Disposition", "")
-            if "attachment;" not in content_disposition or ".txt" not in content_disposition:
-                raise AssertionError("log text download must expose attachment Content-Disposition")
-            if "event=cycle_finish cycle=load" not in download_text or "Тестовый sheet bridge записал данные в live shell." not in download_text:
-                raise AssertionError("downloaded log must match the concrete completed run")
+                raise AssertionError("archived load must not trigger heavy source blocks or implicit refresh")
 
             status_after_load, status_payload = _get_json(
                 f"{base_url}{config.sheet_status_path}?{urllib_parse.urlencode({'as_of_date': AS_OF_DATE})}"
             )
             if status_after_load != 200:
-                raise AssertionError(f"status after async load must return 200, got {status_after_load}")
+                raise AssertionError(f"status after archived load probe must return 200, got {status_after_load}")
             if status_payload["snapshot_id"] != refresh_job["result"]["snapshot_id"]:
-                raise AssertionError("status after load must still point to the prepared ready snapshot")
-            if status_payload.get("manual_context") != load_job["result"].get("manual_context"):
-                raise AssertionError("status after load must keep the persisted manual timestamps")
+                raise AssertionError("status after archived load probe must still point to the prepared ready snapshot")
+            if status_payload.get("manual_context") != refresh_job["result"].get("manual_context"):
+                raise AssertionError("archived load probe must not alter manual timestamps")
 
-            print(f"load_missing_snapshot: ok -> {missing_load_payload['error']}")
+            print(f"load_archived: ok -> {missing_load_payload['status']}")
             print(f"async_refresh_logs: ok -> {len(refresh_job['log_lines'])} lines")
-            print(f"async_load_running: ok -> {running_load_payload['status']}")
-            print(f"async_load_bridge: ok -> {load_job['result']['bridge_result']['bridge']}")
+            print(f"async_load_archived: ok -> {load_start_status}")
             print("smoke-check passed")
         finally:
             server.shutdown()

@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 import threading
 from types import SimpleNamespace
 from typing import Callable
+from urllib import error
 from urllib import request as urllib_request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -165,62 +166,63 @@ def main() -> None:
                 "Последний автозапуск",
                 "Статус последнего автозапуска",
                 "Последнее успешное автообновление",
+                "Legacy Google Sheets",
+                "архивирован",
             ):
                 if expected not in operator_html:
                     raise AssertionError(f"operator UI must expose {expected!r}")
 
-            refresh_status, refresh_payload = _post_json(
+            archived_auto_status, archived_auto_payload = _post_json(
                 refresh_url,
                 {"as_of_date": AS_OF_DATE, "auto_load": True},
             )
+            if archived_auto_status != 400:
+                raise AssertionError(f"auto_load must be rejected as archived, got {archived_auto_status}")
+            if "auto_load targets the archived legacy Google Sheets contour" not in str(archived_auto_payload):
+                raise AssertionError(f"auto_load denial must explain archived contour, got {archived_auto_payload}")
+            if any(block.request_dates for block in counters.values()) or load_runner.calls:
+                raise AssertionError("denied auto_load must not run refresh sources or the sheet bridge")
+
+            refresh_status, refresh_payload = _post_json(
+                refresh_url,
+                {"as_of_date": AS_OF_DATE, "auto_refresh": True},
+            )
             if refresh_status != 200:
-                raise AssertionError(f"auto update must return 200, got {refresh_status}")
+                raise AssertionError(f"refresh-only daily path must return 200, got {refresh_status}")
             if refresh_payload.get("operation") != "auto_update":
-                raise AssertionError("auto update must expose the combined operation")
+                raise AssertionError("auto_refresh daily path must expose auto_update operation")
             if refresh_payload.get("technical_status") != "success":
-                raise AssertionError("auto update must keep the technical completion flag")
-            if refresh_payload.get("status") != "error" or refresh_payload.get("semantic_status") != "error":
-                raise AssertionError("auto update must expose the semantic failure on the combined route")
-            if refresh_payload.get("auto_update_started_at") != AUTO_STARTED_AT:
-                raise AssertionError("auto update must expose the start timestamp")
-            if refresh_payload.get("auto_update_finished_at") != AUTO_FINISHED_AT:
-                raise AssertionError("auto update must expose the finish timestamp")
+                raise AssertionError("refresh-only daily path must keep the technical completion flag")
             if refresh_payload.get("refreshed_at") != REFRESHED_AT:
-                raise AssertionError("auto update must keep the refresh timestamp from the prepared snapshot")
-            if refresh_payload.get("bridge_result", {}).get("bridge") != "fake":
-                raise AssertionError("auto update must run the sheet bridge")
+                raise AssertionError("refresh-only daily path must keep the refresh timestamp from the prepared snapshot")
+            if "bridge_result" in refresh_payload or load_runner.calls:
+                raise AssertionError("refresh-only daily path must not run the legacy Google Sheets bridge")
             if refresh_payload.get("manual_context") != _expected_manual_context():
-                raise AssertionError("auto update must not pollute manual operator timestamps")
-            if refresh_payload.get("semantic_status") != "error":
-                raise AssertionError(f"auto update must surface semantic error when upstream sources are materially bad, got {refresh_payload}")
-            if load_runner.calls != [str(refresh_payload["snapshot_id"])]:
-                raise AssertionError("auto update must write the prepared snapshot exactly once")
+                raise AssertionError("refresh-only daily path must not pollute manual operator timestamps")
             _assert_counting_calls(counters)
 
             status_code, status_payload = _get_json(status_url)
             if status_code != 200:
-                raise AssertionError(f"status must return 200 after auto update, got {status_code}")
+                raise AssertionError(f"status must return 200 after refresh-only daily path, got {status_code}")
             if status_payload.get("snapshot_id") != refresh_payload.get("snapshot_id"):
-                raise AssertionError("status must point to the persisted snapshot created by auto update")
+                raise AssertionError("status must point to the persisted snapshot created by refresh")
             server_context = status_payload.get("server_context") or {}
+            if server_context.get("daily_auto_action") != "server-side refresh ready snapshot for website/operator web-vitrina":
+                raise AssertionError(f"status must describe the refresh-only daily action, got {server_context}")
+            if "Google Sheets" in str(server_context.get("daily_auto_description", "")):
+                raise AssertionError(f"daily description must not route operators to Google Sheets, got {server_context}")
+            if "auto_load=true" in str(server_context.get("daily_auto_trigger_description", "")):
+                raise AssertionError(f"daily trigger description must not keep auto_load=true, got {server_context}")
             if server_context.get("last_auto_run_status") != "success":
-                raise AssertionError("status must keep the technical auto-run state")
-            if server_context.get("last_auto_run_status_label") != "Ошибка":
-                raise AssertionError(f"status must surface the semantic auto-run label, got {server_context}")
-            if server_context.get("last_auto_run_technical_status_label") != "успех":
-                raise AssertionError(f"status must keep the technical auto-run label separately, got {server_context}")
-            if "предыдущая отправка для сравнения отсутствует" not in str(server_context.get("last_auto_run_status_reason", "")):
-                raise AssertionError(f"status must explain why auto-run is warning, got {server_context}")
-            if "Ошибки по" not in str(server_context.get("last_auto_run_status_reason", "")):
-                raise AssertionError(f"status must explain the upstream source failures, got {server_context}")
-            if (server_context.get("last_auto_run_result") or {}).get("semantic_status") != "error":
-                raise AssertionError(f"status must persist the semantic auto-run result, got {server_context}")
+                raise AssertionError("auto_refresh must persist the technical auto-run state")
+            if (server_context.get("last_auto_run_result") or {}).get("snapshot_id") != refresh_payload.get("snapshot_id"):
+                raise AssertionError(f"auto_refresh must persist the refresh-only auto result, got {server_context}")
             if status_payload.get("manual_context") != _expected_manual_context():
-                raise AssertionError("status must keep manual timestamps empty after auto update")
+                raise AssertionError("status must keep manual timestamps empty after refresh-only daily path")
 
-            print(f"auto_update: ok -> {refresh_payload['snapshot_id']}")
-            print(f"auto_status: ok -> {status_payload['server_context']['last_auto_run_status_label']}")
-            print(f"auto_success_at: ok -> {status_payload['server_context']['last_successful_auto_update_at']}")
+            print(f"auto_load_archived: ok -> {archived_auto_status}")
+            print(f"refresh_only: ok -> {refresh_payload['snapshot_id']}")
+            print(f"daily_action: ok -> {status_payload['server_context']['daily_auto_action']}")
         finally:
             server.shutdown()
             server.server_close()
@@ -297,8 +299,11 @@ def _post_json(url: str, payload: dict[str, object]) -> tuple[int, dict[str, obj
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST",
     )
-    with urllib_request.urlopen(request, timeout=60) as response:
-        return response.getcode(), json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib_request.urlopen(request, timeout=60) as response:
+            return response.getcode(), json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
 def _get_json(url: str) -> tuple[int, dict[str, object]]:

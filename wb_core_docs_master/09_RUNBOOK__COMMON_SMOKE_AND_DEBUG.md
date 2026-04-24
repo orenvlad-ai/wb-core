@@ -47,7 +47,7 @@ built_from_commit: "ae486b1ff53136a633fc34389f1c5b025a3d180c"
 Этот runbook нужен для быстрого ответа на вопросы:
 - broken ли registry upload chain;
 - broken ли current server/web-vitrina flow;
-- broken ли legacy sheet/export wiring, если scope действительно затрагивает bound Apps Script/live sheet write;
+- broken ли archived guard для legacy sheet/export wiring, если scope действительно затрагивает bound Apps Script guard;
 - где искать first useful signal.
 
 # Current norm
@@ -263,31 +263,25 @@ python3 apps/sheet_vitrina_v1_stocks_historical_backfill.py \
   --date-to 2026-04-18
 ```
 
-## Legacy GAS/sheet export checks
+## Archived Google Sheets/GAS contour
 
-This section is legacy/export-only for current web-vitrina work. Do not use Google Sheets, GAS, `clasp` or `invalid_grant` as active completion blockers for `/sheet-vitrina-v1/vitrina` or `GET /v1/sheet-vitrina-v1/web-vitrina`; use server/public web-vitrina probes instead.
+Legacy Google Sheets/GAS contour is `ARCHIVED / DO NOT USE`.
 
-```bash
-clasp push
-clasp run prepareRegistryUploadOperatorSheets
-clasp run uploadRegistryUploadBundle
-clasp run prepareCostPriceSheet
-clasp run uploadCostPriceSheet
-# open the narrow repo-owned operator page for explicit refresh
-python3 -m webbrowser http://127.0.0.1:8765/sheet-vitrina-v1/operator
-# open the sibling phase-1 web-vitrina shell if the task changes its route/contract
-python3 -m webbrowser http://127.0.0.1:8765/sheet-vitrina-v1/vitrina
-# curl remains a fallback if browser/UI surface is unavailable
-curl -X POST http://127.0.0.1:8765/v1/sheet-vitrina-v1/refresh \
-  -H 'Content-Type: application/json' \
-  -d '{"as_of_date":"2026-04-12"}'
-curl -X POST http://127.0.0.1:8765/v1/sheet-vitrina-v1/load \
-  -H 'Content-Type: application/json' \
-  -d '{"as_of_date":"2026-04-12"}'
-clasp run loadSheetVitrinaTable
-clasp run getSheetVitrinaV1State
-clasp run getSheetVitrinaV1PresentationSnapshot
-```
+Do not use Google Sheets, GAS, `clasp`, `/v1/sheet-vitrina-v1/load`, `loadSheetVitrinaTable`, sheet readback, or `invalid_grant` as active completion blockers for current website/operator/web-vitrina work.
+
+Allowed references:
+- archive/migration boundary;
+- explicit decommission guard verification;
+- historical evidence.
+
+Current verification targets:
+- `GET /v1/sheet-vitrina-v1/web-vitrina`
+- `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition`
+- `GET /sheet-vitrina-v1/vitrina`
+- `GET /sheet-vitrina-v1/operator`
+- server-side refresh/status/read probes.
+
+If a task explicitly changes archived GAS guard code, closure is `clasp push` plus a guard-only check that archived functions fail fast. Do not run former prepare/upload/load flows as success criteria.
 
 ## GitHub PR closure
 
@@ -314,7 +308,7 @@ Operational rule:
 - проверить scope diff и `git diff --check`;
 - прогнать targeted local smoke / integration smoke по затронутому bounded path;
 - использовать этот closure только там, где scope реально repo-only;
-- не объявлять задачу complete, если для неё по смыслу нужен live/public closure. GAS/sheet closure требуется только для bound Apps Script/live sheet scope.
+- не объявлять задачу complete, если для неё по смыслу нужен live/public closure. Former sheet success closure is archived; GAS closure now means archive-guard push/verify only.
 
 ### Docs-governance closure
 
@@ -342,15 +336,15 @@ Operational rule:
   - `GET /sheet-vitrina-v1/vitrina`
   - content-level verify по affected SKU/date rows в payload/table surface;
   - Google Sheets / GAS / `clasp` / `invalid_grant` не входят в active completion path.
-- current live `sheet_vitrina_v1` contour:
+  - current live `sheet_vitrina_v1` contour:
   - service = `wb-core-registry-http.service`
   - timer = `wb-core-sheet-vitrina-refresh.timer`
   - schedule = `11:00, 20:00 Asia/Yekaterinburg` = `06:00 UTC, 15:00 UTC` in current systemd host timezone
-  - daily timer target = `POST /v1/sheet-vitrina-v1/refresh` with payload flag `auto_load=true`, so the automatic cycle truthfully finishes as `refresh + load to live sheet`
+  - daily timer target = `POST /v1/sheet-vitrina-v1/refresh` with `{"auto_refresh": true}`; it builds server-side ready snapshots only and never auto-loads Google Sheets
 - current bounded `factory-order` supply contour is server/operator-only:
   - live closure still requires deploy + loopback/public probe + one controlled download/upload/calculate/download scenario if those routes changed;
   - the same closure rule now covers the sibling regional block under `Расчёт поставок`: shared `stock_ff` upload lifecycle, regional calculate, summary table and per-district XLSX routes are part of the same operator/public contour;
-  - sheet/GAS verify stays `not in scope`, пока change не затрагивает bound Apps Script или live sheet write path.
+  - sheet/GAS write verify stays out of scope; archived GAS changes require only guard push/verify.
   - if the task changes upload state handling, closure additionally verifies auto-upload-after-file-pick plus `upload -> current uploaded file download -> delete -> absent state`;
   - for inbound upload contract changes, controlled live scenario must cover both mixed positive/zero rows and zero-only files, and status must truthfully expose accepted empty datasets as `row_count = 0`;
   - current UI may accept any positive `sales_avg_period_days`; backend now uses persisted runtime coverage instead of fixed `<= 7`, so covered windows such as `10 / 14 / 21` must succeed after truthful reconcile/backfill.
@@ -364,19 +358,16 @@ Operational rule:
   - truthfully blocked `422`, если shared `stock_ff` отсутствует;
   - district summary totals = sum of generated district XLSX rows;
   - public `GET /v1/sheet-vitrina-v1/supply/wb-regional/status` и `GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district}.xlsx` surface expected JSON/XLSX shape.
-- если change затрагивает operator `load`, bound Apps Script или live sheet write path, closure дополнительно требует `clasp push` и sheet verify по `POST /v1/sheet-vitrina-v1/load` или equivalent existing Apps Script menu flow.
+- если change затрагивает archived bound Apps Script guard, closure дополнительно требует `clasp push` и guard-only verify. Former `POST /v1/sheet-vitrina-v1/load` / Apps Script menu write flow must return archived/blocked and must not be treated as a success path.
 - если runner уже materialized, но `ssh_destination / target_dir / service_name / restart_command / environment_file` или access отсутствуют, это фиксируется как точный blocker, а не как vague ops-gap.
 
-### GAS/sheet closure
+### GAS/sheet archive closure
 
-- если change затрагивает bound Apps Script, sheet-side flow или live sheet behavior, default closure включает `clasp push`, если он безопасен и доступен;
-- после `clasp push` нужно сделать хотя бы минимальный live verify по затронутому flow:
-  - `prepare`
-  - `upload`
-  - `refresh`
-  - `load`
-  - или более узкий subset, если именно он соответствует change scope;
-- если upload меняет current bundle/readiness semantics, после upload недостаточно local smoke: нужно подтвердить `refresh/load` path для current bundle/date.
+- если change затрагивает archived bound Apps Script files, default closure включает `clasp push`, если он безопасен и доступен;
+- после `clasp push` verify должен подтверждать archive guard:
+  - `getLegacyGoogleSheetsArchiveStatus` returns inactive/disabled status;
+  - former write/upload/load functions fail fast with archive message;
+  - no sheet write/readback is required or allowed as completion proof.
 
 ### Docs-pack closure
 
@@ -388,31 +379,30 @@ Operational rule:
   - проверить readiness по `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`;
   - в финальном handoff оставить один human-only шаг: после merge загрузить актуальный pack во внешний Project.
 
-## What to verify in legacy sheet/export contour
+## What to verify in current web/operator contour
 
-Use this section only when the task changes bound Apps Script, live sheet write, or explicit legacy/export behavior. It is not a completion checklist for the current web-vitrina.
+Use this section for current website/operator/public verification. Legacy Google Sheets sections are archived and not a completion checklist.
 
-- `CONFIG / METRICS / FORMULAS` have expected headers and non-empty rows;
-- `prepareRegistryUploadOperatorSheets` currently materializes `33 / 102 / 7`;
-- `uploadRegistryUploadBundle` accepts and persists factual registry sheet lengths; на текущем contour это `33 / 102 / 7`, но проверка не должна зависеть от hardcoded row caps;
-- `COST_PRICE` has exact headers `group / cost_price_rub / effective_from`;
-- `prepareCostPriceSheet` materializes only `COST_PRICE` and its local control block, не меняя existing registry/upload actions;
-- `uploadCostPriceSheet` sends `dataset_version + uploaded_at + cost_price_rows` в separate `POST /v1/cost-price/upload`, а не подмешивает rows в `config_v2 / metrics_v2 / formulas_v2`;
-- current COST_PRICE checkpoint проверяется по accepted/rejected upload result, separate runtime current state и server-side refresh/read integration;
+- `POST /v1/sheet-vitrina-v1/refresh` builds server-side ready snapshots without `auto_load`;
+- `POST /v1/sheet-vitrina-v1/refresh` with `auto_load=true` is rejected as archived legacy Google Sheets target;
+- `POST /v1/sheet-vitrina-v1/load` returns archived/blocked and does not write Google Sheets;
+- `GET /sheet-vitrina-v1/operator` does not expose Google Sheets send as an active action;
+- `GET /v1/sheet-vitrina-v1/status` exposes archived `legacy_google_sheets_contour` in load context;
+- current COST_PRICE checkpoint проверяется по accepted/rejected server upload result, separate runtime current state и server-side refresh/read integration;
 - applicable себестоимость резолвится server-side по `group + latest effective_from <= slot_date`;
 - operator-facing derived rows используют canonical keys `total_proxy_profit_rub` и `proxy_margin_pct_total`;
 - `GET /sheet-vitrina-v1/operator` поднимает simple operator page без SPA/build pipeline;
 - `GET /sheet-vitrina-v1/vitrina` поднимает отдельную live read-only sibling page и не встраивается в existing `/sheet-vitrina-v1/operator`;
 - `GET /v1/sheet-vitrina-v1/web-vitrina` остаётся cheap read-only JSON path: default v1 shape = `contract_name / contract_version / page_route / read_route / meta / status_summary / schema / rows / capabilities`, optional `as_of_date` stays on том же route и не имеет права trigger-ить refresh/upstream fetch;
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition` now adds the page-only payload for `/sheet-vitrina-v1/vitrina`: `composition_name / composition_version / meta / summary_cards / filter_surface / table_surface / status_summary / capabilities`; route still stays read-only and must not trigger refresh/upstream fetch;
-- operator page показывает narrow server-driven surface: top-level sections `Обновление данных` / `Расчёт поставок` / `Отчёты`, compact manual block `Ручная загрузка данных` with embedded actions `Загрузить данные` / `Отправить данные`, one compact reports subsection-switch `Ежедневные отчёты` / `Отчёт по остаткам` inside `Отчёты`, separate compact auto block `Автообновления` и отдельный `Лог`; manual block показывает только persisted manual-success timestamps `Последняя удачная загрузка` / `Последняя удачная отправка` из `manual_context`, reload страницы не считается proof последней manual `Отправить данные`, а completed run можно скачать через `Скачать лог`;
+- operator page показывает narrow server-driven surface: top-level sections `Обновление данных` / `Расчёт поставок` / `Отчёты`, compact manual block `Ручная загрузка данных` with active action `Загрузить данные`, one compact reports subsection-switch `Ежедневные отчёты` / `Отчёт по остаткам` inside `Отчёты`, separate compact auto block `Автообновления` и отдельный `Лог`; manual block shows legacy Google Sheets as archived and does not treat reload or former send/load as proof.
 - `GET /v1/sheet-vitrina-v1/daily-report` остаётся cheap read-only JSON path: route сравнивает только два последних closed business day через persisted ready snapshots `default_business_as_of_date(now)` и `default_business_as_of_date(now)-1 day` и не имеет права trigger-ить refresh/upstream fetch;
 - `GET /v1/sheet-vitrina-v1/stock-report` остаётся cheap read-only JSON path: route по умолчанию читает previous closed business day only from persisted ready snapshot `DATA_VITRINA[yesterday_closed]`, принимает optional explicit `as_of_date` override на том же read path, не trigger-ит refresh/upstream fetch и включает только SKU с district stock `< 50`;
 - subsection `Отчёт по остаткам` now adds a compact SKU selector: full active SKU list comes from current authoritative `config_v2` truth on the operator page itself, defaults to all selected, applies only after `Рассчитать`, rejects empty selection with `Выберите хотя бы один SKU` and must show an empty result instead of stale rows when the selected subset has no breaches;
 - operator page state is browser-owned only: current top-level tab, active subsection under `Отчёты` / `Расчёт поставок` and stock-report SKU selection persist in namespaced `localStorage`; reload must restore the last valid state, while empty/broken storage or obsolete `nmId` values must fall back safely to current defaults/current active SKU truth;
 - daily-report factor lists are now full valid sets sorted by `matched_sku_count desc` and aggregate strength; factor rows surface label + arrow + `N SKU` + truthful aggregate summary instead of plain `вверх/вниз` text;
 - daily-report response now includes `metric_ranking_diagnostics`, so a short decline list can be diagnosed from the payload itself instead of being treated as a UI cap bug;
-- в block `Автообновления` `Автоцепочка` должна быть backend-driven description full daily chain, а не только scheduler time; current truthful wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`;
+- в block `Автообновления` `Автоцепочка` должна быть backend-driven description current daily chain, а не legacy sheet write; current truthful wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: server-side refresh ready snapshot for website/operator web-vitrina`;
 - тот же block должен surface-ить `Последний автозапуск`, `Статус последнего автозапуска` и `Последнее успешное автообновление` из backend/status contract;
 - `POST /v1/sheet-vitrina-v1/refresh` обновляет date-aware ready snapshot в repo-owned SQLite runtime contour;
 - `POST /v1/sheet-vitrina-v1/load` пишет в live sheet только already prepared snapshot и truthfully падает при missing ready snapshot / bridge blocker;
@@ -437,7 +427,7 @@ Use this section only when the task changes bound Apps Script, live sheet write,
 
 | Signal | Meaning |
 | --- | --- |
-| `clasp` / Google auth `invalid_grant` | legacy sheet/GAS auth failure only; not a blocker for current web-vitrina unless the task scope explicitly changes bound Apps Script/live sheet write |
+| `clasp` / Google auth `invalid_grant` | legacy sheet/GAS auth failure only; not a blocker for current web-vitrina unless the task scope explicitly changes archived Apps Script guard code |
 | `CONFIG!I2 должен содержать URL registry upload endpoint` | sheet-side endpoint URL is missing |
 | `COST_PRICE!F2 должен содержать URL cost price upload endpoint или должен быть заполнен CONFIG!I2` | COST_PRICE upload path has no explicit URL and cannot derive origin from registry upload control block |
 | `STATUS.cost_price[*] = missing` or `incomplete` | authoritative COST_PRICE dataset is empty, not materialized, or does not cover every enabled group for the requested slot date |
@@ -472,7 +462,7 @@ Use this section only when the task changes bound Apps Script, live sheet write,
 | manual refresh leaves `closure_retrying` / `closure_pending` state for a source that only failed in the manual run | regression in execution-mode separation; manual path must not create persisted retry debt |
 | `ReferenceError: URL is not defined` | Apps Script runtime bug in sheet-side URL derivation |
 | `registry upload bundle must contain 5-64 metrics_v2 entries` | live runtime still serves stale validator / stale deploy and is not aligned with current repo semantics |
-| `ACCESS_TOKEN_SCOPE_INSUFFICIENT` for `clasp` | local GAS OAuth scopes are insufficient for legacy sheet content read/write; not a current web-vitrina blocker |
+| `ACCESS_TOKEN_SCOPE_INSUFFICIENT` for `clasp` | local GAS OAuth scopes are insufficient for archived GAS guard publish; not a current web-vitrina blocker |
 | `gh: command not found` or `gh auth status -h github.com` shows no active auth | current execution context cannot own ordinary GitHub PR closure; return exact blocker and one minimal manual next step |
 | `gh pr merge` returns permission / protection error | ordinary merge is blocked by missing write rights or branch protection; keep merge as human-only fallback only for this blocker case |
 

@@ -44,9 +44,9 @@ built_from_commit: "967edcc2059b36db36a3846d9f773c0b90e20f90"
 
 Текущий main-confirmed checkpoint:
 - source/data blocks `01–12` уже смёржены;
-- table/projection/wide/sheet read-side `13–19` уже смёржены;
+- table/projection/wide and archived sheet-side `13–19` уже смёржены;
 - registry upload line `20–23` уже смёржена;
-- sheet-side operator line `24–26` уже смёржена как legacy/export contour, включая первый bounded MVP `prepare -> upload -> refresh -> load`;
+- sheet-side operator line `24–26` уже смёржена как legacy/export contour, но Google Sheets/GAS side is now `ARCHIVED / DO NOT USE`;
 - bounded browser-capture collector `27` уже смёржен как repo-owned local promo XLSX runner с truthful sidecar contract;
 - bounded live wiring `28` уже смёржен и переводит `promo_by_price` из blocked gap в current server-owned source seam внутри existing refresh/runtime/read-side contour.
 - web-vitrina line `29–31` уже смёржена и является active user-facing surface: `/sheet-vitrina-v1/vitrina` + `/v1/sheet-vitrina-v1/web-vitrina`.
@@ -65,7 +65,7 @@ built_from_commit: "967edcc2059b36db36a3846d9f773c0b90e20f90"
 Confirmed contour на текущем `main`:
 - `sku_display -> table_projection -> registry_pilot -> wide_matrix -> delivery -> sheet_scaffold`
 - `registry upload -> compact seed -> bounded refresh/read -> web_vitrina_contract -> view_model -> gravity_adapter -> page_composition`
-- legacy/export contour remains: `live write -> presentation -> sheet trigger -> reverse-load`, but it is not the active completion target for web-vitrina tasks.
+- legacy/export contour remains only as archive/migration boundary: `live write -> presentation -> sheet trigger -> reverse-load` is guarded and must not be used as runtime/update/write/load/verify target.
 
 ## Что уже materialized
 
@@ -73,10 +73,9 @@ Confirmed contour на текущем `main`:
 - file-backed accept/store/activate;
 - DB-backed runtime/current truth;
 - live HTTP entrypoint;
-- Apps Script trigger `Отправить реестры на сервер`;
-- compact seed bootstrap для `CONFIG / METRICS / FORMULAS`;
-- выравнивание sheet/upload/runtime под uploaded compact package `33 / 102 / 7`;
-- bounded refresh/read reverse-load в `DATA_VITRINA` и `STATUS`, где ready snapshot хранится в repo-owned SQLite runtime contour.
+- archived Apps Script trigger and compact seed bootstrap for `CONFIG / METRICS / FORMULAS`;
+- server-side uploaded compact package/runtime state `33 / 102 / 7`;
+- server-side refresh/read ready snapshot in repo-owned SQLite runtime contour; Google Sheets reverse-load is archived.
 - repo-owned bounded `promo_xlsx_collector_block`:
   - canonical `direct_open -> cookie -> hydrated DOM -> optional modal close`
   - canonical drawer reset inside `#Portal-drawer`
@@ -103,7 +102,7 @@ Confirmed contour на текущем `main`:
 # Known gaps
 
 - full legacy parity по всем historical metric sections и registry rows;
-- repo-owned hosted deploy/probe contract вокруг upload/load runtime;
+- repo-owned hosted deploy/probe contract around current website/operator runtime;
 - окончательная судьба `AI_EXPORT` как compatibility contract;
 - materialized `packages/domain`, `infra/`, `tests/`, `api/`, `jobs/`, `db/`.
 

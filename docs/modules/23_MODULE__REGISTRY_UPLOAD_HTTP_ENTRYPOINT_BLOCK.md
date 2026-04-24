@@ -312,7 +312,7 @@ update_note: "Обновлён под current seller-session operator checkpoint
   - server хранит и публикует отдельный XLSX на каждый округ, а не один общий recommendation workbook;
   - district XLSX содержит district identification + compact operator rows `nmId / SKU / Количество к поставке` именно по фактически аллоцированному количеству после ограничения `stock_ff`.
 - Current repo state не имел другого authoritative source для legacy parity term `FO_INBOUND_FF_TO_WB`, поэтому entrypoint получил narrow explicit upload contract `Товары в пути от ФФ на Wildberries`; silent drop этого члена формулы считается некорректным.
-- Operator page keeps narrow Russian chrome for operator-visible labels: compact manual block `Ручная загрузка данных` with embedded actions `Загрузить данные` / `Отправить данные`, two persisted manual-success timestamp fields `Последняя удачная загрузка` / `Последняя удачная отправка` plus short persisted semantic summaries for the latest manual refresh/load result, separate `Лог` block and separate compact auto block `Автообновления`; page reload must not present persisted refresh metadata as standalone proof of the last manual sheet write.
+- Operator page keeps narrow Russian chrome for operator-visible labels: compact manual block `Ручная загрузка данных` with active action `Загрузить данные`; former Google Sheets send/load action `Отправить данные` is archived/disabled and is not a runtime/update/write/load/verify target. The page keeps two persisted manual-success timestamp fields `Последняя удачная загрузка` / `Последняя удачная отправка` plus short persisted semantic summaries for the latest manual refresh/archived-load state, separate `Лог` block and separate compact auto block `Автообновления`; page reload must not present persisted refresh metadata as standalone proof of a Google Sheets write.
 - Operator page добавляет отдельный top-level tab `Отчёты` с одним sibling selector по образцу supply tab:
   - `Ежедневные отчёты`
   - `Отчёт по остаткам`
@@ -390,12 +390,13 @@ update_note: "Обновлён под current seller-session operator checkpoint
     - `stock_ru_south_caucasus` -> `Юг и СКФО`
   - merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь` deliberately excluded from stock-report filter and display, because current truth does not split Far East from Siberia
 - Operator page keeps one compact server-driven manual block `Ручная загрузка данных`:
-  - embedded actions `Загрузить данные` / `Отправить данные`
+  - active action `Загрузить данные`
+  - former Google Sheets action `Отправить данные` is archived/disabled
   - `Последняя удачная загрузка`
   - `Последняя удачная отправка`
   - fields are filled only from persisted `manual_context`
   - `Последняя удачная загрузка` = only the last successful manual `refresh`
-  - `Последняя удачная отправка` = only the last successful manual `load`
+  - `Последняя удачная отправка` = historical/manual load field; current Google Sheets load is archived and must not be used as completion proof
   - auto-update success must not overwrite these fields
   - failed manual attempts must not erase the previously known successful manual time
   - reload/page-open state for this block stays truthful to persisted manual-success facts; technical prepared-snapshot details stay only in the job/log surface
@@ -408,7 +409,7 @@ update_note: "Обновлён под current seller-session operator checkpoint
   - `Последнее успешное автообновление`
 - Этот auto block не hardcode-ится в UI: page читает его только из existing `GET /v1/sheet-vitrina-v1/status` / `POST /v1/sheet-vitrina-v1/refresh` response field `server_context`, а manual-success fields page читает только из sibling field `manual_context`.
 - `Автоцепочка` в этом block обязана быть truthful server-driven описанием полного daily auto path, а не только временем:
-  - canonical current wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
+  - canonical current wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: server-side refresh ready snapshot for website/operator web-vitrina`
   - manual operator semantics теперь явно отличаются от auto path: explicit UI buttons всё ещё разделяют `refresh` и `load`, short retries остаются внутри одного run, но persisted long-retry state после manual refresh не создаётся
 - Operator log surface обязан показывать построчный start / key steps / finish / error для обеих operator actions:
   - `refresh` = build/persist ready snapshot only
@@ -579,10 +580,10 @@ update_note: "Обновлён под current seller-session operator checkpoint
 - Repo-owned operator page для explicit refresh теперь живёт на том же thin HTTP entrypoint и убирает ручной `curl` из нормального operator path.
 - Existing operator page/status surface теперь server-driven показывает текущую EKT business-time truth и current timer trigger metadata без отдельного meta route и без hardcoded UI copy.
 - Live service остаётся тонкой loopback HTTP boundary (`wb-core-registry-http.service` -> `127.0.0.1:8765`) и не переносит heavy truth в Apps Script.
-- Existing live daily refresh scheduler materialize-ится как external systemd timer `wb-core-sheet-vitrina-refresh.timer`, который вызывает тот же existing `POST /v1/sheet-vitrina-v1/refresh` ежедневно в `11:00` и `20:00 Asia/Yekaterinburg` (`06:00 UTC` и `15:00 UTC` на current host), но теперь делает это в `auto_load=true` режиме:
-  - server contour сначала materialize-ит ready snapshot тем же heavy refresh path;
-  - затем в том же auto cycle вызывает existing load bridge и доводит результат до live sheet;
-  - итоговый auto result persist-ится в runtime/status surface как last auto run status / timestamps plus semantic result payload, чтобы operator page не маскировала refresh-only под sheet-complete и не теряла combined-cycle warning/error outcome.
+- Existing live daily refresh scheduler materialize-ится как external systemd timer `wb-core-sheet-vitrina-refresh.timer`, который вызывает тот же existing `POST /v1/sheet-vitrina-v1/refresh` ежедневно в `11:00` и `20:00 Asia/Yekaterinburg` (`06:00 UTC` и `15:00 UTC` на current host), но теперь делает только server-side refresh ready snapshot for website/operator web-vitrina:
+  - server contour materialize-ит ready snapshot тем же heavy refresh path;
+  - former `auto_load=true` / load bridge / live Google Sheets write step is archived and rejected;
+  - runtime/status surface не должна маскировать refresh-only под sheet-complete.
 - Existing live contour также допускает отдельный bounded retry timer `wb-core-sheet-vitrina-closure-retry.timer`, который вызывает repo-owned runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py`:
   - timer не делает tight loop и может запускаться чаще, чем real retry cadence, потому что due/backoff decision already lives in persisted runtime state;
   - retry runner дожимает due `yesterday_closed` для всей historical/date-period matrix и same-day `today_current` only for current-snapshot-only group;

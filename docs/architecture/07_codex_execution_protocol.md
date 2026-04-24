@@ -56,7 +56,7 @@ Codex должна остановиться и вынести задачу на 
 | Documentation sync | При значимом техническом изменении обновлена каноническая документация в той же задаче |
 | Project-pack sync | Если изменение влияет на project-oriented pack, обновлены затронутые файлы `wb_core_docs_master/` и manifest |
 | Git capture | Если requested outcome по смыслу включает Git fixation или GitHub closure и пользователь явно не запретил Git/GitHub actions, канонический source-of-truth артефакт доведён до commit/push/PR/merge/delete-branch либо execution возвращён как incomplete с exact blocker |
-| Completion state | Для live/public задач явно зафиксировано, достигнуты ли `repo-complete`, `live-complete`, active-surface verify, `pack-complete`, либо где именно блокер; `sheet-complete` фиксируется только для bound Apps Script/live sheet scope |
+| Completion state | Для live/public задач явно зафиксировано, достигнуты ли `repo-complete`, `live-complete`, active-surface verify, `pack-complete`, либо где именно блокер; `sheet-complete` фиксируется только для archived bound Apps Script guard scope |
 | Local validation | Базовые структурные проверки проходят |
 | Reviewability | Результат понятен ручному reviewer без runtime-археологии |
 | Step discipline | Если нужен manual step, один ответ содержит один практический следующий шаг; несколько независимых рискованных действий не смешиваются |
@@ -76,8 +76,8 @@ Execution handoff должен явно различать четыре сост
   - route/process/service existence проверены в живом contour;
   - public probe или equivalent live verify выполнен.
 - `sheet-complete`:
-  - если задача меняет bound Apps Script, live sheet behavior или sheet-side flow, выполнен `clasp push` или equivalent publish step;
-  - минимальный live verify по затронутому sheet-flow выполнен.
+  - если задача меняет archived bound Apps Script guard, выполнен `clasp push` или equivalent publish step;
+  - минимальный guard-only verify подтверждает, что former sheet-side functions fail fast as archived.
 - `pack-complete`:
   - если задача меняет policy/contract/checkpoint/runbook/status wording, обновлены и primary canonical docs, и затронутый `wb_core_docs_master`;
   - manifest обновлён;
@@ -86,7 +86,7 @@ Execution handoff должен явно различать четыре сост
 Важно:
 - `repo-complete` не означает, что задача полностью завершена.
 - Если задача меняет public HTTP route, runtime/service/nginx publish, bound Apps Script, operator UI или live sheet behavior, execution handoff не считается complete на этапе "код готов в repo".
-- Для таких задач Codex обязана довести нужный active contour в одном bounded execution: live/public/web-vitrina задачи закрываются через `repo-complete + live-complete + public/web-vitrina verify`, а `sheet-complete` добавляется только для изменений bound Apps Script/live sheet write path.
+- Для таких задач Codex обязана довести нужный active contour в одном bounded execution: live/public/web-vitrina задачи закрываются через `repo-complete + live-complete + public/web-vitrina verify`, а `sheet-complete` добавляется только для archived bound Apps Script guard changes.
 - Human-only step допускается только там, где действительно нужны логин, права, branch-protection approval / явный GitHub write blocker, ручная UI-проверка или решение по риску.
 - Если `live-complete` или `sheet-complete` не достигнуты, финальный отчёт обязан явно назвать это состояние и точный blocker, а не маскировать задачу как "готово".
 - Если hosted runtime уже имеет repo-owned deploy/probe contract, отсутствие deploy access или target values больше не считается "неизвестным operational контекстом": в blocker нужно точно назвать, каких именно values/rights не хватает.
@@ -109,7 +109,7 @@ Assistant ведёт bounded работу по шагам.
 - Пользователя подключают только там, где действительно нужен human-only step: логин, права, branch-protection approval / blocker-driven manual merge fallback, ручная UI-проверка, решение по риску.
 - Техническую рутину, которую Codex может безопасно выполнить сама, просить у пользователя нельзя.
 - Если manual step неизбежен, он формулируется как один минимальный следующий шаг.
-- Если задача по смыслу требует live/runtime closure и безопасные доступы уже есть, Codex не должна останавливаться на `repo-complete`; она обязана дотянуть deploy / public verify до полного bounded completion либо вернуть incomplete с exact blocker. `clasp push` требуется только для scope, который реально меняет bound Apps Script или live sheet write.
+- Если задача по смыслу требует live/runtime closure и безопасные доступы уже есть, Codex не должна останавливаться на `repo-complete`; она обязана дотянуть deploy / public verify до полного bounded completion либо вернуть incomplete с exact blocker. `clasp push` требуется только для scope, который реально меняет archived bound Apps Script guard.
 - Для hosted runtime family вокруг `registry_upload_http_entrypoint_block` canonical repo-owned path теперь живёт в `apps/registry_upload_http_entrypoint_hosted_runtime.py`; если задача затрагивает этот contour, сначала используется этот runner, а не ручное угадывание host/service steps.
 
 ## Git Fixation And GitHub Closure Ownership

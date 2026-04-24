@@ -1,4 +1,4 @@
-"""Thin Apps Script bridge for writing prepared sheet_vitrina_v1 snapshots."""
+"""Archived Apps Script bridge for the legacy Google Sheets contour."""
 
 from __future__ import annotations
 
@@ -19,70 +19,40 @@ EXPECTED_CLASP_ROOT_DIR = "gas/sheet_vitrina_v1"
 CLASP_PROFILE_PATH_ENV = "WB_CORE_CLASPRC_PATH"
 GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_SCRIPT_RUN_URL_TEMPLATE = "https://script.googleapis.com/v1/scripts/{script_id}:run"
+LEGACY_GOOGLE_SHEETS_ARCHIVE_STATUS = "ARCHIVED / DO NOT USE"
+LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE = (
+    "Legacy Google Sheets contour is archived. "
+    "Use the website/operator web-vitrina surface instead."
+)
+
+
+class LegacyGoogleSheetsContourArchivedError(RuntimeError):
+    """Raised when a caller tries to use the archived Google Sheets contour."""
+
+
+def legacy_google_sheets_archive_context() -> dict[str, Any]:
+    return {
+        "status": LEGACY_GOOGLE_SHEETS_ARCHIVE_STATUS,
+        "active": False,
+        "write_enabled": False,
+        "load_enabled": False,
+        "verification_target": False,
+        "message": LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE,
+    }
 
 
 def load_sheet_vitrina_ready_snapshot_via_clasp(
     plan: SheetVitrinaV1Envelope,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
+    del plan
     emit = log or _noop
-    config = _load_clasp_config()
-    profile = _load_clasp_profile()
-
-    script_id = str(config.get("scriptId", "") or "").strip()
-    parent_id = str(config.get("parentId", "") or "").strip()
-    root_dir = str(config.get("rootDir", "") or "").strip()
-
-    if not script_id:
-        raise ValueError("missing scriptId in .clasp.json")
-    if not parent_id:
-        raise ValueError("missing parentId in .clasp.json")
-    if root_dir != EXPECTED_CLASP_ROOT_DIR:
-        raise ValueError(f"unexpected rootDir in .clasp.json: {root_dir!r}")
-
-    emit(f"Apps Script bridge: scriptId={script_id}")
-    emit(f"Целевая таблица: spreadsheetId={parent_id}")
-
-    payload = json.dumps(asdict(plan), ensure_ascii=False, separators=(",", ":"))
-
-    emit("Запускаем writeSheetVitrinaV1Plan...")
-    write_result = _run_apps_script_json_function(
-        script_id=script_id,
-        profile=profile,
-        function_name="writeSheetVitrinaV1Plan",
-        parameters=[payload],
-    )
-    if str(write_result.get("spreadsheet_id", "") or "").strip() != parent_id:
-        raise ValueError("writeSheetVitrinaV1Plan returned unexpected spreadsheet_id")
-
-    emit("Проверяем состояние листов через getSheetVitrinaV1State...")
-    sheet_state = _run_apps_script_json_function(
-        script_id=script_id,
-        profile=profile,
-        function_name="getSheetVitrinaV1State",
-        parameters=[],
-    )
-    if str(sheet_state.get("spreadsheet_id", "") or "").strip() != parent_id:
-        raise ValueError("getSheetVitrinaV1State returned unexpected spreadsheet_id")
-
-    return {
-        "bridge": "apps_script_execution_api",
-        "script_id": script_id,
-        "spreadsheet_id": parent_id,
-        "write_result": write_result,
-        "sheet_state": sheet_state,
-    }
+    emit(f"legacy_google_sheets_contour={LEGACY_GOOGLE_SHEETS_ARCHIVE_STATUS}")
+    raise LegacyGoogleSheetsContourArchivedError(LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE)
 
 
 def resolve_sheet_vitrina_live_spreadsheet_url() -> str:
-    config = _load_clasp_config()
-    parent_id = str(config.get("parentId", "") or "").strip()
-    root_dir = str(config.get("rootDir", "") or "").strip()
-    if not parent_id:
-        raise ValueError("missing parentId in .clasp.json")
-    if root_dir != EXPECTED_CLASP_ROOT_DIR:
-        raise ValueError(f"unexpected rootDir in .clasp.json: {root_dir!r}")
-    return f"https://docs.google.com/spreadsheets/d/{parent_id}/edit"
+    raise LegacyGoogleSheetsContourArchivedError(LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE)
 
 
 def _load_clasp_config() -> dict[str, Any]:

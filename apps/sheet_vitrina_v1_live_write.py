@@ -1,4 +1,4 @@
-"""Локальный live write bridge для bound Google Sheet витрины V1."""
+"""Archived local runner for the legacy bound Google Sheet contour."""
 
 from __future__ import annotations
 
@@ -20,6 +20,10 @@ from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Request
 TARGET_SPREADSHEET_ID = "1ltgE8GltN3Rk8qP1UiaT2NPEwQyPKZ-1tuIqV7EC1NE"
 TARGET_SCRIPT_ID = "1QalhdgdmpxekaTMbNEZM1ubLSPKkTYZ53SHacqBU9HRVJQgEKRdHkgSf"
 TARGET_SPREADSHEET_NAME = "WB Core Vitrina V1"
+ARCHIVE_MESSAGE = (
+    "Legacy Google Sheets contour is archived. "
+    "This runner must not push or write sheet_vitrina_v1; use web-vitrina/operator instead."
+)
 
 
 def _run_command(args: list[str]) -> str:
@@ -67,6 +71,7 @@ def _build_write_plan() -> dict[str, Any]:
 
 
 def main() -> None:
+    raise SystemExit(ARCHIVE_MESSAGE)
     _verify_target_config()
     plan = _build_write_plan()
     _run_command(["clasp", "push"])

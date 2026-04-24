@@ -135,7 +135,8 @@ def main() -> None:
             if (
                 "Обновление данных" not in operator_ui_html
                 or "Загрузить данные" not in operator_ui_html
-                or "Отправить данные" not in operator_ui_html
+                or "Legacy Google Sheets" not in operator_ui_html
+                or "архивирован" not in operator_ui_html
             ):
                 raise AssertionError("operator UI must expose the expected minimal page")
             if 'href="' + DEFAULT_SHEET_WEB_VITRINA_UI_PATH + '"' not in operator_ui_html:
@@ -179,7 +180,7 @@ def main() -> None:
                 "Ручная загрузка данных" not in operator_ui_html
                 or "Лог" not in operator_ui_html
                 or "Последняя удачная загрузка" not in operator_ui_html
-                or "Последняя удачная отправка" not in operator_ui_html
+                or "Legacy Google Sheets" not in operator_ui_html
             ):
                 raise AssertionError("operator UI must keep the compact manual/log chrome")
             if (
@@ -284,6 +285,17 @@ def main() -> None:
                 "stock_report_active_skus": expected_active_skus,
                 "stock_report_active_sku_count": len(expected_active_skus),
                 "stock_report_active_sku_source": "current_registry_config_v2",
+                "legacy_google_sheets_contour": {
+                    "status": "ARCHIVED / DO NOT USE",
+                    "active": False,
+                    "write_enabled": False,
+                    "load_enabled": False,
+                    "verification_target": False,
+                    "message": (
+                        "Legacy Google Sheets contour is archived. "
+                        "Use the website/operator web-vitrina surface instead."
+                    ),
+                },
             }:
                 raise AssertionError(
                     "operator UI config must expose refresh/status paths, both report routes, both supply blocks and the full active SKU selector source"
@@ -312,7 +324,8 @@ def main() -> None:
             if server_context.get("daily_refresh_systemd_oncalendar") != "*-*-* 06:00:00 UTC; *-*-* 15:00:00 UTC":
                 raise AssertionError("status read before refresh must expose the configured OnCalendar trigger")
             if server_context.get("daily_auto_description") != (
-                "Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу"
+                "Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: "
+                "server-side refresh ready snapshot for website/operator web-vitrina"
             ):
                 raise AssertionError("status read before refresh must expose the truthful auto-update description")
             if "same-day today_current" not in str(server_context.get("retry_runner_description", "")):

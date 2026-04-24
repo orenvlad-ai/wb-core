@@ -18,7 +18,12 @@ from packages.application.factory_order_supply import FactoryOrderSupplyBlock
 from packages.application.promo_live_source import PromoLiveSourceBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_daily_report import SheetVitrinaV1DailyReportBlock
-from packages.application.sheet_vitrina_v1_load_bridge import load_sheet_vitrina_ready_snapshot_via_clasp
+from packages.application.sheet_vitrina_v1_load_bridge import (
+    LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE,
+    LegacyGoogleSheetsContourArchivedError,
+    legacy_google_sheets_archive_context,
+    load_sheet_vitrina_ready_snapshot_via_clasp,
+)
 from packages.application.sheet_vitrina_v1_stock_report import SheetVitrinaV1StockReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import list_active_sku_options
 from packages.application.sheet_vitrina_v1_temporal_policy import reduce_source_temporal_semantics
@@ -64,7 +69,7 @@ SheetLoadRunner = Callable[[SheetVitrinaV1Envelope, OperatorLogEmitter], dict[st
 SHEET_VITRINA_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/refresh"
 SHEET_VITRINA_LOAD_ROUTE = "/v1/sheet-vitrina-v1/load"
 SHEET_VITRINA_DAILY_TIMER_NAME = "wb-core-sheet-vitrina-refresh.timer"
-SHEET_VITRINA_DAILY_AUTO_ACTION = "загрузка данных + отправка данных в таблицу"
+SHEET_VITRINA_DAILY_AUTO_ACTION = "server-side refresh ready snapshot for website/operator web-vitrina"
 SHEET_VITRINA_DAILY_BUSINESS_TIMES = ", ".join(
     f"{hour:02d}:00" for hour in DAILY_REFRESH_BUSINESS_HOURS
 )
@@ -73,8 +78,8 @@ SHEET_VITRINA_DAILY_AUTO_DESCRIPTION = (
     f"{SHEET_VITRINA_DAILY_AUTO_ACTION}"
 )
 SHEET_VITRINA_DAILY_TRIGGER_DESCRIPTION = (
-    f"{SHEET_VITRINA_DAILY_TIMER_NAME} -> POST {SHEET_VITRINA_REFRESH_ROUTE} (auto_load=true) "
-    f"в {SHEET_VITRINA_DAILY_BUSINESS_TIMES} {CANONICAL_BUSINESS_TIMEZONE_NAME}"
+    f"{SHEET_VITRINA_DAILY_TIMER_NAME} -> POST {SHEET_VITRINA_REFRESH_ROUTE} "
+    f"(auto_refresh=true) в {SHEET_VITRINA_DAILY_BUSINESS_TIMES} {CANONICAL_BUSINESS_TIMEZONE_NAME}"
 )
 SHEET_VITRINA_RETRY_RUNNER_DESCRIPTION = (
     "Persisted retry runner: дожимает due yesterday_closed для historical/date-period families "
@@ -458,7 +463,8 @@ class RegistryUploadHttpEntrypoint:
         return self._run_sheet_refresh(as_of_date=as_of_date, log=None)
 
     def handle_sheet_load_request(self, as_of_date: str | None = None) -> dict[str, Any]:
-        return self._run_sheet_load(as_of_date=as_of_date, log=None)
+        del as_of_date
+        raise LegacyGoogleSheetsContourArchivedError(LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE)
 
     def start_sheet_refresh_job(
         self,
@@ -476,10 +482,8 @@ class RegistryUploadHttpEntrypoint:
         )
 
     def start_sheet_load_job(self, as_of_date: str | None = None) -> dict[str, Any]:
-        return self.operator_jobs.start(
-            operation="load",
-            runner=lambda log: self._run_sheet_load(as_of_date=as_of_date, log=log),
-        )
+        del as_of_date
+        raise LegacyGoogleSheetsContourArchivedError(LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE)
 
     def handle_sheet_operator_job_request(self, job_id: str) -> dict[str, Any]:
         return self.operator_jobs.get(job_id)
@@ -665,14 +669,10 @@ class RegistryUploadHttpEntrypoint:
             if auto_load_visible and default_visible_as_of_date in scheduled_dates:
                 emit(
                     _format_log_event(
-                        "closure_retry_load_start",
+                        "closure_retry_load_skipped",
                         as_of_date=default_visible_as_of_date,
+                        reason="legacy_google_sheets_contour_archived",
                     )
-                )
-                load_result = self._run_sheet_load(
-                    as_of_date=default_visible_as_of_date,
-                    log=emit,
-                    execution_mode=EXECUTION_MODE_PERSISTED_RETRY,
                 )
 
             closure_states = self.runtime.list_temporal_source_closure_states(
@@ -790,7 +790,7 @@ class RegistryUploadHttpEntrypoint:
                     cycle="auto_update",
                     route=SHEET_VITRINA_REFRESH_ROUTE,
                     requested_as_of_date=requested_as_of_date,
-                    action="build_ready_snapshot_and_write_sheet",
+                    action="build_ready_snapshot_for_web_vitrina",
                     trigger=SHEET_VITRINA_DAILY_TIMER_NAME,
                     execution_mode=EXECUTION_MODE_AUTO_DAILY,
                 )
@@ -800,11 +800,6 @@ class RegistryUploadHttpEntrypoint:
             try:
                 refresh_payload = self._run_sheet_refresh(
                     as_of_date=as_of_date,
-                    log=emit,
-                    execution_mode=EXECUTION_MODE_AUTO_DAILY,
-                )
-                load_payload = self._run_sheet_load(
-                    as_of_date=str(refresh_payload["as_of_date"]),
                     log=emit,
                     execution_mode=EXECUTION_MODE_AUTO_DAILY,
                 )
@@ -864,9 +859,9 @@ class RegistryUploadHttpEntrypoint:
                 started_at=started_at,
                 finished_at=finished_at,
                 status="success",
-                as_of_date=str(load_payload["as_of_date"]),
-                snapshot_id=str(load_payload["snapshot_id"]),
-                refreshed_at=str(load_payload["refreshed_at"]),
+                as_of_date=str(refresh_payload["as_of_date"]),
+                snapshot_id=str(refresh_payload["snapshot_id"]),
+                refreshed_at=str(refresh_payload["refreshed_at"]),
                 error=None,
                 result_payload=auto_result,
             )
@@ -878,10 +873,10 @@ class RegistryUploadHttpEntrypoint:
                     semantic_status=auto_result.get("semantic_status"),
                     semantic_reason=auto_result.get("semantic_reason"),
                     route=SHEET_VITRINA_REFRESH_ROUTE,
-                    snapshot_id=load_payload["snapshot_id"],
+                    snapshot_id=refresh_payload["snapshot_id"],
                 )
             )
-            payload = dict(load_payload)
+            payload = dict(refresh_payload)
             payload["technical_status"] = str(payload.get("technical_status") or payload.get("status") or "success")
             payload["status"] = str(auto_result.get("semantic_status") or "warning")
             payload["status_label"] = str(auto_result.get("semantic_label") or "")
@@ -1034,6 +1029,9 @@ class RegistryUploadHttpEntrypoint:
         log: OperatorLogEmitter | None,
         execution_mode: str = EXECUTION_MODE_MANUAL_OPERATOR,
     ) -> dict[str, Any]:
+        del as_of_date, log, execution_mode
+        raise LegacyGoogleSheetsContourArchivedError(LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE)
+
         emit = log or _noop_log
         with self._sheet_cycle_lock:
             previous_load_state = self.runtime.load_sheet_vitrina_load_state()
@@ -1259,6 +1257,7 @@ class RegistryUploadHttpEntrypoint:
             "last_as_of_date": load_state.as_of_date or "",
             "last_refreshed_at": load_state.refreshed_at or "",
             "last_result": _format_operator_result_payload(load_state.result),
+            "legacy_google_sheets_contour": legacy_google_sheets_archive_context(),
         }
 
     def build_sheet_operator_ui_context(self) -> dict[str, Any]:
@@ -1927,11 +1926,11 @@ def _build_auto_update_result_payload(
     error: str | None,
 ) -> dict[str, Any]:
     refresh_semantic = str((refresh_payload or {}).get("semantic_status") or "warning")
-    load_semantic = str((load_payload or {}).get("semantic_status") or "warning")
+    load_semantic = str((load_payload or {}).get("semantic_status") or "")
     semantic_status = (
         "error"
         if technical_status == "error"
-        else _worst_tone([refresh_semantic, load_semantic])
+        else _worst_tone([value for value in [refresh_semantic, load_semantic] if value])
     )
     semantic_reason = (
         str(error or "").strip()
@@ -1941,8 +1940,9 @@ def _build_auto_update_result_payload(
             for part in [
                 f"refresh: {str((refresh_payload or {}).get('semantic_reason') or '').strip()}",
                 f"load: {str((load_payload or {}).get('semantic_reason') or '').strip()}",
+                "legacy Google Sheets load: archived / not executed",
             ]
-            if not part.endswith(": ")
+            if not part.endswith(": ") and (load_payload is not None or not part.startswith("load:"))
         )
     )
     return {

@@ -120,16 +120,16 @@ Readiness pack определяется по `~/Projects/wb-core/wb_core_docs_ma
 
 - `repo-complete` = repo update + local validation + canonical result не остаётся только в рабочем дереве.
 - `live-complete` = live runtime/service/publish contour обновлён и public probe подтверждён.
-- `sheet-complete` = bound Apps Script/sheet publish step выполнен и минимальный live sheet verify подтверждён; это требуется только для изменений bound Apps Script/live sheet write path.
+- `sheet-complete` = archived bound Apps Script guard publish step выполнен и минимальный guard-only verify подтверждён; это требуется только для изменений archived GAS guard.
 - `pack-complete` = primary docs, `wb_core_docs_master` и manifest синхронизированы в repo; если docs/pack менялись, после merge локальный `~/Projects/wb-core` приведён к current `origin/main`, а `~/Projects/wb-core/wb_core_docs_master` проверен как upload-ready source.
 
 Правило completion такое:
 - если задача меняет public route, runtime/service/nginx publish, bound Apps Script, operator UI или live sheet behavior, `repo-complete` недостаточно;
 - Codex обязана довести repo + deploy + active-surface verify в одном bounded execution, если это безопасно и доступно, либо вернуть incomplete с exact blocker;
 - для текущей web-витрины active-surface verify = server/public `/v1/sheet-vitrina-v1/web-vitrina`, `surface=page_composition` и `/sheet-vitrina-v1/vitrina`; Google Sheets / GAS / `clasp` / `invalid_grant` не являются completion blocker;
-- `clasp` + sheet verify добавляются только когда scope реально меняет bound Apps Script или live sheet write path;
+- `clasp` + guard-only verify добавляются только когда scope реально меняет archived bound Apps Script guard;
 - human-only step остаётся только для логина, прав, branch-protection approval / blocker-driven manual merge fallback, ручной UI-проверки или решения по риску;
-- для live/public задачи в финальном отчёте отдельно фиксируются `repo state`, `live deploy state`, `public verify result`; `sheet verify result` указывается как `not in scope`, кроме bound Apps Script/live sheet changes.
+- для live/public задачи в финальном отчёте отдельно фиксируются `repo state`, `live deploy state`, `public verify result`; `sheet verify result` указывается как `not in scope`, кроме archived bound Apps Script guard changes.
 - Для docs-governance-only scope fake live/public/sheet steps не нужны; вместо них нужно честно зафиксировать `not in scope` и довести upload-ready source state.
 - Если hosted contour уже имеет repo-owned deploy runner, blocker должен называть конкретный missing access/value, а не ссылаться на неопределённое “внешнее operational знание”.
 

@@ -2,9 +2,9 @@
 title: "Модуль: sheet_vitrina_v1_registry_upload_trigger_block"
 doc_id: "WB-CORE-MODULE-24-SHEET-VITRINA-V1-REGISTRY-UPLOAD-TRIGGER-BLOCK"
 doc_type: "module"
-status: "active"
-purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `sheet_vitrina_v1_registry_upload_trigger_block`."
-scope: "Первый operator-facing sheet-side trigger для отправки V2-реестров и sibling `COST_PRICE` contour: листы `CONFIG / METRICS / FORMULAS`, отдельный лист `COST_PRICE`, Apps Script menu, bundle assembly, thin HTTP POST в существующий entrypoint и минимальный feedback для оператора."
+status: "archived"
+purpose: "Зафиксировать archive/migration reference по bounded checkpoint блока `sheet_vitrina_v1_registry_upload_trigger_block`."
+scope: "Archived operator-facing sheet-side trigger for former Google Sheets `CONFIG / METRICS / FORMULAS` and `COST_PRICE` flows. Apps Script menu/upload actions are not active runtime/update/write/load targets."
 source_basis:
   - "migration/86_registry_upload_contract.md"
   - "migration/90_registry_upload_http_entrypoint.md"
@@ -38,7 +38,7 @@ related_docs:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/18_MODULE__SHEET_VITRINA_V1_WRITE_BRIDGE_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под sibling COST_PRICE contour: existing registry actions остаются неизменными, а bound Apps Script получает отдельный sheet/menu/upload path для себестоимостей без смешивания с compact registry bundle."
+update_note: "Архивирован: former sheet-side registry/COST_PRICE upload trigger remains only as migration evidence; server HTTP upload contracts remain active outside Google Sheets."
 ---
 
 # 1. Идентификатор и статус
@@ -49,6 +49,13 @@ update_note: "Обновлён под sibling COST_PRICE contour: existing regis
 - `status_verification`: bundle-to-runtime smoke подтверждён
 - `status_checkpoint`: рабочий checkpoint подтверждён
 - `status_main`: модуль смёржен в `main`
+- `status_current`: `ARCHIVED / DO NOT USE`
+
+Current norm:
+- `gas/sheet_vitrina_v1/RegistryUploadTrigger.gs` menu now exposes only archive status.
+- `prepareRegistryUploadOperatorSheets`, `uploadRegistryUploadBundle`, `prepareCostPriceSheet`, `uploadCostPriceSheet` and `loadSheetVitrinaTable` are blocked by `ArchiveGuard.gs`.
+- Server endpoints `POST /v1/registry-upload/bundle` and `POST /v1/cost-price/upload` remain active server contracts when called by current non-Google-Sheets flows.
+- This module must not be used as a Codex completion or verification target.
 
 # 2. Upstream/source basis и semantics
 
