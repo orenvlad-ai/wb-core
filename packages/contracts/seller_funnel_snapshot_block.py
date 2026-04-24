@@ -11,6 +11,7 @@ class SellerFunnelSnapshotRequest:
     snapshot_type: str
     date: str
     scenario: Literal["normal", "not_found"] = "normal"
+    nm_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -54,4 +55,3 @@ class SellerFunnelSnapshotEnvelope:
     """Общий результат блока поверх success/not-found."""
 
     result: SellerFunnelSnapshotResult
-

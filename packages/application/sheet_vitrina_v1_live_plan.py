@@ -620,6 +620,7 @@ class SheetVitrinaV1LivePlanBlock:
                         SellerFunnelSnapshotRequest(
                             snapshot_type="seller_funnel_snapshot",
                             date=slot.column_date,
+                            nm_ids=tuple(requested_nm_ids),
                         )
                     ).result,
                 ),
