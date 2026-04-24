@@ -403,10 +403,16 @@ def _run_json(command: list[str]) -> dict[str, object]:
     result = subprocess.run(
         command,
         cwd=ROOT,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+    if result.returncode != 0:
+        raise AssertionError(
+            "command failed: "
+            + " ".join(command)
+            + f"\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
     payload = json.loads(result.stdout)
     if not isinstance(payload, dict):
         raise AssertionError("runner must emit a JSON object")

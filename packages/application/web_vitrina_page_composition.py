@@ -407,6 +407,8 @@ def _normalize_loading_table(value: Any, *, upload_summary: Mapping[str, Any]) -
     payload = dict(value or {})
     today_date = str(payload.get("today_date") or "")
     yesterday_date = str(payload.get("yesterday_date") or "")
+    available_dates = [str(item) for item in (payload.get("available_dates") or []) if str(item).strip()]
+    default_refresh_date = str(payload.get("default_refresh_date") or today_date or "")
     columns = [
         {
             "id": str(column_payload.get("id") or ""),
@@ -448,7 +450,13 @@ def _normalize_loading_table(value: Any, *, upload_summary: Mapping[str, Any]) -
         "updated_at": str(payload.get("updated_at") or upload_summary.get("updated_at") or ""),
         "today_date": today_date,
         "yesterday_date": yesterday_date,
-        "groups": _normalize_loading_table_groups(payload.get("groups")),
+        "available_dates": available_dates,
+        "default_refresh_date": default_refresh_date,
+        "groups": _normalize_loading_table_groups(
+            payload.get("groups"),
+            available_dates=available_dates,
+            default_refresh_date=default_refresh_date,
+        ),
         "columns": columns,
         "rows": rows,
         "empty_message": str(
@@ -459,12 +467,21 @@ def _normalize_loading_table(value: Any, *, upload_summary: Mapping[str, Any]) -
     }
 
 
-def _normalize_loading_table_groups(value: Any) -> list[dict[str, Any]]:
+def _normalize_loading_table_groups(
+    value: Any,
+    *,
+    available_dates: list[str],
+    default_refresh_date: str,
+) -> list[dict[str, Any]]:
     groups: list[dict[str, Any]] = []
+    fallback_min_date = available_dates[0] if available_dates else ""
+    fallback_max_date = available_dates[-1] if available_dates else ""
     for group in value or []:
         if not isinstance(group, Mapping):
             continue
         group_payload = dict(group)
+        refresh_action = dict(group_payload.get("refresh_action") or {})
+        action_dates = [str(item) for item in (refresh_action.get("available_dates") or available_dates) if str(item).strip()]
         groups.append(
             {
                 "group_id": str(group_payload.get("group_id") or ""),
@@ -472,12 +489,16 @@ def _normalize_loading_table_groups(value: Any) -> list[dict[str, Any]]:
                 "source_keys": [str(item) for item in (group_payload.get("source_keys") or []) if str(item)],
                 "last_updated_at": str(group_payload.get("last_updated_at") or ""),
                 "refresh_action": {
-                    "label": str(((group_payload.get("refresh_action") or {}).get("label")) or "Обновить группу"),
+                    "label": str(refresh_action.get("label") or "Обновить группу"),
                     "source_group_id": str(
-                        ((group_payload.get("refresh_action") or {}).get("source_group_id"))
+                        refresh_action.get("source_group_id")
                         or group_payload.get("group_id")
                         or ""
                     ),
+                    "default_as_of_date": str(refresh_action.get("default_as_of_date") or default_refresh_date),
+                    "available_dates": action_dates,
+                    "min_date": str(refresh_action.get("min_date") or (action_dates[0] if action_dates else fallback_min_date)),
+                    "max_date": str(refresh_action.get("max_date") or (action_dates[-1] if action_dates else fallback_max_date)),
                 },
                 "session_controls": bool(group_payload.get("session_controls")),
             }
