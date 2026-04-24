@@ -131,7 +131,7 @@ def main() -> None:
             upload_url = f"http://127.0.0.1:{config.port}{config.upload_path}"
             plan_url = f"http://127.0.0.1:{config.port}{config.sheet_plan_path}"
             load_url = f"http://127.0.0.1:{config.port}{DEFAULT_SHEET_LOAD_PATH}"
-            operator_ui_url = f"http://127.0.0.1:{config.port}{config.sheet_operator_ui_path}"
+            operator_ui_url = f"http://127.0.0.1:{config.port}{config.sheet_operator_ui_path}?embedded_tab=vitrina"
 
             operator_ui_status, operator_ui_html = _get_text(operator_ui_url)
             if operator_ui_status != 200:

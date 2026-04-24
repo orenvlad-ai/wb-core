@@ -109,6 +109,7 @@ def main() -> None:
         "compact_widths": ready_result["compact_widths"],
         "percent_formatting": ready_result["percent_formatting"],
         "operator_screen_layout": ready_result["operator_screen_layout"],
+        "unified_tab_navigation": ready_result["unified_tab_navigation"],
         "load_refresh_action": ready_result["load_refresh_action"],
         "right_edge_spacer": ready_result["right_edge_spacer"],
         "column_visibility": ready_result["column_visibility"],
@@ -264,6 +265,7 @@ def run_browser_checks(
                 allow_empty_log=expected_percent_rows is None,
             )
             operator_screen_layout = _check_operator_screen_layout(page)
+            unified_tab_navigation = _check_unified_tab_navigation(page)
             first_loading_row = (initial_activity_surface["loading"]["rows"] or [None])[0]
             if not isinstance(first_loading_row, dict):
                 raise AssertionError(f"activity surface must expose at least one loading row, got {initial_activity_surface}")
@@ -433,6 +435,7 @@ def run_browser_checks(
         "compact_widths": compact_widths,
         "percent_formatting": percent_formatting,
         "operator_screen_layout": operator_screen_layout,
+        "unified_tab_navigation": unified_tab_navigation,
         "load_refresh_action": load_refresh_action,
         "column_visibility": column_visibility,
         "horizontal_overscroll_guard": horizontal_overscroll_guard,
@@ -485,6 +488,8 @@ def _print_summary(result: dict[str, object]) -> None:
     print("web_vitrina_browser_compact_widths: ok ->", result["compact_widths"])
     print("web_vitrina_browser_percent_formatting: ok ->", result["percent_formatting"])
     print("web_vitrina_browser_operator_screen_layout: ok ->", result["operator_screen_layout"])
+    if "unified_tab_navigation" in result:
+        print("web_vitrina_browser_unified_tabs: ok ->", result["unified_tab_navigation"])
     print("web_vitrina_browser_load_refresh_action: ok ->", result["load_refresh_action"])
     print("web_vitrina_browser_right_edge_spacer: ok ->", result["right_edge_spacer"])
     print("web_vitrina_browser_sku_separators: ok ->", result["sku_separators"])
@@ -512,21 +517,22 @@ def _route_page_composition_with_delay(route: object) -> None:
 
 def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
     page.goto(base_url + DEFAULT_SHEET_OPERATOR_UI_PATH, wait_until="domcontentloaded")
-    link = page.locator('[data-tab-panel="vitrina"] .eyebrow-link').first
-    href = link.get_attribute("href") or ""
-    if href != DEFAULT_SHEET_WEB_VITRINA_UI_PATH:
-        raise AssertionError(f"operator eyebrow link must target the new vitrina route, got {href!r}")
-    with page.context.expect_page() as popup_info:
-        link.click()
-    popup_page = popup_info.value
-    try:
-        popup_page.wait_for_url("**" + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, timeout=5000)
-        target_url = popup_page.url
-    finally:
-        popup_page.close()
+    page.wait_for_selector("[data-unified-tab-button='vitrina']", timeout=5000)
+    tabs = page.locator("[data-unified-tab-button]").evaluate_all(
+        "nodes => nodes.map(node => ({id: node.getAttribute('data-unified-tab-button') || '', text: (node.textContent || '').trim(), active: node.classList.contains('is-active')}))"
+    )
+    tab_texts = [item["text"] for item in tabs]
+    if tab_texts != ["Витрина", "Расчет поставок", "Отчеты"]:
+        raise AssertionError(f"operator route must expose the unified top tabs, got {tabs}")
+    active_tabs = [item["id"] for item in tabs if item["active"]]
+    if active_tabs != ["vitrina"]:
+        raise AssertionError(f"operator route must default to the vitrina tab, got {tabs}")
+    if page.locator("[data-unified-tab-button]", has_text="Обновление данных").count() != 0:
+        raise AssertionError("operator route must not expose a separate Обновление данных tab")
     return {
-        "href": href,
-        "target_url": target_url,
+        "route": DEFAULT_SHEET_OPERATOR_UI_PATH,
+        "tabs": ", ".join(tab_texts),
+        "default_active": active_tabs[0],
     }
 
 
@@ -574,29 +580,30 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
 def _check_operator_screen_layout(page: object) -> dict[str, object]:
     payload = page.evaluate(
         """() => {
+          const root = document.querySelector('[data-unified-tab-panel="vitrina"]');
           const nodeIndex = selector => {
-            const node = document.querySelector(selector);
-            if (!node) {
+            const node = root ? root.querySelector(selector) : null;
+            if (!node || !root) {
               return -1;
             }
             let current = node;
-            while (current && !(current.parentElement && current.parentElement.matches('main'))) {
+            while (current && current.parentElement !== root) {
               current = current.parentElement;
             }
-            return current ? Array.from(document.querySelectorAll('main > section')).indexOf(current) : -1;
+            return current ? Array.from(root.children).indexOf(current) : -1;
           };
           const loadButton = document.querySelector('[data-load-refresh-button]');
-            const operatorLink = document.querySelector('[data-open-operator]');
             const headers = Array.from(document.querySelectorAll('[data-table-head] th')).map(node => (node.textContent || '').trim());
             return {
+              unified_tabs: Array.from(document.querySelectorAll('[data-unified-tab-button]')).map(node => (node.textContent || '').trim()),
+              active_unified_tab: ((document.querySelector('[data-unified-tab-button].is-active') || {}).textContent || '').trim(),
+              update_tab_count: Array.from(document.querySelectorAll('[data-unified-tab-button]')).filter(node => (node.textContent || '').trim() === 'Обновление данных').length,
               retry_button_count: document.querySelectorAll('[data-retry-button]').length,
               top_status_badge_count: document.querySelectorAll('[data-status-badge]').length,
               json_connect_count: document.querySelectorAll('[data-open-contract]').length,
               progress_count: document.querySelectorAll('[data-global-progress]').length,
               load_button_text: loadButton ? (loadButton.textContent || '').trim() : '',
               load_button_class: loadButton ? (loadButton.getAttribute('class') || '') : '',
-              operator_link_text: operatorLink ? (operatorLink.textContent || '').trim() : '',
-              operator_link_target: operatorLink ? (operatorLink.getAttribute('target') || '') : '',
               headers,
             order: {
               top: nodeIndex('[data-top-panel]'),
@@ -609,6 +616,10 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
           };
         }"""
     )
+    if payload["unified_tabs"] != ["Витрина", "Расчет поставок", "Отчеты"]:
+        raise AssertionError(f"web-vitrina must expose the unified top tabs, got {payload}")
+    if payload["active_unified_tab"] != "Витрина" or payload["update_tab_count"] != 0:
+        raise AssertionError(f"web-vitrina must default to Vitrina and omit update-data tab, got {payload}")
     if payload["retry_button_count"] != 0:
         raise AssertionError(f"removed refresh button must not be rendered, got {payload}")
     if payload["top_status_badge_count"] != 0 or payload["json_connect_count"] != 0:
@@ -617,8 +628,6 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
         raise AssertionError(f"top panel must expose one global progress component, got {payload}")
     if payload["load_button_text"] != "Загрузить и обновить" or "primary" not in payload["load_button_class"]:
         raise AssertionError(f"load+refresh button must be the single primary action, got {payload}")
-    if payload["operator_link_text"] != "Операторский сайт" or payload["operator_link_target"] != "_blank":
-        raise AssertionError(f"operator control must be a new-tab link, got {payload}")
     for forbidden in ("Metric Label", "Sections", "Score Label"):
         if forbidden in payload["headers"]:
             raise AssertionError(f"main table headers must be Russian-only, got {payload['headers']}")
@@ -630,6 +639,41 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
     if any(value < 0 for value in expected_order) or expected_order != sorted(expected_order):
         raise AssertionError(f"web-vitrina blocks must follow the operator screen order, got {payload}")
     return payload
+
+
+def _check_unified_tab_navigation(page: object) -> dict[str, object]:
+    page.locator('[data-unified-tab-button="factory-order"]').click()
+    page.wait_for_function(
+        """() => {
+          const frame = document.querySelector('[data-operator-embed-frame="factory-order"]');
+          const panel = document.querySelector('[data-unified-tab-panel="factory-order"]');
+          return !!frame && !!panel && !panel.hidden && (frame.getAttribute('src') || '').includes('embedded_tab=factory-order');
+        }""",
+        timeout=5000,
+    )
+    page.locator('[data-unified-tab-button="reports"]').click()
+    page.wait_for_function(
+        """() => {
+          const frame = document.querySelector('[data-operator-embed-frame="reports"]');
+          const panel = document.querySelector('[data-unified-tab-panel="reports"]');
+          return !!frame && !!panel && !panel.hidden && (frame.getAttribute('src') || '').includes('embedded_tab=reports');
+        }""",
+        timeout=5000,
+    )
+    page.locator('[data-unified-tab-button="vitrina"]').click()
+    page.wait_for_function(
+        """() => {
+          const panel = document.querySelector('[data-unified-tab-panel="vitrina"]');
+          const active = document.querySelector('[data-unified-tab-button].is-active');
+          return !!panel && !panel.hidden && active && (active.textContent || '').trim() === 'Витрина';
+        }""",
+        timeout=5000,
+    )
+    return {
+        "factory_order_embed": True,
+        "reports_embed": True,
+        "restored_default_tab": True,
+    }
 
 
 def _check_load_refresh_action(

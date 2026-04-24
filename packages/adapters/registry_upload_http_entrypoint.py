@@ -608,6 +608,23 @@ def _build_handler(
                 return
 
             if parsed.path == sheet_operator_ui_path:
+                try:
+                    embedded_tab = _resolve_operator_embedded_tab_from_query(parsed.query)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                if not embedded_tab:
+                    _write_html_response(
+                        self,
+                        HTTPStatus.OK,
+                        _render_sheet_vitrina_web_vitrina_ui(
+                            read_path=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+                            operator_path=sheet_operator_ui_path,
+                            refresh_path=sheet_refresh_path,
+                            job_path=sheet_job_path,
+                        ),
+                    )
+                    return
                 _write_html_response(
                     self,
                     HTTPStatus.OK,
@@ -620,6 +637,7 @@ def _build_handler(
                         status_path=sheet_status_path,
                         job_path=sheet_job_path,
                         operator_context=entrypoint.build_sheet_operator_ui_context(),
+                        embedded_tab=embedded_tab,
                     ),
                 )
                 return
@@ -1610,11 +1628,15 @@ def _render_sheet_vitrina_operator_ui(
     status_path: str,
     job_path: str,
     operator_context: Mapping[str, Any] | None = None,
+    embedded_tab: str = "",
 ) -> str:
     web_vitrina_url = DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     operator_ui_context = operator_context or {}
+    normalized_embedded_tab = embedded_tab if embedded_tab in {"vitrina", "factory-order", "reports"} else ""
     config_payload = {
-        "page_title": "Обновление данных",
+        "page_title": "Операторский сайт" if normalized_embedded_tab else "sheet_vitrina_v1",
+        "embedded": bool(normalized_embedded_tab),
+        "initial_tab": normalized_embedded_tab,
         "daily_report_path": daily_report_path,
         "stock_report_path": stock_report_path,
         "plan_report_path": plan_report_path,
@@ -1648,6 +1670,10 @@ def _render_sheet_vitrina_operator_ui(
     template = OPERATOR_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     return (
         template.replace("__SHEET_VITRINA_V1_OPERATOR_PAGE_TITLE__", config_payload["page_title"])
+        .replace(
+            "__SHEET_VITRINA_V1_OPERATOR_BODY_CLASS__",
+            "is-embedded" if normalized_embedded_tab else "",
+        )
         .replace("__SHEET_VITRINA_V1_WEB_VITRINA_URL__", web_vitrina_url)
         .replace("__SHEET_VITRINA_V1_OPERATOR_CONFIG_JSON__", json.dumps(config_payload, ensure_ascii=False))
     )
@@ -1693,3 +1719,16 @@ def _resolve_sheet_web_vitrina_surface_from_query(query: str) -> str:
         "unsupported web-vitrina surface: "
         f"{surface!r}; expected 'contract' or '{DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}'"
     )
+
+
+def _resolve_operator_embedded_tab_from_query(query: str) -> str:
+    params = urllib_parse.parse_qs(query or "", keep_blank_values=False)
+    values = params.get("embedded_tab") or []
+    if not values:
+        return ""
+    if len(values) != 1:
+        raise ValueError("embedded_tab must be provided at most once")
+    tab = values[0].strip()
+    if tab in {"vitrina", "factory-order", "reports"}:
+        return tab
+    raise ValueError("unsupported embedded_tab: expected 'vitrina', 'factory-order', or 'reports'")

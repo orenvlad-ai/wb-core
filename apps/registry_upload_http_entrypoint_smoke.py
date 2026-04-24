@@ -106,7 +106,7 @@ def main() -> None:
             base_url = f"http://127.0.0.1:{config.port}{config.upload_path}"
             plan_url = f"http://127.0.0.1:{config.port}{config.sheet_plan_path}"
             status_url = f"http://127.0.0.1:{config.port}{config.sheet_status_path}"
-            operator_ui_url = f"http://127.0.0.1:{config.port}{config.sheet_operator_ui_path}"
+            operator_ui_url = f"http://127.0.0.1:{config.port}{config.sheet_operator_ui_path}?embedded_tab=vitrina"
 
             accepted_status, accepted_payload = _post_json_when_ready(
                 base_url,
@@ -164,9 +164,9 @@ def main() -> None:
             ):
                 raise AssertionError("operator UI must persist and restore browser-owned state through the namespaced localStorage key")
             if (
-                'activateTab(persistedOperatorUiState.active_tab || DEFAULT_ACTIVE_TAB);' not in operator_ui_html
-                or 'activateReportSection(persistedOperatorUiState.report_section || DEFAULT_REPORT_SECTION);' not in operator_ui_html
-                or 'activateSupplySection(persistedOperatorUiState.supply_section || DEFAULT_SUPPLY_SECTION);' not in operator_ui_html
+                "isEmbeddedMode ? configuredInitialTab : (persistedOperatorUiState.active_tab || DEFAULT_ACTIVE_TAB)" not in operator_ui_html
+                or "persistedOperatorUiState.report_section || DEFAULT_REPORT_SECTION" not in operator_ui_html
+                or "persistedOperatorUiState.supply_section || DEFAULT_SUPPLY_SECTION" not in operator_ui_html
             ):
                 raise AssertionError("operator UI must restore the active top-level tab and both subsection tabs from persisted state")
             if (
@@ -260,7 +260,9 @@ def main() -> None:
             ]
             operator_ui_config = _extract_operator_ui_config(operator_ui_html)
             if operator_ui_config != {
-                "page_title": "Обновление данных",
+                "page_title": "Операторский сайт",
+                "embedded": True,
+                "initial_tab": "vitrina",
                 "refresh_path": config.sheet_refresh_path,
                 "load_path": DEFAULT_SHEET_LOAD_PATH,
                 "status_path": config.sheet_status_path,

@@ -143,7 +143,7 @@ def main() -> None:
             refresh_url = f"{base_url}{config.sheet_refresh_path}"
             load_url = f"{base_url}{DEFAULT_SHEET_LOAD_PATH}"
             job_url = f"{base_url}{DEFAULT_SHEET_JOB_PATH}"
-            operator_url = f"{base_url}{config.sheet_operator_ui_path}"
+            operator_url = f"{base_url}{config.sheet_operator_ui_path}?embedded_tab=vitrina"
 
             operator_status, operator_html = _get_text(operator_url)
             if operator_status != 200:

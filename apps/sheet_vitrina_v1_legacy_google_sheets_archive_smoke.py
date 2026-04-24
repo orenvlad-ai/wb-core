@@ -130,7 +130,7 @@ def main() -> None:
             if upload_status != 200 or upload_payload.get("status") != "accepted":
                 raise AssertionError(f"fixture upload must be accepted: {upload_status} {upload_payload}")
 
-            operator_status, operator_html = _get_text(f"{base_url}{config.sheet_operator_ui_path}")
+            operator_status, operator_html = _get_text(f"{base_url}{config.sheet_operator_ui_path}?embedded_tab=vitrina")
             if operator_status != 200:
                 raise AssertionError(f"operator UI must return 200, got {operator_status}")
             if "Legacy Google Sheets contour архивирован" not in operator_html:

@@ -64,7 +64,9 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
 # 3. Target contract и смысл результата
 
 - `GET /sheet-vitrina-v1/vitrina` теперь является реальной usable web-vitrina page:
-  - compact operator top panel: link `Операторский сайт` opens `/sheet-vitrina-v1/operator` in a new tab, `Загрузить и обновить` is the single primary manual action, `JSON Connect` and the old cheap `Обновить` button are not rendered, and no permanent top status badge duplicates the summary cards
+  - canonical entrypoint for the unified `sheet_vitrina_v1` UI; first visible tab is `Витрина`, alongside `Расчет поставок` and `Отчеты`
+  - `GET /sheet-vitrina-v1/operator` remains a compatibility entry and renders the same unified shell instead of the former narrow operator-only page; embedded operator-only panels are reserved for the unified tabs and internal compatibility probes
+  - compact top panel inside `Витрина`: `Загрузить и обновить` is the single primary manual action, `JSON Connect` and the old cheap `Обновить` button are not rendered, and no permanent top status badge duplicates the summary cards
   - while `Загрузить и обновить` is running, the top panel shows a minimal stage-based progress bar driven by the existing async job/log polling (`start/queued`, source fetch, prepare/materialize, load/update table, finish); after completion the progress bar disappears and the final semantic status stays in the summary/log surfaces
   - compact summary with separate `Последнее обновление страницы` and `Свежесть данных`
   - primary table immediately follows the summary cards; filters/settings, historical controls and `Действия и состояния` render after the table
@@ -78,7 +80,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - filters area
   - table container
   - truthful `loading / empty / error` states
-  - link back to `/sheet-vitrina-v1/operator`
+  - `Расчет поставок` and `Отчеты` reuse the existing operator template/actions in embedded mode, preserving factory/WB supply blocks and the internal report subsection selector (`Ежедневные отчёты`, `Отчёт по остаткам`, `Выполнение плана`) without changing business routes
 - Existing `GET /v1/sheet-vitrina-v1/web-vitrina` keeps the default public contract unchanged:
   - default/no-surface path still returns `web_vitrina_contract` v1
   - optional `as_of_date` keeps one-day historical read on the same route

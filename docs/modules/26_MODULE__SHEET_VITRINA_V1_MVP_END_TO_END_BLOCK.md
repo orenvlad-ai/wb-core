@@ -153,23 +153,22 @@ update_note: "Обновлён под Google Sheets decommission: active contour
   - `POST /v1/sheet-vitrina-v1/load` returns archived/gone in the current default runtime;
   - `auto_load=true` is rejected; daily timer performs server-side refresh only.
 - Канонический sibling cost-price flow is server-side `POST /v1/cost-price/upload`; the former `COST_PRICE` sheet/menu path is archived.
-- Канонический operator-facing refresh surface:
-  - `GET /sheet-vitrina-v1/operator`
-  - top-level tabs = `Обновление данных`, `Расчёт поставок`, `Отчёты`
-  - this page intentionally stays orchestration-first control surface and does not become the future web-vitrina container
-  - explicit action `Загрузить данные`
-  - `Загрузить данные` вызывает existing `POST /v1/sheet-vitrina-v1/refresh` и materialize-ит ready snapshot only
+- Канонический user-facing UI surface:
+  - `GET /sheet-vitrina-v1/vitrina` is the primary wide entrypoint; first/default tab = `Витрина`
+  - top-level tabs = `Витрина`, `Расчет поставок`, `Отчеты`; no separate top-level `Обновление данных` tab is active
+  - `GET /sheet-vitrina-v1/operator` remains a compatibility entry and renders the same unified shell; embedded operator panels stay available only for the unified supply/report tabs and internal compatibility probes
+  - primary action on `Витрина` is `Загрузить и обновить`, calling existing `POST /v1/sheet-vitrina-v1/refresh` and materializing the ready snapshot only
   - former `Отправить данные`/`POST /v1/sheet-vitrina-v1/load` path is archived and must not write Google Sheets
-  - page additionally читает `GET /v1/sheet-vitrina-v1/daily-report` для compact блока `Ежедневные отчёты` внутри отдельного top-level tab `Отчёты`
-  - page additionally читает `GET /v1/sheet-vitrina-v1/stock-report` для compact блока `Отчёт по остаткам` внутри того же top-level tab `Отчёты`
-  - page additionally читает `GET /v1/sheet-vitrina-v1/plan-report` для compact блока `Выполнение плана` внутри того же top-level tab `Отчёты`
+  - `Отчеты` additionally reads `GET /v1/sheet-vitrina-v1/daily-report` for `Ежедневные отчёты`
+  - `Отчеты` additionally reads `GET /v1/sheet-vitrina-v1/stock-report` for `Отчёт по остаткам`
+  - `Отчеты` additionally reads `GET /v1/sheet-vitrina-v1/plan-report` for `Выполнение плана`
   - page читает `GET /v1/sheet-vitrina-v1/status` для compact manual/auto status surface; root `status` there is semantic snapshot truth, while technical completion stays separated in derived fields
   - page читает `GET /v1/sheet-vitrina-v1/job` для detailed построчного operator log без отдельного audit subsystem
   - тот же `job` route поддерживает text-export конкретного completed run через `format=text&download=1`
-  - sibling phase-1 web-vitrina surface is fixed separately:
+  - web-vitrina read surface:
     - chosen page route = `GET /sheet-vitrina-v1/vitrina`
     - chosen JSON read route = `GET /v1/sheet-vitrina-v1/web-vitrina`
-    - route is sibling, not `/sheet-vitrina-v1/operator/vitrina`, because future web-vitrina must remain a separate working surface instead of a nested subpanel under orchestration-first operator UI
+    - `/sheet-vitrina-v1/operator` is no longer a separate narrow source-of-truth UI; it is a compatibility entry to the same unified shell
     - v1 response is a stable library-agnostic server contract over existing ready snapshot/current truth: `meta + status_summary + schema + rows + capabilities`
     - phase 2 now additionally materializes repo-owned `web_vitrina_view_model` as a separate presentation-domain seam over that contract: `columns + rows + groups + sections + formatters + filters + sorts + state_model`
     - phase 3 now additionally materializes repo-owned `web_vitrina_gravity_table_adapter` as the first concrete adapter over that `view_model`: isolated Gravity-specific `columns + rows + renderers + groupings + filters + sorts + use_table_options + table_props + state_surface`
@@ -211,8 +210,8 @@ update_note: "Обновлён под Google Sheets decommission: active contour
     - DRR fact = `ads_sum / fin_buyout_rub * 100`; ads plan = buyout plan multiplied by planned DRR
     - response always includes selected block plus MTD/QTD/YTD blocks when active SKU truth is available
     - incomplete temporal snapshot coverage is surfaced as `partial`/`unavailable` with missing/covered dates and never as fabricated zero fact
-  - page дополнительно показывает compact manual block `Ручная загрузка данных` с active action `Загрузить данные`; former Google Sheets action `Отправить данные` is archived/disabled, не является active runtime/update/write/load/verify target, and appears only as archived/manual-context history
-  - в том же `Обновление данных` current operator page additionally показывает compact block `Проверка и восстановление Seller-сессии`:
+  - embedded compatibility panel additionally keeps compact manual block `Ручная загрузка данных` с active action `Загрузить данные`; former Google Sheets action `Отправить данные` is archived/disabled, не является active runtime/update/write/load/verify target, and appears only as archived/manual-context history
+  - session controls are exposed in the unified `Витрина` loading table for `Seller Portal / бот`; the archived manual operator panel remains available only as embedded compatibility context:
     - `Проверить сессию` выполняет cheap probe against saved `storage_state.json` и truthfully различает `session_valid_canonical / session_valid_wrong_org / session_invalid / session_missing / session_probe_error`
     - `Восстановить сессию` стартует repo-owned recovery lifecycle и немедленно создаёт текущий `run_id`
     - `Скачать launcher для Mac` отдаёт reusable `.command`, который сам поднимает SSH tunnel к localhost-only noVNC, ждёт local HTTP-ready, poll-ит status конкретного `run_id` и печатает финальную строку `Восстановление завершено: <final_status>`
@@ -569,9 +568,9 @@ Bounded допущение:
 - Smoke проверяет:
   - что `prepare` поднимает operator seed `33 / 102 / 7`;
   - что upload из sheet-side trigger сохраняет current truth в existing runtime без усечения `metrics_v2`;
-  - что operator page `GET /sheet-vitrina-v1/operator` отдается тем же server contour и публикует refresh/load/status/job paths;
-  - что sibling `GET /sheet-vitrina-v1/vitrina` и `GET /v1/sheet-vitrina-v1/web-vitrina` поднимаются тем же contour, но не встраивают новый heavy block в existing operator page;
-  - что operator page показывает compact `Ручная загрузка данных` + `Автообновления`, отдельный `Лог`, fixed-height scroll viewport и `Скачать лог`;
+  - что operator compatibility page `GET /sheet-vitrina-v1/operator` отдается тем же server contour и не становится 404;
+  - что `GET /sheet-vitrina-v1/vitrina` и `GET /v1/sheet-vitrina-v1/web-vitrina` поднимаются тем же contour, with unified top tabs and unchanged read contract;
+  - что embedded compatibility panels still expose compact `Ручная загрузка данных` + `Автообновления`, separate `Лог`, fixed-height scroll viewport and `Скачать лог` for legacy/manual probes;
   - что `POST /v1/sheet-vitrina-v1/refresh` вызывает heavy source blocks и обновляет persisted date-aware ready snapshot;
   - что `POST /v1/sheet-vitrina-v1/load` пишет в live shell только already prepared snapshot и не триггерит heavy refresh заново;
   - что `GET /v1/sheet-vitrina-v1/status` возвращает последний persisted refresh result без live fetch и с `date_columns` / `temporal_slots` plus `server_context`, но не называет snapshot existence ordinary green success;
