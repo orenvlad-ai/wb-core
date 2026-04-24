@@ -270,7 +270,7 @@ update_note: "Обновлён под current operator report checkpoint: existi
   - `yesterday_closed` читается только из accepted/runtime-cached promo truth и не recompute-ится live из текущего seller portal state;
   - invalid later promo attempt не может destructively overwrite accepted current/closed truth.
 - Source-aware invalid signatures для accepted-state policy:
-  - `seller_funnel_snapshot`: zero-filled payload plus freshness gate `source_fetched_at >= next business day start in Asia/Yekaterinburg`;
+  - `seller_funnel_snapshot`: zero-filled payload plus freshness gate `source_fetched_at >= next business day start in Asia/Yekaterinburg`; for `sheet_vitrina_v1` materialization the source payload is first narrowed to enabled/relevant SKU rows, so NULL/invalid values in non-relevant rows are logged as `ignored_non_relevant_invalid_rows` and do not poison the whole accepted snapshot;
   - `web_source_snapshot`: zero-filled payload plus freshness gate `search_analytics_raw.fetched_at >= next business day start in Asia/Yekaterinburg`;
   - `prices_snapshot` и `ads_bids` не попадают под destructive historical closed-day refetch: `yesterday_closed` читается из accepted current snapshot предыдущего business day, а invalid later candidate не должен перетирать accepted yesterday/current truth;
   - `stocks` now stays on the same exact-date Seller Analytics CSV/runtime path, but only `yesterday_closed` is required for semantic green; `today_current` stays truthful `not_available`/blank instead of invented same-day stocks.
