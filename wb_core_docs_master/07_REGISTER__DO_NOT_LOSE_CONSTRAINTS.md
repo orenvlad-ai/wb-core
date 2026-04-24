@@ -22,7 +22,7 @@ update_triggers:
   - "изменение migration boundary"
   - "изменение operator/runtime invariant"
   - "изменение docs governance"
-built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
+built_from_commit: "c5ec48eb5380d0ebc75e7cc497f33b0b163dcbfe"
 ---
 
 # Summary
@@ -50,6 +50,7 @@ built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
 | `C-13` | Если manual handoff неизбежен, действует `one step = one action`: один ответ содержит один минимальный практический следующий шаг и не смешивает несколько независимых рискованных действий. |
 | `C-14` | Матрица `L1/L2/L3` задаёт минимальный execution burden: `L1` = локальный малорисковый шаг без отдельного read-only review и без `README` / architecture sync по умолчанию, только targeted smoke; `L2` = bounded block с обязательными `module doc + index`, targeted smoke и `1` integration smoke; `L3` = boundary/risk/governance task с усиленным bounded execution, docs sync по смыслу текущего checkpoint и при необходимости отдельной merge-readiness проверкой. |
 | `C-15` | Full current truth и `STATUS` остаются authoritative для всего enabled+show_in_data набора; operator-facing `DATA_VITRINA` не должна invent-ить локальный truth path, не должна silently выкидывать `show_in_data` rows и должна materialize-ить incoming server-driven row set как thin data-driven `date_matrix` без sheet-side subset logic. |
+| `C-15a` | Current unified `/sheet-vitrina-v1/vitrina` UI remains a consumer of server-owned ready snapshots and source/job/status truth; group refresh, cell highlights, report filters and browser persistence must not become a second source-of-truth layer. |
 | `C-16` | Для задач с live/public эффектом `repo-complete` недостаточно: execution handoff не считается complete, пока не достигнуты требуемые `live-complete` / public-web verify, либо пока точный blocker явно не назван. Sheet completion is no longer a success path; for archived GAS changes only guard push/verify is required. |
 | `C-17` | Если live deploy/restart или public probe безопасны и доступны, они должны входить в тот же bounded execution по умолчанию, а не откладываться без явной причины. `clasp push` входит в обязательный путь только для archived Apps Script guard changes and verifies blocked/archived behavior, not sheet write success. |
 | `C-18` | Если задача добавляет или меняет public route, обязательна внешняя public probe-проверка; `404`/`Not Found` на ожидаемом route трактуется как stale deploy или incomplete publish wiring, пока не доказано обратное. |

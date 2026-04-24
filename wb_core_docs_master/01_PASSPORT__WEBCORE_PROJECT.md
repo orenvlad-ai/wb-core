@@ -26,6 +26,9 @@ related_modules:
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
   - "docs/modules/27_MODULE__PROMO_XLSX_COLLECTOR_BLOCK.md"
   - "docs/modules/28_MODULE__PROMO_LIVE_SOURCE_WIRING_BLOCK.md"
+  - "docs/modules/29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md"
+  - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
+  - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
 related_paths:
   - "packages/"
   - "apps/"
@@ -35,7 +38,7 @@ update_triggers:
   - "изменение current main-confirmed contour"
   - "merge нового bounded модуля"
   - "смена главного project gap"
-built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
+built_from_commit: "c5ec48eb5380d0ebc75e7cc497f33b0b163dcbfe"
 ---
 
 # Summary
@@ -50,6 +53,7 @@ built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
 - bounded browser-capture collector `27` уже смёржен как repo-owned local promo XLSX runner с truthful sidecar contract;
 - bounded live wiring `28` уже смёржен и переводит `promo_by_price` из blocked gap в current server-owned source seam внутри existing refresh/runtime/read-side contour.
 - web-vitrina line `29–31` уже смёржена и является active user-facing surface: `/sheet-vitrina-v1/vitrina` + `/v1/sheet-vitrina-v1/web-vitrina`.
+- current operator UI unified вокруг `/sheet-vitrina-v1/vitrina`: first tab `Витрина`, sibling tabs `Расчет поставок` и `Отчеты`; `/sheet-vitrina-v1/operator` остаётся compatibility entry на тот же shell.
 
 # Current norm
 
@@ -88,6 +92,12 @@ Confirmed contour на текущем `main`:
   - accepted/runtime-cached exact-date promo truth используется только как fallback, если replay не дал exact `success`
   - invalid later attempts do not overwrite accepted current/closed promo truth
   - low-confidence cross-year labels keep `promo_start_at/end_at = null`
+- unified web-vitrina/operator surface:
+  - primary manual action `Загрузить и обновить` refreshes server-side ready snapshot without Google Sheets `/load`;
+  - bottom `Загрузка данных` renders grouped source status table (`WB API`, `Seller Portal / бот`, `Прочие источники`) with date-scoped `Обновить группу`;
+  - `GET /v1/sheet-vitrina-v1/plan-report` adds read-only `Выполнение плана` over accepted closed-day `fin_report_daily.fin_buyout_rub` + `ads_compact.ads_sum`;
+  - `GET /v1/sheet-vitrina-v1/stock-report` remains read-only previous-closed stock report with current active SKU selector;
+  - seller-funnel materialization filters raw rows to enabled/relevant `nm_ids` before strict field validation and logs ignored invalid non-relevant rows.
 
 ## Authoritative source of truth
 
@@ -102,7 +112,7 @@ Confirmed contour на текущем `main`:
 # Known gaps
 
 - full legacy parity по всем historical metric sections и registry rows;
-- repo-owned hosted deploy/probe contract around current website/operator runtime;
+- repo-owned hosted deploy/probe contract around current website/operator runtime is documented, while actual deploy rights/publish hardening remain a separate completion boundary;
 - окончательная судьба `AI_EXPORT` как compatibility contract;
 - materialized `packages/domain`, `infra/`, `tests/`, `api/`, `jobs/`, `db/`.
 
@@ -110,5 +120,5 @@ Confirmed contour на текущем `main`:
 
 - перенос всего legacy 1:1;
 - утверждение, что actual deploy rights или final production hardening уже materialized в repo;
-- operator UX redesign;
+- broad operator UX redesign beyond the current unified vitrina/supply/reports shell;
 - полный architectural redesign `wb-core`.
