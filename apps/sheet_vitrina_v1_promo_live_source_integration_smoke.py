@@ -120,12 +120,19 @@ def main() -> None:
             if probe.promo_entry_price_best != expected["beneficial_entry_price"]:
                 raise AssertionError(f"{column_date}: probe mismatch, got {probe}")
             ineligible = item_index[requested_nm_ids[1]]
+            expected_ineligible_entry = {
+                "2026-04-20": 1000.0,
+                "2026-04-21": 1100.0,
+                "2026-04-22": 1100.0,
+            }[column_date]
             if (
                 ineligible.promo_participation,
                 ineligible.promo_count_by_price,
                 ineligible.promo_entry_price_best,
-            ) != (0.0, 0.0, 0.0):
-                raise AssertionError(f"{column_date}: ineligible row must stay empty, got {ineligible}")
+            ) != (0.0, 0.0, expected_ineligible_entry):
+                raise AssertionError(
+                    f"{column_date}: ineligible row must preserve candidate entry price, got {ineligible}"
+                )
 
             exact_payload, _ = runtime.load_temporal_source_snapshot(
                 source_key="promo_by_price",

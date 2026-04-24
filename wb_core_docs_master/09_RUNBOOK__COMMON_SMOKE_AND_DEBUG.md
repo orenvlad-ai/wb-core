@@ -165,6 +165,8 @@ Current promo live-source wiring norm:
 - `today_current` runs bounded repo-owned promo collector server-side inside refresh contour
 - `yesterday_closed` attempts corrective interval replay first and falls back to accepted/runtime-cached promo truth only when replay is unavailable or non-exact
 - invalid later attempt must not overwrite accepted current/closed promo truth
+- promo candidate/eligible metric split is canonical: `promo_participation` and `promo_count_by_price` are computed from eligible rows where runtime `price_seller_discounted < Плановая цена для акции`; `promo_entry_price_best` is computed as max plan price across active candidate rows, so ineligible SKUs can truthfully have participation/count `0` and entry price `>0`
+- missing runtime seller price must not fake-positive participation/count, but must not hide candidate-derived `promo_entry_price_best` when active candidate plan prices exist
 
 ## Hosted runtime contract
 

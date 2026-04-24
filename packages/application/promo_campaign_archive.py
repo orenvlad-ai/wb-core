@@ -277,8 +277,6 @@ def materialize_promo_result_from_archive(
     eligible_nm_ids: list[int] = []
     for nm_id in requested:
         candidate_rows = candidate_rows_by_nm_id[nm_id]
-        if candidate_rows and nm_id in missing_price_truth_nm_ids:
-            continue
         item, evaluation = _build_item_from_candidate_rows(
             snapshot_date=snapshot_date,
             nm_id=nm_id,
@@ -290,7 +288,7 @@ def materialize_promo_result_from_archive(
             truthful_zero_no_candidate_nm_ids.append(nm_id)
         elif evaluation.eligible_campaign_identities:
             eligible_nm_ids.append(nm_id)
-        else:
+        elif nm_id not in missing_price_truth_nm_ids:
             truthful_zero_ineligible_nm_ids.append(nm_id)
 
     detail_parts.extend(

@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.promo_live_source import PromoLiveSourceBlock
+from packages.application.promo_metric_truth import PromoCandidateRow, evaluate_candidate_rows
 from packages.application.promo_xlsx_collector_block import parse_period_text
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
@@ -52,6 +53,7 @@ def main() -> None:
         raise AssertionError("fixture bundle must expose at least three enabled nm_ids")
 
     _assert_cross_year_parse_rule()
+    metric_truth_note = _assert_candidate_entry_price_metric_cases()
     canonical_note = _assert_canonical_eligible_set_cases(requested_nm_ids)
     web_vitrina_note = _assert_web_vitrina_period_payload_for_promo_dates(bundle, requested_nm_ids)
     _assert_promo_source_runtime_mapping(bundle, requested_nm_ids)
@@ -59,6 +61,7 @@ def main() -> None:
     replay_note = _assert_historical_interval_replay_cache_fill(requested_nm_ids)
 
     print("cross_year_parse_rule: ok -> low-confidence period keeps null exact dates")
+    print(f"candidate_entry_price_metric_cases: ok -> {metric_truth_note}")
     print(f"canonical_eligible_set: ok -> {canonical_note}")
     print(f"web_vitrina_period_payload: ok -> {web_vitrina_note}")
     print("promo_source_runtime_mapping: ok -> promo metrics reach STATUS and DATA_VITRINA via runtime source")
@@ -380,6 +383,82 @@ def _assert_historical_interval_replay_cache_fill(requested_nm_ids: list[int]) -
         )
 
 
+def _assert_candidate_entry_price_metric_cases() -> str:
+    ineligible = _evaluate_metric_truth_case(
+        nm_id=210183919,
+        plan_prices=[483.0, 488.0, 498.0, 493.0],
+        price_seller_discounted=508.0,
+    )
+    if (
+        ineligible.promo_participation,
+        ineligible.promo_count_by_price,
+        ineligible.promo_entry_price_best,
+    ) != (0.0, 0.0, 498.0):
+        raise AssertionError(f"ineligible candidate entry-price case mismatch, got {ineligible}")
+
+    multi_eligible = _evaluate_metric_truth_case(
+        nm_id=391659990,
+        plan_prices=[566.0, 571.0, 498.0, 493.0],
+        price_seller_discounted=508.0,
+    )
+    if (
+        multi_eligible.promo_participation,
+        multi_eligible.promo_count_by_price,
+        multi_eligible.promo_entry_price_best,
+    ) != (1.0, 2.0, 571.0):
+        raise AssertionError(f"multi-eligible candidate entry-price case mismatch, got {multi_eligible}")
+
+    no_candidate = _evaluate_metric_truth_case(
+        nm_id=210000000,
+        plan_prices=[],
+        price_seller_discounted=508.0,
+    )
+    if (
+        no_candidate.promo_participation,
+        no_candidate.promo_count_by_price,
+        no_candidate.promo_entry_price_best,
+    ) != (0.0, 0.0, 0.0):
+        raise AssertionError(f"no-candidate case mismatch, got {no_candidate}")
+
+    missing_price = _evaluate_metric_truth_case(
+        nm_id=210183919,
+        plan_prices=[483.0, 488.0, 498.0, 493.0],
+        price_seller_discounted=None,
+    )
+    if (
+        missing_price.promo_participation,
+        missing_price.promo_count_by_price,
+        missing_price.promo_entry_price_best,
+    ) != (0.0, 0.0, 498.0):
+        raise AssertionError(f"missing seller price candidate entry-price case mismatch, got {missing_price}")
+
+    return (
+        "ineligible_candidate_entry=498.0; "
+        "multi_eligible_count=2_entry=571.0; "
+        "no_candidate_entry=0.0; "
+        "missing_price_entry=498.0"
+    )
+
+
+def _evaluate_metric_truth_case(
+    *,
+    nm_id: int,
+    plan_prices: list[float],
+    price_seller_discounted: float | None,
+):
+    return evaluate_candidate_rows(
+        candidate_rows=[
+            PromoCandidateRow(
+                nm_id=nm_id,
+                campaign_identity=f"fixture:{index}",
+                plan_price=plan_price,
+            )
+            for index, plan_price in enumerate(plan_prices, start=1)
+        ],
+        price_seller_discounted=price_seller_discounted,
+    )
+
+
 def _assert_canonical_eligible_set_cases(requested_nm_ids: list[int]) -> str:
     with TemporaryDirectory(prefix="sheet-vitrina-promo-canonical-cases-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
@@ -443,9 +522,9 @@ def _assert_canonical_eligible_set_cases(requested_nm_ids: list[int]) -> str:
         if (ineligible_probe.promo_participation, ineligible_probe.promo_count_by_price, ineligible_probe.promo_entry_price_best) != (
             0.0,
             0.0,
-            0.0,
+            1100.0,
         ):
-            raise AssertionError(f"in-interval non-eligible case must stay empty, got {ineligible_probe}")
+            raise AssertionError(f"in-interval non-eligible case must preserve candidate entry price, got {ineligible_probe}")
 
         next_day_probe = next_day_items[requested_nm_ids[0]]
         if (next_day_probe.promo_participation, next_day_probe.promo_count_by_price, next_day_probe.promo_entry_price_best) != (
@@ -473,9 +552,15 @@ def _assert_canonical_eligible_set_cases(requested_nm_ids: list[int]) -> str:
             missing_price_probe.promo_entry_price_best,
         ) != (1.0, 1.0, 1000.0):
             raise AssertionError(f"covered price truth case mismatch, got {missing_price_probe}")
-        if requested_nm_ids[2] in missing_price_items:
+        missing_price_candidate_probe = missing_price_items[requested_nm_ids[2]]
+        if (
+            missing_price_candidate_probe.promo_participation,
+            missing_price_candidate_probe.promo_count_by_price,
+            missing_price_candidate_probe.promo_entry_price_best,
+        ) != (0.0, 0.0, 1300.0):
             raise AssertionError(
-                "SKU with campaign rows but missing price truth must not be materialized as zero"
+                "SKU with campaign rows but missing price truth must preserve candidate entry price, "
+                f"got {missing_price_candidate_probe}"
             )
         if missing_price_result.missing_nm_ids != [requested_nm_ids[2]]:
             raise AssertionError(f"missing price truth ids mismatch, got {missing_price_result.missing_nm_ids}")
@@ -515,11 +600,11 @@ def _assert_canonical_eligible_set_cases(requested_nm_ids: list[int]) -> str:
                     f"price_seller_discounted=missing "
                     f"candidate_campaigns=['2290:2239'] "
                     f"candidate_plan_prices=[1300.0] "
-                    f"eligible_campaigns=unknown_missing_price_truth "
-                    f"eligible_plan_prices=unknown_missing_price_truth "
-                    f"participation=blank "
-                    f"count_by_plan_price=blank "
-                    f"beneficial_entry_price=blank"
+                    f"eligible_campaigns=[] "
+                    f"eligible_plan_prices=[] "
+                    f"participation={missing_price_candidate_probe.promo_participation} "
+                    f"count_by_plan_price={missing_price_candidate_probe.promo_count_by_price} "
+                    f"beneficial_entry_price={missing_price_candidate_probe.promo_entry_price_best}"
                 )
             ]
         )
@@ -574,6 +659,8 @@ def _assert_web_vitrina_period_payload_for_promo_dates(
         positive_row = rows[f"SKU:{requested_nm_ids[0]}|promo_participation"]
         truthful_zero_row = rows[f"SKU:{requested_nm_ids[1]}|promo_participation"]
         missing_price_row = rows[f"SKU:{requested_nm_ids[2]}|promo_participation"]
+        truthful_zero_entry_row = rows[f"SKU:{requested_nm_ids[1]}|promo_entry_price_best"]
+        missing_price_entry_row = rows[f"SKU:{requested_nm_ids[2]}|promo_entry_price_best"]
         positive_values = positive_row["values_by_date"]
         if positive_values != {
             "2026-04-20": 1.0,
@@ -586,10 +673,22 @@ def _assert_web_vitrina_period_payload_for_promo_dates(
         truthful_zero_values = truthful_zero_row["values_by_date"]
         if any(value != 0.0 for value in truthful_zero_values.values()):
             raise AssertionError(f"truthful zero promo row mismatch, got {truthful_zero_values}")
-        missing_price_values = missing_price_row["values_by_date"]
-        if missing_price_values["2026-04-24"] != "":
+        truthful_zero_entry_values = truthful_zero_entry_row["values_by_date"]
+        if truthful_zero_entry_values["2026-04-21"] != 1100.0:
             raise AssertionError(
-                f"missing price truth must be blank in web-vitrina payload, got {missing_price_values}"
+                "ineligible SKU must keep candidate entry price in web-vitrina payload, "
+                f"got {truthful_zero_entry_values}"
+            )
+        missing_price_values = missing_price_row["values_by_date"]
+        if missing_price_values["2026-04-24"] != 0.0:
+            raise AssertionError(
+                f"missing price truth must not fake-positive participation, got {missing_price_values}"
+            )
+        missing_price_entry_values = missing_price_entry_row["values_by_date"]
+        if missing_price_entry_values["2026-04-24"] != 1300.0:
+            raise AssertionError(
+                "missing price truth must preserve candidate entry price in web-vitrina payload, "
+                f"got {missing_price_entry_values}"
             )
 
         composition_payload = entrypoint.handle_sheet_web_vitrina_page_composition_request(
@@ -614,7 +713,7 @@ def _assert_web_vitrina_period_payload_for_promo_dates(
             "dates=2026-04-20..2026-04-24 "
             f"nonzero_SKU={requested_nm_ids[0]} "
             f"truthful_zero_SKU={requested_nm_ids[1]} "
-            f"missing_price_blank_SKU={requested_nm_ids[2]}"
+            f"missing_price_candidate_entry_SKU={requested_nm_ids[2]}"
         )
 
 

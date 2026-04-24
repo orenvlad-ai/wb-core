@@ -35,7 +35,7 @@ related_docs:
   - "docs/modules/27_MODULE__PROMO_XLSX_COLLECTOR_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под archive-first / interval-based promo semantics: collector reuse-ит unchanged campaign artifacts, historical closed-day truth materialize-ится из campaign interval replay в exact-date runtime seam, а existing refresh/load contour продолжает читать только already prepared server-owned snapshots."
+update_note: "Обновлён под archive-first / interval-based promo semantics and canonical candidate-vs-eligible metric split: participation/count считаются по eligible rows, а promo_entry_price_best считается как max plan price по active candidate rows."
 ---
 
 # 1. Идентификатор и статус
@@ -110,13 +110,14 @@ update_note: "Обновлён под archive-first / interval-based promo seman
 # 5. Source -> runtime mapping
 
 - Numeric mapping живёт server-side и не переносится в Apps Script:
-  - сначала строится один общий eligible set из covering campaign participations для `SKU + date`
-  - campaign interval / identity / `Плановая цена для акции` берутся из archived promo workbook + metadata
-  - `price_seller_discounted` берётся как уже materialized daily metric truth для exact date из runtime `prices_snapshot`
-  - row считается eligible, если `price_seller_discounted < Плановая цена для акции`
-  - `promo_entry_price_best` = max(`Плановая цена для акции`) среди eligible rows; при пустом eligible set остаётся truthful empty
-  - `promo_count_by_price` = count of eligible rows
-  - `promo_participation` = `1` when `promo_count_by_price > 0`, else `0`
+  - сначала строится `candidate set` из covering campaign rows для `SKU + date`, где SKU есть в archived workbook, дата попадает в `promo_start_at..promo_end_at`, а `Плановая цена для акции` валидна;
+  - campaign interval / identity / `Плановая цена для акции` берутся из archived promo workbook + metadata;
+  - `price_seller_discounted` берётся как already materialized daily metric truth для exact date из runtime `prices_snapshot`;
+  - `eligible set` = candidate rows, где `price_seller_discounted < Плановая цена для акции`;
+  - `promo_participation` = `1` when eligible set is non-empty, else `0`;
+  - `promo_count_by_price` = count of eligible rows;
+  - `promo_entry_price_best` = max(`Плановая цена для акции`) по candidate rows, not eligible rows; при пустом candidate set остаётся truthful empty `0`;
+  - если candidate set есть, но `price_seller_discounted` отсутствует, source may remain `incomplete`, participation/count stay non-positive, но `promo_entry_price_best` продолжает surface-ить max candidate plan price.
 - overlap rule is deterministic and additive across covering campaigns for the same SKU/date.
 - Workbook alone не считается sufficient:
   - promo title / period / promo status / promo_id / period_id идут из sidecar/card truth
