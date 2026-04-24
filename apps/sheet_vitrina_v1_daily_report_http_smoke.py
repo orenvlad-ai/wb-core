@@ -131,7 +131,8 @@ def main() -> None:
                 "Негативные факторы",
                 "Позитивные факторы",
                 "Загрузить данные",
-                "Отправить данные",
+                "Legacy Google Sheets",
+                "архивирован",
                 "Автообновления",
                 DEFAULT_SHEET_DAILY_REPORT_PATH,
                 DEFAULT_SHEET_STOCK_REPORT_PATH,
@@ -156,7 +157,7 @@ def main() -> None:
                 raise AssertionError("misleading single-day daily-report wording must not remain in operator HTML")
 
             status_code, status_payload = _get_json(f"{base_url}{DEFAULT_SHEET_STATUS_PATH}")
-            if status_code != 200 or status_payload.get("status") != "success":
+            if status_code != 200 or status_payload.get("technical_status") != "success":
                 raise AssertionError(f"status route must stay readable, got {status_code} {status_payload}")
 
             plan_code, plan_payload = _get_json(f"{base_url}{DEFAULT_SHEET_PLAN_PATH}")

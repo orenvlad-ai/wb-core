@@ -2,7 +2,7 @@
 
 ## Current Main-Confirmed Checkpoint
 
-`origin/main` уже реализует bounded read-side и sheet-side контур, а не только foundation-документы.
+`origin/main` уже реализует bounded read-side и current website/operator contour. Legacy Google Sheets/GAS contour сохранён только как archive/migration boundary и помечен `ARCHIVED / DO NOT USE`.
 
 Подтверждённый working contour на `main`:
 - `sku_display_bundle_block`
@@ -13,17 +13,17 @@
 - `sheet_vitrina_v1_scaffold_block`
 
 Дополнительно в `main` уже присутствуют:
-- `sheet_vitrina_v1_write_bridge_block`;
-- `sheet_vitrina_v1_presentation_block`;
+- archived `sheet_vitrina_v1_write_bridge_block`;
+- archived `sheet_vitrina_v1_presentation_block`;
 - `migration/86_registry_upload_contract.md` как канонический контракт upload path для V2-реестров;
 - `registry_upload_bundle_v1_block` как первый artifact-backed upload bundle и local validator для V2-реестров;
 - `registry_upload_file_backed_service_block` как первый file-backed accept/store/activate слой для V2-реестров;
 - `registry_upload_db_backed_runtime_block` как первый DB-backed runtime ingest и current-truth слой для V2-реестров.
 - `registry_upload_http_entrypoint_block` как первый live HTTP/API entrypoint для V2-реестров.
-- `sheet_vitrina_v1_registry_upload_trigger_block` как первый operator-facing Apps Script trigger для отправки `CONFIG / METRICS / FORMULAS` в уже существующий HTTP entrypoint.
-- sibling `COST_PRICE` contour внутри того же app/runtime boundary: отдельный лист `COST_PRICE`, отдельные menu actions и `POST /v1/cost-price/upload` без подмешивания в compact registry bundle.
-- `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` как compact v3 bootstrap для operator sheets `CONFIG / METRICS / FORMULAS`.
-- `sheet_vitrina_v1_mvp_end_to_end_block` как первый bounded end-to-end MVP `prepare -> upload -> refresh -> load DATA_VITRINA`.
+- archived `sheet_vitrina_v1_registry_upload_trigger_block`; Apps Script menu/upload actions are no longer active.
+- sibling `COST_PRICE` server contour внутри того же app/runtime boundary: `POST /v1/cost-price/upload` без подмешивания в compact registry bundle.
+- archived `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` как migration evidence для бывших operator sheets `CONFIG / METRICS / FORMULAS`.
+- `sheet_vitrina_v1_mvp_end_to_end_block` как historical bounded checkpoint; current active path is server-side refresh + public/operator web-vitrina read surfaces, not Google Sheets load.
 - `promo_xlsx_collector_block` как первый repo-owned bounded browser-capture precursor для promo XLSX + metadata sidecar.
 - `promo_live_source_wiring_block` как bounded wiring этого precursor обратно в current `sheet_vitrina_v1` refresh/runtime/read-side contour без отдельного shadow contour.
 
@@ -55,24 +55,21 @@ Target-state — server-first:
 - без table-exclusive truth для production-логики.
 
 Текущее состояние `main`:
-- bounded sheet-side витрина уже есть как `DATA_VITRINA` и `STATUS`;
-- live write и visual presentation подтверждены для этого bounded sheet-side contour;
-- operator-facing upload trigger для `CONFIG / METRICS / FORMULAS` уже materialize-ится в текущей линии;
-- separate operator-facing upload contour для `COST_PRICE` уже materialize-ится в текущей линии как отдельный authoritative dataset и теперь подключён server-side в current `DATA_VITRINA`/`STATUS` read-side через effective-date overlay;
-- compact v3 bootstrap operator sheets уже тоже материализован в текущей линии;
-- первый bounded readback path server-side truth обратно в `DATA_VITRINA` уже является частью текущего `main` как explicit refresh + cheap read split;
-- full replacement operator-table по-прежнему не является частью текущей линии.
+- Google Sheets `DATA_VITRINA`/`STATUS`, live write, visual presentation, Apps Script upload trigger и compact v3 bootstrap переведены в archived/migration-only state;
+- active/current contour = hosted website/operator `sheet_vitrina_v1`, server-side refresh/runtime snapshots, public web-витрина JSON/page composition и `/sheet-vitrina-v1/vitrina`;
+- separate `COST_PRICE` server contour остаётся authoritative dataset и подключается server-side в current refresh/read contour через effective-date overlay;
+- `/v1/sheet-vitrina-v1/load`, GAS menu flows, `clasp` runners and Google Sheets readback are not active completion or verification targets.
 
 ## Current Main-Confirmed Layers
 
 Материализованные слои и каталоги в `main`:
-- `apps/`: smoke runners, local live-write runners и sheet-side utilities;
+- `apps/`: smoke runners; local live-write/presentation runners are archived fail-fast guards;
 - `packages/contracts`: typed DTO, schemas и contract validation;
 - `packages/application`: bundle assembly, orchestration и use-cases;
 - `packages/adapters`: WB API, Sheets и другие I/O adapters в тех блоках, которые уже смёржены;
 - `artifacts/`: fixture, parity и evidence для bounded implementation blocks;
 - `registry/pilot_bundle/`: pilot registry artifacts для новой витрины;
-- `gas/sheet_vitrina_v1/`: bound Apps Script wiring для новой витрины;
+- `gas/sheet_vitrina_v1/`: archived bound Apps Script wiring with explicit archive guard;
 - `docs/` и `migration/`: канонические policy/module/migration документы.
 
 ## Target/Future Layers
@@ -91,20 +88,18 @@ Target-state — server-first:
 
 ### Граница Таблицы
 
-Таблица может:
-- собирать operator input;
-- показывать operator-visible outputs;
-- триггерить controlled workflows через явные интерфейсы.
+Таблица больше не является current operator contour. Legacy spreadsheet may remain only as archive/migration evidence.
 
 Таблица не должна:
 - быть единственным местом production-truth;
 - владеть тяжёлыми transform-ами или long-running fetch-логикой;
 - скрывать server behavior, которое нельзя review-ить в Git.
 
-Текущий `main` уже реализует bounded read-side/sheet-side форму этого правила:
-- таблица и витрина получают controlled bundles;
-- registry upload bundle, file-backed service, DB-backed runtime, live HTTP entrypoint, sheet-side upload trigger и compact v3 bootstrap уже материализованы;
-- bounded reverse-load обратно в `DATA_VITRINA` уже является частью `main` как первый controlled refresh/read path с canonical business timezone `Asia/Yekaterinburg` и live daily refresh timer поверх existing server contour.
+Текущий `main` реализует это как server/web-first rule:
+- website/operator and public web-витрина read server-owned ready snapshots;
+- registry upload bundle, file-backed service, DB-backed runtime and live HTTP entrypoint remain materialized;
+- sheet-side upload trigger, compact v3 bootstrap and reverse-load to `DATA_VITRINA` are archived/do-not-use paths;
+- live daily refresh timer builds server-side ready snapshots only.
 
 ### Граница Сервера
 
@@ -116,8 +111,9 @@ Target-state — server-first:
 - auditability и runtime observability.
 
 Текущее ограничение `main`:
-- contracts, artifact-backed bundle, file-backed service, DB-backed runtime, live HTTP entrypoint, operator-facing sheet trigger и compact v3 bootstrap уже есть;
-- bounded reverse load из server-side truth обратно в таблицу уже смёржен в текущий `main` как persisted ready snapshot в repo-owned runtime SQLite contour;
+- contracts, artifact-backed bundle, file-backed service, DB-backed runtime and live HTTP entrypoint already exist;
+- persisted ready snapshots in repo-owned runtime SQLite are current truth for website/operator surfaces;
+- reverse load into Google Sheets is archived and must not be used as runtime update/write/load path;
 - hosted runtime deploy/probe contract уже repo-owned, но actual deploy rights, final auth-hardening и production storage binding остаются отдельным незакрытым хвостом.
 
 ### Граница Web-Source

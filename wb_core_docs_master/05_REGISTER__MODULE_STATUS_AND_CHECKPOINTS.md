@@ -30,7 +30,7 @@ built_from_commit: "d9398905d96124d25282db3fe356fbdb8fe46f52"
 Практически это значит:
 - source/data foundation уже materialized;
 - registry upload line уже замкнута до HTTP entrypoint;
-- sheet-side line уже дошла до bounded MVP `prepare -> upload -> refresh -> load`.
+- sheet-side line reached bounded MVP historically, but Google Sheets/GAS load/write contour is now archived/do-not-use.
 - web-vitrina line уже имеет stable route/contract seam, отдельный library-agnostic `view_model`, первый concrete grid adapter layer и real live page composition на sibling route.
 
 # Current norm
@@ -39,9 +39,10 @@ built_from_commit: "d9398905d96124d25282db3fe356fbdb8fe46f52"
 | --- | --- | --- |
 | `01–10` | `web-source` + `official-api` | смёржены в `main`, bounded source blocks подтверждены |
 | `11–12` | `rule-based` | смёржены в `main` |
-| `13–19` | `table-facing` / `projection` / `wide-matrix` / `sheet-side scaffold` | смёржены в `main` |
+| `13–16` | `table-facing` / `projection` / `wide-matrix` | смёржены в `main` |
+| `17–19` | `archived sheet-side scaffold/write/presentation` | Google Sheets contour archived / do not use; retained only as migration evidence |
 | `20–23` | `registry upload line` | смёржены в `main` до live HTTP entrypoint |
-| `24–26` | `sheet-side operator line` | смёржены в `main` до первого bounded MVP |
+| `24–26` | `web/operator + archived sheet-side history` | current web/operator contour active; Google Sheets/GAS side archived |
 | `27` | `browser-capture collector` | смёржен в `main` как bounded local promo XLSX collector contour |
 | `28` | `browser-capture live wiring` | смёржен в `main` как promo live source seam inside refresh/runtime/read-side |
 | `29–31` | `web-vitrina seams` | смёржены в `main` как stable read/view-model/adapter ladder plus real sibling page composition |
@@ -72,15 +73,17 @@ built_from_commit: "d9398905d96124d25282db3fe356fbdb8fe46f52"
 ## Operator-facing checkpoint
 
 Current main-confirmed operator flow:
-- `Подготовить листы CONFIG / METRICS / FORMULAS`
-- `Отправить реестры на сервер`
 - `POST /v1/sheet-vitrina-v1/refresh`
-- `Загрузить таблицу`
+- `GET /v1/sheet-vitrina-v1/status`
+- `GET /v1/sheet-vitrina-v1/web-vitrina`
+- `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition`
+- `GET /sheet-vitrina-v1/operator`
+- `GET /sheet-vitrina-v1/vitrina`
+- former Google Sheets `prepare/upload/load DATA_VITRINA` flow is archived and blocked by guards
 
-Current sibling operator input flow:
-- `Подготовить лист COST_PRICE`
-- `Отправить себестоимости`
-- flow обновляет separate `COST_PRICE` authoritative dataset, а existing refresh/read contour затем использует его server-side в current `DATA_VITRINA` / `STATUS`
+Current sibling cost-price flow:
+- server-side `POST /v1/cost-price/upload`
+- flow обновляет separate authoritative dataset, а existing refresh/read contour затем использует его server-side in website/operator/web-vitrina
 
 Current sibling local promo collector precursor flow:
 - `python3 apps/promo_xlsx_collector_live.py`
@@ -122,7 +125,7 @@ Current repo-owned operator refresh surface:
   - page UX for this mode is repo-owned and narrow: calendar + preset buttons + `Начало периода` / `Конец периода` + `Сбросить` / `Сохранить`
 - `web_vitrina_view_model` remains canonical and library-agnostic, the concrete Gravity-specific adapter stays isolated repo-side, and the page layer stays a page-only consumer instead of a second truth owner
 - current phase-1/2/3/4 scope remains narrow: route fixation, stable read contract, library-agnostic presentation seam, concrete grid adapter and minimal live page composition only; export layer, legacy Google Sheets/export migration and broad feature parity stay later
-- page stays intentionally narrow: top-level sections `Обновление данных` / `Расчёт поставок` / `Отчёты`, compact manual block `Ручная загрузка данных` with embedded buttons `Загрузить данные` / `Отправить данные`, two persisted manual-success timestamps `Последняя удачная загрузка` / `Последняя удачная отправка` plus short persisted semantic summaries for latest manual refresh/load, one compact reports subsection-switch `Ежедневные отчёты` / `Отчёт по остаткам` inside `Отчёты`, separate compact auto block `Автообновления` and one fixed-height scrollable `Лог` block with `Скачать лог`
+- page stays intentionally narrow: top-level sections `Обновление данных` / `Расчёт поставок` / `Отчёты`, compact manual block `Ручная загрузка данных` with active button `Загрузить данные`, legacy Google Sheets marked archived, one compact reports subsection-switch `Ежедневные отчёты` / `Отчёт по остаткам` inside `Отчёты`, separate compact auto block `Автообновления` and one fixed-height scrollable `Лог` block with `Скачать лог`
 - daily-report block compares only the two latest closed business days in `Asia/Yekaterinburg`: `yesterday_closed(default_business_as_of_date(now))` vs `yesterday_closed(default_business_as_of_date(now)-1 day)`, never `today_current`
 - daily-report ranked totals stay on the current canonical pool only (`total_view_count`, `total_views_current`, `avg_ctr_current`, `avg_addToCartConversion`, `avg_cartToOrderConversion`, `avg_spp`, `avg_ads_bid_search`, `total_ads_views`, `total_ads_sum`, `avg_localizationPercent`)
 - daily-report SKU block truthfully shows only `display_name + nmId`; common factors use only deterministic sign-safe signals (`views/search views/search CTR/conversions`, `ads_sum`, `price_seller_discounted`, `Нет остатков`, district low-stock `< 20` except `stock_ru_far_siberia`)
@@ -132,13 +135,13 @@ Current repo-owned operator refresh surface:
 - stock-report block now defaults to previous closed business day stocks from persisted ready snapshot `DATA_VITRINA[yesterday_closed]`, keeps threshold `<50`, accepts optional explicit `as_of_date` override on the same read path, uses five district keys (`stock_ru_central`, `stock_ru_northwest`, `stock_ru_volga`, `stock_ru_ural`, `stock_ru_south_caucasus`) and deliberately excludes merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь`
 - stock-report subsection now also exposes a compact SKU selector sourced from full active `config_v2` truth, not from breached rows only; selector defaults to all active SKU selected, uses `display_name + nmId` labels, applies the filter only after `Рассчитать`, rejects zero selected SKU with `Выберите хотя бы один SKU` and shows an honest empty result when the selected subset has no breaches
 - operator page now also persists current top-level tab, active `Отчёты` / `Расчёт поставок` subsection and the stock-report SKU selector in namespaced browser `localStorage` only; reload restores the last valid UI state, while broken storage or obsolete `nmId` values truthfully fall back to the current default/current active SKU set without any server-side user profile state
-- status/refresh responses drive the blocks through `server_context` + `manual_context`, so timezone/scheduler wording, manual-success timestamps and latest semantic summaries are not hardcoded in UI; `Автоцепочка` now truthfully describes the full daily chain `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: загрузка данных + отправка данных в таблицу`
+- status/refresh responses drive the blocks through `server_context` + `manual_context`, so timezone/scheduler wording, manual-success timestamps and latest semantic summaries are not hardcoded in UI; `Автоцепочка` now truthfully describes server-side refresh only, without Google Sheets auto-load
 - `GET /v1/sheet-vitrina-v1/status` now exposes semantic root status for the visible snapshot and keeps technical completion separate, so preserved/unchanged/stale/not_verified results stay yellow or red instead of false green
 - the same block shows backend-driven `Последний автозапуск`, `Статус последнего автозапуска` and `Последнее успешное автообновление`
 - `refresh` и `load` не смешиваются: refresh materialize-ит ready snapshot only, load пишет only already prepared snapshot в live sheet
 - job/log surface is detailed and machine-useful: source/module/adapter/endpoint steps, source result kinds/counts, metric batch summaries and bridge/write results stay server-driven and can be exported per completed run through `GET /v1/sheet-vitrina-v1/job?job_id=...&format=text&download=1`
 - server-side business timezone = `Asia/Yekaterinburg` for default `as_of_date`, `today_current` and operator-facing freshness dates
-- live daily auto-refresh = repo-owned artifacts `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.{service,timer}` -> installed on host as `wb-core-sheet-vitrina-refresh.timer` -> existing `POST /v1/sheet-vitrina-v1/refresh` at `11:00, 20:00 Asia/Yekaterinburg` (`06:00 UTC` and `15:00 UTC` on current host) with `auto_load=true`, so the daily path now finishes as `refresh + load to live sheet`
+- live daily auto-refresh = repo-owned artifacts `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.{service,timer}` -> installed on host as `wb-core-sheet-vitrina-refresh.timer` -> existing `POST /v1/sheet-vitrina-v1/refresh` at `11:00, 20:00 Asia/Yekaterinburg` (`06:00 UTC` and `15:00 UTC` on current host) with `{"auto_refresh": true}`; daily path builds server-side ready snapshot only and never loads Google Sheets
 - source matrix is now explicit: group A bot/web-source historical, group B WB API historical/date-period capable, group C WB API current-snapshot-only, group D other/manual/browser-collector overlays
 - bot-backed current-day sync now explicitly probes `/opt/wb-web-bot/storage_state.json` before running seller portal capture; invalidated browser state surfaces as `seller_portal_session_invalid` / human `сессия seller portal больше не действует; требуется повторный вход` instead of a generic Playwright timeout
 - seller-portal auth recovery on selleros now has a repo-owned localhost-only noVNC/Xvfb path via `apps/seller_portal_relogin_session.py`: it auto-saves refreshed `storage_state.json` after validated login and auto-triggers loopback refresh instead of relying on host-side manual X11

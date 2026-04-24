@@ -2,9 +2,9 @@
 title: "Модуль: sheet_vitrina_v1_registry_seed_v3_bootstrap_block"
 doc_id: "WB-CORE-MODULE-25-SHEET-VITRINA-V1-REGISTRY-SEED-V3-BOOTSTRAP-BLOCK"
 doc_type: "module"
-status: "active"
-purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `sheet_vitrina_v1_registry_seed_v3_bootstrap_block`."
-scope: "Compact v3 bootstrap для `CONFIG / METRICS / FORMULAS`: materialized operator seed из uploaded compact package, полный current sheet/upload dictionary и сохранение service/status блока без поломки upload trigger."
+status: "archived"
+purpose: "Зафиксировать archive/migration reference по bounded checkpoint блока `sheet_vitrina_v1_registry_seed_v3_bootstrap_block`."
+scope: "Archived compact v3 bootstrap for former Google Sheets `CONFIG / METRICS / FORMULAS`. This is not an active current operator/update/write/verify target."
 source_basis:
   - "migration/91_sheet_vitrina_v1_registry_upload_trigger.md"
   - "migration/92_sheet_vitrina_v1_registry_seed_v3_bootstrap.md"
@@ -34,7 +34,7 @@ related_docs:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под uploaded compact package: prepare-step теперь materialize-ит `33 / 102 / 7`, а не промежуточный repo-subset."
+update_note: "Архивирован: former Google Sheets bootstrap remains as migration evidence; current registry truth is server-side runtime/upload state."
 ---
 
 # 1. Идентификатор и статус
@@ -45,6 +45,12 @@ update_note: "Обновлён под uploaded compact package: prepare-step т�
 - `status_verification`: prepare-to-upload smoke подтверждён
 - `status_checkpoint`: рабочий checkpoint подтверждён
 - `status_main`: модуль смёржен в `main`
+- `status_current`: `ARCHIVED / DO NOT USE`
+
+Current norm:
+- `RegistryUploadSeedV3.gs` is retained only as archive/migration context.
+- Any prepare/reprepare path through bound Apps Script is blocked by `ArchiveGuard.gs`.
+- Current active registry package is server-side runtime state, not Google Sheets.
 
 # 2. Upstream/source basis и semantics
 

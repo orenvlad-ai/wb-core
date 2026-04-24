@@ -80,11 +80,7 @@ const COST_PRICE_CONTROL_NOTE =
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu(REGISTRY_UPLOAD_MENU_ROOT)
-    .addItem(REGISTRY_UPLOAD_MENU_PREPARE_LABEL, 'prepareRegistryUploadOperatorSheets')
-    .addItem(REGISTRY_UPLOAD_MENU_UPLOAD_LABEL, 'uploadRegistryUploadBundle')
-    .addItem(REGISTRY_UPLOAD_MENU_PREPARE_COST_PRICE_LABEL, 'prepareCostPriceSheet')
-    .addItem(REGISTRY_UPLOAD_MENU_UPLOAD_COST_PRICE_LABEL, 'uploadCostPriceSheet')
-    .addItem(REGISTRY_UPLOAD_MENU_LOAD_LABEL, 'loadSheetVitrinaTable')
+    .addItem(LEGACY_GOOGLE_SHEETS_ARCHIVE_STATUS, 'showLegacyGoogleSheetsArchiveNotice')
     .addToUi();
 }
 
@@ -982,6 +978,7 @@ function _formatRegistryUploadTimestamp_(date) {
 }
 
 function getRegistryUploadSpreadsheet_() {
+  assertLegacyGoogleSheetsContourActive_();
   const spreadsheet = SpreadsheetApp.openById(REGISTRY_UPLOAD_TARGET_SPREADSHEET_ID);
   if (spreadsheet.getId() !== REGISTRY_UPLOAD_TARGET_SPREADSHEET_ID) {
     throw new Error('unexpected registry upload spreadsheet id');

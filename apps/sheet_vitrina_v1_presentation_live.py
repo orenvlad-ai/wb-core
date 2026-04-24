@@ -1,4 +1,4 @@
-"""Локальный live presentation pass для новой Google Sheets-витрины V1."""
+"""Archived local presentation runner for the legacy Google Sheets contour."""
 
 from __future__ import annotations
 
@@ -14,6 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 TARGET_SPREADSHEET_ID = "1ltgE8GltN3Rk8qP1UiaT2NPEwQyPKZ-1tuIqV7EC1NE"
 TARGET_SCRIPT_ID = "1QalhdgdmpxekaTMbNEZM1ubLSPKkTYZ53SHacqBU9HRVJQgEKRdHkgSf"
 TARGET_SPREADSHEET_NAME = "WB Core Vitrina V1"
+ARCHIVE_MESSAGE = (
+    "Legacy Google Sheets contour is archived. "
+    "This runner must not style or write sheet_vitrina_v1; use web-vitrina/operator instead."
+)
 
 DATA_SHEET_NAME = "DATA_VITRINA"
 STATUS_SHEET_NAME = "STATUS"
@@ -693,6 +697,7 @@ def _find_row_index(values: list[list[Any]], pattern: str, *, normalized: bool =
 
 
 def main() -> None:
+    raise SystemExit(ARCHIVE_MESSAGE)
     _verify_target_config()
     token = _refresh_access_token()
     sheet_props = _get_spreadsheet_metadata(token)

@@ -2,9 +2,9 @@
 title: "Модуль: sheet_vitrina_v1_presentation_block"
 doc_id: "WB-CORE-MODULE-19-SHEET-VITRINA-V1-PRESENTATION-BLOCK"
 doc_type: "module"
-status: "active"
-purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `sheet_vitrina_v1_presentation_block`."
-scope: "Bounded presentation/layout pass для `DATA_VITRINA` и `STATUS`: server-driven two-slot `date_matrix` view поверх incoming current-truth rows без локального subset/fallback logic, semantic number formats и жёсткие границы thin sheet-side presentation шага."
+status: "archived"
+purpose: "Зафиксировать archive/migration reference по bounded checkpoint блока `sheet_vitrina_v1_presentation_block`."
+scope: "Archived presentation/layout pass for former Google Sheets `DATA_VITRINA`/`STATUS`. This module is not an active runtime/write/load/verify target."
 source_basis:
   - "migration/85_sheet_vitrina_v1_presentation.md"
   - "artifacts/sheet_vitrina_v1/evidence/initial__sheet-vitrina-v1__evidence.md"
@@ -27,7 +27,7 @@ related_docs:
   - "docs/modules/18_MODULE__SHEET_VITRINA_V1_WRITE_BRIDGE_BLOCK.md"
   - "artifacts/sheet_vitrina_v1/evidence/initial__sheet-vitrina-v1__evidence.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под server-driven two-day date-matrix presentation: `DATA_VITRINA` visual-но снова близка к legacy sheet, но row set, block set, date columns и metric rows полностью зависят от incoming current truth; локальный 7-metric reshape и локальное угадывание дат не возвращены."
+update_note: "Архивирован: former Google Sheets presentation pass remains only as migration evidence; current active presentation is website/operator web-vitrina."
 ---
 
 # 1. Идентификатор и статус
@@ -38,6 +38,12 @@ update_note: "Обновлён под server-driven two-day date-matrix presenta
 - `status_verification`: targeted smoke для server-driven materialization/layout подтверждён
 - `status_checkpoint`: рабочий checkpoint подтверждён
 - `status_main`: модуль смёржен в `main`
+- `status_current`: `ARCHIVED / DO NOT USE`
+
+Current norm:
+- `apps/sheet_vitrina_v1_presentation_live.py` is a fail-fast archived runner.
+- `gas/sheet_vitrina_v1/PresentationPass.gs` is guarded by `ArchiveGuard.gs`.
+- Google Sheets formatting/readback is not a current verification target.
 
 # 2. Upstream/source basis и semantics
 

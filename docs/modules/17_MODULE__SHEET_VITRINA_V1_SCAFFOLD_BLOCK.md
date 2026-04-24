@@ -2,9 +2,9 @@
 title: "Модуль: sheet_vitrina_v1_scaffold_block"
 doc_id: "WB-CORE-MODULE-17-SHEET-VITRINA-V1-SCAFFOLD-BLOCK"
 doc_type: "module"
-status: "active"
+status: "archived"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `sheet_vitrina_v1_scaffold_block`."
-scope: "Sheet-side scaffold, layout artifacts, sheet-write plan, кодовый минимум, подтверждённый artifact-backed smoke и границы первого технического каркаса новой витрины."
+scope: "Archived sheet-side scaffold, layout artifacts and sheet-write plan for the former Google Sheets contour. This is migration evidence, not an active runtime/update/write/load/verify target."
 source_basis:
   - "migration/81_wide_data_matrix_delivery_contract.md"
   - "migration/82_wide_data_matrix_delivery_bundle_v1.md"
@@ -24,17 +24,18 @@ related_docs:
   - "migration/83_sheet_vitrina_v1_scaffold.md"
   - "artifacts/sheet_vitrina_v1/evidence/initial__sheet-vitrina-v1__evidence.md"
 source_of_truth_level: "module_canonical"
-update_note: "Создан как канонический модульный документ для первого sheet-side scaffold новой Google Sheets-витрины."
+update_note: "Архивирован: former sheet-side scaffold remains as migration evidence; active/current contour is website/operator/public web-vitrina."
 ---
 
 # 1. Идентификатор и статус
 
 - `module_id`: `sheet_vitrina_v1_scaffold_block`
-- `family`: `sheet-side`
+- `family`: `sheet-side archived`
 - `status_transfer`: scaffold перенесён в `wb-core`
 - `status_verification`: artifacts и smoke подтверждены
 - `status_checkpoint`: рабочий checkpoint подтверждён
 - `status_main`: модуль смёржен в `main`
+- `status_current`: `ARCHIVED / DO NOT USE`; не active runtime/update/write/load/verify target
 
 # 2. Upstream/source basis и semantics
 
@@ -98,9 +99,9 @@ update_note: "Создан как канонический модульный д
 
 # 7. Что уже доказано по модулю
 
-- Новая таблица больше не является только delivery-contract идеей: есть живой sheet-side scaffold.
-- `DATA_VITRINA` уже имеет готовый deterministic write plan.
-- `STATUS` уже имеет отдельный deterministic write plan.
+- Historical Google Sheets contour больше не является active/current contour; scaffold сохраняется как archive/migration reference.
+- `DATA_VITRINA` historical write plan сохранён только как migration boundary.
+- `STATUS` historical write plan сохранён только как migration boundary.
 - Partial update semantics сознательно не вводятся раньше времени.
 
 # 8. Что пока не является частью финальной production-сборки

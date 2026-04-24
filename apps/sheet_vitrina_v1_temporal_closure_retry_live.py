@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-auto-load-visible",
         action="store_true",
-        help="Do not push the visible default sheet after retrying due/default dates.",
+        help="Deprecated no-op: legacy Google Sheets load is archived and never auto-runs.",
     )
     return parser.parse_args()
 
@@ -49,7 +49,7 @@ def main() -> None:
     )
     payload = entrypoint.run_sheet_temporal_closure_retry_cycle(
         target_dates=args.dates,
-        auto_load_visible=not args.skip_auto_load_visible,
+        auto_load_visible=False,
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 

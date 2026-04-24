@@ -16,21 +16,19 @@ Legacy-репозитории остаются рабочими, но счита
 - `rule-based` модулей;
 - `table-facing` и `projection` read-side;
 - `registry` pilot line и первый upload bundle path;
-- `wide matrix`, `delivery`, legacy sheet-side/export contour и текущую web-витрину.
+- `wide matrix`, `delivery`, archived legacy sheet-side/export contour и текущую web-витрину.
 
 Подтверждённый main-confirmed contour:
 
 `sku_display -> table_projection -> registry_pilot -> wide_matrix -> delivery -> sheet_scaffold`
 
 В `main` также уже есть:
-- legacy/export write bridge в bound Google Sheet для старого sheet-side contour;
-- presentation pass для `DATA_VITRINA` и `STATUS`;
-- compact v3 bootstrap для `CONFIG / METRICS / FORMULAS`, который поднимает уже заполненные operator sheets и сохраняет service/status block;
-- отдельный bounded `COST_PRICE` contour: лист `COST_PRICE`, separate menu actions, sibling HTTP upload path, server-side authoritative storage seam вне compact registry bundle и read-side overlay в refresh/load contour для `cost_price_rub`, `total_proxy_profit_rub`, `proxy_margin_pct_total`;
+- legacy/export write bridge, presentation pass и compact v3 bootstrap для bound Google Sheet, но этот Google Sheets/GAS contour теперь `ARCHIVED / DO NOT USE` и не является active runtime/update/write/verify target;
+- отдельный bounded `COST_PRICE` server contour: sibling HTTP upload path, server-side authoritative storage seam вне compact registry bundle и read-side overlay в refresh contour для `cost_price_rub`, `total_proxy_profit_rub`, `proxy_margin_pct_total`;
 - bounded promo line в двух шагах:
   - `promo_xlsx_collector_block` как thin browser-capture precursor для promo XLSX + metadata sidecar;
   - `promo_live_source_wiring_block` как current live wiring обратно в `sheet_vitrina_v1` refresh/runtime/read-side contour для `promo_by_price` и promo-backed numeric rows;
-- первый bounded end-to-end MVP `prepare -> upload -> refresh -> load`, где operator seed `33 / 102 / 7`, full current `metrics_v2` dictionary для upload path и controlled reverse-load в `DATA_VITRINA` уже материализованы в коде и артефактах;
+- первый bounded end-to-end MVP history `prepare -> upload -> refresh -> load` сохранён как archive/migration reference; current active contour = website/operator `sheet_vitrina_v1` и public web-витрина без Google Sheets completion blocker;
 - evidence и module docs по этим шагам.
 
 Главные незакрытые gaps на текущем `main`:
@@ -42,18 +40,16 @@ Legacy-репозитории остаются рабочими, но счита
 ## Что repo уже содержит
 
 - `packages/contracts`, `packages/application`, `packages/adapters` с живыми bounded modules;
-- `apps/` с smoke runners и live sheet-side runners;
+- `apps/` с smoke runners; legacy live sheet-side runners сохранены как archived fail-fast guards;
 - `artifacts/` с fixture/parity/evidence по смёрженным блокам;
 - `registry/pilot_bundle/` как pilot registry line для новой витрины;
 - `artifacts/registry_upload_bundle_v1/` как первый artifact-backed upload path для V2-реестров;
 - `artifacts/registry_upload_file_backed_service/` как локальный file-backed receiver для registry upload path;
 - `artifacts/registry_upload_db_backed_runtime/` как локальный DB-backed runtime layer для registry upload path;
 - `artifacts/registry_upload_http_entrypoint/` как первый live HTTP entrypoint для registry upload path;
-- `artifacts/sheet_vitrina_v1_registry_upload_trigger/` как первый operator-facing sheet-side trigger для registry upload path;
-- `artifacts/sheet_vitrina_v1_registry_seed_v3_bootstrap/` как compact v3 bootstrap для operator registry sheets;
-- `artifacts/sheet_vitrina_v1_mvp_end_to_end/` как первый bounded end-to-end MVP для `VB-Core Витрина V1`;
+- `artifacts/sheet_vitrina_v1_registry_upload_trigger/`, `artifacts/sheet_vitrina_v1_registry_seed_v3_bootstrap/` и `artifacts/sheet_vitrina_v1_mvp_end_to_end/` как archived/migration evidence для бывшего sheet-side contour;
 - `packages/application/cost_price_upload.py` и `packages/contracts/cost_price_upload.py` как отдельный authoritative upload contract для `COST_PRICE`, который затем подключается server-side в `sheet_vitrina_v1` refresh/read contour;
-- `gas/sheet_vitrina_v1/` и `.clasp.json` для legacy bound sheet-side/export wiring; это не active production surface для текущей web-витрины;
+- `gas/sheet_vitrina_v1/` и `.clasp.json` для legacy bound sheet-side/export wiring; GAS содержит archive guard, не является active production/update/write/verify target и не должен использоваться как Codex completion path;
 - `wb_core_docs_master/` как compact curated-pack для project-oriented retrieval вне primary repo docs;
 - `docs/modules/` как канонический модульный reference;
 - `migration/` как канонический слой migration contracts и implementation notes.
@@ -77,7 +73,8 @@ Legacy-репозитории остаются рабочими, но счита
 15. Server-side read-side integration `COST_PRICE` в `sheet_vitrina_v1`: authoritative resolution по `group + max(effective_from <= slot_date)`, truthful `STATUS.cost_price[*]` и operator-facing derived metrics `total_proxy_profit_rub` / `proxy_margin_pct_total`.
 16. Первый repo-owned bounded `promo_xlsx_collector_block`: canonical hydration/modal/drawer seams, truthful metadata sidecar, workbook inspection и bounded live integration smoke поверх existing seller session reuse path.
 17. Bounded live wiring `promo_live_source_wiring_block`: `promo_by_price` больше не blocked gap, а current server-owned source seam внутри existing `refresh -> runtime -> STATUS/DATA_VITRINA` contour с accepted snapshot preservation и truthful low-confidence cross-year handling.
-18. После этого остаются full parity и actual hosted deploy access/publish wiring hardening вокруг уже materialized contour.
+18. Legacy Google Sheets/GAS contour переведён в `ARCHIVED / DO NOT USE`; current contour = hosted website/operator/web-vitrina runtime.
+19. После этого остаются full parity archive questions и hosted runtime hardening вокруг current web/operator contour.
 
 ## Что не следует считать частью текущего `main`
 
