@@ -188,6 +188,14 @@ def main() -> None:
             raise AssertionError(f"loading table rows must carry source group ids, got {loading_rows}")
         if loading_table["today_date"] != "2026-04-21" or loading_table["yesterday_date"] != "2026-04-20":
             raise AssertionError(f"loading table dates must be server/business dates, got {loading_table}")
+        if loading_table["default_refresh_date"] != "2026-04-20":
+            raise AssertionError(f"group refresh default must stay within available dates, got {loading_table}")
+        if "2026-04-21" in loading_table["available_dates"]:
+            raise AssertionError(f"group refresh available dates must not invent unsupported today, got {loading_table}")
+        for group in loading_groups.values():
+            action = group["refresh_action"]
+            if action["default_as_of_date"] != "2026-04-20":
+                raise AssertionError(f"group action default must use latest available date, got {group}")
         if loading_columns["today_status"]["label"] != "Сегодня: 2026-04-21":
             raise AssertionError(f"today loading column mismatch, got {loading_columns}")
         if loading_columns["yesterday_status"]["label"] != "Вчера: 2026-04-20":
@@ -483,6 +491,8 @@ def _build_activity_surface_fixture() -> dict[str, object]:
             "updated_at": "2026-04-20T12:05:00Z",
             "today_date": "2026-04-21",
             "yesterday_date": "2026-04-20",
+            "available_dates": ["2026-04-18", "2026-04-20"],
+            "default_refresh_date": "2026-04-21",
             "columns": [
                 {"id": "source", "label": "Источник"},
                 {"id": "today_status", "label": "Сегодня: 2026-04-21"},

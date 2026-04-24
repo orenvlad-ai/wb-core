@@ -408,7 +408,10 @@ def _normalize_loading_table(value: Any, *, upload_summary: Mapping[str, Any]) -
     today_date = str(payload.get("today_date") or "")
     yesterday_date = str(payload.get("yesterday_date") or "")
     available_dates = [str(item) for item in (payload.get("available_dates") or []) if str(item).strip()]
-    default_refresh_date = str(payload.get("default_refresh_date") or today_date or "")
+    default_refresh_date = _default_loading_table_refresh_date(
+        available_dates,
+        preferred_date=str(payload.get("default_refresh_date") or today_date or ""),
+    )
     columns = [
         {
             "id": str(column_payload.get("id") or ""),
@@ -482,6 +485,10 @@ def _normalize_loading_table_groups(
         group_payload = dict(group)
         refresh_action = dict(group_payload.get("refresh_action") or {})
         action_dates = [str(item) for item in (refresh_action.get("available_dates") or available_dates) if str(item).strip()]
+        action_default_date = _default_loading_table_refresh_date(
+            action_dates,
+            preferred_date=str(refresh_action.get("default_as_of_date") or default_refresh_date),
+        )
         groups.append(
             {
                 "group_id": str(group_payload.get("group_id") or ""),
@@ -495,7 +502,7 @@ def _normalize_loading_table_groups(
                         or group_payload.get("group_id")
                         or ""
                     ),
-                    "default_as_of_date": str(refresh_action.get("default_as_of_date") or default_refresh_date),
+                    "default_as_of_date": action_default_date,
                     "available_dates": action_dates,
                     "min_date": str(refresh_action.get("min_date") or (action_dates[0] if action_dates else fallback_min_date)),
                     "max_date": str(refresh_action.get("max_date") or (action_dates[-1] if action_dates else fallback_max_date)),
@@ -504,6 +511,16 @@ def _normalize_loading_table_groups(
             }
         )
     return groups
+
+
+def _default_loading_table_refresh_date(available_dates: list[str], *, preferred_date: str) -> str:
+    normalized = sorted({str(item).strip() for item in available_dates if str(item).strip()})
+    preferred = str(preferred_date or "").strip()
+    if preferred and preferred in normalized:
+        return preferred
+    if normalized:
+        return normalized[-1]
+    return preferred
 
 
 def _normalize_loading_table_status(value: Any, *, date: str) -> dict[str, Any]:

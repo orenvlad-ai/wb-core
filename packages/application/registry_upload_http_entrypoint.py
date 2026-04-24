@@ -830,6 +830,10 @@ class RegistryUploadHttpEntrypoint:
         current_business_date = current_business_date_iso(self.now_factory())
         previous_business_date = default_business_as_of_date(self.now_factory())
         group_refresh_available_dates = self.web_vitrina_block.list_readable_dates(descending=False)
+        group_refresh_default_date = _default_group_refresh_date(
+            group_refresh_available_dates,
+            preferred_date=current_business_date,
+        )
         metric_labels_by_source = _build_activity_metric_labels_by_source(
             getattr(self.runtime.load_current_state(), "metrics_v2", [])
         )
@@ -869,7 +873,7 @@ class RegistryUploadHttpEntrypoint:
                 today_date=current_business_date,
                 yesterday_date=previous_business_date,
                 available_dates=group_refresh_available_dates,
-                default_refresh_date=current_business_date,
+                default_refresh_date=group_refresh_default_date,
                 metric_labels_by_source=metric_labels_by_source,
                 group_last_updated_at=_source_group_last_updated_at_for_snapshot(
                     self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=snapshot_as_of_date),
@@ -3864,9 +3868,19 @@ def _normalize_available_refresh_dates(
     default_refresh_date: str,
 ) -> list[str]:
     normalized = {str(item).strip() for item in dates if str(item).strip()}
-    if default_refresh_date:
+    if not normalized and default_refresh_date:
         normalized.add(default_refresh_date)
     return sorted(normalized)
+
+
+def _default_group_refresh_date(dates: Iterable[str], *, preferred_date: str) -> str:
+    normalized = sorted({str(item).strip() for item in dates if str(item).strip()})
+    preferred = str(preferred_date or "").strip()
+    if preferred and preferred in normalized:
+        return preferred
+    if normalized:
+        return normalized[-1]
+    return preferred
 
 
 def _source_group_id_for_source_key(source_key: str) -> str:
