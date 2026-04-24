@@ -6,7 +6,7 @@ import hashlib
 import importlib
 import json
 import sqlite3
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 import shlex
@@ -63,12 +63,14 @@ from packages.application.sheet_vitrina_v1_live_plan import (
 )
 from packages.contracts.cost_price_upload import CostPriceUploadResult
 from packages.contracts.registry_upload_file_backed_service import RegistryUploadResult
-from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope
+from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope, SheetVitrinaWriteTarget
 
 OperatorLogEmitter = Callable[[str], None]
 SheetLoadRunner = Callable[[SheetVitrinaV1Envelope, OperatorLogEmitter], dict[str, Any]]
 SHEET_VITRINA_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/refresh"
 SHEET_VITRINA_LOAD_ROUTE = "/v1/sheet-vitrina-v1/load"
+SHEET_VITRINA_GROUP_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/group-refresh"
+SHEET_VITRINA_SELLER_RECOVERY_START_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start"
 SHEET_VITRINA_DAILY_TIMER_NAME = "wb-core-sheet-vitrina-refresh.timer"
 SHEET_VITRINA_DAILY_AUTO_ACTION = "server-side refresh ready snapshot for website/operator web-vitrina"
 SHEET_VITRINA_DAILY_BUSINESS_TIMES = ", ".join(
@@ -262,6 +264,41 @@ WEB_VITRINA_SOURCE_METRIC_KEYS = {
         "promo_count_by_price",
         "promo_entry_price_best",
     ),
+}
+WEB_VITRINA_SOURCE_GROUPS = {
+    "wb_api": {
+        "label_ru": "WB API",
+        "source_keys": (
+            "sales_funnel_history",
+            "sf_period",
+            "spp",
+            "stocks",
+            "ads_compact",
+            "fin_report_daily",
+            "prices_snapshot",
+            "ads_bids",
+        ),
+    },
+    "seller_portal_bot": {
+        "label_ru": "Seller Portal / бот",
+        "source_keys": (
+            "seller_funnel_snapshot",
+            "web_source_snapshot",
+            "promo_by_price",
+        ),
+    },
+    "other_sources": {
+        "label_ru": "Прочие источники",
+        "source_keys": (
+            "cost_price",
+        ),
+    },
+}
+WEB_VITRINA_SOURCE_GROUP_ORDER = ("wb_api", "seller_portal_bot", "other_sources")
+WEB_VITRINA_SOURCE_KEY_TO_GROUP = {
+    source_key: group_id
+    for group_id, group in WEB_VITRINA_SOURCE_GROUPS.items()
+    for source_key in group["source_keys"]
 }
 
 
@@ -632,6 +669,22 @@ class RegistryUploadHttpEntrypoint:
         del as_of_date
         raise LegacyGoogleSheetsContourArchivedError(LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE)
 
+    def start_sheet_source_group_refresh_job(
+        self,
+        *,
+        source_group_id: str,
+        as_of_date: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_group_id = _normalize_source_group_id(source_group_id)
+        return self.operator_jobs.start(
+            operation="refresh_group",
+            runner=lambda log: self._run_sheet_source_group_refresh(
+                source_group_id=normalized_group_id,
+                as_of_date=as_of_date,
+                log=log,
+            ),
+        )
+
     def handle_sheet_operator_job_request(self, job_id: str) -> dict[str, Any]:
         return self.operator_jobs.get(job_id)
 
@@ -689,6 +742,34 @@ class RegistryUploadHttpEntrypoint:
             launcher_download_path=launcher_download_path,
         )
 
+    def start_seller_portal_session_check_job(
+        self,
+        *,
+        launcher_download_path: str,
+    ) -> dict[str, Any]:
+        return self.operator_jobs.start(
+            operation="session_check",
+            runner=lambda log: self._run_seller_portal_session_check(
+                launcher_download_path=launcher_download_path,
+                log=log,
+            ),
+        )
+
+    def start_seller_portal_recovery_start_job(
+        self,
+        *,
+        launcher_download_path: str,
+        replace_existing: bool = True,
+    ) -> dict[str, Any]:
+        return self.operator_jobs.start(
+            operation="session_recovery_start",
+            runner=lambda log: self._run_seller_portal_recovery_start(
+                launcher_download_path=launcher_download_path,
+                replace_existing=replace_existing,
+                log=log,
+            ),
+        )
+
     def _build_web_vitrina_activity_surface(
         self,
         *,
@@ -699,14 +780,19 @@ class RegistryUploadHttpEntrypoint:
         job_path: str,
     ) -> dict[str, Any]:
         refresh_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=snapshot_as_of_date)
-        latest_job = self.operator_jobs.latest_relevant_job(
-            operations=("refresh", "auto_update"),
+        latest_refresh_job = self.operator_jobs.latest_relevant_job(
+            operations=("refresh", "auto_update", "refresh_group"),
             preferred_as_of_date=snapshot_as_of_date,
             strict_preferred_as_of_date=True,
         )
+        latest_log_job = self.operator_jobs.latest_relevant_job(
+            operations=("refresh", "auto_update", "refresh_group", "session_check", "session_recovery_start"),
+            preferred_as_of_date=snapshot_as_of_date,
+            strict_preferred_as_of_date=False,
+        )
         upload_records = (
-            _extract_upload_source_records_from_job(latest_job)
-            if latest_job is not None
+            _extract_upload_source_records_from_job(latest_refresh_job)
+            if latest_refresh_job is not None
             else _extract_source_records_from_outcomes(refresh_status.source_outcomes)
         )
         update_records = _extract_source_records_from_outcomes(refresh_status.source_outcomes)
@@ -722,7 +808,7 @@ class RegistryUploadHttpEntrypoint:
             title="Загрузка данных",
             subtitle=(
                 "Что вернули источники в последнем завершённом refresh."
-                if latest_job is not None
+                if latest_refresh_job is not None
                 else "Transient refresh-log недоступен; показываем сохранённый итог по текущему срезу."
             ),
             records=upload_records,
@@ -732,19 +818,19 @@ class RegistryUploadHttpEntrypoint:
                 "Показываем только сохранённый итог по текущему срезу."
             ),
             block_updated_at=(
-                str(latest_job.get("finished_at") or latest_job.get("started_at") or "")
-                if latest_job
+                str(latest_refresh_job.get("finished_at") or latest_refresh_job.get("started_at") or "")
+                if latest_refresh_job
                 else refreshed_at
             ),
             block_detail=(
-                f"job {latest_job.get('job_id', '')} · {str(latest_job.get('operation', 'refresh'))}"
-                if latest_job
+                f"job {latest_refresh_job.get('job_id', '')} · {str(latest_refresh_job.get('operation', 'refresh'))}"
+                if latest_refresh_job
                 else f"snapshot {snapshot_id} · as_of_date {snapshot_as_of_date} · {read_model}"
             ),
         )
         return {
             "log_block": _build_web_vitrina_log_block(
-                latest_job=latest_job,
+                latest_job=latest_log_job,
                 job_path=job_path,
                 persisted_refresh_status=refresh_status,
             ),
@@ -754,6 +840,10 @@ class RegistryUploadHttpEntrypoint:
                 today_date=current_business_date,
                 yesterday_date=previous_business_date,
                 metric_labels_by_source=metric_labels_by_source,
+                group_last_updated_at=_source_group_last_updated_at_for_snapshot(
+                    self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=snapshot_as_of_date),
+                    fallback_updated_at=refreshed_at,
+                ),
             ),
             "update_summary": _build_web_vitrina_endpoint_summary_block(
                 title="Обновление данных",
@@ -1116,9 +1206,11 @@ class RegistryUploadHttpEntrypoint:
                         snapshot_id=plan.snapshot_id,
                     )
                 )
+                refreshed_at = self.refreshed_at_factory()
+                plan = _with_full_refresh_metadata(plan, refreshed_at=refreshed_at)
                 refresh_result = self.runtime.save_sheet_vitrina_ready_snapshot(
                     current_state=current_state,
-                    refreshed_at=self.refreshed_at_factory(),
+                    refreshed_at=refreshed_at,
                     plan=plan,
                 )
                 refresh_outcome = _build_refresh_result_payload(refresh_result)
@@ -1180,6 +1272,275 @@ class RegistryUploadHttpEntrypoint:
                     )
                 )
                 raise
+
+    def _run_sheet_source_group_refresh(
+        self,
+        *,
+        source_group_id: str,
+        as_of_date: str | None,
+        log: OperatorLogEmitter | None,
+    ) -> dict[str, Any]:
+        emit = log or _noop_log
+        source_group = _source_group_config(source_group_id)
+        source_keys = list(source_group["source_keys"])
+        group_label = str(source_group["label_ru"])
+        stage = "start"
+        started_at = self.activated_at_factory()
+        emit(
+            _format_log_event(
+                "group_refresh_start",
+                source_group_id=source_group_id,
+                source_group_label=group_label,
+                initiator="operator_ui",
+                route=SHEET_VITRINA_GROUP_REFRESH_ROUTE,
+                endpoints=",".join(source_keys),
+            )
+        )
+        with self._sheet_cycle_lock:
+            try:
+                current_state = self.runtime.load_current_state()
+                metric_keys = _metric_keys_for_source_keys(current_state.metrics_v2, source_keys=source_keys)
+                if not metric_keys:
+                    raise ValueError(f"source group {source_group_id!r} has no enabled web-vitrina metrics")
+                stage = "source_fetch"
+                emit(
+                    _format_log_event(
+                        "group_refresh_stage_start",
+                        stage=stage,
+                        source_group_id=source_group_id,
+                        source_keys=",".join(source_keys),
+                        metric_keys=",".join(metric_keys),
+                    )
+                )
+                partial_plan = self.sheet_plan_block.build_plan(
+                    as_of_date=as_of_date,
+                    log=emit,
+                    execution_mode=EXECUTION_MODE_MANUAL_OPERATOR,
+                    source_keys=source_keys,
+                    metric_keys=metric_keys,
+                )
+                emit(
+                    _format_log_event(
+                        "group_refresh_stage_finish",
+                        stage=stage,
+                        status="success",
+                        snapshot_id=partial_plan.snapshot_id,
+                        partial_rows=_data_sheet_row_count(partial_plan),
+                    )
+                )
+
+                stage = "prepare_materialize"
+                emit(_format_log_event("group_refresh_stage_start", stage=stage, source_group_id=source_group_id))
+                previous_plan = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=partial_plan.as_of_date)
+                previous_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=partial_plan.as_of_date)
+                refreshed_at = self.refreshed_at_factory()
+                merged_plan, merge_summary = _merge_source_group_ready_snapshot(
+                    previous_plan=previous_plan,
+                    partial_plan=partial_plan,
+                    source_group_id=source_group_id,
+                    source_keys=source_keys,
+                    metric_keys=metric_keys,
+                    refreshed_at=refreshed_at,
+                    previous_refreshed_at=previous_status.refreshed_at,
+                )
+                emit(
+                    _format_log_event(
+                        "group_refresh_stage_finish",
+                        stage=stage,
+                        status="success",
+                        rows_updated=merge_summary["rows_updated"],
+                        rows_preserved=merge_summary["rows_preserved"],
+                        status_rows_updated=merge_summary["status_rows_updated"],
+                    )
+                )
+
+                stage = "load_group_to_vitrina"
+                emit(_format_log_event("group_refresh_stage_start", stage=stage, source_group_id=source_group_id))
+                refresh_result = self.runtime.save_sheet_vitrina_ready_snapshot(
+                    current_state=current_state,
+                    refreshed_at=refreshed_at,
+                    plan=merged_plan,
+                )
+                refresh_outcome = _build_refresh_result_payload(refresh_result)
+                self.runtime.save_sheet_vitrina_manual_refresh_result(
+                    result_payload=refresh_outcome,
+                    refreshed_at=refresh_result.refreshed_at,
+                )
+                emit(
+                    _format_log_event(
+                        "group_refresh_stage_finish",
+                        stage=stage,
+                        status="success",
+                        snapshot_id=merged_plan.snapshot_id,
+                        rows_updated=merge_summary["rows_updated"],
+                        rows_preserved=merge_summary["rows_preserved"],
+                        untouched_groups=",".join(
+                            group_id
+                            for group_id in WEB_VITRINA_SOURCE_GROUP_ORDER
+                            if group_id != source_group_id
+                        ),
+                    )
+                )
+                finished_at = self.activated_at_factory()
+                duration_seconds = _duration_seconds(started_at, finished_at)
+                payload = asdict(refresh_result)
+                payload.update(
+                    {
+                        "operation": "refresh_group",
+                        "source_group_id": source_group_id,
+                        "source_group_label": group_label,
+                        "source_keys": source_keys,
+                        "metric_keys": metric_keys,
+                        "started_at": started_at,
+                        "finished_at": finished_at,
+                        "duration_seconds": duration_seconds,
+                        "merge_summary": merge_summary,
+                        "technical_status": payload["status"],
+                        "status_label": payload["semantic_label"],
+                        "status_reason": payload["semantic_reason"],
+                        "server_context": self.build_sheet_server_context(),
+                        "manual_context": self.build_sheet_manual_context(),
+                        "load_context": self.build_sheet_load_context(),
+                    }
+                )
+                emit(
+                    _format_log_event(
+                        "group_refresh_finish",
+                        status="success",
+                        source_group_id=source_group_id,
+                        duration_seconds=duration_seconds,
+                        rows_updated=merge_summary["rows_updated"],
+                        rows_preserved=merge_summary["rows_preserved"],
+                    )
+                )
+                return payload
+            except Exception as exc:
+                finished_at = self.activated_at_factory()
+                emit(
+                    _format_log_event(
+                        "group_refresh_finish",
+                        status="failed",
+                        failed_stage=stage,
+                        source_group_id=source_group_id,
+                        reason=str(exc),
+                        duration_seconds=_duration_seconds(started_at, finished_at),
+                    )
+                )
+                raise RuntimeError(f"failed at {stage}: {exc}") from exc
+
+    def _run_seller_portal_session_check(
+        self,
+        *,
+        launcher_download_path: str,
+        log: OperatorLogEmitter | None,
+    ) -> dict[str, Any]:
+        emit = log or _noop_log
+        started_at = self.activated_at_factory()
+        emit(_format_log_event("seller_session_check_start", initiator="operator_ui"))
+        try:
+            payload = self.handle_seller_portal_session_check_request(
+                launcher_download_path=launcher_download_path,
+            )
+            finished_at = self.activated_at_factory()
+            status = str(payload.get("status") or "")
+            tone = str(payload.get("status_tone") or "")
+            ok = tone == "success" or status == "session_valid_canonical"
+            emit(
+                _format_log_event(
+                    "seller_session_check_finish",
+                    result="success" if ok else "failed",
+                    status=status,
+                    reason=str(payload.get("summary") or payload.get("message") or ""),
+                    checked_at=finished_at,
+                    duration_seconds=_duration_seconds(started_at, finished_at),
+                )
+            )
+            result = dict(payload)
+            result.update(
+                {
+                    "operation": "session_check",
+                    "checked_at": finished_at,
+                    "status": "success" if ok else "failed",
+                    "session_status": status,
+                    "session_ok": ok,
+                    "semantic_status": "success" if ok else "error",
+                    "semantic_label": "Успешно" if ok else "Ошибка",
+                    "semantic_tone": "success" if ok else "error",
+                    "semantic_reason": str(payload.get("summary") or payload.get("message") or ""),
+                }
+            )
+            return result
+        except Exception as exc:
+            finished_at = self.activated_at_factory()
+            emit(
+                _format_log_event(
+                    "seller_session_check_finish",
+                    result="failed",
+                    reason=str(exc),
+                    checked_at=finished_at,
+                    duration_seconds=_duration_seconds(started_at, finished_at),
+                )
+            )
+            raise
+
+    def _run_seller_portal_recovery_start(
+        self,
+        *,
+        launcher_download_path: str,
+        replace_existing: bool,
+        log: OperatorLogEmitter | None,
+    ) -> dict[str, Any]:
+        emit = log or _noop_log
+        started_at = self.activated_at_factory()
+        emit(
+            _format_log_event(
+                "seller_recovery_start",
+                initiator="operator_ui",
+                route=SHEET_VITRINA_SELLER_RECOVERY_START_ROUTE,
+                replace=str(bool(replace_existing)).lower(),
+            )
+        )
+        try:
+            payload = self.handle_seller_portal_recovery_start_request(
+                launcher_download_path=launcher_download_path,
+                replace=replace_existing,
+            )
+            finished_at = self.activated_at_factory()
+            result = dict(payload)
+            result.update(
+                {
+                    "operation": "session_recovery_start",
+                    "started_at": started_at,
+                    "finished_at": finished_at,
+                    "duration_seconds": _duration_seconds(started_at, finished_at),
+                    "semantic_status": "warning",
+                    "semantic_label": str(payload.get("status_label") or "Запрошено"),
+                    "semantic_tone": "warning",
+                    "semantic_reason": str(payload.get("summary") or payload.get("message") or ""),
+                }
+            )
+            emit(
+                _format_log_event(
+                    "seller_recovery_finish",
+                    result="success",
+                    run_status=str(payload.get("run_status") or payload.get("status") or ""),
+                    running=bool(payload.get("running")),
+                    reason=str(payload.get("summary") or payload.get("message") or ""),
+                    duration_seconds=result["duration_seconds"],
+                )
+            )
+            return result
+        except Exception as exc:
+            finished_at = self.activated_at_factory()
+            emit(
+                _format_log_event(
+                    "seller_recovery_finish",
+                    result="failed",
+                    reason=str(exc),
+                    duration_seconds=_duration_seconds(started_at, finished_at),
+                )
+            )
+            raise
 
     def _run_sheet_load(
         self,
@@ -2313,11 +2674,250 @@ def _sheet_row_counts(plan: SheetVitrinaV1Envelope) -> dict[str, int]:
     return {item.sheet_name: item.row_count for item in plan.sheets}
 
 
-def _find_sheet(plan: SheetVitrinaV1Envelope, sheet_name: str) -> Any | None:
+def _find_sheet(plan: SheetVitrinaV1Envelope, sheet_name: str) -> SheetVitrinaWriteTarget | None:
     for sheet in plan.sheets:
         if sheet.sheet_name == sheet_name:
             return sheet
     return None
+
+
+def _normalize_source_group_id(source_group_id: str) -> str:
+    normalized = str(source_group_id or "").strip()
+    if normalized not in WEB_VITRINA_SOURCE_GROUPS:
+        raise ValueError(
+            "unsupported source_group_id: "
+            f"{normalized!r}; expected one of {', '.join(WEB_VITRINA_SOURCE_GROUP_ORDER)}"
+        )
+    return normalized
+
+
+def _source_group_config(source_group_id: str) -> Mapping[str, Any]:
+    return WEB_VITRINA_SOURCE_GROUPS[_normalize_source_group_id(source_group_id)]
+
+
+def _metric_keys_for_source_keys(metrics: Iterable[Any], *, source_keys: Iterable[str]) -> list[str]:
+    source_key_set = {str(item).strip() for item in source_keys if str(item).strip()}
+    allowed_metric_keys: set[str] = set()
+    for source_key in source_key_set:
+        allowed_metric_keys.update(WEB_VITRINA_SOURCE_METRIC_KEYS.get(source_key, ()))
+    ordered: list[str] = []
+    for metric in sorted(metrics, key=lambda item: int(getattr(item, "display_order", 0) or 0)):
+        metric_key = str(getattr(metric, "metric_key", "") or "").strip()
+        if (
+            metric_key
+            and metric_key in allowed_metric_keys
+            and bool(getattr(metric, "enabled", True))
+            and bool(getattr(metric, "show_in_data", True))
+        ):
+            ordered.append(metric_key)
+    return ordered
+
+
+def _data_sheet_row_count(plan: SheetVitrinaV1Envelope) -> int:
+    data_sheet = _find_sheet(plan, "DATA_VITRINA")
+    return len(data_sheet.rows) if data_sheet is not None else 0
+
+
+def _merge_source_group_ready_snapshot(
+    *,
+    previous_plan: SheetVitrinaV1Envelope,
+    partial_plan: SheetVitrinaV1Envelope,
+    source_group_id: str,
+    source_keys: Iterable[str],
+    metric_keys: Iterable[str],
+    refreshed_at: str,
+    previous_refreshed_at: str,
+) -> tuple[SheetVitrinaV1Envelope, dict[str, Any]]:
+    metric_key_set = {str(item).strip() for item in metric_keys if str(item).strip()}
+    source_key_set = {str(item).strip() for item in source_keys if str(item).strip()}
+    if previous_plan.date_columns != partial_plan.date_columns:
+        raise ValueError(
+            "partial snapshot date_columns mismatch: "
+            f"{partial_plan.date_columns} != {previous_plan.date_columns}"
+        )
+
+    previous_data = _require_sheet(previous_plan, "DATA_VITRINA")
+    partial_data = _require_sheet(partial_plan, "DATA_VITRINA")
+    previous_status = _require_sheet(previous_plan, "STATUS")
+    partial_status = _require_sheet(partial_plan, "STATUS")
+
+    partial_rows_by_id = {_row_id(row): list(row) for row in partial_data.rows if _row_id(row)}
+    updated_row_ids = {
+        row_id
+        for row_id in partial_rows_by_id
+        if _metric_key_from_row_id(row_id) in metric_key_set
+    }
+    merged_data_rows: list[list[Any]] = []
+    rows_updated = 0
+    rows_preserved = 0
+    for row in previous_data.rows:
+        row_id = _row_id(row)
+        if row_id in updated_row_ids:
+            merged_data_rows.append(partial_rows_by_id[row_id])
+            rows_updated += 1
+        else:
+            merged_data_rows.append(list(row))
+            rows_preserved += 1
+    existing_row_ids = {_row_id(row) for row in previous_data.rows if _row_id(row)}
+    for row_id in sorted(updated_row_ids - existing_row_ids):
+        merged_data_rows.append(partial_rows_by_id[row_id])
+        rows_updated += 1
+
+    selected_status_rows = [
+        list(row)
+        for row in partial_status.rows
+        if _status_row_source_base(row) in source_key_set
+    ]
+    selected_status_bases = {_status_row_source_base(row) for row in selected_status_rows}
+    merged_status_rows = [
+        list(row)
+        for row in previous_status.rows
+        if _status_row_source_base(row) not in selected_status_bases
+    ]
+    merged_status_rows.extend(selected_status_rows)
+
+    merged_sheets: list[SheetVitrinaWriteTarget] = []
+    for sheet in previous_plan.sheets:
+        if sheet.sheet_name == "DATA_VITRINA":
+            merged_sheets.append(
+                replace(
+                    sheet,
+                    rows=merged_data_rows,
+                    row_count=len(merged_data_rows),
+                    column_count=len(sheet.header),
+                )
+            )
+        elif sheet.sheet_name == "STATUS":
+            merged_sheets.append(
+                replace(
+                    sheet,
+                    rows=merged_status_rows,
+                    row_count=len(merged_status_rows),
+                    column_count=len(sheet.header),
+                )
+            )
+        else:
+            merged_sheets.append(sheet)
+
+    previous_metadata = dict(getattr(previous_plan, "metadata", {}) or {})
+    row_updated_at = _row_updated_at_metadata(
+        previous_plan,
+        metadata=previous_metadata,
+        fallback_updated_at=previous_refreshed_at,
+    )
+    for row_id in updated_row_ids:
+        row_updated_at[row_id] = refreshed_at
+    group_updated_at = _source_group_updated_at_metadata(
+        metadata=previous_metadata,
+        fallback_updated_at=previous_refreshed_at,
+    )
+    group_updated_at[source_group_id] = refreshed_at
+    metadata = {
+        **previous_metadata,
+        "row_last_updated_at_by_row_id": row_updated_at,
+        "source_group_last_updated_at": group_updated_at,
+        "last_partial_group_refresh": {
+            "source_group_id": source_group_id,
+            "source_keys": sorted(source_key_set),
+            "metric_keys": sorted(metric_key_set),
+            "refreshed_at": refreshed_at,
+        },
+    }
+    merged_plan = SheetVitrinaV1Envelope(
+        plan_version=previous_plan.plan_version,
+        snapshot_id=f"{partial_plan.as_of_date}__partial_group_{source_group_id}__{refreshed_at}",
+        as_of_date=previous_plan.as_of_date,
+        date_columns=previous_plan.date_columns,
+        temporal_slots=previous_plan.temporal_slots,
+        source_temporal_policies=previous_plan.source_temporal_policies,
+        sheets=merged_sheets,
+        metadata=metadata,
+    )
+    return merged_plan, {
+        "rows_updated": rows_updated,
+        "rows_preserved": rows_preserved,
+        "status_rows_updated": len(selected_status_rows),
+        "source_group_id": source_group_id,
+        "source_keys": sorted(source_key_set),
+        "metric_keys": sorted(metric_key_set),
+        "updated_row_ids": sorted(updated_row_ids),
+    }
+
+
+def _with_full_refresh_metadata(plan: SheetVitrinaV1Envelope, *, refreshed_at: str) -> SheetVitrinaV1Envelope:
+    data_sheet = _find_sheet(plan, "DATA_VITRINA")
+    row_updated_at = {
+        _row_id(row): refreshed_at
+        for row in (data_sheet.rows if data_sheet is not None else [])
+        if _row_id(row)
+    }
+    metadata = {
+        **dict(getattr(plan, "metadata", {}) or {}),
+        "row_last_updated_at_by_row_id": row_updated_at,
+        "source_group_last_updated_at": {
+            group_id: refreshed_at
+            for group_id in WEB_VITRINA_SOURCE_GROUP_ORDER
+        },
+    }
+    return replace(plan, metadata=metadata)
+
+
+def _require_sheet(plan: SheetVitrinaV1Envelope, sheet_name: str) -> SheetVitrinaWriteTarget:
+    sheet = _find_sheet(plan, sheet_name)
+    if sheet is None:
+        raise ValueError(f"ready snapshot missing {sheet_name}")
+    return sheet
+
+
+def _row_updated_at_metadata(
+    plan: SheetVitrinaV1Envelope,
+    *,
+    metadata: Mapping[str, Any],
+    fallback_updated_at: str,
+) -> dict[str, str]:
+    raw = metadata.get("row_last_updated_at_by_row_id")
+    result = {str(key): str(value) for key, value in raw.items() if str(key) and str(value)} if isinstance(raw, Mapping) else {}
+    data_sheet = _find_sheet(plan, "DATA_VITRINA")
+    for row in (data_sheet.rows if data_sheet is not None else []):
+        row_id = _row_id(row)
+        if row_id and row_id not in result:
+            result[row_id] = fallback_updated_at
+    return result
+
+
+def _source_group_updated_at_metadata(
+    *,
+    metadata: Mapping[str, Any],
+    fallback_updated_at: str,
+) -> dict[str, str]:
+    raw = metadata.get("source_group_last_updated_at")
+    result = {str(key): str(value) for key, value in raw.items() if str(key) and str(value)} if isinstance(raw, Mapping) else {}
+    for group_id in WEB_VITRINA_SOURCE_GROUP_ORDER:
+        result.setdefault(group_id, fallback_updated_at)
+    return result
+
+
+def _row_id(row: list[Any]) -> str:
+    return str(row[1] or "").strip() if len(row) > 1 else ""
+
+
+def _metric_key_from_row_id(row_id: str) -> str:
+    return str(row_id).split("|", 1)[1] if "|" in str(row_id) else ""
+
+
+def _status_row_source_base(row: list[Any]) -> str:
+    source_key = str(row[0] or "").strip() if row else ""
+    base, _ = _split_temporal_source_key(source_key)
+    return base
+
+
+def _duration_seconds(started_at: str, finished_at: str) -> float:
+    try:
+        start = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+        finish = datetime.fromisoformat(str(finished_at).replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    return max(0.0, (finish - start).total_seconds())
 
 
 def _emit_plan_status_sheet_log(
@@ -2579,6 +3179,7 @@ def _empty_web_vitrina_activity_surface(
             "updated_at": "",
             "today_date": current_business_date,
             "yesterday_date": previous_business_date,
+            "groups": _web_vitrina_loading_table_groups({}),
             "columns": _web_vitrina_loading_table_columns(
                 today_date=current_business_date,
                 yesterday_date=previous_business_date,
@@ -2724,12 +3325,14 @@ def _build_web_vitrina_loading_table(
     today_date: str,
     yesterday_date: str,
     metric_labels_by_source: Mapping[str, list[str]],
+    group_last_updated_at: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     items = list(upload_summary.get("items") or [])
     rows: list[dict[str, Any]] = []
     for item in items:
         item_payload = dict(item or {})
         source_key = str(item_payload.get("source_key") or item_payload.get("endpoint_id") or "").strip()
+        source_group_id = _source_group_id_for_source_key(source_key)
         today_status = _loading_table_status_for_slot(
             item_payload,
             target_date=today_date,
@@ -2743,6 +3346,7 @@ def _build_web_vitrina_loading_table(
         rows.append(
             {
                 "source_key": source_key,
+                "source_group_id": source_group_id,
                 "source_label": str(
                     item_payload.get("label_ru")
                     or item_payload.get("endpoint_label")
@@ -2768,6 +3372,7 @@ def _build_web_vitrina_loading_table(
         "updated_at": str(upload_summary.get("updated_at") or ""),
         "today_date": today_date,
         "yesterday_date": yesterday_date,
+        "groups": _web_vitrina_loading_table_groups(group_last_updated_at or {}),
         "columns": _web_vitrina_loading_table_columns(
             today_date=today_date,
             yesterday_date=yesterday_date,
@@ -2778,6 +3383,43 @@ def _build_web_vitrina_loading_table(
             or "Статусы по источникам пока недоступны."
         ),
     }
+
+
+def _web_vitrina_loading_table_groups(group_last_updated_at: Mapping[str, str]) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for group_id in WEB_VITRINA_SOURCE_GROUP_ORDER:
+        config = WEB_VITRINA_SOURCE_GROUPS[group_id]
+        groups.append(
+            {
+                "group_id": group_id,
+                "label": str(config["label_ru"]),
+                "source_keys": list(config["source_keys"]),
+                "last_updated_at": str(group_last_updated_at.get(group_id) or ""),
+                "refresh_action": {
+                    "label": "Обновить группу",
+                    "source_group_id": group_id,
+                },
+                "session_controls": group_id == "seller_portal_bot",
+            }
+        )
+    return groups
+
+
+def _source_group_id_for_source_key(source_key: str) -> str:
+    return WEB_VITRINA_SOURCE_KEY_TO_GROUP.get(str(source_key or "").strip(), "other_sources")
+
+
+def _source_group_last_updated_at_for_snapshot(
+    snapshot: SheetVitrinaV1Envelope,
+    *,
+    fallback_updated_at: str,
+) -> dict[str, str]:
+    metadata = dict(getattr(snapshot, "metadata", {}) or {})
+    raw = metadata.get("source_group_last_updated_at")
+    result = {str(key): str(value) for key, value in raw.items() if str(key) and str(value)} if isinstance(raw, Mapping) else {}
+    for group_id in WEB_VITRINA_SOURCE_GROUP_ORDER:
+        result.setdefault(group_id, fallback_updated_at)
+    return result
 
 
 def _web_vitrina_loading_table_columns(

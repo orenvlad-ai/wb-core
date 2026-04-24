@@ -37,6 +37,7 @@ DEFAULT_SHEET_STOCK_REPORT_PATH = "/v1/sheet-vitrina-v1/stock-report"
 DEFAULT_SHEET_PLAN_REPORT_PATH = "/v1/sheet-vitrina-v1/plan-report"
 DEFAULT_SHEET_WEB_VITRINA_READ_PATH = "/v1/sheet-vitrina-v1/web-vitrina"
 DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE = "page_composition"
+DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH = "/v1/sheet-vitrina-v1/web-vitrina/group-refresh"
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_SHEET_LOAD_PATH = "/v1/sheet-vitrina-v1/load"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
@@ -44,6 +45,7 @@ DEFAULT_SHEET_JOB_PATH = "/v1/sheet-vitrina-v1/job"
 DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH = "/v1/sheet-vitrina-v1/seller-portal-session/check"
 DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH = "/v1/sheet-vitrina-v1/seller-portal-recovery/status"
 DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH = "/v1/sheet-vitrina-v1/seller-portal-recovery/start"
+DEFAULT_SHEET_WEB_VITRINA_SELLER_RECOVERY_START_PATH = "/v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start"
 DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH = "/v1/sheet-vitrina-v1/seller-portal-recovery/stop"
 DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH = "/v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip"
 DEFAULT_SHEET_OPERATOR_UI_PATH = "/sheet-vitrina-v1/operator"
@@ -388,6 +390,85 @@ def _build_handler(
                     self,
                     HTTPStatus.OK,
                     load_result,
+                )
+                return
+
+            if parsed.path == DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH:
+                try:
+                    payload = _load_optional_request_payload(self)
+                    source_group_id = _resolve_source_group_id(parsed.query, payload)
+                    as_of_date = _resolve_as_of_date(parsed.query, payload)
+                    job_payload = entrypoint.start_sheet_source_group_refresh_job(
+                        source_group_id=source_group_id,
+                        as_of_date=as_of_date or None,
+                    )
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina group refresh runtime failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(
+                    self,
+                    HTTPStatus.ACCEPTED,
+                    _with_sheet_job_urls(job_payload, sheet_job_path),
+                )
+                return
+
+            if parsed.path == DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH:
+                try:
+                    job_payload = entrypoint.start_seller_portal_session_check_job(
+                        launcher_download_path=DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+                    )
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"seller portal session check failed: {exc}"},
+                    )
+                    return
+                _write_json_response(
+                    self,
+                    HTTPStatus.ACCEPTED,
+                    _with_sheet_job_urls(job_payload, sheet_job_path),
+                )
+                return
+
+            if parsed.path == DEFAULT_SHEET_WEB_VITRINA_SELLER_RECOVERY_START_PATH:
+                try:
+                    payload = _load_optional_request_payload(self)
+                    replace = _resolve_replace_requested(payload)
+                    job_payload = entrypoint.start_seller_portal_recovery_start_job(
+                        launcher_download_path=DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+                        replace_existing=replace,
+                    )
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"seller portal recovery start failed: {exc}"},
+                    )
+                    return
+                _write_json_response(
+                    self,
+                    HTTPStatus.ACCEPTED,
+                    _with_sheet_job_urls(job_payload, sheet_job_path),
                 )
                 return
 
@@ -1144,6 +1225,17 @@ def _resolve_single_query_param(query_string: str, name: str) -> str:
     return str(query.get(name, [""])[0]).strip()
 
 
+def _resolve_source_group_id(query_string: str, payload: Mapping[str, Any]) -> str:
+    query_value = _resolve_single_query_param(query_string, "source_group_id")
+    body_value = str(payload.get("source_group_id", "") or "").strip()
+    if query_value and body_value and query_value != body_value:
+        raise ValueError("source_group_id mismatch between query string and request body")
+    value = query_value or body_value
+    if not value:
+        raise ValueError("source_group_id is required")
+    return value
+
+
 def _resolve_required_query_value(query_string: str, name: str) -> str:
     value = _resolve_single_query_param(query_string, name)
     if not value:
@@ -1573,7 +1665,11 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "read_path": read_path,
         "operator_path": operator_path,
         "refresh_path": refresh_path,
+        "group_refresh_path": DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH,
         "job_path": job_path,
+        "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
+        "seller_recovery_start_path": DEFAULT_SHEET_WEB_VITRINA_SELLER_RECOVERY_START_PATH,
+        "seller_recovery_launcher_path": DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
         "page_composition_surface": DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
     }
     template = WEB_VITRINA_UI_TEMPLATE_PATH.read_text(encoding="utf-8")

@@ -204,7 +204,11 @@ update_note: "Обновлён под current operator report checkpoint: existi
     - one-day historical mode via existing `as_of_date`
     - period mode via existing route `date_from/date_to`
     - repo-owned inline calendar/preset panel with buttons `Сбросить` / `Сохранить`
-    - server-driven activity surface now renders `Загрузка данных` first as a full-width compact table over the same truthful source outcomes, with server/business today/yesterday status columns, reason columns, Russian metric labels and secondary technical endpoint text; `Лог` renders below it and keeps the existing job/log download contour; the former `Обновление данных` activity block is not an active page-composition surface
+    - operator-style layout: compact top panel, summary cards, main vitrina table first, then filters/settings, historical controls and bottom `Действия и состояния`
+    - main table display headers are Russian and include `Обновлено`; this field is a per-row last successful update timestamp in the vitrina snapshot metadata, not the business data date
+    - server-driven activity surface renders `Загрузка данных` as a grouped compact table over the same truthful source outcomes: groups `WB API`, `Seller Portal / бот`, `Прочие источники`, each with one `Обновить группу` action and group-level last update timestamp; rows keep server/business today/yesterday status columns, reason columns, Russian metric labels and secondary technical endpoint text
+    - `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` is the web-vitrina group action seam; it starts a job/log-backed partial refresh/load for one source group and must not clear, overwrite or timestamp unrelated groups
+    - `Seller Portal / бот` group reuses the existing seller session/recovery mechanisms for `Проверить сессию`, `Восстановить сессию` and `Скачать лаунчер`; `Лог` renders below the loading table and keeps the existing job/log download contour; the former `Обновление данных` activity block is not an active page-composition surface
     - raw STATUS/job note, JSON fragments, traceback text, request ids and similar technical payload stay in existing log/download contour and must not leak into the main summary-card reason
     - `Свежесть данных` remains server-owned, but its user-facing value now uses the same readable timestamp formatter as browser-owned `Последнее обновление страницы` instead of raw ISO `T/Z`
     - `export_layer`

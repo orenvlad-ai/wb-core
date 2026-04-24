@@ -34,6 +34,7 @@ _DIMENSION_VALUE_KEYS = {
     "nm_id": "nm_id",
     "metric_key": "metric_key",
     "metric_label": "metric_label",
+    "row_last_updated_at": "row_last_updated_at",
     "section": "section",
 }
 
@@ -496,6 +497,8 @@ def _column_width_hint(column_id: str) -> int | None:
         return 208
     if column_id == "metric_label":
         return 176
+    if column_id == "row_last_updated_at":
+        return 132
     if column_id.startswith("date:"):
         return 88
     if column_id in {"scope_key", "metric_key"}:

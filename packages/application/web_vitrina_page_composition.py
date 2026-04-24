@@ -431,6 +431,7 @@ def _normalize_loading_table(value: Any, *, upload_summary: Mapping[str, Any]) -
         rows.append(
             {
                 "source_key": str(row_payload.get("source_key") or ""),
+                "source_group_id": str(row_payload.get("source_group_id") or ""),
                 "source_label": str(row_payload.get("source_label") or row_payload.get("source_key") or ""),
                 "today": _normalize_loading_table_status(row_payload.get("today"), date=today_date),
                 "today_reason": str(row_payload.get("today_reason") or ""),
@@ -447,6 +448,7 @@ def _normalize_loading_table(value: Any, *, upload_summary: Mapping[str, Any]) -
         "updated_at": str(payload.get("updated_at") or upload_summary.get("updated_at") or ""),
         "today_date": today_date,
         "yesterday_date": yesterday_date,
+        "groups": _normalize_loading_table_groups(payload.get("groups")),
         "columns": columns,
         "rows": rows,
         "empty_message": str(
@@ -455,6 +457,32 @@ def _normalize_loading_table(value: Any, *, upload_summary: Mapping[str, Any]) -
             or "Статусы по источникам пока недоступны."
         ),
     }
+
+
+def _normalize_loading_table_groups(value: Any) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for group in value or []:
+        if not isinstance(group, Mapping):
+            continue
+        group_payload = dict(group)
+        groups.append(
+            {
+                "group_id": str(group_payload.get("group_id") or ""),
+                "label": str(group_payload.get("label") or group_payload.get("group_id") or ""),
+                "source_keys": [str(item) for item in (group_payload.get("source_keys") or []) if str(item)],
+                "last_updated_at": str(group_payload.get("last_updated_at") or ""),
+                "refresh_action": {
+                    "label": str(((group_payload.get("refresh_action") or {}).get("label")) or "Обновить группу"),
+                    "source_group_id": str(
+                        ((group_payload.get("refresh_action") or {}).get("source_group_id"))
+                        or group_payload.get("group_id")
+                        or ""
+                    ),
+                },
+                "session_controls": bool(group_payload.get("session_controls")),
+            }
+        )
+    return groups
 
 
 def _normalize_loading_table_status(value: Any, *, date: str) -> dict[str, Any]:

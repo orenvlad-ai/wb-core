@@ -163,6 +163,10 @@ class SheetVitrinaV1WebVitrinaBlock:
             date_columns=snapshot.date_columns,
             config_by_nm_id=config_by_nm_id,
             metrics_by_key=metrics_by_key,
+            row_updated_at_by_id=_resolve_row_updated_at_by_id(
+                snapshot,
+                fallback_updated_at=refreshed_at,
+            ),
         )
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
 
@@ -521,6 +525,7 @@ def _normalize_rows(
     date_columns: list[str],
     config_by_nm_id: Mapping[int, ConfigV2Item],
     metrics_by_key: Mapping[str, MetricV2Item],
+    row_updated_at_by_id: Mapping[str, str],
 ) -> list[WebVitrinaContractRow]:
     normalized: list[WebVitrinaContractRow] = []
     for row_order, row in enumerate(rows, start=1):
@@ -545,6 +550,7 @@ def _normalize_rows(
                 scope_label=scope.scope_label,
                 metric_key=metric_key,
                 metric_label=metric.label_ru if metric is not None else metric_key,
+                row_last_updated_at=str(row_updated_at_by_id.get(row_id) or ""),
                 section=metric.section if metric is not None else "",
                 group=scope.group,
                 nm_id=scope.nm_id,
@@ -605,6 +611,44 @@ def _parse_scope(
     )
 
 
+def _resolve_row_updated_at_by_id(
+    snapshot: SheetVitrinaV1Envelope,
+    *,
+    fallback_updated_at: str,
+) -> dict[str, str]:
+    metadata = dict(getattr(snapshot, "metadata", {}) or {})
+    raw_values = metadata.get("row_last_updated_at_by_row_id")
+    if isinstance(raw_values, Mapping):
+        resolved = {
+            str(row_id): str(updated_at)
+            for row_id, updated_at in raw_values.items()
+            if str(row_id) and str(updated_at)
+        }
+        for row_id, updated_at in _fallback_row_updated_at_by_id(
+            snapshot,
+            fallback_updated_at=fallback_updated_at,
+        ).items():
+            resolved.setdefault(row_id, updated_at)
+        return resolved
+    return _fallback_row_updated_at_by_id(snapshot, fallback_updated_at=fallback_updated_at)
+
+
+def _fallback_row_updated_at_by_id(
+    snapshot: SheetVitrinaV1Envelope,
+    *,
+    fallback_updated_at: str,
+) -> dict[str, str]:
+    row_updated_at: dict[str, str] = {}
+    for sheet in snapshot.sheets:
+        if sheet.sheet_name != WEB_VITRINA_SOURCE_SHEET_NAME:
+            continue
+        for row in sheet.rows:
+            row_id = str(row[1] or "").strip() if len(row) > 1 else ""
+            if row_id:
+                row_updated_at[row_id] = fallback_updated_at
+    return row_updated_at
+
+
 def _build_schema(snapshot: SheetVitrinaV1Envelope) -> WebVitrinaContractSchema:
     temporal_slot_by_date = {
         slot.column_date: slot.slot_key
@@ -613,7 +657,7 @@ def _build_schema(snapshot: SheetVitrinaV1Envelope) -> WebVitrinaContractSchema:
     columns = [
         WebVitrinaContractSchemaColumn(
             column_id="row_order",
-            label="Row order",
+            label="№",
             kind="identity",
             value_type="integer",
             sortable=True,
@@ -621,7 +665,7 @@ def _build_schema(snapshot: SheetVitrinaV1Envelope) -> WebVitrinaContractSchema:
         ),
         WebVitrinaContractSchemaColumn(
             column_id="scope_kind",
-            label="Scope kind",
+            label="Тип",
             kind="dimension",
             value_type="string",
             sortable=True,
@@ -629,7 +673,7 @@ def _build_schema(snapshot: SheetVitrinaV1Envelope) -> WebVitrinaContractSchema:
         ),
         WebVitrinaContractSchemaColumn(
             column_id="scope_key",
-            label="Scope key",
+            label="Ключ объекта",
             kind="dimension",
             value_type="string",
             sortable=True,
@@ -637,7 +681,7 @@ def _build_schema(snapshot: SheetVitrinaV1Envelope) -> WebVitrinaContractSchema:
         ),
         WebVitrinaContractSchemaColumn(
             column_id="scope_label",
-            label="Scope label",
+            label="Объект",
             kind="dimension",
             value_type="string",
             sortable=True,
@@ -645,7 +689,7 @@ def _build_schema(snapshot: SheetVitrinaV1Envelope) -> WebVitrinaContractSchema:
         ),
         WebVitrinaContractSchemaColumn(
             column_id="group",
-            label="Group",
+            label="Группа",
             kind="dimension",
             value_type="string_or_null",
             sortable=True,
@@ -653,7 +697,7 @@ def _build_schema(snapshot: SheetVitrinaV1Envelope) -> WebVitrinaContractSchema:
         ),
         WebVitrinaContractSchemaColumn(
             column_id="nm_id",
-            label="nmId",
+            label="SKU",
             kind="dimension",
             value_type="integer_or_null",
             sortable=True,
@@ -661,7 +705,7 @@ def _build_schema(snapshot: SheetVitrinaV1Envelope) -> WebVitrinaContractSchema:
         ),
         WebVitrinaContractSchemaColumn(
             column_id="metric_key",
-            label="Metric key",
+            label="Ключ метрики",
             kind="dimension",
             value_type="string",
             sortable=True,
@@ -669,15 +713,23 @@ def _build_schema(snapshot: SheetVitrinaV1Envelope) -> WebVitrinaContractSchema:
         ),
         WebVitrinaContractSchemaColumn(
             column_id="metric_label",
-            label="Metric label",
+            label="Метрика",
             kind="dimension",
             value_type="string",
             sortable=True,
             filterable=True,
         ),
         WebVitrinaContractSchemaColumn(
+            column_id="row_last_updated_at",
+            label="Обновлено",
+            kind="dimension",
+            value_type="string",
+            sortable=True,
+            filterable=False,
+        ),
+        WebVitrinaContractSchemaColumn(
             column_id="section",
-            label="Section",
+            label="Раздел",
             kind="dimension",
             value_type="string",
             sortable=True,
@@ -702,31 +754,31 @@ def _build_schema(snapshot: SheetVitrinaV1Envelope) -> WebVitrinaContractSchema:
         WebVitrinaContractSchemaFilter(
             filter_id="scope_kind",
             field="scope_kind",
-            label="Scope kind",
+            label="Тип",
             operators=["eq", "in"],
         ),
         WebVitrinaContractSchemaFilter(
             filter_id="group",
             field="group",
-            label="Group",
+            label="Группа",
             operators=["eq", "in"],
         ),
         WebVitrinaContractSchemaFilter(
             filter_id="nm_id",
             field="nm_id",
-            label="nmId",
+            label="SKU",
             operators=["eq", "in"],
         ),
         WebVitrinaContractSchemaFilter(
             filter_id="section",
             field="section",
-            label="Section",
+            label="Раздел",
             operators=["eq", "in"],
         ),
         WebVitrinaContractSchemaFilter(
             filter_id="metric_key",
             field="metric_key",
-            label="Metric key",
+            label="Ключ метрики",
             operators=["eq", "in"],
         ),
     ]
@@ -735,20 +787,26 @@ def _build_schema(snapshot: SheetVitrinaV1Envelope) -> WebVitrinaContractSchema:
         WebVitrinaContractSchemaSort(
             sort_id="row_order",
             field="row_order",
-            label="Row order",
+            label="Порядок",
             directions=["asc", "desc"],
             default_direction="asc",
         ),
         WebVitrinaContractSchemaSort(
             sort_id="scope_label",
             field="scope_label",
-            label="Scope label",
+            label="Объект",
             directions=["asc", "desc"],
         ),
         WebVitrinaContractSchemaSort(
             sort_id="metric_label",
             field="metric_label",
-            label="Metric label",
+            label="Метрика",
+            directions=["asc", "desc"],
+        ),
+        WebVitrinaContractSchemaSort(
+            sort_id="row_last_updated_at",
+            field="row_last_updated_at",
+            label="Обновлено",
             directions=["asc", "desc"],
         ),
     ]

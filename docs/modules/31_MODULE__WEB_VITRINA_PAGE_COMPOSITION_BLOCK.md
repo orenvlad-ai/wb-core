@@ -64,13 +64,14 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
 # 3. Target contract и смысл результата
 
 - `GET /sheet-vitrina-v1/vitrina` теперь является реальной usable web-vitrina page:
-  - own page header/meta
+  - compact operator top panel: link `Операторский сайт` opens `/sheet-vitrina-v1/operator` in a new tab, `Загрузить и обновить` is the single primary manual action, `JSON Connect` remains secondary/debug, and the old cheap `Обновить` button is not rendered
   - compact summary with separate `Последнее обновление страницы` and `Свежесть данных`
-  - two truthful actions:
-    - `Обновить` = cheap reread текущего page composition/current server-side snapshot
-    - `Загрузить и обновить` = canonical server-side refresh from external sources + page reread, without Google Sheet write path
+  - primary table immediately follows the summary cards; filters/settings, historical controls and `Действия и состояния` render after the table
+  - main table display headers are Russian (`Раздел`, `Метрика`, `Обновлено`, etc.); backend/API keys stay stable, while `Обновлено` surfaces per-row last successful update timestamp from snapshot metadata
+  - `Загрузить и обновить` = canonical server-side refresh from external sources + page reread, without Google Sheet write path
   - two server-driven action-adjacent information blocks:
-    - `Загрузка данных` = main full-width compact table derived from the same per-source upload/fetch truth: rows are human source groups, columns show server/business today and yesterday statuses, reason text, Russian metric labels and the secondary technical endpoint
+    - `Загрузка данных` = grouped compact table derived from the same per-source upload/fetch truth: stable groups `WB API`, `Seller Portal / бот`, `Прочие источники`; each group has `Обновить группу`, group-level last update timestamp, and rows with server/business today and yesterday statuses, reason text, Russian metric labels and secondary technical endpoint
+    - `Seller Portal / бот` group additionally renders bounded session controls (`Проверить сессию`, `Восстановить сессию`, `Скачать лаунчер`) over the existing seller-session/recovery seams
     - `Лог` = compact fixed-height tail below the loading table plus `Скачать лог` via existing job/log contour; if exact transient job for the visible snapshot is unavailable, block must show persisted semantic fallback instead of stale green success
     - former `Обновление данных` is not rendered as a page-composition activity block; persisted `STATUS` rows remain internal truth for status/read contracts
   - filters area
@@ -179,9 +180,10 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - `spp` / `fin_report_daily` stay green when `yesterday_closed` is confirmed and intraday `today_current` only produced tolerated non-final current-day output;
   - `seller_funnel_snapshot` / `web_source_snapshot` remain strict two-slot sources and keep the badge/cards degraded on broken `today_current`.
 - `Загрузить и обновить` on the vitrina now reuse-ит the canonical refresh contour and no longer depends on `/load` or Google Sheet auth to refresh the web-vitrina itself.
+- `Обновить группу` on the vitrina starts `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` for one source group. The action reuses the existing refresh/status/job/log seams, fetches/prepares/loads only the selected group, updates row-level `Обновлено` and group-level `last_updated_at` only for affected rows/groups, and logs stage-aware success/failure (`source_fetch`, `prepare_materialize`, `load_group_to_vitrina`).
 - `Загрузка данных` and `Лог` stay server-driven:
-  - loading table is derived from the last relevant refresh job log and is not overwritten by cheap reread; if exact job association is unavailable, page shows persisted-source fallback with truthful non-OK status rather than unrelated stale run
-  - loading table rows keep server-side severity ordering while preserving canonical source order inside each severity bucket
+  - loading table is derived from the last relevant refresh/group-refresh job log and persisted source fallback; if exact job association is unavailable, page shows truthful non-OK status rather than unrelated stale run
+  - loading table rows are nested under stable source-group headers while preserving source truth and canonical source labels
   - loading table uses server/business `Сегодня: <YYYY-MM-DD>` and `Вчера: <YYYY-MM-DD>` dates, short OK/not-OK cells, reason columns, Russian metric labels from the existing metric registry and secondary technical endpoint text
   - log preview and `Скачать лог` reuse the existing in-memory job/log contour and render below the loading table
   - former `Обновление данных` is not an active page-composition activity block; persisted `STATUS` rows remain the underlying read-side truth for status contracts and fallback source outcomes

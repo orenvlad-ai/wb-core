@@ -369,8 +369,12 @@ class SheetVitrinaV1LivePlanBlock:
         as_of_date: str | None = None,
         log: LivePlanLogEmitter | None = None,
         execution_mode: str = EXECUTION_MODE_AUTO_DAILY,
+        source_keys: Iterable[str] | None = None,
+        metric_keys: Iterable[str] | None = None,
     ) -> SheetVitrinaV1Envelope:
         emit = log or _noop_live_plan_log
+        selected_source_keys = {str(item).strip() for item in (source_keys or []) if str(item).strip()}
+        selected_metric_keys = {str(item).strip() for item in (metric_keys or []) if str(item).strip()}
         current_state = self.runtime.load_current_state()
         effective_date = _resolve_as_of_date(as_of_date, now=self.now_factory())
         current_date = current_business_date_iso(self.now_factory())
@@ -404,6 +408,8 @@ class SheetVitrinaV1LivePlanBlock:
             [item for item in current_state.metrics_v2 if item.enabled and item.show_in_data],
             key=lambda item: item.display_order,
         )
+        if selected_metric_keys:
+            displayed_metrics = [item for item in displayed_metrics if item.metric_key in selected_metric_keys]
         if not displayed_metrics:
             raise ValueError("current registry metrics_v2 does not contain enabled show_in_data rows")
         emit(
@@ -412,28 +418,41 @@ class SheetVitrinaV1LivePlanBlock:
                 enabled_config_count=len(enabled_config),
                 displayed_metrics=len(displayed_metrics),
                 formulas=len(current_state.formulas_v2),
+                selected_sources=",".join(sorted(selected_source_keys)),
+                selected_metrics=",".join(sorted(selected_metric_keys)),
             )
         )
 
         cost_price_state = _load_cost_price_current_state(self.runtime)
-        emit(
-            _format_log_event(
-                "current_web_source_sync_start",
-                source="current_day_web_source_sync",
-                target_date=current_date,
-                block="ShellBackedWebSourceCurrentSync",
+        current_web_source_sync_note = None
+        if not selected_source_keys or "web_source_snapshot" in selected_source_keys:
+            emit(
+                _format_log_event(
+                    "current_web_source_sync_start",
+                    source="current_day_web_source_sync",
+                    target_date=current_date,
+                    block="ShellBackedWebSourceCurrentSync",
+                )
             )
-        )
-        current_web_source_sync_note = self._sync_current_web_source_snapshot(current_date)
-        emit(
-            _format_log_event(
-                "current_web_source_sync_finish",
-                source="current_day_web_source_sync",
-                target_date=current_date,
-                status="error" if current_web_source_sync_note else "success",
-                note=current_web_source_sync_note or "snapshot ensured or already materialized",
+            current_web_source_sync_note = self._sync_current_web_source_snapshot(current_date)
+            emit(
+                _format_log_event(
+                    "current_web_source_sync_finish",
+                    source="current_day_web_source_sync",
+                    target_date=current_date,
+                    status="error" if current_web_source_sync_note else "success",
+                    note=current_web_source_sync_note or "snapshot ensured or already materialized",
+                )
             )
-        )
+        else:
+            emit(
+                _format_log_event(
+                    "current_web_source_sync_skipped",
+                    source="current_day_web_source_sync",
+                    target_date=current_date,
+                    reason="source group does not include web_source_snapshot",
+                )
+            )
         live_sources = self._load_live_sources(
             enabled_config,
             temporal_slots,
@@ -441,6 +460,7 @@ class SheetVitrinaV1LivePlanBlock:
             current_web_source_sync_note=current_web_source_sync_note,
             execution_mode=execution_mode,
             log=emit,
+            source_keys=selected_source_keys or None,
         )
         evaluator = _MetricEvaluator(
             enabled_config=enabled_config,
@@ -565,8 +585,10 @@ class SheetVitrinaV1LivePlanBlock:
         current_web_source_sync_note: str | None = None,
         execution_mode: str = EXECUTION_MODE_AUTO_DAILY,
         log: LivePlanLogEmitter | None = None,
+        source_keys: set[str] | None = None,
     ) -> TemporalLiveSources:
         emit = log or _noop_live_plan_log
+        selected_source_keys = {str(item).strip() for item in (source_keys or set()) if str(item).strip()}
         requested_nm_ids = [item.nm_id for item in enabled_config]
         requested_groups = sorted({item.group for item in enabled_config})
         statuses: list[LiveSourceStatus] = []
@@ -702,6 +724,8 @@ class SheetVitrinaV1LivePlanBlock:
                     ).result,
                 ),
             ]:
+                if selected_source_keys and source_key not in selected_source_keys:
+                    continue
                 temporal_policy = SOURCE_TEMPORAL_POLICIES[source_key]
                 _emit_source_request_log(
                     emit,
@@ -766,28 +790,39 @@ class SheetVitrinaV1LivePlanBlock:
                 elif source_key == "promo_by_price":
                     current_lookups.promo_lookup = _index_promo_items(payload)
 
-        for slot in temporal_slots:
-            _emit_source_request_log(
-                emit,
-                source_key="cost_price",
-                temporal_slot=slot.slot_key,
-                temporal_policy=SOURCE_TEMPORAL_POLICIES["cost_price"],
-                column_date=slot.column_date,
-                requested_nm_ids=requested_nm_ids,
-                requested_groups=requested_groups,
-            )
-            cost_price_status, cost_price_lookup = _build_cost_price_status(
-                current_state=cost_price_state,
-                requested_groups=requested_groups,
-                temporal_slot=slot.slot_key,
-                column_date=slot.column_date,
-            )
-            slot_lookups[slot.slot_key].cost_price_lookup = cost_price_lookup
-            statuses.append(cost_price_status)
-            _emit_source_status_log(emit, cost_price_status)
+        if not selected_source_keys or "cost_price" in selected_source_keys:
+            for slot in temporal_slots:
+                _emit_source_request_log(
+                    emit,
+                    source_key="cost_price",
+                    temporal_slot=slot.slot_key,
+                    temporal_policy=SOURCE_TEMPORAL_POLICIES["cost_price"],
+                    column_date=slot.column_date,
+                    requested_nm_ids=requested_nm_ids,
+                    requested_groups=requested_groups,
+                )
+                cost_price_status, cost_price_lookup = _build_cost_price_status(
+                    current_state=cost_price_state,
+                    requested_groups=requested_groups,
+                    temporal_slot=slot.slot_key,
+                    column_date=slot.column_date,
+                )
+                slot_lookups[slot.slot_key].cost_price_lookup = cost_price_lookup
+                statuses.append(cost_price_status)
+                _emit_source_status_log(emit, cost_price_status)
 
         for source_key, note in BLOCKED_SOURCE_STATUSES.items():
+            if selected_source_keys and source_key not in selected_source_keys:
+                continue
             for slot in temporal_slots:
+                _emit_source_request_log(
+                    emit,
+                    source_key=source_key,
+                    temporal_slot=slot.slot_key,
+                    temporal_policy="blocked",
+                    column_date=slot.column_date,
+                    requested_nm_ids=requested_nm_ids,
+                )
                 blocked_status = LiveSourceStatus(
                     source_key=source_key,
                     temporal_slot=slot.slot_key,
@@ -805,14 +840,6 @@ class SheetVitrinaV1LivePlanBlock:
                     note=note,
                 )
                 statuses.append(blocked_status)
-                _emit_source_request_log(
-                    emit,
-                    source_key=source_key,
-                    temporal_slot=slot.slot_key,
-                    temporal_policy="blocked",
-                    column_date=slot.column_date,
-                    requested_nm_ids=requested_nm_ids,
-                )
                 _emit_source_status_log(emit, blocked_status)
 
         return TemporalLiveSources(

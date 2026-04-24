@@ -142,6 +142,15 @@ def main() -> None:
             raise AssertionError(f"default sort mismatch, got {composition['filter_surface']}")
         if not composition["table_surface"]["columns"] or not composition["table_surface"]["rows"]:
             raise AssertionError(f"table surface is empty, got {composition['table_surface']}")
+        table_headers = [item["header"] for item in composition["table_surface"]["columns"]]
+        for expected_header in ("Раздел", "Метрика", "Обновлено"):
+            if expected_header not in table_headers:
+                raise AssertionError(f"main table must expose Russian header {expected_header!r}, got {table_headers}")
+        for forbidden_header in ("Metric Label", "Sections", "Score Label"):
+            if forbidden_header in table_headers:
+                raise AssertionError(f"main table must not expose English header {forbidden_header!r}, got {table_headers}")
+        if not all("row_last_updated_at" in row["values"] for row in composition["table_surface"]["rows"]):
+            raise AssertionError(f"main table rows must expose row update timestamps, got {composition['table_surface']['rows']}")
         if composition["status_badge"]["tone"] != "success":
             raise AssertionError(f"status badge mismatch, got {composition['status_badge']}")
         if composition["status_badge"]["label"] != "Успешно":
@@ -168,8 +177,15 @@ def main() -> None:
         upload_items = activity_surface["upload_summary"]["items"]
         loading_rows = loading_table["rows"]
         loading_columns = {item["id"]: item for item in loading_table["columns"]}
+        loading_groups = {item["group_id"]: item for item in loading_table["groups"]}
         if [row["source_key"] for row in loading_rows] != [item["source_key"] for item in upload_items]:
             raise AssertionError(f"loading table rows must follow the upload source truth, got {activity_surface}")
+        if sorted(loading_groups) != ["other_sources", "seller_portal_bot", "wb_api"]:
+            raise AssertionError(f"loading table must expose stable source groups, got {loading_groups}")
+        if not loading_groups["seller_portal_bot"]["session_controls"]:
+            raise AssertionError(f"Seller Portal group must expose session controls, got {loading_groups}")
+        if {row["source_group_id"] for row in loading_rows} != {"wb_api", "seller_portal_bot"}:
+            raise AssertionError(f"loading table rows must carry source group ids, got {loading_rows}")
         if loading_table["today_date"] != "2026-04-21" or loading_table["yesterday_date"] != "2026-04-20":
             raise AssertionError(f"loading table dates must be server/business dates, got {loading_table}")
         if loading_columns["today_status"]["label"] != "Сегодня: 2026-04-21":
@@ -476,9 +492,36 @@ def _build_activity_surface_fixture() -> dict[str, object]:
                 {"id": "metrics", "label": "Метрики"},
                 {"id": "technical_endpoint", "label": "Технический endpoint"},
             ],
+            "groups": [
+                {
+                    "group_id": "wb_api",
+                    "label": "WB API",
+                    "source_keys": ["prices_snapshot"],
+                    "last_updated_at": "2026-04-20T12:05:00Z",
+                    "refresh_action": {"label": "Обновить группу", "source_group_id": "wb_api"},
+                    "session_controls": False,
+                },
+                {
+                    "group_id": "seller_portal_bot",
+                    "label": "Seller Portal / бот",
+                    "source_keys": ["web_source_snapshot", "seller_funnel_snapshot"],
+                    "last_updated_at": "2026-04-20T12:05:00Z",
+                    "refresh_action": {"label": "Обновить группу", "source_group_id": "seller_portal_bot"},
+                    "session_controls": True,
+                },
+                {
+                    "group_id": "other_sources",
+                    "label": "Прочие источники",
+                    "source_keys": [],
+                    "last_updated_at": "",
+                    "refresh_action": {"label": "Обновить группу", "source_group_id": "other_sources"},
+                    "session_controls": False,
+                },
+            ],
             "rows": [
                 {
                     "source_key": "prices_snapshot",
+                    "source_group_id": "wb_api",
                     "source_label": "Цены и скидки",
                     "today": {
                         "date": "2026-04-21",
@@ -501,6 +544,7 @@ def _build_activity_surface_fixture() -> dict[str, object]:
                 },
                 {
                     "source_key": "web_source_snapshot",
+                    "source_group_id": "seller_portal_bot",
                     "source_label": "Поисковая аналитика",
                     "today": {
                         "date": "2026-04-21",
@@ -523,6 +567,7 @@ def _build_activity_surface_fixture() -> dict[str, object]:
                 },
                 {
                     "source_key": "seller_funnel_snapshot",
+                    "source_group_id": "seller_portal_bot",
                     "source_label": "Воронка продавца",
                     "today": {
                         "date": "2026-04-21",
@@ -542,54 +587,6 @@ def _build_activity_surface_fixture() -> dict[str, object]:
                     "yesterday_reason": "Готово",
                     "metric_labels": ["Показы в воронке", "Открытия карточки"],
                     "technical_endpoint": "GET /v1/sales-funnel/daily?date=<YYYY-MM-DD>",
-                },
-            ],
-            "empty_message": "",
-        },
-        "update_summary": {
-            "title": "Обновление данных",
-            "subtitle": "Persisted STATUS current read-side snapshot.",
-            "detail": "snapshot fixture-2026-04-20 · as_of_date 2026-04-20 · persisted_ready_snapshot",
-            "updated_at": "2026-04-20T12:05:00Z",
-            "items": [
-                {
-                    "endpoint_id": "prices_snapshot",
-                    "endpoint_label": "POST /api/v2/list/goods/filter",
-                    "source_key": "prices_snapshot",
-                    "label_ru": "Цены и скидки",
-                    "description_ru": "Текущие цены продавца и скидки по SKU.",
-                    "reason_ru": "данные не получены",
-                    "technical_key": "prices_snapshot",
-                    "technical_text": "prices_snapshot · POST /api/v2/list/goods/filter",
-                    "status_label": "Ошибка",
-                    "tone": "error",
-                    "detail": "Текущие цены продавца и скидки по SKU. Причина: данные не получены",
-                },
-                {
-                    "endpoint_id": "web_source_snapshot",
-                    "endpoint_label": "GET /v1/search-analytics/snapshot?date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>",
-                    "source_key": "web_source_snapshot",
-                    "label_ru": "Поисковая аналитика",
-                    "description_ru": "Просмотры, CTR, заказы и средняя позиция в поиске.",
-                    "reason_ru": "использована подтверждённая версия из runtime cache",
-                    "technical_key": "web_source_snapshot",
-                    "technical_text": "web_source_snapshot · GET /v1/search-analytics/snapshot?date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>",
-                    "status_label": "Внимание",
-                    "tone": "warning",
-                    "detail": "Просмотры, CTR, заказы и средняя позиция в поиске. Причина: использована подтверждённая версия из runtime cache",
-                },
-                {
-                    "endpoint_id": "seller_funnel_snapshot",
-                    "endpoint_label": "GET /v1/sales-funnel/daily?date=<YYYY-MM-DD>",
-                    "source_key": "seller_funnel_snapshot",
-                    "label_ru": "Воронка продавца",
-                    "description_ru": "Показы карточки, открытия и базовая конверсия за дату.",
-                    "reason_ru": "",
-                    "technical_key": "seller_funnel_snapshot",
-                    "technical_text": "seller_funnel_snapshot · GET /v1/sales-funnel/daily?date=<YYYY-MM-DD>",
-                    "status_label": "Успешно",
-                    "tone": "success",
-                    "detail": "Показы карточки, открытия и базовая конверсия за дату.",
                 },
             ],
             "empty_message": "",
