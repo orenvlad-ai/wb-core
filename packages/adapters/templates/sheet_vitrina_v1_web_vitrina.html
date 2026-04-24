@@ -915,6 +915,24 @@
       background: #f7faff;
     }
 
+    .vitrina-table td.cell-session-highlight-updated {
+      background: #e6f6ee;
+      box-shadow: inset 0 0 0 1px rgba(22, 101, 52, 0.16);
+    }
+
+    .vitrina-table td.cell-session-highlight-latest-confirmed {
+      background: #fff7df;
+      box-shadow: inset 0 0 0 1px rgba(146, 64, 14, 0.16);
+    }
+
+    .vitrina-table tbody tr:hover td.cell-session-highlight-updated {
+      background: #dcf2e8;
+    }
+
+    .vitrina-table tbody tr:hover td.cell-session-highlight-latest-confirmed {
+      background: #fff1c4;
+    }
+
     .vitrina-table th:last-child,
     .vitrina-table td:last-child {
       border-right: 0;
@@ -1374,7 +1392,8 @@
         checkedAt: ""
       },
       groupActions: {},
-      groupRefreshDates: {}
+      groupRefreshDates: {},
+      sessionHighlights: {}
     };
 
     openOperatorLink.href = WEB_VITRINA_CONFIG.operator_path;
@@ -2868,12 +2887,25 @@
       if (cell.cell_kind === "unknown" || cell.cell_kind === "empty") {
         classes.push("cell-placeholder");
       }
+      const cellDate = dateFromColumnId(column.id);
+      const highlightStatus = cellDate ? sessionHighlightStatus(row, cellDate) : "";
+      if (highlightStatus === "updated") {
+        classes.push("cell-session-highlight-updated");
+      } else if (highlightStatus === "latest_confirmed") {
+        classes.push("cell-session-highlight-latest-confirmed");
+      }
       const title = formatCellTitle(column, row, cell);
       return (
         '<td class="' +
         classes.join(" ") +
         '" data-col-id="' +
         escapeHtml(column.id) +
+        '" data-row-id="' +
+        escapeHtml(row.row_id || "") +
+        '" data-metric-key="' +
+        escapeHtml(cellValue(row, "metric_key") || "") +
+        '" data-cell-date="' +
+        escapeHtml(cellDate || "") +
         '" style="' +
         columnStyle(column, stickyLeft) +
         '" title="' +
@@ -2882,6 +2914,20 @@
         formatCellContent(column, row, cell) +
         "</td>"
       );
+    }
+
+    function dateFromColumnId(columnId) {
+      const normalized = String(columnId || "");
+      return normalized.startsWith("date:") ? normalized.slice(5) : "";
+    }
+
+    function sessionHighlightStatus(row, asOfDate) {
+      const rowId = String((row && row.row_id) || "");
+      const date = String(asOfDate || "");
+      if (!rowId || !date) {
+        return "";
+      }
+      return String(state.sessionHighlights[rowId + "|" + date] || "");
     }
 
     function formatCellContent(column, row, cell) {
@@ -3139,6 +3185,39 @@
       rerenderLoadingTable();
     }
 
+    function clearSessionHighlights() {
+      state.sessionHighlights = {};
+      renderTable();
+    }
+
+    function setSessionHighlightsFromJob(jobPayload) {
+      const cells = Array.isArray(jobPayload && jobPayload.result && jobPayload.result.updated_cells)
+        ? jobPayload.result.updated_cells
+        : [];
+      const highlights = {};
+      cells.forEach(function(cell) {
+        const rowId = String((cell && cell.row_id) || "").trim();
+        const asOfDate = String((cell && cell.as_of_date) || "").trim();
+        const status = normalizeHighlightStatus(cell && cell.status);
+        if (!rowId || !asOfDate || !status) {
+          return;
+        }
+        highlights[rowId + "|" + asOfDate] = status;
+      });
+      state.sessionHighlights = highlights;
+    }
+
+    function normalizeHighlightStatus(value) {
+      const normalized = String(value || "").trim();
+      if (normalized === "updated" || normalized === "success") {
+        return "updated";
+      }
+      if (normalized === "latest_confirmed" || normalized === "fallback_confirmed") {
+        return "latest_confirmed";
+      }
+      return "";
+    }
+
     function appendVisibleActionLogLine(message, payload) {
       const normalizedPayload = payload || {};
       const timestamp = String(normalizedPayload.timestamp || new Date().toISOString());
@@ -3211,6 +3290,7 @@
       state.actionSequence = actionId;
       setActionButtonsDisabled(true);
       setStatusBadge({label: "Загрузка", tone: "warning", detail: "запускаем обновление данных из внешних источников"});
+      clearSessionHighlights();
       showGlobalProgress(10, "Запуск");
       try {
         const requestPayload = {async: true};
@@ -3244,6 +3324,7 @@
         if (!finalJob || finalJob.status !== "success") {
           throw new Error((finalJob && (finalJob.error || finalJob.status)) || "sheet refresh job failed");
         }
+        setSessionHighlightsFromJob(finalJob);
         setStatusBadge({label: "Загрузка", tone: "warning", detail: "данные обновлены, перечитываем витрину"});
         showGlobalProgress(100, "Завершение");
         await loadPageComposition();
@@ -3289,6 +3370,7 @@
       }
       setActionButtonsDisabled(true);
       setStatusBadge({label: "Загрузка", tone: "warning", detail: "обновляем группу источников: " + normalizedGroupId + " за " + selectedDate});
+      clearSessionHighlights();
       setGroupActionState(normalizedGroupId, {
         label: "Запуск обновления группы...",
         tone: "warning",
@@ -3344,6 +3426,7 @@
         if (!finalJob || finalJob.status !== "success") {
           throw new Error((finalJob && (finalJob.error || finalJob.status)) || "source group refresh job failed");
         }
+        setSessionHighlightsFromJob(finalJob);
         setGroupActionState(normalizedGroupId, {
           label: "Группа обновлена",
           tone: "success",

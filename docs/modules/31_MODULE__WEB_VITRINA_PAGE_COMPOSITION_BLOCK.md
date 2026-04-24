@@ -71,7 +71,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - main table display headers are Russian (`Раздел`, `Метрика`, `Обновлено`, etc.); backend/API keys stay stable, while `Обновлено` surfaces per-row last successful update timestamp from snapshot metadata
   - `Загрузить и обновить` = canonical server-side refresh from external sources + page reread, without Google Sheet write path
   - two server-driven action-adjacent information blocks:
-    - `Загрузка данных` = grouped compact table derived from the same per-source upload/fetch truth: stable groups `WB API`, `Seller Portal / бот`, `Прочие источники`; each group has a compact date control, `Обновить группу`, group-level last update timestamp, and rows with server/business today and yesterday statuses, reason text, Russian metric labels and secondary technical endpoint
+    - `Загрузка данных` = grouped compact table derived from the same per-source upload/fetch truth: stable groups `WB API`, `Seller Portal / бот`, `Прочие источники`; each group has a compact date control, `Обновить группу`, group-level last update timestamp, and rows with server/business today and yesterday statuses, reason text, Russian metric labels and secondary technical endpoint. Every metric visible in the main table belongs to exactly one loading group; residual calculated/formula metrics such as proxy profit and proxy margin live in `Прочие источники`.
     - `Seller Portal / бот` group additionally renders bounded session status on the left side of the group header and session controls (`Проверить сессию`, `Восстановить сессию`, `Скачать лаунчер`) over the existing seller-session/recovery seams
     - `Лог` = compact fixed-height tail below the loading table plus `Скачать лог` via existing job/log contour; if exact transient job for the visible snapshot is unavailable, block must show persisted semantic fallback instead of stale green success
     - former `Обновление данных` is not rendered as a page-composition activity block; persisted `STATUS` rows remain internal truth for status/read contracts
@@ -92,6 +92,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - render the received page payload
   - keep only local filter/search/sort state
   - keep only browser-owned page reread timestamp for `Последнее обновление страницы`
+  - keep only session-local cell highlighting for the last refresh result: `updated` cells render as soft green, `latest_confirmed`/fallback cells render as soft yellow, and the highlight disappears on browser reload
   - keep zero ownership over job/log/status truth for `Лог` or `Загрузка данных`
   - never assemble canonical truth
   - never compute business metrics
@@ -183,9 +184,10 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
 - `Загрузить и обновить` on the vitrina now reuse-ит the canonical refresh contour and no longer depends on `/load` or Google Sheet auth to refresh the web-vitrina itself.
 - `Обновить группу` on the vitrina starts date-scoped `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` with payload `{async: true, source_group_id, as_of_date}` for one source group and one selected date. The action immediately surfaces a group-local launch state and appends a visible client action-log line; if the POST fails before a backend job is created, the page shows a group-local error and a visible log line such as `Не удалось запустить обновление группы WB API за 2026-04-24: HTTP 404 route not found`.
 - Once the POST reaches the backend, the action reuses the existing refresh/status/job/log seams, creates a `refresh_group` job before source fetch, fetches/prepares only the selected group, loads only cells for the selected date into the target ready snapshot, updates row-level `Обновлено` and group-level `last_updated_at` only for affected rows/groups, and logs stage-aware success/failure (`source_fetch`, `prepare_materialize`, `load_group_to_vitrina`) with the selected `as_of_date`.
+- Refresh and group-refresh job results may include `updated_cells` entries `{row_id, metric_key, as_of_date, source_group_id, status}`. The field is result metadata for the current UI session only: it drives transient green/yellow cell highlighting and log counters, but it is not persisted as permanent table styling.
 - `Загрузка данных` and `Лог` stay server-driven:
   - loading table is derived from the last relevant refresh/group-refresh job log and persisted source fallback; if exact job association is unavailable, page shows truthful non-OK status rather than unrelated stale run
-  - loading table rows are nested under stable source-group headers while preserving source truth and canonical source labels
+  - loading table rows are nested under stable source-group headers while preserving source truth and canonical source labels; coverage must include all visible main-table metrics, with residual calculated/formula metrics assigned to `Прочие источники`
   - loading table uses server/business `Сегодня: <YYYY-MM-DD>` and `Вчера: <YYYY-MM-DD>` dates, short OK/not-OK cells, reason columns, Russian metric labels from the existing metric registry and secondary technical endpoint text
   - log preview and `Скачать лог` reuse the existing in-memory job/log contour and render below the loading table
   - former `Обновление данных` is not an active page-composition activity block; persisted `STATUS` rows remain the underlying read-side truth for status contracts and fallback source outcomes
