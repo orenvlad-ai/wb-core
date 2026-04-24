@@ -34,6 +34,7 @@ DEFAULT_COST_PRICE_UPLOAD_PATH = "/v1/cost-price/upload"
 DEFAULT_SHEET_PLAN_PATH = "/v1/sheet-vitrina-v1/plan"
 DEFAULT_SHEET_DAILY_REPORT_PATH = "/v1/sheet-vitrina-v1/daily-report"
 DEFAULT_SHEET_STOCK_REPORT_PATH = "/v1/sheet-vitrina-v1/stock-report"
+DEFAULT_SHEET_PLAN_REPORT_PATH = "/v1/sheet-vitrina-v1/plan-report"
 DEFAULT_SHEET_WEB_VITRINA_READ_PATH = "/v1/sheet-vitrina-v1/web-vitrina"
 DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE = "page_composition"
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
@@ -532,6 +533,7 @@ def _build_handler(
                     _render_sheet_vitrina_operator_ui(
                         daily_report_path=DEFAULT_SHEET_DAILY_REPORT_PATH,
                         stock_report_path=DEFAULT_SHEET_STOCK_REPORT_PATH,
+                        plan_report_path=DEFAULT_SHEET_PLAN_REPORT_PATH,
                         refresh_path=sheet_refresh_path,
                         load_path=sheet_load_path,
                         status_path=sheet_status_path,
@@ -691,6 +693,39 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"sheet vitrina stock report runtime failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(
+                    self,
+                    HTTPStatus.OK,
+                    payload,
+                )
+                return
+
+            if parsed.path == DEFAULT_SHEET_PLAN_REPORT_PATH:
+                try:
+                    payload = entrypoint.handle_sheet_plan_report_request(
+                        period=_resolve_required_query_value(parsed.query, "period"),
+                        q1_buyout_plan_rub=_resolve_required_query_float(parsed.query, "q1_buyout_plan_rub"),
+                        q2_buyout_plan_rub=_resolve_required_query_float(parsed.query, "q2_buyout_plan_rub"),
+                        q3_buyout_plan_rub=_resolve_required_query_float(parsed.query, "q3_buyout_plan_rub"),
+                        q4_buyout_plan_rub=_resolve_required_query_float(parsed.query, "q4_buyout_plan_rub"),
+                        plan_drr_pct=_resolve_required_query_float(parsed.query, "plan_drr_pct"),
+                        as_of_date=_resolve_as_of_date_from_query(parsed.query) or None,
+                    )
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina plan report runtime failed: {exc}"},
                     )
                     return
 
@@ -1109,6 +1144,21 @@ def _resolve_single_query_param(query_string: str, name: str) -> str:
     return str(query.get(name, [""])[0]).strip()
 
 
+def _resolve_required_query_value(query_string: str, name: str) -> str:
+    value = _resolve_single_query_param(query_string, name)
+    if not value:
+        raise ValueError(f"{name} query parameter is required")
+    return value
+
+
+def _resolve_required_query_float(query_string: str, name: str) -> float:
+    value = _resolve_required_query_value(query_string, name)
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} query parameter must be numeric") from exc
+
+
 def _resolve_web_vitrina_period_window_from_query(query_string: str) -> tuple[str | None, str | None]:
     query = urllib_parse.parse_qs(query_string)
     date_from = str(query.get("date_from", [""])[0]).strip()
@@ -1462,6 +1512,7 @@ def _render_sheet_vitrina_operator_ui(
     *,
     daily_report_path: str,
     stock_report_path: str,
+    plan_report_path: str,
     refresh_path: str,
     load_path: str,
     status_path: str,
@@ -1474,6 +1525,7 @@ def _render_sheet_vitrina_operator_ui(
         "page_title": "Обновление данных",
         "daily_report_path": daily_report_path,
         "stock_report_path": stock_report_path,
+        "plan_report_path": plan_report_path,
         "refresh_path": refresh_path,
         "load_path": load_path,
         "legacy_google_sheets_contour": legacy_google_sheets_archive_context(),

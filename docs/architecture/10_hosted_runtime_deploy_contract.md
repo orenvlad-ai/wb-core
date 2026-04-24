@@ -17,6 +17,8 @@ Contract покрывает hosted contour на `api.selleros.pro` для routes
 - `POST /v1/sheet-vitrina-v1/refresh`
 - `POST /v1/sheet-vitrina-v1/load`
 - `GET /v1/sheet-vitrina-v1/daily-report`
+- `GET /v1/sheet-vitrina-v1/stock-report`
+- `GET /v1/sheet-vitrina-v1/plan-report`
 - `GET /v1/sheet-vitrina-v1/plan`
 - `GET /v1/sheet-vitrina-v1/status`
 - `GET /v1/sheet-vitrina-v1/job`
@@ -188,7 +190,7 @@ If any of these steps are unavailable or unsafe, execution must return incomplet
 Loopback/runtime probe validates the hosted process behind the reverse proxy or equivalent publish layer.
 
 Public probe validates:
-- `GET /sheet-vitrina-v1/operator` returns `200` + `text/html` and still contains the compact operator tokens for the three top-level sections, server refresh, truthful manual-vs-auto blocks, bounded seller-session block and both bounded supply subsections (`Обновление данных`, `Ручная загрузка данных`, `Проверка и восстановление Seller-сессии`, `Проверить сессию`, `Восстановить сессию`, `Скачать launcher для Mac`, `Остановить восстановление`, `Текущий запуск`, `Финал запуска`, `Статус сессии`, `Расчёт поставок`, `Отчёты`, `Загрузить данные`, `Legacy Google Sheets`, `Ежедневные отчёты`, `Отчёт по остаткам`, `Total Order Sum`, `Негативные факторы`, `Позитивные факторы`, `Скачать лог`, `Лог`, `Автообновления`, `Часовой пояс`, `Автоцепочка`, `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление`, `Общий вход для двух расчётов`, `Заказ на фабрике`, `Поставка на Wildberries`, `Цикл заказов`, `Цикл поставок`)
+- `GET /sheet-vitrina-v1/operator` returns `200` + `text/html` and still contains the compact operator tokens for the three top-level sections, server refresh, truthful manual-vs-auto blocks, bounded seller-session block, report subsections and both bounded supply subsections (`Обновление данных`, `Ручная загрузка данных`, `Проверка и восстановление Seller-сессии`, `Проверить сессию`, `Восстановить сессию`, `Скачать launcher для Mac`, `Остановить восстановление`, `Текущий запуск`, `Финал запуска`, `Статус сессии`, `Расчёт поставок`, `Отчёты`, `Загрузить данные`, `Legacy Google Sheets`, `Ежедневные отчёты`, `Отчёт по остаткам`, `Выполнение плана`, `planReportApplyButton`, `Total Order Sum`, `Негативные факторы`, `Позитивные факторы`, `Скачать лог`, `Лог`, `Автообновления`, `Часовой пояс`, `Автоцепочка`, `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление`, `Общий вход для двух расчётов`, `Заказ на фабрике`, `Поставка на Wildberries`, `Цикл заказов`, `Цикл поставок`)
 - `GET /v1/sheet-vitrina-v1/seller-portal-session/check` returns `200` + JSON with one truthful status from `session_valid_canonical / session_valid_wrong_org / session_invalid / session_missing / session_probe_error`
 - `GET /sheet-vitrina-v1/vitrina` returns `200` + `text/html` as a real sibling page shell: page must contain `Phase 4 Web-Vitrina Page Composition`, `Web-витрина`, canonical JSON route token `/v1/sheet-vitrina-v1/web-vitrina`, explicit `surface=page_composition` wiring and the current seam names `web_vitrina_page_composition / web_vitrina_view_model / web_vitrina_gravity_table_adapter`
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition` returns `200` + JSON `web_vitrina_page_composition` v1 with `meta`, `summary_cards`, `filter_surface`, `table_surface`, `status_summary`, `capabilities`; route stays read-only and must not trigger refresh/upstream fetch from the public read path
@@ -208,6 +210,12 @@ Public probe validates:
   - `status=available` when the current `ready snapshot` for `default_business_as_of_date(now)` contains a valid `yesterday_closed` slot for the requested/default closed business day;
   - `status=unavailable` with truthful `reason` when the current ready snapshot or `yesterday_closed` slot is missing/stale;
   - route stays read-only and must not trigger refresh/upstream fetch from the public read path
+- `GET /v1/sheet-vitrina-v1/plan-report` returns `200` + JSON for valid query params `period`, `q1_buyout_plan_rub`, `q2_buyout_plan_rub`, `q3_buyout_plan_rub`, `q4_buyout_plan_rub`, `plan_drr_pct` and optional `as_of_date`:
+  - response contains `selected_period`, `month_to_date`, `quarter_to_date`, `year_to_date` blocks;
+  - fact source is persisted accepted closed-day snapshots `fin_report_daily.fin_buyout_rub` + `ads_compact.ads_sum` for current active `config_v2` SKU;
+  - buyout plan is distributed by calendar day, with the daily amount derived from the quarter plan for each date;
+  - DRR fact is `ads_sum / fin_buyout_rub * 100`, ads plan is covered-period buyout plan multiplied by planned DRR;
+  - route stays read-only, never triggers refresh/upstream fetch, and returns truthful `available / partial / unavailable` coverage semantics instead of fabricating zero facts
 - `GET /v1/sheet-vitrina-v1/status` returns JSON with either success shape including `server_context` + `manual_context` or truthful `422 {"error": ..., "server_context": ..., "manual_context": ...}`
   - on `200`, root `status` is semantic snapshot outcome (`success / warning / error`), while technical completion stays separated in `technical_status`/derived fields
   - `server_context` / `manual_context` must keep persisted latest semantic result summaries, so restart/reload does not erase warning/error truth

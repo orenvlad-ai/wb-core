@@ -29,6 +29,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_JOB_PATH,
     DEFAULT_SHEET_LOAD_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
+    DEFAULT_SHEET_PLAN_REPORT_PATH,
     DEFAULT_SHEET_REFRESH_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_STOCK_REPORT_PATH,
@@ -80,6 +81,7 @@ class LocalOperatorFixtureServer:
             job_path=DEFAULT_SHEET_JOB_PATH,
             daily_report_path=DEFAULT_SHEET_DAILY_REPORT_PATH,
             stock_report_path=DEFAULT_SHEET_STOCK_REPORT_PATH,
+            plan_report_path=DEFAULT_SHEET_PLAN_REPORT_PATH,
             operator_context={
                 "stock_report_active_skus": ACTIVE_SKUS,
                 "stock_report_active_sku_count": len(ACTIVE_SKUS),

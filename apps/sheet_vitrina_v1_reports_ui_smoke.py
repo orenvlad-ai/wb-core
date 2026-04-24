@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_DAILY_REPORT_PATH,
+    DEFAULT_SHEET_PLAN_REPORT_PATH,
     DEFAULT_SHEET_STOCK_REPORT_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
     _render_sheet_vitrina_operator_ui,
@@ -32,6 +33,7 @@ def main() -> None:
         job_path="/v1/sheet-vitrina-v1/job",
         daily_report_path=DEFAULT_SHEET_DAILY_REPORT_PATH,
         stock_report_path=DEFAULT_SHEET_STOCK_REPORT_PATH,
+        plan_report_path=DEFAULT_SHEET_PLAN_REPORT_PATH,
         operator_context={
             "stock_report_active_skus": active_skus,
             "stock_report_active_sku_count": len(active_skus),
@@ -45,6 +47,7 @@ def main() -> None:
         "Отчёты",
         "Ежедневные отчёты",
         "Отчёт по остаткам",
+        "Выполнение плана",
     ):
         if token not in html:
             raise AssertionError(f"reports tab chrome must keep token {token!r}")
@@ -52,8 +55,10 @@ def main() -> None:
     for token in (
         'data-report-section-button="daily"',
         'data-report-section-button="stock"',
+        'data-report-section-button="plan"',
         'data-report-section-panel="daily"',
         'data-report-section-panel="stock" hidden',
+        'data-report-section-panel="plan" hidden',
         'href="' + DEFAULT_SHEET_WEB_VITRINA_UI_PATH + '"',
         'id="dailyReportPeriod"',
         'id="stockReportPeriod"',
@@ -62,8 +67,14 @@ def main() -> None:
         'id="stockReportSkuValidation"',
         'id="stockReportSelectAllButton"',
         'id="stockReportClearAllButton"',
+        'id="planReportPeriodSelect"',
+        'id="planReportQ1Input"',
+        'id="planReportQ4Input"',
+        'id="planReportDrrInput"',
+        'id="planReportApplyButton"',
         DEFAULT_SHEET_DAILY_REPORT_PATH,
         DEFAULT_SHEET_STOCK_REPORT_PATH,
+        DEFAULT_SHEET_PLAN_REPORT_PATH,
     ):
         if token not in html:
             raise AssertionError(f"reports subsection contract must include token {token!r}")
@@ -106,6 +117,8 @@ def main() -> None:
         raise AssertionError("reports UI config must disclose the active SKU count")
     if config_payload.get("stock_report_active_sku_source") != "current_registry_config_v2":
         raise AssertionError("reports UI config must disclose current registry state as the selector source")
+    if config_payload.get("plan_report_path") != DEFAULT_SHEET_PLAN_REPORT_PATH:
+        raise AssertionError("reports UI config must expose the plan-report read-only route")
 
     fake_rows = [
         {"nm_id": 1001, "identity_label": "SKU Alpha · nmId 1001"},
@@ -117,7 +130,7 @@ def main() -> None:
         raise AssertionError("stock-report selector semantics must exclude deselected SKU from the rendered row set")
 
     print("reports_ui_sections: ok -> Обновление данных / Расчёт поставок / Отчёты")
-    print("reports_ui_subsections: ok -> daily / stock")
+    print("reports_ui_subsections: ok -> daily / stock / plan")
     print("reports_ui_stock_selector: ok -> full active SKU config, default=all, empty-selection validation")
     print("reports_ui_heading_dedup: ok -> no panel-body h1 duplicates")
 

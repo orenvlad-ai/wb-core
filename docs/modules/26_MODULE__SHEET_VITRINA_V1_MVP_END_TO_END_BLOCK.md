@@ -53,6 +53,8 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/seller-portal-recovery/stop"
   - "GET /v1/sheet-vitrina-v1/seller-portal-session/check"
   - "GET /v1/sheet-vitrina-v1/daily-report"
+  - "GET /v1/sheet-vitrina-v1/stock-report"
+  - "GET /v1/sheet-vitrina-v1/plan-report"
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
   - "GET /v1/sheet-vitrina-v1/job"
@@ -160,6 +162,7 @@ update_note: "Обновлён под Google Sheets decommission: active contour
   - former `Отправить данные`/`POST /v1/sheet-vitrina-v1/load` path is archived and must not write Google Sheets
   - page additionally читает `GET /v1/sheet-vitrina-v1/daily-report` для compact блока `Ежедневные отчёты` внутри отдельного top-level tab `Отчёты`
   - page additionally читает `GET /v1/sheet-vitrina-v1/stock-report` для compact блока `Отчёт по остаткам` внутри того же top-level tab `Отчёты`
+  - page additionally читает `GET /v1/sheet-vitrina-v1/plan-report` для compact блока `Выполнение плана` внутри того же top-level tab `Отчёты`
   - page читает `GET /v1/sheet-vitrina-v1/status` для compact manual/auto status surface; root `status` there is semantic snapshot truth, while technical completion stays separated in derived fields
   - page читает `GET /v1/sheet-vitrina-v1/job` для detailed построчного operator log без отдельного audit subsystem
   - тот же `job` route поддерживает text-export конкретного completed run через `format=text&download=1`
@@ -174,7 +177,7 @@ update_note: "Обновлён под Google Sheets decommission: active contour
     - activity/reporting inside that sibling page stays server-owned: `Загрузка данных` / `Обновление данных` now show Russian primary labels/descriptions, short sanitized warning/error reasons, secondary technical ids and severity order `error -> warning -> success`, while raw technical note/traceback payload stays in the existing log path and `Свежесть данных` keeps server-owned semantics but uses the same readable timestamp style as `Последнее обновление страницы`
     - the `view_model` layer stays library-agnostic, the Gravity-specific seam stays repo-side, and page composition remains a page-only layer above them
     - export layer, cutover away from Google Sheets and broad feature parity remain later layers
-  - `Отчёты` uses the same sibling subsection selector pattern as the supply tab: default section = `Ежедневные отчёты`, second section = `Отчёт по остаткам`, only one report body is visible at a time
+  - `Отчёты` uses the same sibling subsection selector pattern as the supply tab: default section = `Ежедневные отчёты`, additional sections = `Отчёт по остаткам` and `Выполнение плана`, only one report body is visible at a time
   - daily-report block остаётся read-only и server-owned:
     - compare target = два последних closed business day в `Asia/Yekaterinburg`
     - current rule = `yesterday_closed` из ready snapshot `as_of_date=default_business_as_of_date(now)` versus `yesterday_closed` из ready snapshot `as_of_date=default_business_as_of_date(now)-1 day`
@@ -200,6 +203,14 @@ update_note: "Обновлён под Google Sheets decommission: active contour
     - sort = min breached district stock ascending, then breached district breadth descending, then total stock ascending
     - compact district labels remain truthful to current repo buckets: `Центральный ФО`, `Северо-Западный ФО`, `Приволжский ФО`, `Уральский ФО`, `Юг и СКФО`
     - merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь` stays fully excluded from stock-report filter/display because current truth does not split Far East from Siberia
+  - plan-report block `Выполнение плана` остаётся read-only и server-owned:
+    - route = `GET /v1/sheet-vitrina-v1/plan-report`
+    - input params = quarterly buyout plans `Q1..Q4`, planned DRR percent and selected period (`yesterday`, `last_7_days`, `last_30_days`, `current_month`, `current_quarter`, `current_year`)
+    - facts use only persisted accepted closed-day snapshots for `fin_report_daily.fin_buyout_rub` and `ads_compact.ads_sum` over current active `config_v2` SKU
+    - buyout plan is distributed by calendar day and crosses quarter boundaries by using the quarter plan for each individual date
+    - DRR fact = `ads_sum / fin_buyout_rub * 100`; ads plan = buyout plan multiplied by planned DRR
+    - response always includes selected block plus MTD/QTD/YTD blocks when active SKU truth is available
+    - incomplete temporal snapshot coverage is surfaced as `partial`/`unavailable` with missing/covered dates and never as fabricated zero fact
   - page дополнительно показывает compact manual block `Ручная загрузка данных` с active action `Загрузить данные`; former Google Sheets action `Отправить данные` is archived/disabled, не является active runtime/update/write/load/verify target, and appears only as archived/manual-context history
   - в том же `Обновление данных` current operator page additionally показывает compact block `Проверка и восстановление Seller-сессии`:
     - `Проверить сессию` выполняет cheap probe against saved `storage_state.json` и truthfully различает `session_valid_canonical / session_valid_wrong_org / session_invalid / session_missing / session_probe_error`
@@ -275,6 +286,12 @@ update_note: "Обновлён под Google Sheets decommission: active contour
   - response body = compact JSON summary для operator block `Ежедневные отчёты`
   - route keeps `200` even when report is not yet comparable and then returns truthful `status=unavailable` + exact `reason`
   - route does not build a new ready snapshot, does not fetch upstream data and does not read `today_current` as the comparison baseline
+- Канонический operator plan-report path:
+  - `GET /v1/sheet-vitrina-v1/plan-report`
+  - response body = compact JSON summary для operator block `Выполнение плана`
+  - valid query returns `200` with root `status=available/partial/unavailable`
+  - required params = `period`, `q1_buyout_plan_rub`, `q2_buyout_plan_rub`, `q3_buyout_plan_rub`, `q4_buyout_plan_rub`, `plan_drr_pct`
+  - route does not build a new ready snapshot, does not fetch upstream data and does not use Google Sheets/GAS
 - Канонический operator live-log path:
   - `GET /v1/sheet-vitrina-v1/job`
   - default response body = current async action status + detailed postрочный live log для `refresh` или `load`
