@@ -3,13 +3,13 @@ title: "Policy: docs sync и Codex protocol"
 doc_id: "WB-CORE-PROJECT-02-POLICY"
 doc_type: "project_policy"
 status: "active"
-purpose: "Кратко зафиксировать двухслойную схему документации, execution contract, task classification matrix и обязательный sync-протокол для Codex."
-scope: "Primary vs secondary docs, update order, manifest discipline как build metadata, local upload-ready source, post-merge external upload reminder, L1/L2/L3 execution matrix, Codex-first execution contract, Git fixation / GitHub closure ownership и запреты на dump-copy."
+purpose: "Кратко зафиксировать двухслойную authoritative/derived схему документации, execution contract, task classification matrix и sync-протокол для Codex."
+scope: "Authoritative vs derived docs, ordinary task-flow без default pack rebuild, отдельный derived-sync flow, manifest discipline как build metadata, local upload-ready source для derived-sync, L1/L2/L3 execution matrix, Codex-first execution contract, Git fixation / GitHub closure ownership и запреты на dump-copy."
 source_basis:
   - "docs/architecture/03_source_of_truth_policy.md"
   - "docs/architecture/07_codex_execution_protocol.md"
   - "README.md"
-source_of_truth_level: "secondary_project_pack"
+source_of_truth_level: "derived_secondary_project_pack"
 related_docs:
   - "docs/architecture/03_source_of_truth_policy.md"
   - "docs/architecture/07_codex_execution_protocol.md"
@@ -22,16 +22,16 @@ update_triggers:
   - "изменение docs governance"
   - "изменение Codex execution rule"
   - "изменение project-pack support rule"
-built_from_commit: "2e6bfd43a88e693a30b130516f5f8ce66889b801"
+built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
 ---
 
 # Summary
 
 В `wb-core` действует двухслойная документационная схема:
-- primary canonical docs в repo;
-- secondary compact project-pack в `wb_core_docs_master/`.
+- authoritative / canonical docs в repo;
+- derived / secondary compact project-pack в `wb_core_docs_master/`.
 
-Новая норма не может появиться сначала в project-pack. Сначала правится primary doc, потом pack.
+Новая норма не может появиться сначала в project-pack. Authoritative docs являются source of truth; pack является derived retrieval artifact и не блокирует обычный task-flow.
 
 Для новых WebCore chat execution handoff действует единый contract: задача сначала классифицируется как `L1 / L2 / L3`, bounded безопасная техработа сначала идёт через Codex, обычный GitHub merge при working `gh` access остаётся Codex-owned routine, а prompt для Codex обязан иметь обязательный classification header и два стандартных финальных блока.
 
@@ -41,10 +41,10 @@ built_from_commit: "2e6bfd43a88e693a30b130516f5f8ce66889b801"
 
 | Layer | Где живёт | Роль |
 | --- | --- | --- |
-| primary canonical docs | `README.md`, `docs/architecture/*`, `docs/modules/*`, `migration/*` | canonical source of truth |
-| secondary project-pack | `wb_core_docs_master/*` | compact retrieval-oriented pack для внешнего ChatGPT Project |
+| authoritative canonical docs | `README.md`, `docs/architecture/*`, `docs/modules/*`, `migration/*` | canonical source of truth |
+| derived project-pack | `wb_core_docs_master/*` | compact retrieval-oriented pack для внешнего ChatGPT Project |
 
-## Required update order
+## Ordinary task-flow
 
 Если изменение влияет на:
 - contract;
@@ -56,12 +56,21 @@ built_from_commit: "2e6bfd43a88e693a30b130516f5f8ce66889b801"
 - do-not-lose constraint,
 
 то порядок такой:
-1. обновить primary canonical docs;
-2. обновить затронутые файлы в `wb_core_docs_master/`;
-3. обновить `99_MANIFEST__DOCSET_VERSION.md`;
-4. зафиксировать результат в Git.
+1. обновить authoritative canonical docs;
+2. зафиксировать результат в Git вместе с code/tests, если они менялись.
 
-Если в задаче менялись primary docs или `wb_core_docs_master/`, порядок closure такой:
+`wb_core_docs_master/**` и `99_MANIFEST__DOCSET_VERSION.md` не обновляются по умолчанию в ordinary task-flow. Отсутствие pack rebuild не является completion blocker для обычной задачи, если task явно не является derived-sync flow.
+
+## Derived-sync flow
+
+Derived pack обновляется отдельным task-flow:
+1. прочитать current authoritative docs и current code-state;
+2. пересобрать затронутые файлы `wb_core_docs_master/**` как compact retrieval pack, а не dump-копию `docs/`;
+3. обновить `99_MANIFEST__DOCSET_VERSION.md` как build metadata only;
+4. выполнить governance/contamination smoke;
+5. зафиксировать результат в Git.
+
+Если task является derived-sync flow или transitional pack rebuild, порядок closure такой:
 1. successful merge;
 2. `~/Projects/wb-core` приведён к current `origin/main`;
 3. `~/Projects/wb-core/wb_core_docs_master` проверен как upload-ready source по manifest;
@@ -86,7 +95,7 @@ Readiness pack определяется по `~/Projects/wb-core/wb_core_docs_ma
 ## External Project upload closure
 
 - Внешний upload в ChatGPT Project остаётся manual/human-only step.
-- Если менялись primary docs или `wb_core_docs_master/`, этот шаг делается после merge.
+- Этот шаг делается после merge только для explicit derived-sync flow или transitional pack rebuild.
 - Единственный допустимый локальный source для этого upload = `~/Projects/wb-core/wb_core_docs_master`.
 - Отдельный post-upload manifest sync больше не нужен.
 - Напоминание об upload живёт в governance/handoff rules, а не как recursive state machine внутри pack.
@@ -121,7 +130,7 @@ Readiness pack определяется по `~/Projects/wb-core/wb_core_docs_ma
 - `repo-complete` = repo update + local validation + canonical result не остаётся только в рабочем дереве.
 - `live-complete` = live runtime/service/publish contour обновлён и public probe подтверждён.
 - `sheet-complete` = archived bound Apps Script guard publish step выполнен и минимальный guard-only verify подтверждён; это требуется только для изменений archived GAS guard.
-- `pack-complete` = primary docs, `wb_core_docs_master` и manifest синхронизированы в repo; если docs/pack менялись, после merge локальный `~/Projects/wb-core` приведён к current `origin/main`, а `~/Projects/wb-core/wb_core_docs_master` проверен как upload-ready source.
+- `pack-complete` = explicit derived-sync flow или transitional pack rebuild довёл `wb_core_docs_master` и manifest до repo-owned sync; после merge локальный `~/Projects/wb-core` приведён к current `origin/main`, а `~/Projects/wb-core/wb_core_docs_master` проверен как upload-ready source.
 
 Правило completion такое:
 - если задача меняет public route, runtime/service/nginx publish, bound Apps Script, operator UI или live sheet behavior, `repo-complete` недостаточно;
@@ -130,7 +139,7 @@ Readiness pack определяется по `~/Projects/wb-core/wb_core_docs_ma
 - `clasp` + guard-only verify добавляются только когда scope реально меняет archived bound Apps Script guard;
 - human-only step остаётся только для логина, прав, branch-protection approval / blocker-driven manual merge fallback, ручной UI-проверки или решения по риску;
 - для live/public задачи в финальном отчёте отдельно фиксируются `repo state`, `live deploy state`, `public verify result`; `sheet verify result` указывается как `not in scope`, кроме archived bound Apps Script guard changes.
-- Для docs-governance-only scope fake live/public/sheet steps не нужны; вместо них нужно честно зафиксировать `not in scope` и довести upload-ready source state.
+- Для docs-governance-only scope fake live/public/sheet steps не нужны; вместо них нужно честно зафиксировать `not in scope`. Upload-ready source state доводится только для explicit derived-sync flow или transitional pack rebuild.
 - Если hosted contour уже имеет repo-owned deploy runner, blocker должен называть конкретный missing access/value, а не ссылаться на неопределённое “внешнее operational знание”.
 
 ## Legacy rule
@@ -142,7 +151,7 @@ Legacy knowledge допускается только в тонком register-с
 Запрещено:
 - тянуть в pack полный legacy audit dump;
 - копировать целиком `docs/` или `migration/`;
-- хранить в pack уникальные нормы, которых нет в primary docs.
+- хранить в pack уникальные нормы, которых нет в authoritative docs.
 
 # Known gaps
 

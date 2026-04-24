@@ -11,7 +11,7 @@ source_basis:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
-source_of_truth_level: "secondary_project_pack"
+source_of_truth_level: "derived_secondary_project_pack"
 related_docs:
   - "docs/architecture/03_source_of_truth_policy.md"
   - "docs/architecture/07_codex_execution_protocol.md"
@@ -22,7 +22,7 @@ update_triggers:
   - "изменение migration boundary"
   - "изменение operator/runtime invariant"
   - "изменение docs governance"
-built_from_commit: "2e6bfd43a88e693a30b130516f5f8ce66889b801"
+built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
 ---
 
 # Summary
@@ -42,8 +42,8 @@ built_from_commit: "2e6bfd43a88e693a30b130516f5f8ce66889b801"
 | `C-05` | Current website/operator/web-vitrina reads server-side ready snapshots; reverse-load в Google Sheets `DATA_VITRINA` must stay archived and guarded. |
 | `C-06` | `wb_core_docs_master` не может становиться dump-копией repo docs или полным legacy mirror. |
 | `C-07` | Legacy knowledge разрешён только как thin register/map/constraint layer. |
-| `C-08` | При изменении contract/status/checkpoint/smoke/glossary/runbook нужно обновлять и primary docs, и затронутый project-pack, и manifest. |
-| `C-09` | Если в задаче менялись primary docs или `wb_core_docs_master/`, после merge `~/Projects/wb-core` должен быть приведён к current `origin/main`, `~/Projects/wb-core/wb_core_docs_master` должен быть проверен как upload-ready source по manifest, и только после этого пользователю остаётся один human-only post-merge шаг: загрузить актуальный pack во внешний ChatGPT Project. |
+| `C-08` | Ordinary task-flow обновляет code/tests и затронутые authoritative docs, если truth изменился; `wb_core_docs_master/**` и manifest не обновляются по умолчанию и не являются completion blocker для обычной задачи. |
+| `C-09` | `wb_core_docs_master/**` и manifest обновляются только в explicit derived-sync flow или transitional pack rebuild; после такого merge `~/Projects/wb-core` должен быть приведён к current `origin/main`, `~/Projects/wb-core/wb_core_docs_master` должен быть проверен как upload-ready source по manifest, и только после этого пользователю остаётся один human-only post-merge шаг: загрузить актуальный pack во внешний ChatGPT Project. |
 | `C-10` | Bounded steps не должны тихо превращаться в deploy/platform redesign, full parity campaign или новый parallel contour. |
 | `C-11` | Для новых WebCore chat prompts prompt к Codex обязан явно содержать `Класс задачи`, `Причина классификации`, `Режим выполнения` и заканчиваться блоками `=== ДЛЯ КУРАТОРА ===` и `=== СЖАТАЯ ПРОВЕРКА ===`; без этого execution handoff считается неполным. |
 | `C-12` | Bounded и безопасная техническая работа должна сначала идти через Codex; пользователю можно отдавать только human-only step: логин, права, branch-protection approval / blocker-driven manual merge fallback, ручная UI-проверка или решение по риску. |
@@ -57,7 +57,7 @@ built_from_commit: "2e6bfd43a88e693a30b130516f5f8ce66889b801"
 | `C-20` | Единственный допустимый локальный source для внешнего ChatGPT Project upload = `~/Projects/wb-core/wb_core_docs_master`; временные копии, zip-архивы и произвольные папки не считаются canonical source. |
 | `C-21` | Перед sync `~/Projects/wb-core` к current `origin/main` несвязанный dirty state нужно сохранять только bounded safe method (`stash`, backup, отдельная branch/worktree или эквивалент), без destructive reset поверх пользовательских изменений. |
 | `C-22` | Готовность pack к upload определяется по `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`, а не по Finder timestamps, имени архива или памяти исполнителя. |
-| `C-23` | После того как upload-ready source подготовлен, в handoff должен оставаться ровно один human-only remainder: внешний upload актуального `wb_core_docs_master`; manifest при этом не превращается в upload state machine. |
+| `C-23` | После explicit derived-sync или transitional pack rebuild, когда upload-ready source подготовлен, в handoff должен оставаться ровно один human-only remainder: внешний upload актуального `wb_core_docs_master`; manifest при этом не превращается в upload state machine. |
 
 # Known gaps
 

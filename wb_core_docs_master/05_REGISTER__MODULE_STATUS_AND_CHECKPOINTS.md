@@ -10,7 +10,7 @@ source_basis:
   - "README.md"
   - "docs/architecture/00_migration_charter.md"
   - "docs/architecture/01_target_architecture.md"
-source_of_truth_level: "secondary_project_pack"
+source_of_truth_level: "derived_secondary_project_pack"
 related_docs:
   - "docs/modules/00_INDEX__MODULES.md"
   - "README.md"
@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "d9398905d96124d25282db3fe356fbdb8fe46f52"
+built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
 ---
 
 # Summary

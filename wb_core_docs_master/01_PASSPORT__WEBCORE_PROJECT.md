@@ -3,14 +3,14 @@ title: "Паспорт проекта WebCore"
 doc_id: "WB-CORE-PROJECT-01-PASSPORT"
 doc_type: "project_passport"
 status: "active"
-purpose: "Дать retrieval-friendly summary текущего состояния `wb-core` без полного чтения всех primary docs."
+purpose: "Дать retrieval-friendly summary текущего состояния `wb-core` без полного чтения всех authoritative docs."
 scope: "Project identity, main-confirmed contour, текущие bounded capabilities, открытые gaps и жёсткие границы текущего checkpoint."
 source_basis:
   - "README.md"
   - "docs/architecture/00_migration_charter.md"
   - "docs/architecture/01_target_architecture.md"
   - "docs/modules/00_INDEX__MODULES.md"
-source_of_truth_level: "secondary_project_pack"
+source_of_truth_level: "derived_secondary_project_pack"
 related_docs:
   - "README.md"
   - "docs/architecture/00_migration_charter.md"
@@ -35,7 +35,7 @@ update_triggers:
   - "изменение current main-confirmed contour"
   - "merge нового bounded модуля"
   - "смена главного project gap"
-built_from_commit: "967edcc2059b36db36a3846d9f773c0b90e20f90"
+built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
 ---
 
 # Summary
@@ -89,7 +89,7 @@ Confirmed contour на текущем `main`:
   - invalid later attempts do not overwrite accepted current/closed promo truth
   - low-confidence cross-year labels keep `promo_start_at/end_at = null`
 
-## Primary source of truth
+## Authoritative source of truth
 
 Нормы и статусы считаются canonical только если они зафиксированы в:
 - `README.md`

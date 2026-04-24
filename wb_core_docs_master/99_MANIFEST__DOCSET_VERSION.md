@@ -10,7 +10,7 @@ source_basis:
   - "docs/architecture/03_source_of_truth_policy.md"
   - "docs/architecture/07_codex_execution_protocol.md"
   - "wb_core_docs_master/00_INDEX__WEBCORE_PROJECT_DOCS.md"
-source_of_truth_level: "secondary_project_pack_manifest"
+source_of_truth_level: "derived_secondary_project_pack_manifest"
 related_docs:
   - "wb_core_docs_master/00_INDEX__WEBCORE_PROJECT_DOCS.md"
   - "wb_core_docs_master/02_POLICY__DOCS_SYNC_AND_CODEX_PROTOCOL.md"
@@ -18,24 +18,19 @@ related_paths:
   - "wb_core_docs_master/"
 update_triggers:
   - "любое изменение pack"
-  - "любое изменение primary docs, влияющее на pack"
+  - "explicit derived-sync flow"
+  - "transitional pack rebuild"
   - "изменение build metadata pack"
-built_from_commit: "a51c01c11803b1fc9fd7e3695af9011e9431b602"
-docset_version: "wb_core_docs_master_v57"
-built_at: "2026-04-24T12:32:10Z"
+built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
+docset_version: "wb_core_docs_master_v58"
+built_at: "2026-04-24T13:20:35Z"
+build_note: "Transitional derived-pack rebuild after authoritative/derived governance alignment."
 core_docs_changed:
   - "README.md"
-  - "docs/architecture/01_target_architecture.md"
+  - "docs/architecture/02_repo_workspace_blueprint.md"
+  - "docs/architecture/03_source_of_truth_policy.md"
   - "docs/architecture/07_codex_execution_protocol.md"
-  - "docs/architecture/10_hosted_runtime_deploy_contract.md"
-  - "docs/modules/00_INDEX__MODULES.md"
-  - "docs/modules/17_MODULE__SHEET_VITRINA_V1_SCAFFOLD_BLOCK.md"
-  - "docs/modules/18_MODULE__SHEET_VITRINA_V1_WRITE_BRIDGE_BLOCK.md"
-  - "docs/modules/19_MODULE__SHEET_VITRINA_V1_PRESENTATION_BLOCK.md"
-  - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
-  - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
-  - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
-  - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
+  - "wb_core_docs_master/00_INDEX__WEBCORE_PROJECT_DOCS.md"
   - "wb_core_docs_master/01_PASSPORT__WEBCORE_PROJECT.md"
   - "wb_core_docs_master/02_POLICY__DOCS_SYNC_AND_CODEX_PROTOCOL.md"
   - "wb_core_docs_master/03_GLOSSARY__TERMS_ALIASES_AND_CANONICAL_NAMES.md"
@@ -58,9 +53,11 @@ core_docs_changed:
 
 - `docset_version` меняется только при осмысленной пересборке pack.
 - `built_from_commit` указывает на repo commit, от которого отталкивался pack.
-- `core_docs_changed` хранит repo-owned список primary/pack docs, которые меняют текущую сборку.
+- `build_note` фиксирует причину текущей сборки как build metadata.
+- `core_docs_changed` хранит repo-owned список authoritative/pack docs, которые меняют текущую сборку.
+- ordinary task-flow не обновляет manifest по умолчанию; manifest обновляется в explicit derived-sync flow или transitional pack rebuild.
 - manifest не хранит operational state внешней загрузки и не требует post-upload repo sync.
-- Если docs/pack менялись, внешний upload текущего pack делается после merge как отдельный human-only шаг, но этот факт не трекается внутри самого pack.
+- Если explicit derived-sync flow или transitional pack rebuild завершён, внешний upload текущего pack делается после merge как отдельный human-only шаг, но этот факт не трекается внутри самого pack.
 
 # Known gaps
 

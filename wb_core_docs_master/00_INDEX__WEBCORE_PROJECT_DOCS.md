@@ -4,13 +4,13 @@ doc_id: "WB-CORE-PROJECT-00-INDEX"
 doc_type: "project_pack_index"
 status: "active"
 purpose: "Дать compact navigation entrypoint для `wb_core_docs_master` как curated-pack под отдельный ChatGPT Project."
-scope: "Состав стартового pack, роли файлов, порядок чтения и границы между primary repo docs и secondary project-pack."
+scope: "Состав стартового pack, роли файлов, порядок чтения и границы между authoritative repo docs и derived secondary project-pack."
 source_basis:
   - "README.md"
   - "docs/architecture/03_source_of_truth_policy.md"
   - "docs/architecture/07_codex_execution_protocol.md"
   - "docs/modules/00_INDEX__MODULES.md"
-source_of_truth_level: "secondary_project_pack"
+source_of_truth_level: "derived_secondary_project_pack"
 related_docs:
   - "README.md"
   - "docs/architecture/03_source_of_truth_policy.md"
@@ -22,14 +22,14 @@ update_triggers:
   - "изменение состава pack"
   - "изменение роли `wb_core_docs_master`"
   - "изменение policy двухслойной схемы docs"
-built_from_commit: "50d9422c0946a4f0eae0e68d2ac7e01d73cb52eb"
+built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
 ---
 
 # Summary
 
-`wb_core_docs_master` — это secondary compact project-pack для retrieval/use вне repo, а не замена primary canonical docs.
+`wb_core_docs_master` — это derived secondary compact project-pack для retrieval/use вне repo, а не замена authoritative canonical docs.
 
-Canonical local upload-ready source для внешнего Project governed primary policy:
+Canonical local upload-ready source для внешнего Project during explicit derived-sync flow:
 - `~/Projects/wb-core/wb_core_docs_master`
 - readiness этого source определяется по manifest, а не самим index
 
@@ -53,7 +53,7 @@ Canonical local upload-ready source для внешнего Project governed pri
 | `09_RUNBOOK__COMMON_SMOKE_AND_DEBUG.md` | compact smoke/debug runbook |
 | `99_MANIFEST__DOCSET_VERSION.md` | version/manifest и build metadata |
 
-Primary canonical docs остаются в:
+Authoritative canonical docs остаются в:
 - `README.md`
 - `docs/architecture/*`
 - `docs/modules/*`
@@ -63,9 +63,9 @@ Primary canonical docs остаются в:
 
 - Pack не покрывает весь текст module docs и не заменяет их.
 - Pack не включает полный legacy-корпус.
-- Upload в внешний ChatGPT Project остаётся отдельным human-only шагом после merge, если менялись primary docs или pack.
+- Upload в внешний ChatGPT Project остаётся отдельным human-only шагом после merge только для explicit derived-sync flow или transitional pack rebuild.
 - Этот index даёт только navigation pointer и не должен сам становиться carrier operational upload rules.
-- Hosted runtime deploy/probe contract теперь materialized в primary docs и отражается в pack как compact navigation/runbook knowledge, включая seller-session session-check, safe stop semantics, per-run completion markers и hardened noVNC/launcher path, а не как hidden operational memory.
+- Hosted runtime deploy/probe contract теперь materialized в authoritative docs и отражается в pack как compact navigation/runbook knowledge, включая seller-session session-check, safe stop semantics, per-run completion markers и hardened noVNC/launcher path, а не как hidden operational memory.
 
 # Not in scope
 
