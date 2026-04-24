@@ -21,6 +21,9 @@ source_basis:
   - "apps/sheet_vitrina_v1_operator_load_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
+  - "apps/sheet_vitrina_v1_web_vitrina_group_refresh_smoke.py"
+  - "apps/sheet_vitrina_v1_plan_report_smoke.py"
+  - "apps/sheet_vitrina_v1_plan_report_http_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_integration_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_view_model_smoke.py"
@@ -39,7 +42,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
+built_from_commit: "c5ec48eb5380d0ebc75e7cc497f33b0b163dcbfe"
 ---
 
 # Summary
@@ -88,6 +91,10 @@ python3 apps/sheet_vitrina_v1_stocks_refresh_smoke.py
 python3 apps/sheet_vitrina_v1_auto_update_smoke.py
 python3 apps/sheet_vitrina_v1_daily_report_smoke.py
 python3 apps/sheet_vitrina_v1_daily_report_http_smoke.py
+python3 apps/sheet_vitrina_v1_stock_report_smoke.py
+python3 apps/sheet_vitrina_v1_plan_report_smoke.py
+python3 apps/sheet_vitrina_v1_plan_report_http_smoke.py
+python3 apps/sheet_vitrina_v1_reports_ui_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_http_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_view_model_smoke.py
@@ -96,7 +103,13 @@ python3 apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_integration_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py
+python3 apps/sheet_vitrina_v1_web_vitrina_current_tail_browser_smoke.py
+python3 apps/sheet_vitrina_v1_web_vitrina_group_coverage_smoke.py
+python3 apps/sheet_vitrina_v1_web_vitrina_group_refresh_smoke.py
+python3 apps/sheet_vitrina_v1_web_vitrina_group_action_ui_smoke.py
+python3 apps/sheet_vitrina_v1_web_vitrina_highlight_ui_smoke.py
 python3 apps/sheet_vitrina_v1_operator_ui_persistence_smoke.py
+python3 apps/sheet_vitrina_v1_seller_funnel_relevant_filter_smoke.py
 python3 apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py
 python3 apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py
 python3 apps/promo_xlsx_collector_contract_smoke.py
@@ -120,6 +133,13 @@ Current web-vitrina phase-3 smoke intent:
 Current web-vitrina phase-4 smoke intent:
 - `apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py` keeps page composition server-driven and checks source-chain metadata, filter surface, row counts and ready/error state behavior without changing the default read contract.
 - `apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py` proves the real sibling page on `/sheet-vitrina-v1/vitrina`: table render, filter controls, empty state, reset recovery and truthful error state all run through the same HTTP contour.
+- `apps/sheet_vitrina_v1_web_vitrina_group_coverage_smoke.py`, `apps/sheet_vitrina_v1_web_vitrina_group_refresh_smoke.py` and `apps/sheet_vitrina_v1_web_vitrina_group_action_ui_smoke.py` prove grouped loading-table coverage, date-scoped `group-refresh` payload semantics and visible launch failure handling.
+- `apps/sheet_vitrina_v1_web_vitrina_highlight_ui_smoke.py` keeps `updated_cells` highlighting browser-session-only.
+
+Current reports smoke intent:
+- `apps/sheet_vitrina_v1_stock_report_smoke.py` checks previous-closed stock report semantics and active SKU filtering.
+- `apps/sheet_vitrina_v1_plan_report_smoke.py` and `apps/sheet_vitrina_v1_plan_report_http_smoke.py` check read-only plan execution calculations and public route wiring.
+- `apps/sheet_vitrina_v1_reports_ui_smoke.py` checks the reports tab, stock selector persistence and plan-report controls.
 
 Targeted expectation for `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`:
 - same-day incoming blank cell in server-owned `DATA_VITRINA` plan must clear the live-sheet cell instead of preserving a stale historical value or stale zero.
@@ -222,11 +242,15 @@ Expected routes:
 - `POST /v1/registry-upload/bundle`
 - `POST /v1/cost-price/upload`
 - `POST /v1/sheet-vitrina-v1/refresh`
-- `POST /v1/sheet-vitrina-v1/load`
+- `POST /v1/sheet-vitrina-v1/load` (archived/blocked)
 - `GET /v1/sheet-vitrina-v1/daily-report`
+- `GET /v1/sheet-vitrina-v1/stock-report`
+- `GET /v1/sheet-vitrina-v1/plan-report`
 - `GET /v1/sheet-vitrina-v1/plan`
 - `GET /v1/sheet-vitrina-v1/status`
 - `GET /v1/sheet-vitrina-v1/job`
+- `GET /v1/sheet-vitrina-v1/seller-portal-session/check`
+- `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh`
 - `GET /sheet-vitrina-v1/operator`
 - `GET /sheet-vitrina-v1/vitrina`
 - `GET /v1/sheet-vitrina-v1/web-vitrina`
@@ -392,21 +416,25 @@ Use this section for current website/operator/public verification. Legacy Google
 - current COST_PRICE checkpoint проверяется по accepted/rejected server upload result, separate runtime current state и server-side refresh/read integration;
 - applicable себестоимость резолвится server-side по `group + latest effective_from <= slot_date`;
 - operator-facing derived rows используют canonical keys `total_proxy_profit_rub` и `proxy_margin_pct_total`;
-- `GET /sheet-vitrina-v1/operator` поднимает simple operator page без SPA/build pipeline;
-- `GET /sheet-vitrina-v1/vitrina` поднимает отдельную live read-only sibling page и не встраивается в existing `/sheet-vitrina-v1/operator`;
+- `GET /sheet-vitrina-v1/vitrina` поднимает primary unified web/operator page без SPA/build pipeline: first/default tab `Витрина`, sibling tabs `Расчет поставок` and `Отчеты`;
+- `GET /sheet-vitrina-v1/operator` остаётся compatibility entry и рендерит тот же unified shell, а не отдельный truth owner;
 - `GET /v1/sheet-vitrina-v1/web-vitrina` остаётся cheap read-only JSON path: default v1 shape = `contract_name / contract_version / page_route / read_route / meta / status_summary / schema / rows / capabilities`, optional `as_of_date` stays on том же route и не имеет права trigger-ить refresh/upstream fetch;
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition` now adds the page-only payload for `/sheet-vitrina-v1/vitrina`: `composition_name / composition_version / meta / summary_cards / filter_surface / table_surface / status_summary / capabilities`; route still stays read-only and must not trigger refresh/upstream fetch;
-- operator page показывает narrow server-driven surface: top-level sections `Обновление данных` / `Расчёт поставок` / `Отчёты`, compact manual block `Ручная загрузка данных` with active action `Загрузить данные`, one compact reports subsection-switch `Ежедневные отчёты` / `Отчёт по остаткам` inside `Отчёты`, separate compact auto block `Автообновления` и отдельный `Лог`; manual block shows legacy Google Sheets as archived and does not treat reload or former send/load as proof.
+- vitrina page shows primary action `Загрузить и обновить`; old top-panel `Обновить`, `JSON Connect` and permanent top status badge are not active current UI.
+- bottom `Действия и состояния` contains server-driven `Загрузка данных` as grouped table (`WB API`, `Seller Portal / бот`, `Прочие источники`) and secondary `Лог`; former sibling block `Обновление данных` is not active page-composition UI.
+- `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` must reach app-level validation. A request without `source_group_id` returns app-level `400 {"error":"source_group_id is required"}`, not proxy `404`.
+- valid group-refresh payload `{async: true, source_group_id, as_of_date}` creates a group/date-scoped job and must not clear, overwrite or timestamp unrelated groups/date cells; `updated_cells` metadata drives only transient browser-session highlighting.
 - `GET /v1/sheet-vitrina-v1/daily-report` остаётся cheap read-only JSON path: route сравнивает только два последних closed business day через persisted ready snapshots `default_business_as_of_date(now)` и `default_business_as_of_date(now)-1 day` и не имеет права trigger-ить refresh/upstream fetch;
 - `GET /v1/sheet-vitrina-v1/stock-report` остаётся cheap read-only JSON path: route по умолчанию читает previous closed business day only from persisted ready snapshot `DATA_VITRINA[yesterday_closed]`, принимает optional explicit `as_of_date` override на том же read path, не trigger-ит refresh/upstream fetch и включает только SKU с district stock `< 50`;
 - subsection `Отчёт по остаткам` now adds a compact SKU selector: full active SKU list comes from current authoritative `config_v2` truth on the operator page itself, defaults to all selected, applies only after `Рассчитать`, rejects empty selection with `Выберите хотя бы один SKU` and must show an empty result instead of stale rows when the selected subset has no breaches;
+- `GET /v1/sheet-vitrina-v1/plan-report` остаётся cheap read-only JSON path: valid query includes `period`, Q1-Q4 buyout plans, planned DRR percent and optional `as_of_date`; facts come only from persisted accepted closed-day `fin_report_daily.fin_buyout_rub` and `ads_compact.ads_sum`, with `available / partial / unavailable` coverage semantics;
 - operator page state is browser-owned only: current top-level tab, active subsection under `Отчёты` / `Расчёт поставок` and stock-report SKU selection persist in namespaced `localStorage`; reload must restore the last valid state, while empty/broken storage or obsolete `nmId` values must fall back safely to current defaults/current active SKU truth;
 - daily-report factor lists are now full valid sets sorted by `matched_sku_count desc` and aggregate strength; factor rows surface label + arrow + `N SKU` + truthful aggregate summary instead of plain `вверх/вниз` text;
 - daily-report response now includes `metric_ranking_diagnostics`, so a short decline list can be diagnosed from the payload itself instead of being treated as a UI cap bug;
 - в block `Автообновления` `Автоцепочка` должна быть backend-driven description current daily chain, а не legacy sheet write; current truthful wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: server-side refresh ready snapshot for website/operator web-vitrina`;
 - тот же block должен surface-ить `Последний автозапуск`, `Статус последнего автозапуска` и `Последнее успешное автообновление` из backend/status contract;
 - `POST /v1/sheet-vitrina-v1/refresh` обновляет date-aware ready snapshot в repo-owned SQLite runtime contour;
-- `POST /v1/sheet-vitrina-v1/load` пишет в live sheet только already prepared snapshot и truthfully падает при missing ready snapshot / bridge blocker;
+- `POST /v1/sheet-vitrina-v1/load` is archived/blocked in current default runtime and must not be used as success proof for web-vitrina completion;
 - empty/default refresh request must resolve `as_of_date` by `Asia/Yekaterinburg`, not by UTC/host-local clock;
 - `GET /v1/sheet-vitrina-v1/status` читает последний persisted refresh result, не триггерит heavy source fetch и показывает `date_columns` / `temporal_slots` plus `server_context`;
 - при missing ready snapshot тот же `GET /v1/sheet-vitrina-v1/status` остаётся truthful `422`, но всё равно отдаёт `server_context`, чтобы operator page показывала текущие timezone/scheduler facts уже в empty state;

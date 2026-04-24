@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
+built_from_commit: "c5ec48eb5380d0ebc75e7cc497f33b0b163dcbfe"
 ---
 
 # Summary
@@ -75,8 +75,13 @@ built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
 Current main-confirmed operator flow:
 - `POST /v1/sheet-vitrina-v1/refresh`
 - `GET /v1/sheet-vitrina-v1/status`
+- `GET /v1/sheet-vitrina-v1/job`
 - `GET /v1/sheet-vitrina-v1/web-vitrina`
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition`
+- `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh`
+- `GET /v1/sheet-vitrina-v1/daily-report`
+- `GET /v1/sheet-vitrina-v1/stock-report`
+- `GET /v1/sheet-vitrina-v1/plan-report`
 - `GET /sheet-vitrina-v1/operator`
 - `GET /sheet-vitrina-v1/vitrina`
 - former Google Sheets `prepare/upload/load DATA_VITRINA` flow is archived and blocked by guards
@@ -97,55 +102,47 @@ Current live promo source flow:
 - accepted/runtime-cached exact-date promo truth stays only as bounded fallback when replay is unavailable or non-exact
 - `STATUS` and ready snapshot now expose truthful promo source facts instead of a permanent blocked gap
 
-Current repo-owned operator refresh surface:
-- `GET /sheet-vitrina-v1/operator`
-- page uses `POST /v1/sheet-vitrina-v1/refresh`, `POST /v1/sheet-vitrina-v1/load`, `GET /v1/sheet-vitrina-v1/daily-report`, `GET /v1/sheet-vitrina-v1/stock-report`, `GET /v1/sheet-vitrina-v1/status` and `GET /v1/sheet-vitrina-v1/job`
-- current `/sheet-vitrina-v1/operator` remains orchestration-first control surface and is intentionally not reused as `/sheet-vitrina-v1/operator/vitrina`
-- web-vitrina is fixed as sibling routes `GET /sheet-vitrina-v1/vitrina` + `GET /v1/sheet-vitrina-v1/web-vitrina`
+Current repo-owned unified web/operator surface:
+- primary route = `GET /sheet-vitrina-v1/vitrina`; first/default tab = `Витрина`, sibling tabs = `Расчет поставок` and `Отчеты`
+- compatibility route = `GET /sheet-vitrina-v1/operator`; it renders the same unified shell and is not a separate source-of-truth owner
+- page uses current read/action routes: `POST /v1/sheet-vitrina-v1/refresh`, `GET /v1/sheet-vitrina-v1/status`, `GET /v1/sheet-vitrina-v1/job`, `GET /v1/sheet-vitrina-v1/daily-report`, `GET /v1/sheet-vitrina-v1/stock-report`, `GET /v1/sheet-vitrina-v1/plan-report` and `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh`
+- former Google Sheets `/load` stays archived/blocked and is not needed for current web-vitrina completion
 - `GET /v1/sheet-vitrina-v1/web-vitrina` stays server-owned and library-agnostic on the default path: current v1 shape is `meta + status_summary + schema + rows + capabilities`, built only from existing ready snapshot/current truth and optional `as_of_date`
-- phase-2 web-vitrina additionally materializes repo-owned `web_vitrina_view_model` over that stable contract: current schema = `columns + rows + groups + sections + formatters + filters + sorts + state_model`
-- phase-3 web-vitrina additionally materializes repo-owned `web_vitrina_gravity_table_adapter` over that `view_model`: current Gravity-specific surface = `columns + rows + renderers + groupings + filters + sorts + use_table_options + table_props + state_surface`
-- phase-4 web-vitrina additionally materializes repo-owned `web_vitrina_page_composition` on the same read route via optional `surface=page_composition`, while `/sheet-vitrina-v1/vitrina` becomes a real read-only page with summary, filters, table container and truthful loading/empty/error states
-- current live vitrina action/status semantics are explicitly split:
-  - `Обновить` = cheap reread of the current page composition/read-side snapshot
-  - `Загрузить и обновить` = canonical `POST /v1/sheet-vitrina-v1/refresh` + reread, without mandatory `/load` / Google Sheet write dependency
-  - summary keeps browser-owned `Последнее обновление страницы` separate from server-owned `Свежесть данных` (`refreshed_at / snapshot_id / as_of_date`), but both now use the same readable user-facing timestamp style without raw ISO `T/Z`
-  - action-adjacent blocks now stay server-owned too:
-    - `Лог` = latest relevant refresh-run tail + `Скачать лог` via existing `GET /v1/sheet-vitrina-v1/job?...format=text&download=1`
-    - `Загрузка данных` = per-source semantic fetch/upload result from the latest relevant refresh job log or persisted exact-snapshot fallback, with Russian primary labels/descriptions, short sanitized warning/error reasons and secondary technical source text
-    - `Обновление данных` = per-source semantic materialization result from persisted `STATUS` rows of the current read-side snapshot with the same human-readable item contract
-    - both lists are server-side sorted as `error -> warning -> success`
-    - raw STATUS/job note, JSON fragments, traceback text, request ids and similar diagnostics stay only in the existing log/download path and no longer leak into the main summary-card reason
-  - cheap `Обновить` may advance only the page reread marker; it must not fabricate a new upload-run state in those blocks
-  - top badge and summary cards are no longer allowed to go green from `ready snapshot exists`; they follow semantic `success / warning / error`
-- the same sibling page now exposes a bounded history period chooser:
-  - default/no-query mode stays the cheap daily contour
-  - explicit `as_of_date` keeps one-day historical mode
-  - explicit `date_from/date_to` now opens a bounded ready-snapshot window through the same existing read route
-  - page UX for this mode is repo-owned and narrow: calendar + preset buttons + `Начало периода` / `Конец периода` + `Сбросить` / `Сохранить`
-- `web_vitrina_view_model` remains canonical and library-agnostic, the concrete Gravity-specific adapter stays isolated repo-side, and the page layer stays a page-only consumer instead of a second truth owner
-- current phase-1/2/3/4 scope remains narrow: route fixation, stable read contract, library-agnostic presentation seam, concrete grid adapter and minimal live page composition only; export layer, legacy Google Sheets/export migration and broad feature parity stay later
-- page stays intentionally narrow: top-level sections `Обновление данных` / `Расчёт поставок` / `Отчёты`, compact manual block `Ручная загрузка данных` with active button `Загрузить данные`, legacy Google Sheets marked archived, one compact reports subsection-switch `Ежедневные отчёты` / `Отчёт по остаткам` inside `Отчёты`, separate compact auto block `Автообновления` and one fixed-height scrollable `Лог` block with `Скачать лог`
-- daily-report block compares only the two latest closed business days in `Asia/Yekaterinburg`: `yesterday_closed(default_business_as_of_date(now))` vs `yesterday_closed(default_business_as_of_date(now)-1 day)`, never `today_current`
+- phase-2 web-vitrina materializes repo-owned `web_vitrina_view_model` over that stable contract: current schema = `columns + rows + groups + sections + formatters + filters + sorts + state_model`
+- phase-3 web-vitrina materializes repo-owned `web_vitrina_gravity_table_adapter` over that `view_model`: current Gravity-specific surface = `columns + rows + renderers + groupings + filters + sorts + use_table_options + table_props + state_surface`
+- phase-4 web-vitrina materializes repo-owned `web_vitrina_page_composition` via optional `surface=page_composition`; the page shell renders summary, main table first, filters/history controls, then bottom `Действия и состояния`
+- current live vitrina action/status semantics:
+  - `Загрузить и обновить` = canonical `POST /v1/sheet-vitrina-v1/refresh` + page reread, without Google Sheets write dependency
+  - the old cheap top-panel `Обновить`, `JSON Connect` and permanent top status badge are not rendered
+  - summary keeps browser-owned `Последнее обновление страницы` separate from server-owned `Свежесть данных`, and both use readable timestamps without raw ISO `T/Z`
+  - `Загрузка данных` is a grouped compact table over source truth: `WB API`, `Seller Portal / бот`, `Прочие источники`; every visible main-table metric belongs to exactly one group, with residual calculated/formula metrics assigned to `Прочие источники`
+  - each group has one compact date control, `Обновить группу`, group-level last update timestamp, today/yesterday status columns, reason columns, Russian metric labels and secondary technical endpoint text
+  - `Seller Portal / бот` additionally exposes session status and `Проверить сессию` / `Восстановить сессию` / `Скачать лаунчер`
+  - `Лог` renders below the loading table and keeps existing job/log download contour
+  - former sibling block `Обновление данных` is no longer an active page-composition activity block; persisted `STATUS` rows remain underlying read-side truth
+  - raw STATUS/job note, JSON fragments, traceback text, request ids and similar diagnostics stay only in existing log/download surfaces
+- `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` accepts `{async: true, source_group_id, as_of_date}` for one source group and one selected date; it must not clear, overwrite or timestamp unrelated groups/date cells
+- group-refresh job results may include `updated_cells`/latest-confirmed metadata for transient browser-session highlighting only; no permanent styling truth is persisted
+- the sibling page keeps bounded history controls: default daily mode, explicit `as_of_date`, and `date_from/date_to` period mode over existing ready snapshots
+- `web_vitrina_view_model` remains canonical and library-agnostic, the Gravity adapter stays isolated repo-side, and the page layer stays a page-only consumer instead of a second truth owner
+- current phase-1/2/3/4 scope remains narrow: route fixation, stable read contract, library-agnostic presentation seam, concrete grid adapter and server-driven page composition only; export layer, legacy Google Sheets/export migration and broad feature parity stay later
+- `Отчеты` uses one sibling subsection selector: `Ежедневные отчёты`, `Отчёт по остаткам`, `Выполнение плана`; only one report body is visible at a time
+- daily-report compares only the two latest closed business days in `Asia/Yekaterinburg`: `yesterday_closed(default_business_as_of_date(now))` vs `yesterday_closed(default_business_as_of_date(now)-1 day)`, never `today_current`
 - daily-report ranked totals stay on the current canonical pool only (`total_view_count`, `total_views_current`, `avg_ctr_current`, `avg_addToCartConversion`, `avg_cartToOrderConversion`, `avg_spp`, `avg_ads_bid_search`, `total_ads_views`, `total_ads_sum`, `avg_localizationPercent`)
-- daily-report SKU block truthfully shows only `display_name + nmId`; common factors use only deterministic sign-safe signals (`views/search views/search CTR/conversions`, `ads_sum`, `price_seller_discounted`, `Нет остатков`, district low-stock `< 20` except `stock_ru_far_siberia`)
-- negative/positive factor sections render the full valid factor set, sorted by matched SKU count and then aggregate strength, not a hard top-5 cap
-- factor rows now show label + restrained direction arrow + matched SKU count + type-aware aggregate summary (`медиана ±X.X%`, `медиана ±N ₽ (±X.X%)`, `медиана остатка N шт.` depending on factor type)
-- daily-report JSON also carries `metric_ranking_diagnostics`, so the observed short decline list is now explicitly explained in the payload itself; the current repo-owned diagnostic smoke keeps `raw=10`, `present=9`, `negative=3`, `positive=6`, with `avg_ads_bid_search` excluded because both closed-day values are missing
-- stock-report block now defaults to previous closed business day stocks from persisted ready snapshot `DATA_VITRINA[yesterday_closed]`, keeps threshold `<50`, accepts optional explicit `as_of_date` override on the same read path, uses five district keys (`stock_ru_central`, `stock_ru_northwest`, `stock_ru_volga`, `stock_ru_ural`, `stock_ru_south_caucasus`) and deliberately excludes merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь`
-- stock-report subsection now also exposes a compact SKU selector sourced from full active `config_v2` truth, not from breached rows only; selector defaults to all active SKU selected, uses `display_name + nmId` labels, applies the filter only after `Рассчитать`, rejects zero selected SKU with `Выберите хотя бы один SKU` and shows an honest empty result when the selected subset has no breaches
-- operator page now also persists current top-level tab, active `Отчёты` / `Расчёт поставок` subsection and the stock-report SKU selector in namespaced browser `localStorage` only; reload restores the last valid UI state, while broken storage or obsolete `nmId` values truthfully fall back to the current default/current active SKU set without any server-side user profile state
-- status/refresh responses drive the blocks through `server_context` + `manual_context`, so timezone/scheduler wording, manual-success timestamps and latest semantic summaries are not hardcoded in UI; `Автоцепочка` now truthfully describes server-side refresh only, without Google Sheets auto-load
-- `GET /v1/sheet-vitrina-v1/status` now exposes semantic root status for the visible snapshot and keeps technical completion separate, so preserved/unchanged/stale/not_verified results stay yellow or red instead of false green
-- the same block shows backend-driven `Последний автозапуск`, `Статус последнего автозапуска` and `Последнее успешное автообновление`
-- `refresh` и `load` не смешиваются: refresh materialize-ит ready snapshot only, load пишет only already prepared snapshot в live sheet
-- job/log surface is detailed and machine-useful: source/module/adapter/endpoint steps, source result kinds/counts, metric batch summaries and bridge/write results stay server-driven and can be exported per completed run through `GET /v1/sheet-vitrina-v1/job?job_id=...&format=text&download=1`
+- stock-report defaults to previous closed business day stocks from persisted ready snapshot `DATA_VITRINA[yesterday_closed]`, keeps threshold `<50`, accepts optional explicit `as_of_date`, uses five district keys and deliberately excludes merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь`
+- stock-report exposes a compact SKU selector sourced from full active `config_v2` truth, not breached rows only; selector applies only after `Рассчитать`, rejects zero selected SKU and handles empty selected-subset results truthfully
+- plan-report `Выполнение плана` is read-only on `GET /v1/sheet-vitrina-v1/plan-report`; valid query includes `period`, Q1-Q4 buyout plans, planned DRR percent and optional `as_of_date`
+- plan-report facts come only from persisted accepted closed-day snapshots for `fin_report_daily.fin_buyout_rub` and `ads_compact.ads_sum`; buyout plan is distributed by calendar day, DRR fact = `ads_sum / fin_buyout_rub * 100`, and missing coverage is `partial`/`unavailable`, not fabricated zero
+- browser persistence is namespaced localStorage only for current top-level tab, supply/report subsections and stock-report SKU selector; broken storage or obsolete `nmId` values fall back to current defaults without server-side user profile state
+- status/refresh responses drive blocks through `server_context` + `manual_context`, so timezone/scheduler wording, manual-success timestamps and latest semantic summaries are not hardcoded in UI
+- `GET /v1/sheet-vitrina-v1/status` exposes semantic root status for the visible snapshot and keeps technical completion separate, so preserved/unchanged/stale/not_verified results stay yellow or red instead of false green
+- job/log surface is detailed and machine-useful: source/module/adapter/endpoint steps, source result kinds/counts, metric batch summaries and write results stay server-driven and can be exported per completed run through `GET /v1/sheet-vitrina-v1/job?job_id=...&format=text&download=1`
 - server-side business timezone = `Asia/Yekaterinburg` for default `as_of_date`, `today_current` and operator-facing freshness dates
 - live daily auto-refresh = repo-owned artifacts `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.{service,timer}` -> installed on host as `wb-core-sheet-vitrina-refresh.timer` -> existing `POST /v1/sheet-vitrina-v1/refresh` at `11:00, 20:00 Asia/Yekaterinburg` (`06:00 UTC` and `15:00 UTC` on current host) with `{"auto_refresh": true}`; daily path builds server-side ready snapshot only and never loads Google Sheets
-- source matrix is now explicit: group A bot/web-source historical, group B WB API historical/date-period capable, group C WB API current-snapshot-only, group D other/manual/browser-collector overlays
-- bot-backed current-day sync now explicitly probes `/opt/wb-web-bot/storage_state.json` before running seller portal capture; invalidated browser state surfaces as `seller_portal_session_invalid` / human `сессия seller portal больше не действует; требуется повторный вход` instead of a generic Playwright timeout
-- seller-portal auth recovery on selleros now has a repo-owned localhost-only noVNC/Xvfb path via `apps/seller_portal_relogin_session.py`: it auto-saves refreshed `storage_state.json` after validated login and auto-triggers loopback refresh instead of relying on host-side manual X11
-- the same seller-session path is now materialized as a permanent operator flow on `/sheet-vitrina-v1/operator`: backend exposes `session-check/start/status/stop/launcher` routes, every recovery start gets its own `run_id`, the page shows a compact `Проверка и восстановление Seller-сессии` block with separate `Текущий запуск / Финал запуска / Статус сессии`, the downloadable Mac launcher waits for local HTTP-ready and opens SSH-tunneled noVNC with explicit websocket path/reconnect, `x11vnc` is hardened with `-noxdamage`, stop closes only the temporary login contour without deleting saved session state, and final success additionally requires canonical supplier confirmation/safe switch rather than only `session ok`
+- source matrix is explicit: group A bot/web-source historical, group B WB API historical/date-period capable, group C WB API current-snapshot-only, group D other/manual/browser-collector overlays
+- `seller_funnel_snapshot` materialization can receive enabled/relevant `nm_ids`; strict validation is applied after relevant-row filtering, so invalid non-relevant rows are logged as `ignored_non_relevant_invalid_rows` instead of poisoning the snapshot
+- bot-backed current-day sync probes `/opt/wb-web-bot/storage_state.json` before seller portal capture; invalidated browser state surfaces as `seller_portal_session_invalid` / human `сессия seller portal больше не действует; требуется повторный вход`
+- seller-portal auth recovery on selleros uses repo-owned localhost-only noVNC/Xvfb path via `apps/seller_portal_relogin_session.py`; unified UI exposes session-check/start/status/stop/launcher controls with per-run `run_id`, safe stop and canonical supplier confirmation
 - historical/date-period families (`seller_funnel_snapshot`, `web_source_snapshot`, `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`) now use persisted accepted closed-day semantics for `yesterday_closed`
 - current-snapshot-only families (`prices_snapshot`, `ads_bids`) capture upstream truth only as current snapshot, but an already accepted snapshot for business day D must materialize as `yesterday_closed=D` on D+1; later invalid auto/manual attempts must not blank prior-day accepted truth or already accepted same-day truth
 - semantic reduction is now source-aware instead of naive two-slot worst-case:

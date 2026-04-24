@@ -28,7 +28,7 @@ update_triggers:
   - "перенос новой legacy capability"
   - "изменение migration boundary"
   - "закрытие крупного compatibility gap"
-built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
+built_from_commit: "c5ec48eb5380d0ebc75e7cc497f33b0b163dcbfe"
 ---
 
 # Summary
@@ -40,7 +40,7 @@ built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
 
 | Legacy surface | Current owner в `wb-core` | Current status | Boundary note |
 | --- | --- | --- | --- |
-| `wb-table-audit` Apps Script operator shell | `gas/sheet_vitrina_v1/*` + website/operator `sheet_vitrina_v1` | archived for Google Sheets; current operator is website/public web-vitrina | former sheet-side contour is migration evidence with archive guards, not active UI/update/write/verify target |
+| `wb-table-audit` Apps Script operator shell | `gas/sheet_vitrina_v1/*` + website/operator `sheet_vitrina_v1` | archived for Google Sheets; current operator is unified website/public web-vitrina | former sheet-side contour is migration evidence with archive guards, not active UI/update/write/verify target; `/sheet-vitrina-v1/vitrina` is the primary current UI and `/sheet-vitrina-v1/operator` is compatibility entry |
 | legacy `CONFIG` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `registry_upload_bundle_v1_block` | перенесён в compact V2/V3 form | не равен full legacy `CONFIG` 1:1 |
 | legacy `METRICS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `sheet_vitrina_v1_mvp_end_to_end_block` | uploaded compact package перенесён | historical sheet/upload dictionary materialized `102` rows; current truth / server plan держат `95` enabled+show_in_data metrics, а website/operator web-vitrina reads the same server-driven ready snapshot |
 | legacy `FORMULAS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `registry_upload_bundle_v1_block` | current uploaded set перенесён | historical sheet-side seed and upload bundle держат `7` formulas rows, нужных authoritative `metrics_v2`; Google Sheets seed is archived |
@@ -60,6 +60,7 @@ built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
 
 - full parity beyond current uploaded compact package и long-tail registry rows;
 - repo-owned promo collector output уже wire-ится в current live metric/read-side line for `promo_by_price`; open tail остаётся только beyond the current wired promo-backed metric subset and beyond current `COST_PRICE` overlay;
+- current reports are website/server-owned: `daily-report`, `stock-report` and `plan-report` are not a revived sheet-side reporting truth layer;
 - окончательная судьба `AI_EXPORT`;
 - actual production-grade rights/wiring/hardening вокруг уже repo-owned hosted deploy contract.
 

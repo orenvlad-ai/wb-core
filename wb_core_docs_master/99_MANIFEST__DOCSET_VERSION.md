@@ -21,15 +21,20 @@ update_triggers:
   - "explicit derived-sync flow"
   - "transitional pack rebuild"
   - "изменение build metadata pack"
-built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
-docset_version: "wb_core_docs_master_v58"
-built_at: "2026-04-24T13:20:35Z"
-build_note: "Transitional derived-pack rebuild after authoritative/derived governance alignment."
+built_from_commit: "c5ec48eb5380d0ebc75e7cc497f33b0b163dcbfe"
+docset_version: "wb_core_docs_master_v59"
+built_at: "2026-04-24T21:43:26Z"
+build_note: "Recurring derived-sync from current authoritative docs and code-state."
 core_docs_changed:
   - "README.md"
   - "docs/architecture/02_repo_workspace_blueprint.md"
   - "docs/architecture/03_source_of_truth_policy.md"
   - "docs/architecture/07_codex_execution_protocol.md"
+  - "docs/architecture/10_hosted_runtime_deploy_contract.md"
+  - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
+  - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
+  - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
+  - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "wb_core_docs_master/00_INDEX__WEBCORE_PROJECT_DOCS.md"
   - "wb_core_docs_master/01_PASSPORT__WEBCORE_PROJECT.md"
   - "wb_core_docs_master/02_POLICY__DOCS_SYNC_AND_CODEX_PROTOCOL.md"
@@ -45,7 +50,7 @@ core_docs_changed:
 
 Этот manifest отвечает на два вопроса:
 - из какого repo commit собран текущий curated-pack;
-- какие primary/pack docs вошли в текущую repo-owned пересборку.
+- какие authoritative/pack docs вошли в текущую repo-owned пересборку.
 
 Внешний upload в ChatGPT Project живёт вне этого manifest и регулируется governance/handoff rules.
 
