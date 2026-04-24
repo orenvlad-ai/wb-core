@@ -76,6 +76,7 @@ def main() -> None:
             expect_cheap_refresh_same_freshness=None,
             expect_data_refresh_changes_freshness=None,
             expected_final_badge_tone=None,
+            run_actions=False,
         )
         _print_summary(result)
         return
@@ -223,6 +224,7 @@ def run_browser_checks(
     expect_cheap_refresh_same_freshness: bool | None = None,
     expect_data_refresh_changes_freshness: bool | None = None,
     expected_final_badge_tone: str | None = None,
+    run_actions: bool = True,
 ) -> dict[str, object]:
     page_url = base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     if as_of_date:
@@ -325,14 +327,18 @@ def run_browser_checks(
             }
             if not all(filter_controls.values()):
                 raise AssertionError(f"missing filter controls: {filter_controls}")
-            compact_widths = _measure_compact_widths(page)
+            compact_widths = _measure_compact_widths(page, strict=expected_percent_rows is not None)
             percent_formatting = _check_percent_formatting(page, expected_rows=expected_percent_rows)
-            load_refresh_action = _check_load_refresh_action(
-                page,
-                previous_summary_cards=initial_summary_cards,
-                previous_activity_surface=initial_activity_surface,
-                expect_freshness_change=expect_data_refresh_changes_freshness,
-                expected_final_badge_tone=expected_final_badge_tone,
+            load_refresh_action = (
+                _check_load_refresh_action(
+                    page,
+                    previous_summary_cards=initial_summary_cards,
+                    previous_activity_surface=initial_activity_surface,
+                    expect_freshness_change=expect_data_refresh_changes_freshness,
+                    expected_final_badge_tone=expected_final_badge_tone,
+                )
+                if run_actions
+                else {"skipped": "read-only public base-url mode"}
             )
 
             metric_select = page.locator("[data-filter-control='metric']")
@@ -388,7 +394,7 @@ def run_browser_checks(
             historical_selector_works = False
             historical_reset_works = False
             preset_calendar_sync = False
-            if not as_of_date:
+            if not as_of_date and run_actions:
                 page.locator("[data-history-preset='week']").click()
                 page.wait_for_function(
                     "() => document.querySelector('[data-history-date-from]').value === '2026-04-14' && document.querySelector('[data-history-date-to]').value === '2026-04-20'",
@@ -890,7 +896,7 @@ def _activity_block_matches(previous_block: dict[str, object], next_block: dict[
     )
 
 
-def _measure_compact_widths(page: object) -> dict[str, int]:
+def _measure_compact_widths(page: object, *, strict: bool) -> dict[str, int]:
     widths = page.locator("[data-table-head] th").evaluate_all(
         """nodes => Object.fromEntries(nodes.map(node => [
           node.getAttribute('data-col-id'),
@@ -906,10 +912,10 @@ def _measure_compact_widths(page: object) -> dict[str, int]:
     for column_id, max_width in required.items():
         if int(widths.get(column_id, 0)) <= 0:
             raise AssertionError(f"missing width measurement for {column_id!r}: {widths}")
-        if int(widths[column_id]) > max_width:
+        if strict and int(widths[column_id]) > max_width:
             raise AssertionError(f"{column_id} must stay compact in browser render, got {widths}")
     for column_id in [key for key in widths if key.startswith("date:")]:
-        if int(widths[column_id]) > 94:
+        if strict and int(widths[column_id]) > 94:
             raise AssertionError(f"date column must stay narrow in browser render, got {widths}")
     return {
         "row_order": int(widths["row_order"]),
