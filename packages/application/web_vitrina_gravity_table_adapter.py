@@ -396,6 +396,8 @@ def _column_floor_width(column_id: str) -> int:
         return 108
     if column_id == "metric_label":
         return 122
+    if column_id == "row_last_updated_at":
+        return 112
     return 72
 
 
@@ -417,6 +419,8 @@ def _header_measure_length(column_id: str, header_text: str) -> int:
         return min(header_length, 12)
     if column_id in {"scope_label", "metric_label"}:
         return min(header_length, 14)
+    if column_id == "row_last_updated_at":
+        return min(header_length, 12)
     return min(header_length, 12)
 
 

@@ -2210,6 +2210,7 @@ def _serialize_sheet_vitrina_plan(plan: SheetVitrinaV1Envelope) -> str:
             for item in plan.temporal_slots
         ],
         "source_temporal_policies": plan.source_temporal_policies,
+        "metadata": _to_jsonable(dict(getattr(plan, "metadata", {}) or {})),
         "sheets": [
             {
                 "sheet_name": item.sheet_name,
@@ -2239,6 +2240,17 @@ def _deserialize_sheet_vitrina_plan(raw_value: str) -> SheetVitrinaV1Envelope:
     plan = parse_sheet_write_plan_payload(payload)
     effective_policies = effective_source_temporal_policies(plan.source_temporal_policies)
     if effective_policies == plan.source_temporal_policies:
+        if isinstance(payload.get("metadata"), Mapping):
+            return SheetVitrinaV1Envelope(
+                plan_version=plan.plan_version,
+                snapshot_id=plan.snapshot_id,
+                as_of_date=plan.as_of_date,
+                date_columns=plan.date_columns,
+                temporal_slots=plan.temporal_slots,
+                source_temporal_policies=plan.source_temporal_policies,
+                sheets=plan.sheets,
+                metadata=dict(payload.get("metadata") or {}),
+            )
         return plan
     return SheetVitrinaV1Envelope(
         plan_version=plan.plan_version,
@@ -2248,6 +2260,7 @@ def _deserialize_sheet_vitrina_plan(raw_value: str) -> SheetVitrinaV1Envelope:
         temporal_slots=plan.temporal_slots,
         source_temporal_policies=effective_policies,
         sheets=plan.sheets,
+        metadata=dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), Mapping) else {},
     )
 
 

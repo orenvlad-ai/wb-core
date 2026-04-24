@@ -93,6 +93,7 @@ class WebVitrinaContractRow:
     scope_label: str
     metric_key: str
     metric_label: str
+    row_last_updated_at: str
     section: str
     group: str | None
     nm_id: int | None

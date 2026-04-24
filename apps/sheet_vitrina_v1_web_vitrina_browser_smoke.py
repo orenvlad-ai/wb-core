@@ -107,7 +107,7 @@ def main() -> None:
         "activity_surface": ready_result["activity_surface"],
         "compact_widths": ready_result["compact_widths"],
         "percent_formatting": ready_result["percent_formatting"],
-        "refresh_loading_status": ready_result["refresh_loading_status"],
+        "operator_screen_layout": ready_result["operator_screen_layout"],
         "load_refresh_action": ready_result["load_refresh_action"],
         "right_edge_spacer": ready_result["right_edge_spacer"],
         "column_visibility": ready_result["column_visibility"],
@@ -276,6 +276,7 @@ def run_browser_checks(
                 page,
                 allow_empty_log=expected_percent_rows is None,
             )
+            operator_screen_layout = _check_operator_screen_layout(page)
             first_loading_row = (initial_activity_surface["loading"]["rows"] or [None])[0]
             if not isinstance(first_loading_row, dict):
                 raise AssertionError(f"activity surface must expose at least one loading row, got {initial_activity_surface}")
@@ -326,17 +327,10 @@ def run_browser_checks(
                 raise AssertionError(f"missing filter controls: {filter_controls}")
             compact_widths = _measure_compact_widths(page)
             percent_formatting = _check_percent_formatting(page, expected_rows=expected_percent_rows)
-            refresh_loading_status = _check_refresh_loading_status(
+            load_refresh_action = _check_load_refresh_action(
                 page,
                 previous_summary_cards=initial_summary_cards,
                 previous_activity_surface=initial_activity_surface,
-                expect_same_freshness=expect_cheap_refresh_same_freshness,
-                expected_final_badge_tone=expected_final_badge_tone,
-            )
-            load_refresh_action = _check_load_refresh_action(
-                page,
-                previous_summary_cards=refresh_loading_status["summary_cards"],
-                previous_activity_surface=refresh_loading_status["activity_surface"],
                 expect_freshness_change=expect_data_refresh_changes_freshness,
                 expected_final_badge_tone=expected_final_badge_tone,
             )
@@ -447,7 +441,7 @@ def run_browser_checks(
         "activity_surface": initial_activity_surface,
         "compact_widths": compact_widths,
         "percent_formatting": percent_formatting,
-        "refresh_loading_status": refresh_loading_status,
+        "operator_screen_layout": operator_screen_layout,
         "load_refresh_action": load_refresh_action,
         "column_visibility": column_visibility,
         "horizontal_overscroll_guard": horizontal_overscroll_guard,
@@ -499,7 +493,7 @@ def _print_summary(result: dict[str, object]) -> None:
     print("web_vitrina_browser_activity_surface: ok ->", result["activity_surface"])
     print("web_vitrina_browser_compact_widths: ok ->", result["compact_widths"])
     print("web_vitrina_browser_percent_formatting: ok ->", result["percent_formatting"])
-    print("web_vitrina_browser_refresh_loading_status: ok ->", result["refresh_loading_status"])
+    print("web_vitrina_browser_operator_screen_layout: ok ->", result["operator_screen_layout"])
     print("web_vitrina_browser_load_refresh_action: ok ->", result["load_refresh_action"])
     print("web_vitrina_browser_right_edge_spacer: ok ->", result["right_edge_spacer"])
     print("web_vitrina_browser_sku_separators: ok ->", result["sku_separators"])
@@ -586,51 +580,61 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
         "scope_checkbox_checked_after_reset": scope_checkbox_checked,
     }
 
-def _check_refresh_loading_status(
-    page: object,
-    *,
-    previous_summary_cards: dict[str, dict[str, str]],
-    previous_activity_surface: dict[str, object],
-    expect_same_freshness: bool | None,
-    expected_final_badge_tone: str | None,
-) -> dict[str, object]:
-    page.locator("[data-retry-button]").click()
-    page.wait_for_function(
+def _check_operator_screen_layout(page: object) -> dict[str, object]:
+    payload = page.evaluate(
         """() => {
-          const badge = document.querySelector('[data-status-badge]');
-          return !!badge && badge.textContent.trim() === 'Загрузка' && badge.className.includes('tone-warning');
-        }""",
-        timeout=5000,
+          const nodeIndex = selector => {
+            const node = document.querySelector(selector);
+            if (!node) {
+              return -1;
+            }
+            let current = node;
+            while (current && !(current.parentElement && current.parentElement.matches('main'))) {
+              current = current.parentElement;
+            }
+            return current ? Array.from(document.querySelectorAll('main > section')).indexOf(current) : -1;
+          };
+          const loadButton = document.querySelector('[data-load-refresh-button]');
+          const operatorLink = document.querySelector('[data-open-operator]');
+          const headers = Array.from(document.querySelectorAll('[data-table-head] th')).map(node => (node.textContent || '').trim());
+          return {
+            retry_button_count: document.querySelectorAll('[data-retry-button]').length,
+            load_button_text: loadButton ? (loadButton.textContent || '').trim() : '',
+            load_button_class: loadButton ? (loadButton.getAttribute('class') || '') : '',
+            operator_link_text: operatorLink ? (operatorLink.textContent || '').trim() : '',
+            operator_link_target: operatorLink ? (operatorLink.getAttribute('target') || '') : '',
+            json_link_class: (document.querySelector('[data-open-contract]') || {}).getAttribute('class') || '',
+            headers,
+            order: {
+              top: nodeIndex('[data-top-panel]'),
+              summary: nodeIndex('[data-summary-grid]'),
+              table: nodeIndex('[data-table-shell]'),
+              filters: nodeIndex('[data-filter-controls]'),
+              history: nodeIndex('[data-history-calendar]'),
+              actions: nodeIndex('[data-activity-block]')
+            }
+          };
+        }"""
     )
-    loading_badge = {
-        "label": page.locator("[data-status-badge]").inner_text().strip(),
-        "class_name": page.locator("[data-status-badge]").get_attribute("class") or "",
-    }
-    _wait_for_semantic_badge(page, expected_tone=expected_final_badge_tone, timeout=20000)
-    next_summary_cards = _read_summary_cards(page)
-    next_activity_surface = _read_activity_surface(page)
-    _assert_page_refresh_card_changed(previous_summary_cards, next_summary_cards, action_name="cheap refresh")
-    freshness_unchanged = _freshness_card_matches(previous_summary_cards, next_summary_cards)
-    if expect_same_freshness is True and not freshness_unchanged:
-        raise AssertionError(
-            f"cheap refresh must not fake data freshness when snapshot is unchanged, got {previous_summary_cards} -> {next_summary_cards}"
-        )
-    if expect_same_freshness is False and freshness_unchanged:
-        raise AssertionError("cheap refresh was expected to advance data freshness but did not")
-    if not _activity_block_matches(previous_activity_surface["loading"], next_activity_surface["loading"]):
-        raise AssertionError(
-            f"cheap refresh must not overwrite the last loading table state, got {previous_activity_surface} -> {next_activity_surface}"
-        )
-    return {
-        "loading_badge": loading_badge,
-        "page_refresh_before": previous_summary_cards["page_refresh"]["updated_at"],
-        "page_refresh_after": next_summary_cards["page_refresh"]["updated_at"],
-        "freshness_before": previous_summary_cards["freshness"]["value"],
-        "freshness_after": next_summary_cards["freshness"]["value"],
-        "freshness_unchanged": freshness_unchanged,
-        "summary_cards": next_summary_cards,
-        "activity_surface": next_activity_surface,
-    }
+    if payload["retry_button_count"] != 0:
+        raise AssertionError(f"removed refresh button must not be rendered, got {payload}")
+    if payload["load_button_text"] != "Загрузить и обновить" or "primary" not in payload["load_button_class"]:
+        raise AssertionError(f"load+refresh button must be the single primary action, got {payload}")
+    if payload["operator_link_text"] != "Операторский сайт" or payload["operator_link_target"] != "_blank":
+        raise AssertionError(f"operator control must be a new-tab link, got {payload}")
+    if "secondary" not in payload["json_link_class"]:
+        raise AssertionError(f"JSON Connect must be secondary when present, got {payload}")
+    for forbidden in ("Metric Label", "Sections", "Score Label"):
+        if forbidden in payload["headers"]:
+            raise AssertionError(f"main table headers must be Russian-only, got {payload['headers']}")
+    for expected in ("Раздел", "Метрика", "Обновлено"):
+        if expected not in payload["headers"]:
+            raise AssertionError(f"main table must expose header {expected!r}, got {payload['headers']}")
+    order_values = payload["order"]
+    expected_order = [order_values[key] for key in ("top", "summary", "table", "filters", "history", "actions")]
+    if any(value < 0 for value in expected_order) or expected_order != sorted(expected_order):
+        raise AssertionError(f"web-vitrina blocks must follow the operator screen order, got {payload}")
+    return payload
 
 
 def _check_load_refresh_action(
@@ -765,6 +769,7 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
           const readLoadingTable = () => {
             const rows = Array.from(document.querySelectorAll('[data-loading-source]')).map(row => ({
               source_key: row.getAttribute('data-loading-source') || '',
+              source_group_id: row.getAttribute('data-loading-source-group') || '',
               source: ((row.querySelector('[data-col-id="source"]') || {}).textContent || '').trim(),
               today_status: ((row.querySelector('[data-col-id="today_status"]') || {}).textContent || '').trim(),
               today_reason: ((row.querySelector('[data-col-id="today_reason"]') || {}).textContent || '').trim(),
@@ -777,10 +782,19 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
               id: node.getAttribute('data-col-id') || '',
               label: (node.textContent || '').trim()
             }));
+            const groups = Array.from(document.querySelectorAll('[data-loading-group]')).map(node => ({
+              group_id: node.getAttribute('data-loading-group') || '',
+              text: (node.textContent || '').trim(),
+              has_refresh_button: node.querySelectorAll('[data-refresh-source-group]').length === 1,
+              has_session_check: node.querySelectorAll('[data-session-check]').length === 1,
+              has_session_recovery_start: node.querySelectorAll('[data-session-recovery-start]').length === 1,
+              has_session_launcher: node.querySelectorAll('[data-session-launcher]').length === 1
+            }));
             return {
               meta: ((document.querySelector('[data-loading-table-meta]') || {}).textContent || '').trim(),
               subtitle: ((document.querySelector('[data-loading-table-subtitle]') || {}).textContent || '').trim(),
               headers: headers,
+              groups: groups,
               rows: rows
             };
           };
@@ -808,6 +822,18 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
         return payload
     if not loading_ids:
         raise AssertionError(f"loading table must expose source rows, got {payload}")
+    group_ids = [item["group_id"] for item in payload["loading"]["groups"]]
+    if group_ids != ["wb_api", "seller_portal_bot", "other_sources"]:
+        raise AssertionError(f"loading table must render grouped source headers, got {payload}")
+    if not all(item["has_refresh_button"] for item in payload["loading"]["groups"]):
+        raise AssertionError(f"each loading group must expose one group refresh button, got {payload}")
+    seller_group = next(item for item in payload["loading"]["groups"] if item["group_id"] == "seller_portal_bot")
+    if not (
+        seller_group["has_session_check"]
+        and seller_group["has_session_recovery_start"]
+        and seller_group["has_session_launcher"]
+    ):
+        raise AssertionError(f"Seller Portal group must expose session controls, got {payload}")
     header_labels = [item["label"] for item in payload["loading"]["headers"]]
     for expected in ("Источник", "Причина сегодня", "Причина вчера", "Метрики", "Технический endpoint"):
         if expected not in header_labels:

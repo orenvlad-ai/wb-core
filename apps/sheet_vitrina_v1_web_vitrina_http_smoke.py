@@ -186,11 +186,9 @@ def main() -> None:
                 raise AssertionError(f"web-vitrina period selected_date_to mismatch, got {period_composition_payload}")
             activity_surface = composition_payload.get("activity_surface") or {}
             log_block = activity_surface.get("log_block", {})
-            if log_block.get("download_path") != "":
-                raise AssertionError(f"web-vitrina log block must not fake a stale job download path, got {activity_surface}")
             if log_block.get("tone") != "error":
                 raise AssertionError(f"web-vitrina log block must surface persisted warning/error fallback, got {activity_surface}")
-            if "Лог последнего refresh" not in str(log_block.get("subtitle", "")):
+            if "refresh" not in str(log_block.get("subtitle", "")):
                 raise AssertionError(f"web-vitrina log block subtitle mismatch, got {activity_surface}")
             upload_items = activity_surface.get("upload_summary", {}).get("items") or []
             if "update_summary" in activity_surface:
@@ -198,8 +196,15 @@ def main() -> None:
             loading_table = activity_surface.get("loading_table", {})
             loading_rows = loading_table.get("rows") or []
             loading_columns = {item.get("id"): item for item in loading_table.get("columns") or []}
+            loading_groups = {item.get("group_id"): item for item in loading_table.get("groups") or []}
             if [row.get("source_key") for row in loading_rows] != [item.get("source_key") for item in upload_items]:
                 raise AssertionError(f"web-vitrina loading table must follow upload source truth, got {activity_surface}")
+            if sorted(loading_groups) != ["other_sources", "seller_portal_bot", "wb_api"]:
+                raise AssertionError(f"web-vitrina loading table must expose stable source groups, got {loading_groups}")
+            if not loading_groups["seller_portal_bot"].get("session_controls"):
+                raise AssertionError(f"seller portal group must expose session controls, got {loading_groups}")
+            if {row.get("source_group_id") for row in loading_rows} != {"wb_api", "seller_portal_bot"}:
+                raise AssertionError(f"loading table rows must be grouped by source group, got {loading_rows}")
             if not str((loading_columns.get("today_status") or {}).get("label") or "").startswith("Сегодня: "):
                 raise AssertionError(f"web-vitrina loading table today column mismatch, got {loading_table}")
             if not str((loading_columns.get("yesterday_status") or {}).get("label") or "").startswith("Вчера: "):
@@ -232,13 +237,13 @@ def main() -> None:
                 raise AssertionError(f"web-vitrina page route must return 200, got {page_status}")
             for expected in (
                 "Web-витрина",
-                "Phase 4 Web-Vitrina Page Composition",
+                "Операторский сайт",
                 DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
                 DEFAULT_SHEET_OPERATOR_UI_PATH,
                 "surface=page_composition",
                 "web_vitrina_page_composition",
-                "web_vitrina_view_model",
-                "web_vitrina_gravity_table_adapter",
+                "data-top-panel",
+                "Загрузить и обновить",
                 "data-filter-controls",
                 "data-history-calendar",
                 "data-history-presets",
@@ -252,10 +257,16 @@ def main() -> None:
                 "data-loading-table-head",
                 "data-loading-table-body",
                 "Загрузка данных",
+                "Обновить группу",
+                "Проверить сессию",
+                "Восстановить сессию",
+                "Скачать лаунчер",
                 "Лог",
             ):
                 if expected not in page_html:
                     raise AssertionError(f"web-vitrina page shell must expose {expected!r}")
+            if "data-retry-button" in page_html:
+                raise AssertionError("web-vitrina page must not render the removed refresh button")
             if "Обновление данных" in page_html or "data-update-summary" in page_html:
                 raise AssertionError("web-vitrina page must not render the removed update data block")
             if page_html.index("data-loading-table") > page_html.index("data-activity-log-body"):

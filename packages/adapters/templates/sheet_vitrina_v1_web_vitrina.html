@@ -48,7 +48,7 @@
       overscroll-behavior-x: none;
     }
 
-    .hero,
+    .top-panel,
     .panel {
       background: var(--panel-bg);
       border: 1px solid var(--border);
@@ -56,64 +56,46 @@
       box-shadow: var(--shadow);
     }
 
-    .hero {
-      padding: 16px 18px;
+    .top-panel {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      flex-wrap: wrap;
+      padding: 10px 14px;
       margin-bottom: 8px;
     }
 
-    .hero-top {
+    .top-panel-left,
+    .top-panel-actions {
       display: flex;
       gap: 16px;
-      justify-content: space-between;
-      align-items: flex-start;
+      align-items: center;
       flex-wrap: wrap;
     }
 
-    .eyebrow {
-      margin: 0 0 10px;
-      font-size: 10px;
+    .operator-site-link {
+      color: var(--accent);
+      font-size: 12px;
       font-weight: 700;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--muted);
-    }
-
-    h1 {
-      margin: 0;
-      font-size: 30px;
-      line-height: 1.08;
-    }
-
-    .lead {
-      margin: 10px 0 0;
-      max-width: 920px;
-      font-size: 12.5px;
-      line-height: 1.55;
-      color: var(--muted);
+      text-decoration: none;
     }
 
     .meta-line,
     .source-line {
-      margin: 10px 0 0;
+      margin: 0;
       font-size: 11px;
       line-height: 1.45;
       color: var(--muted);
       word-break: break-word;
     }
 
-    .hero-actions {
-      display: flex;
-      flex-direction: column;
-      align-items: flex-end;
-      gap: 8px;
-      min-width: 220px;
-    }
-
-    .hero-buttons {
+    .top-panel-actions {
       display: flex;
       flex-wrap: wrap;
+      align-items: center;
       justify-content: flex-end;
-      gap: 10px;
+      gap: 8px;
     }
 
     .button {
@@ -383,6 +365,45 @@
     .activity-metric-list {
       display: block;
       max-width: 360px;
+    }
+
+    .activity-group-row td {
+      background: #eef1f5;
+      color: #364456;
+      font-size: 11px;
+      font-weight: 700;
+      border-top: 1px solid var(--border-strong);
+    }
+
+    .activity-group-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .activity-group-main,
+    .activity-group-actions,
+    .seller-session-controls {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .activity-group-updated,
+    .seller-session-state {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    .activity-group-button,
+    .seller-session-button {
+      min-height: 28px;
+      padding: 5px 9px;
+      font-size: 11px;
     }
 
     .activity-summary-item {
@@ -963,25 +984,18 @@
         padding: 12px;
       }
 
-      .hero,
+      .top-panel,
       .panel {
         padding: 12px;
       }
 
-      h1 {
-        font-size: 24px;
-      }
-
-      .hero-actions {
+      .top-panel,
+      .top-panel-actions {
         align-items: stretch;
-        min-width: 100%;
-      }
-
-      .hero-buttons {
         justify-content: stretch;
       }
 
-      .hero-buttons .button {
+      .top-panel-actions .button {
         flex: 1 1 100%;
       }
 
@@ -1023,31 +1037,15 @@
 </head>
 <body>
   <main class="page" data-web-vitrina-page="web_vitrina_page_composition">
-    <section class="hero">
-      <div class="hero-top">
-        <div>
-          <p class="eyebrow">Phase 4 Web-Vitrina Page Composition</p>
-          <h1>Web-витрина</h1>
-          <p class="lead">
-            Read-only web-витрина поверх persisted snapshot. Визуальный shell стал плотнее и ближе к рабочему табличному
-            референсу, но truth assembly и data seams по-прежнему полностью server-driven.
-          </p>
-          <p class="meta-line" data-page-meta>
-            Загрузка page composition…
-          </p>
-          <p class="source-line" data-source-chain>
-            source chain: web_vitrina_contract -> web_vitrina_view_model -> web_vitrina_gravity_table_adapter -> web_vitrina_page_composition
-          </p>
-        </div>
-        <div class="hero-actions">
-          <span class="status-badge tone-warning" data-status-badge>Загрузка</span>
-          <div class="hero-buttons">
-            <a class="button primary" data-open-contract href="#">JSON contract</a>
-            <a class="button secondary" data-open-operator href="#">Operator</a>
-            <button class="button secondary" type="button" data-load-refresh-button>Загрузить и обновить</button>
-            <button class="button secondary" type="button" data-retry-button>Обновить</button>
-          </div>
-        </div>
+    <section class="top-panel" data-top-panel>
+      <div class="top-panel-left">
+        <a class="operator-site-link" data-open-operator href="#" target="_blank" rel="noopener noreferrer">Операторский сайт</a>
+        <p class="meta-line" data-page-meta>Загрузка page composition…</p>
+      </div>
+      <div class="top-panel-actions">
+        <a class="button secondary" data-open-contract href="#">JSON Connect</a>
+        <button class="button primary" type="button" data-load-refresh-button>Загрузить и обновить</button>
+        <span class="status-badge tone-warning" data-status-badge>Загрузка</span>
       </div>
     </section>
 
@@ -1056,46 +1054,66 @@
     <section class="panel">
       <div class="panel-top">
         <div>
-          <h2>Действия и состояние</h2>
+          <h2>Таблица</h2>
           <p class="panel-note">
-            Этот блок остаётся server-driven: `Обновить` только перечитывает текущий page composition, а `Загрузить и обновить`
-            запускает canonical `POST /refresh` и потом reread-ит уже сохранённый результат.
+            Основная web-витрина поверх persisted ready snapshot.
+          </p>
+        </div>
+        <p class="panel-meta" data-table-meta>
+          ожидание server payload…
+        </p>
+      </div>
+
+      <div class="state-box" data-table-state>
+        <h3 class="state-title" data-state-title>Загрузка витрины…</h3>
+        <p class="state-body" data-state-body>
+          Страница читает server-driven page composition через существующий <code>GET /v1/sheet-vitrina-v1/web-vitrina</code>
+          c optional <code>surface=page_composition</code>.
+        </p>
+      </div>
+
+      <div class="table-shell is-hidden" data-table-shell>
+        <div class="table-scroll" data-table-scroll>
+          <table class="vitrina-table">
+            <thead data-table-head></thead>
+            <tbody data-table-body></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-top">
+        <div>
+          <h2>Фильтры и настройки</h2>
+          <p class="panel-note">
+            Search/select/sort и выбор видимых столбцов работают поверх уже собранного server-driven payload.
+          </p>
+        </div>
+        <div class="table-tools">
+          <details class="column-manager" data-column-manager>
+            <summary class="column-manager-toggle">Столбцы</summary>
+            <div class="column-manager-panel">
+              <p class="column-manager-note" data-column-manager-note>
+                Загрузка настроек столбцов…
+              </p>
+              <div class="column-checkbox-list" data-column-visibility-controls>
+                Загрузка настроек столбцов…
+              </div>
+              <div class="column-manager-actions">
+                <button class="button secondary" type="button" data-columns-reset>Сбросить столбцы</button>
+              </div>
+            </div>
+          </details>
+          <p class="panel-meta" data-filter-meta>
+            загрузка фильтров…
           </p>
         </div>
       </div>
-      <div class="activity-layout">
-        <section class="activity-card">
-          <div class="activity-card-header">
-            <div>
-              <p class="activity-card-title" data-loading-table-title>Загрузка данных</p>
-              <p class="activity-card-subtitle" data-loading-table-subtitle>загрузка статусов…</p>
-            </div>
-          </div>
-          <p class="activity-summary-meta" data-loading-table-meta>Ожидание server summary…</p>
-          <div class="table-shell activity-loading-table" data-loading-table-shell>
-            <div class="table-scroll">
-              <table class="vitrina-table" data-loading-table>
-                <thead data-loading-table-head></thead>
-                <tbody data-loading-table-body></tbody>
-              </table>
-            </div>
-          </div>
-          <p class="activity-empty is-hidden" data-loading-table-empty>Статусы по источникам пока недоступны.</p>
-        </section>
-        <section class="activity-card is-secondary">
-          <div class="activity-card-header">
-            <div>
-              <p class="activity-card-title" data-activity-log-title>Лог</p>
-              <p class="activity-card-subtitle" data-activity-log-subtitle>загрузка лога…</p>
-            </div>
-            <span class="status-pill tone-neutral" data-activity-log-status>Нет данных</span>
-          </div>
-          <p class="activity-card-detail" data-activity-log-detail>Последний релевантный run/log пока не прочитан.</p>
-          <pre class="activity-log-body" data-activity-log-body>Загрузка…</pre>
-          <div class="activity-log-actions">
-            <a class="button secondary is-disabled" data-activity-log-download href="#" download>Скачать лог</a>
-          </div>
-        </section>
+      <div class="filters-grid" data-filter-controls></div>
+      <div class="filters-footer">
+        <p class="filter-summary" data-filter-summary>Загрузка…</p>
+        <button class="button secondary" type="button" data-reset-filters>Сбросить фильтры</button>
       </div>
     </section>
 
@@ -1157,69 +1175,48 @@
       </div>
     </section>
 
-    <section class="panel">
+    <section class="panel" data-activity-block>
       <div class="panel-top">
         <div>
-          <h2>Фильтры</h2>
+          <h2>Действия и состояния</h2>
           <p class="panel-note">
-            Только page-local search/select/sort поверх уже собранного server-driven payload. Никакой business logic в браузер не перенесён.
+            Grouped manual actions reuse existing refresh/status/job/log seams. Отдельный update-summary блок не используется.
           </p>
         </div>
-        <p class="panel-meta" data-filter-meta>
-          загрузка фильтров…
-        </p>
       </div>
-      <div class="filters-grid" data-filter-controls></div>
-      <div class="filters-footer">
-        <p class="filter-summary" data-filter-summary>Загрузка…</p>
-        <button class="button secondary" type="button" data-reset-filters>Сбросить фильтры</button>
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-top">
-        <div>
-          <h2>Таблица</h2>
-          <p class="panel-note">
-            Таблица остаётся thin render shell поверх repo-owned Gravity adapter payload и не становится owner для truth или расчётов.
-          </p>
-        </div>
-        <div class="table-tools">
-          <details class="column-manager" data-column-manager>
-            <summary class="column-manager-toggle">Столбцы</summary>
-            <div class="column-manager-panel">
-              <p class="column-manager-note" data-column-manager-note>
-                Загрузка настроек столбцов…
-              </p>
-              <div class="column-checkbox-list" data-column-visibility-controls>
-                Загрузка настроек столбцов…
-              </div>
-              <div class="column-manager-actions">
-                <button class="button secondary" type="button" data-columns-reset>Сбросить столбцы</button>
-              </div>
+      <div class="activity-layout">
+        <section class="activity-card">
+          <div class="activity-card-header">
+            <div>
+              <p class="activity-card-title" data-loading-table-title>Загрузка данных</p>
+              <p class="activity-card-subtitle" data-loading-table-subtitle>загрузка статусов…</p>
             </div>
-          </details>
-          <p class="panel-meta" data-table-meta>
-            ожидание server payload…
-          </p>
-        </div>
-      </div>
-
-      <div class="state-box" data-table-state>
-        <h3 class="state-title" data-state-title>Загрузка витрины…</h3>
-        <p class="state-body" data-state-body>
-          Страница читает server-driven page composition через существующий <code>GET /v1/sheet-vitrina-v1/web-vitrina</code>
-          c optional <code>surface=page_composition</code>.
-        </p>
-      </div>
-
-      <div class="table-shell is-hidden" data-table-shell>
-        <div class="table-scroll" data-table-scroll>
-          <table class="vitrina-table">
-            <thead data-table-head></thead>
-            <tbody data-table-body></tbody>
-          </table>
-        </div>
+          </div>
+          <p class="activity-summary-meta" data-loading-table-meta>Ожидание server summary…</p>
+          <div class="table-shell activity-loading-table" data-loading-table-shell>
+            <div class="table-scroll">
+              <table class="vitrina-table" data-loading-table>
+                <thead data-loading-table-head></thead>
+                <tbody data-loading-table-body></tbody>
+              </table>
+            </div>
+          </div>
+          <p class="activity-empty is-hidden" data-loading-table-empty>Статусы по источникам пока недоступны.</p>
+        </section>
+        <section class="activity-card is-secondary">
+          <div class="activity-card-header">
+            <div>
+              <p class="activity-card-title" data-activity-log-title>Лог</p>
+              <p class="activity-card-subtitle" data-activity-log-subtitle>загрузка лога…</p>
+            </div>
+            <span class="status-pill tone-neutral" data-activity-log-status>Нет данных</span>
+          </div>
+          <p class="activity-card-detail" data-activity-log-detail>Последний релевантный run/log пока не прочитан.</p>
+          <pre class="activity-log-body" data-activity-log-body>Загрузка…</pre>
+          <div class="activity-log-actions">
+            <a class="button secondary is-disabled" data-activity-log-download href="#" download>Скачать лог</a>
+          </div>
+        </section>
       </div>
     </section>
   </main>
@@ -1228,7 +1225,6 @@
     const WEB_VITRINA_CONFIG = __SHEET_VITRINA_V1_WEB_VITRINA_CONFIG_JSON__;
     const summaryGridNode = document.querySelector("[data-summary-grid]");
     const pageMetaNode = document.querySelector("[data-page-meta]");
-    const sourceChainNode = document.querySelector("[data-source-chain]");
     const statusBadgeNode = document.querySelector("[data-status-badge]");
     const historyMetaNode = document.querySelector("[data-history-meta]");
     const historySummaryNode = document.querySelector("[data-history-summary]");
@@ -1269,7 +1265,6 @@
     const openContractLink = document.querySelector("[data-open-contract]");
     const openOperatorLink = document.querySelector("[data-open-operator]");
     const loadRefreshButton = document.querySelector("[data-load-refresh-button]");
-    const retryButton = document.querySelector("[data-retry-button]");
     const resetFiltersButton = document.querySelector("[data-reset-filters]");
 
     const ALL_VALUE = "__all__";
@@ -1306,18 +1301,38 @@
         defaultVisibleIds: [],
         mandatoryIds: [],
         visibleIds: []
+      },
+      sellerSession: {
+        statusLabel: "",
+        tone: "neutral",
+        checkedAt: ""
       }
     };
 
     openOperatorLink.href = WEB_VITRINA_CONFIG.operator_path;
+    openOperatorLink.target = "_blank";
+    openOperatorLink.rel = "noopener noreferrer";
     openContractLink.href = buildReadUrl("contract").toString();
-
-    retryButton.addEventListener("click", function() {
-      loadPageComposition();
-    });
 
     loadRefreshButton.addEventListener("click", function() {
       runSourceRefreshAndReload();
+    });
+
+    loadingTableBodyNode.addEventListener("click", function(event) {
+      const groupButton = event.target.closest("[data-refresh-source-group]");
+      if (groupButton) {
+        runSourceGroupRefresh(groupButton.getAttribute("data-refresh-source-group") || "");
+        return;
+      }
+      const sessionCheckButton = event.target.closest("[data-session-check]");
+      if (sessionCheckButton) {
+        runSellerSessionCheck();
+        return;
+      }
+      const recoveryStartButton = event.target.closest("[data-session-recovery-start]");
+      if (recoveryStartButton) {
+        runSellerRecoveryStart();
+      }
     });
 
     historyDateFromNode.addEventListener("change", function() {
@@ -1437,8 +1452,10 @@
     }
 
     function setActionButtonsDisabled(disabled) {
-      retryButton.disabled = !!disabled;
       loadRefreshButton.disabled = !!disabled;
+      loadingTableBodyNode.querySelectorAll("button").forEach(function(button) {
+        button.disabled = !!disabled;
+      });
     }
 
     function buildColumnVisibilityStorageKey(payload) {
@@ -1688,11 +1705,86 @@
       loadingTableHeadNode.innerHTML = "<tr>" + columns.map(function(column) {
         return '<th data-col-id="' + escapeHtml(column.id || "") + '">' + escapeHtml(column.label || "") + "</th>";
       }).join("") + "</tr>";
-      loadingTableBodyNode.innerHTML = rows.map(function(row) {
-        return '<tr data-loading-source="' + escapeHtml(row.source_key || "") + '">' + columns.map(function(column) {
-          return '<td data-col-id="' + escapeHtml(column.id || "") + '">' + renderLoadingTableCell(column.id, row) + "</td>";
-        }).join("") + "</tr>";
-      }).join("");
+      loadingTableBodyNode.innerHTML = renderGroupedLoadingRows(block, rows, columns);
+    }
+
+    function renderGroupedLoadingRows(block, rows, columns) {
+      const groups = Array.isArray(block.groups) ? block.groups : [];
+      if (!groups.length) {
+        return rows.map(function(row) {
+          return renderLoadingSourceRow(row, columns);
+        }).join("");
+      }
+      const rowsByGroup = new Map();
+      rows.forEach(function(row) {
+        const groupId = String(row.source_group_id || "other_sources");
+        if (!rowsByGroup.has(groupId)) {
+          rowsByGroup.set(groupId, []);
+        }
+        rowsByGroup.get(groupId).push(row);
+      });
+      const rendered = [];
+      groups.forEach(function(group) {
+        const groupRows = rowsByGroup.get(String(group.group_id || "")) || [];
+        rendered.push(renderLoadingGroupRow(group, columns.length));
+        groupRows.forEach(function(row) {
+          rendered.push(renderLoadingSourceRow(row, columns));
+        });
+        if (!groupRows.length) {
+          rendered.push(
+            '<tr data-loading-source-empty="' +
+            escapeHtml(group.group_id || "") +
+            '"><td colspan="' +
+            String(columns.length) +
+            '">Источники группы пока не представлены в status payload.</td></tr>'
+          );
+        }
+      });
+      return rendered.join("");
+    }
+
+    function renderLoadingGroupRow(group, columnCount) {
+      const groupId = String(group.group_id || "");
+      const updatedAt = String(group.last_updated_at || "");
+      const updatedText = updatedAt ? formatTimestampDisplay(updatedAt) : "нет данных";
+      return [
+        '<tr class="activity-group-row" data-loading-group="' + escapeHtml(groupId) + '"><td colspan="' + String(columnCount) + '">',
+        '<div class="activity-group-header">',
+        '<span class="activity-group-main">',
+        '<span>' + escapeHtml(group.label || groupId) + '</span>',
+        '<span class="activity-group-updated">Последнее обновление: ' + escapeHtml(updatedText) + '</span>',
+        '</span>',
+        '<span class="activity-group-actions">',
+        '<button class="button secondary activity-group-button" type="button" data-refresh-source-group="' + escapeHtml(groupId) + '">Обновить группу</button>',
+        renderSellerSessionControls(group),
+        '</span>',
+        '</div>',
+        '</td></tr>'
+      ].join("");
+    }
+
+    function renderSellerSessionControls(group) {
+      if (!group.session_controls) {
+        return "";
+      }
+      const status = state.sellerSession.statusLabel
+        ? ("Сессия: " + state.sellerSession.statusLabel + " · проверено " + formatTimestampDisplay(state.sellerSession.checkedAt))
+        : "Сессия: не проверялась";
+      const tone = normalizeTone(state.sellerSession.tone || "neutral");
+      return [
+        '<span class="seller-session-controls" data-seller-session-controls>',
+        '<button class="button secondary seller-session-button" type="button" data-session-check>Проверить сессию</button>',
+        '<button class="button secondary seller-session-button" type="button" data-session-recovery-start>Восстановить сессию</button>',
+        '<a class="button secondary seller-session-button" data-session-launcher href="' + escapeHtml(WEB_VITRINA_CONFIG.seller_recovery_launcher_path || "#") + '" download>Скачать лаунчер</a>',
+        '<span class="seller-session-state tone-' + escapeHtml(tone) + '" data-session-state>' + escapeHtml(status) + '</span>',
+        '</span>'
+      ].join("");
+    }
+
+    function renderLoadingSourceRow(row, columns) {
+      return '<tr data-loading-source="' + escapeHtml(row.source_key || "") + '" data-loading-source-group="' + escapeHtml(row.source_group_id || "") + '">' + columns.map(function(column) {
+        return '<td data-col-id="' + escapeHtml(column.id || "") + '">' + renderLoadingTableCell(column.id, row) + "</td>";
+      }).join("") + "</tr>";
     }
 
     function itemToLegacyLoadingRow(item) {
@@ -1703,6 +1795,7 @@
       };
       return {
         source_key: item.source_key || item.endpoint_id || "",
+        source_group_id: item.source_group_id || "other_sources",
         source_label: item.label_ru || item.endpoint_label || item.source_key || item.endpoint_id || "",
         today: fallbackStatus,
         today_reason: fallbackStatus.reason,
@@ -2355,15 +2448,6 @@
         valueOrDash(payload.meta && payload.meta.as_of_date) +
         " · timezone " +
         valueOrDash(payload.meta && payload.meta.business_timezone);
-      sourceChainNode.textContent =
-        "source chain: " +
-        valueOrDash(payload.meta && payload.meta.source_contract_name) +
-        " -> " +
-        valueOrDash(payload.meta && payload.meta.source_view_model_name) +
-        " -> " +
-        valueOrDash(payload.meta && payload.meta.source_adapter_name) +
-        " -> " +
-        valueOrDash(payload.composition_name);
       filterMetaNode.textContent =
         "state namespace: " +
         valueOrDash(payload.meta && payload.meta.state_namespace) +
@@ -2872,6 +2956,170 @@
       }
     }
 
+    async function runSourceGroupRefresh(sourceGroupId) {
+      const normalizedGroupId = String(sourceGroupId || "").trim();
+      if (!normalizedGroupId) {
+        return;
+      }
+      const actionId = state.actionSequence + 1;
+      state.actionSequence = actionId;
+      setActionButtonsDisabled(true);
+      setStatusBadge({label: "Загрузка", tone: "warning", detail: "обновляем группу источников: " + normalizedGroupId});
+      try {
+        const requestPayload = {async: true, source_group_id: normalizedGroupId};
+        const asOfDate = currentActionAsOfDate();
+        if (asOfDate) {
+          requestPayload.as_of_date = asOfDate;
+        }
+        const response = await fetch(WEB_VITRINA_CONFIG.group_refresh_path, {
+          method: "POST",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json; charset=utf-8"
+          },
+          body: JSON.stringify(requestPayload)
+        });
+        const payload = await readJsonResponse(response, "non-json response from source group refresh route");
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "source group refresh route returned " + response.status);
+        }
+        const resolvedJobPath = String(
+          (payload && payload.job_path) ||
+          ((payload && payload.job_id) ? (WEB_VITRINA_CONFIG.job_path + "?job_id=" + encodeURIComponent(payload.job_id)) : "")
+        );
+        const finalJob = await pollSheetJob(resolvedJobPath, actionId);
+        if (actionId !== state.actionSequence) {
+          return;
+        }
+        if (!finalJob || finalJob.status !== "success") {
+          throw new Error((finalJob && (finalJob.error || finalJob.status)) || "source group refresh job failed");
+        }
+        setStatusBadge({label: "Загрузка", tone: "warning", detail: "группа обновлена, перечитываем витрину"});
+        await loadPageComposition();
+      } catch (error) {
+        if (actionId !== state.actionSequence) {
+          return;
+        }
+        const message = String(error && error.message ? error.message : error);
+        setStatusBadge({label: "Ошибка", tone: "error", detail: message});
+      } finally {
+        if (actionId === state.actionSequence) {
+          setActionButtonsDisabled(false);
+        }
+      }
+    }
+
+    async function runSellerSessionCheck() {
+      const actionId = state.actionSequence + 1;
+      state.actionSequence = actionId;
+      setActionButtonsDisabled(true);
+      setStatusBadge({label: "Проверка", tone: "warning", detail: "проверяем Seller Portal session"});
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.seller_session_check_path, {
+          method: "POST",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json; charset=utf-8"
+          },
+          body: JSON.stringify({async: true})
+        });
+        const payload = await readJsonResponse(response, "non-json response from seller session check route");
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "seller session check route returned " + response.status);
+        }
+        const resolvedJobPath = String(
+          (payload && payload.job_path) ||
+          ((payload && payload.job_id) ? (WEB_VITRINA_CONFIG.job_path + "?job_id=" + encodeURIComponent(payload.job_id)) : "")
+        );
+        const finalJob = await pollSheetJob(resolvedJobPath, actionId);
+        if (actionId !== state.actionSequence) {
+          return;
+        }
+        if (!finalJob || finalJob.status !== "success") {
+          throw new Error((finalJob && (finalJob.error || finalJob.status)) || "seller session check job failed");
+        }
+        applySellerSessionResult(finalJob.result || {});
+        setStatusBadge({
+          label: state.sellerSession.statusLabel || "Проверено",
+          tone: state.sellerSession.tone,
+          detail: "Seller Portal session check завершён"
+        });
+        await loadPageComposition();
+      } catch (error) {
+        if (actionId !== state.actionSequence) {
+          return;
+        }
+        const checkedAt = new Date().toISOString();
+        state.sellerSession = {
+          statusLabel: "неуспешно",
+          tone: "error",
+          checkedAt: checkedAt
+        };
+        renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
+        const message = String(error && error.message ? error.message : error);
+        setStatusBadge({label: "Ошибка", tone: "error", detail: message});
+      } finally {
+        if (actionId === state.actionSequence) {
+          setActionButtonsDisabled(false);
+        }
+      }
+    }
+
+    async function runSellerRecoveryStart() {
+      const actionId = state.actionSequence + 1;
+      state.actionSequence = actionId;
+      setActionButtonsDisabled(true);
+      setStatusBadge({label: "Запуск", tone: "warning", detail: "запрашиваем восстановление Seller Portal session"});
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.seller_recovery_start_path, {
+          method: "POST",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json; charset=utf-8"
+          },
+          body: JSON.stringify({replace: true, async: true})
+        });
+        const payload = await readJsonResponse(response, "non-json response from seller recovery start route");
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "seller recovery start route returned " + response.status);
+        }
+        const resolvedJobPath = String(
+          (payload && payload.job_path) ||
+          ((payload && payload.job_id) ? (WEB_VITRINA_CONFIG.job_path + "?job_id=" + encodeURIComponent(payload.job_id)) : "")
+        );
+        const finalJob = resolvedJobPath ? await pollSheetJob(resolvedJobPath, actionId) : {status: "success", result: payload};
+        if (actionId !== state.actionSequence) {
+          return;
+        }
+        if (!finalJob || finalJob.status !== "success") {
+          throw new Error((finalJob && (finalJob.error || finalJob.status)) || "seller recovery start job failed");
+        }
+        setStatusBadge({label: "Запущено", tone: "warning", detail: "recovery flow requested"});
+        await loadPageComposition();
+      } catch (error) {
+        if (actionId !== state.actionSequence) {
+          return;
+        }
+        const message = String(error && error.message ? error.message : error);
+        setStatusBadge({label: "Ошибка", tone: "error", detail: message});
+      } finally {
+        if (actionId === state.actionSequence) {
+          setActionButtonsDisabled(false);
+        }
+      }
+    }
+
+    function applySellerSessionResult(result) {
+      const ok = Boolean(result && result.session_ok);
+      const checkedAt = String((result && result.checked_at) || new Date().toISOString());
+      state.sellerSession = {
+        statusLabel: ok ? "успешно" : "неуспешно",
+        tone: ok ? "success" : "error",
+        checkedAt: checkedAt
+      };
+      renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
+    }
+
     async function loadPageComposition() {
       const requestId = state.requestSequence + 1;
       state.requestSequence = requestId;
@@ -2932,8 +3180,6 @@
         filterSummaryNode.textContent = "Ошибка";
         tableMetaNode.textContent = "page composition недоступен";
         pageMetaNode.textContent = "Ошибка чтения read route";
-        sourceChainNode.textContent =
-          "source chain: web_vitrina_contract -> web_vitrina_view_model -> web_vitrina_gravity_table_adapter -> web_vitrina_page_composition";
         setStatusBadge({label: "Ошибка", tone: "error", detail: message});
         setStateBox("error", "Не удалось загрузить витрину", escapeHtml(message));
       } finally {

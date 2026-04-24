@@ -40,6 +40,7 @@ class SheetVitrinaV1Envelope:
     temporal_slots: list[SheetVitrinaV1TemporalSlot]
     source_temporal_policies: dict[str, str]
     sheets: list[SheetVitrinaWriteTarget]
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
