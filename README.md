@@ -16,14 +16,14 @@ Legacy-репозитории остаются рабочими, но счита
 - `rule-based` модулей;
 - `table-facing` и `projection` read-side;
 - `registry` pilot line и первый upload bundle path;
-- `wide matrix`, `delivery` и `sheet-side` витрины.
+- `wide matrix`, `delivery`, legacy sheet-side/export contour и текущую web-витрину.
 
 Подтверждённый main-confirmed contour:
 
 `sku_display -> table_projection -> registry_pilot -> wide_matrix -> delivery -> sheet_scaffold`
 
 В `main` также уже есть:
-- live write bridge новой витрины в bound Google Sheet;
+- legacy/export write bridge в bound Google Sheet для старого sheet-side contour;
 - presentation pass для `DATA_VITRINA` и `STATUS`;
 - compact v3 bootstrap для `CONFIG / METRICS / FORMULAS`, который поднимает уже заполненные operator sheets и сохраняет service/status block;
 - отдельный bounded `COST_PRICE` contour: лист `COST_PRICE`, separate menu actions, sibling HTTP upload path, server-side authoritative storage seam вне compact registry bundle и read-side overlay в refresh/load contour для `cost_price_rub`, `total_proxy_profit_rub`, `proxy_margin_pct_total`;
@@ -53,7 +53,7 @@ Legacy-репозитории остаются рабочими, но счита
 - `artifacts/sheet_vitrina_v1_registry_seed_v3_bootstrap/` как compact v3 bootstrap для operator registry sheets;
 - `artifacts/sheet_vitrina_v1_mvp_end_to_end/` как первый bounded end-to-end MVP для `VB-Core Витрина V1`;
 - `packages/application/cost_price_upload.py` и `packages/contracts/cost_price_upload.py` как отдельный authoritative upload contract для `COST_PRICE`, который затем подключается server-side в `sheet_vitrina_v1` refresh/read contour;
-- `gas/sheet_vitrina_v1/` и `.clasp.json` для bound sheet-side wiring;
+- `gas/sheet_vitrina_v1/` и `.clasp.json` для legacy bound sheet-side/export wiring; это не active production surface для текущей web-витрины;
 - `wb_core_docs_master/` как compact curated-pack для project-oriented retrieval вне primary repo docs;
 - `docs/modules/` как канонический модульный reference;
 - `migration/` как канонический слой migration contracts и implementation notes.

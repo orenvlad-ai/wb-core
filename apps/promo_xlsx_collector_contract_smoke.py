@@ -20,12 +20,14 @@ from packages.adapters.promo_xlsx_collector_block import (  # noqa: E402
     is_hydrated_state,
 )
 from packages.application.promo_xlsx_collector_block import (  # noqa: E402
+    PromoXlsxCollectorBlock,
     build_metadata,
     classify_export_kind,
     parse_period_text,
 )
 from packages.contracts.promo_xlsx_collector_block import (  # noqa: E402
     CollectorStateSnapshot,
+    PromoXlsxCollectorRequest,
     PromoCardData,
 )
 
@@ -129,11 +131,38 @@ def main() -> None:
         raise AssertionError("metadata sidecar keys must stay stable")
     json.dumps(metadata_payload, ensure_ascii=False)
 
+    result = PromoXlsxCollectorBlock(_HydrationExceptionDriver()).execute(
+        PromoXlsxCollectorRequest(
+            output_root="/tmp/wb-core-promo-hydration-exception-smoke",
+            storage_state_path="/tmp/unused-storage-state.json",
+            hydration_attempt_budget=1,
+        )
+    )
+    if result.status != "blocked":
+        raise AssertionError(f"hydration exception must produce blocked summary, got {result.status}")
+    if len(result.hydration_attempts) != 1:
+        raise AssertionError("hydration exception must persist a failed attempt summary")
+    blocker = result.hydration_attempts[0].blocker or ""
+    if "hydration_exception=synthetic goto timeout" not in blocker:
+        raise AssertionError(f"unexpected hydration exception blocker: {blocker}")
+
     print("sidecar_contract: ok")
     print("export_kind_classification: ok")
     print("cross_year_parse_rule: ok")
     print("entry_reset_constants: ok")
+    print("hydration_exception_surface: ok")
     print("smoke-check passed")
+
+
+class _HydrationExceptionDriver:
+    def start(self, request: PromoXlsxCollectorRequest) -> None:
+        return
+
+    def stop(self) -> None:
+        return
+
+    def attempt_hydration(self, attempt_num: int, label_prefix: str = "initial"):
+        raise TimeoutError("synthetic goto timeout")
 
 
 if __name__ == "__main__":

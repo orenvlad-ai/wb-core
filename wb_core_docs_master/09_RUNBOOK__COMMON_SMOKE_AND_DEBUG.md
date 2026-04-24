@@ -4,7 +4,7 @@ doc_id: "WB-CORE-PROJECT-09-RUNBOOK"
 doc_type: "runbook"
 status: "active"
 purpose: "Дать компактный набор частых smoke/debug команд для `wb-core` без погружения во все artifacts и module docs."
-scope: "Registry upload chain, sheet-side MVP flow, live GAS checks, common failure signatures и минимальные debug entrypoints."
+scope: "Registry upload chain, current server/web-vitrina flow, legacy sheet/export checks, common failure signatures и минимальные debug entrypoints."
 source_basis:
   - "README.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
@@ -46,8 +46,8 @@ built_from_commit: "ae486b1ff53136a633fc34389f1c5b025a3d180c"
 
 Этот runbook нужен для быстрого ответа на вопросы:
 - broken ли registry upload chain;
-- broken ли sheet-side MVP flow;
-- broken ли live GAS wiring;
+- broken ли current server/web-vitrina flow;
+- broken ли legacy sheet/export wiring, если scope действительно затрагивает bound Apps Script/live sheet write;
 - где искать first useful signal.
 
 # Current norm
@@ -163,8 +163,10 @@ Current promo collector norm:
 Current promo live-source wiring norm:
 - authoritative live source key = `promo_by_price`
 - `today_current` runs bounded repo-owned promo collector server-side inside refresh contour
-- `yesterday_closed` reads only accepted/runtime-cached promo truth
+- `yesterday_closed` attempts corrective interval replay first and falls back to accepted/runtime-cached promo truth only when replay is unavailable or non-exact
 - invalid later attempt must not overwrite accepted current/closed promo truth
+- promo candidate/eligible metric split is canonical: `promo_participation` and `promo_count_by_price` are computed from eligible rows where runtime `price_seller_discounted < Плановая цена для акции`; `promo_entry_price_best` is computed as max plan price across active candidate rows, so ineligible SKUs can truthfully have participation/count `0` and entry price `>0`
+- missing runtime seller price must not fake-positive participation/count, but must not hide candidate-derived `promo_entry_price_best` when active candidate plan prices exist
 
 ## Hosted runtime contract
 
@@ -261,7 +263,9 @@ python3 apps/sheet_vitrina_v1_stocks_historical_backfill.py \
   --date-to 2026-04-18
 ```
 
-## Live GAS checks
+## Legacy GAS/sheet export checks
+
+This section is legacy/export-only for current web-vitrina work. Do not use Google Sheets, GAS, `clasp` or `invalid_grant` as active completion blockers for `/sheet-vitrina-v1/vitrina` or `GET /v1/sheet-vitrina-v1/web-vitrina`; use server/public web-vitrina probes instead.
 
 ```bash
 clasp push
@@ -310,7 +314,7 @@ Operational rule:
 - проверить scope diff и `git diff --check`;
 - прогнать targeted local smoke / integration smoke по затронутому bounded path;
 - использовать этот closure только там, где scope реально repo-only;
-- не объявлять задачу complete, если для неё по смыслу нужен live/public/GAS closure.
+- не объявлять задачу complete, если для неё по смыслу нужен live/public closure. GAS/sheet closure требуется только для bound Apps Script/live sheet scope.
 
 ### Docs-governance closure
 
@@ -332,6 +336,12 @@ Operational rule:
   - если change затрагивает daily refresh semantics, обновить и timer wiring;
   - проверить route на loopback/runtime contour через `loopback-probe` или equivalent probe;
   - проверить route снаружи через public URL через `public-probe` или equivalent probe;
+- для текущей web-витрины final verify = server/public web surface:
+  - `GET /v1/sheet-vitrina-v1/web-vitrina`
+  - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition`
+  - `GET /sheet-vitrina-v1/vitrina`
+  - content-level verify по affected SKU/date rows в payload/table surface;
+  - Google Sheets / GAS / `clasp` / `invalid_grant` не входят в active completion path.
 - current live `sheet_vitrina_v1` contour:
   - service = `wb-core-registry-http.service`
   - timer = `wb-core-sheet-vitrina-refresh.timer`
@@ -354,7 +364,7 @@ Operational rule:
   - truthfully blocked `422`, если shared `stock_ff` отсутствует;
   - district summary totals = sum of generated district XLSX rows;
   - public `GET /v1/sheet-vitrina-v1/supply/wb-regional/status` и `GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district}.xlsx` surface expected JSON/XLSX shape.
-- если change затрагивает operator `load` или live sheet write path, closure дополнительно требует `clasp push` и sheet verify по `POST /v1/sheet-vitrina-v1/load` или equivalent existing Apps Script menu flow.
+- если change затрагивает operator `load`, bound Apps Script или live sheet write path, closure дополнительно требует `clasp push` и sheet verify по `POST /v1/sheet-vitrina-v1/load` или equivalent existing Apps Script menu flow.
 - если runner уже materialized, но `ssh_destination / target_dir / service_name / restart_command / environment_file` или access отсутствуют, это фиксируется как точный blocker, а не как vague ops-gap.
 
 ### GAS/sheet closure
@@ -378,7 +388,9 @@ Operational rule:
   - проверить readiness по `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`;
   - в финальном handoff оставить один human-only шаг: после merge загрузить актуальный pack во внешний Project.
 
-## What to verify in sheet
+## What to verify in legacy sheet/export contour
+
+Use this section only when the task changes bound Apps Script, live sheet write, or explicit legacy/export behavior. It is not a completion checklist for the current web-vitrina.
 
 - `CONFIG / METRICS / FORMULAS` have expected headers and non-empty rows;
 - `prepareRegistryUploadOperatorSheets` currently materializes `33 / 102 / 7`;
@@ -425,6 +437,7 @@ Operational rule:
 
 | Signal | Meaning |
 | --- | --- |
+| `clasp` / Google auth `invalid_grant` | legacy sheet/GAS auth failure only; not a blocker for current web-vitrina unless the task scope explicitly changes bound Apps Script/live sheet write |
 | `CONFIG!I2 должен содержать URL registry upload endpoint` | sheet-side endpoint URL is missing |
 | `COST_PRICE!F2 должен содержать URL cost price upload endpoint или должен быть заполнен CONFIG!I2` | COST_PRICE upload path has no explicit URL and cannot derive origin from registry upload control block |
 | `STATUS.cost_price[*] = missing` or `incomplete` | authoritative COST_PRICE dataset is empty, not materialized, or does not cover every enabled group for the requested slot date |
@@ -437,7 +450,7 @@ Operational rule:
 | в ranked decline list daily-report показывается только `3` позиции | truthful data shape for the current comparable pair; repo-owned diagnostic smoke currently keeps `raw_candidate_count=10`, `present_after_none_filter_count=9`, `negative_count=3`, `positive_count=6`, with `avg_ads_bid_search` excluded because both closed-day values are missing |
 | `Отчёт по остаткам пока недоступен` при ожидаемо готовом closed-day snapshot | missing/stale deploy, broken `GET /v1/sheet-vitrina-v1/stock-report` route, либо ready snapshot `default_business_as_of_date(now)` не materialized или его `yesterday_closed` slot не совпадает с requested/default closed business day |
 | `sheet vitrina endpoint returned non-JSON response` | wrong publish/upstream route or HTML error surface instead of expected JSON |
-| `today_current` values оказались под yesterday date column | live runtime или GAS publish stale; current contour всё ещё использует single-date surrogate вместо two-slot ready snapshot |
+| `today_current` values оказались под yesterday date column | live runtime stale; current contour всё ещё использует single-date surrogate вместо two-slot ready snapshot. GAS publish относится только к legacy sheet/export scope |
 | default refresh without `as_of_date` materialize-ит `UTC yesterday` / `UTC today` вместо EKT dates | stale deploy or stale business-time helper; current runtime still uses UTC-bound default-date semantics instead of `Asia/Yekaterinburg` |
 | `required env WB_API_TOKEN is not set` | live/runtime secret boundary is not aligned with the canonical WB token path |
 | `historical stocks report .* did not finish within bounded polling window` or `... was not listed` | Seller Analytics CSV historical report did not become downloadable in bounded time; inspect `STOCK_HISTORY_DAILY_CSV` report queue / token scope / upstream availability |
@@ -448,10 +461,10 @@ Operational rule:
 | `STATUS.web_source_snapshot[yesterday_closed]` or `STATUS.seller_funnel_snapshot[yesterday_closed]` is `closure_retrying` / `closure_rate_limited` / `closure_exhausted` | strict closed-day acceptance has not confirmed final truth yet; closed slot must stay blank/error instead of silently inheriting provisional same-day values |
 | `STATUS.web_source_snapshot[today_current].note` or `STATUS.seller_funnel_snapshot[today_current].note` starts with `current_day_web_source_sync_failed=` | bounded refresh tried server-local same-day capture/handoff and failed before exact-date local snapshot became available; investigate `/opt/wb-web-bot` runners, `/opt/wb-ai/run_web_source_handoff.py`, env and host-local owner paths |
 | the same note contains `seller_portal_session_invalid` or UI reason says `сессия seller portal больше не действует; требуется повторный вход` | current `/opt/wb-web-bot/storage_state.json` no longer authorizes seller portal; prepare localhost-only relogin surface via `cd /opt/wb-core-runtime/app && python3 apps/seller_portal_relogin_session.py start`, then use the returned SSH/noVNC step to log in; the tool auto-saves `storage_state.json` after validated auth and auto-runs refresh |
-| operator block `Восстановление Seller-сессии` shows `starting_visual_session` | localhost-only noVNC/Xvfb is already up, but the visible remote Chromium window is still materializing; wait until the block changes to `awaiting_login`, then open the Mac launcher and log in |
-| operator block `Восстановление Seller-сессии` shows `awaiting_login` | use the same page to start recovery, download the Mac launcher and log in through the SSH-tunneled localhost-only noVNC browser; recovery is not complete until status leaves `awaiting_login` and the tool confirms canonical supplier/save/refresh |
-| operator block `Восстановление Seller-сессии` shows `wrong_organization` | login succeeded, but the saved session still points to a non-canonical supplier; inspect `SELLER_PORTAL_CANONICAL_SUPPLIER_ID` / `SELLER_PORTAL_CANONICAL_SUPPLIER_LABEL`, then rerun recovery so the tool can safe-switch to the canonical supplier before it saves final success |
-| operator block `Восстановление Seller-сессии` shows `refresh_failed` after login | seller auth recovery succeeded and `storage_state.json` was saved, but the post-login refresh still failed deeper in the ingest contour; use existing `Лог` / job download surface and then debug the downstream source family rather than repeating the login blindly |
+| operator block `Проверка и восстановление Seller-сессии` shows `starting` | recovery run уже создан и получил свой `run_id`, но временное окно входа ещё готовится; дождитесь `awaiting_login`, затем скачайте Mac launcher |
+| operator block `Проверка и восстановление Seller-сессии` shows `awaiting_login` | используйте тот же page block, скачайте launcher и войдите через SSH-tunneled localhost-only noVNC browser; recovery не complete until status leaves `awaiting_login` and the tool confirms save/validation/canonical supplier/refresh |
+| operator block shows final `not_needed` | конкретный recovery run завершился сразу: на момент старта seller session already valid + canonical, поэтому noVNC/login не требовались |
+| operator block shows final `error` with summary about wrong cabinet or refresh | смотрите `summary`/`Финал запуска`: final run marker уже materialized и больше не зависит от общего session-check; wrong cabinet => inspect `SELLER_PORTAL_CANONICAL_SUPPLIER_ID` / `SELLER_PORTAL_CANONICAL_SUPPLIER_LABEL`, refresh error => debug downstream refresh/log contour |
 | `STATUS.seller_funnel_snapshot[*] = error` with `invalid_exact_snapshot=zero_filled_seller_funnel_snapshot` | exact-date seller-funnel payload existed but every `view_count/open_card_count` was zero; runtime rejected it as invalid instead of materializing false zero metrics, so inspect `/opt/wb-web-bot` capture freshness and rerun handoff |
 | `STATUS.web_source_snapshot[yesterday_closed].note` contains `closed_day_source_freshness_not_accepted` | exact-date search snapshot was fetched before the business day was actually closed; rerun authoritative closure path instead of accepting a provisional payload as final truth |
 | `STATUS.stocks[yesterday_closed].note` starts with `unmapped stocks quantity outside configured district map=` | historical stocks payload contains quantity outside the current RU district mapping; `stock_total` keeps it, district rows stay source-backed, and the residual is surfaced explicitly instead of being dropped |
@@ -459,7 +472,7 @@ Operational rule:
 | manual refresh leaves `closure_retrying` / `closure_pending` state for a source that only failed in the manual run | regression in execution-mode separation; manual path must not create persisted retry debt |
 | `ReferenceError: URL is not defined` | Apps Script runtime bug in sheet-side URL derivation |
 | `registry upload bundle must contain 5-64 metrics_v2 entries` | live runtime still serves stale validator / stale deploy and is not aligned with current repo semantics |
-| `ACCESS_TOKEN_SCOPE_INSUFFICIENT` for `clasp` | local GAS OAuth scopes are insufficient for content read/write |
+| `ACCESS_TOKEN_SCOPE_INSUFFICIENT` for `clasp` | local GAS OAuth scopes are insufficient for legacy sheet content read/write; not a current web-vitrina blocker |
 | `gh: command not found` or `gh auth status -h github.com` shows no active auth | current execution context cannot own ordinary GitHub PR closure; return exact blocker and one minimal manual next step |
 | `gh pr merge` returns permission / protection error | ordinary merge is blocked by missing write rights or branch protection; keep merge as human-only fallback only for this blocker case |
 

@@ -35,7 +35,7 @@ related_docs:
   - "docs/modules/27_MODULE__PROMO_XLSX_COLLECTOR_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под archive-first / interval-based promo semantics: collector reuse-ит unchanged campaign artifacts, historical closed-day truth materialize-ится из campaign interval replay в exact-date runtime seam, а existing refresh/load contour продолжает читать только already prepared server-owned snapshots."
+update_note: "Обновлён под archive-first / interval-based promo semantics and canonical candidate-vs-eligible metric split: participation/count считаются по eligible rows, а promo_entry_price_best считается как max plan price по active candidate rows."
 ---
 
 # 1. Идентификатор и статус
@@ -60,7 +60,8 @@ update_note: "Обновлён под archive-first / interval-based promo seman
   - `promo_entry_price_best`
 - Historical truth generation теперь тоже server-owned:
   - campaign metadata задаёт authoritative interval `promo_start_at..promo_end_at`
-  - archived workbook задаёт SKU + price fields
+  - archived workbook задаёт SKU + `Плановая цена для акции`
+  - daily metric truth задаёт `price_seller_discounted` через runtime `prices_snapshot[accepted_current_snapshot]` для exact requested date
   - interval replay materialize-ит exact-date payload в existing runtime seam `temporal_source_snapshots[source_key=promo_by_price]`
 
 # 3. Target contract и смысл результата
@@ -71,8 +72,8 @@ update_note: "Обновлён под archive-first / interval-based promo seman
   - after archive sync materialize-ит exact-date current payload из covering archived campaign artifacts;
   - future promo не попадают в current numeric fill.
 - `promo_by_price[yesterday_closed]`:
-  - read-side по-прежнему читает только accepted/runtime-cached promo truth;
-  - но cache miss теперь может truthfully закрываться server-side interval replay из archived campaign artifacts для exact requested date;
+  - corrective refresh сначала обязан попытаться server-side interval replay из archived campaign artifacts для exact requested date и overwrite-ить stale accepted closed snapshot, если replay дал exact `success`;
+  - только если interval replay не дал exact `success`, read-side может fallback-нуться к already accepted/runtime-cached promo truth;
   - invalid later attempt не может destructively overwrite accepted closed/current truth.
 
 `STATUS` для promo source обязан surface-ить:
@@ -94,7 +95,7 @@ update_note: "Обновлён под archive-first / interval-based promo seman
 
 - `promo_by_price` теперь относится к `dual_day_capable` группе read-side, но с asymmetric capture semantics:
   - `today_current` = archive-first live collector attempt for the current business day, followed by archive-based exact-date materialization
-  - `yesterday_closed` = accepted/runtime-cached exact-date truth, which may be initially populated by interval replay on cache miss
+  - `yesterday_closed` = corrective interval replay first, then accepted/runtime cache only as bounded fallback when replay is unavailable or non-exact
 - exact promo dates materialize-ятся только при reliable parse and only inside authoritative campaign interval.
 - Для cross-year short labels:
   - `promo_period_text` остаётся authoritative raw field
@@ -109,13 +110,18 @@ update_note: "Обновлён под archive-first / interval-based promo seman
 # 5. Source -> runtime mapping
 
 - Numeric mapping живёт server-side и не переносится в Apps Script:
-  - `promo_entry_price_best` = best applicable `Плановая цена для акции`
-  - `promo_count_by_price` = count of covering campaign rows where `Текущая розничная цена < Плановая цена для акции`
-  - `promo_participation` = `1` when `promo_count_by_price > 0`, else `0`
+  - сначала строится `candidate set` из covering campaign rows для `SKU + date`, где SKU есть в archived workbook, дата попадает в `promo_start_at..promo_end_at`, а `Плановая цена для акции` валидна;
+  - campaign interval / identity / `Плановая цена для акции` берутся из archived promo workbook + metadata;
+  - `price_seller_discounted` берётся как already materialized daily metric truth для exact date из runtime `prices_snapshot`;
+  - `eligible set` = candidate rows, где `price_seller_discounted < Плановая цена для акции`;
+  - `promo_participation` = `1` when eligible set is non-empty, else `0`;
+  - `promo_count_by_price` = count of eligible rows;
+  - `promo_entry_price_best` = max(`Плановая цена для акции`) по candidate rows, not eligible rows; при пустом candidate set остаётся truthful empty `0`;
+  - если candidate set есть, но `price_seller_discounted` отсутствует, source may remain `incomplete`, participation/count stay non-positive, но `promo_entry_price_best` продолжает surface-ить max candidate plan price.
 - overlap rule is deterministic and additive across covering campaigns for the same SKU/date.
 - Workbook alone не считается sufficient:
   - promo title / period / promo status / promo_id / period_id идут из sidecar/card truth
-  - workbook inspection нужен для row-level numeric fill и export-kind reporting
+  - workbook inspection нужен для export-kind reporting и artifact debugging, но не для вычисления seller discounted price
   - workbook reuse is preferred over redundant repeated downloads when metadata/content did not change
 
 # 6. Кодовые части

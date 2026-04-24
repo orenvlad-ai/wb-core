@@ -29,7 +29,7 @@ related_modules:
 related_paths:
   - "packages/"
   - "apps/"
-  - "gas/sheet_vitrina_v1/"
+  - "gas/sheet_vitrina_v1/ (legacy/export-only for current web-vitrina work)"
   - "registry/"
 update_triggers:
   - "изменение current main-confirmed contour"
@@ -46,9 +46,10 @@ built_from_commit: "967edcc2059b36db36a3846d9f773c0b90e20f90"
 - source/data blocks `01–12` уже смёржены;
 - table/projection/wide/sheet read-side `13–19` уже смёржены;
 - registry upload line `20–23` уже смёржена;
-- sheet-side operator line `24–26` уже смёржена, включая первый bounded MVP `prepare -> upload -> refresh -> load`;
+- sheet-side operator line `24–26` уже смёржена как legacy/export contour, включая первый bounded MVP `prepare -> upload -> refresh -> load`;
 - bounded browser-capture collector `27` уже смёржен как repo-owned local promo XLSX runner с truthful sidecar contract;
 - bounded live wiring `28` уже смёржен и переводит `promo_by_price` из blocked gap в current server-owned source seam внутри existing refresh/runtime/read-side contour.
+- web-vitrina line `29–31` уже смёржена и является active user-facing surface: `/sheet-vitrina-v1/vitrina` + `/v1/sheet-vitrina-v1/web-vitrina`.
 
 # Current norm
 
@@ -63,7 +64,8 @@ built_from_commit: "967edcc2059b36db36a3846d9f773c0b90e20f90"
 
 Confirmed contour на текущем `main`:
 - `sku_display -> table_projection -> registry_pilot -> wide_matrix -> delivery -> sheet_scaffold`
-- `live write -> presentation -> registry upload -> sheet trigger -> compact seed -> bounded refresh/read reverse-load`
+- `registry upload -> compact seed -> bounded refresh/read -> web_vitrina_contract -> view_model -> gravity_adapter -> page_composition`
+- legacy/export contour remains: `live write -> presentation -> sheet trigger -> reverse-load`, but it is not the active completion target for web-vitrina tasks.
 
 ## Что уже materialized
 
@@ -83,8 +85,8 @@ Confirmed contour на текущем `main`:
   - workbook inspection and export-kind classification for downloaded/reused promo XLSX.
 - repo-owned bounded `promo_live_source_wiring_block`:
   - `promo_by_price[today_current]` materialize-ится через repo-owned archive-first collector run
-  - `promo_by_price[yesterday_closed]` по-прежнему читается только из accepted/runtime-cached exact-date promo truth
-  - exact-date promo truth now may be populated server-side from archived campaign interval replay on cache miss
+  - `promo_by_price[yesterday_closed]` на corrective refresh сначала пересчитывается server-side interval replay из archived campaign artifacts
+  - accepted/runtime-cached exact-date promo truth используется только как fallback, если replay не дал exact `success`
   - invalid later attempts do not overwrite accepted current/closed promo truth
   - low-confidence cross-year labels keep `promo_start_at/end_at = null`
 

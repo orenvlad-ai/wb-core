@@ -74,8 +74,9 @@ Legacy и target сравниваются по:
 Нельзя потерять:
 - semantics уровня `date + nmId`;
 - зависимость `promo_count_by_price` от текущего `price_seller_discounted`;
-- `promo_entry_price_best = max(plan_price)` по активным акциям на дату;
-- `promo_participation = 1`, если `promo_count_by_price > 0`, иначе `0`.
+ - общий eligible set для `promo_entry_price_best` / `promo_count_by_price` / `promo_participation`;
+ - `promo_entry_price_best = max(plan_price)` только по eligible акциям на дату, иначе truthful empty `0`;
+ - `promo_participation = 1`, если `promo_count_by_price > 0`, иначе `0`.
 
 ## Required Evidence
 

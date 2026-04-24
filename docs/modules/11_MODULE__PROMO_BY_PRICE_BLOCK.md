@@ -50,8 +50,10 @@ update_note: "Создан как канонический модульный д
 - Legacy смысл результата задаётся на уровне `date + nmId`.
 - Ключевая semantics:
   - active rule определяется как `start_date <= date <= end_date`
-  - `promo_entry_price_best = max(plan_price)` по active rules
-  - `promo_count_by_price = count(plan_price where price_seller_discounted < plan_price + 0.5)`
+  - eligible rule определяется как active rule, где `price_seller_discounted < plan_price`
+  - все три promo-метрики должны выводиться из одного и того же eligible rule set
+  - `promo_entry_price_best = max(plan_price)` по eligible rules; при пустом eligible set = truthful empty `0`
+  - `promo_count_by_price = count(eligible rules)`
   - `promo_participation = 1`, если `promo_count_by_price > 0`
 
 # 3. Target contract и смысл результата

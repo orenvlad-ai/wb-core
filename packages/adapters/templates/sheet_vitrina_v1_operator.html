@@ -1138,20 +1138,51 @@
 
           <section class="block" aria-labelledby="sellerRecoveryTitle">
             <div class="block-header">
-              <h2 id="sellerRecoveryTitle" class="block-title">Восстановление Seller-сессии</h2>
+              <h2 id="sellerRecoveryTitle" class="block-title">Проверка и восстановление Seller-сессии</h2>
               <span id="sellerRecoveryBadge" class="badge is-idle">проверяем</span>
             </div>
             <p class="field-note">
-              Используйте этот блок только для logout/session drop инцидентов seller portal. После входа система сама
-              проверит нужный кабинет, при необходимости переключит supplier, сохранит <code>storage_state.json</code>,
-              запустит refresh и cleanup-нет временный recovery contour.
+              Сначала проверьте сохранённую seller-сессию. Если вход слетел или открыт не тот кабинет, запустите
+              временное окно входа: после логина система сама проверит нужный кабинет, при необходимости переключит
+              supplier, сохранит <code>storage_state.json</code>, запустит refresh и закроет временный login contour.
             </p>
             <div class="block-actions">
-              <button id="sellerRecoveryStartButton" class="action-button secondary-button" type="button">Восстановить Seller-сессию</button>
+              <button id="sellerSessionCheckButton" class="action-button secondary-button" type="button">Проверить сессию</button>
+              <button id="sellerRecoveryStartButton" class="action-button secondary-button" type="button">Восстановить сессию</button>
               <button id="sellerRecoveryLauncherButton" class="action-button secondary-button" type="button" disabled>Скачать launcher для Mac</button>
-              <button id="sellerRecoveryStopButton" class="action-button secondary-button" type="button" disabled>Остановить recovery</button>
+              <button id="sellerRecoveryStopButton" class="action-button secondary-button" type="button" disabled>Остановить восстановление</button>
             </div>
-            <p id="sellerRecoverySummary" class="field-note">Проверяем текущее состояние seller-session...</p>
+            <p class="field-note">
+              «Остановить восстановление» закрывает только временное окно входа. Сохранённый
+              <code>storage_state.json</code> не удаляется, seller-сессия бота не сбрасывается.
+            </p>
+            <dl class="meta-grid">
+              <div>
+                <dt>Текущий запуск</dt>
+                <dd id="sellerRecoveryRunId">не запущен</dd>
+              </div>
+              <div>
+                <dt>Статус запуска</dt>
+                <dd id="sellerRecoveryRunStatus">-</dd>
+              </div>
+              <div>
+                <dt>Финал запуска</dt>
+                <dd id="sellerRecoveryRunFinal">-</dd>
+              </div>
+              <div>
+                <dt>Статус сессии</dt>
+                <dd id="sellerRecoverySessionState">-</dd>
+              </div>
+              <div>
+                <dt>Старт</dt>
+                <dd id="sellerRecoveryStartedAt">-</dd>
+              </div>
+              <div>
+                <dt>Завершение</dt>
+                <dd id="sellerRecoveryFinishedAt">-</dd>
+              </div>
+            </dl>
+            <p id="sellerRecoverySummary" class="field-note">Проверяем сохранённую seller-сессию...</p>
             <p id="sellerRecoveryInstruction" class="field-note" hidden></p>
             <p id="sellerRecoveryTechnical" class="field-note" hidden></p>
             <p id="sellerRecoveryActionMessage" class="section-message"></p>
@@ -1609,9 +1640,16 @@
       const refreshButton = document.getElementById("refreshButton");
       const loadButton = document.getElementById("loadButton");
       const sellerRecoveryBadge = document.getElementById("sellerRecoveryBadge");
+      const sellerSessionCheckButton = document.getElementById("sellerSessionCheckButton");
       const sellerRecoveryStartButton = document.getElementById("sellerRecoveryStartButton");
       const sellerRecoveryLauncherButton = document.getElementById("sellerRecoveryLauncherButton");
       const sellerRecoveryStopButton = document.getElementById("sellerRecoveryStopButton");
+      const sellerRecoveryRunId = document.getElementById("sellerRecoveryRunId");
+      const sellerRecoveryRunStatus = document.getElementById("sellerRecoveryRunStatus");
+      const sellerRecoveryRunFinal = document.getElementById("sellerRecoveryRunFinal");
+      const sellerRecoverySessionState = document.getElementById("sellerRecoverySessionState");
+      const sellerRecoveryStartedAt = document.getElementById("sellerRecoveryStartedAt");
+      const sellerRecoveryFinishedAt = document.getElementById("sellerRecoveryFinishedAt");
       const sellerRecoverySummary = document.getElementById("sellerRecoverySummary");
       const sellerRecoveryInstruction = document.getElementById("sellerRecoveryInstruction");
       const sellerRecoveryTechnical = document.getElementById("sellerRecoveryTechnical");
@@ -1746,6 +1784,7 @@
       let sellerRecoveryPayload = null;
       let sellerRecoveryPollHandle = 0;
       let sellerRecoveryCycleActive = false;
+      let sellerRecoveryObservedRunId = "";
       let recommendationDownloadPath = config.factory_order_recommendation_path || "";
       const stockReportActiveSkus = normalizeStockReportActiveSkus(config.stock_report_active_skus);
       const allStockReportSkuIds = stockReportActiveSkus.map((item) => item.nm_id);
@@ -2480,18 +2519,58 @@
         sellerRecoveryActionMessage.className = "section-message" + (stateClass ? " is-" + stateClass : "");
       }
 
+      function mergeSellerRecoveryWithSessionCheck(sessionPayload) {
+        const sessionResult = sessionPayload && typeof sessionPayload === "object" ? sessionPayload : {};
+        const current = sellerRecoveryPayload && typeof sellerRecoveryPayload === "object"
+          ? sellerRecoveryPayload
+          : {
+              status: "idle",
+              status_label: "Не запущено",
+              status_tone: "idle",
+              run_status: "idle",
+              run_status_label: "Не запущено",
+              run_status_tone: "idle",
+              run_id: "",
+              run_is_final: false
+            };
+        const shouldReplaceSummary = String(current.status || "") === "idle" && !Boolean(current.run_is_final);
+        return {
+          ...current,
+          summary: shouldReplaceSummary ? sessionResult.summary : current.summary,
+          instruction: shouldReplaceSummary ? sessionResult.instruction : current.instruction,
+          technical_line: sessionResult.technical_line || current.technical_line || "",
+          can_start: typeof sessionResult.can_start === "boolean" ? sessionResult.can_start : current.can_start,
+          message: sessionResult.message || current.message || "",
+          current_storage_probe: sessionResult.current_storage_probe || current.current_storage_probe || null,
+          organization_confirmed: Object.prototype.hasOwnProperty.call(sessionResult, "organization_confirmed")
+            ? sessionResult.organization_confirmed
+            : current.organization_confirmed,
+          expected_supplier_id: sessionResult.expected_supplier_id || current.expected_supplier_id || "",
+          expected_supplier_label: sessionResult.expected_supplier_label || current.expected_supplier_label || "",
+          current_supplier_id: sessionResult.current_supplier_id || current.current_supplier_id || "",
+          current_supplier_external_id: sessionResult.current_supplier_external_id || current.current_supplier_external_id || "",
+          session_status: sessionResult.status || current.session_status || "",
+          session_status_label: sessionResult.status_label || current.session_status_label || "",
+          session_status_tone: sessionResult.status_tone || current.session_status_tone || "idle"
+        };
+      }
+
       function updateSellerRecoveryButtons() {
         const payload = sellerRecoveryPayload || {};
         const busy = Boolean(sellerRecoveryAction);
+        sellerSessionCheckButton.disabled = busy || Boolean(payload.running);
         sellerRecoveryStartButton.disabled = busy || !payload.can_start;
         sellerRecoveryLauncherButton.disabled = busy || !payload.launcher_enabled;
         sellerRecoveryStopButton.disabled = busy || !payload.can_stop;
+        sellerSessionCheckButton.textContent = sellerRecoveryAction === "check"
+          ? "Проверяем..."
+          : "Проверить сессию";
         sellerRecoveryStartButton.textContent = sellerRecoveryAction === "start"
           ? "Запускаем..."
-          : "Восстановить Seller-сессию";
+          : "Восстановить сессию";
         sellerRecoveryStopButton.textContent = sellerRecoveryAction === "stop"
           ? "Останавливаем..."
-          : "Остановить recovery";
+          : "Остановить восстановление";
       }
 
       function renderSellerRecovery(payload) {
@@ -2500,10 +2579,23 @@
           ? String(sellerRecoveryPayload.status)
           : "";
         sellerRecoveryPayload = normalized;
+        if (String(normalized.run_id || "")) {
+          sellerRecoveryObservedRunId = String(normalized.run_id || "");
+        } else if (!normalized.running && String(normalized.status || "") === "idle") {
+          sellerRecoveryObservedRunId = "";
+        }
         sellerRecoveryBadge.textContent = valueOrDash(normalized.status_label || normalized.status);
         sellerRecoveryBadge.className = badgeClassForTone(normalized.status_tone);
+        sellerRecoveryRunId.textContent = String(normalized.run_id || normalized.current_run_id || "").trim() || "не запущен";
+        sellerRecoveryRunStatus.textContent = valueOrDash(normalized.run_status_label || normalized.status_label || normalized.status);
+        sellerRecoveryRunFinal.textContent = normalized.run_is_final
+          ? valueOrDash(normalized.run_final_label || normalized.run_final_status)
+          : (String(normalized.run_id || "").trim() ? "ещё не завершён" : "-");
+        sellerRecoverySessionState.textContent = valueOrDash(normalized.session_status_label || normalized.session_status);
+        sellerRecoveryStartedAt.textContent = formatTimestamp(normalized.started_at, "-");
+        sellerRecoveryFinishedAt.textContent = formatTimestamp(normalized.finished_at, "-");
         sellerRecoverySummary.textContent = valueOrDash(
-          normalized.summary || "Состояние seller recovery пока недоступно."
+          normalized.summary || "Состояние seller-сессии пока недоступно."
         );
         const instruction = String(normalized.instruction || "").trim();
         sellerRecoveryInstruction.textContent = instruction;
@@ -2512,7 +2604,7 @@
         sellerRecoveryTechnical.textContent = technical;
         sellerRecoveryTechnical.hidden = !technical;
         updateSellerRecoveryButtons();
-        if (normalized.running || ["starting", "starting_visual_session", "awaiting_login", "auth_confirmed"].includes(String(normalized.status || ""))) {
+        if (normalized.running || ["starting", "awaiting_login", "saving_session", "validating_session", "checking_canonical_supplier", "triggering_refresh"].includes(String(normalized.status || ""))) {
           scheduleSellerRecoveryPoll();
         } else {
           clearSellerRecoveryPoll();
@@ -2520,14 +2612,15 @@
         if (
           sellerRecoveryCycleActive
           && !normalized.running
-          && !["starting", "starting_visual_session", "awaiting_login", "auth_confirmed"].includes(String(normalized.status || ""))
+          && !["starting", "awaiting_login", "saving_session", "validating_session", "checking_canonical_supplier", "triggering_refresh"].includes(String(normalized.status || ""))
         ) {
           sellerRecoveryCycleActive = false;
+          sellerRecoveryObservedRunId = String(normalized.run_id || sellerRecoveryObservedRunId || "");
           Promise.all([loadStatus(), loadDailyReport(), loadStockReport()]).catch(() => {});
         } else if (
           !sellerRecoveryCycleActive
           && previousStatus !== String(normalized.status || "")
-          && String(normalized.status || "") === "success"
+          && String(normalized.status || "") === "completed"
         ) {
           Promise.all([loadStatus(), loadDailyReport(), loadStockReport()]).catch(() => {});
         }
@@ -2821,7 +2914,10 @@
 
       async function loadSellerRecoveryStatus() {
         try {
-          const response = await fetch(config.seller_recovery_status_path, {
+          const recoveryStatusPath = sellerRecoveryObservedRunId
+            ? config.seller_recovery_status_path + "?run_id=" + encodeURIComponent(sellerRecoveryObservedRunId)
+            : config.seller_recovery_status_path;
+          const response = await fetch(recoveryStatusPath, {
             method: "GET",
             headers: { "Accept": "application/json" }
           });
@@ -2836,12 +2932,21 @@
             status: "error",
             status_label: "Ошибка",
             status_tone: "error",
-            summary: "Не удалось прочитать состояние seller recovery.",
+            run_status: "error",
+            run_status_label: "Ошибка",
+            run_status_tone: "error",
+            summary: "Не удалось прочитать состояние seller-сессии.",
             instruction: "",
             technical_line: "",
             can_start: false,
             can_stop: false,
-            launcher_enabled: false
+            launcher_enabled: false,
+            run_id: sellerRecoveryObservedRunId,
+            run_is_final: true,
+            run_final_status: "error",
+            run_final_label: "Восстановление завершено с ошибкой",
+            session_status: "",
+            session_status_label: ""
           });
           setSellerRecoveryMessage(
             error instanceof Error ? error.message : String(error),
@@ -2957,11 +3062,38 @@
         }
       }
 
+      async function checkSellerSession() {
+        sellerRecoveryAction = "check";
+        updateSellerRecoveryButtons();
+        setSellerRecoveryMessage("Проверяем сохранённую seller-сессию...", "");
+        try {
+          const response = await fetch(config.seller_session_check_path, {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          renderSellerRecovery(mergeSellerRecoveryWithSessionCheck(payload));
+          setSellerRecoveryMessage("Проверка сессии завершена.", "success");
+        } catch (error) {
+          setSellerRecoveryMessage(
+            "Не удалось проверить seller-сессию: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+          await loadSellerRecoveryStatus();
+        } finally {
+          sellerRecoveryAction = null;
+          updateSellerRecoveryButtons();
+        }
+      }
+
       async function startSellerRecovery() {
         sellerRecoveryAction = "start";
         sellerRecoveryCycleActive = true;
         updateSellerRecoveryButtons();
-        setSellerRecoveryMessage("Поднимаем temporary seller recovery contour на host...", "");
+        setSellerRecoveryMessage("Поднимаем временное окно входа на host...", "");
         try {
           const response = await fetch(config.seller_recovery_start_path, {
             method: "POST",
@@ -2978,17 +3110,17 @@
           renderSellerRecovery(payload);
           const recoveryStatus = String(payload.status || "");
           setSellerRecoveryMessage(
-            recoveryStatus === "starting_visual_session"
-              ? "Recovery session запущена. Ждём materialization удалённого браузера..."
+            recoveryStatus === "not_needed"
+              ? "Повторный вход не потребовался: запуск завершён сразу."
               : (recoveryStatus === "awaiting_login"
-                ? "Recovery session запущена. Скачайте launcher и войдите в seller portal."
-                : "Recovery request обработан."),
+                ? "Временное окно входа готово. Скачайте launcher и войдите в seller portal."
+                : "Запрос на восстановление обработан."),
             "success"
           );
         } catch (error) {
           sellerRecoveryCycleActive = false;
           setSellerRecoveryMessage(
-            "Не удалось запустить seller recovery: " + (error instanceof Error ? error.message : String(error)),
+            "Не удалось запустить восстановление: " + (error instanceof Error ? error.message : String(error)),
             "error"
           );
           await loadSellerRecoveryStatus();
@@ -3002,7 +3134,7 @@
         sellerRecoveryAction = "stop";
         sellerRecoveryCycleActive = false;
         updateSellerRecoveryButtons();
-        setSellerRecoveryMessage("Останавливаем temporary seller recovery contour...", "");
+        setSellerRecoveryMessage("Закрываем временное окно входа...", "");
         try {
           const response = await fetch(config.seller_recovery_stop_path, {
             method: "POST",
@@ -3013,10 +3145,11 @@
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
           renderSellerRecovery(payload);
-          setSellerRecoveryMessage("Recovery contour остановлен.", "success");
+          sellerRecoveryObservedRunId = String(payload.run_id || sellerRecoveryObservedRunId || "");
+          setSellerRecoveryMessage("Временное окно входа закрыто.", "success");
         } catch (error) {
           setSellerRecoveryMessage(
-            "Не удалось остановить seller recovery: " + (error instanceof Error ? error.message : String(error)),
+            "Не удалось остановить восстановление: " + (error instanceof Error ? error.message : String(error)),
             "error"
           );
           await loadSellerRecoveryStatus();
@@ -3137,7 +3270,7 @@
           link.remove();
           URL.revokeObjectURL(objectUrl);
           setSellerRecoveryMessage(
-            "Launcher скачан. Оставьте окно Terminal открытым до финального статуса recovery.",
+            "Launcher скачан. Оставьте окно Terminal открытым, пока система не подтвердит финальный статус.",
             "success"
           );
         } catch (error) {
@@ -3325,6 +3458,7 @@
       refreshButton.addEventListener("click", () => runAction("refresh"));
       loadButton.addEventListener("click", () => runAction("load"));
       downloadButton.addEventListener("click", downloadCurrentLog);
+      sellerSessionCheckButton.addEventListener("click", checkSellerSession);
       sellerRecoveryStartButton.addEventListener("click", startSellerRecovery);
       sellerRecoveryLauncherButton.addEventListener("click", downloadSellerRecoveryLauncher);
       sellerRecoveryStopButton.addEventListener("click", stopSellerRecovery);
@@ -3414,12 +3548,21 @@
         status: "idle",
         status_label: "Проверяем",
         status_tone: "idle",
-        summary: "Проверяем текущее состояние seller-session...",
+        run_status: "idle",
+        run_status_label: "Проверяем",
+        run_status_tone: "idle",
+        summary: "Проверяем сохранённую seller-сессию...",
         instruction: "",
         technical_line: "",
         can_start: false,
         can_stop: false,
-        launcher_enabled: false
+        launcher_enabled: false,
+        run_id: "",
+        run_is_final: false,
+        run_final_status: "",
+        run_final_label: "",
+        session_status: "",
+        session_status_label: ""
       });
       renderStockReportSkuSelector();
       loadStatus();

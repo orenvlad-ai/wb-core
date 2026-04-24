@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
     DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
     DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
     DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
@@ -34,76 +35,183 @@ class _FakeSellerRecoveryController:
     def __init__(self) -> None:
         self.running = False
         self.visual_ready = False
+        self.current_run_id = ""
+        self.run_counter = 0
+        self.not_needed_next_start = False
         self.calls: list[str] = []
 
-    def read_status(self, *, launcher_download_path: str) -> dict[str, object]:
-        self.calls.append("status")
-        if self.running:
-            if not self.visual_ready:
-                self.visual_ready = True
-                return {
-                    "status": "starting_visual_session",
-                    "status_label": "Запускаем браузер",
-                    "status_tone": "loading",
-                    "summary": "Запускаем удалённый браузер seller portal.",
-                    "instruction": "Дождитесь статуса «Ожидается вход».",
-                    "technical_line": "Нужный кабинет: ИП Сагитов В. Р. · supplier canonical-supplier-id",
-                    "running": True,
-                    "can_start": False,
-                    "can_stop": True,
-                    "launcher_enabled": False,
-                    "launcher_download_path": launcher_download_path,
-                }
-            return {
-                "status": "awaiting_login",
-                "status_label": "Ожидается вход",
-                "status_tone": "warning",
-                "summary": "Откройте launcher и войдите в seller portal.",
-                "instruction": "После входа система сама завершит recovery.",
-                "technical_line": "Нужный кабинет: ИП Сагитов В. Р. · supplier canonical-supplier-id",
-                "running": True,
-                "can_start": False,
-                "can_stop": True,
-                "launcher_enabled": True,
-                "launcher_download_path": launcher_download_path,
-            }
+    def _build_run_payload(
+        self,
+        *,
+        status: str,
+        launcher_download_path: str,
+        summary: str,
+        instruction: str,
+        running: bool,
+        launcher_enabled: bool,
+    ) -> dict[str, object]:
+        final_status = status if status in {"completed", "not_needed", "stopped", "timeout", "error"} else ""
+        final_label = {
+            "completed": "Восстановление завершено",
+            "not_needed": "Повторный вход не потребовался",
+            "stopped": "Восстановление остановлено",
+            "timeout": "Восстановление завершено по таймауту",
+            "error": "Восстановление завершено с ошибкой",
+        }.get(final_status, "")
+        return {
+            "status": status,
+            "status_label": {
+                "idle": "Не запущено",
+                "starting": "Запускаем",
+                "awaiting_login": "Нужно войти",
+                "not_needed": "Не потребовалось",
+                "stopped": "Остановлено",
+            }.get(status, "Ошибка"),
+            "status_tone": {
+                "idle": "idle",
+                "starting": "loading",
+                "awaiting_login": "warning",
+                "not_needed": "success",
+                "stopped": "idle",
+            }.get(status, "error"),
+            "run_status": status,
+            "run_status_label": {
+                "idle": "Не запущено",
+                "starting": "Запускаем",
+                "awaiting_login": "Нужно войти",
+                "not_needed": "Не потребовалось",
+                "stopped": "Остановлено",
+            }.get(status, "Ошибка"),
+            "run_status_tone": {
+                "idle": "idle",
+                "starting": "loading",
+                "awaiting_login": "warning",
+                "not_needed": "success",
+                "stopped": "idle",
+            }.get(status, "error"),
+            "summary": summary,
+            "instruction": instruction,
+            "technical_line": "Нужный кабинет: ИП Сагитов В. Р. · supplier canonical-supplier-id",
+            "running": running,
+            "can_start": not running,
+            "can_stop": running,
+            "launcher_enabled": launcher_enabled,
+            "launcher_download_path": launcher_download_path,
+            "run_id": self.current_run_id,
+            "current_run_id": self.current_run_id,
+            "run_is_final": bool(final_status),
+            "run_final_status": final_status,
+            "run_final_label": final_label,
+            "started_at": "2026-04-23T10:00:00+05:00" if self.current_run_id else "",
+            "finished_at": "2026-04-23T10:01:00+05:00" if final_status else "",
+            "session_status": "session_invalid" if status in {"idle", "starting", "awaiting_login", "stopped"} else "session_valid_canonical",
+            "session_status_label": "Нужен вход" if status in {"idle", "starting", "awaiting_login", "stopped"} else "Сессия активна",
+            "session_status_tone": "error" if status in {"idle", "starting", "awaiting_login", "stopped"} else "success",
+        }
+
+    def check_session(self, *, launcher_download_path: str) -> dict[str, object]:
+        self.calls.append("check")
         return {
             "status": "session_invalid",
-            "status_label": "Требуется вход",
+            "status_label": "Нужен вход",
             "status_tone": "error",
-            "summary": "Сессия seller portal больше не действует; запустите восстановление.",
-            "instruction": "Нажмите «Восстановить Seller-сессию», затем скачайте launcher.",
+            "summary": "Сохранённая seller-сессия больше не действует.",
+            "instruction": "Нажмите «Восстановить сессию» и войдите через launcher для Mac.",
             "technical_line": "Нужный кабинет: ИП Сагитов В. Р. · supplier canonical-supplier-id",
-            "running": False,
+            "running": self.running,
             "can_start": True,
             "can_stop": False,
             "launcher_enabled": False,
             "launcher_download_path": launcher_download_path,
         }
 
+    def read_status(self, *, launcher_download_path: str, run_id: str | None = None) -> dict[str, object]:
+        self.calls.append(f"status:{run_id or ''}")
+        if run_id and run_id != self.current_run_id:
+            return self._build_run_payload(
+                status="error",
+                launcher_download_path=launcher_download_path,
+                summary="Текущий launcher больше не смотрит на свой запуск: этот recovery run уже не является текущим.",
+                instruction="Откройте operator page заново и скачайте launcher для нового запуска.",
+                running=False,
+                launcher_enabled=False,
+            )
+        if self.running:
+            if not self.visual_ready:
+                self.visual_ready = True
+                return self._build_run_payload(
+                    status="starting",
+                    launcher_download_path=launcher_download_path,
+                    summary="Запускаем текущее временное окно входа на host.",
+                    instruction="Дождитесь статуса «Нужно войти».",
+                    running=True,
+                    launcher_enabled=False,
+                )
+            return self._build_run_payload(
+                status="awaiting_login",
+                launcher_download_path=launcher_download_path,
+                summary="Временное окно входа готово. Откройте launcher и войдите в seller portal.",
+                instruction="После входа система сама сохранит storage_state.json и завершит текущий запуск.",
+                running=True,
+                launcher_enabled=True,
+            )
+        if self.not_needed_next_start:
+            return self._build_run_payload(
+                status="not_needed",
+                launcher_download_path=launcher_download_path,
+                summary="Повторный вход не потребовался: на момент старта seller-сессия уже была активна и нужный кабинет был подтверждён.",
+                instruction="Текущий запуск завершён сразу, без noVNC и launcher.",
+                running=False,
+                launcher_enabled=False,
+            )
+        return self._build_run_payload(
+            status="idle",
+            launcher_download_path=launcher_download_path,
+            summary="Новый запуск восстановления сейчас не выполняется. Сохранённая seller-сессия больше не действует.",
+            instruction="Нажмите «Восстановить сессию», затем скачайте launcher и выполните вход.",
+            running=False,
+            launcher_enabled=False,
+        )
+
     def start(self, *, replace: bool, launcher_download_path: str) -> dict[str, object]:
         self.calls.append(f"start:{replace}")
+        self.run_counter += 1
+        self.current_run_id = f"seller-recovery-run-{self.run_counter}"
+        if self.not_needed_next_start:
+            self.running = False
+            self.visual_ready = False
+            self.not_needed_next_start = False
+            return self._build_run_payload(
+                status="not_needed",
+                launcher_download_path=launcher_download_path,
+                summary="Повторный вход не потребовался: на момент старта seller-сессия уже была активна и нужный кабинет был подтверждён.",
+                instruction="Текущий запуск завершён сразу, без noVNC и launcher.",
+                running=False,
+                launcher_enabled=False,
+            )
         self.running = True
         self.visual_ready = False
-        return self.read_status(launcher_download_path=launcher_download_path)
+        return self._build_run_payload(
+            status="starting",
+            launcher_download_path=launcher_download_path,
+            summary="Запускаем текущее временное окно входа на host.",
+            instruction="Дождитесь статуса «Нужно войти».",
+            running=True,
+            launcher_enabled=False,
+        )
 
     def stop(self, *, launcher_download_path: str) -> dict[str, object]:
         self.calls.append("stop")
         self.running = False
         self.visual_ready = False
-        return {
-            "status": "stopped",
-            "status_label": "Остановлено",
-            "status_tone": "idle",
-            "summary": "Временный recovery-сеанс остановлен.",
-            "instruction": "При необходимости можно запустить recovery заново.",
-            "technical_line": "Нужный кабинет: ИП Сагитов В. Р. · supplier canonical-supplier-id",
-            "running": False,
-            "can_start": True,
-            "can_stop": False,
-            "launcher_enabled": False,
-            "launcher_download_path": launcher_download_path,
-        }
+        return self._build_run_payload(
+            status="stopped",
+            launcher_download_path=launcher_download_path,
+            summary="Восстановление остановлено: временное окно входа закрыто. Сохранённая seller-сессия и бот не изменены.",
+            instruction="Кнопка «Остановить восстановление» закрывает только временное окно входа.",
+            running=False,
+            launcher_enabled=False,
+        )
 
     def build_launcher_archive(self, *, public_status_url: str, public_operator_url: str) -> tuple[bytes, str]:
         self.calls.append("launcher")
@@ -116,8 +224,15 @@ class _FakeSellerRecoveryController:
                 "\n".join(
                     [
                         "#!/bin/bash",
-                        f'STATUS_URL="{public_status_url}"',
+                        "set -euo pipefail",
+                        f'RUN_ID="{self.current_run_id}"',
+                        f'STATUS_URL="{public_status_url}?run_id={self.current_run_id}"',
                         f'OPERATOR_URL="{public_operator_url}"',
+                        'STATUS_JSON="$(curl -fsS "${STATUS_URL}" 2>/dev/null || true)"',
+                        "STATUS=\"$(printf '%s' \"${STATUS_JSON}\" | python3 -c 'import json, sys; raw = sys.stdin.read().strip(); print((json.loads(raw).get(\"status\", \"\") if raw else \"\"), end=\"\")' 2>/dev/null || true)\"",
+                        'SUMMARY="$(printf \'%s\' "${STATUS_JSON}" | python3 -c \'import json, sys; raw = sys.stdin.read().strip(); print((json.loads(raw).get(\"summary\", \"\") if raw else \"\"), end=\"\")\' 2>/dev/null || true)"',
+                        'echo "Восстановление завершено: ${STATUS:-unknown}"',
+                        'echo "${SUMMARY}"',
                     ]
                 ),
             )
@@ -151,10 +266,11 @@ def main() -> None:
             operator_status, operator_html = _get_text(base_url + DEFAULT_SHEET_OPERATOR_UI_PATH)
             if operator_status != 200:
                 raise AssertionError(f"operator UI must return 200, got {operator_status}")
-            if "Восстановление Seller-сессии" not in operator_html:
+            if "Проверка и восстановление Seller-сессии" not in operator_html or "Проверить сессию" not in operator_html:
                 raise AssertionError("operator UI must render the seller recovery block")
             config_payload = _extract_operator_ui_config(operator_html)
             for key, expected in {
+                "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
                 "seller_recovery_status_path": DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
                 "seller_recovery_start_path": DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
                 "seller_recovery_stop_path": DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH,
@@ -163,21 +279,35 @@ def main() -> None:
                 if config_payload.get(key) != expected:
                     raise AssertionError(f"operator UI config must expose {key}, got {config_payload.get(key)!r}")
 
+            check_code, check_payload = _get_json(base_url + DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH)
+            if check_code != 200 or check_payload.get("status") != "session_invalid":
+                raise AssertionError(f"session-check must surface invalid session, got {check_code} / {check_payload}")
+
             status_code, status_payload = _get_json(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH)
-            if status_code != 200 or status_payload.get("status") != "session_invalid":
-                raise AssertionError(f"initial recovery status must surface invalid session, got {status_code} / {status_payload}")
+            if status_code != 200 or status_payload.get("status") != "idle" or status_payload.get("session_status") != "session_invalid":
+                raise AssertionError(f"initial recovery status must separate idle run-state from invalid session-state, got {status_code} / {status_payload}")
 
             start_code, start_payload = _post_json(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH, {"replace": True})
-            if start_code != 200 or start_payload.get("status") != "starting_visual_session":
-                raise AssertionError(f"start must surface visual-session startup before awaiting_login, got {start_code} / {start_payload}")
+            if start_code != 200 or start_payload.get("status") != "starting" or not start_payload.get("run_id"):
+                raise AssertionError(f"start must surface current run startup with run_id, got {start_code} / {start_payload}")
             if start_payload.get("launcher_enabled") is not False:
-                raise AssertionError("starting_visual_session must keep launcher disabled until browser window is ready")
+                raise AssertionError("starting status must keep launcher disabled until browser window is ready")
+
+            status_code, status_payload = _get_json(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH)
+            if status_code != 200 or status_payload.get("status") != "starting":
+                raise AssertionError(f"first status after start must still surface startup, got {status_code} / {status_payload}")
 
             status_code, status_payload = _get_json(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH)
             if status_code != 200 or status_payload.get("status") != "awaiting_login":
-                raise AssertionError(f"status after start must stay awaiting_login, got {status_code} / {status_payload}")
+                raise AssertionError(f"status after startup must switch to awaiting_login, got {status_code} / {status_payload}")
             if status_payload.get("launcher_enabled") is not True:
                 raise AssertionError("awaiting_login payload must enable launcher download once the browser window is visible")
+            run_id = str(status_payload.get("run_id") or "").strip()
+            scoped_status_code, scoped_status_payload = _get_json(
+                base_url + DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH + "?run_id=" + run_id
+            )
+            if scoped_status_code != 200 or scoped_status_payload.get("run_id") != run_id or scoped_status_payload.get("status") != "awaiting_login":
+                raise AssertionError(f"run-aware status surface must resolve the active recovery run, got {scoped_status_code} / {scoped_status_payload}")
 
             launcher_request = urllib_request.Request(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH, method="GET")
             with urllib_request.urlopen(launcher_request, timeout=15) as response:
@@ -193,15 +323,27 @@ def main() -> None:
                 launcher_text = archive.read("seller-portal-relogin.command").decode("utf-8")
                 if DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH not in launcher_text or DEFAULT_SHEET_OPERATOR_UI_PATH not in launcher_text:
                     raise AssertionError("launcher script must poll recovery status and reopen operator UI")
+                if "python3 -c" not in launcher_text or 'json.loads(raw).get("status", "")' not in launcher_text:
+                    raise AssertionError("launcher script must parse the root recovery status via JSON, not regex")
+                if "run_id=" + run_id not in launcher_text or "Восстановление завершено: ${STATUS:-unknown}" not in launcher_text:
+                    raise AssertionError("launcher script must bind to the current run_id and print a final completion marker")
 
             stop_code, stop_payload = _post_json(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH, {})
             if stop_code != 200 or stop_payload.get("status") != "stopped":
                 raise AssertionError(f"stop must cleanup recovery contour, got {stop_code} / {stop_payload}")
-            if controller.calls != ["status", "start:True", "status", "status", "launcher", "stop"]:
+            if stop_payload.get("run_final_status") != "stopped":
+                raise AssertionError(f"stop must surface a final stopped outcome, got {stop_payload}")
+
+            controller.not_needed_next_start = True
+            second_start_code, second_start_payload = _post_json(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH, {"replace": True})
+            if second_start_code != 200 or second_start_payload.get("status") != "not_needed" or second_start_payload.get("run_final_status") != "not_needed":
+                raise AssertionError(f"not_needed start must finish immediately with final outcome, got {second_start_code} / {second_start_payload}")
+            if controller.calls != ["check", "status:", "start:True", "status:", "status:", f"status:{run_id}", "launcher", "stop", "start:True"]:
                 raise AssertionError(f"unexpected recovery controller lifecycle, got {controller.calls}")
 
+            print("seller_portal_session_check_http: ok -> lightweight session-check route is wired")
             print("seller_portal_recovery_http_operator: ok -> operator UI exposes recovery block and config")
-            print("seller_portal_recovery_http_lifecycle: ok -> start/status/stop lifecycle is wired")
+            print("seller_portal_recovery_http_lifecycle: ok -> run-aware start/status/stop/not_needed lifecycle is wired")
             print("seller_portal_recovery_launcher_download: ok -> downloadable Mac launcher is attached")
             print("smoke-check passed")
         finally:

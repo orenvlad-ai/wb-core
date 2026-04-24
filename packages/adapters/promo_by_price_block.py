@@ -104,14 +104,19 @@ class RuleBackedPromoByPriceSource:
                 if not active_rules:
                     continue
                 price = price_by_key.get((date, nm_id))
-                best_plan = max(rule["plan_price"] for rule in active_rules)
                 count = 0.0
                 participation = 0.0
+                best_plan = 0.0
                 if isinstance(price, float) and price > 0:
-                    count = float(
-                        sum(1 for rule in active_rules if price < rule["plan_price"] + 0.5)
-                    )
+                    eligible_rules = [
+                        rule
+                        for rule in active_rules
+                        if price < rule["plan_price"]
+                    ]
+                    count = float(len(eligible_rules))
                     participation = 1.0 if count > 0 else 0.0
+                    if eligible_rules:
+                        best_plan = max(rule["plan_price"] for rule in eligible_rules)
                 rows.append(
                     {
                         "date": date,

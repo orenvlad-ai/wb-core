@@ -51,6 +51,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/load"
   - "POST /v1/sheet-vitrina-v1/seller-portal-recovery/start"
   - "POST /v1/sheet-vitrina-v1/seller-portal-recovery/stop"
+  - "GET /v1/sheet-vitrina-v1/seller-portal-session/check"
   - "GET /v1/sheet-vitrina-v1/daily-report"
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
@@ -111,7 +112,7 @@ related_docs:
   - "docs/modules/29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md"
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current seller-session recovery checkpoint: `sheet_vitrina_v1` по-прежнему разделяет group A bot/web-source historical, group B WB API date/period-capable, group C WB API current-snapshot-only и group D other/manual overlays, status reduction остаётся source-aware, а bot-backed current-day sync теперь делает explicit seller-portal session probe и materialize-ит permanent operator-facing seller recovery block with start/status/stop/launcher flow, canonical supplier enforcement и truthful visual-start lifecycle instead of ad-hoc headed-X11 recovery."
+update_note: "Обновлён под current seller-session operator checkpoint: `sheet_vitrina_v1` по-прежнему разделяет group A bot/web-source historical, group B WB API date/period-capable, group C WB API current-snapshot-only и group D other/manual overlays, status reduction остаётся source-aware, а bot-backed current-day sync теперь делает explicit seller-portal session probe и materialize-ит permanent operator-facing seller-session block with session-check/start/status/stop/launcher flow, canonical supplier enforcement, safe stop semantics, per-run `run_id` / final outcome semantics и hardened noVNC/launcher path instead of ad-hoc headed-X11 recovery."
 ---
 
 # 1. Идентификатор и статус
@@ -197,12 +198,14 @@ update_note: "Обновлён под current seller-session recovery checkpoint
     - compact district labels remain truthful to current repo buckets: `Центральный ФО`, `Северо-Западный ФО`, `Приволжский ФО`, `Уральский ФО`, `Юг и СКФО`
     - merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь` stays fully excluded from stock-report filter/display because current truth does not split Far East from Siberia
   - page дополнительно показывает compact manual block `Ручная загрузка данных` с embedded actions `Загрузить данные` / `Отправить данные`, двумя persisted manual-success fields `Последняя удачная загрузка` / `Последняя удачная отправка` и short persisted summaries of the latest manual refresh/load semantic result
-  - в том же `Обновление данных` current operator page additionally показывает compact block `Восстановление Seller-сессии`:
-    - `Восстановить Seller-сессию` стартует repo-owned recovery lifecycle
-    - `Скачать launcher для Mac` отдаёт reusable `.command`, который сам поднимает SSH tunnel к localhost-only noVNC и открывает browser
-    - `Остановить recovery` cleanup-ит temporary contour
-    - badge/summary/instruction remain server-driven and truthfully show `starting_visual_session / awaiting_login / wrong_organization / refresh_failed / success / stopped / error`
-    - `starting_visual_session` means the temporary noVNC contour is already up, but the visible remote Chromium window is still materializing; launcher/login readiness moves to `awaiting_login` only after the browser is actually visible instead of leaving the operator on a black canvas
+  - в том же `Обновление данных` current operator page additionally показывает compact block `Проверка и восстановление Seller-сессии`:
+    - `Проверить сессию` выполняет cheap probe against saved `storage_state.json` и truthfully различает `session_valid_canonical / session_valid_wrong_org / session_invalid / session_missing / session_probe_error`
+    - `Восстановить сессию` стартует repo-owned recovery lifecycle и немедленно создаёт текущий `run_id`
+    - `Скачать launcher для Mac` отдаёт reusable `.command`, который сам поднимает SSH tunnel к localhost-only noVNC, ждёт local HTTP-ready, poll-ит status конкретного `run_id` и печатает финальную строку `Восстановление завершено: <final_status>`
+    - `Остановить восстановление` cleanup-ит только temporary contour и не удаляет saved seller session
+    - operator UI одновременно показывает отдельно session state и run state: `Текущий запуск / Статус запуска / Финал запуска / Статус сессии / Старт / Завершение`
+    - recovery run truthfully проходит through `starting / awaiting_login / saving_session / validating_session / checking_canonical_supplier / triggering_refresh` and must end as one explicit final outcome: `completed / not_needed / stopped / timeout / error`
+    - host-side VNC contour is additionally hardened with `x11vnc -noxdamage`, because user-facing truth here is the noVNC canvas rather than host-side local screenshots
   - эти два manual fields заполняются только из `manual_context`: successful manual `refresh` обновляет только `Последняя удачная загрузка`, successful manual `load` обновляет только `Последняя удачная отправка`, auto path их не трогает
   - reload/page-open state этого manual block truthfully показывает только persisted manual-success facts и не является самостоятельным доказательством успешной последней manual `Отправить данные` без completed job/log
   - page дополнительно показывает compact block `Автообновления`, который заполняется только из server-driven `server_context`

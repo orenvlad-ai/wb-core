@@ -63,7 +63,7 @@ Foundation-этап уже пройден. Текущее состояние `ma
 - table-facing и projection слой для новой витрины;
 - registry pilot line;
 - wide matrix, delivery bundle и sheet scaffold;
-- live write bridge и presentation pass для новой Google Sheets-витрины;
+- legacy/export live write bridge и presentation pass для прежнего Google Sheets contour;
 - compact v3 bootstrap для `CONFIG / METRICS / FORMULAS`;
 - первый bounded refresh/read split с repo-owned ready snapshot для reverse-load обратно в `DATA_VITRINA`.
 

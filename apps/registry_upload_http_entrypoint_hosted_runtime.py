@@ -29,6 +29,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
+    DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
     DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
     DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
     DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
@@ -96,6 +97,7 @@ ROUTE_ENV_DEFAULTS = {
 RSYNC_EXCLUDES = [
     ".git/",
     ".runtime/",
+    ".clasp.json",
     "__pycache__/",
     ".pytest_cache/",
     ".mypy_cache/",
@@ -295,6 +297,12 @@ def collect_public_surface(
                 f"{base_url}{route_paths['SHEET_VITRINA_STATUS_HTTP_PATH']}",
                 as_of_date,
             ),
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
+            name="seller_session_check",
+            method="GET",
+            url=f"{base_url}{DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH}",
             timeout_seconds=timeout_seconds,
         ),
         _collect_http_probe(
@@ -768,14 +776,21 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "SKU",
             "Рассчитать",
             "Выберите хотя бы один SKU",
-            "Восстановление Seller-сессии",
+            "Проверка и восстановление Seller-сессии",
+            "Проверить сессию",
+            "Восстановить сессию",
             "Скачать launcher для Mac",
+            "Остановить восстановление",
+            "Текущий запуск",
+            "Финал запуска",
+            "Статус сессии",
             "wb-core:sheet-vitrina-v1:operator-ui-state:v1",
             "window.localStorage",
             "Негативные факторы",
             "Позитивные факторы",
             DEFAULT_SHEET_DAILY_REPORT_PATH,
             DEFAULT_SHEET_STOCK_REPORT_PATH,
+            DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
             DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
             DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
             DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH,
@@ -812,6 +827,27 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "operator page shape ok"
             if evaluation["ok"]
             else f"expected 200 text/html with operator tokens, missing={missing_tokens}, forbidden={present_forbidden}"
+        )
+        return evaluation
+
+    if route == "seller_session_check":
+        json_body = result.get("json_body") or {}
+        allowed_statuses = {
+            "session_valid_canonical",
+            "session_valid_wrong_org",
+            "session_invalid",
+            "session_missing",
+            "session_probe_error",
+        }
+        evaluation["ok"] = (
+            status == 200
+            and "application/json" in content_type
+            and str(json_body.get("status") or "") in allowed_statuses
+        )
+        evaluation["detail"] = (
+            "seller session-check route ok"
+            if evaluation["ok"]
+            else "expected 200 JSON seller session-check route with truthful session status"
         )
         return evaluation
 

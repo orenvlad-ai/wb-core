@@ -20,6 +20,7 @@ from packages.contracts.promo_xlsx_collector_block import (
     CollectorStateSnapshot,
     DownloadArtifact,
     ExportKind,
+    HydrationAttemptSummary,
     PromoCardData,
     PromoMetadata,
     PromoOutcome,
@@ -82,7 +83,21 @@ class PromoXlsxCollectorBlock:
         try:
             hydrated = False
             for attempt_num in range(1, request.hydration_attempt_budget + 1):
-                attempt = self._driver.attempt_hydration(attempt_num)
+                try:
+                    attempt = self._driver.attempt_hydration(attempt_num)
+                except Exception as exc:
+                    attempt = HydrationAttemptSummary(
+                        attempt_num=attempt_num,
+                        entry_strategy="direct_open",
+                        cookie_clicked=False,
+                        hydrated_success=False,
+                        title="",
+                        url="",
+                        timeline_count=0,
+                        overlay_count=0,
+                        time_to_hydrated_sec=None,
+                        blocker=f"hydration_exception={exc}",
+                    )
                 summary.hydration_attempts.append(attempt)
                 self._write_json(run_dir / "run_summary.json", asdict(summary))
                 if attempt.hydrated_success:

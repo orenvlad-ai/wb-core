@@ -90,8 +90,8 @@ Current sibling local promo collector precursor flow:
 Current live promo source flow:
 - `POST /v1/sheet-vitrina-v1/refresh`
 - contour now invokes repo-owned archive-first promo collector server-side for `promo_by_price[today_current]`
-- `promo_by_price[yesterday_closed]` still reads only accepted/runtime-cached exact-date promo truth
-- cache miss on `promo_by_price[yesterday_closed]` may be filled server-side by interval replay from archived campaign artifacts when authoritative coverage exists
+- `promo_by_price[yesterday_closed]` now attempts corrective interval replay first on every refresh
+- accepted/runtime-cached exact-date promo truth stays only as bounded fallback when replay is unavailable or non-exact
 - `STATUS` and ready snapshot now expose truthful promo source facts instead of a permanent blocked gap
 
 Current repo-owned operator refresh surface:
@@ -121,7 +121,7 @@ Current repo-owned operator refresh surface:
   - explicit `date_from/date_to` now opens a bounded ready-snapshot window through the same existing read route
   - page UX for this mode is repo-owned and narrow: calendar + preset buttons + `Начало периода` / `Конец периода` + `Сбросить` / `Сохранить`
 - `web_vitrina_view_model` remains canonical and library-agnostic, the concrete Gravity-specific adapter stays isolated repo-side, and the page layer stays a page-only consumer instead of a second truth owner
-- current phase-1/2/3/4 scope remains narrow: route fixation, stable read contract, library-agnostic presentation seam, concrete grid adapter and minimal live page composition only; export layer, Google Sheets cutover and broad feature parity stay later
+- current phase-1/2/3/4 scope remains narrow: route fixation, stable read contract, library-agnostic presentation seam, concrete grid adapter and minimal live page composition only; export layer, legacy Google Sheets/export migration and broad feature parity stay later
 - page stays intentionally narrow: top-level sections `Обновление данных` / `Расчёт поставок` / `Отчёты`, compact manual block `Ручная загрузка данных` with embedded buttons `Загрузить данные` / `Отправить данные`, two persisted manual-success timestamps `Последняя удачная загрузка` / `Последняя удачная отправка` plus short persisted semantic summaries for latest manual refresh/load, one compact reports subsection-switch `Ежедневные отчёты` / `Отчёт по остаткам` inside `Отчёты`, separate compact auto block `Автообновления` and one fixed-height scrollable `Лог` block with `Скачать лог`
 - daily-report block compares only the two latest closed business days in `Asia/Yekaterinburg`: `yesterday_closed(default_business_as_of_date(now))` vs `yesterday_closed(default_business_as_of_date(now)-1 day)`, never `today_current`
 - daily-report ranked totals stay on the current canonical pool only (`total_view_count`, `total_views_current`, `avg_ctr_current`, `avg_addToCartConversion`, `avg_cartToOrderConversion`, `avg_spp`, `avg_ads_bid_search`, `total_ads_views`, `total_ads_sum`, `avg_localizationPercent`)
@@ -142,7 +142,7 @@ Current repo-owned operator refresh surface:
 - source matrix is now explicit: group A bot/web-source historical, group B WB API historical/date-period capable, group C WB API current-snapshot-only, group D other/manual/browser-collector overlays
 - bot-backed current-day sync now explicitly probes `/opt/wb-web-bot/storage_state.json` before running seller portal capture; invalidated browser state surfaces as `seller_portal_session_invalid` / human `сессия seller portal больше не действует; требуется повторный вход` instead of a generic Playwright timeout
 - seller-portal auth recovery on selleros now has a repo-owned localhost-only noVNC/Xvfb path via `apps/seller_portal_relogin_session.py`: it auto-saves refreshed `storage_state.json` after validated login and auto-triggers loopback refresh instead of relying on host-side manual X11
-- the same recovery path is now materialized as a permanent operator flow on `/sheet-vitrina-v1/operator`: backend exposes `start/status/stop/launcher` routes, the page shows a compact `Восстановление Seller-сессии` block, the downloadable Mac launcher opens SSH-tunneled noVNC without manual command editing, the lifecycle now truthfully distinguishes `starting_visual_session` from `awaiting_login` so the operator does not attach to a black canvas, and final success additionally requires canonical supplier confirmation/safe switch rather than only `session ok`
+- the same seller-session path is now materialized as a permanent operator flow on `/sheet-vitrina-v1/operator`: backend exposes `session-check/start/status/stop/launcher` routes, every recovery start gets its own `run_id`, the page shows a compact `Проверка и восстановление Seller-сессии` block with separate `Текущий запуск / Финал запуска / Статус сессии`, the downloadable Mac launcher waits for local HTTP-ready and opens SSH-tunneled noVNC with explicit websocket path/reconnect, `x11vnc` is hardened with `-noxdamage`, stop closes only the temporary login contour without deleting saved session state, and final success additionally requires canonical supplier confirmation/safe switch rather than only `session ok`
 - historical/date-period families (`seller_funnel_snapshot`, `web_source_snapshot`, `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`) now use persisted accepted closed-day semantics for `yesterday_closed`
 - current-snapshot-only families (`prices_snapshot`, `ads_bids`) capture upstream truth only as current snapshot, but an already accepted snapshot for business day D must materialize as `yesterday_closed=D` on D+1; later invalid auto/manual attempts must not blank prior-day accepted truth or already accepted same-day truth
 - semantic reduction is now source-aware instead of naive two-slot worst-case:
@@ -152,7 +152,7 @@ Current repo-owned operator refresh surface:
 - manual operator refresh keeps short retries inside the run but does not create persisted long-retry tails and does not overwrite accepted truth on invalid candidates
 - promo source follows the same accepted-truth norm:
   - invalid current attempt must not overwrite already accepted same-day promo truth
-  - `yesterday_closed` must read only accepted/runtime-cached promo truth
+  - `yesterday_closed` must first try corrective interval replay and may fall back to accepted/runtime cache only when replay is unavailable or non-exact
   - low-confidence cross-year labels keep null exact dates instead of invented dates
 - live retry completion is bounded by repo-owned runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py` plus repo-owned artifacts `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.{service,timer}` installed on host as `wb-core-sheet-vitrina-closure-retry.timer`; the runner covers due `yesterday_closed` for the full historical/date-period matrix and same-day current-only capture retries only within the current business day
 
