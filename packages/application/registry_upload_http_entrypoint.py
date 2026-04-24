@@ -676,11 +676,29 @@ class RegistryUploadHttpEntrypoint:
         as_of_date: str | None = None,
     ) -> dict[str, Any]:
         normalized_group_id = _normalize_source_group_id(source_group_id)
+        now = self.now_factory()
+        selected_as_of_date = _resolve_group_refresh_selected_date(as_of_date, now=now)
+        available_dates = self.web_vitrina_block.list_readable_dates(descending=False)
+        if selected_as_of_date not in set(available_dates):
+            available_text = (
+                f"{available_dates[0]}..{available_dates[-1]}"
+                if available_dates
+                else "нет доступных дат"
+            )
+            raise ValueError(
+                f"Дата {selected_as_of_date} недоступна для обновления группы; "
+                f"доступный период: {available_text}"
+            )
+        target_snapshot_as_of_date = _target_snapshot_as_of_date_for_group_refresh(
+            selected_as_of_date,
+            now=now,
+        )
         return self.operator_jobs.start(
             operation="refresh_group",
             runner=lambda log: self._run_sheet_source_group_refresh(
                 source_group_id=normalized_group_id,
-                as_of_date=as_of_date,
+                selected_as_of_date=selected_as_of_date,
+                target_snapshot_as_of_date=target_snapshot_as_of_date,
                 log=log,
             ),
         )
@@ -801,6 +819,7 @@ class RegistryUploadHttpEntrypoint:
         update_source_keys = _ordered_activity_source_keys(shared_source_keys, update_records)
         current_business_date = current_business_date_iso(self.now_factory())
         previous_business_date = default_business_as_of_date(self.now_factory())
+        group_refresh_available_dates = self.web_vitrina_block.list_readable_dates(descending=False)
         metric_labels_by_source = _build_activity_metric_labels_by_source(
             getattr(self.runtime.load_current_state(), "metrics_v2", [])
         )
@@ -839,6 +858,8 @@ class RegistryUploadHttpEntrypoint:
                 upload_summary=upload_summary,
                 today_date=current_business_date,
                 yesterday_date=previous_business_date,
+                available_dates=group_refresh_available_dates,
+                default_refresh_date=current_business_date,
                 metric_labels_by_source=metric_labels_by_source,
                 group_last_updated_at=_source_group_last_updated_at_for_snapshot(
                     self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=snapshot_as_of_date),
@@ -1277,7 +1298,8 @@ class RegistryUploadHttpEntrypoint:
         self,
         *,
         source_group_id: str,
-        as_of_date: str | None,
+        selected_as_of_date: str,
+        target_snapshot_as_of_date: str,
         log: OperatorLogEmitter | None,
     ) -> dict[str, Any]:
         emit = log or _noop_log
@@ -1291,6 +1313,8 @@ class RegistryUploadHttpEntrypoint:
                 "group_refresh_start",
                 source_group_id=source_group_id,
                 source_group_label=group_label,
+                as_of_date=selected_as_of_date,
+                target_snapshot_as_of_date=target_snapshot_as_of_date,
                 initiator="operator_ui",
                 route=SHEET_VITRINA_GROUP_REFRESH_ROUTE,
                 endpoints=",".join(source_keys),
@@ -1308,12 +1332,14 @@ class RegistryUploadHttpEntrypoint:
                         "group_refresh_stage_start",
                         stage=stage,
                         source_group_id=source_group_id,
+                        as_of_date=selected_as_of_date,
+                        target_snapshot_as_of_date=target_snapshot_as_of_date,
                         source_keys=",".join(source_keys),
                         metric_keys=",".join(metric_keys),
                     )
                 )
                 partial_plan = self.sheet_plan_block.build_plan(
-                    as_of_date=as_of_date,
+                    as_of_date=target_snapshot_as_of_date,
                     log=emit,
                     execution_mode=EXECUTION_MODE_MANUAL_OPERATOR,
                     source_keys=source_keys,
@@ -1325,14 +1351,24 @@ class RegistryUploadHttpEntrypoint:
                         stage=stage,
                         status="success",
                         snapshot_id=partial_plan.snapshot_id,
+                        as_of_date=selected_as_of_date,
+                        target_snapshot_as_of_date=target_snapshot_as_of_date,
                         partial_rows=_data_sheet_row_count(partial_plan),
                     )
                 )
 
                 stage = "prepare_materialize"
-                emit(_format_log_event("group_refresh_stage_start", stage=stage, source_group_id=source_group_id))
-                previous_plan = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=partial_plan.as_of_date)
-                previous_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=partial_plan.as_of_date)
+                emit(
+                    _format_log_event(
+                        "group_refresh_stage_start",
+                        stage=stage,
+                        source_group_id=source_group_id,
+                        as_of_date=selected_as_of_date,
+                        target_snapshot_as_of_date=target_snapshot_as_of_date,
+                    )
+                )
+                previous_plan = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=target_snapshot_as_of_date)
+                previous_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=target_snapshot_as_of_date)
                 refreshed_at = self.refreshed_at_factory()
                 merged_plan, merge_summary = _merge_source_group_ready_snapshot(
                     previous_plan=previous_plan,
@@ -1342,12 +1378,15 @@ class RegistryUploadHttpEntrypoint:
                     metric_keys=metric_keys,
                     refreshed_at=refreshed_at,
                     previous_refreshed_at=previous_status.refreshed_at,
+                    selected_as_of_date=selected_as_of_date,
                 )
                 emit(
                     _format_log_event(
                         "group_refresh_stage_finish",
                         stage=stage,
                         status="success",
+                        as_of_date=selected_as_of_date,
+                        target_snapshot_as_of_date=target_snapshot_as_of_date,
                         rows_updated=merge_summary["rows_updated"],
                         rows_preserved=merge_summary["rows_preserved"],
                         status_rows_updated=merge_summary["status_rows_updated"],
@@ -1355,7 +1394,15 @@ class RegistryUploadHttpEntrypoint:
                 )
 
                 stage = "load_group_to_vitrina"
-                emit(_format_log_event("group_refresh_stage_start", stage=stage, source_group_id=source_group_id))
+                emit(
+                    _format_log_event(
+                        "group_refresh_stage_start",
+                        stage=stage,
+                        source_group_id=source_group_id,
+                        as_of_date=selected_as_of_date,
+                        target_snapshot_as_of_date=target_snapshot_as_of_date,
+                    )
+                )
                 refresh_result = self.runtime.save_sheet_vitrina_ready_snapshot(
                     current_state=current_state,
                     refreshed_at=refreshed_at,
@@ -1372,6 +1419,8 @@ class RegistryUploadHttpEntrypoint:
                         stage=stage,
                         status="success",
                         snapshot_id=merged_plan.snapshot_id,
+                        as_of_date=selected_as_of_date,
+                        target_snapshot_as_of_date=target_snapshot_as_of_date,
                         rows_updated=merge_summary["rows_updated"],
                         rows_preserved=merge_summary["rows_preserved"],
                         untouched_groups=",".join(
@@ -1389,6 +1438,8 @@ class RegistryUploadHttpEntrypoint:
                         "operation": "refresh_group",
                         "source_group_id": source_group_id,
                         "source_group_label": group_label,
+                        "selected_as_of_date": selected_as_of_date,
+                        "target_snapshot_as_of_date": target_snapshot_as_of_date,
                         "source_keys": source_keys,
                         "metric_keys": metric_keys,
                         "started_at": started_at,
@@ -1408,6 +1459,8 @@ class RegistryUploadHttpEntrypoint:
                         "group_refresh_finish",
                         status="success",
                         source_group_id=source_group_id,
+                        as_of_date=selected_as_of_date,
+                        target_snapshot_as_of_date=target_snapshot_as_of_date,
                         duration_seconds=duration_seconds,
                         rows_updated=merge_summary["rows_updated"],
                         rows_preserved=merge_summary["rows_preserved"],
@@ -1422,6 +1475,8 @@ class RegistryUploadHttpEntrypoint:
                         status="failed",
                         failed_stage=stage,
                         source_group_id=source_group_id,
+                        as_of_date=selected_as_of_date,
+                        target_snapshot_as_of_date=target_snapshot_as_of_date,
                         reason=str(exc),
                         duration_seconds=_duration_seconds(started_at, finished_at),
                     )
@@ -2695,6 +2750,22 @@ def _source_group_config(source_group_id: str) -> Mapping[str, Any]:
     return WEB_VITRINA_SOURCE_GROUPS[_normalize_source_group_id(source_group_id)]
 
 
+def _resolve_group_refresh_selected_date(value: str | None, *, now: datetime) -> str:
+    normalized = str(value or "").strip() or current_business_date_iso(now)
+    try:
+        datetime.strptime(normalized, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"Дата обновления группы должна быть в формате YYYY-MM-DD, получено {normalized!r}") from exc
+    return normalized
+
+
+def _target_snapshot_as_of_date_for_group_refresh(selected_as_of_date: str, *, now: datetime) -> str:
+    current_date = current_business_date_iso(now)
+    if selected_as_of_date == current_date:
+        return default_business_as_of_date(now)
+    return selected_as_of_date
+
+
 def _metric_keys_for_source_keys(metrics: Iterable[Any], *, source_keys: Iterable[str]) -> list[str]:
     source_key_set = {str(item).strip() for item in source_keys if str(item).strip()}
     allowed_metric_keys: set[str] = set()
@@ -2727,10 +2798,12 @@ def _merge_source_group_ready_snapshot(
     metric_keys: Iterable[str],
     refreshed_at: str,
     previous_refreshed_at: str,
+    selected_as_of_date: str | None = None,
 ) -> tuple[SheetVitrinaV1Envelope, dict[str, Any]]:
     metric_key_set = {str(item).strip() for item in metric_keys if str(item).strip()}
     source_key_set = {str(item).strip() for item in source_keys if str(item).strip()}
-    if previous_plan.date_columns != partial_plan.date_columns:
+    selected_date = str(selected_as_of_date or "").strip()
+    if not selected_date and previous_plan.date_columns != partial_plan.date_columns:
         raise ValueError(
             "partial snapshot date_columns mismatch: "
             f"{partial_plan.date_columns} != {previous_plan.date_columns}"
@@ -2740,6 +2813,21 @@ def _merge_source_group_ready_snapshot(
     partial_data = _require_sheet(partial_plan, "DATA_VITRINA")
     previous_status = _require_sheet(previous_plan, "STATUS")
     partial_status = _require_sheet(partial_plan, "STATUS")
+    previous_date_indexes: list[int] = []
+    partial_date_indexes: list[int] = []
+    selected_temporal_slots: set[str] = set()
+    if selected_date:
+        previous_date_indexes = _sheet_header_indexes(previous_data.header, selected_date)
+        partial_date_indexes = _sheet_header_indexes(partial_data.header, selected_date)
+        if not previous_date_indexes:
+            raise ValueError(f"target ready snapshot does not contain selected date {selected_date}")
+        if not partial_date_indexes:
+            raise ValueError(f"partial group snapshot does not contain selected date {selected_date}")
+        selected_temporal_slots = {
+            str(slot.slot_key)
+            for slot in partial_plan.temporal_slots
+            if str(slot.column_date) == selected_date
+        }
 
     partial_rows_by_id = {_row_id(row): list(row) for row in partial_data.rows if _row_id(row)}
     updated_row_ids = {
@@ -2753,7 +2841,17 @@ def _merge_source_group_ready_snapshot(
     for row in previous_data.rows:
         row_id = _row_id(row)
         if row_id in updated_row_ids:
-            merged_data_rows.append(partial_rows_by_id[row_id])
+            if selected_date:
+                merged_data_rows.append(
+                    _merge_row_selected_date(
+                        previous_row=list(row),
+                        partial_row=partial_rows_by_id[row_id],
+                        previous_indexes=previous_date_indexes,
+                        partial_indexes=partial_date_indexes,
+                    )
+                )
+            else:
+                merged_data_rows.append(partial_rows_by_id[row_id])
             rows_updated += 1
         else:
             merged_data_rows.append(list(row))
@@ -2767,12 +2865,23 @@ def _merge_source_group_ready_snapshot(
         list(row)
         for row in partial_status.rows
         if _status_row_source_base(row) in source_key_set
+        and (
+            not selected_date
+            or not selected_temporal_slots
+            or _status_row_temporal_slot(row) in selected_temporal_slots
+        )
     ]
-    selected_status_bases = {_status_row_source_base(row) for row in selected_status_rows}
+    selected_status_keys = {
+        _status_row_key(row) if selected_date else _status_row_source_base(row)
+        for row in selected_status_rows
+    }
     merged_status_rows = [
         list(row)
         for row in previous_status.rows
-        if _status_row_source_base(row) not in selected_status_bases
+        if (
+            (_status_row_key(row) if selected_date else _status_row_source_base(row))
+            not in selected_status_keys
+        )
     ]
     merged_status_rows.extend(selected_status_rows)
 
@@ -2820,6 +2929,8 @@ def _merge_source_group_ready_snapshot(
             "source_group_id": source_group_id,
             "source_keys": sorted(source_key_set),
             "metric_keys": sorted(metric_key_set),
+            "selected_as_of_date": selected_date,
+            "updated_dates": [selected_date] if selected_date else list(previous_plan.date_columns),
             "refreshed_at": refreshed_at,
         },
     }
@@ -2840,6 +2951,8 @@ def _merge_source_group_ready_snapshot(
         "source_group_id": source_group_id,
         "source_keys": sorted(source_key_set),
         "metric_keys": sorted(metric_key_set),
+        "selected_as_of_date": selected_date,
+        "updated_dates": [selected_date] if selected_date else list(previous_plan.date_columns),
         "updated_row_ids": sorted(updated_row_ids),
     }
 
@@ -2901,14 +3014,51 @@ def _row_id(row: list[Any]) -> str:
     return str(row[1] or "").strip() if len(row) > 1 else ""
 
 
+def _sheet_header_indexes(header: Iterable[Any], value: str) -> list[int]:
+    normalized_value = str(value or "").strip()
+    return [
+        index
+        for index, item in enumerate(header)
+        if str(item or "").strip() == normalized_value
+    ]
+
+
+def _merge_row_selected_date(
+    *,
+    previous_row: list[Any],
+    partial_row: list[Any],
+    previous_indexes: list[int],
+    partial_indexes: list[int],
+) -> list[Any]:
+    merged = list(previous_row)
+    fallback_partial_index = partial_indexes[0]
+    for previous_index in previous_indexes:
+        partial_index = previous_index if previous_index in partial_indexes else fallback_partial_index
+        if partial_index < len(partial_row):
+            while previous_index >= len(merged):
+                merged.append("")
+            merged[previous_index] = partial_row[partial_index]
+    return merged
+
+
 def _metric_key_from_row_id(row_id: str) -> str:
     return str(row_id).split("|", 1)[1] if "|" in str(row_id) else ""
 
 
+def _status_row_key(row: list[Any]) -> str:
+    return str(row[0] or "").strip() if row else ""
+
+
 def _status_row_source_base(row: list[Any]) -> str:
-    source_key = str(row[0] or "").strip() if row else ""
+    source_key = _status_row_key(row)
     base, _ = _split_temporal_source_key(source_key)
     return base
+
+
+def _status_row_temporal_slot(row: list[Any]) -> str:
+    source_key = _status_row_key(row)
+    _, temporal_slot = _split_temporal_source_key(source_key)
+    return temporal_slot
 
 
 def _duration_seconds(started_at: str, finished_at: str) -> float:
@@ -3151,6 +3301,7 @@ def _empty_web_vitrina_activity_surface(
 ) -> dict[str, Any]:
     current_business_date = current_business_date_iso()
     previous_business_date = default_business_as_of_date()
+    available_dates = sorted({current_business_date, previous_business_date})
     return {
         "log_block": {
             "title": "Лог",
@@ -3179,7 +3330,13 @@ def _empty_web_vitrina_activity_surface(
             "updated_at": "",
             "today_date": current_business_date,
             "yesterday_date": previous_business_date,
-            "groups": _web_vitrina_loading_table_groups({}),
+            "available_dates": available_dates,
+            "default_refresh_date": current_business_date,
+            "groups": _web_vitrina_loading_table_groups(
+                {},
+                available_dates=available_dates,
+                default_refresh_date=current_business_date,
+            ),
             "columns": _web_vitrina_loading_table_columns(
                 today_date=current_business_date,
                 yesterday_date=previous_business_date,
@@ -3324,6 +3481,8 @@ def _build_web_vitrina_loading_table(
     upload_summary: Mapping[str, Any],
     today_date: str,
     yesterday_date: str,
+    available_dates: Iterable[str],
+    default_refresh_date: str,
     metric_labels_by_source: Mapping[str, list[str]],
     group_last_updated_at: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -3372,7 +3531,16 @@ def _build_web_vitrina_loading_table(
         "updated_at": str(upload_summary.get("updated_at") or ""),
         "today_date": today_date,
         "yesterday_date": yesterday_date,
-        "groups": _web_vitrina_loading_table_groups(group_last_updated_at or {}),
+        "available_dates": _normalize_available_refresh_dates(available_dates, default_refresh_date=default_refresh_date),
+        "default_refresh_date": default_refresh_date,
+        "groups": _web_vitrina_loading_table_groups(
+            group_last_updated_at or {},
+            available_dates=_normalize_available_refresh_dates(
+                available_dates,
+                default_refresh_date=default_refresh_date,
+            ),
+            default_refresh_date=default_refresh_date,
+        ),
         "columns": _web_vitrina_loading_table_columns(
             today_date=today_date,
             yesterday_date=yesterday_date,
@@ -3385,8 +3553,19 @@ def _build_web_vitrina_loading_table(
     }
 
 
-def _web_vitrina_loading_table_groups(group_last_updated_at: Mapping[str, str]) -> list[dict[str, Any]]:
+def _web_vitrina_loading_table_groups(
+    group_last_updated_at: Mapping[str, str],
+    *,
+    available_dates: Iterable[str] = (),
+    default_refresh_date: str = "",
+) -> list[dict[str, Any]]:
     groups: list[dict[str, Any]] = []
+    normalized_available_dates = _normalize_available_refresh_dates(
+        available_dates,
+        default_refresh_date=default_refresh_date,
+    )
+    min_date = normalized_available_dates[0] if normalized_available_dates else ""
+    max_date = normalized_available_dates[-1] if normalized_available_dates else ""
     for group_id in WEB_VITRINA_SOURCE_GROUP_ORDER:
         config = WEB_VITRINA_SOURCE_GROUPS[group_id]
         groups.append(
@@ -3398,11 +3577,26 @@ def _web_vitrina_loading_table_groups(group_last_updated_at: Mapping[str, str]) 
                 "refresh_action": {
                     "label": "Обновить группу",
                     "source_group_id": group_id,
+                    "default_as_of_date": default_refresh_date,
+                    "available_dates": normalized_available_dates,
+                    "min_date": min_date,
+                    "max_date": max_date,
                 },
                 "session_controls": group_id == "seller_portal_bot",
             }
         )
     return groups
+
+
+def _normalize_available_refresh_dates(
+    dates: Iterable[str],
+    *,
+    default_refresh_date: str,
+) -> list[str]:
+    normalized = {str(item).strip() for item in dates if str(item).strip()}
+    if default_refresh_date:
+        normalized.add(default_refresh_date)
+    return sorted(normalized)
 
 
 def _source_group_id_for_source_key(source_key: str) -> str:

@@ -99,12 +99,12 @@ def main() -> None:
     _print_summary({
         "base_url": ready_result["base_url"],
         "table_rendered": ready_result["table_rendered"],
-        "initial_loading_badge": ready_result["initial_loading_badge"],
+        "top_panel": ready_result["top_panel"],
         "default_total_first": ready_result["default_total_first"],
         "default_sku_metric_cluster": ready_result["default_sku_metric_cluster"],
         "sku_separators": ready_result["sku_separators"],
         "filter_controls": ready_result["filter_controls"],
-        "status_badge": ready_result["status_badge"],
+        "status_summary": ready_result["status_summary"],
         "activity_surface": ready_result["activity_surface"],
         "compact_widths": ready_result["compact_widths"],
         "percent_formatting": ready_result["percent_formatting"],
@@ -245,35 +245,20 @@ def run_browser_checks(
         try:
             page.goto(page_url, wait_until="commit")
             page.wait_for_load_state("domcontentloaded")
-            initial_loading_badge = {
-                "label": page.locator("[data-status-badge]").inner_text().strip(),
-                "class_name": page.locator("[data-status-badge]").get_attribute("class") or "",
+            top_panel_state = {
+                "status_badge_count": page.locator("[data-status-badge]").count(),
+                "json_connect_count": page.locator("[data-open-contract]").count(),
+                "progress_count": page.locator("[data-global-progress]").count(),
+                "progress_hidden": page.locator("[data-global-progress]").evaluate("node => node.hidden"),
             }
-            if initial_loading_badge["label"] == "Ошибка" or "tone-error" in initial_loading_badge["class_name"]:
-                raise AssertionError(f"initial status badge must not start in an error state, got {initial_loading_badge}")
+            if top_panel_state["status_badge_count"] != 0 or top_panel_state["json_connect_count"] != 0:
+                raise AssertionError(f"top panel must not render JSON Connect or a permanent status badge, got {top_panel_state}")
             page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
             total_rows = page.locator("[data-table-body] tr").count()
             if total_rows <= 0:
                 raise AssertionError("web-vitrina table must render at least one row")
-            final_badge = {
-                "label": page.locator("[data-status-badge]").inner_text().strip(),
-                "class_name": page.locator("[data-status-badge]").get_attribute("class") or "",
-            }
-            expected_badge_labels = {
-                "success": "Успешно",
-                "warning": "Внимание",
-                "error": "Ошибка",
-            }
-            if expected_final_badge_tone is None:
-                if final_badge["label"] not in expected_badge_labels.values():
-                    raise AssertionError(f"status badge must end in a Russian semantic state, got {final_badge}")
-            else:
-                expected_label = expected_badge_labels[expected_final_badge_tone]
-                if final_badge["label"] != expected_label or f"tone-{expected_final_badge_tone}" not in final_badge["class_name"]:
-                    raise AssertionError(
-                        f"status badge must end in truthful {expected_final_badge_tone} state, got {final_badge}"
-                    )
             initial_summary_cards = _read_summary_cards(page)
+            status_summary = initial_summary_cards.get("status", {})
             initial_activity_surface = _read_activity_surface(
                 page,
                 allow_empty_log=expected_percent_rows is None,
@@ -436,13 +421,13 @@ def run_browser_checks(
         "base_url": base_url,
         "as_of_date": as_of_date,
         "table_rendered": total_rows > 0,
-        "initial_loading_badge": initial_loading_badge,
+        "top_panel": top_panel_state,
         "default_total_first": initial_order[0]["scope_label"] == "ИТОГО",
         "default_sku_metric_cluster": sku_cluster_ok,
         "sku_separators": sku_separators,
         "right_edge_spacer": right_edge_spacer,
         "filter_controls": filter_controls,
-        "status_badge": final_badge,
+        "status_summary": status_summary,
         "summary_cards": initial_summary_cards,
         "activity_surface": initial_activity_surface,
         "compact_widths": compact_widths,
@@ -494,8 +479,8 @@ def _print_summary(result: dict[str, object]) -> None:
     if result.get("as_of_date"):
         print("web_vitrina_browser_as_of_date: ok ->", result["as_of_date"])
     print("web_vitrina_browser_table: ok ->", result["table_rendered"])
-    print("web_vitrina_browser_initial_loading_badge: ok ->", result["initial_loading_badge"])
-    print("web_vitrina_browser_status_badge: ok ->", result["status_badge"])
+    print("web_vitrina_browser_top_panel: ok ->", result["top_panel"])
+    print("web_vitrina_browser_status_summary: ok ->", result["status_summary"])
     print("web_vitrina_browser_activity_surface: ok ->", result["activity_surface"])
     print("web_vitrina_browser_compact_widths: ok ->", result["compact_widths"])
     print("web_vitrina_browser_percent_formatting: ok ->", result["percent_formatting"])
@@ -601,16 +586,18 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
             return current ? Array.from(document.querySelectorAll('main > section')).indexOf(current) : -1;
           };
           const loadButton = document.querySelector('[data-load-refresh-button]');
-          const operatorLink = document.querySelector('[data-open-operator]');
-          const headers = Array.from(document.querySelectorAll('[data-table-head] th')).map(node => (node.textContent || '').trim());
-          return {
-            retry_button_count: document.querySelectorAll('[data-retry-button]').length,
-            load_button_text: loadButton ? (loadButton.textContent || '').trim() : '',
-            load_button_class: loadButton ? (loadButton.getAttribute('class') || '') : '',
-            operator_link_text: operatorLink ? (operatorLink.textContent || '').trim() : '',
-            operator_link_target: operatorLink ? (operatorLink.getAttribute('target') || '') : '',
-            json_link_class: (document.querySelector('[data-open-contract]') || {}).getAttribute('class') || '',
-            headers,
+            const operatorLink = document.querySelector('[data-open-operator]');
+            const headers = Array.from(document.querySelectorAll('[data-table-head] th')).map(node => (node.textContent || '').trim());
+            return {
+              retry_button_count: document.querySelectorAll('[data-retry-button]').length,
+              top_status_badge_count: document.querySelectorAll('[data-status-badge]').length,
+              json_connect_count: document.querySelectorAll('[data-open-contract]').length,
+              progress_count: document.querySelectorAll('[data-global-progress]').length,
+              load_button_text: loadButton ? (loadButton.textContent || '').trim() : '',
+              load_button_class: loadButton ? (loadButton.getAttribute('class') || '') : '',
+              operator_link_text: operatorLink ? (operatorLink.textContent || '').trim() : '',
+              operator_link_target: operatorLink ? (operatorLink.getAttribute('target') || '') : '',
+              headers,
             order: {
               top: nodeIndex('[data-top-panel]'),
               summary: nodeIndex('[data-summary-grid]'),
@@ -624,12 +611,14 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
     )
     if payload["retry_button_count"] != 0:
         raise AssertionError(f"removed refresh button must not be rendered, got {payload}")
+    if payload["top_status_badge_count"] != 0 or payload["json_connect_count"] != 0:
+        raise AssertionError(f"top panel must not render JSON Connect or a permanent status badge, got {payload}")
+    if payload["progress_count"] != 1:
+        raise AssertionError(f"top panel must expose one global progress component, got {payload}")
     if payload["load_button_text"] != "Загрузить и обновить" or "primary" not in payload["load_button_class"]:
         raise AssertionError(f"load+refresh button must be the single primary action, got {payload}")
     if payload["operator_link_text"] != "Операторский сайт" or payload["operator_link_target"] != "_blank":
         raise AssertionError(f"operator control must be a new-tab link, got {payload}")
-    if "secondary" not in payload["json_link_class"]:
-        raise AssertionError(f"JSON Connect must be secondary when present, got {payload}")
     for forbidden in ("Metric Label", "Sections", "Score Label"):
         if forbidden in payload["headers"]:
             raise AssertionError(f"main table headers must be Russian-only, got {payload['headers']}")
@@ -661,18 +650,25 @@ def _check_load_refresh_action(
         raise AssertionError(f"load+refresh button must use POST /refresh, got {load_response.request.method}")
     page.wait_for_function(
         """() => {
-          const badge = document.querySelector('[data-status-badge]');
-          return !!badge && badge.textContent.trim() === 'Загрузка' && badge.className.includes('tone-warning');
+          const progress = document.querySelector('[data-global-progress]');
+          const bar = document.querySelector('[data-global-progress-bar]');
+          return !!progress && !!bar && !progress.hidden && parseFloat(bar.style.width || '0') >= 10;
         }""",
         timeout=5000,
     )
-    _wait_for_semantic_badge(
+    _wait_for_action_completion(
         page,
-        expected_tone=expected_final_badge_tone,
         timeout=45000,
         require_enabled_button=True,
     )
     next_summary_cards = _read_summary_cards(page)
+    if expected_final_badge_tone is not None:
+        expected_label = _badge_label(expected_final_badge_tone)
+        status_card = next_summary_cards.get("status") or {}
+        if status_card.get("value") != expected_label:
+            raise AssertionError(
+                f"status summary must end in truthful {expected_final_badge_tone} state, got {status_card}"
+            )
     next_activity_surface = _read_activity_surface(page)
     _assert_page_refresh_card_changed(previous_summary_cards, next_summary_cards, action_name="source refresh")
     freshness_changed = not _freshness_card_matches(previous_summary_cards, next_summary_cards)
@@ -686,10 +682,7 @@ def _check_load_refresh_action(
         raise AssertionError(
             f"source refresh must advance loading table/log state, got {previous_activity_surface} -> {next_activity_surface}"
         )
-    final_badge = {
-        "label": page.locator("[data-status-badge]").inner_text().strip(),
-        "class_name": page.locator("[data-status-badge]").get_attribute("class") or "",
-    }
+    progress_hidden = page.locator("[data-global-progress]").evaluate("node => node.hidden")
     return {
         "http_status": load_response.status,
         "method": load_response.request.method,
@@ -698,7 +691,8 @@ def _check_load_refresh_action(
         "freshness_before": previous_summary_cards["freshness"]["value"],
         "freshness_after": next_summary_cards["freshness"]["value"],
         "freshness_changed": freshness_changed,
-        "final_badge": final_badge,
+        "progress_hidden_after": progress_hidden,
+        "status_summary": next_summary_cards.get("status", {}),
         "activity_surface": next_activity_surface,
     }
 
@@ -792,9 +786,14 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
               group_id: node.getAttribute('data-loading-group') || '',
               text: (node.textContent || '').trim(),
               has_refresh_button: node.querySelectorAll('[data-refresh-source-group]').length === 1,
+              date_value: (node.querySelector('[data-refresh-source-group-date]') || {}).value || '',
+              date_min: (node.querySelector('[data-refresh-source-group-date]') || {}).min || '',
+              date_max: (node.querySelector('[data-refresh-source-group-date]') || {}).max || '',
               has_session_check: node.querySelectorAll('[data-session-check]').length === 1,
               has_session_recovery_start: node.querySelectorAll('[data-session-recovery-start]').length === 1,
-              has_session_launcher: node.querySelectorAll('[data-session-launcher]').length === 1
+              has_session_launcher: node.querySelectorAll('[data-session-launcher]').length === 1,
+              session_state_in_main: !!node.querySelector('.activity-group-main [data-session-state]'),
+              session_state_in_controls: !!node.querySelector('.activity-group-actions [data-session-state]')
             }));
             return {
               meta: ((document.querySelector('[data-loading-table-meta]') || {}).textContent || '').trim(),
@@ -833,6 +832,8 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
         raise AssertionError(f"loading table must render grouped source headers, got {payload}")
     if not all(item["has_refresh_button"] for item in payload["loading"]["groups"]):
         raise AssertionError(f"each loading group must expose one group refresh button, got {payload}")
+    if not all(item["date_value"] for item in payload["loading"]["groups"]):
+        raise AssertionError(f"each loading group must expose a default refresh date, got {payload}")
     seller_group = next(item for item in payload["loading"]["groups"] if item["group_id"] == "seller_portal_bot")
     if not (
         seller_group["has_session_check"]
@@ -840,6 +841,8 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
         and seller_group["has_session_launcher"]
     ):
         raise AssertionError(f"Seller Portal group must expose session controls, got {payload}")
+    if not seller_group["session_state_in_main"] or seller_group["session_state_in_controls"]:
+        raise AssertionError(f"Seller Portal session state must be placed in the left group header, got {payload}")
     header_labels = [item["label"] for item in payload["loading"]["headers"]]
     for expected in ("Источник", "Причина сегодня", "Причина вчера", "Метрики", "Технический endpoint"):
         if expected not in header_labels:
@@ -847,26 +850,19 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
     return payload
 
 
-def _wait_for_semantic_badge(
+def _wait_for_action_completion(
     page: object,
     *,
-    expected_tone: str | None,
     timeout: int,
     require_enabled_button: bool = False,
 ) -> None:
-    expected_label = _badge_label(expected_tone) if expected_tone else None
-    conditions = ["!!badge"]
-    if expected_label is None:
-        conditions.append("['Успешно', 'Внимание', 'Ошибка'].includes(badge.textContent.trim())")
-    else:
-        conditions.append(f"badge.textContent.trim() === '{expected_label}'")
-        conditions.append(f"badge.className.includes('tone-{expected_tone}')")
+    conditions = ["!!progress", "progress.hidden"]
     if require_enabled_button:
         conditions.append("!!button")
         conditions.append("!button.disabled")
     page.wait_for_function(
         f"""() => {{
-          const badge = document.querySelector('[data-status-badge]');
+          const progress = document.querySelector('[data-global-progress]');
           const button = document.querySelector('[data-load-refresh-button]');
           return {' && '.join(conditions)};
         }}""",

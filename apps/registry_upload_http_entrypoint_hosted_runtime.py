@@ -879,6 +879,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "surface=page_composition",
             "web_vitrina_page_composition",
             "data-top-panel",
+            "data-global-progress",
             "data-filter-controls",
             "data-loading-table",
             "data-loading-table-head",
@@ -894,7 +895,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         missing_tokens = [token for token in tokens if token not in body]
         removed_tokens = [
             token
-            for token in ("data-update-summary", "data-retry-button", "Обновление данных")
+            for token in ("data-update-summary", "data-retry-button", "data-status-badge", "JSON Connect", "Обновление данных")
             if token in body
         ]
         evaluation["ok"] = (

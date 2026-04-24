@@ -143,24 +143,41 @@
       transform: none;
     }
 
-    .status-badge {
-      display: inline-flex;
+    .top-progress {
+      display: inline-grid;
+      grid-template-columns: minmax(120px, 180px) auto;
       align-items: center;
       gap: 8px;
-      border-radius: 999px;
-      padding: 6px 11px;
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.02em;
+      min-height: 34px;
     }
 
-    .status-badge::before {
-      content: "";
-      width: 8px;
-      height: 8px;
+    .top-progress[hidden] {
+      display: none;
+    }
+
+    .top-progress-track {
+      position: relative;
+      width: 100%;
+      height: 6px;
+      overflow: hidden;
       border-radius: 999px;
-      background: currentColor;
-      opacity: 0.8;
+      background: #e8edf4;
+    }
+
+    .top-progress-bar {
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--accent);
+      transition: width 180ms ease;
+    }
+
+    .top-progress-label {
+      min-width: 88px;
+      font-size: 11px;
+      line-height: 1.35;
+      color: var(--muted);
+      white-space: nowrap;
     }
 
     .tone-success {
@@ -394,6 +411,7 @@
 
     .activity-group-updated,
     .activity-group-run-state,
+    .activity-group-date-label,
     .seller-session-state {
       font-size: 11px;
       font-weight: 600;
@@ -426,10 +444,26 @@
     }
 
     .activity-group-button,
-    .seller-session-button {
+    .seller-session-button,
+    .activity-group-date-input {
       min-height: 28px;
       padding: 5px 9px;
       font-size: 11px;
+    }
+
+    .activity-group-date-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .activity-group-date-input {
+      width: 136px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #ffffff;
+      color: var(--text);
+      font: inherit;
     }
 
     .activity-summary-item {
@@ -1069,9 +1103,13 @@
         <p class="meta-line" data-page-meta>Загрузка page composition…</p>
       </div>
       <div class="top-panel-actions">
-        <a class="button secondary" data-open-contract href="#">JSON Connect</a>
+        <div class="top-progress" data-global-progress hidden>
+          <div class="top-progress-track" aria-hidden="true">
+            <div class="top-progress-bar" data-global-progress-bar></div>
+          </div>
+          <span class="top-progress-label" data-global-progress-label>Запуск…</span>
+        </div>
         <button class="button primary" type="button" data-load-refresh-button>Загрузить и обновить</button>
-        <span class="status-badge tone-warning" data-status-badge>Загрузка</span>
       </div>
     </section>
 
@@ -1251,7 +1289,9 @@
     const WEB_VITRINA_CONFIG = __SHEET_VITRINA_V1_WEB_VITRINA_CONFIG_JSON__;
     const summaryGridNode = document.querySelector("[data-summary-grid]");
     const pageMetaNode = document.querySelector("[data-page-meta]");
-    const statusBadgeNode = document.querySelector("[data-status-badge]");
+    const globalProgressNode = document.querySelector("[data-global-progress]");
+    const globalProgressBarNode = document.querySelector("[data-global-progress-bar]");
+    const globalProgressLabelNode = document.querySelector("[data-global-progress-label]");
     const historyMetaNode = document.querySelector("[data-history-meta]");
     const historySummaryNode = document.querySelector("[data-history-summary]");
     const historyCalendarNode = document.querySelector("[data-history-calendar]");
@@ -1333,13 +1373,16 @@
         tone: "neutral",
         checkedAt: ""
       },
-      groupActions: {}
+      groupActions: {},
+      groupRefreshDates: {}
     };
 
     openOperatorLink.href = WEB_VITRINA_CONFIG.operator_path;
     openOperatorLink.target = "_blank";
     openOperatorLink.rel = "noopener noreferrer";
-    openContractLink.href = buildReadUrl("contract").toString();
+    if (openContractLink) {
+      openContractLink.href = buildReadUrl("contract").toString();
+    }
 
     loadRefreshButton.addEventListener("click", function() {
       runSourceRefreshAndReload();
@@ -1359,6 +1402,17 @@
       const recoveryStartButton = event.target.closest("[data-session-recovery-start]");
       if (recoveryStartButton) {
         runSellerRecoveryStart();
+      }
+    });
+
+    loadingTableBodyNode.addEventListener("change", function(event) {
+      const dateInput = event.target.closest("[data-refresh-source-group-date]");
+      if (!dateInput) {
+        return;
+      }
+      const groupId = String(dateInput.getAttribute("data-refresh-source-group-date") || "").trim();
+      if (groupId) {
+        state.groupRefreshDates[groupId] = String(dateInput.value || "").trim();
       }
     });
 
@@ -1437,21 +1491,47 @@
       return url;
     }
 
-    function setStatusBadge(payload) {
-      const badge = normalizeStatusBadgePayload(payload);
-      statusBadgeNode.textContent = badge.label;
-      statusBadgeNode.className = "status-badge tone-" + normalizeTone(badge.tone);
-      statusBadgeNode.title = badge.detail || "";
+    function setStatusBadge(_payload) {
+      return;
     }
 
-    function normalizeStatusBadgePayload(payload) {
-      if (payload && payload.status_badge && typeof payload.status_badge === "object") {
-        return payload.status_badge;
+    function showGlobalProgress(percent, label) {
+      if (!globalProgressNode || !globalProgressBarNode || !globalProgressLabelNode) {
+        return;
       }
-      if (payload && typeof payload.label === "string") {
-        return payload;
+      const normalizedPercent = Math.max(0, Math.min(100, Number(percent) || 0));
+      globalProgressNode.hidden = false;
+      globalProgressBarNode.style.width = normalizedPercent + "%";
+      globalProgressLabelNode.textContent = String(label || "Загрузка…");
+    }
+
+    function hideGlobalProgress() {
+      if (!globalProgressNode || !globalProgressBarNode || !globalProgressLabelNode) {
+        return;
       }
-      return {label: "Ошибка", tone: "error", detail: "status unavailable"};
+      globalProgressNode.hidden = true;
+      globalProgressBarNode.style.width = "0%";
+      globalProgressLabelNode.textContent = "Запуск…";
+    }
+
+    function progressFromJob(payload) {
+      const lines = Array.isArray(payload && payload.log_lines) ? payload.log_lines.join("\n") : "";
+      if (String(payload && payload.status || "") !== "running") {
+        return {percent: 100, label: "Завершение"};
+      }
+      if (lines.includes("refresh_runtime_save_start") || lines.includes("group_refresh_stage_start stage=load_group_to_vitrina")) {
+        return {percent: 90, label: "Обновление таблицы"};
+      }
+      if (lines.includes("refresh_snapshot_ready") || lines.includes("group_refresh_stage_start stage=prepare_materialize")) {
+        return {percent: 65, label: "Подготовка"};
+      }
+      if (lines.includes("refresh_build_start") || lines.includes("source_step_start") || lines.includes("group_refresh_stage_start stage=source_fetch")) {
+        return {percent: 35, label: "Загрузка источников"};
+      }
+      if (lines.includes("cycle_start") || lines.includes("group_refresh_start")) {
+        return {percent: 15, label: "Job запущен"};
+      }
+      return {percent: 10, label: "Запуск"};
     }
 
     function updatePageHistoryPeriod(payload) {
@@ -1468,7 +1548,9 @@
         url.searchParams.delete("as_of_date");
       }
       window.history.replaceState({}, "", url.toString());
-      openContractLink.href = buildReadUrl("contract").toString();
+      if (openContractLink) {
+        openContractLink.href = buildReadUrl("contract").toString();
+      }
     }
 
     function normalizeTone(value) {
@@ -1780,15 +1862,40 @@
         '<div class="activity-group-header">',
         '<span class="activity-group-main">',
         '<span>' + escapeHtml(group.label || groupId) + '</span>',
+        renderSellerSessionState(group),
         '<span class="activity-group-updated">Последнее обновление: ' + escapeHtml(updatedText) + '</span>',
         renderGroupActionState(actionState),
         '</span>',
         '<span class="activity-group-actions">',
+        renderGroupDateControl(group),
         '<button class="button secondary activity-group-button" type="button" data-refresh-source-group="' + escapeHtml(groupId) + '">Обновить группу</button>',
         renderSellerSessionControls(group),
         '</span>',
         '</div>',
         '</td></tr>'
+      ].join("");
+    }
+
+    function renderGroupDateControl(group) {
+      const groupId = String(group.group_id || "");
+      const action = group.refresh_action || {};
+      const availableDates = Array.isArray(action.available_dates) ? action.available_dates.map(String).filter(Boolean) : [];
+      const defaultDate = String(
+        state.groupRefreshDates[groupId] ||
+        action.default_as_of_date ||
+        loadingTableBlock().default_refresh_date ||
+        loadingTableBlock().today_date ||
+        ""
+      );
+      const minDate = String(action.min_date || availableDates[0] || "");
+      const maxDate = String(action.max_date || availableDates[availableDates.length - 1] || "");
+      return [
+        '<label class="activity-group-date-label">Дата',
+        '<input class="activity-group-date-input" type="date" data-refresh-source-group-date="' + escapeHtml(groupId) + '" value="' + escapeHtml(defaultDate) + '"' +
+          (minDate ? ' min="' + escapeHtml(minDate) + '"' : "") +
+          (maxDate ? ' max="' + escapeHtml(maxDate) + '"' : "") +
+        '>',
+        '</label>'
       ].join("");
     }
 
@@ -1810,7 +1917,7 @@
       ].join("");
     }
 
-    function renderSellerSessionControls(group) {
+    function renderSellerSessionState(group) {
       if (!group.session_controls) {
         return "";
       }
@@ -1818,12 +1925,18 @@
         ? ("Сессия: " + state.sellerSession.statusLabel + " · проверено " + formatTimestampDisplay(state.sellerSession.checkedAt))
         : "Сессия: не проверялась";
       const tone = normalizeTone(state.sellerSession.tone || "neutral");
+      return '<span class="seller-session-state tone-' + escapeHtml(tone) + '" data-session-state>' + escapeHtml(status) + '</span>';
+    }
+
+    function renderSellerSessionControls(group) {
+      if (!group.session_controls) {
+        return "";
+      }
       return [
         '<span class="seller-session-controls" data-seller-session-controls>',
         '<button class="button secondary seller-session-button" type="button" data-session-check>Проверить сессию</button>',
         '<button class="button secondary seller-session-button" type="button" data-session-recovery-start>Восстановить сессию</button>',
         '<a class="button secondary seller-session-button" data-session-launcher href="' + escapeHtml(WEB_VITRINA_CONFIG.seller_recovery_launcher_path || "#") + '" download>Скачать лаунчер</a>',
-        '<span class="seller-session-state tone-' + escapeHtml(tone) + '" data-session-state>' + escapeHtml(status) + '</span>',
         '</span>'
       ].join("");
     }
@@ -2907,6 +3020,13 @@
         .replace(/'/g, "&#39;");
     }
 
+    function cssEscape(value) {
+      if (window.CSS && typeof window.CSS.escape === "function") {
+        return window.CSS.escape(String(value));
+      }
+      return String(value).replace(/["\\]/g, "\\$&");
+    }
+
     async function readJsonResponse(response, fallbackErrorText) {
       const text = await response.text();
       try {
@@ -2951,6 +3071,49 @@
         return "Прочие источники";
       }
       return normalizedGroupId || "группа";
+    }
+
+    function getLoadingGroup(groupId) {
+      const normalizedGroupId = String(groupId || "").trim();
+      const groups = Array.isArray(loadingTableBlock().groups) ? loadingTableBlock().groups : [];
+      for (const group of groups) {
+        if (String(group.group_id || "") === normalizedGroupId) {
+          return group;
+        }
+      }
+      return null;
+    }
+
+    function getSelectedGroupRefreshDate(groupId) {
+      const normalizedGroupId = String(groupId || "").trim();
+      const input = loadingTableBodyNode.querySelector('[data-refresh-source-group-date="' + cssEscape(normalizedGroupId) + '"]');
+      const group = getLoadingGroup(normalizedGroupId);
+      const action = (group && group.refresh_action) || {};
+      const selectedDate = String(
+        (input && input.value) ||
+        state.groupRefreshDates[normalizedGroupId] ||
+        action.default_as_of_date ||
+        loadingTableBlock().default_refresh_date ||
+        loadingTableBlock().today_date ||
+        ""
+      ).trim();
+      if (selectedDate) {
+        state.groupRefreshDates[normalizedGroupId] = selectedDate;
+      }
+      return selectedDate;
+    }
+
+    function validateGroupRefreshDate(groupId, selectedDate) {
+      const group = getLoadingGroup(groupId);
+      const action = (group && group.refresh_action) || {};
+      const availableDates = Array.isArray(action.available_dates) ? action.available_dates.map(String).filter(Boolean) : [];
+      if (!selectedDate) {
+        return "Выберите дату обновления группы.";
+      }
+      if (availableDates.length && !availableDates.includes(selectedDate)) {
+        return "Дата " + selectedDate + " недоступна для обновления группы.";
+      }
+      return "";
     }
 
     function setGroupActionState(groupId, payload) {
@@ -3011,7 +3174,7 @@
       return "HTTP " + String(status || "0") + " " + normalizedReason;
     }
 
-    async function pollSheetJob(jobPath, actionId) {
+    async function pollSheetJob(jobPath, actionId, progressCallback) {
       const resolvedJobPath = String(jobPath || "");
       if (!resolvedJobPath) {
         throw new Error("job path is missing for refresh action");
@@ -3031,6 +3194,9 @@
         if (!response.ok) {
           throw new Error((payload && payload.error) ? payload.error : "sheet job route returned " + response.status);
         }
+        if (typeof progressCallback === "function") {
+          progressCallback(progressFromJob(payload), payload);
+        }
         if (payload.status !== "running") {
           return payload;
         }
@@ -3045,6 +3211,7 @@
       state.actionSequence = actionId;
       setActionButtonsDisabled(true);
       setStatusBadge({label: "Загрузка", tone: "warning", detail: "запускаем обновление данных из внешних источников"});
+      showGlobalProgress(10, "Запуск");
       try {
         const requestPayload = {async: true};
         const asOfDate = currentActionAsOfDate();
@@ -3063,11 +3230,14 @@
         if (!response.ok) {
           throw new Error((payload && payload.error) ? payload.error : "sheet refresh route returned " + response.status);
         }
+        showGlobalProgress(15, "Job запущен");
         const resolvedJobPath = String(
           (payload && payload.job_path) ||
           ((payload && payload.job_id) ? (WEB_VITRINA_CONFIG.job_path + "?job_id=" + encodeURIComponent(payload.job_id)) : "")
         );
-        const finalJob = await pollSheetJob(resolvedJobPath, actionId);
+        const finalJob = await pollSheetJob(resolvedJobPath, actionId, function(progress) {
+          showGlobalProgress(progress.percent, progress.label);
+        });
         if (actionId !== state.actionSequence) {
           return;
         }
@@ -3075,6 +3245,7 @@
           throw new Error((finalJob && (finalJob.error || finalJob.status)) || "sheet refresh job failed");
         }
         setStatusBadge({label: "Загрузка", tone: "warning", detail: "данные обновлены, перечитываем витрину"});
+        showGlobalProgress(100, "Завершение");
         await loadPageComposition();
       } catch (error) {
         if (actionId !== state.actionSequence) {
@@ -3082,9 +3253,14 @@
         }
         const message = String(error && error.message ? error.message : error);
         setStatusBadge({label: "Ошибка", tone: "error", detail: message});
+        appendVisibleActionLogLine(
+          "Не удалось выполнить общую загрузку: " + message,
+          {statusLabel: "Ошибка", tone: "error", detail: message}
+        );
       } finally {
         if (actionId === state.actionSequence) {
           setActionButtonsDisabled(false);
+          hideGlobalProgress();
         }
       }
     }
@@ -3095,25 +3271,35 @@
         return;
       }
       const groupLabel = getLoadingGroupLabel(normalizedGroupId);
+      const selectedDate = getSelectedGroupRefreshDate(normalizedGroupId);
+      const dateError = validateGroupRefreshDate(normalizedGroupId, selectedDate);
       const actionId = state.actionSequence + 1;
       state.actionSequence = actionId;
+      if (dateError) {
+        setGroupActionState(normalizedGroupId, {
+          label: "Дата недоступна",
+          tone: "error",
+          detail: dateError
+        });
+        appendVisibleActionLogLine(
+          "Не удалось запустить обновление группы " + groupLabel + ": " + dateError,
+          {statusLabel: "Ошибка", tone: "error", detail: dateError}
+        );
+        return;
+      }
       setActionButtonsDisabled(true);
-      setStatusBadge({label: "Загрузка", tone: "warning", detail: "обновляем группу источников: " + normalizedGroupId});
+      setStatusBadge({label: "Загрузка", tone: "warning", detail: "обновляем группу источников: " + normalizedGroupId + " за " + selectedDate});
       setGroupActionState(normalizedGroupId, {
         label: "Запуск обновления группы...",
         tone: "warning",
-        detail: "Ожидаем ответ backend."
+        detail: "Дата: " + selectedDate + ". Ожидаем ответ backend."
       });
       appendVisibleActionLogLine(
-        "Запуск обновления группы " + groupLabel + "...",
+        "Запуск обновления группы " + groupLabel + " за " + selectedDate + "...",
         {statusLabel: "Запуск", tone: "warning", detail: "Ожидаем создание refresh_group job."}
       );
       try {
-        const requestPayload = {async: true, source_group_id: normalizedGroupId};
-        const asOfDate = currentActionAsOfDate();
-        if (asOfDate) {
-          requestPayload.as_of_date = asOfDate;
-        }
+        const requestPayload = {async: true, source_group_id: normalizedGroupId, as_of_date: selectedDate};
         const response = await fetch(WEB_VITRINA_CONFIG.group_refresh_path, {
           method: "POST",
           headers: {
@@ -3124,7 +3310,7 @@
         });
         const payload = await readJsonResponse(response, "non-json response from source group refresh route");
         if (!response.ok) {
-          const message = "Не удалось запустить обновление группы " + groupLabel + ": " + formatHttpLaunchFailure(response, payload);
+          const message = "Не удалось запустить обновление группы " + groupLabel + " за " + selectedDate + ": " + formatHttpLaunchFailure(response, payload);
           setGroupActionState(normalizedGroupId, {
             label: "Ошибка запуска",
             tone: "error",
@@ -3148,7 +3334,7 @@
           detail: "job " + String((payload && payload.job_id) || "")
         });
         appendVisibleActionLogLine(
-          "Job обновления группы " + groupLabel + " запущен" + ((payload && payload.job_id) ? ": " + payload.job_id : "") + ".",
+          "Job обновления группы " + groupLabel + " за " + selectedDate + " запущен" + ((payload && payload.job_id) ? ": " + payload.job_id : "") + ".",
           {statusLabel: "Запуск", tone: "warning", detail: "Poll refresh_group job."}
         );
         const finalJob = await pollSheetJob(resolvedJobPath, actionId);
@@ -3164,7 +3350,7 @@
           detail: "Перечитываем витрину."
         });
         appendVisibleActionLogLine(
-          "Обновление группы " + groupLabel + " завершено успешно.",
+          "Обновление группы " + groupLabel + " за " + selectedDate + " завершено успешно.",
           {statusLabel: "Успешно", tone: "success", detail: "refresh_group job finished."}
         );
         setStatusBadge({label: "Загрузка", tone: "warning", detail: "группа обновлена, перечитываем витрину"});

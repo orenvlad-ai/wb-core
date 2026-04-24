@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import time
 from tempfile import TemporaryDirectory
+from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -61,6 +62,7 @@ def main() -> None:
             runtime=runtime,
             activated_at_factory=lambda: NEW_REFRESHED_AT,
             refreshed_at_factory=lambda: NEW_REFRESHED_AT,
+            now_factory=lambda: datetime(2026, 4, 21, 15, 0, tzinfo=timezone.utc),
         )
 
         captured: dict[str, object] = {}
@@ -73,7 +75,7 @@ def main() -> None:
         entrypoint.sheet_plan_block.build_plan = build_partial_plan  # type: ignore[method-assign]
         job = entrypoint.start_sheet_source_group_refresh_job(
             source_group_id="wb_api",
-            as_of_date="2026-04-20",
+            as_of_date="2026-04-21",
         )
         job_snapshot = _wait_job(entrypoint, str(job["job_id"]))
         if job_snapshot["status"] != "success":
@@ -90,10 +92,17 @@ def main() -> None:
         price_row_id = f"SKU:{nm_id}|price_seller_discounted"
         seller_row_id = f"SKU:{nm_id}|view_count"
         other_row_id = f"SKU:{nm_id}|cost_price_rub"
-        if data_rows[price_row_id][2] != 999:
-            raise AssertionError(f"selected wb_api row must be replaced, got {data_rows}")
-        if data_rows[seller_row_id][2] != 20 or data_rows[other_row_id][2] != 70:
+        if data_rows[price_row_id][2] != 100 or data_rows[price_row_id][3] != 999:
+            raise AssertionError(f"selected wb_api row must update only selected date, got {data_rows}")
+        if data_rows[seller_row_id][2] != 20 or data_rows[seller_row_id][3] != 21:
+            raise AssertionError(f"unrelated seller row must stay untouched, got {data_rows}")
+        if data_rows[other_row_id][2] != 70 or data_rows[other_row_id][3] != 71:
             raise AssertionError(f"unrelated groups must stay untouched, got {data_rows}")
+        status_rows = {row[0]: row for row in _sheet(merged, "STATUS").rows}
+        if status_rows["prices_snapshot[yesterday_closed]"][10] != "old price yesterday":
+            raise AssertionError(f"date-scoped refresh must preserve unselected status slot, got {status_rows}")
+        if status_rows["prices_snapshot[today_current]"][10] != "new price today":
+            raise AssertionError(f"date-scoped refresh must update selected status slot, got {status_rows}")
         metadata = dict(getattr(merged, "metadata", {}) or {})
         row_updated_at = metadata.get("row_last_updated_at_by_row_id") or {}
         group_updated_at = metadata.get("source_group_last_updated_at") or {}
@@ -117,6 +126,17 @@ def main() -> None:
         if row_timestamps.get(seller_row_id) != OLD_REFRESHED_AT:
             raise AssertionError(f"web contract must preserve unrelated row timestamp, got {row_timestamps}")
 
+        try:
+            entrypoint.start_sheet_source_group_refresh_job(
+                source_group_id="wb_api",
+                as_of_date="2026-04-19",
+            )
+        except ValueError as exc:
+            if "Дата 2026-04-19 недоступна для обновления группы" not in str(exc):
+                raise AssertionError(f"unsupported backend date must be human-readable, got {exc}") from exc
+        else:
+            raise AssertionError("unsupported group refresh date must fail before job creation")
+
         def failing_build_plan(**_: object) -> SheetVitrinaV1Envelope:
             raise RuntimeError("seller portal session invalid")
 
@@ -129,6 +149,7 @@ def main() -> None:
         log_text, _ = entrypoint.handle_sheet_operator_job_text_request(str(job["job_id"]))
         for expected in (
             "event=group_refresh_start",
+            "as_of_date=2026-04-21",
             "stage=source_fetch",
             "stage=prepare_materialize",
             "stage=load_group_to_vitrina",
@@ -138,6 +159,7 @@ def main() -> None:
                 raise AssertionError(f"group refresh log missing {expected!r}: {log_text}")
 
         print("web_vitrina_group_refresh_partial_update: ok ->", merge_summary)
+        print("web_vitrina_group_refresh_unsupported_date: ok -> 2026-04-19")
         print("web_vitrina_group_refresh_timestamps: ok ->", row_updated_at[price_row_id], row_updated_at[seller_row_id])
         print("web_vitrina_group_refresh_stage_failure: ok ->", failed_snapshot["error"])
 
@@ -147,25 +169,28 @@ def _build_previous_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
         plan_version="delivery_contract_v1__sheet_scaffold_v1",
         snapshot_id="previous-full-snapshot",
         as_of_date="2026-04-20",
-        date_columns=["2026-04-20"],
-        temporal_slots=[SheetVitrinaV1TemporalSlot(slot_key="today_current", slot_label="Сегодня", column_date="2026-04-20")],
+        date_columns=["2026-04-20", "2026-04-21"],
+        temporal_slots=[
+            SheetVitrinaV1TemporalSlot(slot_key="yesterday_closed", slot_label="Вчера", column_date="2026-04-20"),
+            SheetVitrinaV1TemporalSlot(slot_key="today_current", slot_label="Сегодня", column_date="2026-04-21"),
+        ],
         source_temporal_policies={},
         sheets=[
             SheetVitrinaWriteTarget(
                 sheet_name="DATA_VITRINA",
                 write_start_cell="A1",
-                write_rect="A1:C4",
+                write_rect="A1:D4",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
-                header=["label", "key", "2026-04-20"],
+                header=["label", "key", "2026-04-20", "2026-04-21"],
                 rows=[
-                    ["SKU: цена со скидкой", f"SKU:{nm_id}|price_seller_discounted", 100],
-                    ["SKU: показы", f"SKU:{nm_id}|view_count", 20],
-                    ["SKU: себестоимость", f"SKU:{nm_id}|cost_price_rub", 70],
+                    ["SKU: цена со скидкой", f"SKU:{nm_id}|price_seller_discounted", 100, 101],
+                    ["SKU: показы", f"SKU:{nm_id}|view_count", 20, 21],
+                    ["SKU: себестоимость", f"SKU:{nm_id}|cost_price_rub", 70, 71],
                 ],
                 row_count=3,
-                column_count=3,
+                column_count=4,
             ),
             SheetVitrinaWriteTarget(
                 sheet_name="STATUS",
@@ -176,11 +201,12 @@ def _build_previous_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
                 partial_update_allowed=False,
                 header=STATUS_HEADER,
                 rows=[
-                    _status_row("prices_snapshot[today_current]", "success", "old price"),
+                    _status_row("prices_snapshot[yesterday_closed]", "success", "old price yesterday"),
+                    _status_row("prices_snapshot[today_current]", "success", "old price today"),
                     _status_row("seller_funnel_snapshot[today_current]", "success", "old seller"),
                     _status_row("cost_price[today_current]", "success", "old cost"),
                 ],
-                row_count=3,
+                row_count=4,
                 column_count=len(STATUS_HEADER),
             ),
         ],
@@ -192,21 +218,24 @@ def _build_partial_wb_api_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
         plan_version="delivery_contract_v1__sheet_scaffold_v1",
         snapshot_id="partial-wb-api-snapshot",
         as_of_date="2026-04-20",
-        date_columns=["2026-04-20"],
-        temporal_slots=[SheetVitrinaV1TemporalSlot(slot_key="today_current", slot_label="Сегодня", column_date="2026-04-20")],
+        date_columns=["2026-04-20", "2026-04-21"],
+        temporal_slots=[
+            SheetVitrinaV1TemporalSlot(slot_key="yesterday_closed", slot_label="Вчера", column_date="2026-04-20"),
+            SheetVitrinaV1TemporalSlot(slot_key="today_current", slot_label="Сегодня", column_date="2026-04-21"),
+        ],
         source_temporal_policies={},
         sheets=[
             SheetVitrinaWriteTarget(
                 sheet_name="DATA_VITRINA",
                 write_start_cell="A1",
-                write_rect="A1:C2",
+                write_rect="A1:D2",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
-                header=["label", "key", "2026-04-20"],
-                rows=[["SKU: цена со скидкой", f"SKU:{nm_id}|price_seller_discounted", 999]],
+                header=["label", "key", "2026-04-20", "2026-04-21"],
+                rows=[["SKU: цена со скидкой", f"SKU:{nm_id}|price_seller_discounted", 111, 999]],
                 row_count=1,
-                column_count=3,
+                column_count=4,
             ),
             SheetVitrinaWriteTarget(
                 sheet_name="STATUS",
@@ -216,8 +245,11 @@ def _build_partial_wb_api_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
                 write_mode="overwrite",
                 partial_update_allowed=False,
                 header=STATUS_HEADER,
-                rows=[_status_row("prices_snapshot[today_current]", "success", "new price")],
-                row_count=1,
+                rows=[
+                    _status_row("prices_snapshot[yesterday_closed]", "success", "new price yesterday"),
+                    _status_row("prices_snapshot[today_current]", "success", "new price today"),
+                ],
+                row_count=2,
                 column_count=len(STATUS_HEADER),
             ),
         ],

@@ -64,14 +64,15 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
 # 3. Target contract и смысл результата
 
 - `GET /sheet-vitrina-v1/vitrina` теперь является реальной usable web-vitrina page:
-  - compact operator top panel: link `Операторский сайт` opens `/sheet-vitrina-v1/operator` in a new tab, `Загрузить и обновить` is the single primary manual action, `JSON Connect` remains secondary/debug, and the old cheap `Обновить` button is not rendered
+  - compact operator top panel: link `Операторский сайт` opens `/sheet-vitrina-v1/operator` in a new tab, `Загрузить и обновить` is the single primary manual action, `JSON Connect` and the old cheap `Обновить` button are not rendered, and no permanent top status badge duplicates the summary cards
+  - while `Загрузить и обновить` is running, the top panel shows a minimal stage-based progress bar driven by the existing async job/log polling (`start/queued`, source fetch, prepare/materialize, load/update table, finish); after completion the progress bar disappears and the final semantic status stays in the summary/log surfaces
   - compact summary with separate `Последнее обновление страницы` and `Свежесть данных`
   - primary table immediately follows the summary cards; filters/settings, historical controls and `Действия и состояния` render after the table
   - main table display headers are Russian (`Раздел`, `Метрика`, `Обновлено`, etc.); backend/API keys stay stable, while `Обновлено` surfaces per-row last successful update timestamp from snapshot metadata
   - `Загрузить и обновить` = canonical server-side refresh from external sources + page reread, without Google Sheet write path
   - two server-driven action-adjacent information blocks:
-    - `Загрузка данных` = grouped compact table derived from the same per-source upload/fetch truth: stable groups `WB API`, `Seller Portal / бот`, `Прочие источники`; each group has `Обновить группу`, group-level last update timestamp, and rows with server/business today and yesterday statuses, reason text, Russian metric labels and secondary technical endpoint
-    - `Seller Portal / бот` group additionally renders bounded session controls (`Проверить сессию`, `Восстановить сессию`, `Скачать лаунчер`) over the existing seller-session/recovery seams
+    - `Загрузка данных` = grouped compact table derived from the same per-source upload/fetch truth: stable groups `WB API`, `Seller Portal / бот`, `Прочие источники`; each group has a compact date control, `Обновить группу`, group-level last update timestamp, and rows with server/business today and yesterday statuses, reason text, Russian metric labels and secondary technical endpoint
+    - `Seller Portal / бот` group additionally renders bounded session status on the left side of the group header and session controls (`Проверить сессию`, `Восстановить сессию`, `Скачать лаунчер`) over the existing seller-session/recovery seams
     - `Лог` = compact fixed-height tail below the loading table plus `Скачать лог` via existing job/log contour; if exact transient job for the visible snapshot is unavailable, block must show persisted semantic fallback instead of stale green success
     - former `Обновление данных` is not rendered as a page-composition activity block; persisted `STATUS` rows remain internal truth for status/read contracts
   - filters area
@@ -170,7 +171,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
 - user-facing timestamp render is unified:
   - `Свежесть данных` now reuses the same client formatter as `Последнее обновление страницы`
   - raw ISO artefacts like `T` / `Z` stay machine-only and no longer leak into the visible page text
-- top badge and `Свежесть данных` tone now follow semantic snapshot truth:
+- summary/card and `Свежесть данных` tone now follow semantic snapshot truth:
   - green = confirmed normal result;
   - yellow = empty/zero/unchanged/stale/not_refreshed/preserved/retrying/not_verified;
   - red = hard source/materialization failure;
@@ -178,10 +179,10 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
 - source-aware temporal policy is now part of that read-side truth:
   - `stocks` stays green when only non-required `today_current` is blank/`not_available`;
   - `spp` / `fin_report_daily` stay green when `yesterday_closed` is confirmed and intraday `today_current` only produced tolerated non-final current-day output;
-  - `seller_funnel_snapshot` / `web_source_snapshot` remain strict two-slot sources and keep the badge/cards degraded on broken `today_current`.
+  - `seller_funnel_snapshot` / `web_source_snapshot` remain strict two-slot sources and keep the summary cards degraded on broken `today_current`.
 - `Загрузить и обновить` on the vitrina now reuse-ит the canonical refresh contour and no longer depends on `/load` or Google Sheet auth to refresh the web-vitrina itself.
-- `Обновить группу` on the vitrina starts `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` for one source group. The action immediately surfaces a group-local launch state and appends a visible client action-log line; if the POST fails before a backend job is created, the page shows a group-local error and a visible log line such as `Не удалось запустить обновление группы WB API: HTTP 404 route not found`.
-- Once the POST reaches the backend, the action reuses the existing refresh/status/job/log seams, creates a `refresh_group` job before source fetch, fetches/prepares/loads only the selected group, updates row-level `Обновлено` and group-level `last_updated_at` only for affected rows/groups, and logs stage-aware success/failure (`source_fetch`, `prepare_materialize`, `load_group_to_vitrina`).
+- `Обновить группу` on the vitrina starts date-scoped `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` with payload `{async: true, source_group_id, as_of_date}` for one source group and one selected date. The action immediately surfaces a group-local launch state and appends a visible client action-log line; if the POST fails before a backend job is created, the page shows a group-local error and a visible log line such as `Не удалось запустить обновление группы WB API за 2026-04-24: HTTP 404 route not found`.
+- Once the POST reaches the backend, the action reuses the existing refresh/status/job/log seams, creates a `refresh_group` job before source fetch, fetches/prepares only the selected group, loads only cells for the selected date into the target ready snapshot, updates row-level `Обновлено` and group-level `last_updated_at` only for affected rows/groups, and logs stage-aware success/failure (`source_fetch`, `prepare_materialize`, `load_group_to_vitrina`) with the selected `as_of_date`.
 - `Загрузка данных` and `Лог` stay server-driven:
   - loading table is derived from the last relevant refresh/group-refresh job log and persisted source fallback; if exact job association is unavailable, page shows truthful non-OK status rather than unrelated stale run
   - loading table rows are nested under stable source-group headers while preserving source truth and canonical source labels
