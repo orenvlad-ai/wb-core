@@ -393,10 +393,36 @@
     }
 
     .activity-group-updated,
+    .activity-group-run-state,
     .seller-session-state {
       font-size: 11px;
       font-weight: 600;
       color: var(--muted);
+    }
+
+    .activity-group-run-state {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: var(--idle-bg);
+      color: var(--idle-text);
+    }
+
+    .activity-group-run-state.tone-warning {
+      background: var(--warning-bg);
+      color: var(--warning-text);
+    }
+
+    .activity-group-run-state.tone-success {
+      background: var(--success-bg);
+      color: var(--success-text);
+    }
+
+    .activity-group-run-state.tone-error {
+      background: var(--error-bg);
+      color: var(--error-text);
     }
 
     .activity-group-button,
@@ -1306,7 +1332,8 @@
         statusLabel: "",
         tone: "neutral",
         checkedAt: ""
-      }
+      },
+      groupActions: {}
     };
 
     openOperatorLink.href = WEB_VITRINA_CONFIG.operator_path;
@@ -1747,12 +1774,14 @@
       const groupId = String(group.group_id || "");
       const updatedAt = String(group.last_updated_at || "");
       const updatedText = updatedAt ? formatTimestampDisplay(updatedAt) : "нет данных";
+      const actionState = state.groupActions[groupId] || null;
       return [
         '<tr class="activity-group-row" data-loading-group="' + escapeHtml(groupId) + '"><td colspan="' + String(columnCount) + '">',
         '<div class="activity-group-header">',
         '<span class="activity-group-main">',
         '<span>' + escapeHtml(group.label || groupId) + '</span>',
         '<span class="activity-group-updated">Последнее обновление: ' + escapeHtml(updatedText) + '</span>',
+        renderGroupActionState(actionState),
         '</span>',
         '<span class="activity-group-actions">',
         '<button class="button secondary activity-group-button" type="button" data-refresh-source-group="' + escapeHtml(groupId) + '">Обновить группу</button>',
@@ -1760,6 +1789,24 @@
         '</span>',
         '</div>',
         '</td></tr>'
+      ].join("");
+    }
+
+    function renderGroupActionState(actionState) {
+      if (!actionState || !actionState.label) {
+        return "";
+      }
+      const titleParts = [];
+      if (actionState.detail) {
+        titleParts.push(actionState.detail);
+      }
+      if (actionState.updatedAt) {
+        titleParts.push(formatTimestampDisplay(actionState.updatedAt));
+      }
+      return [
+        '<span class="activity-group-run-state tone-' + escapeHtml(normalizeTone(actionState.tone || "neutral")) + '" data-group-action-state title="' + escapeHtml(titleParts.join(" · ")) + '">',
+        escapeHtml(actionState.label),
+        '</span>'
       ].join("");
     }
 
@@ -2878,6 +2925,92 @@
       return String(params.get("as_of_date") || "").trim();
     }
 
+    function loadingTableBlock() {
+      return ((state.composition || {}).activity_surface || {}).loading_table || {};
+    }
+
+    function rerenderLoadingTable() {
+      renderLoadingTable(loadingTableBlock());
+    }
+
+    function getLoadingGroupLabel(groupId) {
+      const normalizedGroupId = String(groupId || "").trim();
+      const groups = Array.isArray(loadingTableBlock().groups) ? loadingTableBlock().groups : [];
+      for (const group of groups) {
+        if (String(group.group_id || "") === normalizedGroupId) {
+          return String(group.label || normalizedGroupId);
+        }
+      }
+      if (normalizedGroupId === "wb_api") {
+        return "WB API";
+      }
+      if (normalizedGroupId === "seller_portal_bot") {
+        return "Seller Portal / бот";
+      }
+      if (normalizedGroupId === "other_sources") {
+        return "Прочие источники";
+      }
+      return normalizedGroupId || "группа";
+    }
+
+    function setGroupActionState(groupId, payload) {
+      const normalizedGroupId = String(groupId || "").trim();
+      if (!normalizedGroupId) {
+        return;
+      }
+      state.groupActions[normalizedGroupId] = {
+        label: String((payload && payload.label) || ""),
+        tone: String((payload && payload.tone) || "neutral"),
+        detail: String((payload && payload.detail) || ""),
+        updatedAt: String((payload && payload.updatedAt) || new Date().toISOString())
+      };
+      rerenderLoadingTable();
+    }
+
+    function clearGroupActionState(groupId) {
+      const normalizedGroupId = String(groupId || "").trim();
+      if (!normalizedGroupId) {
+        return;
+      }
+      delete state.groupActions[normalizedGroupId];
+      rerenderLoadingTable();
+    }
+
+    function appendVisibleActionLogLine(message, payload) {
+      const normalizedPayload = payload || {};
+      const timestamp = String(normalizedPayload.timestamp || new Date().toISOString());
+      const line = timestamp + " " + String(message || "");
+      const currentText = String(activityLogBodyNode.textContent || "").trim();
+      const fallbackTexts = new Set([
+        "Загрузка…",
+        "Лог пока недоступен.",
+        "Сохранённый итог есть, но transient refresh-log для этого среза недоступен."
+      ]);
+      activityLogBodyNode.textContent = currentText && !fallbackTexts.has(currentText)
+        ? currentText + "\n" + line
+        : line;
+      if (normalizedPayload.statusLabel) {
+        activityLogStatusNode.textContent = String(normalizedPayload.statusLabel);
+      }
+      activityLogStatusNode.className = "status-pill tone-" + normalizeTone(normalizedPayload.tone || "neutral");
+      activityLogDetailNode.textContent = String(normalizedPayload.detail || message || "");
+    }
+
+    function formatHttpLaunchFailure(response, payload) {
+      const status = Number(response && response.status ? response.status : 0);
+      const rawReason = String(
+        (payload && (payload.error || payload.detail || payload.reason)) ||
+        (response && response.statusText) ||
+        ""
+      ).trim();
+      const normalizedReason = (
+        status === 404 && (!rawReason || /not found/i.test(rawReason))
+      )
+        ? "route not found"
+        : (rawReason || "request failed");
+      return "HTTP " + String(status || "0") + " " + normalizedReason;
+    }
+
     async function pollSheetJob(jobPath, actionId) {
       const resolvedJobPath = String(jobPath || "");
       if (!resolvedJobPath) {
@@ -2961,10 +3094,20 @@
       if (!normalizedGroupId) {
         return;
       }
+      const groupLabel = getLoadingGroupLabel(normalizedGroupId);
       const actionId = state.actionSequence + 1;
       state.actionSequence = actionId;
       setActionButtonsDisabled(true);
       setStatusBadge({label: "Загрузка", tone: "warning", detail: "обновляем группу источников: " + normalizedGroupId});
+      setGroupActionState(normalizedGroupId, {
+        label: "Запуск обновления группы...",
+        tone: "warning",
+        detail: "Ожидаем ответ backend."
+      });
+      appendVisibleActionLogLine(
+        "Запуск обновления группы " + groupLabel + "...",
+        {statusLabel: "Запуск", tone: "warning", detail: "Ожидаем создание refresh_group job."}
+      );
       try {
         const requestPayload = {async: true, source_group_id: normalizedGroupId};
         const asOfDate = currentActionAsOfDate();
@@ -2981,11 +3124,32 @@
         });
         const payload = await readJsonResponse(response, "non-json response from source group refresh route");
         if (!response.ok) {
-          throw new Error((payload && payload.error) ? payload.error : "source group refresh route returned " + response.status);
+          const message = "Не удалось запустить обновление группы " + groupLabel + ": " + formatHttpLaunchFailure(response, payload);
+          setGroupActionState(normalizedGroupId, {
+            label: "Ошибка запуска",
+            tone: "error",
+            detail: message
+          });
+          appendVisibleActionLogLine(
+            message,
+            {statusLabel: "Ошибка", tone: "error", detail: message}
+          );
+          const launchError = new Error(message);
+          launchError.loggedToActionLog = true;
+          throw launchError;
         }
         const resolvedJobPath = String(
           (payload && payload.job_path) ||
           ((payload && payload.job_id) ? (WEB_VITRINA_CONFIG.job_path + "?job_id=" + encodeURIComponent(payload.job_id)) : "")
+        );
+        setGroupActionState(normalizedGroupId, {
+          label: "Job запущен",
+          tone: "warning",
+          detail: "job " + String((payload && payload.job_id) || "")
+        });
+        appendVisibleActionLogLine(
+          "Job обновления группы " + groupLabel + " запущен" + ((payload && payload.job_id) ? ": " + payload.job_id : "") + ".",
+          {statusLabel: "Запуск", tone: "warning", detail: "Poll refresh_group job."}
         );
         const finalJob = await pollSheetJob(resolvedJobPath, actionId);
         if (actionId !== state.actionSequence) {
@@ -2994,13 +3158,35 @@
         if (!finalJob || finalJob.status !== "success") {
           throw new Error((finalJob && (finalJob.error || finalJob.status)) || "source group refresh job failed");
         }
+        setGroupActionState(normalizedGroupId, {
+          label: "Группа обновлена",
+          tone: "success",
+          detail: "Перечитываем витрину."
+        });
+        appendVisibleActionLogLine(
+          "Обновление группы " + groupLabel + " завершено успешно.",
+          {statusLabel: "Успешно", tone: "success", detail: "refresh_group job finished."}
+        );
         setStatusBadge({label: "Загрузка", tone: "warning", detail: "группа обновлена, перечитываем витрину"});
+        clearGroupActionState(normalizedGroupId);
         await loadPageComposition();
       } catch (error) {
         if (actionId !== state.actionSequence) {
           return;
         }
         const message = String(error && error.message ? error.message : error);
+        if (!error || !error.loggedToActionLog) {
+          const detail = "Обновление группы " + groupLabel + " завершилось ошибкой: " + message;
+          setGroupActionState(normalizedGroupId, {
+            label: "Ошибка обновления",
+            tone: "error",
+            detail: detail
+          });
+          appendVisibleActionLogLine(
+            detail,
+            {statusLabel: "Ошибка", tone: "error", detail: detail}
+          );
+        }
         setStatusBadge({label: "Ошибка", tone: "error", detail: message});
       } finally {
         if (actionId === state.actionSequence) {

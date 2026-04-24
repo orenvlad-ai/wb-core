@@ -43,6 +43,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_REFRESH_PATH,
     DEFAULT_SHEET_STOCK_REPORT_PATH,
     DEFAULT_SHEET_STATUS_PATH,
+    DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH,
     DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
     DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
@@ -1127,6 +1128,16 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         )
         return evaluation
 
+    if route == "web_vitrina_group_refresh_missing_group":
+        error_text = str(payload.get("error", "") or payload.get("detail", "") or "")
+        evaluation["ok"] = status == 400 and "source_group_id is required" in error_text
+        evaluation["detail"] = (
+            "web-vitrina group-refresh route is publicly published and reached app-level validation"
+            if evaluation["ok"]
+            else "expected app-level JSON 400 for POST group-refresh without source_group_id"
+        )
+        return evaluation
+
     if route == "factory_order_recommendation":
         error_text = str(payload.get("error", "") or "")
         evaluation["ok"] = status == 422 and bool(error_text)
@@ -1364,6 +1375,7 @@ results = [
     _collect("status", "GET", _append_as_of_date(PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_STATUS_HTTP_PATH"], PAYLOAD["as_of_date"])),
     _collect("web_vitrina_read", "GET", _append_as_of_date(PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_READ_PATH!r}, PAYLOAD["as_of_date"])),
     _collect("web_vitrina_page_composition", "GET", _append_query_params(PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_READ_PATH!r}, {{"as_of_date": PAYLOAD["as_of_date"], "surface": {DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE!r}}})),
+    _collect("web_vitrina_group_refresh_missing_group", "POST", PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH!r}, {{}}),
     _collect("daily_report", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/daily-report"),
     _collect("stock_report", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/stock-report"),
     _collect("plan_report", "GET", _append_query_params(PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/plan-report", _plan_report_params(PAYLOAD["as_of_date"]))),
