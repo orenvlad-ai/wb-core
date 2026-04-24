@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-23-REGISTRY-UPLOAD-HTTP-ENTRYPOINT-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `registry_upload_http_entrypoint_block`."
-scope: "Первый live inbound HTTP entrypoint для V2-реестров, separate `COST_PRICE` upload contour и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, sibling cost-price request, thin request -> runtime -> response wiring, server-side `activated_at`, separated refresh/load actions, date-aware plan/status read, compact read-only daily-report surface for two latest closed business days, repo-owned orchestration-first operator page, sibling phase-4 web-vitrina page composition поверх stable seams и existing read route, plus bounded server-side factory-order supply contour без SPA/build pipeline."
+scope: "Первый live inbound HTTP entrypoint для V2-реестров, separate `COST_PRICE` upload contour и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, sibling cost-price request, thin request -> runtime -> response wiring, server-side `activated_at`, separated refresh/load actions, date-aware plan/status read, compact read-only daily/stock/plan-execution report surfaces, repo-owned orchestration-first operator page, sibling phase-4 web-vitrina page composition поверх stable seams и existing read route, plus bounded server-side factory-order supply contour без SPA/build pipeline."
 source_basis:
   - "migration/86_registry_upload_contract.md"
   - "migration/89_registry_upload_db_backed_runtime.md"
@@ -45,6 +45,8 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/seller-portal-recovery/stop"
   - "GET /v1/sheet-vitrina-v1/seller-portal-session/check"
   - "GET /v1/sheet-vitrina-v1/daily-report"
+  - "GET /v1/sheet-vitrina-v1/stock-report"
+  - "GET /v1/sheet-vitrina-v1/plan-report"
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
   - "GET /v1/sheet-vitrina-v1/job"
@@ -77,6 +79,8 @@ related_runners:
   - "apps/sheet_vitrina_v1_factory_order_http_smoke.py"
   - "apps/sheet_vitrina_v1_daily_report_smoke.py"
   - "apps/sheet_vitrina_v1_daily_report_http_smoke.py"
+  - "apps/sheet_vitrina_v1_plan_report_smoke.py"
+  - "apps/sheet_vitrina_v1_plan_report_http_smoke.py"
   - "apps/sheet_vitrina_v1_operator_load_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
@@ -96,7 +100,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current seller-session operator checkpoint: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, default `GET /v1/sheet-vitrina-v1/web-vitrina` по-прежнему materialize-ит stable library-agnostic `web_vitrina_contract` v1, source/reporting semantics учитывают expected temporal model per source family, а bot-backed current-day sync теперь имеет permanent operator-facing seller-session block (`session-check/start/status/stop/launcher`) поверх repo-owned localhost-only noVNC/Xvfb relogin tool с canonical supplier enforcement, safe stop semantics, per-run `run_id` / final outcome semantics и hardened launcher/noVNC path вместо разовой host-side X11 рутины."
+update_note: "Обновлён под current operator report checkpoint: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, reports tab теперь включает read-only `Выполнение плана` поверх `GET /v1/sheet-vitrina-v1/plan-report`, sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, default `GET /v1/sheet-vitrina-v1/web-vitrina` по-прежнему materialize-ит stable library-agnostic `web_vitrina_contract` v1, source/reporting semantics учитывают expected temporal model per source family, а bot-backed current-day sync имеет permanent operator-facing seller-session block (`session-check/start/status/stop/launcher`) поверх repo-owned localhost-only noVNC/Xvfb relogin tool."
 ---
 
 # 1. Идентификатор и статус
@@ -158,6 +162,7 @@ update_note: "Обновлён под current seller-session operator checkpoint
   - `POST /v1/sheet-vitrina-v1/load` = thin operator action, который пишет уже готовый snapshot в live sheet через existing bound Apps Script bridge, но operator-facing result отдельно distinguishes technical bridge completion from confirmed sheet update
   - `GET /v1/sheet-vitrina-v1/daily-report` = cheap read-only JSON summary для compact блока `Ежедневные отчёты`
   - `GET /v1/sheet-vitrina-v1/stock-report` = cheap read-only JSON summary для compact блока `Отчёт по остаткам`
+  - `GET /v1/sheet-vitrina-v1/plan-report` = cheap read-only JSON summary для compact блока `Выполнение плана`
   - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
   - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result, where root `status` is semantic snapshot outcome rather than mere ready-snapshot existence
   - `GET /v1/sheet-vitrina-v1/job` = cheap poll/read surface для live operator log и async action state
@@ -316,7 +321,8 @@ update_note: "Обновлён под current seller-session operator checkpoint
 - Operator page добавляет отдельный top-level tab `Отчёты` с одним sibling selector по образцу supply tab:
   - `Ежедневные отчёты`
   - `Отчёт по остаткам`
-  - по умолчанию открыт `Ежедневные отчёты`, одновременно показывается только один report body, browser persistence не используется;
+  - `Выполнение плана`
+  - по умолчанию открыт `Ежедневные отчёты`, одновременно показывается только один report body, browser persistence хранит только выбранный tab/subsection и SKU-фильтр отчёта по остаткам;
 - `Ежедневные отчёты`:
   - block сравнивает только два последних closed business day в `Asia/Yekaterinburg`;
   - current rule = `current business date -> compare yesterday_closed(default_business_as_of_date(now)) vs yesterday_closed(default_business_as_of_date(now)-1 day)`;
@@ -389,6 +395,15 @@ update_note: "Обновлён под current seller-session operator checkpoint
     - `stock_ru_ural` -> `Уральский ФО`
     - `stock_ru_south_caucasus` -> `Юг и СКФО`
   - merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь` deliberately excluded from stock-report filter and display, because current truth does not split Far East from Siberia
+- `Выполнение плана`:
+  - route = `GET /v1/sheet-vitrina-v1/plan-report`
+  - route is read-only and does not trigger refresh/upstream fetch/backfill;
+  - required query params: `period`, `q1_buyout_plan_rub`, `q2_buyout_plan_rub`, `q3_buyout_plan_rub`, `q4_buyout_plan_rub`, `plan_drr_pct`; optional `as_of_date` fixes the previous closed business day reference;
+  - response always returns selected period plus `month_to_date`, `quarter_to_date`, `year_to_date` blocks when current active SKU truth is available;
+  - facts are summed only from persisted accepted closed-day temporal snapshots: `fin_report_daily.fin_buyout_rub` and `ads_compact.ads_sum`;
+  - buyout plan is calendar-day based: each date uses that date's quarter plan divided by the number of days in the quarter, so cross-quarter periods use different daily plans;
+  - DRR fact = `ads_sum / fin_buyout_rub * 100`; ads plan = covered-period buyout plan multiplied by planned DRR;
+  - incomplete coverage is surfaced as `status=partial` with missing/covered dates instead of silent zero facts; no usable accepted snapshots yields `status=unavailable`.
 - Operator page keeps one compact server-driven manual block `Ручная загрузка данных`:
   - active action `Загрузить данные`
   - former Google Sheets action `Отправить данные` is archived/disabled
