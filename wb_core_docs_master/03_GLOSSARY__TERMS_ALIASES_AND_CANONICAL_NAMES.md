@@ -11,7 +11,7 @@ source_basis:
   - "docs/modules/00_INDEX__MODULES.md"
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
-source_of_truth_level: "secondary_project_pack"
+source_of_truth_level: "derived_secondary_project_pack"
 related_docs:
   - "README.md"
   - "docs/architecture/01_target_architecture.md"
@@ -21,7 +21,7 @@ update_triggers:
   - "изменение canonical naming"
   - "появление нового публичного термина"
   - "изменение operator-visible labels"
-built_from_commit: "23491a0b8313e45403ac6b4afdb8f7bd0a178134"
+built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
 ---
 
 # Summary
@@ -36,7 +36,7 @@ built_from_commit: "23491a0b8313e45403ac6b4afdb8f7bd0a178134"
 | Canonical name | Допустимые aliases | Норма использования |
 | --- | --- | --- |
 | `wb-core` | `WebCore`, `WB Core` | repo и canonical project id |
-| `wb_core_docs_master` | `docs master`, `project pack` | secondary compact project-pack |
+| `wb_core_docs_master` | `docs master`, `project pack` | derived secondary compact project-pack |
 | `VB-Core Витрина V1` | `WB Core Vitrina V1`, `sheet_vitrina_v1` | legacy Google Sheets contour; archived / do not use |
 | `sheet_vitrina_v1` | `sheet_vitrina`, `Vitrina V1` | current website/operator/web-vitrina server contour; GAS part is archive-only |
 | `CONFIG / METRICS / FORMULAS` | `operator sheets`, `registry sheets` | former sheet-side input реестры; archive/migration-only |

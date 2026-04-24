@@ -83,13 +83,13 @@ Domain-логика отсюда начинаться не должна.
 
 ### `wb_core_docs_master/`
 
-Здесь живёт secondary compact project-pack для внешнего retrieval/use в отдельном ChatGPT Project.
+Здесь живёт derived secondary compact project-pack для внешнего retrieval/use в отдельном ChatGPT Project.
 
 Правила слоя:
 - это не замена `README.md`, `docs/architecture/*`, `docs/modules/*` и `migration/*`;
 - это не dump-копия всего repo docs;
 - здесь разрешены только compact summary, glossary, registers, runbook и manifest;
-- source of truth для норм и контрактов всё равно остаётся в primary repo docs.
+- source of truth для норм и контрактов всё равно остаётся в authoritative repo docs.
 
 Для внешнего Project canonical local source определяется отдельно:
 - final upload-ready source = `~/Projects/wb-core/wb_core_docs_master`;

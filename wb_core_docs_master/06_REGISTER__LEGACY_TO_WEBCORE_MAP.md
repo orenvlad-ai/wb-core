@@ -14,7 +14,7 @@ source_basis:
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
   - "docs/modules/27_MODULE__PROMO_XLSX_COLLECTOR_BLOCK.md"
   - "docs/modules/28_MODULE__PROMO_LIVE_SOURCE_WIRING_BLOCK.md"
-source_of_truth_level: "secondary_project_pack"
+source_of_truth_level: "derived_secondary_project_pack"
 related_docs:
   - "README.md"
   - "docs/architecture/00_migration_charter.md"
@@ -28,7 +28,7 @@ update_triggers:
   - "перенос новой legacy capability"
   - "изменение migration boundary"
   - "закрытие крупного compatibility gap"
-built_from_commit: "967edcc2059b36db36a3846d9f773c0b90e20f90"
+built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
 ---
 
 # Summary

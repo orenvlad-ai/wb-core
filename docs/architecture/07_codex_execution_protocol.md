@@ -53,8 +53,8 @@ Codex должна остановиться и вынести задачу на 
 | Contract | Заявленные контракты совпадают с repository evidence или помечены как inference |
 | Boundaries | В foundation work не добавлена business-логика |
 | Diff hygiene | Нет случайных правок в reference-репозиториях |
-| Documentation sync | При значимом техническом изменении обновлена каноническая документация в той же задаче |
-| Project-pack sync | Если изменение влияет на project-oriented pack, обновлены затронутые файлы `wb_core_docs_master/` и manifest |
+| Documentation sync | При значимом техническом изменении обновлена authoritative/canonical документация в той же задаче |
+| Derived-pack sync | Только для явного derived-sync flow или transitional pack rebuild: обновлены затронутые файлы `wb_core_docs_master/` и manifest |
 | Git capture | Если requested outcome по смыслу включает Git fixation или GitHub closure и пользователь явно не запретил Git/GitHub actions, канонический source-of-truth артефакт доведён до commit/push/PR/merge/delete-branch либо execution возвращён как incomplete с exact blocker |
 | Completion state | Для live/public задач явно зафиксировано, достигнуты ли `repo-complete`, `live-complete`, active-surface verify, `pack-complete`, либо где именно блокер; `sheet-complete` фиксируется только для archived bound Apps Script guard scope |
 | Local validation | Базовые структурные проверки проходят |
@@ -79,9 +79,10 @@ Execution handoff должен явно различать четыре сост
   - если задача меняет archived bound Apps Script guard, выполнен `clasp push` или equivalent publish step;
   - минимальный guard-only verify подтверждает, что former sheet-side functions fail fast as archived.
 - `pack-complete`:
-  - если задача меняет policy/contract/checkpoint/runbook/status wording, обновлены и primary canonical docs, и затронутый `wb_core_docs_master`;
-  - manifest обновлён;
-  - если задача меняла primary docs или `wb_core_docs_master/`, после successful merge локальный `~/Projects/wb-core` приведён к current `origin/main`, `~/Projects/wb-core/wb_core_docs_master` проверен как upload-ready source по manifest, а в финальном handoff оставлен ровно один human-only шаг: загрузить актуальный pack во внешний ChatGPT Project.
+  - применяется только для явного derived-sync flow или transitional pack rebuild;
+  - `wb_core_docs_master/**` пересобран из current authoritative docs / code-state;
+  - manifest обновлён как build-metadata only;
+  - после successful merge локальный `~/Projects/wb-core` приведён к current `origin/main`, `~/Projects/wb-core/wb_core_docs_master` проверен как upload-ready source по manifest, а в финальном handoff оставлен ровно один human-only шаг: загрузить актуальный pack во внешний ChatGPT Project.
 
 Важно:
 - `repo-complete` не означает, что задача полностью завершена.
@@ -91,7 +92,8 @@ Execution handoff должен явно различать четыре сост
 - Если `live-complete` или `sheet-complete` не достигнуты, финальный отчёт обязан явно назвать это состояние и точный blocker, а не маскировать задачу как "готово".
 - Если hosted runtime уже имеет repo-owned deploy/probe contract, отсутствие deploy access или target values больше не считается "неизвестным operational контекстом": в blocker нужно точно назвать, каких именно values/rights не хватает.
 - `pack-complete` не равен внешнему upload в ChatGPT Project: внешний upload остаётся отдельным human-only post-merge step.
-- Repo-owned pack sync должен быть доведён в той же задаче, но отдельный post-upload manifest-sync больше не требуется.
+- Ordinary task-flow не требует `pack-complete`: он обновляет code/tests и затронутые authoritative docs, если truth изменился.
+- Repo-owned pack sync доводится в той же задаче только когда задача явно является derived-sync flow или transitional pack rebuild; отдельный post-upload manifest-sync не требуется.
 
 ## Execution Step Discipline
 
@@ -219,14 +221,17 @@ Assistant ведёт bounded работу по шагам.
   - PR / paused-ветка.
 
 Для `wb_core_docs_master` действует дополнительное частное правило:
-- primary canonical docs всегда первичны по отношению к project-pack;
+- authoritative/canonical docs всегда первичны по отношению к project-pack;
+- `wb_core_docs_master/` является derived / secondary retrieval pack и не является source of truth;
 - `wb_core_docs_master/` обновляется только как compact curated-pack, а не как dump-копия `docs/`;
-- если изменение влияет на contract/status/smoke/checkpoint/module status/glossary/common runbook/migration boundary, Codex обязана:
-  - обновить primary repo docs;
-  - обновить затронутые файлы в `wb_core_docs_master/`;
-  - обновить `wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`;
-  - если в этой задаче менялись primary docs или `wb_core_docs_master/`, после merge привести `~/Projects/wb-core` к current `origin/main`, проверить `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md` как признак upload-ready source и в финальном handoff оставить ровно один human-only следующий шаг: загрузить актуальный pack во внешний ChatGPT Project;
+- ordinary task-flow обновляет затронутые authoritative docs, если truth изменился, но не обновляет `wb_core_docs_master/**` и manifest по умолчанию;
+- если задача явно является derived-sync flow или transitional pack rebuild, Codex обязана:
+  - пересобрать затронутые файлы в `wb_core_docs_master/` из current authoritative docs / code-state;
+  - обновить `wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md` как build-metadata only;
+  - выполнить governance/contamination smoke для pack;
+  - после merge привести `~/Projects/wb-core` к current `origin/main`, проверить `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md` как признак upload-ready source и в финальном handoff оставить ровно один human-only следующий шаг: загрузить актуальный pack во внешний ChatGPT Project;
 - manifest для `wb_core_docs_master` остаётся build-metadata файлом и не ведёт operational state внешней загрузки;
+- manifest не должен содержать operational upload-state поля вроде `project_upload_required`, `last_project_upload_at` или `project_upload_note`;
 - legacy knowledge в `wb_core_docs_master` разрешён только в register-слое (`LEGACY_TO_WEBCORE_MAP`, `DO_NOT_LOSE_CONSTRAINTS`), а не как перенос полного legacy-корпуса;
 - создание или изменение `wb_core_docs_master` без Git-фиксации так же считается незавершённой задачей.
 

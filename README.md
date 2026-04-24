@@ -68,13 +68,14 @@ Legacy-репозитории остаются рабочими, но счита
 10. Первый operator-facing sheet-side trigger для отправки `CONFIG / METRICS / FORMULAS` в уже materialized entrypoint.
 11. Compact v3 bootstrap для `CONFIG / METRICS / FORMULAS` с сохранением service/status block.
 12. Первый bounded end-to-end MVP, где expanded MVP-safe registry seed, upload и load `DATA_VITRINA` уже работают в одном контуре.
-13. Появление `wb_core_docs_master` как secondary compact project-pack поверх primary canonical repo docs.
+13. Появление `wb_core_docs_master` как derived secondary compact project-pack поверх authoritative canonical repo docs.
 14. Отдельный bounded contour для `COST_PRICE`: `COST_PRICE` sheet-side prepare/upload, sibling `POST /v1/cost-price/upload` и separate authoritative dataset в том же runtime/app boundary.
 15. Server-side read-side integration `COST_PRICE` в `sheet_vitrina_v1`: authoritative resolution по `group + max(effective_from <= slot_date)`, truthful `STATUS.cost_price[*]` и operator-facing derived metrics `total_proxy_profit_rub` / `proxy_margin_pct_total`.
 16. Первый repo-owned bounded `promo_xlsx_collector_block`: canonical hydration/modal/drawer seams, truthful metadata sidecar, workbook inspection и bounded live integration smoke поверх existing seller session reuse path.
 17. Bounded live wiring `promo_live_source_wiring_block`: `promo_by_price` больше не blocked gap, а current server-owned source seam внутри existing `refresh -> runtime -> STATUS/DATA_VITRINA` contour с accepted snapshot preservation и truthful low-confidence cross-year handling.
 18. Legacy Google Sheets/GAS contour переведён в `ARCHIVED / DO NOT USE`; current contour = hosted website/operator/web-vitrina runtime.
 19. После этого остаются full parity archive questions и hosted runtime hardening вокруг current web/operator contour.
+20. Docs governance переведён в authoritative/derived режим: ordinary task-flow обновляет затронутые canonical docs при truth change, а `wb_core_docs_master` пересобирается отдельным derived-sync flow.
 
 ## Что не следует считать частью текущего `main`
 

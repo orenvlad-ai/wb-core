@@ -30,7 +30,7 @@ source_basis:
   - "apps/promo_xlsx_collector_integration_smoke.py"
   - "apps/sheet_vitrina_v1_promo_live_source_smoke.py"
   - "apps/sheet_vitrina_v1_promo_live_source_integration_smoke.py"
-source_of_truth_level: "secondary_project_pack"
+source_of_truth_level: "derived_secondary_project_pack"
 related_paths:
   - "apps/"
   - "gas/sheet_vitrina_v1/"
@@ -39,7 +39,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "ae486b1ff53136a633fc34389f1c5b025a3d180c"
+built_from_commit: "ecc1257e5944a7dee487e0c03b1c58c0ac5999cb"
 ---
 
 # Summary
@@ -313,13 +313,13 @@ Operational rule:
 ### Docs-governance closure
 
 - если change ограничен governance/docs/pack rules, не придумывать fake deploy / `clasp` / sheet verify steps;
-- обновить primary docs;
-- обновить затронутый `wb_core_docs_master`;
-- обновить manifest;
+- обновить затронутые authoritative docs, если truth изменился;
+- не обновлять `wb_core_docs_master/**` и manifest по умолчанию в ordinary task-flow;
+- обновлять `wb_core_docs_master/**` и manifest только если task явно является derived-sync flow или transitional pack rebuild;
 - проверить scope diff и `git diff --check`;
 - закрыть GitHub closure до merge + delete-branch, если access работает;
-- после merge привести `~/Projects/wb-core` к current `origin/main` и проверить `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md` как upload-ready source;
-- оставить один human-only remainder: внешний upload актуального pack.
+- для explicit derived-sync/transitional pack rebuild после merge привести `~/Projects/wb-core` к current `origin/main` и проверить `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md` как upload-ready source;
+- для explicit derived-sync/transitional pack rebuild оставить один human-only remainder: внешний upload актуального pack.
 
 ### Live route/runtime closure
 
@@ -369,15 +369,16 @@ Operational rule:
   - former write/upload/load functions fail fast with archive message;
   - no sheet write/readback is required or allowed as completion proof.
 
-### Docs-pack closure
+### Derived-pack closure
 
-- если change меняет contract/status/checkpoint/runbook/policy wording, нужно:
-  - обновить primary docs;
-  - обновить затронутый `wb_core_docs_master`;
-  - обновить manifest;
-  - после merge привести `~/Projects/wb-core` к current `origin/main`;
-  - проверить readiness по `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`;
-  - в финальном handoff оставить один human-only шаг: после merge загрузить актуальный pack во внешний Project.
+- применять только когда task явно является derived-sync flow или transitional pack rebuild;
+- перед pack rebuild authoritative docs должны уже отражать current truth;
+- пересобрать затронутый `wb_core_docs_master` как compact derived retrieval pack;
+- обновить manifest как build-metadata only, без operational upload-state;
+- проверить governance smoke и contamination smoke;
+- после merge привести `~/Projects/wb-core` к current `origin/main`;
+- проверить readiness по `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`;
+- в финальном handoff оставить один human-only шаг: после merge загрузить актуальный pack во внешний Project.
 
 ## What to verify in current web/operator contour
 
