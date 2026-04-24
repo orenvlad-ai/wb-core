@@ -255,6 +255,10 @@ WEB_VITRINA_SOURCE_METRIC_KEYS = {
     "cost_price": (
         "avg_cost_price_rub",
         "cost_price_rub",
+        "proxy_margin_pct_total",
+        "total_proxy_profit_rub",
+        "proxy_margin_pct",
+        "proxy_profit_rub",
     ),
     "promo_by_price": (
         "total_promo_participation",
@@ -300,6 +304,12 @@ WEB_VITRINA_SOURCE_KEY_TO_GROUP = {
     for group_id, group in WEB_VITRINA_SOURCE_GROUPS.items()
     for source_key in group["source_keys"]
 }
+WEB_VITRINA_OTHER_SOURCES_DERIVED_METRIC_KEYS = (
+    "proxy_margin_pct_total",
+    "total_proxy_profit_rub",
+    "proxy_margin_pct",
+    "proxy_profit_rub",
+)
 
 
 class SellerPortalRecoveryController:
@@ -1241,9 +1251,16 @@ class RegistryUploadHttpEntrypoint:
                         refreshed_at=refresh_result.refreshed_at,
                     )
                 payload = asdict(refresh_result)
+                updated_cells = _updated_cells_for_plan(plan)
                 payload["technical_status"] = payload["status"]
                 payload["status_label"] = payload["semantic_label"]
                 payload["status_reason"] = payload["semantic_reason"]
+                payload["updated_cells"] = updated_cells
+                payload["updated_cell_count"] = _count_updated_cells_by_status(updated_cells, "updated")
+                payload["latest_confirmed_cell_count"] = _count_updated_cells_by_status(
+                    updated_cells,
+                    "latest_confirmed",
+                )
                 payload["server_context"] = self.build_sheet_server_context()
                 payload["manual_context"] = self.build_sheet_manual_context()
                 payload["load_context"] = self.build_sheet_load_context()
@@ -1257,6 +1274,8 @@ class RegistryUploadHttpEntrypoint:
                         status_rows=refresh_result.sheet_row_counts.get("STATUS"),
                         semantic_status=refresh_result.semantic_status,
                         semantic_reason=refresh_result.semantic_reason,
+                        updated_cells=payload["updated_cell_count"],
+                        latest_confirmed_cells=payload["latest_confirmed_cell_count"],
                     )
                 )
                 emit(
@@ -1390,6 +1409,8 @@ class RegistryUploadHttpEntrypoint:
                         rows_updated=merge_summary["rows_updated"],
                         rows_preserved=merge_summary["rows_preserved"],
                         status_rows_updated=merge_summary["status_rows_updated"],
+                        updated_cells=merge_summary["updated_cell_count"],
+                        latest_confirmed_cells=merge_summary["latest_confirmed_cell_count"],
                     )
                 )
 
@@ -1423,6 +1444,8 @@ class RegistryUploadHttpEntrypoint:
                         target_snapshot_as_of_date=target_snapshot_as_of_date,
                         rows_updated=merge_summary["rows_updated"],
                         rows_preserved=merge_summary["rows_preserved"],
+                        updated_cells=merge_summary["updated_cell_count"],
+                        latest_confirmed_cells=merge_summary["latest_confirmed_cell_count"],
                         untouched_groups=",".join(
                             group_id
                             for group_id in WEB_VITRINA_SOURCE_GROUP_ORDER
@@ -1464,6 +1487,8 @@ class RegistryUploadHttpEntrypoint:
                         duration_seconds=duration_seconds,
                         rows_updated=merge_summary["rows_updated"],
                         rows_preserved=merge_summary["rows_preserved"],
+                        updated_cells=merge_summary["updated_cell_count"],
+                        latest_confirmed_cells=merge_summary["latest_confirmed_cell_count"],
                     )
                 )
                 return payload
@@ -2784,6 +2809,14 @@ def _metric_keys_for_source_keys(metrics: Iterable[Any], *, source_keys: Iterabl
     return ordered
 
 
+def _source_key_for_metric_key(metric_key: str) -> str:
+    normalized_metric_key = str(metric_key or "").strip()
+    for source_key, metric_keys in WEB_VITRINA_SOURCE_METRIC_KEYS.items():
+        if normalized_metric_key in set(metric_keys):
+            return source_key
+    return ""
+
+
 def _data_sheet_row_count(plan: SheetVitrinaV1Envelope) -> int:
     data_sheet = _find_sheet(plan, "DATA_VITRINA")
     return len(data_sheet.rows) if data_sheet is not None else 0
@@ -2860,6 +2893,13 @@ def _merge_source_group_ready_snapshot(
     for row_id in sorted(updated_row_ids - existing_row_ids):
         merged_data_rows.append(partial_rows_by_id[row_id])
         rows_updated += 1
+    if source_group_id == "other_sources" and selected_date:
+        _recompute_other_sources_derived_rows(
+            rows=merged_data_rows,
+            header=previous_data.header,
+            selected_dates=[selected_date],
+            updated_row_ids=updated_row_ids,
+        )
 
     selected_status_rows = [
         list(row)
@@ -2921,6 +2961,14 @@ def _merge_source_group_ready_snapshot(
         fallback_updated_at=previous_refreshed_at,
     )
     group_updated_at[source_group_id] = refreshed_at
+    updated_cells = _updated_cells_for_plan(
+        replace(
+            previous_plan,
+            sheets=merged_sheets,
+        ),
+        row_ids=updated_row_ids,
+        date_columns=[selected_date] if selected_date else list(previous_plan.date_columns),
+    )
     metadata = {
         **previous_metadata,
         "row_last_updated_at_by_row_id": row_updated_at,
@@ -2931,6 +2979,7 @@ def _merge_source_group_ready_snapshot(
             "metric_keys": sorted(metric_key_set),
             "selected_as_of_date": selected_date,
             "updated_dates": [selected_date] if selected_date else list(previous_plan.date_columns),
+            "updated_cells": updated_cells,
             "refreshed_at": refreshed_at,
         },
     }
@@ -2954,6 +3003,9 @@ def _merge_source_group_ready_snapshot(
         "selected_as_of_date": selected_date,
         "updated_dates": [selected_date] if selected_date else list(previous_plan.date_columns),
         "updated_row_ids": sorted(updated_row_ids),
+        "updated_cells": updated_cells,
+        "updated_cell_count": _count_updated_cells_by_status(updated_cells, "updated"),
+        "latest_confirmed_cell_count": _count_updated_cells_by_status(updated_cells, "latest_confirmed"),
     }
 
 
@@ -3010,6 +3062,115 @@ def _source_group_updated_at_metadata(
     return result
 
 
+def _updated_cells_for_plan(
+    plan: SheetVitrinaV1Envelope,
+    *,
+    row_ids: Iterable[str] | None = None,
+    date_columns: Iterable[str] | None = None,
+) -> list[dict[str, str]]:
+    data_sheet = _find_sheet(plan, "DATA_VITRINA")
+    if data_sheet is None:
+        return []
+    row_id_filter = {str(item).strip() for item in (row_ids or []) if str(item).strip()}
+    date_filter = {str(item).strip() for item in (date_columns or plan.date_columns) if str(item).strip()}
+    status_by_source_date = _updated_cell_statuses_by_source_and_date(plan)
+    result: list[dict[str, str]] = []
+    for row in data_sheet.rows:
+        row_id = _row_id(row)
+        if not row_id or (row_id_filter and row_id not in row_id_filter):
+            continue
+        metric_key = _metric_key_from_row_id(row_id)
+        source_key = _source_key_for_metric_key(metric_key)
+        source_group_id = _source_group_id_for_source_key(source_key)
+        if not source_key or not source_group_id:
+            continue
+        for as_of_date in plan.date_columns:
+            if date_filter and as_of_date not in date_filter:
+                continue
+            status = status_by_source_date.get((source_key, as_of_date), "updated")
+            if status not in {"updated", "latest_confirmed"}:
+                continue
+            result.append(
+                {
+                    "row_id": row_id,
+                    "metric_key": metric_key,
+                    "as_of_date": as_of_date,
+                    "source_group_id": source_group_id,
+                    "source_key": source_key,
+                    "status": status,
+                }
+            )
+    return result
+
+
+def _updated_cell_statuses_by_source_and_date(plan: SheetVitrinaV1Envelope) -> dict[tuple[str, str], str]:
+    status_sheet = _find_sheet(plan, "STATUS")
+    if status_sheet is None:
+        return {}
+    slot_date_by_key = {str(slot.slot_key): str(slot.column_date) for slot in plan.temporal_slots}
+    grouped_rows: dict[tuple[str, str], list[list[Any]]] = {}
+    for row in status_sheet.rows:
+        source_key = _status_row_source_base(row)
+        if not source_key or source_key == "registry_upload_current_state":
+            continue
+        temporal_slot = _status_row_temporal_slot(row)
+        as_of_date = slot_date_by_key.get(temporal_slot) or _status_row_date(row)
+        if not as_of_date:
+            continue
+        grouped_rows.setdefault((source_key, as_of_date), []).append(list(row))
+    return {
+        key: status
+        for key, rows in grouped_rows.items()
+        if (status := _updated_cell_status_for_status_rows(rows))
+    }
+
+
+def _updated_cell_status_for_status_rows(rows: list[list[Any]]) -> str:
+    statuses = [_updated_cell_status_for_status_row(row) for row in rows]
+    if "latest_confirmed" in statuses:
+        return "latest_confirmed"
+    if "updated" in statuses:
+        return "updated"
+    return ""
+
+
+def _updated_cell_status_for_status_row(row: list[Any]) -> str:
+    kind = str(row[1] if len(row) > 1 else "").strip().lower()
+    note = str(row[10] if len(row) > 10 else "").strip().lower()
+    if kind in {"error", "missing", "not_found", "blocked", "not_available"}:
+        return ""
+    latest_confirmed_tokens = (
+        "latest_confirmed",
+        "fallback",
+        "runtime_cache",
+        "accepted_closed_runtime_snapshot",
+        "accepted_current_runtime_snapshot",
+        "accepted_closed_from_prior_current_snapshot",
+        "accepted_prior_current_runtime_cache",
+        "exact_date_provisional_runtime_cache",
+        "accepted_closed_from_interval_replay",
+        "accepted_current_from_prior",
+    )
+    if any(token in note for token in latest_confirmed_tokens):
+        return "latest_confirmed"
+    if kind == "warning":
+        return "latest_confirmed"
+    if kind == "success":
+        return "updated"
+    return ""
+
+
+def _status_row_date(row: list[Any]) -> str:
+    for index in (4, 5, 3, 2):
+        if len(row) > index and str(row[index] or "").strip():
+            return str(row[index] or "").strip()
+    return ""
+
+
+def _count_updated_cells_by_status(updated_cells: Iterable[Mapping[str, Any]], status: str) -> int:
+    return sum(1 for item in updated_cells if str(item.get("status") or "") == status)
+
+
 def _row_id(row: list[Any]) -> str:
     return str(row[1] or "").strip() if len(row) > 1 else ""
 
@@ -3039,6 +3200,112 @@ def _merge_row_selected_date(
                 merged.append("")
             merged[previous_index] = partial_row[partial_index]
     return merged
+
+
+def _recompute_other_sources_derived_rows(
+    *,
+    rows: list[list[Any]],
+    header: Iterable[Any],
+    selected_dates: Iterable[str],
+    updated_row_ids: set[str],
+) -> None:
+    row_by_id = {_row_id(row): row for row in rows if _row_id(row)}
+    date_indexes = [
+        index
+        for selected_date in selected_dates
+        for index in _sheet_header_indexes(header, selected_date)
+    ]
+    if not date_indexes:
+        return
+    for date_index in date_indexes:
+        for row_id, row in sorted(row_by_id.items()):
+            if row_id not in updated_row_ids or _metric_key_from_row_id(row_id) != "proxy_profit_rub":
+                continue
+            scope = _row_scope_from_row_id(row_id)
+            value = _compute_proxy_profit_for_scope(row_by_id, scope=scope, date_index=date_index)
+            _set_row_value(row, date_index, _to_sheet_cell_number(value))
+        for row_id, row in sorted(row_by_id.items()):
+            if row_id not in updated_row_ids or _metric_key_from_row_id(row_id) != "total_proxy_profit_rub":
+                continue
+            value = _sum_sku_metric_values(row_by_id, metric_key="proxy_profit_rub", date_index=date_index)
+            _set_row_value(row, date_index, _to_sheet_cell_number(value))
+        for row_id, row in sorted(row_by_id.items()):
+            metric_key = _metric_key_from_row_id(row_id)
+            if row_id not in updated_row_ids or metric_key not in {"proxy_margin_pct", "proxy_margin_pct_total"}:
+                continue
+            scope = _row_scope_from_row_id(row_id)
+            order_sum_metric = "total_orderSum" if metric_key == "proxy_margin_pct_total" else "orderSum"
+            profit_metric = "total_proxy_profit_rub" if metric_key == "proxy_margin_pct_total" else "proxy_profit_rub"
+            order_sum = _row_metric_number(row_by_id, scope=scope, metric_key=order_sum_metric, date_index=date_index)
+            profit = _row_metric_number(row_by_id, scope=scope, metric_key=profit_metric, date_index=date_index)
+            value = None if order_sum is None or profit is None else (0.0 if order_sum == 0 else profit / order_sum)
+            _set_row_value(row, date_index, _to_sheet_cell_number(value))
+
+
+def _compute_proxy_profit_for_scope(
+    row_by_id: Mapping[str, list[Any]],
+    *,
+    scope: str,
+    date_index: int,
+) -> float | None:
+    order_sum = _row_metric_number(row_by_id, scope=scope, metric_key="orderSum", date_index=date_index)
+    order_count = _row_metric_number(row_by_id, scope=scope, metric_key="orderCount", date_index=date_index)
+    cost_price = _row_metric_number(row_by_id, scope=scope, metric_key="cost_price_rub", date_index=date_index)
+    ads_sum = _row_metric_number(row_by_id, scope=scope, metric_key="ads_sum", date_index=date_index)
+    if None in {order_sum, order_count, cost_price, ads_sum}:
+        return None
+    return float(order_sum) * 0.5096 - float(order_count) * 0.91 * float(cost_price) - float(ads_sum)
+
+
+def _sum_sku_metric_values(
+    row_by_id: Mapping[str, list[Any]],
+    *,
+    metric_key: str,
+    date_index: int,
+) -> float | None:
+    values = [
+        _cell_number(row[date_index] if date_index < len(row) else None)
+        for row_id, row in row_by_id.items()
+        if row_id.startswith("SKU:") and _metric_key_from_row_id(row_id) == metric_key
+    ]
+    numeric = [value for value in values if value is not None]
+    return float(sum(numeric)) if numeric else None
+
+
+def _row_metric_number(
+    row_by_id: Mapping[str, list[Any]],
+    *,
+    scope: str,
+    metric_key: str,
+    date_index: int,
+) -> float | None:
+    row = row_by_id.get(f"{scope}|{metric_key}")
+    if row is None or date_index >= len(row):
+        return None
+    return _cell_number(row[date_index])
+
+
+def _cell_number(value: Any) -> float | None:
+    if value in ("", None):
+        return None
+    try:
+        return float(str(value).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _to_sheet_cell_number(value: float | None) -> float | str:
+    return "" if value is None else float(value)
+
+
+def _set_row_value(row: list[Any], index: int, value: Any) -> None:
+    while index >= len(row):
+        row.append("")
+    row[index] = value
+
+
+def _row_scope_from_row_id(row_id: str) -> str:
+    return str(row_id).split("|", 1)[0] if "|" in str(row_id) else str(row_id)
 
 
 def _metric_key_from_row_id(row_id: str) -> str:
