@@ -84,6 +84,12 @@ def main() -> None:
         merge_summary = result["merge_summary"]
         if merge_summary["rows_updated"] != 1 or merge_summary["rows_preserved"] != 2:
             raise AssertionError(f"group refresh must update only selected rows, got {merge_summary}")
+        if result.get("updated_cells") != merge_summary["updated_cells"]:
+            raise AssertionError("group refresh result must expose updated_cells at the top level")
+        if result.get("updated_cell_count") != merge_summary["updated_cell_count"]:
+            raise AssertionError("group refresh result must expose updated_cell_count at the top level")
+        if result.get("latest_confirmed_cell_count") != merge_summary["latest_confirmed_cell_count"]:
+            raise AssertionError("group refresh result must expose latest_confirmed_cell_count at the top level")
         if "price_seller_discounted" not in captured["metric_keys"]:
             raise AssertionError(f"wb_api refresh must select wb_api metric keys, got {captured}")
 

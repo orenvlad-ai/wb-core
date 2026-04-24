@@ -3191,9 +3191,12 @@
     }
 
     function setSessionHighlightsFromJob(jobPayload) {
-      const cells = Array.isArray(jobPayload && jobPayload.result && jobPayload.result.updated_cells)
-        ? jobPayload.result.updated_cells
+      const result = (jobPayload && jobPayload.result) || {};
+      const directCells = Array.isArray(result.updated_cells) ? result.updated_cells : null;
+      const mergeCells = Array.isArray(result.merge_summary && result.merge_summary.updated_cells)
+        ? result.merge_summary.updated_cells
         : [];
+      const cells = directCells || mergeCells;
       const highlights = {};
       cells.forEach(function(cell) {
         const rowId = String((cell && cell.row_id) || "").trim();
