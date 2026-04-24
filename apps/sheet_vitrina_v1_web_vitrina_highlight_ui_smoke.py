@@ -45,24 +45,26 @@ def main() -> None:
                             "operation": "refresh",
                             "status": "success",
                             "result": {
-                                "updated_cells": [
-                                    {
-                                        "row_id": "TOTAL|total_orderSum",
-                                        "metric_key": "total_orderSum",
-                                        "as_of_date": "2026-04-20",
-                                        "source_group_id": "wb_api",
-                                        "source_key": "sales_funnel_history",
-                                        "status": "updated",
-                                    },
-                                    {
-                                        "row_id": "TOTAL|total_view_count",
-                                        "metric_key": "total_view_count",
-                                        "as_of_date": "2026-04-20",
-                                        "source_group_id": "seller_portal_bot",
-                                        "source_key": "seller_funnel_snapshot",
-                                        "status": "latest_confirmed",
-                                    },
-                                ],
+                                "merge_summary": {
+                                    "updated_cells": [
+                                        {
+                                            "row_id": "TOTAL|total_orderSum",
+                                            "metric_key": "total_orderSum",
+                                            "as_of_date": "2026-04-20",
+                                            "source_group_id": "wb_api",
+                                            "source_key": "sales_funnel_history",
+                                            "status": "updated",
+                                        },
+                                        {
+                                            "row_id": "TOTAL|total_view_count",
+                                            "metric_key": "total_view_count",
+                                            "as_of_date": "2026-04-20",
+                                            "source_group_id": "seller_portal_bot",
+                                            "source_key": "seller_funnel_snapshot",
+                                            "status": "latest_confirmed",
+                                        },
+                                    ],
+                                },
                             },
                             "log_lines": ["event=highlight_smoke_finish"],
                         }
