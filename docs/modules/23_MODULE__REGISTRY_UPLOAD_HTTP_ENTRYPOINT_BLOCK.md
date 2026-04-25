@@ -410,18 +410,18 @@ update_note: "Обновлён под current operator report checkpoint: report
 - `Выполнение плана`:
   - route = `GET /v1/sheet-vitrina-v1/plan-report`
   - route is read-only and does not trigger refresh/upstream fetch/backfill;
-  - required query params: `period`, `q1_buyout_plan_rub`, `q2_buyout_plan_rub`, `q3_buyout_plan_rub`, `q4_buyout_plan_rub`, `plan_drr_pct`; optional `as_of_date` fixes the previous closed business day reference;
+  - primary required query params: `period`, `h1_buyout_plan_rub`, `h2_buyout_plan_rub`, `plan_drr_pct`; optional `as_of_date` fixes the previous closed business day reference; legacy complete `q1_buyout_plan_rub`..`q4_buyout_plan_rub` may be accepted transitionally by summing Q1+Q2 into H1 and Q3+Q4 into H2;
   - response always returns selected period plus `month_to_date`, `quarter_to_date`, `year_to_date` blocks when current active SKU truth is available;
   - each block has its own `available / partial / unavailable` status, coverage details, reason, source-of-truth/source-mix and metric values when the block is available or partial;
   - missing YTD/January/February coverage must not hide an available selected period; top-level status may aggregate block state but must not make the response all-or-nothing;
   - daily facts are summed from persisted accepted closed-day temporal snapshots: `fin_report_daily.fin_buyout_rub` and `ads_compact.ads_sum`;
-  - optional source mix for aggregate blocks may include `manual_monthly_plan_report_baseline` from server-side runtime SQLite, only for full months wholly inside the period and only when that month has no daily accepted facts;
-  - daily accepted snapshots have precedence: if any day in a month is covered by daily facts, the monthly baseline for that month is not added, preventing double-count;
+  - optional source mix for aggregate blocks may include `manual_monthly_plan_report_baseline` from server-side runtime SQLite for full months wholly inside the period; if a baseline month has incomplete daily precision, the monthly aggregate covers that month and overlapping daily rows are excluded from the block to prevent double-count;
+  - daily accepted snapshots have precedence only when the whole month is covered by daily facts; then the monthly baseline is not added;
   - baseline is not a general historical backfill, is not Google Sheets/GAS, does not replace accepted snapshots, and is used only by this plan-report route;
   - operator baseline routes are `GET /v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx`, `POST /v1/sheet-vitrina-v1/plan-report/baseline-upload`, `GET /v1/sheet-vitrina-v1/plan-report/baseline-status`;
   - baseline XLSX uses Russian headers with backend mapping: `Месяц`, `Выкуп, руб. / fin_buyout_rub`, `Рекламные расходы, руб. / ads_sum`;
-  - buyout plan is calendar-day based: each date uses that date's quarter plan divided by the number of days in the quarter, so cross-quarter periods use different daily plans;
-  - DRR fact = `ads_sum / fin_buyout_rub * 100`; ads plan = covered-period buyout plan multiplied by planned DRR;
+  - buyout plan is calendar-day based and coverage-independent: each date uses that date's H1/H2 plan divided by the number of days in the half-year, so periods crossing 30 Jun / 1 Jul use different daily plans;
+  - DRR fact = `ads_sum / fin_buyout_rub * 100`; ads plan = full-calendar period buyout plan multiplied by planned DRR;
   - incomplete coverage is surfaced locally as `status=partial` with missing/covered dates instead of silent zero facts; no usable daily facts or applicable full-month baseline for a block yields block-level `status=unavailable`.
 - Operator page keeps one compact server-driven manual block `Ручная загрузка данных`:
   - active action `Загрузить данные`

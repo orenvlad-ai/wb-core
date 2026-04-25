@@ -26,6 +26,8 @@ BUNDLE_FIXTURE = (
 NOW = datetime(2026, 4, 21, 1, 0, tzinfo=timezone.utc)
 REFERENCE_DATE = "2026-04-20"
 ACCEPTED_ROLE = "accepted_closed_day_snapshot"
+H1_PLAN_RUB = 271500.0
+H2_PLAN_RUB = 552000.0
 
 
 def main() -> None:
@@ -96,10 +98,8 @@ def main() -> None:
         block = SheetVitrinaV1PlanReportBlock(runtime=runtime, now_factory=lambda: NOW)
         payload = block.build(
             period="last_30_days",
-            q1_buyout_plan_rub=90000.0,
-            q2_buyout_plan_rub=182000.0,
-            q3_buyout_plan_rub=273000.0,
-            q4_buyout_plan_rub=365000.0,
+            h1_buyout_plan_rub=H1_PLAN_RUB,
+            h2_buyout_plan_rub=H2_PLAN_RUB,
             plan_drr_pct=10.0,
         )
         if payload.get("status") != "available":
@@ -111,13 +111,13 @@ def main() -> None:
 
         selected = payload["periods"]["selected_period"]
         if selected["date_from"] != "2026-03-22" or selected["date_to"] != REFERENCE_DATE or selected["day_count"] != 30:
-            raise AssertionError(f"last_30_days window must cross quarter boundary truthfully, got {selected}")
+            raise AssertionError(f"last_30_days window must span the expected calendar range, got {selected}")
         _assert_close(selected["metrics"]["buyout_rub"]["fact"], 45000.0, "selected buyout fact")
-        _assert_close(selected["metrics"]["buyout_rub"]["plan"], 50000.0, "selected buyout plan")
-        _assert_close(selected["metrics"]["buyout_rub"]["delta_abs"], -5000.0, "selected buyout delta")
-        _assert_close(selected["metrics"]["buyout_rub"]["delta_pct"], -10.0, "selected buyout delta_pct")
-        if selected["metrics"]["buyout_rub"]["status_label"] != "ниже плана":
-            raise AssertionError(f"buyout status must be below-plan when fact < plan, got {selected}")
+        _assert_close(selected["metrics"]["buyout_rub"]["plan"], 45000.0, "selected buyout plan")
+        _assert_close(selected["metrics"]["buyout_rub"]["delta_abs"], 0.0, "selected buyout delta")
+        _assert_close(selected["metrics"]["buyout_rub"]["delta_pct"], 0.0, "selected buyout delta_pct")
+        if selected["metrics"]["buyout_rub"]["status_label"] != "выполнен":
+            raise AssertionError(f"buyout status must be fulfilled when fact equals plan, got {selected}")
         _assert_close(selected["metrics"]["drr_pct"]["fact"], 12.0, "selected drr fact")
         _assert_close(selected["metrics"]["drr_pct"]["plan"], 10.0, "selected drr plan")
         _assert_close(selected["metrics"]["drr_pct"]["delta_pp"], 2.0, "selected drr delta_pp")
@@ -125,15 +125,15 @@ def main() -> None:
         if selected["metrics"]["drr_pct"]["status_label"] != "выше плана":
             raise AssertionError(f"drr status must disclose above-plan overspend, got {selected}")
         _assert_close(selected["metrics"]["ads_sum_rub"]["fact"], 5400.0, "selected ads fact")
-        _assert_close(selected["metrics"]["ads_sum_rub"]["plan"], 5000.0, "selected ads plan")
-        _assert_close(selected["metrics"]["ads_sum_rub"]["delta_abs"], 400.0, "selected ads delta")
-        _assert_close(selected["metrics"]["ads_sum_rub"]["delta_pct"], 8.0, "selected ads delta_pct")
+        _assert_close(selected["metrics"]["ads_sum_rub"]["plan"], 4500.0, "selected ads plan")
+        _assert_close(selected["metrics"]["ads_sum_rub"]["delta_abs"], 900.0, "selected ads delta")
+        _assert_close(selected["metrics"]["ads_sum_rub"]["delta_pct"], 20.0, "selected ads delta_pct")
 
         mtd = payload["periods"]["month_to_date"]
         if mtd["date_from"] != "2026-04-01" or mtd["day_count"] != 20:
             raise AssertionError(f"MTD block must start from month start, got {mtd}")
-        _assert_close(mtd["metrics"]["buyout_rub"]["plan"], 40000.0, "mtd buyout plan")
-        _assert_close(mtd["metrics"]["ads_sum_rub"]["plan"], 4000.0, "mtd ads plan")
+        _assert_close(mtd["metrics"]["buyout_rub"]["plan"], 30000.0, "mtd buyout plan")
+        _assert_close(mtd["metrics"]["ads_sum_rub"]["plan"], 3000.0, "mtd ads plan")
 
         qtd = payload["periods"]["quarter_to_date"]
         if qtd["date_from"] != "2026-04-01" or qtd["day_count"] != 20:
@@ -143,7 +143,7 @@ def main() -> None:
         ytd = payload["periods"]["year_to_date"]
         if ytd["date_from"] != "2026-01-01" or ytd["day_count"] != 110:
             raise AssertionError(f"YTD block must start from year start, got {ytd}")
-        _assert_close(ytd["metrics"]["buyout_rub"]["plan"], 130000.0, "ytd buyout plan")
+        _assert_close(ytd["metrics"]["buyout_rub"]["plan"], 165000.0, "ytd buyout plan")
         _assert_close(ytd["metrics"]["buyout_rub"]["fact"], 165000.0, "ytd buyout fact")
         if ytd["metrics"]["buyout_rub"]["status_label"] != "выполнен":
             raise AssertionError(f"YTD buyout must be marked as fulfilled when fact >= plan, got {ytd}")
@@ -157,10 +157,8 @@ def main() -> None:
         )
         unavailable_payload = block.build(
             period="current_month",
-            q1_buyout_plan_rub=90000.0,
-            q2_buyout_plan_rub=182000.0,
-            q3_buyout_plan_rub=273000.0,
-            q4_buyout_plan_rub=365000.0,
+            h1_buyout_plan_rub=H1_PLAN_RUB,
+            h2_buyout_plan_rub=H2_PLAN_RUB,
             plan_drr_pct=10.0,
             as_of_date=REFERENCE_DATE,
         )
@@ -183,10 +181,8 @@ def main() -> None:
         empty_block = SheetVitrinaV1PlanReportBlock(runtime=empty_runtime, now_factory=lambda: NOW)
         empty_payload = empty_block.build(
             period="yesterday",
-            q1_buyout_plan_rub=90000.0,
-            q2_buyout_plan_rub=182000.0,
-            q3_buyout_plan_rub=273000.0,
-            q4_buyout_plan_rub=365000.0,
+            h1_buyout_plan_rub=H1_PLAN_RUB,
+            h2_buyout_plan_rub=H2_PLAN_RUB,
             plan_drr_pct=10.0,
             as_of_date=REFERENCE_DATE,
         )
@@ -206,10 +202,8 @@ def main() -> None:
         partial_block = SheetVitrinaV1PlanReportBlock(runtime=partial_runtime, now_factory=lambda: NOW)
         partial_payload = partial_block.build(
             period="last_30_days",
-            q1_buyout_plan_rub=90000.0,
-            q2_buyout_plan_rub=182000.0,
-            q3_buyout_plan_rub=273000.0,
-            q4_buyout_plan_rub=365000.0,
+            h1_buyout_plan_rub=H1_PLAN_RUB,
+            h2_buyout_plan_rub=H2_PLAN_RUB,
             plan_drr_pct=10.0,
             as_of_date=REFERENCE_DATE,
         )
@@ -236,10 +230,8 @@ def main() -> None:
         )
         mixed_payload = partial_block.build(
             period="current_year",
-            q1_buyout_plan_rub=90000.0,
-            q2_buyout_plan_rub=182000.0,
-            q3_buyout_plan_rub=273000.0,
-            q4_buyout_plan_rub=365000.0,
+            h1_buyout_plan_rub=H1_PLAN_RUB,
+            h2_buyout_plan_rub=H2_PLAN_RUB,
             plan_drr_pct=10.0,
             as_of_date=REFERENCE_DATE,
         )
@@ -253,8 +245,91 @@ def main() -> None:
             raise AssertionError(f"mixed YTD source mix must disclose Jan/Feb baseline and March+ daily, got {mixed_payload}")
         _assert_close(mixed_ytd["metrics"]["buyout_rub"]["fact"], 135500.0, "mixed ytd buyout fact")
         _assert_close(mixed_ytd["metrics"]["ads_sum_rub"]["fact"], 15080.0, "mixed ytd ads fact")
-        _assert_close(mixed_ytd["metrics"]["ads_sum_rub"]["plan"], 13000.0, "mixed ytd ads plan")
+        _assert_close(mixed_ytd["metrics"]["ads_sum_rub"]["plan"], 16500.0, "mixed ytd ads plan")
         _assert_close(mixed_ytd["metrics"]["drr_pct"]["fact"], 15080.0 / 135500.0 * 100.0, "mixed ytd drr fact")
+
+        wb_plan_payload = block.build(
+            period="current_year",
+            h1_buyout_plan_rub=155379879.0,
+            h2_buyout_plan_rub=294620120.0,
+            plan_drr_pct=6.0,
+            as_of_date="2026-04-24",
+        )
+        wb_ytd = wb_plan_payload["periods"]["year_to_date"]
+        wb_mtd = wb_plan_payload["periods"]["month_to_date"]
+        wb_qtd = wb_plan_payload["periods"]["quarter_to_date"]
+        expected_ytd_plan = 155379879.0 / 181.0 * 114.0
+        expected_mtd_qtd_plan = 155379879.0 / 181.0 * 24.0
+        _assert_close(wb_ytd["metrics"]["buyout_rub"]["plan"], expected_ytd_plan, "2026-04-24 ytd h1/h2 plan")
+        _assert_close(wb_mtd["metrics"]["buyout_rub"]["plan"], expected_mtd_qtd_plan, "2026-04-24 mtd h1/h2 plan")
+        _assert_close(wb_qtd["metrics"]["buyout_rub"]["plan"], expected_mtd_qtd_plan, "2026-04-24 qtd h1/h2 plan")
+
+        split_payload = block.build(
+            period="last_30_days",
+            h1_buyout_plan_rub=181000.0,
+            h2_buyout_plan_rub=368000.0,
+            plan_drr_pct=10.0,
+            as_of_date="2026-07-10",
+        )
+        split_selected = split_payload["periods"]["selected_period"]
+        _assert_close(
+            split_selected["metrics"]["buyout_rub"]["plan"],
+            (181000.0 / 181.0 * 20.0) + (368000.0 / 184.0 * 10.0),
+            "h1/h2 split plan across Jun/Jul",
+        )
+
+        reconcile_runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "reconciliation-controls")
+        reconcile_result = reconcile_runtime.ingest_bundle(bundle, activated_at="2026-04-21T01:00:00Z")
+        if reconcile_result.status != "accepted":
+            raise AssertionError(f"reconciliation runtime bundle ingest must be accepted, got {reconcile_result}")
+        reconcile_runtime.save_plan_report_monthly_baseline(
+            rows=[
+                {"month": "2026-01", "fin_buyout_rub": 27444563.5, "ads_sum": 2783637.0},
+                {"month": "2026-02", "fin_buyout_rub": 27444563.5, "ads_sum": 2783637.0},
+            ],
+            uploaded_at="2026-04-21T01:00:00Z",
+            source_kind=MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
+            uploaded_filename="baseline.xlsx",
+            uploaded_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            workbook_checksum="test-checksum",
+        )
+        _seed_daily_snapshots(
+            reconcile_runtime,
+            primary_nm_id=primary_nm_id,
+            date_from=date(2026, 3, 1),
+            date_to=date(2026, 3, 31),
+            buyout_rub=41917072.0 / 31.0,
+            ads_sum=4814777.0 / 31.0,
+        )
+        _seed_daily_snapshots(
+            reconcile_runtime,
+            primary_nm_id=primary_nm_id,
+            date_from=date(2026, 4, 1),
+            date_to=date(2026, 4, 24),
+            buyout_rub=39920319.0 / 24.0,
+            ads_sum=3826937.0 / 24.0,
+        )
+        reconcile_block = SheetVitrinaV1PlanReportBlock(runtime=reconcile_runtime, now_factory=lambda: NOW)
+        q1_payload = reconcile_block.build(
+            period="current_year",
+            h1_buyout_plan_rub=155379879.0,
+            h2_buyout_plan_rub=294620120.0,
+            plan_drr_pct=6.0,
+            as_of_date="2026-03-31",
+        )
+        q1_ytd = q1_payload["periods"]["year_to_date"]
+        _assert_close(q1_ytd["metrics"]["buyout_rub"]["fact"], 96806199.0, "q1 manager buyout control")
+        _assert_close(q1_ytd["metrics"]["ads_sum_rub"]["fact"], 10382051.0, "q1 manager ads control")
+        april_payload = reconcile_block.build(
+            period="current_month",
+            h1_buyout_plan_rub=155379879.0,
+            h2_buyout_plan_rub=294620120.0,
+            plan_drr_pct=6.0,
+            as_of_date="2026-04-24",
+        )
+        april_mtd = april_payload["periods"]["month_to_date"]
+        _assert_close(april_mtd["metrics"]["buyout_rub"]["fact"], 39920319.0, "apr1-24 buyout control")
+        _assert_close(april_mtd["metrics"]["ads_sum_rub"]["fact"], 3826937.0, "apr1-24 ads control")
 
         no_double_runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "no-double-count")
         no_double_result = no_double_runtime.ingest_bundle(bundle, activated_at="2026-04-21T01:00:00Z")
@@ -281,10 +356,8 @@ def main() -> None:
             now_factory=lambda: NOW,
         ).build(
             period="current_year",
-            q1_buyout_plan_rub=9300.0,
-            q2_buyout_plan_rub=182000.0,
-            q3_buyout_plan_rub=273000.0,
-            q4_buyout_plan_rub=365000.0,
+            h1_buyout_plan_rub=18100.0,
+            h2_buyout_plan_rub=H2_PLAN_RUB,
             plan_drr_pct=10.0,
             as_of_date="2026-01-31",
         )
@@ -293,6 +366,44 @@ def main() -> None:
             raise AssertionError(f"baseline must not double-count a month with daily facts, got {no_double_payload}")
         _assert_close(no_double_ytd["metrics"]["buyout_rub"]["fact"], 3100.0, "no-double ytd buyout fact")
         _assert_close(no_double_ytd["metrics"]["ads_sum_rub"]["fact"], 310.0, "no-double ytd ads fact")
+
+        partial_overlap_runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "baseline-partial-overlap")
+        partial_overlap_result = partial_overlap_runtime.ingest_bundle(bundle, activated_at="2026-04-21T01:00:00Z")
+        if partial_overlap_result.status != "accepted":
+            raise AssertionError(f"partial-overlap runtime bundle ingest must be accepted, got {partial_overlap_result}")
+        _seed_daily_snapshots(
+            partial_overlap_runtime,
+            primary_nm_id=primary_nm_id,
+            date_from=date(2026, 1, 1),
+            date_to=date(2026, 1, 1),
+            buyout_rub=100.0,
+            ads_sum=10.0,
+        )
+        partial_overlap_runtime.save_plan_report_monthly_baseline(
+            rows=[{"month": "2026-01", "fin_buyout_rub": 999999.0, "ads_sum": 99999.0}],
+            uploaded_at="2026-04-21T01:00:00Z",
+            source_kind=MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
+            uploaded_filename="baseline.xlsx",
+            uploaded_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            workbook_checksum="test-checksum",
+        )
+        partial_overlap_payload = SheetVitrinaV1PlanReportBlock(
+            runtime=partial_overlap_runtime,
+            now_factory=lambda: NOW,
+        ).build(
+            period="current_year",
+            h1_buyout_plan_rub=18100.0,
+            h2_buyout_plan_rub=H2_PLAN_RUB,
+            plan_drr_pct=10.0,
+            as_of_date="2026-01-31",
+        )
+        partial_overlap_ytd = partial_overlap_payload["periods"]["year_to_date"]
+        partial_overlap_source = partial_overlap_ytd.get("source_breakdown") or {}
+        if partial_overlap_source.get("baseline_months") != ["2026-01"]:
+            raise AssertionError(f"baseline must cover a partial-overlap full month, got {partial_overlap_payload}")
+        if partial_overlap_source.get("daily_excluded_by_monthly_baseline_dates") != ["2026-01-01"]:
+            raise AssertionError(f"daily overlap must be excluded when monthly baseline covers the month, got {partial_overlap_payload}")
+        _assert_close(partial_overlap_ytd["metrics"]["buyout_rub"]["fact"], 999999.0, "partial-overlap ytd buyout fact")
 
         template_bytes, template_filename = block.build_baseline_template()
         template_rows = read_first_sheet_rows(template_bytes)
@@ -339,13 +450,15 @@ def main() -> None:
 
         print("plan_report_status: ok ->", payload["status"])
         print("plan_report_selected_period: ok ->", selected["date_from"], selected["date_to"])
-        print("plan_report_cross_quarter_plan: ok ->", selected["metrics"]["buyout_rub"]["plan"])
+        print("plan_report_half_year_plan: ok ->", selected["metrics"]["buyout_rub"]["plan"])
         print("plan_report_mtd_qtd_ytd: ok ->", mtd["day_count"], qtd["day_count"], ytd["day_count"])
         print("plan_report_partial_coverage_guard: ok ->", missing_dates_by_source)
         print("plan_report_unavailable_coverage_guard: ok ->", empty_payload["status"])
         print("plan_report_selected_independent_from_ytd: ok ->", partial_selected["status"], partial_ytd["status"])
         print("plan_report_mixed_baseline_ytd: ok ->", mixed_ytd["status"], baseline_mix["months"])
         print("plan_report_no_double_count: ok ->", no_double_ytd["metrics"]["buyout_rub"]["fact"])
+        print("plan_report_partial_overlap_baseline: ok ->", partial_overlap_source["baseline_months"])
+        print("plan_report_reconciliation_controls: ok ->", q1_ytd["metrics"]["buyout_rub"]["fact"], april_mtd["metrics"]["buyout_rub"]["fact"])
         print("plan_report_baseline_xlsx: ok ->", upload_payload["accepted_months"])
 
 
@@ -412,7 +525,7 @@ def _seed_daily_snapshots(
 
 
 def _assert_close(actual: float | None, expected: float, label: str) -> None:
-    if actual is None or abs(actual - expected) > 1e-6:
+    if actual is None or abs(actual - expected) > 1e-3:
         raise AssertionError(f"{label} must be {expected}, got {actual}")
 
 

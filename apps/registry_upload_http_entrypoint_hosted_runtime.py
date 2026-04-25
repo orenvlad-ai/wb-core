@@ -1317,10 +1317,8 @@ def _append_query_params(url, params):
 def _plan_report_params(as_of_date):
     params = {{
         "period": "current_month",
-        "q1_buyout_plan_rub": "90000",
-        "q2_buyout_plan_rub": "182000",
-        "q3_buyout_plan_rub": "273000",
-        "q4_buyout_plan_rub": "365000",
+        "h1_buyout_plan_rub": "272000",
+        "h2_buyout_plan_rub": "638000",
         "plan_drr_pct": "10",
     }}
     if as_of_date:
@@ -1442,10 +1440,8 @@ def _append_as_of_date(url: str, as_of_date: str | None) -> str:
 def _build_plan_report_probe_params(as_of_date: str | None) -> dict[str, str]:
     params = {
         "period": "current_month",
-        "q1_buyout_plan_rub": "90000",
-        "q2_buyout_plan_rub": "182000",
-        "q3_buyout_plan_rub": "273000",
-        "q4_buyout_plan_rub": "365000",
+        "h1_buyout_plan_rub": "272000",
+        "h2_buyout_plan_rub": "638000",
         "plan_drr_pct": "10",
     }
     if as_of_date:

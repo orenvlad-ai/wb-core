@@ -211,12 +211,12 @@ update_note: "Обновлён под Google Sheets decommission and current pla
     - merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь` stays fully excluded from stock-report filter/display because current truth does not split Far East from Siberia
   - plan-report block `Выполнение плана` остаётся read-only и server-owned:
     - route = `GET /v1/sheet-vitrina-v1/plan-report`
-    - input params = quarterly buyout plans `Q1..Q4`, planned DRR percent and selected period (`yesterday`, `last_7_days`, `last_30_days`, `current_month`, `current_quarter`, `current_year`)
+    - primary input params = half-year buyout plans `H1/H2`, planned DRR percent and selected period (`yesterday`, `last_7_days`, `last_30_days`, `current_month`, `current_quarter`, `current_year`); legacy complete `Q1..Q4` params may be accepted transitionally by summing Q1+Q2 into H1 and Q3+Q4 into H2
     - daily facts use persisted accepted closed-day snapshots for `fin_report_daily.fin_buyout_rub` and `ads_compact.ads_sum` over current active `config_v2` SKU
     - optional manual monthly facts come only from the separate runtime source `manual_monthly_plan_report_baseline`, uploaded through the plan-report baseline XLSX routes and used only for full baseline months inside aggregate plan-report periods
-    - daily accepted snapshots have precedence over monthly baseline; if a month has any daily accepted facts, that month baseline is not added
-    - buyout plan is distributed by calendar day and crosses quarter boundaries by using the quarter plan for each individual date
-    - DRR fact = `ads_sum / fin_buyout_rub * 100`; ads plan = buyout plan multiplied by planned DRR
+    - if a baseline month has incomplete daily precision, the monthly aggregate covers that month and overlapping daily rows are excluded from the block to prevent double-count; a fully daily-covered month uses daily facts and skips baseline
+    - buyout plan is distributed by calendar day and crosses 30 Jun / 1 Jul by using the H1/H2 plan for each individual date
+    - DRR fact = `ads_sum / fin_buyout_rub * 100`; ads plan = full-calendar buyout plan multiplied by planned DRR
     - response always includes selected block plus MTD/QTD/YTD blocks when active SKU truth is available
     - each block carries its own `available / partial / unavailable` status, coverage details, reason, source mix and metrics; missing YTD must not hide an available selected period
     - incomplete temporal snapshot/baseline coverage is surfaced as `partial`/`unavailable` with missing/covered dates and never as fabricated zero fact
@@ -302,7 +302,7 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - valid query returns `200` with root `status=available/partial/unavailable`
   - response body always contains per-block `periods.selected_period`, `periods.month_to_date`, `periods.quarter_to_date`, `periods.year_to_date`
   - root status is aggregate; UI must render available/partial blocks even when another block is unavailable
-  - required params = `period`, `q1_buyout_plan_rub`, `q2_buyout_plan_rub`, `q3_buyout_plan_rub`, `q4_buyout_plan_rub`, `plan_drr_pct`
+  - primary required params = `period`, `h1_buyout_plan_rub`, `h2_buyout_plan_rub`, `plan_drr_pct`; legacy complete `q1_buyout_plan_rub`..`q4_buyout_plan_rub` remains a transitional fallback only
   - sibling baseline routes:
     - `GET /v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx`
     - `POST /v1/sheet-vitrina-v1/plan-report/baseline-upload`

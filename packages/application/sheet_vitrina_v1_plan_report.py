@@ -46,7 +46,7 @@ PERSISTENT_BLOCKS = (
 REPORT_NOTES = (
     "Отчёт остаётся server-side read-only path и не триггерит refresh/upstream fetch.",
     "Факт читается из persisted accepted closed-day runtime snapshots `fin_report_daily` + `ads_compact` по current active `config_v2`; manual monthly baseline используется только для plan-report aggregate blocks и не подменяет daily snapshots.",
-    "План по выкупу считается посуточно: квартальный план делится на количество календарных дней квартала, затем дневные доли суммируются по диапазону.",
+    "План по выкупу считается посуточно: план H1/H2 делится на количество календарных дней соответствующего полугодия, затем дневные доли суммируются по полному календарному диапазону блока.",
     "Факт DRR считается как `ads_sum / fin_buyout_rub * 100`; плановый DRR сравнивается именно как процент, без подмены на рекламный бюджет.",
     "План рекламных расходов = `план выкупа за период * плановый DRR / 100`.",
 )
@@ -126,11 +126,13 @@ class SheetVitrinaV1PlanReportBlock:
         self,
         *,
         period: str,
-        q1_buyout_plan_rub: float,
-        q2_buyout_plan_rub: float,
-        q3_buyout_plan_rub: float,
-        q4_buyout_plan_rub: float,
         plan_drr_pct: float,
+        h1_buyout_plan_rub: float | None = None,
+        h2_buyout_plan_rub: float | None = None,
+        q1_buyout_plan_rub: float | None = None,
+        q2_buyout_plan_rub: float | None = None,
+        q3_buyout_plan_rub: float | None = None,
+        q4_buyout_plan_rub: float | None = None,
         as_of_date: str | None = None,
     ) -> dict[str, Any]:
         normalized_period = str(period or "").strip()
@@ -138,12 +140,15 @@ class SheetVitrinaV1PlanReportBlock:
             raise ValueError(
                 "period must be one of: yesterday, last_7_days, last_30_days, current_month, current_quarter, current_year"
             )
-        quarter_plans = {
-            1: _require_non_negative_number(q1_buyout_plan_rub, field_name="q1_buyout_plan_rub"),
-            2: _require_non_negative_number(q2_buyout_plan_rub, field_name="q2_buyout_plan_rub"),
-            3: _require_non_negative_number(q3_buyout_plan_rub, field_name="q3_buyout_plan_rub"),
-            4: _require_non_negative_number(q4_buyout_plan_rub, field_name="q4_buyout_plan_rub"),
-        }
+        plan_inputs = _resolve_buyout_plan_inputs(
+            h1_buyout_plan_rub=h1_buyout_plan_rub,
+            h2_buyout_plan_rub=h2_buyout_plan_rub,
+            q1_buyout_plan_rub=q1_buyout_plan_rub,
+            q2_buyout_plan_rub=q2_buyout_plan_rub,
+            q3_buyout_plan_rub=q3_buyout_plan_rub,
+            q4_buyout_plan_rub=q4_buyout_plan_rub,
+        )
+        half_year_plans = plan_inputs["half_year_plans"]
         normalized_plan_drr_pct = _require_non_negative_number(plan_drr_pct, field_name="plan_drr_pct")
         current_business_date = current_business_date_iso(self.now_factory())
         reference_date = date.fromisoformat(as_of_date or default_business_as_of_date(self.now_factory()))
@@ -171,10 +176,11 @@ class SheetVitrinaV1PlanReportBlock:
             "selected_period_label": selected_window.label,
             "notes": list(REPORT_NOTES),
             "inputs": {
-                "q1_buyout_plan_rub": quarter_plans[1],
-                "q2_buyout_plan_rub": quarter_plans[2],
-                "q3_buyout_plan_rub": quarter_plans[3],
-                "q4_buyout_plan_rub": quarter_plans[4],
+                "plan_model": "half_year",
+                "input_model": plan_inputs["input_model"],
+                "h1_buyout_plan_rub": half_year_plans[1],
+                "h2_buyout_plan_rub": half_year_plans[2],
+                "legacy_quarter_inputs": plan_inputs.get("legacy_quarter_inputs"),
                 "plan_drr_pct": normalized_plan_drr_pct,
             },
             "source_of_truth": {
@@ -268,7 +274,7 @@ class SheetVitrinaV1PlanReportBlock:
                 baseline_by_month=baseline_by_month,
                 missing_dates_by_source=missing_dates_by_source,
                 invalid_dates_by_source=invalid_dates_by_source,
-                quarter_plans=quarter_plans,
+                half_year_plans=half_year_plans,
                 plan_drr_pct=normalized_plan_drr_pct,
             ),
         }
@@ -279,7 +285,7 @@ class SheetVitrinaV1PlanReportBlock:
                 baseline_by_month=baseline_by_month,
                 missing_dates_by_source=missing_dates_by_source,
                 invalid_dates_by_source=invalid_dates_by_source,
-                quarter_plans=quarter_plans,
+                half_year_plans=half_year_plans,
                 plan_drr_pct=normalized_plan_drr_pct,
             )
 
@@ -300,11 +306,11 @@ class SheetVitrinaV1PlanReportBlock:
                 f"для диапазона {date_from}..{date_to}."
             )
 
-        global_daily_covered_set = set(daily_facts)
+        global_daily_available_set = set(daily_facts)
         global_baseline_months = _baseline_months_for_window(
             date_from=date.fromisoformat(date_from),
             date_to=reference_date,
-            daily_covered_dates=global_daily_covered_set,
+            daily_available_dates=global_daily_available_set,
             baseline_by_month=baseline_by_month,
         )
         global_baseline_covered_dates = [
@@ -313,11 +319,12 @@ class SheetVitrinaV1PlanReportBlock:
             for item in _iter_dates(_month_start(month), _month_end(month))
         ]
         global_baseline_covered_set = set(global_baseline_covered_dates)
-        global_covered_dates = sorted(global_daily_covered_set | global_baseline_covered_set)
+        global_effective_daily_covered_set = global_daily_available_set - global_baseline_covered_set
+        global_covered_dates = sorted(global_effective_daily_covered_set | global_baseline_covered_set)
         global_missing_dates = [
             item
             for item in expected_dates
-            if item not in global_daily_covered_set and item not in global_baseline_covered_set
+            if item not in global_effective_daily_covered_set and item not in global_baseline_covered_set
         ]
 
         return {
@@ -330,13 +337,19 @@ class SheetVitrinaV1PlanReportBlock:
                 **base_payload["coverage"],
                 "expected_day_count": len(expected_dates),
                 "covered_day_count": len(global_covered_dates),
-                "daily_covered_day_count": len(daily_facts),
+                "covered_calendar_days": len(global_covered_dates),
+                "daily_covered_day_count": len(global_effective_daily_covered_set),
+                "covered_by_daily_snapshot_days": len(global_effective_daily_covered_set),
                 "baseline_covered_day_count": len(global_baseline_covered_dates),
+                "covered_by_monthly_baseline_days": len(global_baseline_covered_dates),
                 "covered_dates": global_covered_dates,
-                "daily_covered_dates": sorted(daily_facts),
+                "daily_covered_dates": sorted(global_effective_daily_covered_set),
+                "daily_dates": sorted(global_effective_daily_covered_set),
                 "baseline_covered_months": global_baseline_months,
+                "baseline_months": global_baseline_months,
                 "missing_day_count": len(global_missing_dates),
                 "missing_dates": global_missing_dates,
+                "fact_is_partial": bool(global_missing_dates),
                 "missing_dates_by_source": _filter_missing_dates_by_source(
                     missing_dates_by_source=missing_dates_by_source,
                     missing_dates=set(global_missing_dates),
@@ -347,8 +360,78 @@ class SheetVitrinaV1PlanReportBlock:
                     covered_by_baseline=global_baseline_covered_set,
                 ),
             },
+            "source_breakdown": {
+                "daily_dates": sorted(global_effective_daily_covered_set),
+                "daily_available_dates_before_monthly_baseline_precedence": sorted(global_daily_available_set),
+                "daily_excluded_by_monthly_baseline_dates": sorted(
+                    global_daily_available_set & global_baseline_covered_set
+                ),
+                "baseline_months": global_baseline_months,
+                "missing_dates": global_missing_dates,
+                "covered_calendar_days": len(global_covered_dates),
+                "covered_by_daily_snapshot_days": len(global_effective_daily_covered_set),
+                "covered_by_monthly_baseline_days": len(global_baseline_covered_dates),
+                "fact_is_partial": bool(global_missing_dates),
+            },
             "periods": period_blocks,
         }
+
+
+def _resolve_buyout_plan_inputs(
+    *,
+    h1_buyout_plan_rub: float | None,
+    h2_buyout_plan_rub: float | None,
+    q1_buyout_plan_rub: float | None,
+    q2_buyout_plan_rub: float | None,
+    q3_buyout_plan_rub: float | None,
+    q4_buyout_plan_rub: float | None,
+) -> dict[str, Any]:
+    h1_provided = h1_buyout_plan_rub is not None
+    h2_provided = h2_buyout_plan_rub is not None
+    if h1_provided or h2_provided:
+        if not h1_provided or not h2_provided:
+            raise ValueError("h1_buyout_plan_rub and h2_buyout_plan_rub query parameters must be provided together")
+        return {
+            "input_model": "half_year",
+            "half_year_plans": {
+                1: _require_non_negative_number(h1_buyout_plan_rub, field_name="h1_buyout_plan_rub"),
+                2: _require_non_negative_number(h2_buyout_plan_rub, field_name="h2_buyout_plan_rub"),
+            },
+            "legacy_quarter_inputs": None,
+        }
+
+    legacy_values = {
+        1: q1_buyout_plan_rub,
+        2: q2_buyout_plan_rub,
+        3: q3_buyout_plan_rub,
+        4: q4_buyout_plan_rub,
+    }
+    if any(value is not None for value in legacy_values.values()):
+        missing = [f"q{quarter}_buyout_plan_rub" for quarter, value in legacy_values.items() if value is None]
+        if missing:
+            raise ValueError(
+                "legacy quarterly plan params must be provided as a complete Q1..Q4 set; "
+                f"missing: {', '.join(missing)}"
+            )
+        quarter_plans = {
+            quarter: _require_non_negative_number(value, field_name=f"q{quarter}_buyout_plan_rub")
+            for quarter, value in legacy_values.items()
+        }
+        return {
+            "input_model": "legacy_quarter_params_summed_to_half_year",
+            "half_year_plans": {
+                1: quarter_plans[1] + quarter_plans[2],
+                2: quarter_plans[3] + quarter_plans[4],
+            },
+            "legacy_quarter_inputs": {
+                "q1_buyout_plan_rub": quarter_plans[1],
+                "q2_buyout_plan_rub": quarter_plans[2],
+                "q3_buyout_plan_rub": quarter_plans[3],
+                "q4_buyout_plan_rub": quarter_plans[4],
+            },
+        }
+
+    raise ValueError("h1_buyout_plan_rub and h2_buyout_plan_rub query parameters are required")
 
 
 def _build_selected_window(*, reference_date: date, period_key: str) -> PeriodWindow:
@@ -383,13 +466,13 @@ def _baseline_months_for_window(
     *,
     date_from: date,
     date_to: date,
-    daily_covered_dates: set[str],
+    daily_available_dates: set[str],
     baseline_by_month: Mapping[str, Mapping[str, Any]],
 ) -> list[str]:
     months: list[str] = []
     for month in _full_months_inside_window(date_from=date_from, date_to=date_to):
         month_dates = [item.isoformat() for item in _iter_dates(_month_start(month), _month_end(month))]
-        if any(item in daily_covered_dates for item in month_dates):
+        if all(item in daily_available_dates for item in month_dates):
             continue
         if month in baseline_by_month:
             months.append(month)
@@ -462,16 +545,16 @@ def _build_period_block(
     baseline_by_month: Mapping[str, Mapping[str, Any]],
     missing_dates_by_source: Mapping[str, list[str]],
     invalid_dates_by_source: Mapping[str, Mapping[str, str]],
-    quarter_plans: Mapping[int, float],
+    half_year_plans: Mapping[int, float],
     plan_drr_pct: float,
 ) -> dict[str, Any]:
     dates = [item.isoformat() for item in _iter_dates(date.fromisoformat(window.date_from), date.fromisoformat(window.date_to))]
-    daily_covered_dates = [item for item in dates if item in daily_facts]
-    daily_covered_set = set(daily_covered_dates)
+    daily_available_dates = [item for item in dates if item in daily_facts]
+    daily_available_set = set(daily_available_dates)
     baseline_months = _baseline_months_for_window(
         date_from=date.fromisoformat(window.date_from),
         date_to=date.fromisoformat(window.date_to),
-        daily_covered_dates=daily_covered_set,
+        daily_available_dates=daily_available_set,
         baseline_by_month=baseline_by_month,
     )
     baseline_covered_dates = [
@@ -480,6 +563,9 @@ def _build_period_block(
         for item in _iter_dates(_month_start(month), _month_end(month))
     ]
     baseline_covered_set = set(baseline_covered_dates)
+    daily_covered_dates = [item for item in daily_available_dates if item not in baseline_covered_set]
+    daily_covered_set = set(daily_covered_dates)
+    daily_excluded_by_baseline_dates = [item for item in daily_available_dates if item in baseline_covered_set]
     covered_dates = sorted(daily_covered_set | baseline_covered_set)
     missing_dates = [item for item in dates if item not in daily_covered_set and item not in baseline_covered_set]
     fact_buyout_rub = (
@@ -495,13 +581,13 @@ def _build_period_block(
         else None
     )
     fact_drr_pct = _compute_drr_pct(ads_sum_rub=fact_ads_sum_rub, buyout_rub=fact_buyout_rub)
-    full_plan_buyout_rub = sum(_daily_buyout_plan_for_date(date.fromisoformat(item), quarter_plans) for item in dates)
+    full_plan_buyout_rub = sum(_daily_buyout_plan_for_date(date.fromisoformat(item), half_year_plans) for item in dates)
     covered_plan_buyout_rub = (
-        sum(_daily_buyout_plan_for_date(date.fromisoformat(item), quarter_plans) for item in covered_dates)
+        sum(_daily_buyout_plan_for_date(date.fromisoformat(item), half_year_plans) for item in covered_dates)
         if covered_dates
         else None
     )
-    plan_ads_sum_rub = None if covered_plan_buyout_rub is None else covered_plan_buyout_rub * (plan_drr_pct / 100.0)
+    plan_ads_sum_rub = full_plan_buyout_rub * (plan_drr_pct / 100.0)
     status = "available" if not missing_dates else "partial" if covered_dates else "unavailable"
     block_missing_by_source = _filter_missing_dates_by_source(
         missing_dates_by_source=missing_dates_by_source,
@@ -516,7 +602,7 @@ def _build_period_block(
     if status == "partial":
         reason = (
             "Часть дат периода не имеет usable accepted closed-day snapshots или full-month baseline; "
-            "факт и план сравниваются только по покрытой части периода."
+            "факт частичный, план рассчитан по полному календарному периоду."
         )
     elif status == "unavailable":
         reason = "Для периода нет usable accepted closed-day snapshots или применимой full-month baseline; факт не рассчитывается."
@@ -539,6 +625,8 @@ def _build_period_block(
                 "dates": daily_covered_dates,
                 "day_count": len(daily_covered_dates),
                 "source_keys": [FIN_SOURCE_KEY, ADS_SOURCE_KEY],
+                "available_dates_before_monthly_baseline_precedence": daily_available_dates,
+                "excluded_by_monthly_baseline_dates": daily_excluded_by_baseline_dates,
             },
             "manual_monthly_plan_report_baseline": {
                 "months": baseline_months,
@@ -549,27 +637,46 @@ def _build_period_block(
         "coverage": {
             "expected_day_count": len(dates),
             "covered_day_count": len(covered_dates),
+            "covered_calendar_days": len(covered_dates),
             "daily_covered_day_count": len(daily_covered_dates),
+            "covered_by_daily_snapshot_days": len(daily_covered_dates),
             "baseline_covered_day_count": len(baseline_covered_dates),
+            "covered_by_monthly_baseline_days": len(baseline_covered_dates),
             "missing_day_count": len(missing_dates),
             "covered_dates": covered_dates,
             "daily_covered_dates": daily_covered_dates,
+            "daily_dates": daily_covered_dates,
             "baseline_covered_months": baseline_months,
+            "baseline_months": baseline_months,
             "missing_dates": missing_dates,
             "missing_dates_by_source": block_missing_by_source,
             "invalid_dates_by_source": block_invalid_by_source,
+            "fact_is_partial": bool(missing_dates),
+        },
+        "source_breakdown": {
+            "daily_dates": daily_covered_dates,
+            "daily_available_dates_before_monthly_baseline_precedence": daily_available_dates,
+            "daily_excluded_by_monthly_baseline_dates": daily_excluded_by_baseline_dates,
+            "baseline_months": baseline_months,
+            "missing_dates": missing_dates,
+            "covered_calendar_days": len(covered_dates),
+            "covered_by_daily_snapshot_days": len(daily_covered_dates),
+            "covered_by_monthly_baseline_days": len(baseline_covered_dates),
+            "fact_is_partial": bool(missing_dates),
         },
         "metrics": {
             "buyout_rub": _build_buyout_metric(
                 fact=fact_buyout_rub,
-                plan=covered_plan_buyout_rub,
+                plan=full_plan_buyout_rub,
                 full_period_plan=full_plan_buyout_rub,
+                covered_period_plan=covered_plan_buyout_rub,
             ),
             "drr_pct": _build_drr_metric(fact=fact_drr_pct, plan=plan_drr_pct),
             "ads_sum_rub": _build_ads_metric(
                 fact=fact_ads_sum_rub,
                 plan=plan_ads_sum_rub,
                 full_period_plan=full_plan_buyout_rub * (plan_drr_pct / 100.0),
+                covered_period_plan=None if covered_plan_buyout_rub is None else covered_plan_buyout_rub * (plan_drr_pct / 100.0),
             ),
         },
     }
@@ -580,6 +687,7 @@ def _build_buyout_metric(
     fact: float | None,
     plan: float | None,
     full_period_plan: float | None,
+    covered_period_plan: float | None = None,
 ) -> dict[str, Any]:
     delta_abs = _safe_delta(fact=fact, plan=plan)
     return {
@@ -588,6 +696,7 @@ def _build_buyout_metric(
         "fact": fact,
         "plan": plan,
         "full_period_plan": full_period_plan,
+        "covered_period_plan": covered_period_plan,
         "delta_abs": delta_abs,
         "delta_pct": _safe_relative_delta(fact=fact, plan=plan),
         **_status_payload(
@@ -621,6 +730,7 @@ def _build_ads_metric(
     fact: float | None,
     plan: float | None,
     full_period_plan: float | None,
+    covered_period_plan: float | None = None,
 ) -> dict[str, Any]:
     delta_abs = _safe_delta(fact=fact, plan=plan)
     return {
@@ -629,6 +739,7 @@ def _build_ads_metric(
         "fact": fact,
         "plan": plan,
         "full_period_plan": full_period_plan,
+        "covered_period_plan": covered_period_plan,
         "delta_abs": delta_abs,
         "delta_pct": _safe_relative_delta(fact=fact, plan=plan),
         **_status_payload(
@@ -739,25 +850,29 @@ def _compute_drr_pct(*, ads_sum_rub: float | None, buyout_rub: float | None) -> 
     return (float(ads_sum_rub) / float(buyout_rub)) * 100.0
 
 
-def _daily_buyout_plan_for_date(value: date, quarter_plans: Mapping[int, float]) -> float:
-    quarter = _quarter_of_date(value)
-    quarter_plan = float(quarter_plans[quarter])
-    quarter_days = _days_in_quarter(value)
-    return quarter_plan / quarter_days
+def _daily_buyout_plan_for_date(value: date, half_year_plans: Mapping[int, float]) -> float:
+    half_year = _half_year_of_date(value)
+    half_year_plan = float(half_year_plans[half_year])
+    half_year_days = _days_in_half_year(value)
+    return half_year_plan / half_year_days
+
+
+def _half_year_of_date(value: date) -> int:
+    return 1 if value.month <= 6 else 2
 
 
 def _quarter_of_date(value: date) -> int:
     return ((value.month - 1) // 3) + 1
 
 
-def _days_in_quarter(value: date) -> int:
-    quarter_start_month = ((_quarter_of_date(value) - 1) * 3) + 1
-    quarter_start = value.replace(month=quarter_start_month, day=1)
-    if quarter_start_month == 10:
-        next_quarter_start = value.replace(year=value.year + 1, month=1, day=1)
+def _days_in_half_year(value: date) -> int:
+    if _half_year_of_date(value) == 1:
+        start = value.replace(month=1, day=1)
+        next_half_year_start = value.replace(month=7, day=1)
     else:
-        next_quarter_start = value.replace(month=quarter_start_month + 3, day=1)
-    return (next_quarter_start - quarter_start).days
+        start = value.replace(month=7, day=1)
+        next_half_year_start = value.replace(year=value.year + 1, month=1, day=1)
+    return (next_half_year_start - start).days
 
 
 def _iter_dates(start_date: date, end_date: date):

@@ -1537,9 +1537,9 @@
           <div class="grid">
             <section class="block">
               <h2 class="block-title">Выполнение плана</h2>
-              <p id="planReportPeriod" class="report-period">Выберите период и задайте квартальные планы.</p>
+              <p id="planReportPeriod" class="report-period">Выберите период и задайте планы H1/H2.</p>
               <p id="planReportLead" class="field-note">
-                Факт считается server-side из accepted closed-day snapshots <code>fin_buyout_rub</code> и <code>ads_sum</code>; план распределяется по календарным дням кварталов.
+                Факт считается server-side из accepted closed-day snapshots <code>fin_buyout_rub</code> и <code>ads_sum</code>; план распределяется по всем календарным дням H1/H2.
               </p>
               <div class="plan-report-toolbar">
                 <div class="plan-report-controls">
@@ -1555,20 +1555,12 @@
                     </select>
                   </div>
                   <div class="field plan-report-field">
-                    <label for="planReportQ1Input">План выкупа Q1, руб.</label>
-                    <input id="planReportQ1Input" type="number" min="0" step="0.01" inputmode="decimal">
+                    <label for="planReportH1Input">План выкупа H1, руб.</label>
+                    <input id="planReportH1Input" type="number" min="0" step="0.01" inputmode="decimal">
                   </div>
                   <div class="field plan-report-field">
-                    <label for="planReportQ2Input">План выкупа Q2, руб.</label>
-                    <input id="planReportQ2Input" type="number" min="0" step="0.01" inputmode="decimal">
-                  </div>
-                  <div class="field plan-report-field">
-                    <label for="planReportQ3Input">План выкупа Q3, руб.</label>
-                    <input id="planReportQ3Input" type="number" min="0" step="0.01" inputmode="decimal">
-                  </div>
-                  <div class="field plan-report-field">
-                    <label for="planReportQ4Input">План выкупа Q4, руб.</label>
-                    <input id="planReportQ4Input" type="number" min="0" step="0.01" inputmode="decimal">
+                    <label for="planReportH2Input">План выкупа H2, руб.</label>
+                    <input id="planReportH2Input" type="number" min="0" step="0.01" inputmode="decimal">
                   </div>
                   <div class="field plan-report-field">
                     <label for="planReportDrrInput">Плановый DRR, %</label>
@@ -1578,7 +1570,7 @@
                 <div class="block-actions">
                   <button id="planReportApplyButton" class="action-button secondary-button" type="button">Рассчитать</button>
                 </div>
-                <p id="planReportValidation" class="plan-report-validation" hidden>Заполните квартальные планы и плановый DRR.</p>
+                <p id="planReportValidation" class="plan-report-validation" hidden>Заполните планы H1/H2 и плановый DRR.</p>
               </div>
               <div class="plan-report-baseline">
                 <div class="plan-report-baseline-head">
@@ -2002,10 +1994,8 @@
       const planReportStatus = document.getElementById("planReportStatus");
       const planReportContent = document.getElementById("planReportContent");
       const planReportPeriodSelect = document.getElementById("planReportPeriodSelect");
-      const planReportQ1Input = document.getElementById("planReportQ1Input");
-      const planReportQ2Input = document.getElementById("planReportQ2Input");
-      const planReportQ3Input = document.getElementById("planReportQ3Input");
-      const planReportQ4Input = document.getElementById("planReportQ4Input");
+      const planReportH1Input = document.getElementById("planReportH1Input");
+      const planReportH2Input = document.getElementById("planReportH2Input");
       const planReportDrrInput = document.getElementById("planReportDrrInput");
       const planReportApplyButton = document.getElementById("planReportApplyButton");
       const planReportValidation = document.getElementById("planReportValidation");
@@ -2912,8 +2902,8 @@
 
       function renderPlanReportUnavailable(payload, fallbackMessage) {
         planReportPayload = payload || null;
-        planReportPeriod.textContent = "Выберите период и задайте квартальные планы.";
-        planReportLead.textContent = "Факт считается server-side из accepted closed-day snapshots fin_buyout_rub и ads_sum; план распределяется по календарным дням кварталов.";
+        planReportPeriod.textContent = "Выберите период и задайте планы H1/H2.";
+        planReportLead.textContent = "Факт считается server-side из accepted closed-day snapshots fin_buyout_rub и ads_sum; план распределяется по всем календарным дням H1/H2.";
         planReportStatus.textContent = valueOrDash((payload && payload.reason) || fallbackMessage || "Отчёт выполнения плана пока недоступен.");
         planReportStatus.className = "section-message is-error";
         planReportContent.hidden = true;
@@ -2941,7 +2931,7 @@
         const qtd = periods.quarter_to_date || {};
         const ytd = periods.year_to_date || {};
         planReportPeriod.textContent = "Reference date: " + formatHumanDate(payload.reference_date) + ". Основной период: " + valueOrDash(payload.selected_period_label) + ".";
-        planReportLead.textContent = "Active SKU в current config: " + valueOrDash(payload.active_sku_count) + ". План по выкупу распределяется по календарным дням кварталов; факт DRR считается как ads_sum / fin_buyout_rub * 100.";
+        planReportLead.textContent = "Active SKU в current config: " + valueOrDash(payload.active_sku_count) + ". План по выкупу распределяется по всем календарным дням H1/H2; факт DRR считается как ads_sum / fin_buyout_rub * 100.";
         if (payload.status === "available") {
           planReportStatus.textContent = "Source of truth: accepted closed-day runtime snapshots fin_report_daily + ads_compact.";
           planReportStatus.className = "section-message";
@@ -2966,21 +2956,17 @@
       function readPlanReportRequest() {
         const request = {
           period: String(planReportPeriodSelect.value || "").trim(),
-          q1_buyout_plan_rub: String(planReportQ1Input.value || "").trim(),
-          q2_buyout_plan_rub: String(planReportQ2Input.value || "").trim(),
-          q3_buyout_plan_rub: String(planReportQ3Input.value || "").trim(),
-          q4_buyout_plan_rub: String(planReportQ4Input.value || "").trim(),
+          h1_buyout_plan_rub: String(planReportH1Input.value || "").trim(),
+          h2_buyout_plan_rub: String(planReportH2Input.value || "").trim(),
           plan_drr_pct: String(planReportDrrInput.value || "").trim(),
         };
         const missing = Object.entries(request).find(([key, value]) => key !== "period" && !value);
         if (!request.period || missing) {
-          return { error: "Заполните квартальные планы и плановый DRR." };
+          return { error: "Заполните планы H1/H2 и плановый DRR." };
         }
         const numericKeys = [
-          "q1_buyout_plan_rub",
-          "q2_buyout_plan_rub",
-          "q3_buyout_plan_rub",
-          "q4_buyout_plan_rub",
+          "h1_buyout_plan_rub",
+          "h2_buyout_plan_rub",
           "plan_drr_pct",
         ];
         const params = new URLSearchParams();
@@ -4208,10 +4194,8 @@
       ));
       [
         planReportPeriodSelect,
-        planReportQ1Input,
-        planReportQ2Input,
-        planReportQ3Input,
-        planReportQ4Input,
+        planReportH1Input,
+        planReportH2Input,
         planReportDrrInput
       ].forEach((input) => {
         input.addEventListener("input", () => {

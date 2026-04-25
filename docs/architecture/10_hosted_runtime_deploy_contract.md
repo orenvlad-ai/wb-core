@@ -216,13 +216,13 @@ Public probe validates:
   - `status=available` when the current `ready snapshot` for `default_business_as_of_date(now)` contains a valid `yesterday_closed` slot for the requested/default closed business day;
   - `status=unavailable` with truthful `reason` when the current ready snapshot or `yesterday_closed` slot is missing/stale;
   - route stays read-only and must not trigger refresh/upstream fetch from the public read path
-- `GET /v1/sheet-vitrina-v1/plan-report` returns `200` + JSON for valid query params `period`, `q1_buyout_plan_rub`, `q2_buyout_plan_rub`, `q3_buyout_plan_rub`, `q4_buyout_plan_rub`, `plan_drr_pct` and optional `as_of_date`:
+- `GET /v1/sheet-vitrina-v1/plan-report` returns `200` + JSON for valid primary query params `period`, `h1_buyout_plan_rub`, `h2_buyout_plan_rub`, `plan_drr_pct` and optional `as_of_date`; legacy complete `q1_buyout_plan_rub`..`q4_buyout_plan_rub` may be accepted only as transitional fallback:
   - response contains `selected_period`, `month_to_date`, `quarter_to_date`, `year_to_date` blocks;
   - each block has independent `available / partial / unavailable` status, coverage details, reason, source mix and metrics; an unavailable YTD block must not hide an available selected period;
   - daily fact source is persisted accepted closed-day snapshots `fin_report_daily.fin_buyout_rub` + `ads_compact.ads_sum` for current active `config_v2` SKU;
-  - manual monthly source `manual_monthly_plan_report_baseline` may contribute only full months that have no daily accepted facts and only inside this plan-report route;
-  - buyout plan is distributed by calendar day, with the daily amount derived from the quarter plan for each date;
-  - DRR fact is `ads_sum / fin_buyout_rub * 100`, ads plan is covered-period buyout plan multiplied by planned DRR;
+  - manual monthly source `manual_monthly_plan_report_baseline` may contribute only full months inside this plan-report route; if daily precision for a baseline month is incomplete, the monthly aggregate covers the month and overlapping daily rows are excluded from the block to avoid double-count;
+  - buyout plan is distributed by calendar day, with the daily amount derived from the H1/H2 plan for each date and independent from fact coverage;
+  - DRR fact is `ads_sum / fin_buyout_rub * 100`, ads plan is full-calendar period buyout plan multiplied by planned DRR;
   - route stays read-only, never triggers refresh/upstream fetch, and returns truthful `available / partial / unavailable` coverage semantics instead of fabricating zero facts
 - `GET /v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx` returns `200` + XLSX content type with compact Russian headers for monthly baseline upload
 - `GET /v1/sheet-vitrina-v1/plan-report/baseline-status` returns `200` + JSON baseline status/totals/months/upload metadata

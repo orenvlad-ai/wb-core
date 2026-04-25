@@ -98,8 +98,8 @@ def main() -> None:
                 'data-report-section-button="plan"',
                 'data-report-section-panel="plan" hidden',
                 'id="planReportPeriodSelect"',
-                'id="planReportQ1Input"',
-                'id="planReportQ4Input"',
+                'id="planReportH1Input"',
+                'id="planReportH2Input"',
                 'id="planReportDrrInput"',
                 'id="planReportApplyButton"',
                 'id="planReportBaselineTemplateButton"',
@@ -136,10 +136,8 @@ def main() -> None:
             query = urllib_parse.urlencode(
                 {
                     "period": "last_30_days",
-                    "q1_buyout_plan_rub": "90000",
-                    "q2_buyout_plan_rub": "182000",
-                    "q3_buyout_plan_rub": "273000",
-                    "q4_buyout_plan_rub": "365000",
+                    "h1_buyout_plan_rub": "271500",
+                    "h2_buyout_plan_rub": "552000",
                     "plan_drr_pct": "10",
                 }
             )
@@ -159,21 +157,37 @@ def main() -> None:
             if selected.get("status") != "available":
                 raise AssertionError(f"selected period must stay available while YTD is partial, got {report_payload}")
             if selected.get("date_from") != "2026-03-22" or selected.get("day_count") != 30:
-                raise AssertionError(f"plan report selected window must cross Q1/Q2 boundary, got {report_payload}")
+                raise AssertionError(f"plan report selected window must span expected dates, got {report_payload}")
             buyout_metric = (selected.get("metrics") or {}).get("buyout_rub") or {}
-            if buyout_metric.get("plan") != 50000.0 or buyout_metric.get("fact") != 45000.0:
+            if buyout_metric.get("plan") != 45000.0 or buyout_metric.get("fact") != 45000.0:
                 raise AssertionError(f"plan report buyout contract must keep server-side plan/fact math, got {report_payload}")
             drr_metric = (selected.get("metrics") or {}).get("drr_pct") or {}
             if drr_metric.get("fact") != 12.0 or drr_metric.get("delta_pp") != 2.0:
                 raise AssertionError(f"plan report drr block must stay percentage-based, got {report_payload}")
             ads_metric = (selected.get("metrics") or {}).get("ads_sum_rub") or {}
-            if ads_metric.get("plan") != 5000.0 or ads_metric.get("fact") != 5400.0:
+            if ads_metric.get("plan") != 4500.0 or ads_metric.get("fact") != 5400.0:
                 raise AssertionError(f"ads spend plan must derive from buyout plan * planned DRR, got {report_payload}")
+            if not selected.get("source_breakdown"):
+                raise AssertionError(f"plan report must expose per-block source breakdown, got {report_payload}")
             if "month_to_date" not in report_payload.get("periods", {}) or "quarter_to_date" not in report_payload.get("periods", {}) or "year_to_date" not in report_payload.get("periods", {}):
                 raise AssertionError(f"plan report must always expose MTD/QTD/YTD blocks, got {report_payload}")
             ytd = (report_payload.get("periods") or {}).get("year_to_date") or {}
             if ytd.get("status") != "partial":
                 raise AssertionError(f"YTD must stay local partial before baseline, got {report_payload}")
+            legacy_query = urllib_parse.urlencode(
+                {
+                    "period": "last_30_days",
+                    "q1_buyout_plan_rub": "90000",
+                    "q2_buyout_plan_rub": "181500",
+                    "q3_buyout_plan_rub": "276000",
+                    "q4_buyout_plan_rub": "276000",
+                    "plan_drr_pct": "10",
+                }
+            )
+            legacy_status, legacy_payload = _get_json(f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_PATH}?{legacy_query}")
+            legacy_inputs = legacy_payload.get("inputs") or {}
+            if legacy_status != 200 or legacy_inputs.get("input_model") != "legacy_quarter_params_summed_to_half_year":
+                raise AssertionError(f"legacy Q1-Q4 params must stay transitional only, got {legacy_status} {legacy_payload}")
 
             baseline_workbook = build_single_sheet_workbook_bytes(
                 "План факт месяцы",
@@ -214,10 +228,8 @@ def main() -> None:
             partial_query = urllib_parse.urlencode(
                 {
                     "period": "current_month",
-                    "q1_buyout_plan_rub": "90000",
-                    "q2_buyout_plan_rub": "182000",
-                    "q3_buyout_plan_rub": "273000",
-                    "q4_buyout_plan_rub": "365000",
+                    "h1_buyout_plan_rub": "271500",
+                    "h2_buyout_plan_rub": "552000",
                     "plan_drr_pct": "10",
                     "as_of_date": REFERENCE_DATE,
                 }
