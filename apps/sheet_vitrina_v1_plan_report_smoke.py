@@ -44,47 +44,53 @@ def main() -> None:
         primary_nm_id = active_nm_ids[0]
         for snapshot_day in _iter_dates(date(2026, 1, 1), date.fromisoformat(REFERENCE_DATE)):
             snapshot_date = snapshot_day.isoformat()
+            fin_result_payload = {
+                "kind": "success",
+                "snapshot_date": snapshot_date,
+                "count": 1,
+                "items": [
+                    {
+                        "nm_id": primary_nm_id,
+                        "fin_buyout_rub": 1500.0,
+                    }
+                ],
+                "storage_total": {
+                    "nm_id": 0,
+                    "fin_storage_fee_total": 0.0,
+                },
+            }
             runtime.save_temporal_source_slot_snapshot(
                 source_key="fin_report_daily",
                 snapshot_date=snapshot_date,
                 snapshot_role=ACCEPTED_ROLE,
                 captured_at=f"{snapshot_date}T12:00:00Z",
-                payload={
-                    "result": {
-                        "kind": "success",
-                        "snapshot_date": snapshot_date,
-                        "count": 1,
-                        "items": [
-                            {
-                                "nm_id": primary_nm_id,
-                                "fin_buyout_rub": 1500.0,
-                            }
-                        ],
-                        "storage_total": {
-                            "nm_id": 0,
-                            "fin_storage_fee_total": 0.0,
-                        },
-                    }
-                },
+                payload=(
+                    fin_result_payload
+                    if snapshot_date == REFERENCE_DATE
+                    else {"result": fin_result_payload}
+                ),
             )
+            ads_result_payload = {
+                "kind": "success",
+                "snapshot_date": snapshot_date,
+                "count": 1,
+                "items": [
+                    {
+                        "nm_id": primary_nm_id,
+                        "ads_sum": 180.0,
+                    }
+                ],
+            }
             runtime.save_temporal_source_slot_snapshot(
                 source_key="ads_compact",
                 snapshot_date=snapshot_date,
                 snapshot_role=ACCEPTED_ROLE,
                 captured_at=f"{snapshot_date}T12:05:00Z",
-                payload={
-                    "result": {
-                        "kind": "success",
-                        "snapshot_date": snapshot_date,
-                        "count": 1,
-                        "items": [
-                            {
-                                "nm_id": primary_nm_id,
-                                "ads_sum": 180.0,
-                            }
-                        ],
-                    }
-                },
+                payload=(
+                    ads_result_payload
+                    if snapshot_date == REFERENCE_DATE
+                    else {"result": ads_result_payload}
+                ),
             )
 
         block = SheetVitrinaV1PlanReportBlock(runtime=runtime, now_factory=lambda: NOW)
