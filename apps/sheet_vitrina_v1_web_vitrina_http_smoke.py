@@ -160,13 +160,19 @@ def main() -> None:
             ):
                 if required_meta_key not in composition_meta:
                     raise AssertionError(f"web-vitrina page composition missing time-model meta {required_meta_key!r}: {composition_meta}")
-            if composition_meta.get("snapshot_as_of_date") != composition_meta.get("as_of_date"):
-                raise AssertionError(f"snapshot_as_of_date must mirror visible ready snapshot key, got {composition_meta}")
+            if composition_meta.get("snapshot_as_of_date") != "2026-04-20":
+                raise AssertionError(f"snapshot_as_of_date must point to visible source-status snapshot key, got {composition_meta}")
+            if composition_meta.get("visible_date_columns") != ["2026-04-17", "2026-04-18", "2026-04-19", "2026-04-20"]:
+                raise AssertionError(f"default page composition must use latest four-day period, got {composition_meta}")
+            if (composition_payload.get("status_summary") or {}).get("source_status_snapshot_as_of_date") != "2026-04-20":
+                raise AssertionError(f"source-status snapshot key mismatch, got {composition_payload.get('status_summary')}")
             if composition_meta.get("business_timezone") != "Asia/Yekaterinburg":
                 raise AssertionError(f"business timezone mismatch in page time model, got {composition_meta}")
             historical_access = composition_payload.get("historical_access") or {}
-            if historical_access.get("current_mode") != "default":
+            if historical_access.get("current_mode") != "historical_period":
                 raise AssertionError(f"web-vitrina historical selector mode mismatch, got {composition_payload}")
+            if historical_access.get("selected_date_from") != "2026-04-17" or historical_access.get("selected_date_to") != "2026-04-20":
+                raise AssertionError(f"default history range must be latest four days, got {historical_access}")
             if historical_access.get("supported_query_mode") != "date_window":
                 raise AssertionError(f"web-vitrina historical query mode mismatch, got {historical_access}")
             if [item.get("value") for item in historical_access.get("options") or []] != [
@@ -292,6 +298,9 @@ def main() -> None:
                 "data-top-panel",
                 "Загрузить и обновить",
                 "data-filter-controls",
+                "data-history-toggle",
+                "data-history-label",
+                "data-history-popover",
                 "data-history-calendar",
                 "data-history-presets",
                 "data-history-date-from",

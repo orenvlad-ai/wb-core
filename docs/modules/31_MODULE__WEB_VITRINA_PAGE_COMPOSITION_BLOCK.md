@@ -70,7 +70,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - compact top panel inside `Витрина`: `Загрузить и обновить` is the single primary manual action, `JSON Connect` and the old cheap `Обновить` button are not rendered, and no permanent top status badge duplicates the summary cards
   - while `Загрузить и обновить` is running, the top panel shows a minimal stage-based progress bar driven by the existing async job/log polling (`start/queued`, source fetch, prepare/materialize, load/update table, finish); after completion the progress bar disappears and the final semantic status stays in the summary/log surfaces
   - compact summary with separate `Последнее обновление страницы` and `Свежесть данных`
-  - primary table immediately follows the summary cards; filters/settings, historical controls and `Действия и состояния` render after the table
+  - compact historical period control now sits above the primary table, between summary/action context and the table; the old always-expanded `История` block is not rendered by default, so the operator sees the table immediately after a narrow date-range strip
   - main table display headers are Russian (`Раздел`, `Метрика`, `Обновлено`, etc.); backend/API keys stay stable, while `Обновлено` surfaces per-row last successful update timestamp from snapshot metadata
   - `Загрузить и обновить` = canonical server-side refresh from external sources + page reread, without Google Sheet write path
   - two server-driven action-adjacent information blocks:
@@ -215,9 +215,12 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - warning/error reasons are strictly summarized on the backend: raw STATUS/job note, JSON blobs, traceback text, request ids and similar technical payload stay only in the existing log/download surface
   - for bot-backed families an invalidated seller session is surfaced as short human reason (`сессия seller portal больше не действует; требуется повторный вход`) instead of generic `Template request ... was not captured`
 - Historical period UX is intentionally thin:
-  - calendar/preset panel lives in the same server template
-  - `Сохранить` only rewrites query string and re-reads server payload
-  - `Сбросить` only removes `as_of_date/date_from/date_to` and returns to cheap daily mode
+  - the collapsed control shows `DD.MM.YYYY - DD.MM.YYYY` plus a calendar icon above the table
+  - first open / hard refresh without explicit query uses the latest four server-readable business dates inclusive, ending on backend-owned `today_current_date` when that date is present in the current visible/readable context
+  - calendar, presets (`Неделя`, `2 недели`, `Месяц`, `Квартал`, `Год`), manual `date_from/date_to` fields and `Сбросить`/`Сохранить` live inside a popover
+  - `Сохранить` rewrites query string and re-reads server payload through the existing `date_from/date_to` ready-snapshot window path
+  - `Сбросить` removes `as_of_date/date_from/date_to` and returns to the same latest-four-days default
+  - source-status lazy load uses `source_status_snapshot_as_of_date` from the server contract, so a period ending in `today_current` does not accidentally use the current-day column as the ready-snapshot key
 - period mode aggregates semantic status across the selected ready-snapshot window and must not force green merely because the window exists.
 - The page composition layer knows only page/layout/render state and does not become a second truth owner.
 - User-facing `ЕБД` / `единая база данных` means the shared server-side accepted truth/runtime layer behind web-vitrina and reports; the browser page, Google Sheets/GAS and localStorage are not data-truth owners.

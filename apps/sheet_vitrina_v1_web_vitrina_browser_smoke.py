@@ -320,7 +320,10 @@ def run_browser_checks(
             if "POST /api/v2/list/goods/filter" not in str(first_loading_row.get("technical") or ""):
                 raise AssertionError(f"activity rows must keep the technical endpoint, got {initial_activity_surface}")
             historical_panel_present = (
-                page.locator("[data-history-calendar]").count() == 1
+                page.locator("[data-history-panel]").count() == 1
+                and page.locator("[data-history-toggle]").count() == 1
+                and page.locator("[data-history-label]").count() == 1
+                and page.locator("[data-history-calendar]").count() == 1
                 and page.locator("[data-history-presets]").count() == 1
                 and page.locator("[data-history-date-from]").count() == 1
                 and page.locator("[data-history-date-to]").count() == 1
@@ -329,6 +332,20 @@ def run_browser_checks(
             )
             if not historical_panel_present:
                 raise AssertionError("historical period selector controls must be present on the page")
+            initial_history_state = page.evaluate(
+                """() => ({
+                  label: (document.querySelector('[data-history-label]') || {}).textContent || '',
+                  popoverHidden: !!(document.querySelector('[data-history-popover]') || {}).hidden,
+                  dateFrom: (document.querySelector('[data-history-date-from]') || {}).value || '',
+                  dateTo: (document.querySelector('[data-history-date-to]') || {}).value || ''
+                })"""
+            )
+            if initial_history_state["label"].strip() != "17.04.2026 - 20.04.2026":
+                raise AssertionError(f"default compact history label mismatch, got {initial_history_state}")
+            if not initial_history_state["popoverHidden"]:
+                raise AssertionError(f"history picker popover must be closed by default, got {initial_history_state}")
+            if initial_history_state["dateFrom"] != "2026-04-17" or initial_history_state["dateTo"] != "2026-04-20":
+                raise AssertionError(f"default history range must be latest four days, got {initial_history_state}")
             preset_count = page.locator("[data-history-preset]").count()
             if preset_count < 5:
                 raise AssertionError(f"historical period presets must be present, got {preset_count}")
@@ -424,6 +441,8 @@ def run_browser_checks(
             historical_reset_works = False
             preset_calendar_sync = False
             if not as_of_date and run_actions:
+                page.locator("[data-history-toggle]").click()
+                page.wait_for_selector("[data-history-popover]:not([hidden])", timeout=5000)
                 page.locator("[data-history-preset='week']").click()
                 page.wait_for_function(
                     "() => document.querySelector('[data-history-date-from]').value === '2026-04-14' && document.querySelector('[data-history-date-to]').value === '2026-04-20'",
@@ -435,6 +454,7 @@ def run_browser_checks(
                     "() => new URL(window.location.href).searchParams.get('date_from') === '2026-04-14' && new URL(window.location.href).searchParams.get('date_to') === '2026-04-20'",
                     timeout=5000,
                 )
+                page.wait_for_function("() => document.querySelector('[data-history-popover]').hidden", timeout=5000)
                 page.wait_for_function(
                     "() => document.querySelector('[data-page-meta]').textContent.includes('Снимок: 20.04.2026')",
                     timeout=5000,
@@ -443,9 +463,16 @@ def run_browser_checks(
                     page.locator("[data-table-body] tr").count() > 0
                     and page.locator('[data-col-id^=\"date:\"]').count() >= 7
                 )
+                page.locator("[data-history-toggle]").click()
+                page.wait_for_selector("[data-history-popover]:not([hidden])", timeout=5000)
                 page.locator("[data-history-reset]").click()
                 page.wait_for_function(
                     "() => !new URL(window.location.href).searchParams.has('date_from') && !new URL(window.location.href).searchParams.has('date_to') && !new URL(window.location.href).searchParams.has('as_of_date')",
+                    timeout=5000,
+                )
+                page.wait_for_function("() => document.querySelector('[data-history-popover]').hidden", timeout=5000)
+                page.wait_for_function(
+                    "() => (document.querySelector('[data-history-label]').textContent || '').trim() === '17.04.2026 - 20.04.2026'",
                     timeout=5000,
                 )
                 page.wait_for_function(
@@ -650,9 +677,9 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
             order: {
               top: nodeIndex('[data-top-panel]'),
               summary: nodeIndex('[data-summary-grid]'),
+              history: nodeIndex('[data-history-panel]'),
               table: nodeIndex('[data-table-shell]'),
               filters: nodeIndex('[data-filter-controls]'),
-              history: nodeIndex('[data-history-calendar]'),
               actions: nodeIndex('[data-activity-block]')
             }
           };
@@ -677,7 +704,7 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
         if expected not in payload["headers"]:
             raise AssertionError(f"main table must expose header {expected!r}, got {payload['headers']}")
     order_values = payload["order"]
-    expected_order = [order_values[key] for key in ("top", "summary", "table", "filters", "history", "actions")]
+    expected_order = [order_values[key] for key in ("top", "summary", "history", "table", "filters", "actions")]
     if any(value < 0 for value in expected_order) or expected_order != sorted(expected_order):
         raise AssertionError(f"web-vitrina blocks must follow the operator screen order, got {payload}")
     return payload

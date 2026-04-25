@@ -105,6 +105,7 @@ class SheetVitrinaV1WebVitrinaBlock:
         current_state = self.runtime.load_current_state()
         _validate_period_request(as_of_date=as_of_date, date_from=date_from, date_to=date_to)
         read_model = WEB_VITRINA_READ_MODEL
+        source_status_snapshot_as_of_date = ""
         if date_from and date_to:
             default_visible_snapshot = _load_default_visible_snapshot(
                 runtime=self.runtime,
@@ -124,6 +125,7 @@ class SheetVitrinaV1WebVitrinaBlock:
                 runtime=self.runtime,
                 period_date_bindings=period_date_bindings,
             )
+            source_status_snapshot_as_of_date = period_date_bindings[-1].snapshot_as_of_date
             data_sheet_row_count = len(snapshot.sheets[0].rows) if snapshot.sheets else 0
             read_model = WEB_VITRINA_PERIOD_READ_MODEL
         else:
@@ -145,6 +147,7 @@ class SheetVitrinaV1WebVitrinaBlock:
                 "reason": refresh_status.semantic_reason,
                 "counts": dict(refresh_status.source_outcome_counts),
             }
+            source_status_snapshot_as_of_date = snapshot.as_of_date
             data_sheet_row_count = refresh_status.sheet_row_counts.get(WEB_VITRINA_SOURCE_SHEET_NAME, 0)
         auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()
         manual_state = self.runtime.load_sheet_vitrina_manual_operator_state()
@@ -199,6 +202,7 @@ class SheetVitrinaV1WebVitrinaBlock:
                 business_now=to_business_datetime(now).replace(microsecond=0).isoformat(),
                 current_business_date=current_business_date_iso(now),
                 default_as_of_date=default_business_as_of_date(now),
+                source_status_snapshot_as_of_date=source_status_snapshot_as_of_date,
                 last_auto_run_status=auto_update_state.last_run_status or "never",
                 last_auto_run_started_at=auto_update_state.last_run_started_at,
                 last_auto_run_finished_at=auto_update_state.last_run_finished_at,

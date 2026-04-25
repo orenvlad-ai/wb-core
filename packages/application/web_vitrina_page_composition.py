@@ -333,6 +333,9 @@ def _build_time_model(contract_payload: Mapping[str, Any]) -> dict[str, Any]:
     status_summary = dict(contract_payload.get("status_summary") or {})
     snapshot_as_of_date = str(meta.get("as_of_date") or "")
     date_columns = [str(item) for item in (meta.get("date_columns") or []) if str(item)]
+    source_status_snapshot = str(status_summary.get("source_status_snapshot_as_of_date") or "")
+    if source_status_snapshot:
+        snapshot_as_of_date = source_status_snapshot
     temporal_slots = [
         dict(item)
         for item in (meta.get("temporal_slots") or [])
