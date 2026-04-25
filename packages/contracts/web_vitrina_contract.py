@@ -35,6 +35,7 @@ class WebVitrinaContractStatusSummary:
     business_now: str
     current_business_date: str
     default_as_of_date: str
+    source_status_snapshot_as_of_date: str
     last_auto_run_status: str
     last_auto_run_started_at: str | None
     last_auto_run_finished_at: str | None

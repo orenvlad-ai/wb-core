@@ -7,7 +7,7 @@ import importlib
 import json
 import sqlite3
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import shlex
 import threading
@@ -625,14 +625,40 @@ class RegistryUploadHttpEntrypoint:
         effective_as_of_date = as_of_date or default_business_as_of_date(self.now_factory())
         available_snapshot_dates = self.web_vitrina_block.list_readable_dates(descending=True)
         default_as_of_date = default_business_as_of_date(self.now_factory())
+        selected_date_from = date_from
+        selected_date_to = date_to
         try:
-            contract = self.web_vitrina_block.build(
-                page_route=page_route,
-                read_route=read_route,
-                as_of_date=as_of_date,
-                date_from=date_from,
-                date_to=date_to,
-            )
+            if not as_of_date and not date_from and not date_to:
+                seed_contract = self.web_vitrina_block.build(
+                    page_route=page_route,
+                    read_route=read_route,
+                    as_of_date=None,
+                    date_from=None,
+                    date_to=None,
+                )
+                default_range = _default_web_vitrina_page_period(
+                    seed_contract,
+                    available_snapshot_dates=available_snapshot_dates,
+                )
+                if default_range is not None:
+                    selected_date_from, selected_date_to = default_range
+                    contract = self.web_vitrina_block.build(
+                        page_route=page_route,
+                        read_route=read_route,
+                        as_of_date=None,
+                        date_from=selected_date_from,
+                        date_to=selected_date_to,
+                    )
+                else:
+                    contract = seed_contract
+            else:
+                contract = self.web_vitrina_block.build(
+                    page_route=page_route,
+                    read_route=read_route,
+                    as_of_date=as_of_date,
+                    date_from=date_from,
+                    date_to=date_to,
+                )
             view_model = build_web_vitrina_view_model(contract)
             adapter = build_web_vitrina_gravity_table_adapter(view_model)
         except Exception as exc:
@@ -654,22 +680,28 @@ class RegistryUploadHttpEntrypoint:
                 available_snapshot_dates=available_snapshot_dates,
                 default_as_of_date=default_as_of_date,
                 selected_as_of_date=as_of_date,
-                selected_date_from=date_from,
-                selected_date_to=date_to,
+                selected_date_from=selected_date_from,
+                selected_date_to=selected_date_to,
                 activity_surface=activity_surface,
             )
 
+        source_status_snapshot_as_of_date = _web_vitrina_source_status_snapshot_as_of_date(contract)
+        source_status_snapshot_id = _web_vitrina_source_status_snapshot_id(
+            self.runtime,
+            contract,
+            snapshot_as_of_date=source_status_snapshot_as_of_date,
+        )
         activity_surface = _web_vitrina_source_status_not_loaded_activity_surface(
-            snapshot_as_of_date=str(contract.meta.as_of_date),
-            snapshot_id=str(contract.meta.snapshot_id),
+            snapshot_as_of_date=source_status_snapshot_as_of_date,
+            snapshot_id=source_status_snapshot_id,
             refreshed_at=str(contract.meta.refreshed_at),
             read_model=str(contract.status_summary.read_model),
         )
         if include_source_status:
             try:
                 activity_surface = self._build_web_vitrina_activity_surface(
-                    snapshot_as_of_date=str(contract.meta.as_of_date),
-                    snapshot_id=str(contract.meta.snapshot_id),
+                    snapshot_as_of_date=source_status_snapshot_as_of_date,
+                    snapshot_id=source_status_snapshot_id,
                     refreshed_at=str(contract.meta.refreshed_at),
                     read_model=str(contract.status_summary.read_model),
                     job_path=job_path,
@@ -677,8 +709,8 @@ class RegistryUploadHttpEntrypoint:
             except Exception as exc:  # pragma: no cover - bounded fallback
                 if _is_ready_snapshot_missing_error(exc):
                     activity_surface = _web_vitrina_source_status_missing_snapshot_activity_surface(
-                        requested_as_of_date=str(contract.meta.as_of_date),
-                        snapshot_as_of_date=str(contract.meta.as_of_date),
+                        requested_as_of_date=source_status_snapshot_as_of_date,
+                        snapshot_as_of_date=source_status_snapshot_as_of_date,
                         technical_detail=str(exc),
                         now=self.now_factory(),
                     )
@@ -698,8 +730,8 @@ class RegistryUploadHttpEntrypoint:
             operator_route=operator_route,
             available_snapshot_dates=available_snapshot_dates,
             selected_as_of_date=as_of_date,
-            selected_date_from=date_from,
-            selected_date_to=date_to,
+            selected_date_from=selected_date_from,
+            selected_date_to=selected_date_to,
             activity_surface=activity_surface,
         )
 
@@ -2853,6 +2885,70 @@ def _target_snapshot_as_of_date_for_group_refresh(selected_as_of_date: str, *, n
     if selected_as_of_date == current_date:
         return default_business_as_of_date(now)
     return selected_as_of_date
+
+
+def _default_web_vitrina_page_period(
+    contract: Any,
+    *,
+    available_snapshot_dates: Iterable[str],
+) -> tuple[str, str] | None:
+    """Default UI period: latest four server-readable business dates, inclusive."""
+
+    date_columns = [str(item) for item in getattr(contract.meta, "date_columns", []) if str(item)]
+    readable_dates = {str(item) for item in available_snapshot_dates if str(item)}
+    if not date_columns or not readable_dates:
+        return None
+    status_summary = contract.status_summary
+    current_business_date = str(getattr(status_summary, "current_business_date", "") or "")
+    default_as_of_date = str(getattr(status_summary, "default_as_of_date", "") or "")
+    if current_business_date in readable_dates:
+        period_end = current_business_date
+    elif default_as_of_date in readable_dates:
+        period_end = default_as_of_date
+    else:
+        period_end = sorted(readable_dates)[-1]
+    try:
+        end_date = date.fromisoformat(period_end)
+    except ValueError:
+        return None
+    period_start = (end_date - timedelta(days=3)).isoformat()
+    expected_dates = [
+        (date.fromisoformat(period_start) + timedelta(days=offset)).isoformat()
+        for offset in range(4)
+    ]
+    if any(item not in readable_dates for item in expected_dates):
+        return None
+    return period_start, period_end
+
+
+def _web_vitrina_source_status_snapshot_as_of_date(contract: Any) -> str:
+    meta = contract.meta
+    status_summary = contract.status_summary
+    explicit_source_snapshot = str(getattr(status_summary, "source_status_snapshot_as_of_date", "") or "")
+    if explicit_source_snapshot:
+        return explicit_source_snapshot
+    snapshot_as_of_date = str(getattr(meta, "as_of_date", "") or "")
+    date_columns = {str(item) for item in getattr(meta, "date_columns", []) if str(item)}
+    read_model = str(getattr(status_summary, "read_model", "") or "")
+    default_as_of_date = str(getattr(status_summary, "default_as_of_date", "") or "")
+    if read_model == "persisted_ready_snapshot_window" and default_as_of_date in date_columns:
+        return default_as_of_date
+    return snapshot_as_of_date
+
+
+def _web_vitrina_source_status_snapshot_id(
+    runtime: RegistryUploadDbBackedRuntime,
+    contract: Any,
+    *,
+    snapshot_as_of_date: str,
+) -> str:
+    contract_snapshot_id = str(getattr(contract.meta, "snapshot_id", "") or "")
+    if str(getattr(contract.meta, "as_of_date", "") or "") == snapshot_as_of_date:
+        return contract_snapshot_id
+    try:
+        return str(runtime.load_sheet_vitrina_ready_snapshot(as_of_date=snapshot_as_of_date).snapshot_id)
+    except Exception:  # pragma: no cover - best-effort display metadata
+        return contract_snapshot_id
 
 
 def _metric_keys_for_source_keys(metrics: Iterable[Any], *, source_keys: Iterable[str]) -> list[str]:
