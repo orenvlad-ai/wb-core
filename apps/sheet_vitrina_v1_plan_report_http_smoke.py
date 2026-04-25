@@ -107,6 +107,10 @@ def main() -> None:
                 'id="planReportH1Input"',
                 'id="planReportH2Input"',
                 'id="planReportDrrInput"',
+                'id="planReportContractStartCheckbox"',
+                'id="planReportContractStartDateInput"',
+                "С учётом даты подписания",
+                "Дата подписания",
                 'id="planReportApplyButton"',
                 'id="planReportBaselineTemplateButton"',
                 'id="planReportBaselineFileInput"',
@@ -221,6 +225,50 @@ def main() -> None:
                     raise AssertionError(f"period {period_key} selected block is wrong, got {period_payload}")
                 if period_state == "not_started" and period_selected.get("metrics", {}).get("buyout_rub", {}).get("plan") is not None:
                     raise AssertionError(f"future period {period_key} must not fabricate a plan, got {period_payload}")
+            contract_query = urllib_parse.urlencode(
+                {
+                    "period": "first_quarter",
+                    "h1_buyout_plan_rub": "155379879",
+                    "h2_buyout_plan_rub": "294620120",
+                    "plan_drr_pct": "6",
+                    "as_of_date": "2026-04-24",
+                    "use_contract_start_date": "true",
+                    "contract_start_date": "2026-02-01",
+                }
+            )
+            contract_status, contract_payload = _get_json(f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_PATH}?{contract_query}")
+            contract_selected = (contract_payload.get("periods") or {}).get("selected_period") or {}
+            if (
+                contract_status != 200
+                or contract_selected.get("date_from") != "2026-02-01"
+                or contract_selected.get("date_to") != "2026-03-31"
+                or contract_selected.get("day_count") != 59
+                or not contract_selected.get("contract_start_applied")
+            ):
+                raise AssertionError(f"contract start route must trim first_quarter to Feb+Mar, got {contract_status} {contract_payload}")
+            expected_contract_plan = 155379879.0 / 181.0 * 59.0
+            actual_contract_plan = (contract_selected.get("metrics") or {}).get("buyout_rub", {}).get("plan")
+            if actual_contract_plan is None or abs(actual_contract_plan - expected_contract_plan) > 1e-3:
+                raise AssertionError(
+                    f"contract start route must keep H1 denominator for plan, got {actual_contract_plan}"
+                )
+            invalid_contract_query = urllib_parse.urlencode(
+                {
+                    "period": "first_quarter",
+                    "h1_buyout_plan_rub": "155379879",
+                    "h2_buyout_plan_rub": "294620120",
+                    "plan_drr_pct": "6",
+                    "use_contract_start_date": "true",
+                    "contract_start_date": "not-a-date",
+                }
+            )
+            invalid_contract_status, invalid_contract_payload = _get_json(
+                f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_PATH}?{invalid_contract_query}"
+            )
+            if invalid_contract_status != 400 or "contract_start_date" not in str(invalid_contract_payload.get("error", "")):
+                raise AssertionError(
+                    f"invalid contract_start_date must be a controlled 400, got {invalid_contract_status} {invalid_contract_payload}"
+                )
             legacy_query = urllib_parse.urlencode(
                 {
                     "period": "last_30_days",
@@ -296,6 +344,7 @@ def main() -> None:
             print("plan_report_route: ok ->", report_payload["reference_date"], report_payload["selected_period_key"])
             print("plan_report_source: ok ->", source_of_truth["read_model"], source_of_truth["snapshot_role"])
             print("plan_report_blocks: ok ->", ", ".join(sorted(report_payload["periods"].keys())))
+            print("plan_report_contract_start: ok ->", contract_selected.get("date_from"), contract_selected.get("date_to"))
             print("plan_report_baseline_routes: ok ->", template_status, baseline_upload_payload["accepted_months"])
             print("plan_report_ytd_after_baseline: ok ->", ytd_block["status"])
             print("plan_report_partial_route: ok ->", partial_payload["status"], partial_coverage["missing_dates_by_source"])

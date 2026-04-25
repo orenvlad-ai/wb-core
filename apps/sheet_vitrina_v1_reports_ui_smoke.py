@@ -80,6 +80,10 @@ def main() -> None:
         'id="planReportH1Input"',
         'id="planReportH2Input"',
         'id="planReportDrrInput"',
+        'id="planReportContractStartCheckbox"',
+        'id="planReportContractStartDateInput"',
+        "С учётом даты подписания",
+        "Дата подписания",
         'id="planReportApplyButton"',
         'id="planReportBaselineTemplateButton"',
         'id="planReportBaselineFileInput"',
@@ -121,6 +125,10 @@ def main() -> None:
         raise AssertionError("plan-report H1/H2/DRR inputs must restore from namespaced browser storage")
     if "writePersistedOperatorUiState({ plan_report_inputs: inputs });" not in html:
         raise AssertionError("plan-report H1/H2/DRR inputs must persist into namespaced browser storage")
+    if 'params.set("use_contract_start_date", "true");' not in html or 'params.set("contract_start_date", request.contract_start_date);' not in html:
+        raise AssertionError("plan-report contract start mode must be sent through explicit query params")
+    if "setContractStartInputEnabled(planReportContractStartCheckbox.checked);" not in html:
+        raise AssertionError("plan-report contract date input must be enabled only when the checkbox is active")
     if '<th>Показатель</th><th>Факт</th><th>План</th><th>Отклонение</th><th>Отклонение %</th>' not in html:
         raise AssertionError("plan-report tables must use the compact five-column layout")
     if "<th>Статус</th>" in html:

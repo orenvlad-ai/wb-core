@@ -487,6 +487,21 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     page.fill("#planReportH1Input", "155379879")
     page.fill("#planReportH2Input", "294620120")
     page.fill("#planReportDrrInput", "6")
+    page.check("#planReportContractStartCheckbox")
+    page.fill("#planReportContractStartDateInput", "2026-02-01")
+    plan_report_request_urls: list[str] = []
+    def _capture_plan_report_request(route) -> None:
+        plan_report_request_urls.append(route.request.url)
+        route.fulfill(
+            status=200,
+            content_type="application/json; charset=utf-8",
+            body=json.dumps(_plan_report_payload(), ensure_ascii=False),
+        )
+
+    page.route(
+        "**/v1/sheet-vitrina-v1/plan-report?**",
+        _capture_plan_report_request,
+    )
     page.click("#planReportApplyButton")
     page.wait_for_function(
         """(storageKey) => {
@@ -497,10 +512,15 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                 parsed.plan_report_inputs.period === "first_half" &&
                 parsed.plan_report_inputs.h1_buyout_plan_rub === "155379879" &&
                 parsed.plan_report_inputs.h2_buyout_plan_rub === "294620120" &&
-                parsed.plan_report_inputs.plan_drr_pct === "6";
+                parsed.plan_report_inputs.plan_drr_pct === "6" &&
+                parsed.plan_report_inputs.use_contract_start_date === true &&
+                parsed.plan_report_inputs.contract_start_date === "2026-02-01";
         }""",
         arg=STORAGE_KEY,
     )
+    latest_plan_report_url = plan_report_request_urls[-1] if plan_report_request_urls else ""
+    if "use_contract_start_date=true" not in latest_plan_report_url or "contract_start_date=2026-02-01" not in latest_plan_report_url:
+        raise AssertionError(f"plan-report request must include contract start params when enabled, got {plan_report_request_urls}")
     page.reload(wait_until="domcontentloaded")
     page.click('[data-report-section-button="plan"]')
     restored_plan_inputs = {
@@ -508,9 +528,21 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "h1": page.locator("#planReportH1Input").input_value(),
         "h2": page.locator("#planReportH2Input").input_value(),
         "drr": page.locator("#planReportDrrInput").input_value(),
+        "use_contract_start_date": page.locator("#planReportContractStartCheckbox").is_checked(),
+        "contract_start_date": page.locator("#planReportContractStartDateInput").input_value(),
+        "contract_date_disabled": page.locator("#planReportContractStartDateInput").is_disabled(),
     }
-    if restored_plan_inputs != {"period": "first_half", "h1": "155379879", "h2": "294620120", "drr": "6"}:
-        raise AssertionError(f"plan-report H1/H2/DRR inputs must survive reload, got {restored_plan_inputs}")
+    expected_restored_inputs = {
+        "period": "first_half",
+        "h1": "155379879",
+        "h2": "294620120",
+        "drr": "6",
+        "use_contract_start_date": True,
+        "contract_start_date": "2026-02-01",
+        "contract_date_disabled": False,
+    }
+    if restored_plan_inputs != expected_restored_inputs:
+        raise AssertionError(f"plan-report H1/H2/DRR/contract inputs must survive reload, got {restored_plan_inputs}")
 
     persisted_state = page.evaluate(
         """(storageKey) => {
@@ -579,7 +611,9 @@ def _run_fallback_scenario(context, base_url: str) -> dict[str, object]:
                         period: "unsupported",
                         h1_buyout_plan_rub: "-1",
                         h2_buyout_plan_rub: "not-a-number",
-                        plan_drr_pct: ""
+                        plan_drr_pct: "",
+                        use_contract_start_date: true,
+                        contract_start_date: "not-a-date"
                     }
                 }));
             }""",
@@ -605,8 +639,19 @@ def _run_fallback_scenario(context, base_url: str) -> dict[str, object]:
         "h1": page.locator("#planReportH1Input").input_value(),
         "h2": page.locator("#planReportH2Input").input_value(),
         "drr": page.locator("#planReportDrrInput").input_value(),
+        "use_contract_start_date": page.locator("#planReportContractStartCheckbox").is_checked(),
+        "contract_start_date": page.locator("#planReportContractStartDateInput").input_value(),
+        "contract_date_disabled": page.locator("#planReportContractStartDateInput").is_disabled(),
     }
-    if invalid_plan_restore != {"period": "current_month", "h1": "", "h2": "", "drr": ""}:
+    if invalid_plan_restore != {
+        "period": "current_month",
+        "h1": "",
+        "h2": "",
+        "drr": "",
+        "use_contract_start_date": False,
+        "contract_start_date": "",
+        "contract_date_disabled": True,
+    }:
         raise AssertionError(f"invalid persisted plan inputs must be ignored safely, got {invalid_plan_restore}")
 
     context.close()
@@ -614,6 +659,38 @@ def _run_fallback_scenario(context, base_url: str) -> dict[str, object]:
         "invalid_storage_fallback": invalid_state,
         "obsolete_sku_fallback": obsolete_state,
         "invalid_plan_input_fallback": invalid_plan_restore,
+    }
+
+
+def _plan_report_payload() -> dict[str, object]:
+    block = {
+        "label": "За первое полугодие",
+        "date_from": "2026-02-01",
+        "date_to": "2026-04-20",
+        "day_count": 79,
+        "status": "available",
+        "reason": "Период обрезан по дате подписания: 2026-02-01.",
+        "metrics": {},
+        "coverage": {},
+        "source_breakdown": {},
+    }
+    return {
+        "status": "available",
+        "selected_period_label": "За первое полугодие",
+        "effective_as_of_date": "2026-04-20",
+        "active_sku_count": len(ACTIVE_SKUS),
+        "inputs": {
+            "use_contract_start_date": True,
+            "contract_start_date": "2026-02-01",
+        },
+        "periods": {
+            "selected_period": block,
+            "month_to_date": {**block, "label": "С начала месяца", "date_from": "2026-04-01", "day_count": 20},
+            "quarter_to_date": {**block, "label": "С начала квартала", "date_from": "2026-04-01", "day_count": 20},
+            "year_to_date": {**block, "label": "С начала года", "date_from": "2026-02-01", "day_count": 79},
+        },
+        "baseline": {"status": "missing", "months": []},
+        "notes": [],
     }
 
 

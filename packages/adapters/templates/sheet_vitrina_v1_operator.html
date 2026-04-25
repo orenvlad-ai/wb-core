@@ -730,6 +730,27 @@
       min-width: 150px;
     }
 
+    .plan-report-checkbox-field {
+      flex: 0 1 220px;
+      min-width: 200px;
+      align-self: center;
+    }
+
+    .plan-report-checkbox-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 42px;
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .plan-report-checkbox-label input {
+      width: auto;
+      margin: 0;
+    }
+
     .plan-report-grid {
       display: grid;
       gap: 16px;
@@ -1572,6 +1593,16 @@
                     <label for="planReportDrrInput">Плановый DRR, %</label>
                     <input id="planReportDrrInput" type="number" min="0" step="0.01" inputmode="decimal">
                   </div>
+                  <div class="field plan-report-checkbox-field">
+                    <label class="plan-report-checkbox-label" for="planReportContractStartCheckbox">
+                      <input id="planReportContractStartCheckbox" type="checkbox">
+                      <span>С учётом даты подписания</span>
+                    </label>
+                  </div>
+                  <div class="field plan-report-field">
+                    <label for="planReportContractStartDateInput">Дата подписания</label>
+                    <input id="planReportContractStartDateInput" type="date" disabled>
+                  </div>
                 </div>
                 <div class="block-actions">
                   <button id="planReportApplyButton" class="action-button secondary-button" type="button">Рассчитать</button>
@@ -2003,6 +2034,8 @@
       const planReportH1Input = document.getElementById("planReportH1Input");
       const planReportH2Input = document.getElementById("planReportH2Input");
       const planReportDrrInput = document.getElementById("planReportDrrInput");
+      const planReportContractStartCheckbox = document.getElementById("planReportContractStartCheckbox");
+      const planReportContractStartDateInput = document.getElementById("planReportContractStartDateInput");
       const planReportApplyButton = document.getElementById("planReportApplyButton");
       const planReportValidation = document.getElementById("planReportValidation");
       const planReportSelectedTitle = document.getElementById("planReportSelectedTitle");
@@ -2243,6 +2276,24 @@
         return Number.isFinite(numericValue) && numericValue >= 0 ? normalized : "";
       }
 
+      function isValidIsoDate(value) {
+        const normalized = String(value || "").trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+          return false;
+        }
+        const parsed = new Date(normalized + "T00:00:00Z");
+        return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === normalized;
+      }
+
+      function sanitizePersistedPlanDateValue(value) {
+        const normalized = String(value || "").trim();
+        return isValidIsoDate(normalized) ? normalized : "";
+      }
+
+      function setContractStartInputEnabled(enabled) {
+        planReportContractStartDateInput.disabled = !enabled;
+      }
+
       function restorePlanReportInputs(storageState) {
         const rawState = storageState && typeof storageState === "object" ? storageState : {};
         const inputs = rawState.plan_report_inputs && typeof rawState.plan_report_inputs === "object"
@@ -2264,6 +2315,12 @@
         if (planDrr) {
           planReportDrrInput.value = planDrr;
         }
+        const contractStartDate = sanitizePersistedPlanDateValue(inputs.contract_start_date);
+        planReportContractStartCheckbox.checked = inputs.use_contract_start_date === true && Boolean(contractStartDate);
+        if (contractStartDate) {
+          planReportContractStartDateInput.value = contractStartDate;
+        }
+        setContractStartInputEnabled(planReportContractStartCheckbox.checked);
       }
 
       function persistPlanReportInputs(request) {
@@ -2274,7 +2331,9 @@
           period: String(planReportPeriodSelect.value || "").trim(),
           h1_buyout_plan_rub: String(planReportH1Input.value || "").trim(),
           h2_buyout_plan_rub: String(planReportH2Input.value || "").trim(),
-          plan_drr_pct: String(planReportDrrInput.value || "").trim()
+          plan_drr_pct: String(planReportDrrInput.value || "").trim(),
+          use_contract_start_date: Boolean(planReportContractStartCheckbox.checked),
+          contract_start_date: sanitizePersistedPlanDateValue(planReportContractStartDateInput.value)
         };
         if (!VALID_PLAN_REPORT_PERIODS.has(inputs.period)) {
           return;
@@ -2284,6 +2343,9 @@
           !sanitizePersistedPlanInputValue(inputs.h2_buyout_plan_rub) ||
           !sanitizePersistedPlanInputValue(inputs.plan_drr_pct)
         ) {
+          return;
+        }
+        if (inputs.use_contract_start_date && !inputs.contract_start_date) {
           return;
         }
         writePersistedOperatorUiState({ plan_report_inputs: inputs });
@@ -3057,8 +3119,12 @@
         const qtd = periods.quarter_to_date || {};
         const ytd = periods.year_to_date || {};
         const effectiveAsOfDate = payload.effective_as_of_date || payload.reference_date;
+        const inputs = payload.inputs && typeof payload.inputs === "object" ? payload.inputs : {};
+        const contractNote = inputs.use_contract_start_date && inputs.contract_start_date
+          ? " Периоды обрезаны по дате подписания: " + formatHumanDate(inputs.contract_start_date) + "."
+          : "";
         planReportPeriod.textContent = "Последний закрытый день: " + formatHumanDate(effectiveAsOfDate) + ". Основной период: " + valueOrDash(payload.selected_period_label) + ".";
-        planReportLead.textContent = "Active SKU в current config: " + valueOrDash(payload.active_sku_count) + ". Текущий незакрытый день не входит в расчёт; план распределяется по календарным дням H1/H2.";
+        planReportLead.textContent = "Active SKU в current config: " + valueOrDash(payload.active_sku_count) + ". Текущий незакрытый день не входит в расчёт; план распределяется по календарным дням H1/H2." + contractNote;
         if (payload.status === "available") {
           planReportStatus.textContent = "Source of truth: accepted closed-day runtime snapshots fin_report_daily + ads_compact.";
           planReportStatus.className = "section-message";
@@ -3086,8 +3152,12 @@
           h1_buyout_plan_rub: String(planReportH1Input.value || "").trim(),
           h2_buyout_plan_rub: String(planReportH2Input.value || "").trim(),
           plan_drr_pct: String(planReportDrrInput.value || "").trim(),
+          use_contract_start_date: Boolean(planReportContractStartCheckbox.checked),
+          contract_start_date: String(planReportContractStartDateInput.value || "").trim(),
         };
-        const missing = Object.entries(request).find(([key, value]) => key !== "period" && !value);
+        const missing = Object.entries(request).find(([key, value]) => (
+          !["period", "use_contract_start_date", "contract_start_date"].includes(key) && !value
+        ));
         if (!request.period || missing) {
           return { error: "Заполните планы H1/H2 и плановый DRR." };
         }
@@ -3104,6 +3174,13 @@
             return { error: "Каждое значение должно быть числом не меньше 0." };
           }
           params.set(key, String(numericValue));
+        }
+        if (request.use_contract_start_date) {
+          if (!isValidIsoDate(request.contract_start_date)) {
+            return { error: "Укажите дату подписания в формате ГГГГ-ММ-ДД." };
+          }
+          params.set("use_contract_start_date", "true");
+          params.set("contract_start_date", request.contract_start_date);
         }
         return { query: params.toString() };
       }
@@ -4324,7 +4401,8 @@
         planReportPeriodSelect,
         planReportH1Input,
         planReportH2Input,
-        planReportDrrInput
+        planReportDrrInput,
+        planReportContractStartDateInput
       ].forEach((input) => {
         input.addEventListener("input", () => {
           if (planReportValidation.hidden) {
@@ -4335,6 +4413,16 @@
             setPlanReportValidation("");
           }
         });
+      });
+      planReportContractStartCheckbox.addEventListener("change", () => {
+        setContractStartInputEnabled(planReportContractStartCheckbox.checked);
+        if (planReportValidation.hidden) {
+          return;
+        }
+        const request = readPlanReportRequest();
+        if (!request.error) {
+          setPlanReportValidation("");
+        }
       });
 
       restorePlanReportInputs(persistedOperatorUiState);

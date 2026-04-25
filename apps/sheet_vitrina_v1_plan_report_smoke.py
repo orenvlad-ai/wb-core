@@ -223,6 +223,59 @@ def main() -> None:
                     f"{period_key} fixed-period plan",
                 )
 
+        contract_payload = block.build(
+            period="first_quarter",
+            h1_buyout_plan_rub=155379879.0,
+            h2_buyout_plan_rub=294620120.0,
+            plan_drr_pct=6.0,
+            as_of_date="2026-04-24",
+            use_contract_start_date=True,
+            contract_start_date="2026-02-01",
+        )
+        contract_selected = contract_payload["periods"]["selected_period"]
+        if (
+            contract_selected["date_from"] != "2026-02-01"
+            or contract_selected["date_to"] != "2026-03-31"
+            or contract_selected["day_count"] != 59
+            or not contract_selected.get("contract_start_applied")
+        ):
+            raise AssertionError(f"contract start must trim Q1 to Feb+Mar, got {contract_selected}")
+        _assert_close(
+            contract_selected["metrics"]["buyout_rub"]["fact"],
+            59.0 * 1500.0,
+            "contract-trimmed q1 buyout fact",
+        )
+        _assert_close(
+            contract_selected["metrics"]["ads_sum_rub"]["fact"],
+            59.0 * 180.0,
+            "contract-trimmed q1 ads fact",
+        )
+        _assert_close(
+            contract_selected["metrics"]["buyout_rub"]["plan"],
+            155379879.0 / 181.0 * 59.0,
+            "contract-trimmed q1 h1-denominator buyout plan",
+        )
+        if "2026-01-31" in (contract_selected.get("coverage") or {}).get("covered_dates", []):
+            raise AssertionError(f"contract start must exclude January coverage, got {contract_selected}")
+        before_contract_payload = block.build(
+            period="first_quarter",
+            h1_buyout_plan_rub=155379879.0,
+            h2_buyout_plan_rub=294620120.0,
+            plan_drr_pct=6.0,
+            as_of_date="2026-04-24",
+            use_contract_start_date=True,
+            contract_start_date="2026-04-01",
+        )
+        before_contract_selected = before_contract_payload["periods"]["selected_period"]
+        if (
+            before_contract_selected.get("status") != "unavailable"
+            or before_contract_selected.get("period_state") != "not_started"
+            or before_contract_selected["metrics"]["buyout_rub"]["plan"] is not None
+        ):
+            raise AssertionError(
+                f"period fully before contract start must be unavailable without fake plan, got {before_contract_selected}"
+            )
+
         missing_day = "2026-04-10"
         runtime.delete_temporal_source_slot_snapshots(
             source_key="ads_compact",
@@ -405,6 +458,31 @@ def main() -> None:
         april_mtd = april_payload["periods"]["month_to_date"]
         _assert_close(april_mtd["metrics"]["buyout_rub"]["fact"], 39920319.0, "apr1-24 buyout control")
         _assert_close(april_mtd["metrics"]["ads_sum_rub"]["fact"], 3826937.0, "apr1-24 ads control")
+        contract_control_payload = reconcile_block.build(
+            period="first_quarter",
+            h1_buyout_plan_rub=155379879.0,
+            h2_buyout_plan_rub=294620120.0,
+            plan_drr_pct=6.0,
+            as_of_date="2026-04-24",
+            use_contract_start_date=True,
+            contract_start_date="2026-02-01",
+        )
+        contract_control_selected = contract_control_payload["periods"]["selected_period"]
+        _assert_close(
+            contract_control_selected["metrics"]["buyout_rub"]["fact"],
+            27444563.5 + 41917072.0,
+            "contract control Feb+Mar buyout fact",
+        )
+        _assert_close(
+            contract_control_selected["metrics"]["ads_sum_rub"]["fact"],
+            2783637.0 + 4814777.0,
+            "contract control Feb+Mar ads fact",
+        )
+        _assert_close(
+            contract_control_selected["metrics"]["buyout_rub"]["plan"],
+            155379879.0 / 181.0 * 59.0,
+            "contract control q1 h1-denominator buyout plan",
+        )
 
         no_double_runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "no-double-count")
         no_double_result = no_double_runtime.ingest_bundle(bundle, activated_at="2026-04-21T01:00:00Z")
@@ -534,6 +612,7 @@ def main() -> None:
         print("plan_report_no_double_count: ok ->", no_double_ytd["metrics"]["buyout_rub"]["fact"])
         print("plan_report_partial_overlap_baseline: ok ->", partial_overlap_source["baseline_months"])
         print("plan_report_reconciliation_controls: ok ->", q1_ytd["metrics"]["buyout_rub"]["fact"], april_mtd["metrics"]["buyout_rub"]["fact"])
+        print("plan_report_contract_start: ok ->", contract_selected["date_from"], contract_selected["date_to"])
         print("plan_report_baseline_xlsx: ok ->", upload_payload["accepted_months"])
 
 
