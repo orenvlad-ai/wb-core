@@ -550,6 +550,8 @@ class RegistryUploadHttpEntrypoint:
         q3_buyout_plan_rub: float | None = None,
         q4_buyout_plan_rub: float | None = None,
         as_of_date: str | None = None,
+        use_contract_start_date: bool = False,
+        contract_start_date: str | None = None,
     ) -> dict[str, Any]:
         return self.plan_report_block.build(
             period=period,
@@ -561,6 +563,8 @@ class RegistryUploadHttpEntrypoint:
             q3_buyout_plan_rub=q3_buyout_plan_rub,
             q4_buyout_plan_rub=q4_buyout_plan_rub,
             as_of_date=as_of_date,
+            use_contract_start_date=use_contract_start_date,
+            contract_start_date=contract_start_date,
         )
 
     def handle_sheet_plan_report_baseline_template_request(self) -> tuple[bytes, str]:

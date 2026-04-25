@@ -842,6 +842,8 @@ def _build_handler(
                         q3_buyout_plan_rub=_resolve_optional_query_float(parsed.query, "q3_buyout_plan_rub"),
                         q4_buyout_plan_rub=_resolve_optional_query_float(parsed.query, "q4_buyout_plan_rub"),
                         as_of_date=_resolve_as_of_date_from_query(parsed.query) or None,
+                        use_contract_start_date=_resolve_optional_query_bool(parsed.query, "use_contract_start_date"),
+                        contract_start_date=_resolve_single_query_param(parsed.query, "contract_start_date") or None,
                     )
                 except ValueError as exc:
                     _write_json_response(
@@ -1340,6 +1342,17 @@ def _resolve_optional_query_float(query_string: str, name: str) -> float | None:
         return float(value)
     except ValueError as exc:
         raise ValueError(f"{name} query parameter must be numeric") from exc
+
+
+def _resolve_optional_query_bool(query_string: str, name: str) -> bool:
+    value = _resolve_single_query_param(query_string, name).lower()
+    if not value:
+        return False
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} query parameter must be true or false")
 
 
 def _resolve_web_vitrina_period_window_from_query(query_string: str) -> tuple[str | None, str | None]:

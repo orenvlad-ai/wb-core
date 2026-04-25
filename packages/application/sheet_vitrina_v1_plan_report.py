@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import re
@@ -77,6 +77,11 @@ class PeriodWindow:
     period_state: str = "closed_day_window"
     requested_date_from: str | None = None
     requested_date_to: str | None = None
+    original_date_from: str | None = None
+    original_date_to: str | None = None
+    contract_start_date: str | None = None
+    contract_start_applied: bool = False
+    contract_start_note: str | None = None
 
 
 class SheetVitrinaV1PlanReportBlock:
@@ -152,6 +157,8 @@ class SheetVitrinaV1PlanReportBlock:
         q3_buyout_plan_rub: float | None = None,
         q4_buyout_plan_rub: float | None = None,
         as_of_date: str | None = None,
+        use_contract_start_date: bool = False,
+        contract_start_date: str | None = None,
     ) -> dict[str, Any]:
         normalized_period = str(period or "").strip()
         if normalized_period not in PERIOD_LABELS:
@@ -171,14 +178,31 @@ class SheetVitrinaV1PlanReportBlock:
         current_business_date = current_business_date_iso(self.now_factory())
         default_closed_business_date = date.fromisoformat(default_business_as_of_date(self.now_factory()))
         reference_date = date.fromisoformat(as_of_date) if as_of_date else default_closed_business_date
+        normalized_contract_start_date = _resolve_contract_start_date(
+            use_contract_start_date=use_contract_start_date,
+            contract_start_date=contract_start_date,
+        )
         selected_window = _build_selected_window(reference_date=reference_date, period_key=normalized_period)
         fixed_windows = [
             _build_to_date_window(reference_date=reference_date, period_key=key, label=label)
             for key, label in PERSISTENT_BLOCKS
         ]
+        if normalized_contract_start_date is not None:
+            selected_window = _apply_contract_start_date(
+                window=selected_window,
+                contract_start_date=normalized_contract_start_date,
+            )
+            fixed_windows = [
+                _apply_contract_start_date(
+                    window=window,
+                    contract_start_date=normalized_contract_start_date,
+                )
+                for window in fixed_windows
+            ]
         all_windows = [selected_window, *fixed_windows]
         effective_windows = [window for window in all_windows if window.day_count > 0]
-        date_from = min(date.fromisoformat(window.date_from) for window in effective_windows).isoformat()
+        source_windows = effective_windows or all_windows
+        date_from = min(date.fromisoformat(window.date_from) for window in source_windows).isoformat()
         date_to = reference_date.isoformat()
         base_payload = {
             "status": "unavailable",
@@ -199,6 +223,12 @@ class SheetVitrinaV1PlanReportBlock:
                 "h2_buyout_plan_rub": half_year_plans[2],
                 "legacy_quarter_inputs": plan_inputs.get("legacy_quarter_inputs"),
                 "plan_drr_pct": normalized_plan_drr_pct,
+                "use_contract_start_date": normalized_contract_start_date is not None,
+                "contract_start_date": (
+                    normalized_contract_start_date.isoformat()
+                    if normalized_contract_start_date is not None
+                    else None
+                ),
             },
             "source_of_truth": {
                 "read_model": "persisted_temporal_source_slot_snapshots_plus_plan_report_monthly_baseline",
@@ -470,6 +500,18 @@ def _resolve_buyout_plan_inputs(
     raise ValueError("h1_buyout_plan_rub and h2_buyout_plan_rub query parameters are required")
 
 
+def _resolve_contract_start_date(*, use_contract_start_date: bool, contract_start_date: str | None) -> date | None:
+    if not use_contract_start_date:
+        return None
+    normalized = str(contract_start_date or "").strip()
+    if not normalized:
+        raise ValueError("contract_start_date query parameter is required when use_contract_start_date=true")
+    try:
+        return date.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError("contract_start_date query parameter must use YYYY-MM-DD format") from exc
+
+
 def _build_selected_window(*, reference_date: date, period_key: str) -> PeriodWindow:
     if period_key in FIXED_PERIOD_BOUNDS:
         return _build_fixed_period_window(reference_date=reference_date, period_key=period_key)
@@ -528,6 +570,51 @@ def _build_fixed_period_window(*, reference_date: date, period_key: str) -> Peri
         period_state=period_state,
         requested_date_from=requested_start.isoformat(),
         requested_date_to=requested_end.isoformat(),
+    )
+
+
+def _apply_contract_start_date(*, window: PeriodWindow, contract_start_date: date) -> PeriodWindow:
+    original_date_from = window.original_date_from or window.date_from
+    original_date_to = window.original_date_to or window.date_to
+    original_start = date.fromisoformat(window.date_from)
+    original_end = date.fromisoformat(window.date_to)
+    effective_start = max(original_start, contract_start_date)
+    contract_note = f"Период обрезан по дате подписания: {contract_start_date.isoformat()}."
+    if window.period_state == "not_started":
+        return replace(
+            window,
+            date_from=effective_start.isoformat(),
+            day_count=0,
+            original_date_from=original_date_from,
+            original_date_to=original_date_to,
+            contract_start_date=contract_start_date.isoformat(),
+            contract_start_applied=contract_start_date > original_start,
+            contract_start_note=contract_note if contract_start_date > original_start else None,
+        )
+    if effective_start > original_end:
+        return replace(
+            window,
+            date_from=effective_start.isoformat(),
+            day_count=0,
+            period_state="not_started",
+            original_date_from=original_date_from,
+            original_date_to=original_date_to,
+            contract_start_date=contract_start_date.isoformat(),
+            contract_start_applied=True,
+            contract_start_note=(
+                f"Период {original_date_from}..{original_date_to} полностью раньше даты подписания "
+                f"{contract_start_date.isoformat()}."
+            ),
+        )
+    return replace(
+        window,
+        date_from=effective_start.isoformat(),
+        day_count=(original_end - effective_start).days + 1,
+        original_date_from=original_date_from,
+        original_date_to=original_date_to,
+        contract_start_date=contract_start_date.isoformat(),
+        contract_start_applied=contract_start_date > original_start,
+        contract_start_note=contract_note if contract_start_date > original_start else None,
     )
 
 
@@ -707,6 +794,8 @@ def _build_period_block(
         reason = "Для периода нет usable accepted closed-day snapshots или применимой full-month baseline; факт не рассчитывается."
     elif baseline_months:
         reason = "Факт периода включает manual monthly baseline для полных месяцев без daily coverage."
+    if window.contract_start_note:
+        reason = f"{window.contract_start_note} {reason}".strip()
     return {
         "label": window.label,
         "date_from": window.date_from,
@@ -716,6 +805,11 @@ def _build_period_block(
         "period_state": window.period_state,
         "requested_date_from": window.requested_date_from or window.date_from,
         "requested_date_to": window.requested_date_to or window.date_to,
+        "original_date_from": window.original_date_from or window.date_from,
+        "original_date_to": window.original_date_to or window.date_to,
+        "contract_start_date": window.contract_start_date,
+        "contract_start_applied": window.contract_start_applied,
+        "contract_start_note": window.contract_start_note,
         "status": status,
         "reason": reason,
         "source_of_truth": {
@@ -803,7 +897,7 @@ def _build_period_block(
 
 
 def _build_not_started_period_block(*, window: PeriodWindow) -> dict[str, Any]:
-    reason = (
+    reason = window.contract_start_note or (
         "Период ещё не начался относительно последнего закрытого дня "
         f"{window.effective_as_of_date}; факт и план не рассчитываются без закрытых дат периода."
     )
@@ -816,6 +910,11 @@ def _build_not_started_period_block(*, window: PeriodWindow) -> dict[str, Any]:
         "period_state": "not_started",
         "requested_date_from": window.requested_date_from or window.date_from,
         "requested_date_to": window.requested_date_to or window.date_to,
+        "original_date_from": window.original_date_from or window.date_from,
+        "original_date_to": window.original_date_to or window.date_to,
+        "contract_start_date": window.contract_start_date,
+        "contract_start_applied": window.contract_start_applied,
+        "contract_start_note": window.contract_start_note,
         "status": "unavailable",
         "reason": reason,
         "source_of_truth": {
