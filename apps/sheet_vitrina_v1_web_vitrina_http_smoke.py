@@ -214,11 +214,11 @@ def main() -> None:
                     raise AssertionError(f"web-vitrina loading table missing {required_column}, got {loading_table}")
             if [item.get("endpoint_id") for item in upload_items] != [
                 "prices_snapshot",
-                "web_source_snapshot",
                 "seller_funnel_snapshot",
+                "web_source_snapshot",
             ]:
-                raise AssertionError(f"upload summary must be sorted error -> warning -> success, got {activity_surface}")
-            if [item.get("status_label") for item in upload_items] != ["Ошибка", "Внимание", "Успешно"]:
+                raise AssertionError(f"upload summary must be sorted error -> source-aware success, got {activity_surface}")
+            if [item.get("status_label") for item in upload_items] != ["Ошибка", "Успешно", "Успешно"]:
                 raise AssertionError(f"upload summary status mismatch, got {activity_surface}")
             if upload_items[0].get("label_ru") != "Цены и скидки" or upload_items[0].get("reason_ru") != "данные не получены":
                 raise AssertionError(f"upload summary russian label/reason mismatch, got {activity_surface}")

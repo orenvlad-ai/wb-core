@@ -348,6 +348,9 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - `seller_funnel_snapshot` и `web_source_snapshot` remain full two-slot sources; broken `today_current` stays warning/error and must keep top badge/cards degraded.
   - `stocks[yesterday_closed]` stays authoritative required closed-day truth from exact-date historical CSV/runtime snapshots, while `stocks[today_current]` is a truthful non-required `not_available` slot that no longer counts against source or aggregate semantic status.
   - `spp` и `fin_report_daily` still request `today_current`, but intraday current-day non-yield (`empty`, `zero-like`, `invalid_exact_snapshot`, `no-result`, bounded `429/timeout`, preserved/runtime-cache current fallback) is tolerated when `yesterday_closed` is confirmed success.
+  - `prices_snapshot` и `ads_bids` remain current-snapshot-only: accepted-current rollover, same-day accepted preservation and latest confirmed filled values are OK; a required current slot without accepted fallback remains not OK.
+  - `promo_by_price` accepted/runtime-cached latest confirmed values are OK when the visible cells are filled; invalid attempts without accepted fallback remain not OK.
+  - loading/action status cells must use this same source-aware reduction instead of treating every `not refreshed / unchanged / fallback` note as red.
 - Для bot/web-source family (`seller_funnel_snapshot`, `web_source_snapshot`) current server-side read rule теперь bounded и truthful:
   - сначала source adapter пробует explicit requested date/window;
   - при `404` source adapter пробует latest payload без query params;
@@ -381,6 +384,10 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - on D+1 the already accepted snapshot for D materializes into `yesterday_closed=D` via persisted accepted-current seam, without destructive historical refetch;
   - `today_current=D+1` remains a separate current slot and does not overwrite `yesterday_closed=D`;
   - manual invalid run does not blank accepted yesterday/current truth and does not create persisted due retry states.
+- Web-vitrina session highlight metadata is action-scoped:
+  - full `POST /v1/sheet-vitrina-v1/refresh` emits `updated_cells` across every refreshed temporal date column, normally `yesterday_closed + today_current`;
+  - `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` emits `updated_cells` only for the selected source group and selected `as_of_date`;
+  - `updated` means the visible ready value changed, `latest_confirmed` means the cell was checked and filled from accepted/latest-confirmed fallback, and the browser must not persist this as styling truth.
 - Для `stocks` current checkpoint теперь обязан:
   - materialize-ить `stocks[yesterday_closed]` из Seller Analytics CSV path `STOCK_HISTORY_DAILY_CSV`;
   - surface-ить `stocks[today_current]` как truthful `not_available`/blank non-required slot instead of inventing same-day stocks;

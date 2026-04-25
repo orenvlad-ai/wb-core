@@ -27,7 +27,12 @@ from packages.application.sheet_vitrina_v1_load_bridge import (
 from packages.application.sheet_vitrina_v1_plan_report import SheetVitrinaV1PlanReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import SheetVitrinaV1StockReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import list_active_sku_options
-from packages.application.sheet_vitrina_v1_temporal_policy import reduce_source_temporal_semantics
+from packages.application.sheet_vitrina_v1_temporal_policy import (
+    effective_source_temporal_policy,
+    reduce_source_temporal_semantics,
+    source_nonblocking_slot_reason,
+    slot_counts_toward_source_status,
+)
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
 from packages.application.web_vitrina_gravity_table_adapter import (
     build_web_vitrina_gravity_table_adapter,
@@ -3173,19 +3178,7 @@ def _updated_cell_status_for_status_row(row: list[Any]) -> str:
     note = str(row[10] if len(row) > 10 else "").strip().lower()
     if kind in {"error", "missing", "not_found", "blocked", "not_available"}:
         return ""
-    latest_confirmed_tokens = (
-        "latest_confirmed",
-        "fallback",
-        "runtime_cache",
-        "accepted_closed_runtime_snapshot",
-        "accepted_current_runtime_snapshot",
-        "accepted_closed_from_prior_current_snapshot",
-        "accepted_prior_current_runtime_cache",
-        "exact_date_provisional_runtime_cache",
-        "accepted_closed_from_interval_replay",
-        "accepted_current_from_prior",
-    )
-    if any(token in note for token in latest_confirmed_tokens):
+    if _status_note_is_latest_confirmed(note):
         return "latest_confirmed"
     if kind == "warning":
         return "latest_confirmed"
@@ -4020,8 +4013,8 @@ def _build_endpoint_summary_item(
     }
 
 
-def _activity_slot_statuses(record: Mapping[str, Any]) -> list[dict[str, str]]:
-    statuses: list[dict[str, str]] = []
+def _activity_slot_statuses(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    statuses: list[dict[str, Any]] = []
     for raw_slot in record.get("slots") or []:
         slot = dict(raw_slot or {})
         tone = str(slot.get("tone") or slot.get("status") or "warning").strip() or "warning"
@@ -4041,6 +4034,10 @@ def _activity_slot_statuses(record: Mapping[str, Any]) -> list[dict[str, str]]:
                 "date": str(slot.get("date") or ""),
                 "date_from": str(slot.get("date_from") or ""),
                 "date_to": str(slot.get("date_to") or ""),
+                "kind": str(slot.get("kind") or "").strip().lower(),
+                "note": str(slot.get("note") or "").strip(),
+                "requested_count": _coerce_int(slot.get("requested_count")),
+                "covered_count": _coerce_int(slot.get("covered_count")),
             }
         )
     return statuses
@@ -4052,12 +4049,35 @@ def _loading_table_status_for_slot(
     target_date: str,
     temporal_slot: str,
 ) -> dict[str, str]:
+    source_key = str(item.get("source_key") or item.get("endpoint_id") or "").strip()
+    temporal_policy = effective_source_temporal_policy(source_key, "")
+    all_slots = [dict(slot) for slot in (item.get("slot_statuses") or [])]
+    has_confirmed_yesterday_success = any(
+        _loading_slot_has_confirmed_success(slot)
+        for slot in all_slots
+        if str(slot.get("temporal_slot") or "") == TEMPORAL_SLOT_YESTERDAY_CLOSED
+    )
     matching_slots = [
         dict(slot)
-        for slot in (item.get("slot_statuses") or [])
+        for slot in all_slots
         if _activity_slot_matches_date_or_slot(slot, target_date=target_date, temporal_slot=temporal_slot)
     ]
     if not matching_slots:
+        nonblocking_reason = source_nonblocking_slot_reason(
+            source_key=source_key,
+            temporal_policy=temporal_policy,
+            temporal_slot=temporal_slot,
+            slot_outcome={},
+            has_confirmed_yesterday_success=has_confirmed_yesterday_success,
+        )
+        if nonblocking_reason:
+            return {
+                "date": target_date,
+                "ok": True,
+                "label": "OK",
+                "tone": "success",
+                "reason": nonblocking_reason,
+            }
         fallback_reason = str(item.get("reason_ru") or item.get("detail") or "").strip()
         return {
             "date": target_date,
@@ -4068,17 +4088,111 @@ def _loading_table_status_for_slot(
         }
     worst_slot = sorted(
         matching_slots,
-        key=lambda slot: _activity_tone_rank(str(slot.get("tone") or "warning")),
+        key=lambda slot: _loading_slot_rank(
+            source_key=source_key,
+            temporal_policy=temporal_policy,
+            temporal_slot=temporal_slot,
+            slot=slot,
+            has_confirmed_yesterday_success=has_confirmed_yesterday_success,
+        ),
     )[0]
-    tone = str(worst_slot.get("tone") or "warning")
-    ok = tone == "success"
+    ok = _loading_slot_is_semantic_ok(
+        source_key=source_key,
+        temporal_policy=temporal_policy,
+        temporal_slot=temporal_slot,
+        slot=worst_slot,
+        has_confirmed_yesterday_success=has_confirmed_yesterday_success,
+    )
     return {
         "date": target_date,
         "ok": ok,
         "label": "OK" if ok else "не OK",
         "tone": "success" if ok else "error",
-        "reason": "Готово" if ok else str(worst_slot.get("reason") or _activity_reason_fallback(tone)),
+        "reason": _loading_slot_reason(
+            ok=ok,
+            source_key=source_key,
+            temporal_policy=temporal_policy,
+            temporal_slot=temporal_slot,
+            slot=worst_slot,
+            has_confirmed_yesterday_success=has_confirmed_yesterday_success,
+        ),
     }
+
+
+def _loading_slot_rank(
+    *,
+    source_key: str,
+    temporal_policy: str,
+    temporal_slot: str,
+    slot: Mapping[str, Any],
+    has_confirmed_yesterday_success: bool,
+) -> int:
+    if _loading_slot_is_semantic_ok(
+        source_key=source_key,
+        temporal_policy=temporal_policy,
+        temporal_slot=temporal_slot,
+        slot=slot,
+        has_confirmed_yesterday_success=has_confirmed_yesterday_success,
+    ):
+        return _activity_tone_rank("success")
+    return _activity_tone_rank(str(slot.get("tone") or slot.get("status") or "warning"))
+
+
+def _loading_slot_is_semantic_ok(
+    *,
+    source_key: str,
+    temporal_policy: str,
+    temporal_slot: str,
+    slot: Mapping[str, Any],
+    has_confirmed_yesterday_success: bool,
+) -> bool:
+    if not slot_counts_toward_source_status(
+        source_key=source_key,
+        temporal_policy=temporal_policy,
+        temporal_slot=temporal_slot,
+        slot_outcome=slot,
+        has_confirmed_yesterday_success=has_confirmed_yesterday_success,
+    ):
+        return True
+    if _loading_slot_has_confirmed_success(slot):
+        return True
+    return False
+
+
+def _loading_slot_has_confirmed_success(slot: Mapping[str, Any]) -> bool:
+    status = str(slot.get("status") or slot.get("tone") or "").strip()
+    kind = str(slot.get("kind") or "").strip().lower()
+    note = str(slot.get("note") or "").strip()
+    if status == "success":
+        return True
+    return kind == "success" and _status_note_is_latest_confirmed(note)
+
+
+def _loading_slot_reason(
+    *,
+    ok: bool,
+    source_key: str,
+    temporal_policy: str,
+    temporal_slot: str,
+    slot: Mapping[str, Any],
+    has_confirmed_yesterday_success: bool,
+) -> str:
+    if ok:
+        nonblocking_reason = source_nonblocking_slot_reason(
+            source_key=source_key,
+            temporal_policy=temporal_policy,
+            temporal_slot=temporal_slot,
+            slot_outcome=slot,
+            has_confirmed_yesterday_success=has_confirmed_yesterday_success,
+        )
+        if nonblocking_reason:
+            return nonblocking_reason
+        note = str(slot.get("note") or "")
+        if _status_note_is_latest_confirmed(note):
+            return _humanize_note(note) or "использована последняя подтверждённая версия"
+        return "Готово"
+    tone = str(slot.get("tone") or slot.get("status") or "warning")
+    return str(slot.get("reason") or _activity_reason_fallback(tone))
 
 
 def _activity_slot_matches_date_or_slot(
@@ -4449,6 +4563,8 @@ def _note_requires_warning(note: str) -> bool:
     normalized = str(note or "").strip()
     if not normalized:
         return False
+    if _status_note_is_latest_confirmed(normalized):
+        return False
     success_markers = {
         "resolution_rule=accepted_closed_current_attempt",
         "resolution_rule=accepted_current_current_attempt",
@@ -4464,6 +4580,31 @@ def _note_requires_warning(note: str) -> bool:
         "resolution_rule=accepted_prior_current_runtime_cache",
     }
     return any(marker in normalized for marker in warning_markers)
+
+
+def _status_note_is_latest_confirmed(note: str) -> bool:
+    normalized = str(note or "").strip().lower()
+    if not normalized:
+        return False
+    latest_confirmed_tokens = (
+        "latest_confirmed",
+        "fallback",
+        "runtime_cache",
+        "accepted_closed_runtime_snapshot",
+        "accepted_current_runtime_snapshot",
+        "accepted_closed_from_prior_current_snapshot",
+        "accepted_closed_from_prior_current_cache",
+        "accepted_prior_current_runtime_cache",
+        "exact_date_provisional_runtime_cache",
+        "accepted_closed_from_interval_replay",
+        "accepted_current_from_prior",
+        "accepted_closed_preserved_after_invalid_attempt",
+        "accepted_current_preserved_after_invalid_attempt",
+        "exact_date_stocks_history_runtime_cache",
+        "exact_date_promo_current_runtime_cache",
+        "exact_date_runtime_cache",
+    )
+    return any(token in normalized for token in latest_confirmed_tokens)
 
 
 def _worst_tone(statuses: Iterable[str]) -> str:
