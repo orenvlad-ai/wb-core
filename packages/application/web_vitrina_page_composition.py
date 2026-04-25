@@ -462,6 +462,7 @@ def _normalize_loading_table(value: Any, *, upload_summary: Mapping[str, Any]) -
         ),
         "columns": columns,
         "rows": rows,
+        "source_status_state": str(payload.get("source_status_state") or ("loaded" if rows else "empty")),
         "empty_message": str(
             payload.get("empty_message")
             or upload_summary.get("empty_message")

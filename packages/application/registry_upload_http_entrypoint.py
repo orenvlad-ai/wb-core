@@ -620,6 +620,7 @@ class RegistryUploadHttpEntrypoint:
         as_of_date: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
+        include_source_status: bool = False,
     ) -> dict[str, Any]:
         effective_as_of_date = as_of_date or default_business_as_of_date(self.now_factory())
         available_snapshot_dates = self.web_vitrina_block.list_readable_dates(descending=True)
@@ -648,21 +649,27 @@ class RegistryUploadHttpEntrypoint:
                 selected_date_to=date_to,
             )
 
-        activity_surface = _empty_web_vitrina_activity_surface()
-        try:
-            activity_surface = self._build_web_vitrina_activity_surface(
-                snapshot_as_of_date=str(contract.meta.as_of_date),
-                snapshot_id=str(contract.meta.snapshot_id),
-                refreshed_at=str(contract.meta.refreshed_at),
-                read_model=str(contract.status_summary.read_model),
-                job_path=job_path,
-            )
-        except Exception as exc:  # pragma: no cover - bounded fallback
-            activity_surface = _empty_web_vitrina_activity_surface(
-                log_message=f"activity surface unavailable: {exc}",
-                upload_message=f"upload summary unavailable: {exc}",
-                update_message=f"update summary unavailable: {exc}",
-            )
+        activity_surface = _web_vitrina_source_status_not_loaded_activity_surface(
+            snapshot_as_of_date=str(contract.meta.as_of_date),
+            snapshot_id=str(contract.meta.snapshot_id),
+            refreshed_at=str(contract.meta.refreshed_at),
+            read_model=str(contract.status_summary.read_model),
+        )
+        if include_source_status:
+            try:
+                activity_surface = self._build_web_vitrina_activity_surface(
+                    snapshot_as_of_date=str(contract.meta.as_of_date),
+                    snapshot_id=str(contract.meta.snapshot_id),
+                    refreshed_at=str(contract.meta.refreshed_at),
+                    read_model=str(contract.status_summary.read_model),
+                    job_path=job_path,
+                )
+            except Exception as exc:  # pragma: no cover - bounded fallback
+                activity_surface = _empty_web_vitrina_activity_surface(
+                    log_message=f"activity surface unavailable: {exc}",
+                    upload_message=f"upload summary unavailable: {exc}",
+                    update_message=f"update summary unavailable: {exc}",
+                )
 
         return build_web_vitrina_page_composition(
             contract=contract,
@@ -3649,6 +3656,54 @@ def _empty_web_vitrina_activity_surface(
     }
 
 
+def _web_vitrina_source_status_not_loaded_activity_surface(
+    *,
+    snapshot_as_of_date: str,
+    snapshot_id: str,
+    refreshed_at: str,
+    read_model: str,
+) -> dict[str, Any]:
+    current_business_date = current_business_date_iso()
+    previous_business_date = default_business_as_of_date()
+    return {
+        "log_block": {
+            "title": "Лог",
+            "subtitle": "Лог не загружается вместе с первичным открытием страницы",
+            "status_label": "Не загружено",
+            "tone": "neutral",
+            "detail": f"snapshot {snapshot_id} · as_of_date {snapshot_as_of_date} · {read_model}",
+            "preview_lines": [],
+            "line_count": 0,
+            "download_path": "",
+            "log_filename": "",
+            "empty_message": "Нажмите «Загрузить» в блоке «Загрузка данных», чтобы прочитать source-status details и лог.",
+        },
+        "upload_summary": {
+            "title": "Загрузка данных",
+            "subtitle": "Статусы источников не загружены.",
+            "detail": f"snapshot {snapshot_id} · as_of_date {snapshot_as_of_date} · {read_model}",
+            "updated_at": refreshed_at,
+            "items": [],
+            "empty_message": "Статусы источников не загружены. Нажмите «Загрузить», чтобы посмотреть детали.",
+        },
+        "loading_table": {
+            "title": "Загрузка данных",
+            "subtitle": "Статусы источников не загружены.",
+            "detail": f"snapshot {snapshot_id} · as_of_date {snapshot_as_of_date} · {read_model}",
+            "updated_at": refreshed_at,
+            "today_date": current_business_date,
+            "yesterday_date": previous_business_date,
+            "available_dates": [],
+            "default_refresh_date": "",
+            "groups": [],
+            "columns": [],
+            "rows": [],
+            "source_status_state": "not_loaded",
+            "empty_message": "Статусы источников не загружены. Нажмите «Загрузить», чтобы посмотреть детали.",
+        },
+    }
+
+
 def _build_web_vitrina_log_block(
     *,
     latest_job: Mapping[str, Any] | None,
@@ -3840,9 +3895,10 @@ def _build_web_vitrina_loading_table(
             yesterday_date=yesterday_date,
         ),
         "rows": rows,
+        "source_status_state": "loaded" if rows else "empty",
         "empty_message": str(
             upload_summary.get("empty_message")
-            or "Статусы по источникам пока недоступны."
+            or "Status payload не содержит source rows для текущего среза. Повторите загрузку или смотрите лог."
         ),
     }
 
