@@ -665,7 +665,7 @@ def _sum_snapshot_metric(
     result_kinds: set[str],
     field_name: str,
 ) -> float:
-    result = _get_attr(payload, "result")
+    result = _get_temporal_snapshot_result(payload)
     kind = str(_get_attr(result, "kind", "") or "").strip()
     snapshot_date = str(_get_attr(result, "snapshot_date", "") or "").strip()
     if kind not in result_kinds:
@@ -684,6 +684,13 @@ def _sum_snapshot_metric(
             continue
         total += float(_get_numeric_attr(item, field_name, default=0.0))
     return total
+
+
+def _get_temporal_snapshot_result(payload: Any) -> Any:
+    wrapped_result = _get_attr(payload, "result")
+    if wrapped_result is not None:
+        return wrapped_result
+    return payload
 
 
 def _get_attr(value: Any, field_name: str, default: Any = None) -> Any:
