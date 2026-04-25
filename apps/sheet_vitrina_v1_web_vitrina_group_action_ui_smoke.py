@@ -57,7 +57,7 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
                 )
 
             context.route(
-                "**/v1/sheet-vitrina-v1/web-vitrina?surface=page_composition*",
+                "**/v1/sheet-vitrina-v1/web-vitrina*",
                 empty_loading_rows,
             )
             page = context.new_page()

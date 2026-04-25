@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, is_dataclass
 from typing import Any, Mapping
 
+from packages.business_time import CANONICAL_BUSINESS_TIMEZONE_NAME
 from packages.contracts.web_vitrina_contract import WebVitrinaContractV1
 from packages.contracts.web_vitrina_gravity_table_adapter import WebVitrinaGravityTableAdapterV1
 from packages.contracts.web_vitrina_view_model import WebVitrinaViewModelV1
@@ -45,6 +46,7 @@ def build_web_vitrina_page_composition(
     group_counts = _count_rows(rows, key="group_id")
     row_kind_counts = _count_rows(rows, key="row_kind")
     metric_counts = _count_metric_rows(rows)
+    time_model = _build_time_model(contract_payload)
     column_labels = {
         str(column["id"]): str(column["header"])
         for column in columns
@@ -64,6 +66,14 @@ def build_web_vitrina_page_composition(
             "operator_route": operator_route,
             "snapshot_id": str(contract_payload["meta"]["snapshot_id"]),
             "as_of_date": str(contract_payload["meta"]["as_of_date"]),
+            "snapshot_as_of_date": time_model["snapshot_as_of_date"],
+            "yesterday_closed_date": time_model["yesterday_closed_date"],
+            "today_current_date": time_model["today_current_date"],
+            "visible_date_columns": list(time_model["visible_date_columns"]),
+            "server_now": time_model["server_now"],
+            "server_now_business_tz": time_model["server_now_business_tz"],
+            "generated_at": time_model["generated_at"],
+            "time_model": time_model,
             "business_timezone": str(contract_payload["meta"]["business_timezone"]),
             "current_state": current_state,
             "state_message": _resolve_ready_state_message(adapter_payload),
@@ -199,6 +209,10 @@ def build_web_vitrina_page_error_composition(
     selected_date_to: str | None,
     activity_surface: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    time_model = _build_error_time_model(
+        as_of_date=as_of_date,
+        default_as_of_date=default_as_of_date,
+    )
     return {
         "composition_name": WEB_VITRINA_PAGE_COMPOSITION_NAME,
         "composition_version": WEB_VITRINA_PAGE_COMPOSITION_VERSION,
@@ -209,7 +223,15 @@ def build_web_vitrina_page_error_composition(
             "operator_route": operator_route,
             "snapshot_id": "",
             "as_of_date": as_of_date,
-            "business_timezone": "",
+            "snapshot_as_of_date": time_model["snapshot_as_of_date"],
+            "yesterday_closed_date": time_model["yesterday_closed_date"],
+            "today_current_date": time_model["today_current_date"],
+            "visible_date_columns": list(time_model["visible_date_columns"]),
+            "server_now": "",
+            "server_now_business_tz": "",
+            "generated_at": "",
+            "time_model": time_model,
+            "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
             "current_state": "error",
             "state_message": error_message,
             "source_contract_name": "web_vitrina_contract",
@@ -304,6 +326,56 @@ def _to_payload(value: Any) -> dict[str, Any]:
     if is_dataclass(value):
         return asdict(value)
     raise TypeError(f"unsupported web_vitrina page payload input: {type(value)!r}")
+
+
+def _build_time_model(contract_payload: Mapping[str, Any]) -> dict[str, Any]:
+    meta = dict(contract_payload.get("meta") or {})
+    status_summary = dict(contract_payload.get("status_summary") or {})
+    snapshot_as_of_date = str(meta.get("as_of_date") or "")
+    date_columns = [str(item) for item in (meta.get("date_columns") or []) if str(item)]
+    temporal_slots = [
+        dict(item)
+        for item in (meta.get("temporal_slots") or [])
+        if isinstance(item, Mapping)
+    ]
+    yesterday_closed_date = (
+        _temporal_slot_date(temporal_slots, "yesterday_closed")
+        or snapshot_as_of_date
+    )
+    today_current_date = _temporal_slot_date(temporal_slots, "today_current")
+    if not today_current_date and len(date_columns) >= 2 and date_columns[-1] != yesterday_closed_date:
+        today_current_date = date_columns[-1]
+    return {
+        "business_timezone": str(meta.get("business_timezone") or CANONICAL_BUSINESS_TIMEZONE_NAME),
+        "snapshot_as_of_date": snapshot_as_of_date,
+        "yesterday_closed_date": yesterday_closed_date,
+        "today_current_date": today_current_date,
+        "visible_date_columns": date_columns,
+        "server_now": str(meta.get("generated_at") or ""),
+        "server_now_business_tz": str(status_summary.get("business_now") or ""),
+        "generated_at": str(meta.get("generated_at") or ""),
+    }
+
+
+def _build_error_time_model(*, as_of_date: str, default_as_of_date: str) -> dict[str, Any]:
+    snapshot_as_of_date = str(as_of_date or default_as_of_date or "")
+    return {
+        "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
+        "snapshot_as_of_date": snapshot_as_of_date,
+        "yesterday_closed_date": snapshot_as_of_date,
+        "today_current_date": "",
+        "visible_date_columns": [snapshot_as_of_date] if snapshot_as_of_date else [],
+        "server_now": "",
+        "server_now_business_tz": "",
+        "generated_at": "",
+    }
+
+
+def _temporal_slot_date(temporal_slots: list[Mapping[str, Any]], slot_key: str) -> str:
+    for slot in temporal_slots:
+        if str(slot.get("slot_key") or "") == slot_key:
+            return str(slot.get("column_date") or "")
+    return ""
 
 
 def _count_rows(rows: list[Mapping[str, Any]], *, key: str) -> dict[str, int]:

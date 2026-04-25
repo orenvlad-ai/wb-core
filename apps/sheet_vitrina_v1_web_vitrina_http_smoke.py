@@ -149,6 +149,21 @@ def main() -> None:
                 raise AssertionError(f"web-vitrina page composition state mismatch, got {composition_payload}")
             if composition_payload.get("table_surface", {}).get("total_row_count") != 4:
                 raise AssertionError(f"web-vitrina page composition row count mismatch, got {composition_payload}")
+            composition_meta = composition_payload.get("meta", {})
+            for required_meta_key in (
+                "snapshot_as_of_date",
+                "yesterday_closed_date",
+                "today_current_date",
+                "visible_date_columns",
+                "server_now_business_tz",
+                "time_model",
+            ):
+                if required_meta_key not in composition_meta:
+                    raise AssertionError(f"web-vitrina page composition missing time-model meta {required_meta_key!r}: {composition_meta}")
+            if composition_meta.get("snapshot_as_of_date") != composition_meta.get("as_of_date"):
+                raise AssertionError(f"snapshot_as_of_date must mirror visible ready snapshot key, got {composition_meta}")
+            if composition_meta.get("business_timezone") != "Asia/Yekaterinburg":
+                raise AssertionError(f"business timezone mismatch in page time model, got {composition_meta}")
             historical_access = composition_payload.get("historical_access") or {}
             if historical_access.get("current_mode") != "default":
                 raise AssertionError(f"web-vitrina historical selector mode mismatch, got {composition_payload}")
@@ -184,6 +199,19 @@ def main() -> None:
             )
             if details_status != 200:
                 raise AssertionError(f"web-vitrina source status details route must return 200, got {details_status}")
+
+            missing_status, missing_payload = _get_json(
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&include_source_status=1&as_of_date=2099-01-01"
+            )
+            if missing_status != 200:
+                raise AssertionError(f"web-vitrina missing source-status snapshot must return page payload, got {missing_status}")
+            missing_loading_table = (missing_payload.get("activity_surface") or {}).get("loading_table") or {}
+            if missing_loading_table.get("source_status_state") != "missing_snapshot":
+                raise AssertionError(f"missing snapshot must be first-class source-status state, got {missing_payload}")
+            if missing_loading_table.get("rows") or missing_loading_table.get("groups"):
+                raise AssertionError(f"missing snapshot must not render fake group shells, got {missing_loading_table}")
+            if "Снимок за 01.01.2099 не подготовлен" not in str(missing_loading_table.get("empty_message") or ""):
+                raise AssertionError(f"missing snapshot message mismatch, got {missing_loading_table}")
 
             period_composition_status, period_composition_payload = _get_json(
                 f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&date_from=2026-04-18&date_to=2026-04-20"
