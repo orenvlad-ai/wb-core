@@ -388,6 +388,43 @@ def run_browser_checks(
             }
             if not all(filter_controls.values()):
                 raise AssertionError(f"missing filter controls: {filter_controls}")
+            table_toolbar = page.evaluate(
+                """() => {
+                  const toolbar = document.querySelector('[data-table-toolbar]');
+                  const tableShell = document.querySelector('[data-table-shell]');
+                  const labels = toolbar ? Array.from(toolbar.querySelectorAll('.filter-label')).map((node) => (node.textContent || '').trim()).filter(Boolean) : [];
+                  const rect = toolbar ? toolbar.getBoundingClientRect() : {height: 0};
+                  const beforeTable = !!toolbar && !!tableShell && !!(toolbar.compareDocumentPosition(tableShell) & Node.DOCUMENT_POSITION_FOLLOWING);
+                  return {
+                    exists: !!toolbar,
+                    beforeTable: beforeTable,
+                    labels: labels,
+                    height: Math.round(rect.height),
+                    oldHeadingCount: Array.from(document.querySelectorAll('h2')).filter((node) => (node.textContent || '').trim() === 'Фильтры и настройки').length,
+                    oldPanelTextVisible: (document.body.innerText || '').includes('Search/select/sort и выбор видимых столбцов'),
+                    oldResetTextVisible: (document.body.innerText || '').includes('Сбросить фильтры'),
+                    columnManagerCount: document.querySelectorAll('[data-column-manager]').length,
+                    columnResetCount: document.querySelectorAll('[data-columns-reset]').length
+                  };
+                }"""
+            )
+            expected_toolbar_labels = {"Диапазон", "Поиск", "Секции", "Группа", "Scope", "Метрики", "Столбцы", "Сортировка"}
+            missing_toolbar_labels = expected_toolbar_labels.difference(set(table_toolbar["labels"]))
+            if (
+                not table_toolbar["exists"]
+                or not table_toolbar["beforeTable"]
+                or table_toolbar["oldHeadingCount"]
+                or table_toolbar["oldPanelTextVisible"]
+                or table_toolbar["oldResetTextVisible"]
+                or table_toolbar["columnManagerCount"] != 1
+                or table_toolbar["columnResetCount"] != 1
+                or missing_toolbar_labels
+            ):
+                raise AssertionError(
+                    f"table controls must live in one compact toolbar above the table, got {table_toolbar}, missing={missing_toolbar_labels}"
+                )
+            if table_toolbar["height"] > 130:
+                raise AssertionError(f"table toolbar must stay compact, got {table_toolbar}")
             compact_widths = _measure_compact_widths(page, strict=expected_percent_rows is not None)
             percent_formatting = _check_percent_formatting(page, expected_rows=expected_percent_rows)
             load_refresh_action = (
@@ -532,6 +569,7 @@ def run_browser_checks(
         "sku_separators": sku_separators,
         "right_edge_spacer": right_edge_spacer,
         "filter_controls": filter_controls,
+        "table_toolbar": table_toolbar,
         "status_summary": status_summary,
         "summary_cards": initial_summary_cards,
         "activity_surface": initial_activity_surface,
@@ -602,6 +640,8 @@ def _print_summary(result: dict[str, object]) -> None:
     print("web_vitrina_browser_default_total_first: ok ->", result["default_total_first"])
     print("web_vitrina_browser_default_sku_metric_cluster: ok ->", result["default_sku_metric_cluster"])
     print("web_vitrina_browser_filters: ok ->", result["filter_controls"])
+    if "table_toolbar" in result:
+        print("web_vitrina_browser_table_toolbar: ok ->", result["table_toolbar"])
     print("web_vitrina_browser_metric_filter: ok ->", result["metric_filter_applied"])
     print("web_vitrina_browser_empty_state: ok ->", result["empty_state_after_search"])
     print("web_vitrina_browser_reset: ok ->", result["reset_restores_table"])
@@ -711,6 +751,7 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
             order: {
               top: nodeIndex('[data-top-panel]'),
               summary: nodeIndex('[data-summary-grid]'),
+              toolbar: nodeIndex('[data-table-toolbar]'),
               history: nodeIndex('[data-history-panel]'),
               table: nodeIndex('[data-table-shell]'),
               filters: nodeIndex('[data-filter-controls]'),
@@ -738,9 +779,11 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
         if expected not in payload["headers"]:
             raise AssertionError(f"main table must expose header {expected!r}, got {payload['headers']}")
     order_values = payload["order"]
-    expected_order = [order_values[key] for key in ("top", "summary", "history", "table", "filters", "actions")]
+    expected_order = [order_values[key] for key in ("top", "summary", "toolbar", "table", "actions")]
     if any(value < 0 for value in expected_order) or expected_order != sorted(expected_order):
         raise AssertionError(f"web-vitrina blocks must follow the operator screen order, got {payload}")
+    if order_values["history"] != order_values["toolbar"] or order_values["filters"] != order_values["toolbar"]:
+        raise AssertionError(f"history and filters must share the compact table toolbar, got {payload}")
     return payload
 
 
