@@ -26,6 +26,7 @@ related_tables:
   - "temporal_source_snapshots"
   - "temporal_source_slot_snapshots"
   - "temporal_source_closure_state"
+  - "sheet_vitrina_v1_plan_report_monthly_baseline"
   - "sheet_vitrina_v1_factory_order_dataset_state"
   - "sheet_vitrina_v1_factory_order_result_state"
 related_endpoints: []
@@ -40,7 +41,7 @@ related_docs:
   - "migration/89_registry_upload_db_backed_runtime.md"
   - "docs/modules/21_MODULE__REGISTRY_UPLOAD_FILE_BACKED_SERVICE_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current temporal closure seam: SQLite-backed runtime теперь materialize-ит не только current registry state и version history, но и role-aware temporal slot snapshots plus persisted closure retry state для strict `yesterday_closed + today_current` truth, alongside operator-side factory-order dataset/result state."
+update_note: "Обновлён под current temporal closure seam and plan-report baseline: SQLite-backed runtime теперь materialize-ит current registry state/version history, role-aware temporal slot snapshots, persisted closure retry state, operator-side factory-order dataset/result state and a separate manual monthly baseline table used only by the plan-report."
 ---
 
 # 1. Идентификатор и статус
@@ -87,6 +88,11 @@ update_note: "Обновлён под current temporal closure seam: SQLite-back
     - `closed_day_candidate_snapshot`
     - `accepted_closed_day_snapshot`
   - persisted closure retry state в `temporal_source_closure_state` с `source_key / target_date / slot_kind / attempt_count / next_retry_at / state / last_reason / accepted_at`;
+  - separate plan-report manual monthly baseline в `sheet_vitrina_v1_plan_report_monthly_baseline`:
+    - key = `month` в формате `YYYY-MM`;
+    - fact fields = `fin_buyout_rub`, `ads_sum`;
+    - metadata = `uploaded_at`, `source_kind=manual_monthly_plan_report_baseline`, uploaded filename/content-type, workbook checksum, optional note;
+    - baseline не подменяет `accepted_closed_day_snapshot` и используется только расчётом `GET /v1/sheet-vitrina-v1/plan-report`;
   - operator-side uploaded workbook state для factory-order datasets;
   - last successful factory-order result state.
 - Для current factory-order seam `temporal_source_snapshots[source_key=sales_funnel_history]` является authoritative server-side storage contract для persisted `orderCount` history:
@@ -162,6 +168,10 @@ update_note: "Обновлён под current temporal closure seam: SQLite-back
 - Тот же runtime слой теперь достаточно выразителен и для historical stocks truth:
   - `stocks` exact-date success payload хранится в общем `temporal_source_snapshots` без нового отдельного storage contour;
   - live refresh может читать этот cache runtime-first и не refetch-ить historical CSV при уже materialized snapshot.
+- Тот же runtime слой теперь содержит bounded operator-owned manual monthly baseline для `Выполнение плана`:
+  - агрегаты Jan/Feb и последующих недостающих полных месяцев могут быть загружены XLSX-файлом в отдельную таблицу;
+  - daily accepted snapshots остаются приоритетным source по дням;
+  - baseline не становится general-purpose historical backfill и не доступен другим отчётам.
 
 # 8. Что пока не является частью финальной production-сборки
 

@@ -39,6 +39,8 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_LOAD_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
+    DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH,
+    DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH,
     DEFAULT_SHEET_PLAN_REPORT_PATH,
     DEFAULT_SHEET_REFRESH_PATH,
     DEFAULT_SHEET_STOCK_REPORT_PATH,
@@ -275,6 +277,12 @@ def collect_public_surface(
             timeout_seconds=timeout_seconds,
         ),
         _collect_http_probe(
+            name="operator_reports",
+            method="GET",
+            url=f"{base_url}{route_paths['SHEET_VITRINA_OPERATOR_UI_PATH']}?embedded_tab=reports",
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
             name="web_vitrina_page",
             method="GET",
             url=f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}",
@@ -347,6 +355,18 @@ def collect_public_surface(
                 f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_PATH}",
                 _build_plan_report_probe_params(as_of_date),
             ),
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
+            name="plan_report_baseline_status",
+            method="GET",
+            url=f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH}",
+            timeout_seconds=timeout_seconds,
+        ),
+        _collect_http_probe(
+            name="plan_report_baseline_template",
+            method="GET",
+            url=f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH}",
             timeout_seconds=timeout_seconds,
         ),
         _collect_http_probe(
@@ -761,74 +781,24 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
     if route == "operator":
         body = str(result.get("body_excerpt", ""))
         tokens = [
-            "Обновление данных",
-            "Ручная загрузка данных",
-            "Загрузить данные",
-            "Legacy Google Sheets",
-            "архивирован",
-            "Скачать лог",
-            "Отчёты",
-            "Расчёт поставок",
-            "Общий вход для двух расчётов",
-            "Заказ на фабрике",
-            "Поставка на Wildberries",
-            "Скачать шаблон остатков ФФ",
-            "Скачать шаблон товаров в пути от фабрики",
-            "Скачать шаблон товаров в пути от ФФ на Wildberries",
-            "Рассчитать заказ на фабрике",
-            "Скачать рекомендацию",
-            "Рассчитать поставку на Wildberries",
-            "Сводка по федеральным округам",
-            "XLSX по округам",
-            "Цикл заказов, дней",
-            "Цикл поставок, дней",
-            "Автообновления",
-            "Ежедневные отчёты",
-            "Отчёт по остаткам",
-            "Выполнение плана",
-            "SKU",
-            "Рассчитать",
-            "planReportApplyButton",
-            "Выберите хотя бы один SKU",
-            "Проверка и восстановление Seller-сессии",
+            "Web-витрина",
+            "Витрина",
+            "Расчет поставок",
+            "Отчеты",
+            "Загрузить и обновить",
+            "Загрузка данных",
+            "Действия и состояния",
             "Проверить сессию",
             "Восстановить сессию",
-            "Скачать launcher для Mac",
-            "Остановить восстановление",
-            "Текущий запуск",
-            "Финал запуска",
-            "Статус сессии",
-            "wb-core:sheet-vitrina-v1:operator-ui-state:v1",
-            "window.localStorage",
-            "Негативные факторы",
-            "Позитивные факторы",
-            DEFAULT_SHEET_DAILY_REPORT_PATH,
-            DEFAULT_SHEET_STOCK_REPORT_PATH,
-            DEFAULT_SHEET_PLAN_REPORT_PATH,
-            DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
-            DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
-            DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
-            DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH,
-            DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
-            'data-report-section-button="daily"',
-            'data-report-section-button="stock"',
-            'data-report-section-button="plan"',
-            'id="dailyReportPeriod"',
-            'id="stockReportPeriod"',
-            'id="planReportPeriodSelect"',
-            'id="stockReportSkuSelector"',
-            'id="stockReportApplyButton"',
-            "Часовой пояс",
-            "Автоцепочка",
-            "Последний автозапуск",
-            "Статус последнего автозапуска",
-            "Последнее успешное автообновление",
-            "Лог",
-            "Последняя удачная загрузка",
-            "Legacy Google Sheets",
+            "Скачать лаунчер",
+            'data-unified-tab-button="vitrina"',
+            'data-unified-tab-button="factory-order"',
+            'data-unified-tab-button="reports"',
+            'data-operator-embed-frame="factory-order"',
+            'data-operator-embed-frame="reports"',
+            DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+            "surface=page_composition",
             route_paths["SHEET_VITRINA_REFRESH_HTTP_PATH"],
-            route_paths["SHEET_VITRINA_STATUS_HTTP_PATH"],
-            DEFAULT_SHEET_LOAD_PATH,
             DEFAULT_SHEET_JOB_PATH,
         ]
         missing_tokens = [token for token in tokens if token not in body]
@@ -844,6 +814,37 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "operator page shape ok"
             if evaluation["ok"]
             else f"expected 200 text/html with operator tokens, missing={missing_tokens}, forbidden={present_forbidden}"
+        )
+        return evaluation
+
+    if route == "operator_reports":
+        body = str(result.get("body_excerpt", ""))
+        tokens = [
+            "Отчёты",
+            "Ежедневные отчёты",
+            "Отчёт по остаткам",
+            "Выполнение плана",
+            "Исторические данные для отчёта",
+            "planReportApplyButton",
+            "planReportBaselineTemplateButton",
+            "planReportBaselineFileInput",
+            "planReportBaselineStatus",
+            DEFAULT_SHEET_DAILY_REPORT_PATH,
+            DEFAULT_SHEET_STOCK_REPORT_PATH,
+            DEFAULT_SHEET_PLAN_REPORT_PATH,
+            DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH,
+            DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH,
+            'data-report-section-button="daily"',
+            'data-report-section-button="stock"',
+            'data-report-section-button="plan"',
+            'data-report-section-panel="plan"',
+        ]
+        missing_tokens = [token for token in tokens if token not in body]
+        evaluation["ok"] = status == 200 and "text/html" in content_type and not missing_tokens
+        evaluation["detail"] = (
+            "operator reports embedded panel ok"
+            if evaluation["ok"]
+            else f"expected 200 text/html with reports/baseline tokens, missing={missing_tokens}"
         )
         return evaluation
 
@@ -872,7 +873,6 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         body = str(result.get("body_excerpt", ""))
         tokens = [
             "Web-витрина",
-            "Операторский сайт",
             "Загрузить и обновить",
             DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
             route_paths["SHEET_VITRINA_OPERATOR_UI_PATH"],
@@ -919,6 +919,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         "factory_order_template_stock_ff",
         "factory_order_template_inbound_factory",
         "factory_order_template_inbound_ff_to_wb",
+        "plan_report_baseline_template",
     }:
         if route == "web_vitrina_page_composition":
             json_body = result.get("json_body") or {}
@@ -938,10 +939,11 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             )
             return evaluation
         evaluation["ok"] = status == 200 and "spreadsheetml.sheet" in content_type
+        label = "plan-report baseline template" if route == "plan_report_baseline_template" else "factory-order template"
         evaluation["detail"] = (
-            "factory-order template download route ok"
+            f"{label} download route ok"
             if evaluation["ok"]
-            else "expected 200 XLSX response for factory-order template route"
+            else f"expected 200 XLSX response for {label} route"
         )
         return evaluation
 
@@ -1063,6 +1065,30 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
                 "periods",
                 "notes",
             ],
+        )
+        return evaluation
+
+    if route == "plan_report_baseline_status":
+        evaluation["ok"], evaluation["detail"] = _validate_json_result(
+            status,
+            payload,
+            success_keys=[
+                "status",
+                "source_kind",
+                "row_count",
+                "months",
+                "totals",
+                "warning",
+            ],
+        )
+        return evaluation
+
+    if route == "plan_report_baseline_template":
+        evaluation["ok"] = status == 200 and "spreadsheetml.sheet" in content_type
+        evaluation["detail"] = (
+            "plan-report baseline template route ok"
+            if evaluation["ok"]
+            else "expected 200 XLSX plan-report baseline template route"
         )
         return evaluation
 
@@ -1370,6 +1396,7 @@ def _collect(name, method, url, json_payload=None):
 
 results = [
     _collect("operator", "GET", PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_OPERATOR_UI_PATH"]),
+    _collect("operator_reports", "GET", PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_OPERATOR_UI_PATH"] + "?embedded_tab=reports"),
     _collect("web_vitrina_page", "GET", PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_UI_PATH!r}),
     _collect("load_route", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/load"),
     _collect("job", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/job?job_id=hosted_runtime_probe"),
@@ -1380,6 +1407,8 @@ results = [
     _collect("daily_report", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/daily-report"),
     _collect("stock_report", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/stock-report"),
     _collect("plan_report", "GET", _append_query_params(PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/plan-report", _plan_report_params(PAYLOAD["as_of_date"]))),
+    _collect("plan_report_baseline_status", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/plan-report/baseline-status"),
+    _collect("plan_report_baseline_template", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx"),
     _collect("plan", "GET", _append_as_of_date(PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_HTTP_PATH"], PAYLOAD["as_of_date"])),
     _collect("factory_order_status", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/status"),
     _collect("factory_order_template_stock_ff", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"),

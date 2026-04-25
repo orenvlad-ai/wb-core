@@ -559,6 +559,25 @@ class RegistryUploadHttpEntrypoint:
             as_of_date=as_of_date,
         )
 
+    def handle_sheet_plan_report_baseline_template_request(self) -> tuple[bytes, str]:
+        return self.plan_report_block.build_baseline_template()
+
+    def handle_sheet_plan_report_baseline_status_request(self) -> dict[str, Any]:
+        return self.plan_report_block.build_baseline_status()
+
+    def handle_sheet_plan_report_baseline_upload_request(
+        self,
+        workbook_bytes: bytes,
+        *,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+    ) -> dict[str, Any]:
+        return self.plan_report_block.upload_baseline(
+            workbook_bytes,
+            uploaded_filename=uploaded_filename,
+            uploaded_content_type=uploaded_content_type,
+        )
+
     def handle_sheet_web_vitrina_request(
         self,
         *,

@@ -13,7 +13,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
-from packages.application.sheet_vitrina_v1_plan_report import SheetVitrinaV1PlanReportBlock
+from packages.application.sheet_vitrina_v1_plan_report import (
+    BASELINE_TEMPLATE_HEADERS,
+    MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
+    SheetVitrinaV1PlanReportBlock,
+)
+from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
 
 BUNDLE_FIXTURE = (
     ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
@@ -182,12 +187,160 @@ def main() -> None:
         if empty_payload.get("status") != "unavailable":
             raise AssertionError(f"plan report must be unavailable when no usable snapshots exist, got {empty_payload}")
 
+        partial_runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "daily-from-march")
+        partial_result = partial_runtime.ingest_bundle(bundle, activated_at="2026-04-21T01:00:00Z")
+        if partial_result.status != "accepted":
+            raise AssertionError(f"partial runtime bundle ingest must be accepted, got {partial_result}")
+        _seed_daily_snapshots(
+            partial_runtime,
+            primary_nm_id=primary_nm_id,
+            date_from=date(2026, 3, 1),
+            date_to=date.fromisoformat(REFERENCE_DATE),
+        )
+        partial_block = SheetVitrinaV1PlanReportBlock(runtime=partial_runtime, now_factory=lambda: NOW)
+        partial_payload = partial_block.build(
+            period="last_30_days",
+            q1_buyout_plan_rub=90000.0,
+            q2_buyout_plan_rub=182000.0,
+            q3_buyout_plan_rub=273000.0,
+            q4_buyout_plan_rub=365000.0,
+            plan_drr_pct=10.0,
+            as_of_date=REFERENCE_DATE,
+        )
+        partial_selected = partial_payload["periods"]["selected_period"]
+        partial_ytd = partial_payload["periods"]["year_to_date"]
+        if partial_payload.get("status") != "partial":
+            raise AssertionError(f"global YTD gaps may make top-level status partial, got {partial_payload}")
+        if partial_selected.get("status") != "available":
+            raise AssertionError(f"selected period must stay available despite missing Jan/Feb YTD, got {partial_payload}")
+        if partial_ytd.get("status") != "partial":
+            raise AssertionError(f"YTD must disclose missing Jan/Feb without baseline, got {partial_payload}")
+        _assert_close(partial_selected["metrics"]["buyout_rub"]["fact"], 45000.0, "partial selected buyout fact")
+
+        partial_runtime.save_plan_report_monthly_baseline(
+            rows=[
+                {"month": "2026-01", "fin_buyout_rub": 31000.0, "ads_sum": 3100.0},
+                {"month": "2026-02", "fin_buyout_rub": 28000.0, "ads_sum": 2800.0},
+            ],
+            uploaded_at="2026-04-21T01:00:00Z",
+            source_kind=MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
+            uploaded_filename="baseline.xlsx",
+            uploaded_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            workbook_checksum="test-checksum",
+        )
+        mixed_payload = partial_block.build(
+            period="current_year",
+            q1_buyout_plan_rub=90000.0,
+            q2_buyout_plan_rub=182000.0,
+            q3_buyout_plan_rub=273000.0,
+            q4_buyout_plan_rub=365000.0,
+            plan_drr_pct=10.0,
+            as_of_date=REFERENCE_DATE,
+        )
+        mixed_ytd = mixed_payload["periods"]["year_to_date"]
+        if mixed_ytd.get("status") != "available":
+            raise AssertionError(f"YTD must become available after Jan/Feb baseline plus March+ daily, got {mixed_payload}")
+        source_mix = mixed_ytd.get("source_mix") or {}
+        baseline_mix = source_mix.get("manual_monthly_plan_report_baseline") or {}
+        daily_mix = source_mix.get("daily_accepted_snapshots") or {}
+        if baseline_mix.get("months") != ["2026-01", "2026-02"] or daily_mix.get("day_count") != 51:
+            raise AssertionError(f"mixed YTD source mix must disclose Jan/Feb baseline and March+ daily, got {mixed_payload}")
+        _assert_close(mixed_ytd["metrics"]["buyout_rub"]["fact"], 135500.0, "mixed ytd buyout fact")
+        _assert_close(mixed_ytd["metrics"]["ads_sum_rub"]["fact"], 15080.0, "mixed ytd ads fact")
+        _assert_close(mixed_ytd["metrics"]["ads_sum_rub"]["plan"], 13000.0, "mixed ytd ads plan")
+        _assert_close(mixed_ytd["metrics"]["drr_pct"]["fact"], 15080.0 / 135500.0 * 100.0, "mixed ytd drr fact")
+
+        no_double_runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "no-double-count")
+        no_double_result = no_double_runtime.ingest_bundle(bundle, activated_at="2026-04-21T01:00:00Z")
+        if no_double_result.status != "accepted":
+            raise AssertionError(f"no-double runtime bundle ingest must be accepted, got {no_double_result}")
+        _seed_daily_snapshots(
+            no_double_runtime,
+            primary_nm_id=primary_nm_id,
+            date_from=date(2026, 1, 1),
+            date_to=date(2026, 1, 31),
+            buyout_rub=100.0,
+            ads_sum=10.0,
+        )
+        no_double_runtime.save_plan_report_monthly_baseline(
+            rows=[{"month": "2026-01", "fin_buyout_rub": 999999.0, "ads_sum": 99999.0}],
+            uploaded_at="2026-04-21T01:00:00Z",
+            source_kind=MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
+            uploaded_filename="baseline.xlsx",
+            uploaded_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            workbook_checksum="test-checksum",
+        )
+        no_double_payload = SheetVitrinaV1PlanReportBlock(
+            runtime=no_double_runtime,
+            now_factory=lambda: NOW,
+        ).build(
+            period="current_year",
+            q1_buyout_plan_rub=9300.0,
+            q2_buyout_plan_rub=182000.0,
+            q3_buyout_plan_rub=273000.0,
+            q4_buyout_plan_rub=365000.0,
+            plan_drr_pct=10.0,
+            as_of_date="2026-01-31",
+        )
+        no_double_ytd = no_double_payload["periods"]["year_to_date"]
+        if (no_double_ytd.get("source_mix") or {}).get("manual_monthly_plan_report_baseline", {}).get("months"):
+            raise AssertionError(f"baseline must not double-count a month with daily facts, got {no_double_payload}")
+        _assert_close(no_double_ytd["metrics"]["buyout_rub"]["fact"], 3100.0, "no-double ytd buyout fact")
+        _assert_close(no_double_ytd["metrics"]["ads_sum_rub"]["fact"], 310.0, "no-double ytd ads fact")
+
+        template_bytes, template_filename = block.build_baseline_template()
+        template_rows = read_first_sheet_rows(template_bytes)
+        if template_filename != "sheet-vitrina-v1-plan-report-baseline-template.xlsx":
+            raise AssertionError(f"baseline template filename must be stable, got {template_filename}")
+        if (
+            template_rows[0] != BASELINE_TEMPLATE_HEADERS
+            or not template_rows[1]
+            or template_rows[1][0] != "2026-01"
+            or not template_rows[2]
+            or template_rows[2][0] != "2026-02"
+        ):
+            raise AssertionError(f"baseline template must expose Russian headers and Jan/Feb rows, got {template_rows}")
+
+        xlsx_runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "baseline-xlsx")
+        xlsx_block = SheetVitrinaV1PlanReportBlock(runtime=xlsx_runtime, now_factory=lambda: NOW)
+        valid_workbook = build_single_sheet_workbook_bytes(
+            "План факт месяцы",
+            [
+                BASELINE_TEMPLATE_HEADERS,
+                ["2026-01", 31000.0, 3100.0],
+                ["2026-02", 28000.0, 2800.0],
+            ],
+        )
+        upload_payload = xlsx_block.upload_baseline(valid_workbook, uploaded_filename="baseline.xlsx")
+        if upload_payload.get("status") != "accepted" or upload_payload.get("accepted_months") != ["2026-01", "2026-02"]:
+            raise AssertionError(f"valid Jan/Feb baseline upload must be accepted, got {upload_payload}")
+        _expect_value_error(
+            lambda: xlsx_block.upload_baseline(
+                build_single_sheet_workbook_bytes("План факт месяцы", [BASELINE_TEMPLATE_HEADERS, ["2026-13", 1, 1]])
+            ),
+            "invalid month",
+        )
+        _expect_value_error(
+            lambda: xlsx_block.upload_baseline(
+                build_single_sheet_workbook_bytes("План факт месяцы", [BASELINE_TEMPLATE_HEADERS, ["2026-01", -1, 1]])
+            ),
+            "negative value",
+        )
+        _expect_value_error(
+            lambda: xlsx_block.upload_baseline(build_single_sheet_workbook_bytes("План факт месяцы", [BASELINE_TEMPLATE_HEADERS])),
+            "empty baseline workbook",
+        )
+
         print("plan_report_status: ok ->", payload["status"])
         print("plan_report_selected_period: ok ->", selected["date_from"], selected["date_to"])
         print("plan_report_cross_quarter_plan: ok ->", selected["metrics"]["buyout_rub"]["plan"])
         print("plan_report_mtd_qtd_ytd: ok ->", mtd["day_count"], qtd["day_count"], ytd["day_count"])
         print("plan_report_partial_coverage_guard: ok ->", missing_dates_by_source)
         print("plan_report_unavailable_coverage_guard: ok ->", empty_payload["status"])
+        print("plan_report_selected_independent_from_ytd: ok ->", partial_selected["status"], partial_ytd["status"])
+        print("plan_report_mixed_baseline_ytd: ok ->", mixed_ytd["status"], baseline_mix["months"])
+        print("plan_report_no_double_count: ok ->", no_double_ytd["metrics"]["buyout_rub"]["fact"])
+        print("plan_report_baseline_xlsx: ok ->", upload_payload["accepted_months"])
 
 
 def _iter_dates(date_from: date, date_to: date):
@@ -197,9 +350,72 @@ def _iter_dates(date_from: date, date_to: date):
         current += timedelta(days=1)
 
 
+def _seed_daily_snapshots(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    primary_nm_id: int,
+    date_from: date,
+    date_to: date,
+    buyout_rub: float = 1500.0,
+    ads_sum: float = 180.0,
+) -> None:
+    for snapshot_day in _iter_dates(date_from, date_to):
+        snapshot_date = snapshot_day.isoformat()
+        runtime.save_temporal_source_slot_snapshot(
+            source_key="fin_report_daily",
+            snapshot_date=snapshot_date,
+            snapshot_role=ACCEPTED_ROLE,
+            captured_at=f"{snapshot_date}T12:00:00Z",
+            payload={
+                "result": {
+                    "kind": "success",
+                    "snapshot_date": snapshot_date,
+                    "count": 1,
+                    "items": [
+                        {
+                            "nm_id": primary_nm_id,
+                            "fin_buyout_rub": buyout_rub,
+                        }
+                    ],
+                    "storage_total": {
+                        "nm_id": 0,
+                        "fin_storage_fee_total": 0.0,
+                    },
+                }
+            },
+        )
+        runtime.save_temporal_source_slot_snapshot(
+            source_key="ads_compact",
+            snapshot_date=snapshot_date,
+            snapshot_role=ACCEPTED_ROLE,
+            captured_at=f"{snapshot_date}T12:05:00Z",
+            payload={
+                "result": {
+                    "kind": "success",
+                    "snapshot_date": snapshot_date,
+                    "count": 1,
+                    "items": [
+                        {
+                            "nm_id": primary_nm_id,
+                            "ads_sum": ads_sum,
+                        }
+                    ],
+                }
+            },
+        )
+
+
 def _assert_close(actual: float | None, expected: float, label: str) -> None:
     if actual is None or abs(actual - expected) > 1e-6:
         raise AssertionError(f"{label} must be {expected}, got {actual}")
+
+
+def _expect_value_error(callback, label: str) -> None:
+    try:
+        callback()
+    except ValueError:
+        return
+    raise AssertionError(f"{label} must be rejected")
 
 
 if __name__ == "__main__":

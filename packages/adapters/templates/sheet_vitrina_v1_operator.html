@@ -835,6 +835,51 @@
       color: var(--error-text);
     }
 
+    .plan-report-baseline {
+      display: grid;
+      gap: 10px;
+      margin: 0 0 14px;
+      padding: 14px 0;
+      border-top: 1px solid rgba(15, 23, 42, 0.08);
+      border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+    }
+
+    .plan-report-baseline-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+
+    .plan-report-baseline h3 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .plan-report-baseline p {
+      margin: 4px 0 0;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--muted);
+    }
+
+    .plan-report-baseline-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .plan-report-baseline-details {
+      display: grid;
+      gap: 6px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--muted);
+    }
+
     .log-actions {
       display: flex;
       gap: 8px;
@@ -1535,6 +1580,20 @@
                 </div>
                 <p id="planReportValidation" class="plan-report-validation" hidden>Заполните квартальные планы и плановый DRR.</p>
               </div>
+              <div class="plan-report-baseline">
+                <div class="plan-report-baseline-head">
+                  <div>
+                    <h3>Исторические данные для отчёта</h3>
+                    <p id="planReportBaselineStatus">Читаем состояние baseline...</p>
+                  </div>
+                  <div class="plan-report-baseline-actions">
+                    <button id="planReportBaselineTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон</button>
+                    <input id="planReportBaselineFileInput" type="file" accept=".xlsx">
+                  </div>
+                </div>
+                <div id="planReportBaselineDetails" class="plan-report-baseline-details"></div>
+                <p id="planReportBaselineMessage" class="section-message"></p>
+              </div>
               <p id="planReportStatus" class="section-message">Заполните параметры и нажмите «Рассчитать».</p>
               <div id="planReportContent" class="daily-report" hidden>
                 <div class="plan-report-grid">
@@ -1960,6 +2019,11 @@
       const planReportYtdRange = document.getElementById("planReportYtdRange");
       const planReportYtdTable = document.getElementById("planReportYtdTable");
       const planReportNotes = document.getElementById("planReportNotes");
+      const planReportBaselineStatus = document.getElementById("planReportBaselineStatus");
+      const planReportBaselineDetails = document.getElementById("planReportBaselineDetails");
+      const planReportBaselineMessage = document.getElementById("planReportBaselineMessage");
+      const planReportBaselineTemplateButton = document.getElementById("planReportBaselineTemplateButton");
+      const planReportBaselineFileInput = document.getElementById("planReportBaselineFileInput");
       const downloadButton = document.getElementById("downloadButton");
       const logViewport = document.getElementById("logViewport");
       const logBlock = document.getElementById("logBlock");
@@ -2744,6 +2808,24 @@
           .join("");
       }
 
+      function renderPlanReportBaselineStatus(payload) {
+        const baseline = payload && typeof payload === "object" ? payload : {};
+        const status = String(baseline.status || "missing");
+        const months = Array.isArray(baseline.months) ? baseline.months.filter(Boolean) : [];
+        const totals = baseline.totals || {};
+        if (status !== "uploaded" || !months.length) {
+          planReportBaselineStatus.textContent = "Baseline не загружен.";
+          planReportBaselineDetails.innerHTML = "<p>" + escapeHtml(valueOrDash(baseline.warning || "YTD до daily coverage может быть partial/unavailable.")) + "</p>";
+          return;
+        }
+        planReportBaselineStatus.textContent = "Загружено месяцев: " + months.join(", ") + ".";
+        planReportBaselineDetails.innerHTML = [
+          "<p>Выкуп: " + escapeHtml(formatNumber(totals.fin_buyout_rub)) + " · Рекламные расходы: " + escapeHtml(formatNumber(totals.ads_sum)) + "</p>",
+          "<p>Последняя загрузка: " + escapeHtml(valueOrDash(baseline.uploaded_at).replace("T", " ")) + "</p>",
+          "<p>" + escapeHtml(valueOrDash(baseline.warning)) + "</p>"
+        ].join("");
+      }
+
       function formatPercentValue(value) {
         if (!isFiniteNumber(value)) {
           return "н/д";
@@ -2877,6 +2959,7 @@
         planReportMtdTable.innerHTML = renderPlanMetricTable(mtd);
         planReportQtdTable.innerHTML = renderPlanMetricTable(qtd);
         planReportYtdTable.innerHTML = renderPlanMetricTable(ytd);
+        renderPlanReportBaselineStatus(payload.baseline);
         renderPlanReportNotes(payload.notes);
       }
 
@@ -3183,6 +3266,11 @@
       function setRegionalMessage(text, stateClass) {
         regionalMessage.textContent = text || "";
         regionalMessage.className = "section-message" + (stateClass ? " is-" + stateClass : "");
+      }
+
+      function setPlanReportBaselineMessage(text, stateClass) {
+        planReportBaselineMessage.textContent = text || "";
+        planReportBaselineMessage.className = "section-message" + (stateClass ? " is-" + stateClass : "");
       }
 
       function readFieldValues() {
@@ -3573,6 +3661,27 @@
         } finally {
           planReportApplyButton.disabled = false;
           planReportApplyButton.textContent = "Рассчитать";
+        }
+      }
+
+      async function loadPlanReportBaselineStatus() {
+        try {
+          const response = await fetch(config.plan_report_baseline_status_path, {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          renderPlanReportBaselineStatus(payload);
+        } catch (error) {
+          planReportBaselineStatus.textContent = "Baseline status недоступен.";
+          planReportBaselineDetails.innerHTML = "";
+          setPlanReportBaselineMessage(
+            "Не удалось прочитать baseline: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
         }
       }
 
@@ -4078,6 +4187,25 @@
       });
       stockReportApplyButton.addEventListener("click", applyStockReportSelection);
       planReportApplyButton.addEventListener("click", loadPlanReport);
+      planReportBaselineTemplateButton.addEventListener("click", () => downloadBinary(
+        config.plan_report_baseline_template_path,
+        "sheet-vitrina-v1-plan-report-baseline-template.xlsx",
+        "Шаблон исторических данных скачан.",
+        setPlanReportBaselineMessage
+      ));
+      planReportBaselineFileInput.addEventListener("change", () => uploadDataset(
+        config.plan_report_baseline_upload_path,
+        planReportBaselineFileInput,
+        setPlanReportBaselineMessage,
+        [
+          loadPlanReportBaselineStatus,
+          async () => {
+            if (planReportPayload) {
+              await loadPlanReport();
+            }
+          }
+        ]
+      ));
       [
         planReportPeriodSelect,
         planReportQ1Input,
@@ -4137,6 +4265,7 @@
       loadSellerRecoveryStatus();
       loadDailyReport();
       loadStockReport();
+      loadPlanReportBaselineStatus();
       loadFactoryStatus();
       loadRegionalStatus();
     })();

@@ -39,6 +39,9 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_DAILY_REPORT_PATH,
     DEFAULT_SHEET_LOAD_PATH,
     DEFAULT_SHEET_PLAN_PATH,
+    DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH,
+    DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH,
+    DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH,
     DEFAULT_SHEET_PLAN_REPORT_PATH,
     DEFAULT_SHEET_REFRESH_PATH,
     DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
@@ -146,10 +149,15 @@ def main() -> None:
                 "Отчёты" not in operator_ui_html
                 or "Ежедневные отчёты" not in operator_ui_html
                 or "Отчёт по остаткам" not in operator_ui_html
+                or "Выполнение плана" not in operator_ui_html
+                or "Исторические данные для отчёта" not in operator_ui_html
                 or 'data-report-section-button="daily"' not in operator_ui_html
                 or 'data-report-section-button="stock"' not in operator_ui_html
+                or 'data-report-section-button="plan"' not in operator_ui_html
+                or 'id="planReportBaselineTemplateButton"' not in operator_ui_html
+                or 'id="planReportBaselineFileInput"' not in operator_ui_html
             ):
-                raise AssertionError("operator UI must expose the compact reports tab with both subsection-switched report blocks")
+                raise AssertionError("operator UI must expose the compact reports tab with daily/stock/plan report blocks and baseline controls")
             if (
                 'id="stockReportSkuSelector"' not in operator_ui_html
                 or 'id="stockReportApplyButton"' not in operator_ui_html
@@ -275,6 +283,9 @@ def main() -> None:
                 "daily_report_path": DEFAULT_SHEET_DAILY_REPORT_PATH,
                 "stock_report_path": DEFAULT_SHEET_STOCK_REPORT_PATH,
                 "plan_report_path": DEFAULT_SHEET_PLAN_REPORT_PATH,
+                "plan_report_baseline_template_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH,
+                "plan_report_baseline_upload_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH,
+                "plan_report_baseline_status_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH,
                 "factory_order_status_path": DEFAULT_FACTORY_ORDER_STATUS_PATH,
                 "factory_order_template_stock_ff_path": DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
                 "factory_order_template_inbound_factory_path": DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
