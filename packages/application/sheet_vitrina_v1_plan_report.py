@@ -219,7 +219,8 @@ class SheetVitrinaV1PlanReportBlock:
         baseline_rows = self.runtime.load_plan_report_monthly_baseline()
         baseline_by_month = {str(row["month"]): row for row in baseline_rows}
         expected_dates = [item.isoformat() for item in _iter_dates(date.fromisoformat(date_from), reference_date)]
-        daily_facts: dict[str, dict[str, float | None]] = {}
+        daily_buyout_facts: dict[str, float] = {}
+        daily_ads_facts: dict[str, float] = {}
         active_nm_id_set = set(active_nm_ids)
         missing_dates_by_source: dict[str, list[str]] = {}
         invalid_dates_by_source: dict[str, dict[str, str]] = {}
@@ -238,39 +239,34 @@ class SheetVitrinaV1PlanReportBlock:
                 missing_dates_by_source.setdefault(FIN_SOURCE_KEY, []).append(snapshot_date)
             if ads_snapshot is None:
                 missing_dates_by_source.setdefault(ADS_SOURCE_KEY, []).append(snapshot_date)
-            if fin_snapshot is None or ads_snapshot is None:
-                continue
-            try:
-                buyout_rub = _sum_snapshot_metric(
-                    payload=fin_snapshot,
-                    expected_snapshot_date=snapshot_date,
-                    allowed_nm_ids=active_nm_id_set,
-                    result_kinds={"success"},
-                    field_name="fin_buyout_rub",
-                )
-            except ValueError as exc:
-                invalid_dates_by_source.setdefault(FIN_SOURCE_KEY, {})[snapshot_date] = str(exc)
-                continue
-            try:
-                ads_sum_rub = _sum_snapshot_metric(
-                    payload=ads_snapshot,
-                    expected_snapshot_date=snapshot_date,
-                    allowed_nm_ids=active_nm_id_set,
-                    result_kinds={"success", "empty"},
-                    field_name="ads_sum",
-                )
-            except ValueError as exc:
-                invalid_dates_by_source.setdefault(ADS_SOURCE_KEY, {})[snapshot_date] = str(exc)
-                continue
-            daily_facts[snapshot_date] = {
-                "buyout_rub": buyout_rub,
-                "ads_sum_rub": ads_sum_rub,
-            }
+            if fin_snapshot is not None:
+                try:
+                    daily_buyout_facts[snapshot_date] = _sum_snapshot_metric(
+                        payload=fin_snapshot,
+                        expected_snapshot_date=snapshot_date,
+                        allowed_nm_ids=active_nm_id_set,
+                        result_kinds={"success"},
+                        field_name="fin_buyout_rub",
+                    )
+                except ValueError as exc:
+                    invalid_dates_by_source.setdefault(FIN_SOURCE_KEY, {})[snapshot_date] = str(exc)
+            if ads_snapshot is not None:
+                try:
+                    daily_ads_facts[snapshot_date] = _sum_snapshot_metric(
+                        payload=ads_snapshot,
+                        expected_snapshot_date=snapshot_date,
+                        allowed_nm_ids=active_nm_id_set,
+                        result_kinds={"success", "empty"},
+                        field_name="ads_sum",
+                    )
+                except ValueError as exc:
+                    invalid_dates_by_source.setdefault(ADS_SOURCE_KEY, {})[snapshot_date] = str(exc)
 
         period_blocks = {
             "selected_period": _build_period_block(
                 window=selected_window,
-                daily_facts=daily_facts,
+                daily_buyout_facts=daily_buyout_facts,
+                daily_ads_facts=daily_ads_facts,
                 baseline_by_month=baseline_by_month,
                 missing_dates_by_source=missing_dates_by_source,
                 invalid_dates_by_source=invalid_dates_by_source,
@@ -281,7 +277,8 @@ class SheetVitrinaV1PlanReportBlock:
         for fixed_window in fixed_windows:
             period_blocks[fixed_window.key] = _build_period_block(
                 window=fixed_window,
-                daily_facts=daily_facts,
+                daily_buyout_facts=daily_buyout_facts,
+                daily_ads_facts=daily_ads_facts,
                 baseline_by_month=baseline_by_month,
                 missing_dates_by_source=missing_dates_by_source,
                 invalid_dates_by_source=invalid_dates_by_source,
@@ -306,11 +303,14 @@ class SheetVitrinaV1PlanReportBlock:
                 f"для диапазона {date_from}..{date_to}."
             )
 
-        global_daily_available_set = set(daily_facts)
+        global_buyout_available_set = set(daily_buyout_facts)
+        global_ads_available_set = set(daily_ads_facts)
+        global_daily_fully_available_set = global_buyout_available_set & global_ads_available_set
+        global_daily_any_available_set = global_buyout_available_set | global_ads_available_set
         global_baseline_months = _baseline_months_for_window(
             date_from=date.fromisoformat(date_from),
             date_to=reference_date,
-            daily_available_dates=global_daily_available_set,
+            daily_available_dates=global_daily_fully_available_set,
             baseline_by_month=baseline_by_month,
         )
         global_baseline_covered_dates = [
@@ -319,12 +319,17 @@ class SheetVitrinaV1PlanReportBlock:
             for item in _iter_dates(_month_start(month), _month_end(month))
         ]
         global_baseline_covered_set = set(global_baseline_covered_dates)
-        global_effective_daily_covered_set = global_daily_available_set - global_baseline_covered_set
-        global_covered_dates = sorted(global_effective_daily_covered_set | global_baseline_covered_set)
+        global_effective_buyout_covered_set = global_buyout_available_set - global_baseline_covered_set
+        global_effective_ads_covered_set = global_ads_available_set - global_baseline_covered_set
+        global_effective_daily_any_covered_set = global_daily_any_available_set - global_baseline_covered_set
+        global_effective_daily_fully_covered_set = (
+            global_effective_buyout_covered_set & global_effective_ads_covered_set
+        )
+        global_covered_dates = sorted(global_effective_daily_any_covered_set | global_baseline_covered_set)
         global_missing_dates = [
             item
             for item in expected_dates
-            if item not in global_effective_daily_covered_set and item not in global_baseline_covered_set
+            if item not in global_effective_daily_fully_covered_set and item not in global_baseline_covered_set
         ]
 
         return {
@@ -338,13 +343,19 @@ class SheetVitrinaV1PlanReportBlock:
                 "expected_day_count": len(expected_dates),
                 "covered_day_count": len(global_covered_dates),
                 "covered_calendar_days": len(global_covered_dates),
-                "daily_covered_day_count": len(global_effective_daily_covered_set),
-                "covered_by_daily_snapshot_days": len(global_effective_daily_covered_set),
+                "daily_covered_day_count": len(global_effective_daily_fully_covered_set),
+                "covered_by_daily_snapshot_days": len(global_effective_daily_fully_covered_set),
+                "daily_any_source_covered_day_count": len(global_effective_daily_any_covered_set),
+                "buyout_daily_covered_day_count": len(global_effective_buyout_covered_set),
+                "ads_daily_covered_day_count": len(global_effective_ads_covered_set),
                 "baseline_covered_day_count": len(global_baseline_covered_dates),
                 "covered_by_monthly_baseline_days": len(global_baseline_covered_dates),
                 "covered_dates": global_covered_dates,
-                "daily_covered_dates": sorted(global_effective_daily_covered_set),
-                "daily_dates": sorted(global_effective_daily_covered_set),
+                "daily_covered_dates": sorted(global_effective_daily_fully_covered_set),
+                "daily_dates": sorted(global_effective_daily_fully_covered_set),
+                "daily_any_source_dates": sorted(global_effective_daily_any_covered_set),
+                "buyout_daily_dates": sorted(global_effective_buyout_covered_set),
+                "ads_daily_dates": sorted(global_effective_ads_covered_set),
                 "baseline_covered_months": global_baseline_months,
                 "baseline_months": global_baseline_months,
                 "missing_day_count": len(global_missing_dates),
@@ -361,15 +372,23 @@ class SheetVitrinaV1PlanReportBlock:
                 ),
             },
             "source_breakdown": {
-                "daily_dates": sorted(global_effective_daily_covered_set),
-                "daily_available_dates_before_monthly_baseline_precedence": sorted(global_daily_available_set),
+                "daily_dates": sorted(global_effective_daily_fully_covered_set),
+                "daily_any_source_dates": sorted(global_effective_daily_any_covered_set),
+                "buyout_daily_dates": sorted(global_effective_buyout_covered_set),
+                "ads_daily_dates": sorted(global_effective_ads_covered_set),
+                "daily_available_dates_before_monthly_baseline_precedence": sorted(global_daily_fully_available_set),
+                "buyout_available_dates_before_monthly_baseline_precedence": sorted(global_buyout_available_set),
+                "ads_available_dates_before_monthly_baseline_precedence": sorted(global_ads_available_set),
                 "daily_excluded_by_monthly_baseline_dates": sorted(
-                    global_daily_available_set & global_baseline_covered_set
+                    global_daily_any_available_set & global_baseline_covered_set
                 ),
                 "baseline_months": global_baseline_months,
                 "missing_dates": global_missing_dates,
                 "covered_calendar_days": len(global_covered_dates),
-                "covered_by_daily_snapshot_days": len(global_effective_daily_covered_set),
+                "covered_by_daily_snapshot_days": len(global_effective_daily_fully_covered_set),
+                "daily_any_source_covered_day_count": len(global_effective_daily_any_covered_set),
+                "buyout_daily_covered_day_count": len(global_effective_buyout_covered_set),
+                "ads_daily_covered_day_count": len(global_effective_ads_covered_set),
                 "covered_by_monthly_baseline_days": len(global_baseline_covered_dates),
                 "fact_is_partial": bool(global_missing_dates),
             },
@@ -541,7 +560,8 @@ def _filter_invalid_dates_by_source(
 def _build_period_block(
     *,
     window: PeriodWindow,
-    daily_facts: Mapping[str, Mapping[str, float | None]],
+    daily_buyout_facts: Mapping[str, float],
+    daily_ads_facts: Mapping[str, float],
     baseline_by_month: Mapping[str, Mapping[str, Any]],
     missing_dates_by_source: Mapping[str, list[str]],
     invalid_dates_by_source: Mapping[str, Mapping[str, str]],
@@ -549,12 +569,16 @@ def _build_period_block(
     plan_drr_pct: float,
 ) -> dict[str, Any]:
     dates = [item.isoformat() for item in _iter_dates(date.fromisoformat(window.date_from), date.fromisoformat(window.date_to))]
-    daily_available_dates = [item for item in dates if item in daily_facts]
-    daily_available_set = set(daily_available_dates)
+    buyout_available_dates = [item for item in dates if item in daily_buyout_facts]
+    ads_available_dates = [item for item in dates if item in daily_ads_facts]
+    buyout_available_set = set(buyout_available_dates)
+    ads_available_set = set(ads_available_dates)
+    daily_fully_available_set = buyout_available_set & ads_available_set
+    daily_any_available_set = buyout_available_set | ads_available_set
     baseline_months = _baseline_months_for_window(
         date_from=date.fromisoformat(window.date_from),
         date_to=date.fromisoformat(window.date_to),
-        daily_available_dates=daily_available_set,
+        daily_available_dates=daily_fully_available_set,
         baseline_by_month=baseline_by_month,
     )
     baseline_covered_dates = [
@@ -563,21 +587,27 @@ def _build_period_block(
         for item in _iter_dates(_month_start(month), _month_end(month))
     ]
     baseline_covered_set = set(baseline_covered_dates)
-    daily_covered_dates = [item for item in daily_available_dates if item not in baseline_covered_set]
-    daily_covered_set = set(daily_covered_dates)
-    daily_excluded_by_baseline_dates = [item for item in daily_available_dates if item in baseline_covered_set]
-    covered_dates = sorted(daily_covered_set | baseline_covered_set)
-    missing_dates = [item for item in dates if item not in daily_covered_set and item not in baseline_covered_set]
+    buyout_daily_dates = [item for item in buyout_available_dates if item not in baseline_covered_set]
+    ads_daily_dates = [item for item in ads_available_dates if item not in baseline_covered_set]
+    buyout_daily_set = set(buyout_daily_dates)
+    ads_daily_set = set(ads_daily_dates)
+    daily_fully_covered_set = buyout_daily_set & ads_daily_set
+    daily_any_covered_set = (daily_any_available_set - baseline_covered_set)
+    daily_excluded_by_baseline_dates = [item for item in dates if item in daily_any_available_set and item in baseline_covered_set]
+    covered_dates = sorted(daily_any_covered_set | baseline_covered_set)
+    daily_fully_covered_dates = sorted(daily_fully_covered_set)
+    fully_covered_dates = sorted(daily_fully_covered_set | baseline_covered_set)
+    missing_dates = [item for item in dates if item not in daily_fully_covered_set and item not in baseline_covered_set]
     fact_buyout_rub = (
-        sum(float(daily_facts[item]["buyout_rub"] or 0.0) for item in daily_covered_dates)
+        sum(float(daily_buyout_facts[item]) for item in buyout_daily_dates)
         + sum(float(baseline_by_month[month]["fin_buyout_rub"]) for month in baseline_months)
-        if covered_dates
+        if buyout_daily_dates or baseline_months
         else None
     )
     fact_ads_sum_rub = (
-        sum(float(daily_facts[item]["ads_sum_rub"] or 0.0) for item in daily_covered_dates)
+        sum(float(daily_ads_facts[item]) for item in ads_daily_dates)
         + sum(float(baseline_by_month[month]["ads_sum"]) for month in baseline_months)
-        if covered_dates
+        if ads_daily_dates or baseline_months
         else None
     )
     fact_drr_pct = _compute_drr_pct(ads_sum_rub=fact_ads_sum_rub, buyout_rub=fact_buyout_rub)
@@ -622,11 +652,13 @@ def _build_period_block(
         },
         "source_mix": {
             "daily_accepted_snapshots": {
-                "dates": daily_covered_dates,
-                "day_count": len(daily_covered_dates),
+                "dates": daily_fully_covered_dates,
+                "day_count": len(daily_fully_covered_dates),
                 "source_keys": [FIN_SOURCE_KEY, ADS_SOURCE_KEY],
-                "available_dates_before_monthly_baseline_precedence": daily_available_dates,
+                "available_dates_before_monthly_baseline_precedence": sorted(daily_fully_available_set),
                 "excluded_by_monthly_baseline_dates": daily_excluded_by_baseline_dates,
+                "buyout_dates": buyout_daily_dates,
+                "ads_dates": ads_daily_dates,
             },
             "manual_monthly_plan_report_baseline": {
                 "months": baseline_months,
@@ -638,14 +670,21 @@ def _build_period_block(
             "expected_day_count": len(dates),
             "covered_day_count": len(covered_dates),
             "covered_calendar_days": len(covered_dates),
-            "daily_covered_day_count": len(daily_covered_dates),
-            "covered_by_daily_snapshot_days": len(daily_covered_dates),
+            "daily_covered_day_count": len(daily_fully_covered_dates),
+            "covered_by_daily_snapshot_days": len(daily_fully_covered_dates),
+            "daily_any_source_covered_day_count": len(daily_any_covered_set),
+            "buyout_daily_covered_day_count": len(buyout_daily_dates),
+            "ads_daily_covered_day_count": len(ads_daily_dates),
             "baseline_covered_day_count": len(baseline_covered_dates),
             "covered_by_monthly_baseline_days": len(baseline_covered_dates),
             "missing_day_count": len(missing_dates),
             "covered_dates": covered_dates,
-            "daily_covered_dates": daily_covered_dates,
-            "daily_dates": daily_covered_dates,
+            "fully_covered_dates": fully_covered_dates,
+            "daily_covered_dates": daily_fully_covered_dates,
+            "daily_dates": daily_fully_covered_dates,
+            "daily_any_source_dates": sorted(daily_any_covered_set),
+            "buyout_daily_dates": buyout_daily_dates,
+            "ads_daily_dates": ads_daily_dates,
             "baseline_covered_months": baseline_months,
             "baseline_months": baseline_months,
             "missing_dates": missing_dates,
@@ -654,13 +693,21 @@ def _build_period_block(
             "fact_is_partial": bool(missing_dates),
         },
         "source_breakdown": {
-            "daily_dates": daily_covered_dates,
-            "daily_available_dates_before_monthly_baseline_precedence": daily_available_dates,
+            "daily_dates": daily_fully_covered_dates,
+            "daily_any_source_dates": sorted(daily_any_covered_set),
+            "buyout_daily_dates": buyout_daily_dates,
+            "ads_daily_dates": ads_daily_dates,
+            "daily_available_dates_before_monthly_baseline_precedence": sorted(daily_fully_available_set),
+            "buyout_available_dates_before_monthly_baseline_precedence": buyout_available_dates,
+            "ads_available_dates_before_monthly_baseline_precedence": ads_available_dates,
             "daily_excluded_by_monthly_baseline_dates": daily_excluded_by_baseline_dates,
             "baseline_months": baseline_months,
             "missing_dates": missing_dates,
             "covered_calendar_days": len(covered_dates),
-            "covered_by_daily_snapshot_days": len(daily_covered_dates),
+            "covered_by_daily_snapshot_days": len(daily_fully_covered_dates),
+            "daily_any_source_covered_day_count": len(daily_any_covered_set),
+            "buyout_daily_covered_day_count": len(buyout_daily_dates),
+            "ads_daily_covered_day_count": len(ads_daily_dates),
             "covered_by_monthly_baseline_days": len(baseline_covered_dates),
             "fact_is_partial": bool(missing_dates),
         },

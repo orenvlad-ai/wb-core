@@ -220,6 +220,7 @@ Public probe validates:
   - response contains `selected_period`, `month_to_date`, `quarter_to_date`, `year_to_date` blocks;
   - each block has independent `available / partial / unavailable` status, coverage details, reason, source mix and metrics; an unavailable YTD block must not hide an available selected period;
   - daily fact source is persisted accepted closed-day snapshots `fin_report_daily.fin_buyout_rub` + `ads_compact.ads_sum` for current active `config_v2` SKU;
+  - buyout and ads daily facts use the same accepted temporal source slot layer but keep source-specific coverage; missing one source for a date keeps the block partial instead of dropping the other source's available fact;
   - manual monthly source `manual_monthly_plan_report_baseline` may contribute only full months inside this plan-report route; if daily precision for a baseline month is incomplete, the monthly aggregate covers the month and overlapping daily rows are excluded from the block to avoid double-count;
   - buyout plan is distributed by calendar day, with the daily amount derived from the H1/H2 plan for each date and independent from fact coverage;
   - DRR fact is `ads_sum / fin_buyout_rub * 100`, ads plan is full-calendar period buyout plan multiplied by planned DRR;
@@ -227,6 +228,7 @@ Public probe validates:
 - `GET /v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx` returns `200` + XLSX content type with compact Russian headers for monthly baseline upload
 - `GET /v1/sheet-vitrina-v1/plan-report/baseline-status` returns `200` + JSON baseline status/totals/months/upload metadata
 - `POST /v1/sheet-vitrina-v1/plan-report/baseline-upload` accepts a controlled XLSX upload with months `YYYY-MM` and non-negative numeric facts, rejects empty/invalid/negative rows, stores aggregates idempotently in runtime SQLite and does not write Google Sheets/GAS or accepted daily snapshots
+- Historical web-vitrina/report consistency repair is performed only through the repo-owned one-off CLI `apps/sheet_vitrina_v1_ready_fact_reconcile.py`: dry-run first, apply only for bounded windows/metrics, no overwrite of existing accepted diffs, no fake zeros from blank ready cells, and no recurring Google Sheets/GAS dependency.
 - `GET /v1/sheet-vitrina-v1/status` returns JSON with either success shape including `server_context` + `manual_context` or truthful `422 {"error": ..., "server_context": ..., "manual_context": ...}`
   - on `200`, root `status` is semantic snapshot outcome (`success / warning / error`), while technical completion stays separated in `technical_status`/derived fields
   - `server_context` / `manual_context` must keep persisted latest semantic result summaries, so restart/reload does not erase warning/error truth
