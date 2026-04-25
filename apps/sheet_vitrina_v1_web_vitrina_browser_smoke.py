@@ -236,9 +236,16 @@ def run_browser_checks(
             ignore_https_errors=ignore_https_errors,
             viewport={"width": 1100, "height": 900},
         )
+        source_status_detail_urls: list[str] = []
+
+        def route_page_composition(route: object) -> None:
+            if "include_source_status=1" in route.request.url:
+                source_status_detail_urls.append(route.request.url)
+            _route_page_composition_with_delay(route)
+
         context.route(
             "**/v1/sheet-vitrina-v1/web-vitrina*",
-            lambda route: _route_page_composition_with_delay(route),
+            route_page_composition,
         )
         operator_page = context.new_page()
         operator_link = _check_operator_link(operator_page, base_url)
@@ -280,6 +287,21 @@ def run_browser_checks(
                 raise AssertionError(f"source-status load button mismatch, got {initial_unloaded_activity_surface}")
             page.locator("[data-source-status-load]").click()
             page.wait_for_selector("[data-loading-source]", timeout=20000)
+            if not source_status_detail_urls:
+                raise AssertionError("source-status details request was not captured")
+            latest_details_url = source_status_detail_urls[-1]
+            if "include_source_status=1" not in latest_details_url or "as_of_date=" not in latest_details_url:
+                raise AssertionError(
+                    f"source-status lazy-load must request explicit visible snapshot_as_of_date, got {latest_details_url}"
+                )
+            if "date_from=" in latest_details_url or "date_to=" in latest_details_url:
+                raise AssertionError(
+                    f"source-status lazy-load must not use a date window as the snapshot key, got {latest_details_url}"
+                )
+            if base_url.startswith("http://127.0.0.1") and "as_of_date=2026-04-20" not in latest_details_url:
+                raise AssertionError(
+                    f"fixture source-status details must use visible snapshot 2026-04-20, got {latest_details_url}"
+                )
             initial_activity_surface = _read_activity_surface(
                 page,
                 allow_empty_log=expected_percent_rows is None,
@@ -414,7 +436,7 @@ def run_browser_checks(
                     timeout=5000,
                 )
                 page.wait_for_function(
-                    "() => document.querySelector('[data-page-meta]').textContent.includes('as_of_date 2026-04-20')",
+                    "() => document.querySelector('[data-page-meta]').textContent.includes('Снимок: 20.04.2026')",
                     timeout=5000,
                 )
                 historical_selector_works = (

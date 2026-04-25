@@ -636,6 +636,15 @@ class RegistryUploadHttpEntrypoint:
             view_model = build_web_vitrina_view_model(contract)
             adapter = build_web_vitrina_gravity_table_adapter(view_model)
         except Exception as exc:
+            activity_surface = (
+                _web_vitrina_source_status_missing_snapshot_activity_surface(
+                    requested_as_of_date=effective_as_of_date,
+                    technical_detail=str(exc),
+                    now=self.now_factory(),
+                )
+                if include_source_status and _is_ready_snapshot_missing_error(exc)
+                else None
+            )
             return build_web_vitrina_page_error_composition(
                 page_route=page_route,
                 read_route=read_route,
@@ -647,6 +656,7 @@ class RegistryUploadHttpEntrypoint:
                 selected_as_of_date=as_of_date,
                 selected_date_from=date_from,
                 selected_date_to=date_to,
+                activity_surface=activity_surface,
             )
 
         activity_surface = _web_vitrina_source_status_not_loaded_activity_surface(
@@ -665,11 +675,19 @@ class RegistryUploadHttpEntrypoint:
                     job_path=job_path,
                 )
             except Exception as exc:  # pragma: no cover - bounded fallback
-                activity_surface = _empty_web_vitrina_activity_surface(
-                    log_message=f"activity surface unavailable: {exc}",
-                    upload_message=f"upload summary unavailable: {exc}",
-                    update_message=f"update summary unavailable: {exc}",
-                )
+                if _is_ready_snapshot_missing_error(exc):
+                    activity_surface = _web_vitrina_source_status_missing_snapshot_activity_surface(
+                        requested_as_of_date=str(contract.meta.as_of_date),
+                        snapshot_as_of_date=str(contract.meta.as_of_date),
+                        technical_detail=str(exc),
+                        now=self.now_factory(),
+                    )
+                else:
+                    activity_surface = _empty_web_vitrina_activity_surface(
+                        log_message=f"activity surface unavailable: {exc}",
+                        upload_message=f"upload summary unavailable: {exc}",
+                        update_message=f"update summary unavailable: {exc}",
+                    )
 
         return build_web_vitrina_page_composition(
             contract=contract,
@@ -3654,6 +3672,83 @@ def _empty_web_vitrina_activity_surface(
             "empty_message": update_message,
         },
     }
+
+
+def _web_vitrina_source_status_missing_snapshot_activity_surface(
+    *,
+    requested_as_of_date: str,
+    technical_detail: str,
+    now: datetime,
+    snapshot_as_of_date: str | None = None,
+) -> dict[str, Any]:
+    current_business_date = current_business_date_iso(now)
+    previous_business_date = default_business_as_of_date(now)
+    requested = str(requested_as_of_date or snapshot_as_of_date or "").strip()
+    snapshot_date = str(snapshot_as_of_date or requested or "").strip()
+    display_date = _format_ru_date(snapshot_date or requested)
+    message = (
+        f"Снимок за {display_date} не подготовлен. "
+        "Нажмите «Загрузить и обновить», чтобы подготовить данные."
+    )
+    technical = str(technical_detail or "").strip()
+    detail = (
+        f"requested_as_of_date {requested or '—'} · "
+        f"snapshot_as_of_date {snapshot_date or '—'} · "
+        f"business_timezone {CANONICAL_BUSINESS_TIMEZONE_NAME}"
+    )
+    return {
+        "log_block": {
+            "title": "Лог",
+            "subtitle": "Source-status details не загружены: отсутствует ready snapshot",
+            "status_label": "Нет снимка",
+            "tone": "warning",
+            "detail": technical,
+            "preview_lines": [technical] if technical else [],
+            "line_count": 1 if technical else 0,
+            "download_path": "",
+            "log_filename": "",
+            "empty_message": message,
+        },
+        "upload_summary": {
+            "title": "Загрузка данных",
+            "subtitle": "Снимок не подготовлен.",
+            "detail": detail,
+            "updated_at": "",
+            "items": [],
+            "empty_message": message,
+        },
+        "loading_table": {
+            "title": "Загрузка данных",
+            "subtitle": "Снимок не подготовлен.",
+            "detail": detail,
+            "updated_at": "",
+            "today_date": current_business_date,
+            "yesterday_date": previous_business_date,
+            "available_dates": [],
+            "default_refresh_date": "",
+            "groups": [],
+            "columns": [],
+            "rows": [],
+            "source_status_state": "missing_snapshot",
+            "snapshot_as_of_date": snapshot_date,
+            "requested_as_of_date": requested,
+            "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
+            "empty_message": message,
+        },
+    }
+
+
+def _is_ready_snapshot_missing_error(exc: Exception) -> bool:
+    return "ready snapshot missing" in str(exc)
+
+
+def _format_ru_date(value: str) -> str:
+    normalized = str(value or "").strip()
+    try:
+        parsed = datetime.strptime(normalized, "%Y-%m-%d")
+    except ValueError:
+        return normalized or "выбранную дату"
+    return parsed.strftime("%d.%m.%Y")
 
 
 def _web_vitrina_source_status_not_loaded_activity_surface(

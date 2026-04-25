@@ -102,6 +102,20 @@ def main() -> None:
             raise AssertionError(f"page composition identity mismatch, got {composition}")
         if composition["meta"]["current_state"] != "ready":
             raise AssertionError(f"page composition state mismatch, got {composition['meta']}")
+        expected_time_model = {
+            "snapshot_as_of_date": "2026-04-20",
+            "yesterday_closed_date": "2026-04-20",
+            "today_current_date": "",
+            "visible_date_columns": ["2026-04-20"],
+            "business_timezone": "Asia/Yekaterinburg",
+        }
+        for key, expected_value in expected_time_model.items():
+            if composition["meta"].get(key) != expected_value:
+                raise AssertionError(f"page composition time-model field {key!r} mismatch, got {composition['meta']}")
+        if composition["meta"].get("time_model", {}).get("snapshot_as_of_date") != "2026-04-20":
+            raise AssertionError(f"page composition nested time model mismatch, got {composition['meta']}")
+        if not composition["meta"].get("server_now_business_tz"):
+            raise AssertionError(f"page composition must expose server business time, got {composition['meta']}")
         if composition["meta"]["source_adapter_name"] != "web_vitrina_gravity_table_adapter":
             raise AssertionError(f"page composition source chain mismatch, got {composition['meta']}")
         if composition["meta"]["state_namespace"] != "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1":
@@ -284,6 +298,10 @@ def main() -> None:
         )
         if error_payload["meta"]["current_state"] != "error":
             raise AssertionError(f"error composition state mismatch, got {error_payload['meta']}")
+        if error_payload["meta"]["snapshot_as_of_date"] != "2026-04-21":
+            raise AssertionError(f"error composition snapshot date mismatch, got {error_payload['meta']}")
+        if error_payload["meta"]["business_timezone"] != "Asia/Yekaterinburg":
+            raise AssertionError(f"error composition business timezone mismatch, got {error_payload['meta']}")
         if error_payload["table_surface"]["state_surface"]["current_state"] != "error":
             raise AssertionError(f"error table state mismatch, got {error_payload['table_surface']}")
         if error_payload["historical_access"]["current_mode"] != "historical_day":

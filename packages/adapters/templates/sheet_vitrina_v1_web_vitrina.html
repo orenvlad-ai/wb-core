@@ -1602,7 +1602,10 @@
       const dateFrom = params.get("date_from");
       const dateTo = params.get("date_to");
       const asOfDate = params.get("as_of_date");
-      if (dateFrom && dateTo) {
+      const explicitAsOfDate = normalizeIsoDate(normalizedOptions.asOfDate || "");
+      if (explicitAsOfDate) {
+        url.searchParams.set("as_of_date", explicitAsOfDate);
+      } else if (dateFrom && dateTo) {
         url.searchParams.set("date_from", dateFrom);
         url.searchParams.set("date_to", dateTo);
       } else if (asOfDate) {
@@ -1615,6 +1618,23 @@
         url.searchParams.set("include_source_status", "1");
       }
       return url;
+    }
+
+    function buildSourceStatusDetailsUrl() {
+      return buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {
+        includeSourceStatus: true,
+        asOfDate: visibleSnapshotAsOfDate()
+      });
+    }
+
+    function visibleSnapshotAsOfDate() {
+      const meta = ((state.composition || {}).meta || {});
+      return normalizeIsoDate(meta.snapshot_as_of_date || meta.as_of_date || "");
+    }
+
+    function normalizeIsoDate(value) {
+      const normalized = String(value || "").trim();
+      return /^\d{4}-\d{2}-\d{2}$/.test(normalized) ? normalized : "";
     }
 
     function normalizeUnifiedTab(value) {
@@ -1976,10 +1996,10 @@
       activityLogSubtitleNode.textContent = String(logBlock.subtitle || "");
       activityLogStatusNode.textContent = String(logBlock.status_label || "Нет данных");
       activityLogStatusNode.className = "status-pill tone-" + normalizeTone(logBlock.tone);
-      activityLogDetailNode.textContent = String(logBlock.detail || "");
+      activityLogDetailNode.textContent = formatVisibleTimestampText(logBlock.detail || "");
       const previewLines = Array.isArray(logBlock.preview_lines) ? logBlock.preview_lines : [];
       activityLogBodyNode.textContent = previewLines.length
-        ? previewLines.join("\n")
+        ? previewLines.map(formatVisibleTimestampText).join("\n")
         : String(logBlock.empty_message || "Лог пока недоступен.");
       const downloadPath = String(logBlock.download_path || "");
       if (downloadPath) {
@@ -2009,7 +2029,7 @@
       if (block.detail) {
         detailParts.push(String(block.detail));
       }
-      loadingTableMetaNode.textContent = detailParts.join(" · ") || "Статусы по источникам пока недоступны.";
+      loadingTableMetaNode.textContent = detailParts.join(" · ") || sourceStatusStateMessage(sourceStatusState);
       const columns = Array.isArray(block.columns) ? block.columns : [];
       const items = Array.isArray(block.items) ? block.items : [];
       const rows = Array.isArray(block.rows) ? block.rows : items.map(itemToLegacyLoadingRow);
@@ -2057,7 +2077,7 @@
 
     function normalizeSourceStatusState(value) {
       const normalized = String(value || "").trim();
-      if (normalized === "not_loaded" || normalized === "loading" || normalized === "loaded" || normalized === "empty" || normalized === "error") {
+      if (normalized === "not_loaded" || normalized === "loading" || normalized === "loaded" || normalized === "empty" || normalized === "error" || normalized === "missing_snapshot") {
         return normalized;
       }
       return "loaded";
@@ -2072,6 +2092,9 @@
       }
       if (value === "empty") {
         return "Status payload не содержит source rows. Повторите загрузку или смотрите лог.";
+      }
+      if (value === "missing_snapshot") {
+        return "Снимок не подготовлен. Нажмите «Загрузить и обновить», чтобы подготовить данные.";
       }
       return "Статусы источников не загружены. Нажмите «Загрузить», чтобы посмотреть детали.";
     }
@@ -2277,7 +2300,7 @@
         label: "Последнее обновление страницы",
         value: state.page.lastRenderedAt.toISOString(),
         value_kind: "timestamp",
-        detail: "последний успешный reread page composition в этом браузере",
+        detail: "последний успешный reread page composition в этом браузере · Ваше локальное время: " + valueOrDash(browserTimezoneLabel()),
         updated_at: state.page.lastRenderedAt.toISOString(),
         tone: "neutral"
       };
@@ -2306,10 +2329,38 @@
     }
 
     function formatClientTimestamp(dateValue) {
-      return new Intl.DateTimeFormat("ru-RU", {
+      const formatted = new Intl.DateTimeFormat("ru-RU", {
         dateStyle: "short",
         timeStyle: "medium"
       }).format(dateValue);
+      const timezone = browserTimezoneLabel();
+      return timezone ? formatted + " (" + timezone + ")" : formatted;
+    }
+
+    function browserTimezoneLabel() {
+      try {
+        return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+      } catch (error) {
+        return "";
+      }
+    }
+
+    function formatBusinessDateDisplay(value) {
+      const normalized = normalizeIsoDate(value);
+      if (!normalized) {
+        return String(value || "");
+      }
+      const parts = normalized.split("-");
+      return parts[2] + "." + parts[1] + "." + parts[0];
+    }
+
+    function formatVisibleTimestampText(value) {
+      return String(value || "").replace(
+        /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g,
+        function(match) {
+          return formatTimestampDisplay(match);
+        }
+      );
     }
 
     function renderFilterControls(payload) {
@@ -2868,13 +2919,14 @@
       if (!state.filters.sort) {
         state.filters.sort = (payload.filter_surface && payload.filter_surface.default_sort_value) || "";
       }
-      pageMetaNode.textContent =
-        "snapshot " +
-        valueOrDash(payload.meta && payload.meta.snapshot_id) +
-        " · as_of_date " +
-        valueOrDash(payload.meta && payload.meta.as_of_date) +
-        " · timezone " +
-        valueOrDash(payload.meta && payload.meta.business_timezone);
+      const meta = payload.meta || {};
+      pageMetaNode.textContent = [
+        "Снимок: " + valueOrDash(formatBusinessDateDisplay(meta.snapshot_as_of_date || meta.as_of_date)),
+        "Вчера закрытый день: " + valueOrDash(formatBusinessDateDisplay(meta.yesterday_closed_date)),
+        "Сегодня текущий день: " + valueOrDash(formatBusinessDateDisplay(meta.today_current_date)),
+        "Бизнес TZ: " + valueOrDash(meta.business_timezone),
+        "Ваше локальное время: " + valueOrDash(browserTimezoneLabel())
+      ].join(" · ");
       filterMetaNode.textContent =
         "state namespace: " +
         valueOrDash(payload.meta && payload.meta.state_namespace) +
@@ -3363,7 +3415,7 @@
       }
       try {
         const response = await fetch(
-          buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {includeSourceStatus: true}).toString(),
+          buildSourceStatusDetailsUrl().toString(),
           {
             method: "GET",
             headers: {"Accept": "application/json"}
@@ -3382,12 +3434,13 @@
         const activitySurface = payload.activity_surface || {};
         const loadingTable = activitySurface.loading_table || {};
         if (!Array.isArray(loadingTable.rows) || !loadingTable.rows.length) {
+          const returnedState = normalizeSourceStatusState(loadingTable.source_status_state);
           const emptySurface = {
             log_block: activitySurface.log_block || (((state.composition || {}).activity_surface || {}).log_block || {}),
             loading_table: Object.assign({}, loadingTable, {
               title: loadingTable.title || "Загрузка данных",
-              source_status_state: "empty",
-              empty_message: loadingTable.empty_message || "Status payload не содержит source rows. Повторите загрузку или смотрите лог."
+              source_status_state: returnedState === "loaded" ? "empty" : returnedState,
+              empty_message: loadingTable.empty_message || sourceStatusStateMessage(returnedState)
             })
           };
           if (state.composition) {
