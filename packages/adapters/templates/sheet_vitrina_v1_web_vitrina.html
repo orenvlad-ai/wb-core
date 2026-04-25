@@ -589,12 +589,70 @@
       text-align: right;
     }
 
-    .table-tools {
+    .table-control-toolbar {
       display: flex;
-      flex-direction: column;
       align-items: flex-end;
       gap: 8px;
-      min-width: min(100%, 320px);
+      flex-wrap: wrap;
+      margin: 8px 0;
+      padding: 7px 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #ffffff;
+    }
+
+    .table-filter-controls {
+      display: flex;
+      align-items: flex-end;
+      gap: 8px;
+      flex: 1 1 480px;
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+
+    .toolbar-field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      flex: 0 1 124px;
+      min-width: 110px;
+    }
+
+    .toolbar-field-range {
+      flex-basis: 240px;
+      min-width: 220px;
+    }
+
+    .toolbar-field-search {
+      flex: 1 1 170px;
+      min-width: 150px;
+    }
+
+    .toolbar-field-columns {
+      flex-basis: 100px;
+      min-width: 96px;
+    }
+
+    .toolbar-field-actions {
+      flex: 0 0 auto;
+      min-width: 120px;
+      align-self: stretch;
+      justify-content: flex-end;
+    }
+
+    .toolbar-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      min-height: 34px;
+    }
+
+    .toolbar-summary {
+      max-width: 96px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .column-manager {
@@ -607,10 +665,11 @@
       justify-content: center;
       gap: 8px;
       list-style: none;
+      width: 100%;
       min-height: 34px;
       border: 1px solid var(--border);
       border-radius: 6px;
-      padding: 8px 12px;
+      padding: 6px 10px;
       background: var(--panel-subtle);
       font-size: 12px;
       font-weight: 600;
@@ -635,7 +694,7 @@
     .column-manager-panel {
       position: absolute;
       top: calc(100% + 8px);
-      right: 0;
+      left: 0;
       z-index: 6;
       width: min(320px, calc(100vw - 48px));
       border: 1px solid var(--border);
@@ -695,12 +754,6 @@
       margin-top: 10px;
     }
 
-    .filters-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
-      gap: 8px;
-    }
-
     .history-compact-panel {
       position: relative;
       display: flex;
@@ -714,7 +767,7 @@
       align-items: center;
       justify-content: space-between;
       gap: 10px;
-      width: min(330px, 100%);
+      width: 100%;
       min-height: 36px;
       border: 1px solid var(--border);
       border-radius: 6px;
@@ -954,7 +1007,7 @@
     }
 
     .filter-card-wide {
-      grid-column: span 2;
+      flex-basis: 190px;
     }
 
     .filter-label {
@@ -1000,6 +1053,11 @@
       font-size: 12px;
       color: var(--muted);
       line-height: 1.5;
+    }
+
+    .table-control-toolbar .filter-summary {
+      font-size: 11px;
+      line-height: 1.35;
     }
 
     .table-shell {
@@ -1228,23 +1286,51 @@
         flex: 1 1 100%;
       }
 
+      .table-control-toolbar {
+        flex-wrap: nowrap;
+        align-items: flex-end;
+        overflow-x: auto;
+        padding-bottom: 8px;
+        overscroll-behavior-x: contain;
+      }
+
+      .table-filter-controls {
+        flex: 0 0 auto;
+        flex-wrap: nowrap;
+        min-width: max-content;
+      }
+
+      .toolbar-field {
+        flex: 0 0 148px;
+      }
+
+      .toolbar-field-range {
+        flex-basis: 250px;
+      }
+
+      .toolbar-field-search {
+        flex-basis: 180px;
+      }
+
+      .toolbar-field-columns {
+        flex-basis: 116px;
+      }
+
+      .toolbar-field-actions {
+        flex-basis: 124px;
+      }
+
       .filter-card-wide {
-        grid-column: span 1;
+        flex-basis: 190px;
       }
 
       .panel-meta {
         text-align: left;
       }
 
-      .table-tools {
-        width: 100%;
-        align-items: stretch;
-      }
-
       .column-manager-panel {
-        right: auto;
         left: 0;
-        width: 100%;
+        width: min(320px, calc(100vw - 24px));
       }
 
       .history-compact-panel {
@@ -1308,50 +1394,81 @@
 
     <section class="summary-grid" data-summary-grid></section>
 
-    <section class="history-compact-panel" data-history-panel>
-      <button class="history-compact-control" type="button" data-history-toggle aria-expanded="false" aria-controls="history-popover">
-        <span class="history-control-label" data-history-label>загрузка периода…</span>
-        <svg class="history-control-icon" viewBox="0 0 24 24" aria-hidden="true">
-          <rect x="4" y="5" width="16" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="2"></rect>
-          <path d="M8 3v4M16 3v4M4 10h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
-        </svg>
-      </button>
-      <div class="history-popover" id="history-popover" data-history-popover hidden>
-        <div class="history-picker-head">
-          <button class="history-month-nav" type="button" data-history-prev-month aria-label="Предыдущий месяц">&lt;</button>
-          <p class="history-month-label" data-history-month-label>месяц</p>
-          <button class="history-month-nav" type="button" data-history-next-month aria-label="Следующий месяц">&gt;</button>
-        </div>
-        <p data-history-meta hidden></p>
-        <p data-history-calendar-detail hidden></p>
-        <section class="history-calendar-panel">
-          <div class="history-months" data-history-calendar>
-            загрузка календаря…
-          </div>
-        </section>
-        <div class="history-presets-panel">
-          <div class="history-preset-list" data-history-presets>
-            загрузка пресетов…
-          </div>
-        </div>
-        <div class="history-fields">
-          <label class="filter-card">
-            <span class="filter-label">Начало периода</span>
-            <input class="input" type="date" data-history-date-from>
-          </label>
-          <label class="filter-card">
-            <span class="filter-label">Конец периода</span>
-            <input class="input" type="date" data-history-date-to>
-          </label>
-        </div>
-        <div class="filters-footer">
-          <p class="filter-summary" data-history-summary>Загрузка…</p>
-          <div class="history-actions">
-            <button class="button secondary" type="button" data-history-reset>Сбросить</button>
-            <button class="button primary" type="button" data-history-save>Сохранить</button>
+    <section class="table-control-toolbar" data-table-toolbar aria-label="Управление таблицей">
+      <div class="toolbar-field toolbar-field-range">
+        <span class="filter-label">Диапазон</span>
+        <div class="history-compact-panel" data-history-panel>
+          <button class="history-compact-control" type="button" data-history-toggle aria-expanded="false" aria-controls="history-popover">
+            <span class="history-control-label" data-history-label>загрузка периода…</span>
+            <svg class="history-control-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="4" y="5" width="16" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="2"></rect>
+              <path d="M8 3v4M16 3v4M4 10h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+            </svg>
+          </button>
+          <div class="history-popover" id="history-popover" data-history-popover hidden>
+            <div class="history-picker-head">
+              <button class="history-month-nav" type="button" data-history-prev-month aria-label="Предыдущий месяц">&lt;</button>
+              <p class="history-month-label" data-history-month-label>месяц</p>
+              <button class="history-month-nav" type="button" data-history-next-month aria-label="Следующий месяц">&gt;</button>
+            </div>
+            <p data-history-meta hidden></p>
+            <p data-history-calendar-detail hidden></p>
+            <section class="history-calendar-panel">
+              <div class="history-months" data-history-calendar>
+                загрузка календаря…
+              </div>
+            </section>
+            <div class="history-presets-panel">
+              <div class="history-preset-list" data-history-presets>
+                загрузка пресетов…
+              </div>
+            </div>
+            <div class="history-fields">
+              <label class="filter-card">
+                <span class="filter-label">Начало периода</span>
+                <input class="input" type="date" data-history-date-from>
+              </label>
+              <label class="filter-card">
+                <span class="filter-label">Конец периода</span>
+                <input class="input" type="date" data-history-date-to>
+              </label>
+            </div>
+            <div class="filters-footer">
+              <p class="filter-summary" data-history-summary>Загрузка…</p>
+              <div class="history-actions">
+                <button class="button secondary" type="button" data-history-reset>Сбросить</button>
+                <button class="button primary" type="button" data-history-save>Сохранить</button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
+      <div class="filters-grid table-filter-controls" data-filter-controls></div>
+      <div class="toolbar-field toolbar-field-columns">
+        <span class="filter-label">Столбцы</span>
+        <details class="column-manager" data-column-manager>
+          <summary class="column-manager-toggle">Настроить</summary>
+          <div class="column-manager-panel">
+            <p class="column-manager-note" data-column-manager-note>
+              Загрузка настроек столбцов…
+            </p>
+            <div class="column-checkbox-list" data-column-visibility-controls>
+              Загрузка настроек столбцов…
+            </div>
+            <div class="column-manager-actions">
+              <button class="button secondary" type="button" data-columns-reset>Сбросить столбцы</button>
+            </div>
+          </div>
+        </details>
+      </div>
+      <div class="toolbar-field toolbar-field-actions">
+        <span class="filter-label">Итог</span>
+        <div class="toolbar-actions">
+          <p class="filter-summary toolbar-summary" data-filter-summary>Загрузка…</p>
+          <button class="button secondary" type="button" data-reset-filters>Сбросить</button>
+        </div>
+      </div>
+      <p class="panel-meta" data-filter-meta hidden>загрузка фильтров…</p>
     </section>
 
     <section class="panel">
@@ -1382,41 +1499,6 @@
             <tbody data-table-body></tbody>
           </table>
         </div>
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-top">
-        <div>
-          <h2>Фильтры и настройки</h2>
-          <p class="panel-note">
-            Search/select/sort и выбор видимых столбцов работают поверх уже собранного server-driven payload.
-          </p>
-        </div>
-        <div class="table-tools">
-          <details class="column-manager" data-column-manager>
-            <summary class="column-manager-toggle">Столбцы</summary>
-            <div class="column-manager-panel">
-              <p class="column-manager-note" data-column-manager-note>
-                Загрузка настроек столбцов…
-              </p>
-              <div class="column-checkbox-list" data-column-visibility-controls>
-                Загрузка настроек столбцов…
-              </div>
-              <div class="column-manager-actions">
-                <button class="button secondary" type="button" data-columns-reset>Сбросить столбцы</button>
-              </div>
-            </div>
-          </details>
-          <p class="panel-meta" data-filter-meta>
-            загрузка фильтров…
-          </p>
-        </div>
-      </div>
-      <div class="filters-grid" data-filter-controls></div>
-      <div class="filters-footer">
-        <p class="filter-summary" data-filter-summary>Загрузка…</p>
-        <button class="button secondary" type="button" data-reset-filters>Сбросить фильтры</button>
       </div>
     </section>
 
@@ -2497,18 +2579,18 @@
         sortOptionsByValue.set(option.value, option);
       });
       filterControlsNode.innerHTML = surface.controls.map(function(control) {
-        const classes = ["filter-card"];
+        const classes = ["filter-card", "toolbar-field"];
         if (control.kind === "search") {
-          classes.push("filter-card-wide");
+          classes.push("filter-card-wide", "toolbar-field-search");
         }
         return [
           '<label class="' + classes.join(" ") + '" data-filter-card="' + escapeHtml(control.control_id) + '">',
-          '<span class="filter-label">' + escapeHtml(control.label) + "</span>",
+          '<span class="filter-label">' + escapeHtml(toolbarControlLabel(control)) + "</span>",
           buildControlHtml(control),
           "</label>"
         ].join("");
       }).join("") + [
-        '<label class="filter-card">',
+        '<label class="filter-card toolbar-field">',
         '<span class="filter-label">Сортировка</span>',
         '<select class="select" data-filter-control="sort">',
         (surface.sort_options || []).map(function(option) {
@@ -2527,6 +2609,26 @@
         node.addEventListener("change", handleFilterInput);
       });
       syncControlValues();
+    }
+
+    function toolbarControlLabel(control) {
+      const controlId = String((control && control.control_id) || "");
+      if (controlId === "search") {
+        return "Поиск";
+      }
+      if (controlId === "section") {
+        return "Секции";
+      }
+      if (controlId === "group") {
+        return "Группа";
+      }
+      if (controlId === "scope_kind") {
+        return "Scope";
+      }
+      if (controlId === "metric") {
+        return "Метрики";
+      }
+      return String((control && control.label) || controlId || "");
     }
 
     function renderHistoricalAccess(payload) {

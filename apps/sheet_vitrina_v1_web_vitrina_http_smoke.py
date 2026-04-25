@@ -297,6 +297,7 @@ def main() -> None:
                 "web_vitrina_page_composition",
                 "data-top-panel",
                 "Загрузить и обновить",
+                "data-table-toolbar",
                 "data-filter-controls",
                 "data-history-toggle",
                 "data-history-label",
@@ -326,6 +327,8 @@ def main() -> None:
                     raise AssertionError(f"web-vitrina page shell must expose {expected!r}")
             if "data-retry-button" in page_html:
                 raise AssertionError("web-vitrina page must not render the removed refresh button")
+            if "Фильтры и настройки" in page_html or "Search/select/sort и выбор видимых столбцов" in page_html or "Сбросить фильтры" in page_html:
+                raise AssertionError("web-vitrina page must not render the former expanded filters/settings block")
             if 'data-unified-tab-button="update"' in page_html or ">Обновление данных</button>" in page_html or "data-update-summary" in page_html:
                 raise AssertionError("web-vitrina page must not render the removed update data block")
             if page_html.index("data-loading-table") > page_html.index("data-activity-log-body"):

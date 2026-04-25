@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-31-WEB-VITRINA-PAGE-COMPOSITION-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded phase-4 слою `web_vitrina_page_composition_block`."
-scope: "Real page composition для `GET /sheet-vitrina-v1/vitrina`: separate sibling page shell, split page-refresh/data-freshness summary, server-driven full-width table `Загрузка данных`, secondary block `Лог`, semantic green/red truth taxonomy for today/yesterday source status, bounded `Обновить` vs `Загрузить и обновить` action semantics, filters area, table container, truthful loading/empty/error states и minimal inline client island поверх stable server seams `web_vitrina_contract -> web_vitrina_view_model -> web_vitrina_gravity_table_adapter` без SPA/platform redesign."
+scope: "Real page composition для `GET /sheet-vitrina-v1/vitrina`: separate sibling page shell, split page-refresh/data-freshness summary, server-driven full-width table `Загрузка данных`, secondary block `Лог`, semantic green/red truth taxonomy for today/yesterday source status, bounded `Обновить` vs `Загрузить и обновить` action semantics, compact table toolbar for period/search/filters/columns/sort, table container, truthful loading/empty/error states и minimal inline client island поверх stable server seams `web_vitrina_contract -> web_vitrina_view_model -> web_vitrina_gravity_table_adapter` без SPA/platform redesign."
 source_basis:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
@@ -70,7 +70,8 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - compact top panel inside `Витрина`: `Загрузить и обновить` is the single primary manual action, `JSON Connect` and the old cheap `Обновить` button are not rendered, and no permanent top status badge duplicates the summary cards
   - while `Загрузить и обновить` is running, the top panel shows a minimal stage-based progress bar driven by the existing async job/log polling (`start/queued`, source fetch, prepare/materialize, load/update table, finish); after completion the progress bar disappears and the final semantic status stays in the summary/log surfaces
   - compact summary with separate `Последнее обновление страницы` and `Свежесть данных`
-  - compact historical period control now sits above the primary table, between summary/action context and the table; the old always-expanded `История` block is not rendered by default, so the operator sees the table immediately after a narrow date-range strip
+  - compact historical period control now sits in the primary table toolbar, between summary/action context and the table; the old always-expanded `История` block is not rendered by default, so the operator sees the table immediately after a narrow date-range strip
+  - table controls are one compact toolbar above the table, not a separate `Фильтры и настройки` section: `Диапазон`, `Поиск`, `Секции`, `Группа`, `Scope`, `Метрики`, `Столбцы`, `Сортировка` share the same line/wrapping strip and reuse the existing local filter/search/sort/column-visibility state
   - main table display headers are Russian (`Раздел`, `Метрика`, `Обновлено`, etc.); backend/API keys stay stable, while `Обновлено` surfaces per-row last successful update timestamp from snapshot metadata
   - `Загрузить и обновить` = canonical server-side refresh from external sources + page reread, without Google Sheet write path
   - two server-driven action-adjacent information blocks:
@@ -78,7 +79,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
     - `Seller Portal / бот` group additionally renders bounded session status on the left side of the group header and session controls (`Проверить сессию`, `Восстановить сессию`, `Скачать лаунчер`) over the existing seller-session/recovery seams
     - `Лог` = compact fixed-height tail below the loading table plus `Скачать лог` via existing job/log contour; if exact transient job for the visible snapshot is unavailable, block must show persisted semantic fallback instead of stale green success
     - former `Обновление данных` is not rendered as a page-composition activity block; persisted `STATUS` rows remain internal truth for status/read contracts
-  - filters area
+  - compact table toolbar
   - table container
   - truthful `loading / empty / error` states
   - `Расчет поставок` and `Отчеты` reuse the existing operator template/actions in embedded mode, preserving factory/WB supply blocks and the internal report subsection selector (`Ежедневные отчёты`, `Отчёт по остаткам`, `Выполнение плана`) without changing business routes; embedded height is measured from the actual `.page` content rather than iframe viewport/body `100vh`, and edge wheel gestures are relayed to the parent shell so these tabs do not create large empty scroll tails or swallow the first trackpad scroll
@@ -218,6 +219,10 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - the collapsed control shows `DD.MM.YYYY - DD.MM.YYYY` plus a calendar icon above the table
   - first open / hard refresh without explicit query uses the latest four server-readable business dates inclusive, ending on backend-owned `today_current_date` when that date is present in the current visible/readable context
   - opened state is a compact one-month picker, not the former expanded `История` section: header has previous/next month arrows, the calendar renders only one month, and technical mode/default/query-state explanations are not user-facing
+- Table control UX is intentionally thin:
+  - the former expanded `Фильтры и настройки` card is not rendered as a separate section
+  - search, section/group/scope/metric filters, column visibility and sorting live in the compact toolbar next to `Диапазон`
+  - controls stay browser-local and only filter/sort the already received page payload; they do not trigger source refresh, data writes or new truth semantics
   - presets (`Неделя`, `2 недели`, `Месяц`, `Квартал`, `Год`), manual `date_from/date_to` fields and `Сбросить`/`Сохранить` live below that one-month calendar in the same small popover
   - `Сохранить` rewrites query string and re-reads server payload through the existing `date_from/date_to` ready-snapshot window path
   - `Сбросить` removes `as_of_date/date_from/date_to` and returns to the same latest-four-days default
