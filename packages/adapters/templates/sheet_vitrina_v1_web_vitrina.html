@@ -508,7 +508,8 @@
 
     .activity-group-button,
     .seller-session-button,
-    .activity-group-date-input {
+    .activity-group-date-input,
+    .activity-source-status-button {
       min-height: 28px;
       padding: 5px 9px;
       font-size: 11px;
@@ -1343,6 +1344,7 @@
               <p class="activity-card-title" data-loading-table-title>Загрузка данных</p>
               <p class="activity-card-subtitle" data-loading-table-subtitle>загрузка статусов…</p>
             </div>
+            <button class="button secondary activity-source-status-button" type="button" data-source-status-load>Загрузить</button>
           </div>
           <p class="activity-summary-meta" data-loading-table-meta>Ожидание server summary…</p>
           <div class="table-shell activity-loading-table" data-loading-table-shell>
@@ -1431,6 +1433,7 @@
     const openContractLink = document.querySelector("[data-open-contract]");
     const openOperatorLink = document.querySelector("[data-open-operator]");
     const loadRefreshButton = document.querySelector("[data-load-refresh-button]");
+    const sourceStatusLoadButton = document.querySelector("[data-source-status-load]");
     const resetFiltersButton = document.querySelector("[data-reset-filters]");
 
     const ALL_VALUE = "__all__";
@@ -1477,6 +1480,10 @@
       },
       groupActions: {},
       groupRefreshDates: {},
+      sourceStatus: {
+        loaded: false,
+        requestSequence: 0
+      },
       sessionHighlights: {}
     };
 
@@ -1491,6 +1498,9 @@
 
     loadRefreshButton.addEventListener("click", function() {
       runSourceRefreshAndReload();
+    });
+    sourceStatusLoadButton.addEventListener("click", function() {
+      loadSourceStatusDetails();
     });
 
     unifiedTabButtons.forEach(function(button) {
@@ -1585,8 +1595,9 @@
       }
     }, {passive: false});
 
-    function buildReadUrl(surface) {
+    function buildReadUrl(surface, options) {
       const url = new URL(WEB_VITRINA_CONFIG.read_path, window.location.origin);
+      const normalizedOptions = options || {};
       const params = new URLSearchParams(window.location.search);
       const dateFrom = params.get("date_from");
       const dateTo = params.get("date_to");
@@ -1599,6 +1610,9 @@
       }
       if (surface && surface !== "contract") {
         url.searchParams.set("surface", surface);
+      }
+      if (normalizedOptions.includeSourceStatus) {
+        url.searchParams.set("include_source_status", "1");
       }
       return url;
     }
@@ -1755,6 +1769,7 @@
 
     function setActionButtonsDisabled(disabled) {
       loadRefreshButton.disabled = !!disabled;
+      sourceStatusLoadButton.disabled = !!disabled;
       loadingTableBodyNode.querySelectorAll("button").forEach(function(button) {
         button.disabled = !!disabled;
       });
@@ -1985,6 +2000,8 @@
     function renderLoadingTable(block) {
       loadingTableTitleNode.textContent = String(block.title || "Загрузка данных");
       loadingTableSubtitleNode.textContent = String(block.subtitle || "");
+      const sourceStatusState = normalizeSourceStatusState(block.source_status_state);
+      syncSourceStatusLoadButton(sourceStatusState);
       const detailParts = [];
       if (block.updated_at) {
         detailParts.push(formatTimestampDisplay(block.updated_at));
@@ -1997,18 +2014,74 @@
       const items = Array.isArray(block.items) ? block.items : [];
       const rows = Array.isArray(block.rows) ? block.rows : items.map(itemToLegacyLoadingRow);
       const groups = Array.isArray(block.groups) ? block.groups : [];
+      if (sourceStatusState !== "loaded") {
+        loadingTableShellNode.classList.add("is-hidden");
+        loadingTableEmptyNode.classList.remove("is-hidden");
+        loadingTableHeadNode.innerHTML = "";
+        loadingTableBodyNode.innerHTML = "";
+        loadingTableEmptyNode.textContent = String(
+          block.empty_message ||
+          sourceStatusStateMessage(sourceStatusState)
+        );
+        state.sourceStatus.loaded = false;
+        return;
+      }
       if ((!rows.length && !groups.length) || !columns.length) {
         loadingTableShellNode.classList.add("is-hidden");
         loadingTableEmptyNode.classList.remove("is-hidden");
+        loadingTableHeadNode.innerHTML = "";
+        loadingTableBodyNode.innerHTML = "";
         loadingTableEmptyNode.textContent = String(block.empty_message || "Статусы по источникам пока недоступны.");
+        state.sourceStatus.loaded = false;
         return;
       }
+      if (!rows.length) {
+        loadingTableShellNode.classList.add("is-hidden");
+        loadingTableEmptyNode.classList.remove("is-hidden");
+        loadingTableHeadNode.innerHTML = "";
+        loadingTableBodyNode.innerHTML = "";
+        loadingTableEmptyNode.textContent = String(
+          block.empty_message || "Status payload не содержит source rows. Повторите загрузку или смотрите лог."
+        );
+        state.sourceStatus.loaded = false;
+        return;
+      }
+      state.sourceStatus.loaded = true;
       loadingTableShellNode.classList.remove("is-hidden");
       loadingTableEmptyNode.classList.add("is-hidden");
       loadingTableHeadNode.innerHTML = "<tr>" + columns.map(function(column) {
         return '<th data-col-id="' + escapeHtml(column.id || "") + '">' + escapeHtml(column.label || "") + "</th>";
       }).join("") + "</tr>";
       loadingTableBodyNode.innerHTML = renderGroupedLoadingRows(block, rows, columns);
+    }
+
+    function normalizeSourceStatusState(value) {
+      const normalized = String(value || "").trim();
+      if (normalized === "not_loaded" || normalized === "loading" || normalized === "loaded" || normalized === "empty" || normalized === "error") {
+        return normalized;
+      }
+      return "loaded";
+    }
+
+    function sourceStatusStateMessage(value) {
+      if (value === "loading") {
+        return "Загружаем статусы источников…";
+      }
+      if (value === "error") {
+        return "Не удалось загрузить статусы источников. Повторите загрузку или смотрите лог.";
+      }
+      if (value === "empty") {
+        return "Status payload не содержит source rows. Повторите загрузку или смотрите лог.";
+      }
+      return "Статусы источников не загружены. Нажмите «Загрузить», чтобы посмотреть детали.";
+    }
+
+    function syncSourceStatusLoadButton(sourceStatusState) {
+      if (!sourceStatusLoadButton) {
+        return;
+      }
+      sourceStatusLoadButton.textContent = sourceStatusState === "loading" ? "Загрузка…" : "Загрузить";
+      sourceStatusLoadButton.disabled = sourceStatusState === "loading";
     }
 
     function renderGroupedLoadingRows(block, rows, columns) {
@@ -3274,6 +3347,92 @@
       renderLoadingTable(loadingTableBlock());
     }
 
+    async function loadSourceStatusDetails() {
+      const requestId = state.sourceStatus.requestSequence + 1;
+      state.sourceStatus.requestSequence = requestId;
+      const previousLoaded = !!state.sourceStatus.loaded;
+      if (!previousLoaded) {
+        renderLoadingTable({
+          title: "Загрузка данных",
+          subtitle: "Загружаем статусы источников…",
+          source_status_state: "loading",
+          empty_message: "Загружаем статусы источников…"
+        });
+      } else {
+        syncSourceStatusLoadButton("loading");
+      }
+      try {
+        const response = await fetch(
+          buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {includeSourceStatus: true}).toString(),
+          {
+            method: "GET",
+            headers: {"Accept": "application/json"}
+          }
+        );
+        const payload = await readJsonResponse(response, "non-json response from source status details route");
+        if (requestId !== state.sourceStatus.requestSequence) {
+          return;
+        }
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "source status details route returned " + response.status);
+        }
+        if (!payload || payload.composition_name !== "web_vitrina_page_composition") {
+          throw new Error("unexpected source status details payload");
+        }
+        const activitySurface = payload.activity_surface || {};
+        const loadingTable = activitySurface.loading_table || {};
+        if (!Array.isArray(loadingTable.rows) || !loadingTable.rows.length) {
+          const emptySurface = {
+            log_block: activitySurface.log_block || (((state.composition || {}).activity_surface || {}).log_block || {}),
+            loading_table: Object.assign({}, loadingTable, {
+              title: loadingTable.title || "Загрузка данных",
+              source_status_state: "empty",
+              empty_message: loadingTable.empty_message || "Status payload не содержит source rows. Повторите загрузку или смотрите лог."
+            })
+          };
+          if (state.composition) {
+            state.composition.activity_surface = emptySurface;
+          }
+          renderActivitySurface(emptySurface);
+          return;
+        }
+        if (state.composition) {
+          state.composition.activity_surface = activitySurface;
+        }
+        renderActivitySurface(activitySurface);
+      } catch (error) {
+        if (requestId !== state.sourceStatus.requestSequence) {
+          return;
+        }
+        const message = String(error && error.message ? error.message : error);
+        appendVisibleActionLogLine(
+          "Не удалось загрузить статусы источников: " + message,
+          {statusLabel: "Ошибка", tone: "error", detail: message}
+        );
+        if (!previousLoaded) {
+          const errorSurface = {
+            log_block: (((state.composition || {}).activity_surface || {}).log_block || {}),
+            loading_table: {
+              title: "Загрузка данных",
+              subtitle: "Ошибка загрузки source-status details",
+              detail: message,
+              source_status_state: "error",
+              rows: [],
+              groups: [],
+              columns: [],
+              empty_message: "Не удалось загрузить статусы источников. Повторите загрузку или смотрите лог."
+            }
+          };
+          if (state.composition) {
+            state.composition.activity_surface = errorSurface;
+          }
+          renderActivitySurface(errorSurface);
+        } else {
+          syncSourceStatusLoadButton("loaded");
+        }
+      }
+    }
+
     function getLoadingGroupLabel(groupId) {
       const normalizedGroupId = String(groupId || "").trim();
       const groups = Array.isArray(loadingTableBlock().groups) ? loadingTableBlock().groups : [];
@@ -3505,7 +3664,7 @@
         setSessionHighlightsFromJob(finalJob);
         setStatusBadge({label: "Загрузка", tone: "warning", detail: "данные обновлены, перечитываем витрину"});
         showGlobalProgress(100, "Завершение");
-        await loadPageComposition();
+        await loadPageComposition({includeSourceStatus: state.sourceStatus.loaded});
       } catch (error) {
         if (actionId !== state.actionSequence) {
           return;
@@ -3616,7 +3775,7 @@
         );
         setStatusBadge({label: "Загрузка", tone: "warning", detail: "группа обновлена, перечитываем витрину"});
         clearGroupActionState(normalizedGroupId);
-        await loadPageComposition();
+        await loadPageComposition({includeSourceStatus: true});
       } catch (error) {
         if (actionId !== state.actionSequence) {
           return;
@@ -3677,7 +3836,7 @@
           tone: state.sellerSession.tone,
           detail: "Seller Portal session check завершён"
         });
-        await loadPageComposition();
+        await loadPageComposition({includeSourceStatus: state.sourceStatus.loaded});
       } catch (error) {
         if (actionId !== state.actionSequence) {
           return;
@@ -3728,7 +3887,7 @@
           throw new Error((finalJob && (finalJob.error || finalJob.status)) || "seller recovery start job failed");
         }
         setStatusBadge({label: "Запущено", tone: "warning", detail: "recovery flow requested"});
-        await loadPageComposition();
+        await loadPageComposition({includeSourceStatus: state.sourceStatus.loaded});
       } catch (error) {
         if (actionId !== state.actionSequence) {
           return;
@@ -3753,7 +3912,8 @@
       renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
     }
 
-    async function loadPageComposition() {
+    async function loadPageComposition(options) {
+      const normalizedOptions = options || {};
       const requestId = state.requestSequence + 1;
       state.requestSequence = requestId;
       setActionButtonsDisabled(true);
@@ -3766,9 +3926,14 @@
           "</code>."
       );
       try {
-        const response = await fetch(buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface).toString(), {
+        const response = await fetch(
+          buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {
+            includeSourceStatus: !!normalizedOptions.includeSourceStatus
+          }).toString(),
+          {
           headers: {"Accept": "application/json"}
-        });
+          }
+        );
         const payload = await readJsonResponse(response, "non-json response from page composition surface");
         if (requestId !== state.requestSequence) {
           return;

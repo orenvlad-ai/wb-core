@@ -748,6 +748,7 @@ def _build_handler(
                         as_of_date=as_of_date,
                         date_from=date_from,
                         date_to=date_to,
+                        include_source_status=_resolve_optional_query_bool(parsed.query, "include_source_status"),
                     )
                     _write_json_response(
                         self,

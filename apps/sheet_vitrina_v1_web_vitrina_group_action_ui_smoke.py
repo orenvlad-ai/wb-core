@@ -32,18 +32,23 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
             def empty_loading_rows(route: object) -> None:
                 response = route.fetch()
                 payload = response.json()
+                if "include_source_status=1" not in route.request.url:
+                    route.fulfill(
+                        status=response.status,
+                        content_type="application/json",
+                        body=json.dumps(payload, ensure_ascii=False),
+                    )
+                    return
                 activity_surface = payload.get("activity_surface") or {}
                 upload_summary = activity_surface.get("upload_summary") or {}
                 loading_table = activity_surface.get("loading_table") or {}
-                fallback = (
-                    "Последний завершённый refresh-run в памяти сервиса пока не найден. "
-                    "Показываем только сохранённый итог по текущему срезу."
-                )
-                upload_summary["subtitle"] = "Transient refresh-log недоступен; показываем сохранённый итог по текущему срезу."
+                fallback = "Status payload не содержит source rows для текущего среза. Повторите загрузку или смотрите лог."
+                upload_summary["subtitle"] = "Source-status details пустые."
                 upload_summary["items"] = []
                 upload_summary["empty_message"] = fallback
                 loading_table["subtitle"] = upload_summary["subtitle"]
                 loading_table["rows"] = []
+                loading_table["source_status_state"] = "empty"
                 loading_table["empty_message"] = fallback
                 route.fulfill(
                     status=response.status,
@@ -57,31 +62,42 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
             )
             page = context.new_page()
             page.goto(base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, wait_until="domcontentloaded")
-            page.wait_for_selector("[data-refresh-source-group='wb_api']", timeout=20000)
-            payload = page.evaluate(
+            page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+            initial_payload = page.evaluate(
                 """() => ({
                   shell_hidden: document.querySelector('[data-loading-table-shell]').classList.contains('is-hidden'),
                   empty_hidden: document.querySelector('[data-loading-table-empty]').classList.contains('is-hidden'),
+                  empty_text: document.querySelector('[data-loading-table-empty]').textContent.trim(),
+                  load_button: document.querySelector('[data-source-status-load]').textContent.trim(),
                   group_count: document.querySelectorAll('[data-loading-group]').length,
                   button_count: document.querySelectorAll('[data-refresh-source-group]').length,
                   source_row_count: document.querySelectorAll('[data-loading-source]').length,
-                  empty_source_rows: document.querySelectorAll('[data-loading-source-empty]').length,
-                  session_controls: document.querySelectorAll('[data-session-check]').length,
-                  subtitle: document.querySelector('[data-loading-table-subtitle]').textContent.trim()
+                  empty_source_rows: document.querySelectorAll('[data-loading-source-empty]').length
                 })"""
             )
-            if payload != {
-                "shell_hidden": False,
-                "empty_hidden": True,
-                "group_count": 3,
-                "button_count": 3,
+            if initial_payload != {
+                "shell_hidden": True,
+                "empty_hidden": False,
+                "empty_text": "Статусы источников не загружены. Нажмите «Загрузить», чтобы посмотреть детали.",
+                "load_button": "Загрузить",
+                "group_count": 0,
+                "button_count": 0,
                 "source_row_count": 0,
-                "empty_source_rows": 3,
-                "session_controls": 1,
-                "subtitle": "Transient refresh-log недоступен; показываем сохранённый итог по текущему срезу.",
+                "empty_source_rows": 0,
             }:
-                raise AssertionError(f"group controls must survive empty transient loading rows, got {payload}")
-            print("web_vitrina_group_actions_empty_rows: ok -> controls remain visible")
+                raise AssertionError(f"initial source status state must be unloaded, got {initial_payload}")
+            page.locator("[data-source-status-load]").click()
+            page.wait_for_function(
+                """() => {
+                  const empty = document.querySelector('[data-loading-table-empty]');
+                  return !!empty && !empty.classList.contains('is-hidden')
+                    && empty.textContent.includes('Status payload не содержит source rows')
+                    && document.querySelectorAll('[data-loading-source-empty]').length === 0
+                    && document.querySelectorAll('[data-refresh-source-group]').length === 0;
+                }""",
+                timeout=5000,
+            )
+            print("web_vitrina_source_status_lazy_empty: ok -> no fake group shells")
             browser.close()
 
 
@@ -104,6 +120,8 @@ def _assert_group_action_launch_error() -> None:
             context.route("**/v1/sheet-vitrina-v1/web-vitrina/group-refresh", fail_group_refresh)
             page = context.new_page()
             page.goto(base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, wait_until="domcontentloaded")
+            page.wait_for_selector("[data-source-status-load]", timeout=20000)
+            page.locator("[data-source-status-load]").click()
             page.wait_for_selector("[data-refresh-source-group]", timeout=20000)
             group_button = page.locator("[data-refresh-source-group='wb_api']").first
             page.locator("[data-refresh-source-group-date='wb_api']").fill("2026-04-13")

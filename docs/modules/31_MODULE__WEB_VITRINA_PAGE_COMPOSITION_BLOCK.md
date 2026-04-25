@@ -27,6 +27,7 @@ related_tables:
 related_endpoints:
   - "GET /sheet-vitrina-v1/vitrina"
   - "GET /v1/sheet-vitrina-v1/web-vitrina"
+  - "GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition&include_source_status=1"
 related_runners:
   - "apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py"
@@ -73,7 +74,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - main table display headers are Russian (`Раздел`, `Метрика`, `Обновлено`, etc.); backend/API keys stay stable, while `Обновлено` surfaces per-row last successful update timestamp from snapshot metadata
   - `Загрузить и обновить` = canonical server-side refresh from external sources + page reread, without Google Sheet write path
   - two server-driven action-adjacent information blocks:
-    - `Загрузка данных` = grouped compact table derived from the same per-source upload/fetch truth: stable groups `WB API`, `Seller Portal / бот`, `Прочие источники`; each group has a compact date control, `Обновить группу`, group-level last update timestamp, and rows with server/business today and yesterday statuses, reason text, Russian metric labels and secondary technical endpoint. Every metric visible in the main table belongs to exactly one loading group; residual calculated/formula metrics such as proxy profit and proxy margin live in `Прочие источники`.
+    - `Загрузка данных` = lazy detailed source-status surface. Initial page composition renders only a calm `not_loaded` state plus the explicit button `Загрузить`; it must not auto-render source group shells or the misleading row `Источники группы пока не представлены в status payload.` before the operator asks for details. On click, the page makes a read-only request to the same web-vitrina read route with `surface=page_composition&include_source_status=1` and then renders the grouped compact table derived from per-source upload/fetch truth: stable groups `WB API`, `Seller Portal / бот`, `Прочие источники`; each group has a compact date control, `Обновить группу`, group-level last update timestamp, and rows with server/business today and yesterday statuses, reason text, Russian metric labels and secondary technical endpoint. Every metric visible in the main table belongs to exactly one loading group; residual calculated/formula metrics such as proxy profit and proxy margin live in `Прочие источники`.
     - `Seller Portal / бот` group additionally renders bounded session status on the left side of the group header and session controls (`Проверить сессию`, `Восстановить сессию`, `Скачать лаунчер`) over the existing seller-session/recovery seams
     - `Лог` = compact fixed-height tail below the loading table plus `Скачать лог` via existing job/log contour; if exact transient job for the visible snapshot is unavailable, block must show persisted semantic fallback instead of stale green success
     - former `Обновление данных` is not rendered as a page-composition activity block; persisted `STATUS` rows remain internal truth for status/read contracts
@@ -85,7 +86,8 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - default/no-surface path still returns `web_vitrina_contract` v1
   - optional `as_of_date` keeps one-day historical read on the same route
   - optional `date_from/date_to` now materializes a bounded ready-snapshot period window on the same route
-  - optional `surface=page_composition` now returns a server-driven page payload for the live page shell
+  - optional `surface=page_composition` now returns a server-driven page payload for the live page shell; by default it keeps source-status details unloaded
+  - optional `include_source_status=1` on that page-composition surface returns the detailed grouped loading table without triggering refresh/upstream fetch
 - `page_composition` is server-owned and assembled only from:
   - `web_vitrina_contract`
   - `web_vitrina_view_model`
@@ -95,6 +97,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - keep only local filter/search/sort state
   - keep only browser-owned page reread timestamp for `Последнее обновление страницы`
   - keep only session-local cell highlighting for the last refresh result: `updated` cells render as soft green, `latest_confirmed`/fallback cells render as soft yellow, full refresh highlights every refreshed temporal date column (`yesterday_closed` and `today_current` when both are in scope), group refresh highlights only the selected group/date, and the highlight disappears on browser reload
+  - keep only session-local source-status load state for `Загрузка данных`: `not_loaded`, `loading`, `loaded`, `empty`, `error`; this state controls visibility of the detailed table and retry button but never becomes source truth
   - keep zero ownership over job/log/status truth for `Лог` or `Загрузка данных`
   - never assemble canonical truth
   - never compute business metrics
@@ -156,13 +159,15 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
 - `apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py`
   - confirms `composition_name/version`, source chain, state namespace, filter surface, timestamp-format hint for `Свежесть данных` and human-readable activity payload fields
 - `apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py`
-  - confirms real page render, visible table, filter controls, Russian activity labels/reasons, unified readable freshness timestamp without raw ISO artefacts, empty state on no-match search, reset recovery, period selector UX (`calendar + presets + date_from/date_to + save/reset`) and truthful error state when the ready snapshot is absent
+  - confirms real page render, visible table, lazy source-status initial state, explicit `Загрузить` details flow, filter controls, Russian activity labels/reasons, unified readable freshness timestamp without raw ISO artefacts, empty state on no-match search, reset recovery, period selector UX (`calendar + presets + date_from/date_to + save/reset`) and truthful error state when the ready snapshot is absent
 - `apps/sheet_vitrina_v1_web_vitrina_http_smoke.py`
   - confirms default `web_vitrina_contract` path stays stable, optional `date_from/date_to` works as bounded period window and optional `surface=page_composition` works on the same route with severity-sorted human activity items
 - `apps/sheet_vitrina_v1_web_vitrina_highlight_ui_smoke.py`
   - confirms full refresh session highlighting covers both touched temporal dates, keeps green for changed cells, yellow for latest-confirmed cells and clears on browser reload
 - `apps/sheet_vitrina_v1_web_vitrina_source_status_smoke.py`
   - confirms source-aware loading-table reduction for accepted-current rollover, latest-confirmed/runtime-cache fallback, `stocks[today_current]` non-required slots, promo fallback and `fin_report_daily[yesterday_closed]` accepted truth
+- `apps/sheet_vitrina_v1_web_vitrina_group_action_ui_smoke.py`
+  - confirms initial `Загрузка данных` does not auto-render source group details, explicit empty/error details payload does not create fake group shells, and group refresh controls still work after details are loaded
 - `apps/sheet_vitrina_v1_web_vitrina_reason_sanitization_smoke.py`
   - confirms warning/error `reason_ru` is derived as a short human summary and visible card text no longer leaks raw JSON, traceback, request ids, `resolution_rule=...` or `accepted_at=...`
 - `apps/registry_upload_http_entrypoint_hosted_runtime.py`
@@ -196,8 +201,10 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
 - Once the POST reaches the backend, the action reuses the existing refresh/status/job/log seams, creates a `refresh_group` job before source fetch, fetches/prepares only the selected group, loads only cells for the selected date into the target ready snapshot, updates row-level `Обновлено` and group-level `last_updated_at` only for affected rows/groups, and logs stage-aware success/failure (`source_fetch`, `prepare_materialize`, `load_group_to_vitrina`) with the selected `as_of_date`.
 - Refresh and group-refresh job results may include `updated_cells` entries `{row_id, metric_key, as_of_date, source_group_id, status}`. The field is result metadata for the current UI session only: it drives transient green/yellow cell highlighting and log counters, but it is not persisted as permanent table styling. Full refresh emits metadata across all refreshed `date_columns`; group refresh remains bounded to the selected `source_group_id + as_of_date`.
 - `Загрузка данных` and `Лог` stay server-driven:
+  - source-status details are lazy-loaded: initial page-open keeps a `not_loaded` state and the `Загрузить` button; no grouped source rows, no group action controls and no session controls are rendered until the explicit read-only details request succeeds
+  - if the explicit details request returns empty/incomplete payload, the UI shows an explicit empty/error message and retry button instead of normal-looking group shells with `Источники группы пока не представлены...`
   - loading table is derived from the last relevant refresh/group-refresh job log and persisted source fallback; if exact job association is unavailable, page shows truthful non-OK status rather than unrelated stale run
-  - absence of transient in-memory refresh-log must not hide source-group headers/actions: the grouped controls remain visible from server-driven capabilities even when source rows are available only as persisted summary or are temporarily empty
+  - after explicit details load succeeds, absence of transient in-memory refresh-log must not hide source-group headers/actions when persisted source summary and backend capabilities are available; before that click, controls stay intentionally unloaded
   - loading table rows are nested under stable source-group headers while preserving source truth and canonical source labels; coverage must include all visible main-table metrics, with residual calculated/formula metrics assigned to `Прочие источники`
   - loading table uses server/business `Сегодня: <YYYY-MM-DD>` and `Вчера: <YYYY-MM-DD>` dates, short OK/not-OK cells, reason columns, Russian metric labels from the existing metric registry and secondary technical endpoint text
   - loading table OK/not-OK reduction is source-aware: latest confirmed/runtime-cache/accepted fallback with filled visible cells is OK, non-required source slots are OK/non-degrading, and red is reserved for required source failures without accepted fallback or required visible value

@@ -172,6 +172,18 @@ def main() -> None:
                 "year",
             ]:
                 raise AssertionError(f"web-vitrina preset options mismatch, got {historical_access}")
+            initial_activity_surface = composition_payload.get("activity_surface") or {}
+            initial_loading_table = initial_activity_surface.get("loading_table") or {}
+            if initial_loading_table.get("source_status_state") != "not_loaded":
+                raise AssertionError(f"initial page composition must not auto-load source details, got {initial_activity_surface}")
+            if initial_loading_table.get("rows") or initial_loading_table.get("groups"):
+                raise AssertionError(f"initial page composition must not expose source group shells, got {initial_loading_table}")
+
+            details_status, details_payload = _get_json(
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&include_source_status=1"
+            )
+            if details_status != 200:
+                raise AssertionError(f"web-vitrina source status details route must return 200, got {details_status}")
 
             period_composition_status, period_composition_payload = _get_json(
                 f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&date_from=2026-04-18&date_to=2026-04-20"
@@ -184,7 +196,7 @@ def main() -> None:
                 raise AssertionError(f"web-vitrina period selected_date_from mismatch, got {period_composition_payload}")
             if period_composition_payload.get("historical_access", {}).get("selected_date_to") != "2026-04-20":
                 raise AssertionError(f"web-vitrina period selected_date_to mismatch, got {period_composition_payload}")
-            activity_surface = composition_payload.get("activity_surface") or {}
+            activity_surface = details_payload.get("activity_surface") or {}
             log_block = activity_surface.get("log_block", {})
             if log_block.get("tone") != "error":
                 raise AssertionError(f"web-vitrina log block must surface persisted warning/error fallback, got {activity_surface}")
@@ -229,8 +241,8 @@ def main() -> None:
                 raise AssertionError(f"loading table must expose Russian metric labels, got {first_loading_row}")
             if first_loading_row.get("technical_endpoint") != "POST /api/v2/list/goods/filter":
                 raise AssertionError(f"loading table technical endpoint mismatch, got {first_loading_row}")
-            if composition_payload.get("status_badge", {}).get("tone") != "error":
-                raise AssertionError(f"web-vitrina page composition must reflect semantic error tone, got {composition_payload}")
+            if details_payload.get("status_badge", {}).get("tone") != "error":
+                raise AssertionError(f"web-vitrina page composition must reflect semantic error tone, got {details_payload}")
 
             page_status, page_html = _get_text(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}")
             if page_status != 200:

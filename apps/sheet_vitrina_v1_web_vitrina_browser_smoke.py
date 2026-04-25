@@ -260,6 +260,26 @@ def run_browser_checks(
                 raise AssertionError("web-vitrina table must render at least one row")
             initial_summary_cards = _read_summary_cards(page)
             status_summary = initial_summary_cards.get("status", {})
+            initial_unloaded_activity_surface = _read_activity_surface(
+                page,
+                allow_empty_log=True,
+            )
+            if initial_unloaded_activity_surface["loading"]["rows"]:
+                raise AssertionError(
+                    f"loading details must not auto-render before click, got {initial_unloaded_activity_surface}"
+                )
+            if initial_unloaded_activity_surface["loading"]["groups"]:
+                raise AssertionError(
+                    f"initial loading state must not render empty group shells, got {initial_unloaded_activity_surface}"
+                )
+            if "Источники группы пока не представлены" in initial_unloaded_activity_surface["loading"].get("empty_text", ""):
+                raise AssertionError(
+                    f"initial unloaded state must not look like missing status payload, got {initial_unloaded_activity_surface}"
+                )
+            if initial_unloaded_activity_surface["loading"].get("source_status_button") != "Загрузить":
+                raise AssertionError(f"source-status load button mismatch, got {initial_unloaded_activity_surface}")
+            page.locator("[data-source-status-load]").click()
+            page.wait_for_selector("[data-loading-source]", timeout=20000)
             initial_activity_surface = _read_activity_surface(
                 page,
                 allow_empty_log=expected_percent_rows is None,
@@ -840,6 +860,8 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
               session_state_in_controls: !!node.querySelector('.activity-group-actions [data-session-state]')
             }));
             return {
+              source_status_button: ((document.querySelector('[data-source-status-load]') || {}).textContent || '').trim(),
+              empty_text: ((document.querySelector('[data-loading-table-empty]') || {}).textContent || '').trim(),
               meta: ((document.querySelector('[data-loading-table-meta]') || {}).textContent || '').trim(),
               subtitle: ((document.querySelector('[data-loading-table-subtitle]') || {}).textContent || '').trim(),
               headers: headers,
