@@ -2178,6 +2178,8 @@ def _note_requires_warning(note: str) -> bool:
     normalized = str(note or "").strip()
     if not normalized:
         return False
+    if _status_note_is_latest_confirmed(normalized):
+        return False
     success_markers = {
         "resolution_rule=accepted_closed_current_attempt",
         "resolution_rule=accepted_current_current_attempt",
@@ -2193,6 +2195,31 @@ def _note_requires_warning(note: str) -> bool:
         "resolution_rule=accepted_prior_current_runtime_cache",
     }
     return any(marker in normalized for marker in warning_markers)
+
+
+def _status_note_is_latest_confirmed(note: str) -> bool:
+    normalized = str(note or "").strip().lower()
+    if not normalized:
+        return False
+    latest_confirmed_tokens = (
+        "latest_confirmed",
+        "fallback",
+        "runtime_cache",
+        "accepted_closed_runtime_snapshot",
+        "accepted_current_runtime_snapshot",
+        "accepted_closed_from_prior_current_snapshot",
+        "accepted_closed_from_prior_current_cache",
+        "accepted_prior_current_runtime_cache",
+        "exact_date_provisional_runtime_cache",
+        "accepted_closed_from_interval_replay",
+        "accepted_current_from_prior",
+        "accepted_closed_preserved_after_invalid_attempt",
+        "accepted_current_preserved_after_invalid_attempt",
+        "exact_date_stocks_history_runtime_cache",
+        "exact_date_promo_current_runtime_cache",
+        "exact_date_runtime_cache",
+    )
+    return any(token in normalized for token in latest_confirmed_tokens)
 
 
 def _compose_source_reason(slot_outcomes: list[dict[str, Any]]) -> str:

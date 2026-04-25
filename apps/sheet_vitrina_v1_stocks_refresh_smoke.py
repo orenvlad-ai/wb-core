@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import socket
-import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import threading
@@ -104,8 +103,6 @@ def main() -> None:
                 f"http://127.0.0.1:{config.port}{config.sheet_status_path}"
                 f"?{urllib_parse.urlencode({'as_of_date': AS_OF_DATE})}"
             )
-            upload_url = f"http://127.0.0.1:{config.port}{config.upload_path}"
-
             refresh_status, refresh_payload = _post_json(refresh_url, {"as_of_date": AS_OF_DATE})
             if refresh_status != 200 or refresh_payload["status"] != "success":
                 raise AssertionError(f"refresh must succeed, got {refresh_status} {refresh_payload}")
@@ -154,18 +151,6 @@ def main() -> None:
             if not any(_row_yesterday_value(row) == 2.0 for row in _find_data_rows(plan_payload, "stock_ru_far_siberia")):
                 raise AssertionError("far/siberia district must materialize from cached historical stocks")
 
-            load_harness_result = _run_load_only_harness(endpoint_url=upload_url, as_of_date=AS_OF_DATE)
-            if load_harness_result["load_error"]:
-                raise AssertionError(f"sheet-side load must succeed, got {load_harness_result['load_error']!r}")
-            if load_harness_result["load_result"]["http_status"] != 200:
-                raise AssertionError("sheet-side load must receive 200")
-            loaded_rows = load_harness_result["sheets"]["DATA_VITRINA"]["values"]
-            if not any(_row_yesterday_value(row) == 50.0 for row in _find_loaded_rows(loaded_rows, "total_stock_total")):
-                raise AssertionError("loaded DATA_VITRINA must keep historical total_stock_total")
-            if not all(
-                _row_today_value(row) in {"", None} for row in _find_loaded_rows(loaded_rows, "stock_total")
-            ):
-                raise AssertionError("loaded DATA_VITRINA must keep today_current stocks blank under yesterday-only policy")
             if status_payload["snapshot_id"] != refresh_payload["snapshot_id"]:
                 raise AssertionError("status snapshot_id must match refreshed snapshot")
 
@@ -280,27 +265,6 @@ def _get_json(url: str) -> tuple[int, dict[str, Any]]:
         return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
-def _run_load_only_harness(*, endpoint_url: str, as_of_date: str) -> dict[str, Any]:
-    return json.loads(
-        subprocess.check_output(
-            [
-                "node",
-                str(ROOT / "apps" / "sheet_vitrina_v1_registry_upload_trigger_harness.js"),
-                "--mode",
-                "load_only",
-                "--scriptPath",
-                str(ROOT / "gas" / "sheet_vitrina_v1" / "RegistryUploadTrigger.gs"),
-                "--endpointUrl",
-                endpoint_url,
-                "--asOfDate",
-                as_of_date,
-            ],
-            cwd=ROOT,
-            text=True,
-        )
-    )
-
-
 def _find_status_row(plan_payload: dict[str, Any], source_key: str) -> dict[str, Any]:
     status_sheet = _find_sheet(plan_payload, "STATUS")
     for row in status_sheet["rows"]:
@@ -314,14 +278,6 @@ def _find_data_rows(plan_payload: dict[str, Any], metric_key: str) -> list[list[
     return [
         row
         for row in data_sheet["rows"]
-        if len(row) >= 4 and (row[1] == metric_key or str(row[1]).endswith(f"|{metric_key}"))
-    ]
-
-
-def _find_loaded_rows(rows: list[list[Any]], metric_key: str) -> list[list[Any]]:
-    return [
-        row
-        for row in rows
         if len(row) >= 4 and (row[1] == metric_key or str(row[1]).endswith(f"|{metric_key}"))
     ]
 

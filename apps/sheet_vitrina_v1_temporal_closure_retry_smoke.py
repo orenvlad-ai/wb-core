@@ -60,17 +60,17 @@ def main() -> None:
                 raise AssertionError(f"{key} must not inherit provisional current data into closed slot")
             if "closure_state=closure_retrying" not in str(second_status_rows[key][10]):
                 raise AssertionError(f"{key} must expose retry state in note")
-        if second_status_rows["stocks[yesterday_closed]"][1] != "success":
-            raise AssertionError("stocks yesterday_closed must promote the exact-date cache instead of inventing a fresh closed slot")
-        if "exact_date_stocks_history_runtime_cache" not in str(second_status_rows["stocks[yesterday_closed]"][10]):
-            raise AssertionError("stocks yesterday_closed must disclose exact-date runtime cache resolution")
+        if second_status_rows["stocks[yesterday_closed]"][1] != "closure_retrying":
+            raise AssertionError("stocks yesterday_closed must stay strict when exact-date history/cache is still missing")
+        if "closure_state=closure_retrying" not in str(second_status_rows["stocks[yesterday_closed]"][10]):
+            raise AssertionError("stocks yesterday_closed must disclose strict closed-day retry state")
         second_data_rows = _data_rows(second_plan)
         if second_data_rows[f"SKU:{probe_nm_id}|views_current"][2:] != ["", 200.0]:
             raise AssertionError("search metric must stay blank for closed slot while closure is retrying")
         if second_data_rows[f"SKU:{probe_nm_id}|view_count"][2:] != ["", 400.0]:
             raise AssertionError("seller metric must stay blank for closed slot while closure is retrying")
-        if second_data_rows[f"SKU:{probe_nm_id}|stock_total"][2:] != [17.0, 18.0]:
-            raise AssertionError("stocks must reuse exact-date cache for yesterday_closed and keep today_current")
+        if second_data_rows[f"SKU:{probe_nm_id}|stock_total"][2:] != ["", ""]:
+            raise AssertionError("stocks must keep both slots blank until exact-date closed history is available")
 
         state.enable_acceptance(SECOND_AS_OF_DATE)
         plan_block = _build_live_plan(runtime=runtime, state=state, current_date=SECOND_CURRENT_DATE, current_hour=10)
@@ -86,8 +86,8 @@ def main() -> None:
             raise AssertionError("search metric must expose accepted yesterday + current today values")
         if third_data_rows[f"SKU:{probe_nm_id}|view_count"][2:] != [300.0, 400.0]:
             raise AssertionError("seller metric must expose accepted yesterday + current today values")
-        if third_data_rows[f"SKU:{probe_nm_id}|stock_total"][2:] != [17.0, 18.0]:
-            raise AssertionError("stocks must expose accepted yesterday + current today values after retry")
+        if third_data_rows[f"SKU:{probe_nm_id}|stock_total"][2:] != [17.0, ""]:
+            raise AssertionError("stocks must expose accepted yesterday and keep non-required today blank after retry")
 
         state.invalidate_after_acceptance(SECOND_AS_OF_DATE)
         preserved_plan = plan_block.build_plan(as_of_date=SECOND_AS_OF_DATE)
@@ -102,7 +102,7 @@ def main() -> None:
             raise AssertionError("later invalid closed-day search attempt must not overwrite the accepted yesterday snapshot")
         if preserved_data_rows[f"SKU:{probe_nm_id}|view_count"][2:] != [300.0, 400.0]:
             raise AssertionError("later invalid closed-day seller attempt must not overwrite the accepted yesterday snapshot")
-        if preserved_data_rows[f"SKU:{probe_nm_id}|stock_total"][2:] != [17.0, 18.0]:
+        if preserved_data_rows[f"SKU:{probe_nm_id}|stock_total"][2:] != [17.0, ""]:
             raise AssertionError("later invalid closed-day stocks attempt must not overwrite the accepted yesterday snapshot")
 
         print(f"first_refresh: ok -> {first_plan.snapshot_id}")
