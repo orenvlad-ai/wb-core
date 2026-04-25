@@ -323,6 +323,9 @@ def run_browser_checks(
                 page.locator("[data-history-panel]").count() == 1
                 and page.locator("[data-history-toggle]").count() == 1
                 and page.locator("[data-history-label]").count() == 1
+                and page.locator("[data-history-prev-month]").count() == 1
+                and page.locator("[data-history-next-month]").count() == 1
+                and page.locator("[data-history-month-label]").count() == 1
                 and page.locator("[data-history-calendar]").count() == 1
                 and page.locator("[data-history-presets]").count() == 1
                 and page.locator("[data-history-date-from]").count() == 1
@@ -346,6 +349,18 @@ def run_browser_checks(
                 raise AssertionError(f"history picker popover must be closed by default, got {initial_history_state}")
             if initial_history_state["dateFrom"] != "2026-04-17" or initial_history_state["dateTo"] != "2026-04-20":
                 raise AssertionError(f"default history range must be latest four days, got {initial_history_state}")
+            visible_body_text = page.locator("body").inner_text()
+            for forbidden_history_text in (
+                "История",
+                "mode:",
+                "supported query:",
+                "default as_of_date",
+                "route state",
+                "Открыт period window",
+                "Доступно snapshots",
+            ):
+                if forbidden_history_text in visible_body_text:
+                    raise AssertionError(f"compact picker must not expose technical history text {forbidden_history_text!r}")
             preset_count = page.locator("[data-history-preset]").count()
             if preset_count < 5:
                 raise AssertionError(f"historical period presets must be present, got {preset_count}")
@@ -443,6 +458,25 @@ def run_browser_checks(
             if not as_of_date and run_actions:
                 page.locator("[data-history-toggle]").click()
                 page.wait_for_selector("[data-history-popover]:not([hidden])", timeout=5000)
+                compact_popover_state = page.evaluate(
+                    """() => {
+                      const popover = document.querySelector('[data-history-popover]');
+                      const rect = popover ? popover.getBoundingClientRect() : {width: 0, height: 0};
+                      return {
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height),
+                        monthCount: document.querySelectorAll('[data-history-month]').length,
+                        monthLabel: (document.querySelector('[data-history-month-label]') || {}).textContent || '',
+                        prevVisible: !!document.querySelector('[data-history-prev-month]'),
+                        nextVisible: !!document.querySelector('[data-history-next-month]'),
+                        dayCount: document.querySelectorAll('[data-history-day]').length
+                      };
+                    }"""
+                )
+                if compact_popover_state["monthCount"] != 1 or compact_popover_state["width"] > 380 or compact_popover_state["height"] > 520:
+                    raise AssertionError(f"history picker popover must stay compact and one-month, got {compact_popover_state}")
+                if not compact_popover_state["prevVisible"] or not compact_popover_state["nextVisible"] or compact_popover_state["dayCount"] < 28:
+                    raise AssertionError(f"history picker must expose month navigation and calendar grid, got {compact_popover_state}")
                 page.locator("[data-history-preset='week']").click()
                 page.wait_for_function(
                     "() => document.querySelector('[data-history-date-from]').value === '2026-04-14' && document.querySelector('[data-history-date-to]').value === '2026-04-20'",
