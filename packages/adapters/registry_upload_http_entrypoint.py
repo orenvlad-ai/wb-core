@@ -834,11 +834,13 @@ def _build_handler(
                 try:
                     payload = entrypoint.handle_sheet_plan_report_request(
                         period=_resolve_required_query_value(parsed.query, "period"),
-                        q1_buyout_plan_rub=_resolve_required_query_float(parsed.query, "q1_buyout_plan_rub"),
-                        q2_buyout_plan_rub=_resolve_required_query_float(parsed.query, "q2_buyout_plan_rub"),
-                        q3_buyout_plan_rub=_resolve_required_query_float(parsed.query, "q3_buyout_plan_rub"),
-                        q4_buyout_plan_rub=_resolve_required_query_float(parsed.query, "q4_buyout_plan_rub"),
                         plan_drr_pct=_resolve_required_query_float(parsed.query, "plan_drr_pct"),
+                        h1_buyout_plan_rub=_resolve_optional_query_float(parsed.query, "h1_buyout_plan_rub"),
+                        h2_buyout_plan_rub=_resolve_optional_query_float(parsed.query, "h2_buyout_plan_rub"),
+                        q1_buyout_plan_rub=_resolve_optional_query_float(parsed.query, "q1_buyout_plan_rub"),
+                        q2_buyout_plan_rub=_resolve_optional_query_float(parsed.query, "q2_buyout_plan_rub"),
+                        q3_buyout_plan_rub=_resolve_optional_query_float(parsed.query, "q3_buyout_plan_rub"),
+                        q4_buyout_plan_rub=_resolve_optional_query_float(parsed.query, "q4_buyout_plan_rub"),
                         as_of_date=_resolve_as_of_date_from_query(parsed.query) or None,
                     )
                 except ValueError as exc:
@@ -1324,6 +1326,16 @@ def _resolve_required_query_value(query_string: str, name: str) -> str:
 
 def _resolve_required_query_float(query_string: str, name: str) -> float:
     value = _resolve_required_query_value(query_string, name)
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} query parameter must be numeric") from exc
+
+
+def _resolve_optional_query_float(query_string: str, name: str) -> float | None:
+    value = _resolve_single_query_param(query_string, name)
+    if not value:
+        return None
     try:
         return float(value)
     except ValueError as exc:
