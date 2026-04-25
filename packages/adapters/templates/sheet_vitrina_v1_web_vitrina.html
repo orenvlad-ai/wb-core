@@ -751,90 +751,86 @@
       top: calc(100% + 8px);
       left: 0;
       z-index: 7;
-      width: min(760px, calc(100vw - 48px));
+      width: min(340px, calc(100vw - 48px));
       border: 1px solid var(--border);
       border-radius: 8px;
       background: #ffffff;
-      box-shadow: 0 18px 40px rgba(23, 32, 45, 0.14);
-      padding: 12px;
+      box-shadow: 0 14px 30px rgba(23, 32, 45, 0.14);
+      padding: 10px;
     }
 
     .history-popover[hidden] {
       display: none;
     }
 
-    .history-layout {
+    .history-picker-head {
       display: grid;
-      grid-template-columns: minmax(0, 2.2fr) minmax(220px, 0.95fr);
-      gap: 12px;
-      align-items: start;
-    }
-
-    .history-calendar-panel,
-    .history-presets-panel {
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: var(--panel-subtle);
-      padding: 10px;
-    }
-
-    .history-calendar-top {
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
-      align-items: flex-start;
-      flex-wrap: wrap;
+      grid-template-columns: 28px minmax(0, 1fr) 28px;
+      align-items: center;
+      gap: 6px;
       margin-bottom: 8px;
     }
 
-    .history-calendar-title {
-      margin: 0;
-      font-size: 13px;
-      font-weight: 700;
+    .history-month-nav {
+      width: 28px;
+      height: 28px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #ffffff;
       color: var(--text);
+      font: inherit;
+      font-size: 16px;
+      line-height: 1;
+      cursor: pointer;
     }
 
-    .history-calendar-detail {
-      margin: 3px 0 0;
-      font-size: 11px;
-      line-height: 1.45;
-      color: var(--muted);
+    .history-month-nav:hover:not(:disabled) {
+      border-color: var(--accent);
+    }
+
+    .history-month-nav:disabled {
+      color: #a7b3c1;
+      cursor: not-allowed;
+      background: #f7f8fa;
+    }
+
+    .history-month-label {
+      margin: 0;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.2;
+      text-align: center;
+      color: var(--text);
+      text-transform: capitalize;
+    }
+
+    .history-calendar-panel {
+      border: 0;
+      background: transparent;
+      padding: 0;
     }
 
     .history-months {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-      gap: 10px;
+      display: block;
     }
 
     .history-month {
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: #ffffff;
-      padding: 8px;
-    }
-
-    .history-month-header {
-      margin: 0 0 8px;
-      font-size: 12px;
-      font-weight: 700;
-      color: var(--text);
-      text-transform: capitalize;
+      padding: 0;
     }
 
     .history-weekdays,
     .history-days {
       display: grid;
       grid-template-columns: repeat(7, minmax(0, 1fr));
-      gap: 4px;
+      gap: 2px;
     }
 
     .history-weekdays {
-      margin-bottom: 6px;
+      margin-bottom: 4px;
     }
 
     .history-weekday {
-      font-size: 10px;
+      font-size: 9px;
       font-weight: 700;
       text-transform: uppercase;
       text-align: center;
@@ -843,8 +839,8 @@
 
     .history-day,
     .history-day-empty {
-      min-height: 34px;
-      border-radius: 6px;
+      min-height: 26px;
+      border-radius: 5px;
     }
 
     .history-day-empty {
@@ -853,9 +849,9 @@
 
     .history-day {
       appearance: none;
-      border: 1px solid var(--border);
-      background: #ffffff;
-      padding: 4px 0;
+      border: 1px solid transparent;
+      background: transparent;
+      padding: 2px 0;
       font: inherit;
       font-size: 11px;
       color: var(--text);
@@ -864,7 +860,6 @@
     }
 
     .history-day:hover:not(:disabled) {
-      transform: translateY(-1px);
       border-color: var(--accent);
     }
 
@@ -893,33 +888,63 @@
     }
 
     .history-presets-panel {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
+      margin-top: 9px;
     }
 
     .history-preset-list {
       display: grid;
-      gap: 8px;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 4px;
     }
 
     .history-preset-button {
-      justify-content: flex-start;
       width: 100%;
+      min-height: 28px;
+      padding: 4px 6px;
+      font-size: 11px;
     }
 
     .history-fields {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 8px;
-      margin-top: 10px;
+      gap: 6px;
+      margin-top: 8px;
     }
 
     .history-actions {
       display: flex;
-      gap: 8px;
+      gap: 6px;
       flex-wrap: wrap;
       justify-content: flex-end;
+    }
+
+    .history-popover .filter-label {
+      font-size: 9px;
+      letter-spacing: 0.05em;
+    }
+
+    .history-popover .input {
+      min-height: 30px;
+      padding: 5px 7px;
+      font-size: 11px;
+    }
+
+    .history-popover .filters-footer {
+      gap: 6px;
+      margin-top: 8px;
+      align-items: center;
+    }
+
+    .history-popover .filter-summary {
+      min-height: 18px;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .history-popover .history-actions .button {
+      min-height: 30px;
+      padding: 5px 9px;
+      font-size: 11px;
     }
 
     .filter-card {
@@ -1231,15 +1256,18 @@
       }
 
       .history-popover {
-        width: calc(100vw - 24px);
-        max-height: min(78vh, 720px);
+        width: min(340px, calc(100vw - 24px));
+        max-height: min(82vh, 560px);
         overflow: auto;
       }
 
-      .history-layout,
       .activity-layout,
       .history-fields {
         grid-template-columns: 1fr;
+      }
+
+      .history-preset-list {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
       .history-actions {
@@ -1289,42 +1317,22 @@
         </svg>
       </button>
       <div class="history-popover" id="history-popover" data-history-popover hidden>
-        <div class="panel-top">
-          <div>
-            <h2>История</h2>
-            <p class="panel-note">
-              Период читается через существующий server-side ready snapshot window на route web-витрины.
-            </p>
-          </div>
-          <p class="panel-meta" data-history-meta>
-            загрузка доступа к периодам…
-          </p>
+        <div class="history-picker-head">
+          <button class="history-month-nav" type="button" data-history-prev-month aria-label="Предыдущий месяц">&lt;</button>
+          <p class="history-month-label" data-history-month-label>месяц</p>
+          <button class="history-month-nav" type="button" data-history-next-month aria-label="Следующий месяц">&gt;</button>
         </div>
-        <div class="history-layout">
-          <section class="history-calendar-panel">
-            <div class="history-calendar-top">
-              <div>
-                <p class="history-calendar-title">Выбор периода</p>
-                <p class="history-calendar-detail" data-history-calendar-detail>
-                  загрузка календаря…
-                </p>
-              </div>
-            </div>
-            <div class="history-months" data-history-calendar>
-              загрузка календаря…
-            </div>
-          </section>
-          <aside class="history-presets-panel">
-            <div>
-              <p class="history-calendar-title">Пресеты</p>
-              <p class="history-calendar-detail">
-                Пресеты подставляют period window поверх реально materialized ready snapshots.
-              </p>
-            </div>
-            <div class="history-preset-list" data-history-presets>
-              загрузка пресетов…
-            </div>
-          </aside>
+        <p data-history-meta hidden></p>
+        <p data-history-calendar-detail hidden></p>
+        <section class="history-calendar-panel">
+          <div class="history-months" data-history-calendar>
+            загрузка календаря…
+          </div>
+        </section>
+        <div class="history-presets-panel">
+          <div class="history-preset-list" data-history-presets>
+            загрузка пресетов…
+          </div>
         </div>
         <div class="history-fields">
           <label class="filter-card">
@@ -1482,6 +1490,9 @@
     const historyToggleButton = document.querySelector("[data-history-toggle]");
     const historyPopoverNode = document.querySelector("[data-history-popover]");
     const historyLabelNode = document.querySelector("[data-history-label]");
+    const historyMonthLabelNode = document.querySelector("[data-history-month-label]");
+    const historyPrevMonthButton = document.querySelector("[data-history-prev-month]");
+    const historyNextMonthButton = document.querySelector("[data-history-next-month]");
     const historyMetaNode = document.querySelector("[data-history-meta]");
     const historySummaryNode = document.querySelector("[data-history-summary]");
     const historyCalendarNode = document.querySelector("[data-history-calendar]");
@@ -1544,6 +1555,7 @@
         draftDateTo: "",
         awaitingRangeEnd: false,
         visibleMonths: [],
+        visibleMonthStart: "",
         defaultAsOfDate: "",
         currentMode: "default"
       },
@@ -1607,6 +1619,12 @@
         setHistoryPopoverOpen(false);
       }
     });
+    historyPrevMonthButton.addEventListener("click", function() {
+      shiftHistoryVisibleMonth(-1);
+    });
+    historyNextMonthButton.addEventListener("click", function() {
+      shiftHistoryVisibleMonth(1);
+    });
 
     unifiedTabButtons.forEach(function(button) {
       button.addEventListener("click", function() {
@@ -1646,6 +1664,7 @@
     historyDateFromNode.addEventListener("change", function() {
       state.history.draftDateFrom = normalizeHistoryInputValue(historyDateFromNode.value);
       state.history.awaitingRangeEnd = false;
+      syncVisibleMonthToHistoryDraft();
       syncHistoryFieldValues();
       renderHistoryCalendar(state.composition);
       renderHistoryStatus(state.composition);
@@ -1654,6 +1673,7 @@
     historyDateToNode.addEventListener("change", function() {
       state.history.draftDateTo = normalizeHistoryInputValue(historyDateToNode.value);
       state.history.awaitingRangeEnd = false;
+      syncVisibleMonthToHistoryDraft();
       syncHistoryFieldValues();
       renderHistoryCalendar(state.composition);
       renderHistoryStatus(state.composition);
@@ -2536,6 +2556,7 @@
       } else {
         resetHistoryDraft(payload, {forceDefault: true});
       }
+      syncVisibleMonthToHistoryDraft();
       renderHistoryCompactLabel();
       historyMetaNode.textContent =
         "mode: " +
@@ -2564,6 +2585,7 @@
       historyPresetsNode.querySelectorAll("[data-history-preset]").forEach(function(node) {
         node.addEventListener("click", function() {
           applyHistoryPreset(String(node.getAttribute("data-history-preset") || ""));
+          syncVisibleMonthToHistoryDraft();
           syncHistoryFieldValues();
           renderHistoryCalendar(payload);
           renderHistoryStatus(payload);
@@ -2583,6 +2605,7 @@
       if (normalizedOptions.forceDefault && defaultRange) {
         state.history.draftDateFrom = defaultRange.dateFrom;
         state.history.draftDateTo = defaultRange.dateTo;
+        state.history.visibleMonthStart = clampHistoryMonthStart(startOfMonthIso(defaultRange.dateTo));
         return;
       }
       if (payload && payload.historical_access && payload.historical_access.current_mode !== "default") {
@@ -2593,6 +2616,7 @@
         if (defaultRange) {
           state.history.draftDateFrom = defaultRange.dateFrom;
           state.history.draftDateTo = defaultRange.dateTo;
+          state.history.visibleMonthStart = clampHistoryMonthStart(startOfMonthIso(defaultRange.dateTo));
         }
       }
     }
@@ -2651,11 +2675,8 @@
       }
       const draftLabel = state.history.draftDateFrom && state.history.draftDateTo
         ? formatBusinessDateDisplay(state.history.draftDateFrom) + " - " + formatBusinessDateDisplay(state.history.draftDateTo)
-        : "Текущий режим без периода";
-      historySummaryNode.textContent =
-        valueOrDash(payload && payload.historical_access && payload.historical_access.status_text) +
-        " Черновик: " +
-        draftLabel + ".";
+        : "";
+      historySummaryNode.textContent = draftLabel ? "Диапазон: " + draftLabel : "";
       renderHistoryCompactLabel();
     }
 
@@ -2766,6 +2787,7 @@
       state.history.draftDateFrom = presetRange.dateFrom;
       state.history.draftDateTo = presetRange.dateTo;
       state.history.awaitingRangeEnd = false;
+      state.history.visibleMonthStart = clampHistoryMonthStart(startOfMonthIso(presetRange.dateTo));
     }
 
     function resolveHistoryPresetRange(presetId, anchorDate) {
@@ -2796,6 +2818,7 @@
       if (!dateValue) {
         return;
       }
+      state.history.visibleMonthStart = clampHistoryMonthStart(startOfMonthIso(dateValue));
       if (!state.history.draftDateFrom || (state.history.draftDateFrom && state.history.draftDateTo && !state.history.awaitingRangeEnd)) {
         state.history.draftDateFrom = dateValue;
         state.history.draftDateTo = dateValue;
@@ -2814,25 +2837,77 @@
     function buildVisibleHistoryMonths() {
       if (!state.history.availableDates.length) {
         state.history.visibleMonths = [];
+        state.history.visibleMonthStart = "";
+        syncHistoryMonthNavigation();
         return [];
       }
-      const firstDate = state.history.availableDates[0];
-      const lastDate = state.history.availableDates[state.history.availableDates.length - 1];
-      const startMonth = startOfMonthIso(firstDate);
-      const endMonth = startOfMonthIso(lastDate);
-      const monthStarts = [];
-      let cursor = startMonth;
-      while (cursor <= endMonth) {
-        monthStarts.push(cursor);
-        cursor = addMonthsIso(cursor, 1);
+      if (!state.history.visibleMonthStart) {
+        syncVisibleMonthToHistoryDraft();
       }
-      state.history.visibleMonths = monthStarts;
-      return monthStarts.map(function(monthStart) {
-        return {
-          monthStart: monthStart,
-          monthLabel: formatHistoryMonthLabel(monthStart)
-        };
-      });
+      state.history.visibleMonthStart = clampHistoryMonthStart(state.history.visibleMonthStart);
+      state.history.visibleMonths = [state.history.visibleMonthStart];
+      syncHistoryMonthNavigation();
+      return [{
+        monthStart: state.history.visibleMonthStart,
+        monthLabel: formatHistoryMonthLabel(state.history.visibleMonthStart)
+      }];
+    }
+
+    function syncVisibleMonthToHistoryDraft() {
+      if (!state.history.availableDates.length) {
+        state.history.visibleMonthStart = "";
+        return;
+      }
+      const anchor =
+        normalizeIsoDate(state.history.draftDateTo) ||
+        normalizeIsoDate(state.history.draftDateFrom) ||
+        normalizeIsoDate(state.history.defaultAsOfDate) ||
+        state.history.availableDates[state.history.availableDates.length - 1];
+      state.history.visibleMonthStart = clampHistoryMonthStart(startOfMonthIso(anchor));
+    }
+
+    function clampHistoryMonthStart(monthStart) {
+      if (!state.history.availableDates.length) {
+        return "";
+      }
+      const minMonth = startOfMonthIso(state.history.availableDates[0]);
+      const maxMonth = startOfMonthIso(state.history.availableDates[state.history.availableDates.length - 1]);
+      if (!monthStart || monthStart < minMonth) {
+        return minMonth;
+      }
+      if (monthStart > maxMonth) {
+        return maxMonth;
+      }
+      return monthStart;
+    }
+
+    function shiftHistoryVisibleMonth(deltaMonths) {
+      if (!state.history.availableDates.length) {
+        return;
+      }
+      const currentMonth = state.history.visibleMonthStart || startOfMonthIso(state.history.draftDateTo || state.history.defaultAsOfDate || state.history.availableDates[state.history.availableDates.length - 1] || "");
+      state.history.visibleMonthStart = clampHistoryMonthStart(addMonthsIso(currentMonth, deltaMonths));
+      renderHistoryCalendar(state.composition);
+      renderHistoryStatus(state.composition);
+    }
+
+    function syncHistoryMonthNavigation() {
+      const visibleMonthStart = state.history.visibleMonthStart;
+      if (historyMonthLabelNode) {
+        historyMonthLabelNode.textContent = visibleMonthStart ? capitalizeFirst(formatHistoryMonthLabel(visibleMonthStart)) : "месяц";
+      }
+      if (!historyPrevMonthButton || !historyNextMonthButton) {
+        return;
+      }
+      if (!state.history.availableDates.length || !visibleMonthStart) {
+        historyPrevMonthButton.disabled = true;
+        historyNextMonthButton.disabled = true;
+        return;
+      }
+      const minMonth = startOfMonthIso(state.history.availableDates[0]);
+      const maxMonth = startOfMonthIso(state.history.availableDates[state.history.availableDates.length - 1]);
+      historyPrevMonthButton.disabled = visibleMonthStart <= minMonth;
+      historyNextMonthButton.disabled = visibleMonthStart >= maxMonth;
     }
 
     function buildHistoryMonthMarkup(monthDescriptor) {
@@ -2885,8 +2960,7 @@
         dayCursor = shiftDate(dayCursor, 1);
       }
       return [
-        '<section class="history-month">',
-        '<h3 class="history-month-header">' + escapeHtml(monthDescriptor.monthLabel) + "</h3>",
+        '<section class="history-month" data-history-month="' + escapeHtml(monthDescriptor.monthStart) + '">',
         '<div class="history-weekdays">',
         ["пн", "вт", "ср", "чт", "пт", "сб", "вс"].map(function(label) {
           return '<div class="history-weekday">' + escapeHtml(label) + "</div>";
@@ -2998,6 +3072,11 @@
         year: "numeric",
         timeZone: "UTC"
       }).format(parseIsoDate(isoDate));
+    }
+
+    function capitalizeFirst(value) {
+      const normalized = String(value || "");
+      return normalized ? normalized.charAt(0).toUpperCase() + normalized.slice(1) : "";
     }
 
     function buildControlHtml(control) {

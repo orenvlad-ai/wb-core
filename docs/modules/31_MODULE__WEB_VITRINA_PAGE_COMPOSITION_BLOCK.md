@@ -217,7 +217,8 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
 - Historical period UX is intentionally thin:
   - the collapsed control shows `DD.MM.YYYY - DD.MM.YYYY` plus a calendar icon above the table
   - first open / hard refresh without explicit query uses the latest four server-readable business dates inclusive, ending on backend-owned `today_current_date` when that date is present in the current visible/readable context
-  - calendar, presets (`Неделя`, `2 недели`, `Месяц`, `Квартал`, `Год`), manual `date_from/date_to` fields and `Сбросить`/`Сохранить` live inside a popover
+  - opened state is a compact one-month picker, not the former expanded `История` section: header has previous/next month arrows, the calendar renders only one month, and technical mode/default/query-state explanations are not user-facing
+  - presets (`Неделя`, `2 недели`, `Месяц`, `Квартал`, `Год`), manual `date_from/date_to` fields and `Сбросить`/`Сохранить` live below that one-month calendar in the same small popover
   - `Сохранить` rewrites query string and re-reads server payload through the existing `date_from/date_to` ready-snapshot window path
   - `Сбросить` removes `as_of_date/date_from/date_to` and returns to the same latest-four-days default
   - source-status lazy load uses `source_status_snapshot_as_of_date` from the server contract, so a period ending in `today_current` does not accidentally use the current-day column as the ready-snapshot key
