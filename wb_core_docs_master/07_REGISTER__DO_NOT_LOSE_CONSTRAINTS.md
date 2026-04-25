@@ -22,7 +22,7 @@ update_triggers:
   - "изменение migration boundary"
   - "изменение operator/runtime invariant"
   - "изменение docs governance"
-built_from_commit: "c5ec48eb5380d0ebc75e7cc497f33b0b163dcbfe"
+built_from_commit: "c8faa36b1eec440925a8c98b5d87eb188e5e7492"
 ---
 
 # Summary
@@ -51,6 +51,8 @@ built_from_commit: "c5ec48eb5380d0ebc75e7cc497f33b0b163dcbfe"
 | `C-14` | Матрица `L1/L2/L3` задаёт минимальный execution burden: `L1` = локальный малорисковый шаг без отдельного read-only review и без `README` / architecture sync по умолчанию, только targeted smoke; `L2` = bounded block с обязательными `module doc + index`, targeted smoke и `1` integration smoke; `L3` = boundary/risk/governance task с усиленным bounded execution, docs sync по смыслу текущего checkpoint и при необходимости отдельной merge-readiness проверкой. |
 | `C-15` | Full current truth и `STATUS` остаются authoritative для всего enabled+show_in_data набора; operator-facing `DATA_VITRINA` не должна invent-ить локальный truth path, не должна silently выкидывать `show_in_data` rows и должна materialize-ить incoming server-driven row set как thin data-driven `date_matrix` без sheet-side subset logic. |
 | `C-15a` | Current unified `/sheet-vitrina-v1/vitrina` UI remains a consumer of server-owned ready snapshots and source/job/status truth; group refresh, cell highlights, report filters and browser persistence must not become a second source-of-truth layer. |
+| `C-15b` | `ЕБД` / `единая база данных` is only a user-facing alias for shared server-side accepted truth/runtime state in `wb-core`; Google Sheets/GAS, HTML/browser UI, browser `localStorage`, report-private manual tables and operator XLSX baseline uploads must not be treated as the canonical data-truth layer. |
+| `C-15c` | Plan-report baseline and ready-fact reconcile remain bounded server-side support paths: baseline can fill only full-month plan-report aggregates, ready-fact reconcile can insert only missing accepted `fin_report_daily` / `ads_compact` slots from persisted ready snapshots, and neither path may overwrite existing accepted diffs or fabricate blank values as zeros. |
 | `C-16` | Для задач с live/public эффектом `repo-complete` недостаточно: execution handoff не считается complete, пока не достигнуты требуемые `live-complete` / public-web verify, либо пока точный blocker явно не назван. Sheet completion is no longer a success path; for archived GAS changes only guard push/verify is required. |
 | `C-17` | Если live deploy/restart или public probe безопасны и доступны, они должны входить в тот же bounded execution по умолчанию, а не откладываться без явной причины. `clasp push` входит в обязательный путь только для archived Apps Script guard changes and verifies blocked/archived behavior, not sheet write success. |
 | `C-18` | Если задача добавляет или меняет public route, обязательна внешняя public probe-проверка; `404`/`Not Found` на ожидаемом route трактуется как stale deploy или incomplete publish wiring, пока не доказано обратное. |

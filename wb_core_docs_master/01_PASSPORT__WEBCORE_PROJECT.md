@@ -38,7 +38,7 @@ update_triggers:
   - "изменение current main-confirmed contour"
   - "merge нового bounded модуля"
   - "смена главного project gap"
-built_from_commit: "c5ec48eb5380d0ebc75e7cc497f33b0b163dcbfe"
+built_from_commit: "c8faa36b1eec440925a8c98b5d87eb188e5e7492"
 ---
 
 # Summary
@@ -94,10 +94,14 @@ Confirmed contour на текущем `main`:
   - low-confidence cross-year labels keep `promo_start_at/end_at = null`
 - unified web-vitrina/operator surface:
   - primary manual action `Загрузить и обновить` refreshes server-side ready snapshot without Google Sheets `/load`;
-  - bottom `Загрузка данных` renders grouped source status table (`WB API`, `Seller Portal / бот`, `Прочие источники`) with date-scoped `Обновить группу`;
-  - `GET /v1/sheet-vitrina-v1/plan-report` adds read-only `Выполнение плана` over accepted closed-day `fin_report_daily.fin_buyout_rub` + `ads_compact.ads_sum`;
+  - compact table toolbar combines period/search/filter/column/sort controls; default no-query history opens the latest four server-readable business dates ending on backend-owned `today_current_date` when available;
+  - bottom `Загрузка данных` is lazy: initial state shows only `not_loaded` + `Загрузить`, then explicit read-only `surface=page_composition&include_source_status=1` loads grouped source status table (`WB API`, `Seller Portal / бот`, `Прочие источники`) with date-scoped `Обновить группу`;
+  - `GET /v1/sheet-vitrina-v1/plan-report` adds read-only `Выполнение плана` over accepted closed-day `fin_report_daily.fin_buyout_rub` + `ads_compact.ads_sum`, H1/H2 plan params, per-block coverage and optional server-side monthly baseline;
+  - plan-report baseline routes (`baseline-template.xlsx`, `baseline-upload`, `baseline-status`) store operator monthly aggregates in separate runtime SQLite state used only by the plan report;
+  - one-off `apps/sheet_vitrina_v1_ready_fact_reconcile.py` can dry-run/apply missing accepted slots from already persisted ready snapshots without overwriting existing diffs or fabricating zeros;
   - `GET /v1/sheet-vitrina-v1/stock-report` remains read-only previous-closed stock report with current active SKU selector;
   - seller-funnel materialization filters raw rows to enabled/relevant `nm_ids` before strict field validation and logs ignored invalid non-relevant rows.
+- User-facing `ЕБД` / `единая база данных` now means the shared server-side accepted truth/runtime layer behind web-vitrina, plan-report and future reports; it is not Google Sheets/GAS, browser UI/localStorage or a private report-only manual table.
 
 ## Authoritative source of truth
 

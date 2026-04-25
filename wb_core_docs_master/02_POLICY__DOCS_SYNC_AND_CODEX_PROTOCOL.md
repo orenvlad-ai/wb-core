@@ -22,7 +22,7 @@ update_triggers:
   - "изменение docs governance"
   - "изменение Codex execution rule"
   - "изменение project-pack support rule"
-built_from_commit: "c5ec48eb5380d0ebc75e7cc497f33b0b163dcbfe"
+built_from_commit: "c8faa36b1eec440925a8c98b5d87eb188e5e7492"
 ---
 
 # Summary
@@ -91,6 +91,10 @@ Manifest не должен хранить:
 
 Manifest остаётся build/pack metadata файлом и не ведёт operational state внешней загрузки.
 Readiness pack определяется по `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`, а не по Finder timestamps.
+
+## Current data-truth alias
+
+Если в current website/operator contour используется user-facing alias `ЕБД` / `единая база данных`, pack трактует его только как derived label для общего server-side accepted truth/runtime layer `wb-core`: persisted accepted temporal source slots, ready snapshots and related runtime state. Этот alias не означает Google Sheets/GAS, HTML/browser UI, browser `localStorage` или private manual table одного отчёта.
 
 ## External Project upload closure
 
