@@ -37,6 +37,20 @@ PERIOD_LABELS = {
     "current_month": "За текущий месяц",
     "current_quarter": "За текущий квартал",
     "current_year": "За текущий год",
+    "first_quarter": "За первый квартал",
+    "second_quarter": "За второй квартал",
+    "third_quarter": "За третий квартал",
+    "fourth_quarter": "За четвертый квартал",
+    "first_half": "За первое полугодие",
+    "second_half": "За второе полугодие",
+}
+FIXED_PERIOD_BOUNDS = {
+    "first_quarter": (1, 1, 3, 31),
+    "second_quarter": (4, 1, 6, 30),
+    "third_quarter": (7, 1, 9, 30),
+    "fourth_quarter": (10, 1, 12, 31),
+    "first_half": (1, 1, 6, 30),
+    "second_half": (7, 1, 12, 31),
 }
 PERSISTENT_BLOCKS = (
     ("month_to_date", "С начала месяца"),
@@ -59,6 +73,10 @@ class PeriodWindow:
     date_from: str
     date_to: str
     day_count: int
+    effective_as_of_date: str
+    period_state: str = "closed_day_window"
+    requested_date_from: str | None = None
+    requested_date_to: str | None = None
 
 
 class SheetVitrinaV1PlanReportBlock:
@@ -138,7 +156,7 @@ class SheetVitrinaV1PlanReportBlock:
         normalized_period = str(period or "").strip()
         if normalized_period not in PERIOD_LABELS:
             raise ValueError(
-                "period must be one of: yesterday, last_7_days, last_30_days, current_month, current_quarter, current_year"
+                "period must be one of: " + ", ".join(PERIOD_LABELS)
             )
         plan_inputs = _resolve_buyout_plan_inputs(
             h1_buyout_plan_rub=h1_buyout_plan_rub,
@@ -151,20 +169,16 @@ class SheetVitrinaV1PlanReportBlock:
         half_year_plans = plan_inputs["half_year_plans"]
         normalized_plan_drr_pct = _require_non_negative_number(plan_drr_pct, field_name="plan_drr_pct")
         current_business_date = current_business_date_iso(self.now_factory())
-        reference_date = date.fromisoformat(as_of_date or default_business_as_of_date(self.now_factory()))
+        default_closed_business_date = date.fromisoformat(default_business_as_of_date(self.now_factory()))
+        reference_date = date.fromisoformat(as_of_date) if as_of_date else default_closed_business_date
         selected_window = _build_selected_window(reference_date=reference_date, period_key=normalized_period)
         fixed_windows = [
-            PeriodWindow(
-                key=key,
-                label=label,
-                date_from=_period_start_for_key(reference_date=reference_date, period_key=key).isoformat(),
-                date_to=reference_date.isoformat(),
-                day_count=(reference_date - _period_start_for_key(reference_date=reference_date, period_key=key)).days + 1,
-            )
+            _build_to_date_window(reference_date=reference_date, period_key=key, label=label)
             for key, label in PERSISTENT_BLOCKS
         ]
         all_windows = [selected_window, *fixed_windows]
-        date_from = min(date.fromisoformat(window.date_from) for window in all_windows).isoformat()
+        effective_windows = [window for window in all_windows if window.day_count > 0]
+        date_from = min(date.fromisoformat(window.date_from) for window in effective_windows).isoformat()
         date_to = reference_date.isoformat()
         base_payload = {
             "status": "unavailable",
@@ -172,6 +186,9 @@ class SheetVitrinaV1PlanReportBlock:
             "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
             "current_business_date": current_business_date,
             "reference_date": reference_date.isoformat(),
+            "effective_as_of_date": reference_date.isoformat(),
+            "default_closed_business_date": default_closed_business_date.isoformat(),
+            "requested_as_of_date": str(as_of_date or "").strip() or None,
             "selected_period_key": selected_window.key,
             "selected_period_label": selected_window.label,
             "notes": list(REPORT_NOTES),
@@ -454,6 +471,8 @@ def _resolve_buyout_plan_inputs(
 
 
 def _build_selected_window(*, reference_date: date, period_key: str) -> PeriodWindow:
+    if period_key in FIXED_PERIOD_BOUNDS:
+        return _build_fixed_period_window(reference_date=reference_date, period_key=period_key)
     start_date = _period_start_for_key(reference_date=reference_date, period_key=period_key)
     return PeriodWindow(
         key=period_key,
@@ -461,6 +480,54 @@ def _build_selected_window(*, reference_date: date, period_key: str) -> PeriodWi
         date_from=start_date.isoformat(),
         date_to=reference_date.isoformat(),
         day_count=(reference_date - start_date).days + 1,
+        effective_as_of_date=reference_date.isoformat(),
+        requested_date_from=start_date.isoformat(),
+        requested_date_to=reference_date.isoformat(),
+    )
+
+
+def _build_to_date_window(*, reference_date: date, period_key: str, label: str) -> PeriodWindow:
+    start_date = _period_start_for_key(reference_date=reference_date, period_key=period_key)
+    return PeriodWindow(
+        key=period_key,
+        label=label,
+        date_from=start_date.isoformat(),
+        date_to=reference_date.isoformat(),
+        day_count=(reference_date - start_date).days + 1,
+        effective_as_of_date=reference_date.isoformat(),
+        requested_date_from=start_date.isoformat(),
+        requested_date_to=reference_date.isoformat(),
+    )
+
+
+def _build_fixed_period_window(*, reference_date: date, period_key: str) -> PeriodWindow:
+    start_month, start_day, end_month, end_day = FIXED_PERIOD_BOUNDS[period_key]
+    requested_start = reference_date.replace(month=start_month, day=start_day)
+    requested_end = reference_date.replace(month=end_month, day=end_day)
+    if reference_date < requested_start:
+        return PeriodWindow(
+            key=period_key,
+            label=PERIOD_LABELS[period_key],
+            date_from=requested_start.isoformat(),
+            date_to=requested_end.isoformat(),
+            day_count=0,
+            effective_as_of_date=reference_date.isoformat(),
+            period_state="not_started",
+            requested_date_from=requested_start.isoformat(),
+            requested_date_to=requested_end.isoformat(),
+        )
+    effective_end = min(reference_date, requested_end)
+    period_state = "completed" if effective_end == requested_end else "in_progress"
+    return PeriodWindow(
+        key=period_key,
+        label=PERIOD_LABELS[period_key],
+        date_from=requested_start.isoformat(),
+        date_to=effective_end.isoformat(),
+        day_count=(effective_end - requested_start).days + 1,
+        effective_as_of_date=reference_date.isoformat(),
+        period_state=period_state,
+        requested_date_from=requested_start.isoformat(),
+        requested_date_to=requested_end.isoformat(),
     )
 
 
@@ -568,6 +635,8 @@ def _build_period_block(
     half_year_plans: Mapping[int, float],
     plan_drr_pct: float,
 ) -> dict[str, Any]:
+    if window.period_state == "not_started":
+        return _build_not_started_period_block(window=window)
     dates = [item.isoformat() for item in _iter_dates(date.fromisoformat(window.date_from), date.fromisoformat(window.date_to))]
     buyout_available_dates = [item for item in dates if item in daily_buyout_facts]
     ads_available_dates = [item for item in dates if item in daily_ads_facts]
@@ -643,6 +712,10 @@ def _build_period_block(
         "date_from": window.date_from,
         "date_to": window.date_to,
         "day_count": window.day_count,
+        "effective_as_of_date": window.effective_as_of_date,
+        "period_state": window.period_state,
+        "requested_date_from": window.requested_date_from or window.date_from,
+        "requested_date_to": window.requested_date_to or window.date_to,
         "status": status,
         "reason": reason,
         "source_of_truth": {
@@ -724,6 +797,106 @@ def _build_period_block(
                 plan=plan_ads_sum_rub,
                 full_period_plan=full_plan_buyout_rub * (plan_drr_pct / 100.0),
                 covered_period_plan=None if covered_plan_buyout_rub is None else covered_plan_buyout_rub * (plan_drr_pct / 100.0),
+            ),
+        },
+    }
+
+
+def _build_not_started_period_block(*, window: PeriodWindow) -> dict[str, Any]:
+    reason = (
+        "Период ещё не начался относительно последнего закрытого дня "
+        f"{window.effective_as_of_date}; факт и план не рассчитываются без закрытых дат периода."
+    )
+    return {
+        "label": window.label,
+        "date_from": window.date_from,
+        "date_to": window.date_to,
+        "day_count": 0,
+        "effective_as_of_date": window.effective_as_of_date,
+        "period_state": "not_started",
+        "requested_date_from": window.requested_date_from or window.date_from,
+        "requested_date_to": window.requested_date_to or window.date_to,
+        "status": "unavailable",
+        "reason": reason,
+        "source_of_truth": {
+            "daily_sources": [FIN_SOURCE_KEY, ADS_SOURCE_KEY],
+            "daily_snapshot_role": TEMPORAL_ROLE_ACCEPTED_CLOSED,
+            "manual_monthly_source": MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
+        },
+        "source_mix": {
+            "daily_accepted_snapshots": {
+                "dates": [],
+                "day_count": 0,
+                "source_keys": [FIN_SOURCE_KEY, ADS_SOURCE_KEY],
+                "available_dates_before_monthly_baseline_precedence": [],
+                "excluded_by_monthly_baseline_dates": [],
+                "buyout_dates": [],
+                "ads_dates": [],
+            },
+            "manual_monthly_plan_report_baseline": {
+                "months": [],
+                "day_count": 0,
+                "source_kind": MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
+            },
+        },
+        "coverage": {
+            "expected_day_count": 0,
+            "covered_day_count": 0,
+            "covered_calendar_days": 0,
+            "daily_covered_day_count": 0,
+            "covered_by_daily_snapshot_days": 0,
+            "daily_any_source_covered_day_count": 0,
+            "buyout_daily_covered_day_count": 0,
+            "ads_daily_covered_day_count": 0,
+            "baseline_covered_day_count": 0,
+            "covered_by_monthly_baseline_days": 0,
+            "missing_day_count": 0,
+            "covered_dates": [],
+            "fully_covered_dates": [],
+            "daily_covered_dates": [],
+            "daily_dates": [],
+            "daily_any_source_dates": [],
+            "buyout_daily_dates": [],
+            "ads_daily_dates": [],
+            "baseline_covered_months": [],
+            "baseline_months": [],
+            "missing_dates": [],
+            "missing_dates_by_source": {},
+            "invalid_dates_by_source": {},
+            "fact_is_partial": False,
+        },
+        "source_breakdown": {
+            "daily_dates": [],
+            "daily_any_source_dates": [],
+            "buyout_daily_dates": [],
+            "ads_daily_dates": [],
+            "daily_available_dates_before_monthly_baseline_precedence": [],
+            "buyout_available_dates_before_monthly_baseline_precedence": [],
+            "ads_available_dates_before_monthly_baseline_precedence": [],
+            "daily_excluded_by_monthly_baseline_dates": [],
+            "baseline_months": [],
+            "missing_dates": [],
+            "covered_calendar_days": 0,
+            "covered_by_daily_snapshot_days": 0,
+            "daily_any_source_covered_day_count": 0,
+            "buyout_daily_covered_day_count": 0,
+            "ads_daily_covered_day_count": 0,
+            "covered_by_monthly_baseline_days": 0,
+            "fact_is_partial": False,
+        },
+        "metrics": {
+            "buyout_rub": _build_buyout_metric(
+                fact=None,
+                plan=None,
+                full_period_plan=None,
+                covered_period_plan=None,
+            ),
+            "drr_pct": _build_drr_metric(fact=None, plan=None),
+            "ads_sum_rub": _build_ads_metric(
+                fact=None,
+                plan=None,
+                full_period_plan=None,
+                covered_period_plan=None,
             ),
         },
     }

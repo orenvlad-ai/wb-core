@@ -94,6 +94,34 @@ def main() -> None:
                     else {"result": ads_result_payload}
                 ),
             )
+        runtime.save_temporal_source_slot_snapshot(
+            source_key="fin_report_daily",
+            snapshot_date="2026-04-21",
+            snapshot_role=ACCEPTED_ROLE,
+            captured_at="2026-04-21T12:00:00Z",
+            payload={
+                "result": {
+                    "kind": "success",
+                    "snapshot_date": "2026-04-21",
+                    "count": 1,
+                    "items": [{"nm_id": primary_nm_id, "fin_buyout_rub": 999999.0}],
+                }
+            },
+        )
+        runtime.save_temporal_source_slot_snapshot(
+            source_key="ads_compact",
+            snapshot_date="2026-04-21",
+            snapshot_role=ACCEPTED_ROLE,
+            captured_at="2026-04-21T12:05:00Z",
+            payload={
+                "result": {
+                    "kind": "success",
+                    "snapshot_date": "2026-04-21",
+                    "count": 1,
+                    "items": [{"nm_id": primary_nm_id, "ads_sum": 99999.0}],
+                }
+            },
+        )
 
         block = SheetVitrinaV1PlanReportBlock(runtime=runtime, now_factory=lambda: NOW)
         payload = block.build(
@@ -106,6 +134,8 @@ def main() -> None:
             raise AssertionError(f"plan report must be available, got {payload}")
         if payload.get("reference_date") != REFERENCE_DATE:
             raise AssertionError(f"plan report must default to the previous closed business day, got {payload}")
+        if payload.get("effective_as_of_date") != REFERENCE_DATE:
+            raise AssertionError(f"plan report must expose effective previous closed day, got {payload}")
         if payload.get("selected_period_key") != "last_30_days":
             raise AssertionError(f"selected period key must be preserved, got {payload}")
 
@@ -147,6 +177,51 @@ def main() -> None:
         _assert_close(ytd["metrics"]["buyout_rub"]["fact"], 165000.0, "ytd buyout fact")
         if ytd["metrics"]["buyout_rub"]["status_label"] != "выполнен":
             raise AssertionError(f"YTD buyout must be marked as fulfilled when fact >= plan, got {ytd}")
+        current_day_guard = block.build(
+            period="yesterday",
+            h1_buyout_plan_rub=H1_PLAN_RUB,
+            h2_buyout_plan_rub=H2_PLAN_RUB,
+            plan_drr_pct=10.0,
+        )
+        current_day_selected = current_day_guard["periods"]["selected_period"]
+        if current_day_selected["date_to"] != REFERENCE_DATE:
+            raise AssertionError(f"default report must exclude current business day, got {current_day_guard}")
+        _assert_close(current_day_selected["metrics"]["buyout_rub"]["fact"], 1500.0, "current-day exclusion fact")
+
+        fixed_expectations = {
+            "first_quarter": ("2026-01-01", "2026-03-31", 90, "completed", "available", 135000.0),
+            "second_quarter": ("2026-04-01", "2026-04-20", 20, "in_progress", "available", 30000.0),
+            "third_quarter": ("2026-07-01", "2026-09-30", 0, "not_started", "unavailable", None),
+            "fourth_quarter": ("2026-10-01", "2026-12-31", 0, "not_started", "unavailable", None),
+            "first_half": ("2026-01-01", "2026-04-20", 110, "in_progress", "available", 165000.0),
+            "second_half": ("2026-07-01", "2026-12-31", 0, "not_started", "unavailable", None),
+        }
+        for period_key, (date_from, date_to, day_count, period_state, status, expected_plan) in fixed_expectations.items():
+            fixed_payload = block.build(
+                period=period_key,
+                h1_buyout_plan_rub=H1_PLAN_RUB,
+                h2_buyout_plan_rub=H2_PLAN_RUB,
+                plan_drr_pct=10.0,
+                as_of_date=REFERENCE_DATE,
+            )
+            fixed_selected = fixed_payload["periods"]["selected_period"]
+            if (
+                fixed_selected["date_from"] != date_from
+                or fixed_selected["date_to"] != date_to
+                or fixed_selected["day_count"] != day_count
+                or fixed_selected["period_state"] != period_state
+                or fixed_selected["status"] != status
+            ):
+                raise AssertionError(f"fixed period {period_key} has wrong range/status, got {fixed_selected}")
+            if expected_plan is None:
+                if fixed_selected["metrics"]["buyout_rub"]["plan"] is not None:
+                    raise AssertionError(f"future period {period_key} must not fabricate a plan, got {fixed_selected}")
+            else:
+                _assert_close(
+                    fixed_selected["metrics"]["buyout_rub"]["plan"],
+                    expected_plan,
+                    f"{period_key} fixed-period plan",
+                )
 
         missing_day = "2026-04-10"
         runtime.delete_temporal_source_slot_snapshots(

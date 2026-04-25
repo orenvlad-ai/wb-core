@@ -80,7 +80,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - filters area
   - table container
   - truthful `loading / empty / error` states
-  - `Расчет поставок` and `Отчеты` reuse the existing operator template/actions in embedded mode, preserving factory/WB supply blocks and the internal report subsection selector (`Ежедневные отчёты`, `Отчёт по остаткам`, `Выполнение плана`) without changing business routes
+  - `Расчет поставок` and `Отчеты` reuse the existing operator template/actions in embedded mode, preserving factory/WB supply blocks and the internal report subsection selector (`Ежедневные отчёты`, `Отчёт по остаткам`, `Выполнение плана`) without changing business routes; embedded height is measured from the actual `.page` content rather than iframe viewport/body `100vh`, and edge wheel gestures are relayed to the parent shell so these tabs do not create large empty scroll tails or swallow the first trackpad scroll
 - Existing `GET /v1/sheet-vitrina-v1/web-vitrina` keeps the default public contract unchanged:
   - default/no-surface path still returns `web_vitrina_contract` v1
   - optional `as_of_date` keeps one-day historical read on the same route
@@ -172,6 +172,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
 - Web-vitrina completion is verified through the server/public web surface (`/v1/sheet-vitrina-v1/web-vitrina`, optional `surface=page_composition`, and `/sheet-vitrina-v1/vitrina`); Google Sheets / GAS / `clasp` are not active verification targets for this surface.
 - Historical ready snapshots may be used as bounded, audited reconciliation input for the shared accepted temporal source layer when the read model already contains daily SKU facts that reports lack; this is done only by repo-owned dry-run/apply tooling and does not make the browser UI or Google Sheets/GAS a source of truth.
 - `Свежесть данных` stays server-owned and comes from the current read-side snapshot metadata (`refreshed_at / snapshot_id / as_of_date`), while `Последнее обновление страницы` is only the browser reread marker and is intentionally separate.
+- Embedded `Расчет поставок` / `Отчеты` remain UI-only composition inside `/sheet-vitrina-v1/vitrina`; iframe sizing/scroll relay changes do not introduce browser-side business truth or server-side profile persistence.
 - user-facing timestamp render is unified:
   - `Свежесть данных` now reuses the same client formatter as `Последнее обновление страницы`
   - raw ISO artefacts like `T` / `Z` stay machine-only and no longer leak into the visible page text

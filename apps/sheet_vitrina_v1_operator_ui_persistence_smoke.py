@@ -368,12 +368,14 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "storage_key": STORAGE_KEY,
         "default_state": persistence_result["default_state"],
         "top_tab_persistence": persistence_result["top_tab_persistence"],
-        "subsection_persistence": persistence_result["subsection_persistence"],
-        "sku_persistence": persistence_result["sku_persistence"],
-        "zero_selection_guard": persistence_result["zero_selection_guard"],
-        "invalid_storage_fallback": fallback_result["invalid_storage_fallback"],
-        "obsolete_sku_fallback": fallback_result["obsolete_sku_fallback"],
-    }
+            "subsection_persistence": persistence_result["subsection_persistence"],
+            "sku_persistence": persistence_result["sku_persistence"],
+            "plan_input_persistence": persistence_result["plan_input_persistence"],
+            "zero_selection_guard": persistence_result["zero_selection_guard"],
+            "invalid_storage_fallback": fallback_result["invalid_storage_fallback"],
+            "obsolete_sku_fallback": fallback_result["obsolete_sku_fallback"],
+            "invalid_plan_input_fallback": fallback_result["invalid_plan_input_fallback"],
+        }
 
 
 def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
@@ -480,6 +482,36 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     if "Выберите хотя бы один SKU" not in validation_text:
         raise AssertionError(f"zero-selection validation must stay active, got {validation_text!r}")
 
+    page.click('[data-report-section-button="plan"]')
+    page.select_option("#planReportPeriodSelect", "first_half")
+    page.fill("#planReportH1Input", "155379879")
+    page.fill("#planReportH2Input", "294620120")
+    page.fill("#planReportDrrInput", "6")
+    page.click("#planReportApplyButton")
+    page.wait_for_function(
+        """(storageKey) => {
+            const raw = window.localStorage.getItem(storageKey);
+            if (!raw) return false;
+            const parsed = JSON.parse(raw);
+            return parsed.plan_report_inputs &&
+                parsed.plan_report_inputs.period === "first_half" &&
+                parsed.plan_report_inputs.h1_buyout_plan_rub === "155379879" &&
+                parsed.plan_report_inputs.h2_buyout_plan_rub === "294620120" &&
+                parsed.plan_report_inputs.plan_drr_pct === "6";
+        }""",
+        arg=STORAGE_KEY,
+    )
+    page.reload(wait_until="domcontentloaded")
+    page.click('[data-report-section-button="plan"]')
+    restored_plan_inputs = {
+        "period": page.locator("#planReportPeriodSelect").input_value(),
+        "h1": page.locator("#planReportH1Input").input_value(),
+        "h2": page.locator("#planReportH2Input").input_value(),
+        "drr": page.locator("#planReportDrrInput").input_value(),
+    }
+    if restored_plan_inputs != {"period": "first_half", "h1": "155379879", "h2": "294620120", "drr": "6"}:
+        raise AssertionError(f"plan-report H1/H2/DRR inputs must survive reload, got {restored_plan_inputs}")
+
     persisted_state = page.evaluate(
         """(storageKey) => {
             const raw = window.localStorage.getItem(storageKey);
@@ -495,13 +527,14 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "default_state": default_state,
         "top_tab_persistence": factory_state,
         "subsection_persistence": reports_state,
-        "sku_persistence": {
-            "kept_label": kept_label,
-            "selected_labels_after_reload": selected_labels_after_reload,
-            "storage_state": persisted_state,
-        },
-        "zero_selection_guard": validation_text.strip(),
-    }
+            "sku_persistence": {
+                "kept_label": kept_label,
+                "selected_labels_after_reload": selected_labels_after_reload,
+                "storage_state": persisted_state,
+            },
+            "zero_selection_guard": validation_text.strip(),
+            "plan_input_persistence": restored_plan_inputs,
+        }
 
 
 def _run_fallback_scenario(context, base_url: str) -> dict[str, object]:
@@ -534,16 +567,22 @@ def _run_fallback_scenario(context, base_url: str) -> dict[str, object]:
         raise AssertionError("broken storage fallback must restore all active SKU as the default selector state")
 
     page.evaluate(
-        """(storageKey) => {
-            window.localStorage.setItem(storageKey, JSON.stringify({
-                version: 1,
-                active_tab: "reports",
-                report_section: "stock",
-                supply_section: "regional",
-                stock_report_selected_sku_ids: [999999],
-                stock_report_applied_sku_ids: [999999]
-            }));
-        }""",
+            """(storageKey) => {
+                window.localStorage.setItem(storageKey, JSON.stringify({
+                    version: 1,
+                    active_tab: "reports",
+                    report_section: "stock",
+                    supply_section: "regional",
+                    stock_report_selected_sku_ids: [999999],
+                    stock_report_applied_sku_ids: [999999],
+                    plan_report_inputs: {
+                        period: "unsupported",
+                        h1_buyout_plan_rub: "-1",
+                        h2_buyout_plan_rub: "not-a-number",
+                        plan_drr_pct: ""
+                    }
+                }));
+            }""",
         STORAGE_KEY,
     )
     page.reload(wait_until="domcontentloaded")
@@ -560,11 +599,21 @@ def _run_fallback_scenario(context, base_url: str) -> dict[str, object]:
     _open_stock_selector(page)
     if len(_checked_stock_selector_labels(page)) != len(_stock_selector_labels(page)):
         raise AssertionError("obsolete persisted SKU ids must be dropped and replaced with the current default all-selected state")
+    page.click('[data-report-section-button="plan"]')
+    invalid_plan_restore = {
+        "period": page.locator("#planReportPeriodSelect").input_value(),
+        "h1": page.locator("#planReportH1Input").input_value(),
+        "h2": page.locator("#planReportH2Input").input_value(),
+        "drr": page.locator("#planReportDrrInput").input_value(),
+    }
+    if invalid_plan_restore != {"period": "current_month", "h1": "", "h2": "", "drr": ""}:
+        raise AssertionError(f"invalid persisted plan inputs must be ignored safely, got {invalid_plan_restore}")
 
     context.close()
     return {
         "invalid_storage_fallback": invalid_state,
         "obsolete_sku_fallback": obsolete_state,
+        "invalid_plan_input_fallback": invalid_plan_restore,
     }
 
 
@@ -642,11 +691,13 @@ def _print_summary(result: dict[str, object]) -> None:
         result["subsection_persistence"],
     )
     print("operator_ui_sku_restore: ok ->", result["sku_persistence"])
+    print("operator_ui_plan_input_restore: ok ->", result["plan_input_persistence"])
     print("operator_ui_zero_guard: ok ->", result["zero_selection_guard"])
     print(
         "operator_ui_storage_fallback: ok ->",
         result["invalid_storage_fallback"],
         result["obsolete_sku_fallback"],
+        result["invalid_plan_input_fallback"],
     )
 
 

@@ -410,7 +410,9 @@ update_note: "Обновлён под current operator report checkpoint: report
 - `Выполнение плана`:
   - route = `GET /v1/sheet-vitrina-v1/plan-report`
   - route is read-only and does not trigger refresh/upstream fetch/backfill;
-  - primary required query params: `period`, `h1_buyout_plan_rub`, `h2_buyout_plan_rub`, `plan_drr_pct`; optional `as_of_date` fixes the previous closed business day reference; legacy complete `q1_buyout_plan_rub`..`q4_buyout_plan_rub` may be accepted transitionally by summing Q1+Q2 into H1 and Q3+Q4 into H2;
+  - primary required query params: `period`, `h1_buyout_plan_rub`, `h2_buyout_plan_rub`, `plan_drr_pct`; optional `as_of_date` is interpreted as the last included closed day; default/no-override resolves to the previous closed business day in `Asia/Yekaterinburg`; legacy complete `q1_buyout_plan_rub`..`q4_buyout_plan_rub` may be accepted transitionally by summing Q1+Q2 into H1 and Q3+Q4 into H2;
+  - supported `period` values: `yesterday`, `last_7_days`, `last_30_days`, `current_month`, `current_quarter`, `current_year`, `first_quarter`, `second_quarter`, `third_quarter`, `fourth_quarter`, `first_half`, `second_half`;
+  - current business day is excluded from default fact, plan, DRR, ads-plan and coverage semantics; selected/fixed periods are clipped to `effective_as_of_date`, and future fixed periods return local `unavailable / not_started` without fake zero or future plan;
   - response always returns selected period plus `month_to_date`, `quarter_to_date`, `year_to_date` blocks when current active SKU truth is available;
   - each block has its own `available / partial / unavailable` status, coverage details, reason, source-of-truth/source-mix and metric values when the block is available or partial;
   - missing YTD/January/February coverage must not hide an available selected period; top-level status may aggregate block state but must not make the response all-or-nothing;
@@ -423,7 +425,9 @@ update_note: "Обновлён под current operator report checkpoint: report
   - baseline XLSX uses Russian headers with backend mapping: `Месяц`, `Выкуп, руб. / fin_buyout_rub`, `Рекламные расходы, руб. / ads_sum`;
   - buyout plan is calendar-day based and coverage-independent: each date uses that date's H1/H2 plan divided by the number of days in the half-year, so periods crossing 30 Jun / 1 Jul use different daily plans;
   - DRR fact = `ads_sum / fin_buyout_rub * 100`; ads plan = full-calendar period buyout plan multiplied by planned DRR;
-  - incomplete coverage is surfaced locally as `status=partial` with missing/covered dates instead of silent zero facts; no usable daily facts or applicable full-month baseline for a block yields block-level `status=unavailable`.
+  - incomplete coverage is surfaced locally as `status=partial` with missing/covered dates instead of silent zero facts; no usable daily facts or applicable full-month baseline for a block yields block-level `status=unavailable`;
+  - operator UI uses Russian period labels, a uniform 2x2 grid for selected/MTD/QTD/YTD cards, metric columns `Показатель / Факт / План / Отклонение / Отклонение %`, and keeps status/coverage as text rather than a table column;
+  - H1/H2/DRR browser inputs may persist only in namespaced `localStorage` as UI convenience; this is not server-side profile state and not a fact/source-of-truth layer.
 - Bounded historical fact reconciliation for this contour is repo-owned, explicit and non-recurring:
   - `apps/sheet_vitrina_v1_ready_fact_reconcile.py dry-run|apply` compares server-side `DATA_VITRINA` ready snapshots against accepted temporal source slots for `fin_buyout_rub` and `ads_sum`;
   - apply mode inserts only missing accepted source slots, writes `source_kind=web_vitrina_ready_snapshot_to_temporal_accepted_fact_reconcile_v1` metadata/checksum, records closure success metadata, and refuses to overwrite existing accepted snapshots with diffs;
