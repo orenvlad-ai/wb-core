@@ -1996,7 +1996,8 @@
       const columns = Array.isArray(block.columns) ? block.columns : [];
       const items = Array.isArray(block.items) ? block.items : [];
       const rows = Array.isArray(block.rows) ? block.rows : items.map(itemToLegacyLoadingRow);
-      if (!rows.length || !columns.length) {
+      const groups = Array.isArray(block.groups) ? block.groups : [];
+      if ((!rows.length && !groups.length) || !columns.length) {
         loadingTableShellNode.classList.add("is-hidden");
         loadingTableEmptyNode.classList.remove("is-hidden");
         loadingTableEmptyNode.textContent = String(block.empty_message || "Статусы по источникам пока недоступны.");
