@@ -51,10 +51,13 @@
 
     body.is-embedded {
       background: transparent;
+      min-height: 0;
+      overflow: hidden;
     }
 
     body.is-embedded .page {
       max-width: none;
+      min-height: 0;
       padding: 0;
     }
 
@@ -740,10 +743,6 @@
       padding: 18px;
     }
 
-    .plan-report-card.is-primary {
-      grid-column: 1 / -1;
-    }
-
     .plan-report-card-head {
       display: flex;
       align-items: flex-start;
@@ -772,7 +771,7 @@
       width: 100%;
       border-collapse: collapse;
       font-size: 14px;
-      min-width: 720px;
+      table-layout: fixed;
     }
 
     .plan-report-table th,
@@ -781,6 +780,7 @@
       border-top: 1px solid rgba(15, 23, 42, 0.08);
       text-align: left;
       vertical-align: top;
+      overflow-wrap: anywhere;
     }
 
     .plan-report-table thead th {
@@ -1552,6 +1552,12 @@
                       <option value="current_month" selected>За текущий месяц</option>
                       <option value="current_quarter">За текущий квартал</option>
                       <option value="current_year">За текущий год</option>
+                      <option value="first_quarter">За первый квартал</option>
+                      <option value="second_quarter">За второй квартал</option>
+                      <option value="third_quarter">За третий квартал</option>
+                      <option value="fourth_quarter">За четвертый квартал</option>
+                      <option value="first_half">За первое полугодие</option>
+                      <option value="second_half">За второе полугодие</option>
                     </select>
                   </div>
                   <div class="field plan-report-field">
@@ -1589,7 +1595,7 @@
               <p id="planReportStatus" class="section-message">Заполните параметры и нажмите «Рассчитать».</p>
               <div id="planReportContent" class="daily-report" hidden>
                 <div class="plan-report-grid">
-                  <section class="plan-report-card is-primary">
+                  <section class="plan-report-card">
                     <div class="plan-report-card-head">
                       <div>
                         <h3 id="planReportSelectedTitle">Основной период</h3>
@@ -2102,6 +2108,20 @@
       const VALID_TABS = new Set(["vitrina", "factory-order", "reports"]);
       const VALID_REPORT_SECTIONS = new Set(["daily", "stock", "plan"]);
       const VALID_SUPPLY_SECTIONS = new Set(["factory", "regional"]);
+      const VALID_PLAN_REPORT_PERIODS = new Set([
+        "yesterday",
+        "last_7_days",
+        "last_30_days",
+        "current_month",
+        "current_quarter",
+        "current_year",
+        "first_quarter",
+        "second_quarter",
+        "third_quarter",
+        "fourth_quarter",
+        "first_half",
+        "second_half"
+      ]);
       const isEmbeddedMode = Boolean(config.embedded);
       const configuredInitialTab = normalizePersistedSectionName(config.initial_tab, VALID_TABS, DEFAULT_ACTIVE_TAB);
       let activeJobId = null;
@@ -2214,6 +2234,61 @@
         return allStockReportSkuIds.slice();
       }
 
+      function sanitizePersistedPlanInputValue(value) {
+        const normalized = value || value === 0 ? String(value).trim() : "";
+        if (!normalized) {
+          return "";
+        }
+        const numericValue = Number(normalized);
+        return Number.isFinite(numericValue) && numericValue >= 0 ? normalized : "";
+      }
+
+      function restorePlanReportInputs(storageState) {
+        const rawState = storageState && typeof storageState === "object" ? storageState : {};
+        const inputs = rawState.plan_report_inputs && typeof rawState.plan_report_inputs === "object"
+          ? rawState.plan_report_inputs
+          : {};
+        const period = String(inputs.period || "").trim();
+        if (VALID_PLAN_REPORT_PERIODS.has(period)) {
+          planReportPeriodSelect.value = period;
+        }
+        const h1Plan = sanitizePersistedPlanInputValue(inputs.h1_buyout_plan_rub);
+        const h2Plan = sanitizePersistedPlanInputValue(inputs.h2_buyout_plan_rub);
+        const planDrr = sanitizePersistedPlanInputValue(inputs.plan_drr_pct);
+        if (h1Plan) {
+          planReportH1Input.value = h1Plan;
+        }
+        if (h2Plan) {
+          planReportH2Input.value = h2Plan;
+        }
+        if (planDrr) {
+          planReportDrrInput.value = planDrr;
+        }
+      }
+
+      function persistPlanReportInputs(request) {
+        if (!request || request.error) {
+          return;
+        }
+        const inputs = {
+          period: String(planReportPeriodSelect.value || "").trim(),
+          h1_buyout_plan_rub: String(planReportH1Input.value || "").trim(),
+          h2_buyout_plan_rub: String(planReportH2Input.value || "").trim(),
+          plan_drr_pct: String(planReportDrrInput.value || "").trim()
+        };
+        if (!VALID_PLAN_REPORT_PERIODS.has(inputs.period)) {
+          return;
+        }
+        if (
+          !sanitizePersistedPlanInputValue(inputs.h1_buyout_plan_rub) ||
+          !sanitizePersistedPlanInputValue(inputs.h2_buyout_plan_rub) ||
+          !sanitizePersistedPlanInputValue(inputs.plan_drr_pct)
+        ) {
+          return;
+        }
+        writePersistedOperatorUiState({ plan_report_inputs: inputs });
+      }
+
       function activateTab(tabName, options) {
         const activeTabName = normalizePersistedSectionName(tabName, VALID_TABS, DEFAULT_ACTIVE_TAB);
         tabButtons.forEach((button) => {
@@ -2269,10 +2344,13 @@
         if (!isEmbeddedMode || !window.parent || window.parent === window) {
           return;
         }
-        const height = Math.max(
-          document.body ? document.body.scrollHeight : 0,
-          document.documentElement ? document.documentElement.scrollHeight : 0
-        );
+        const pageNode = document.querySelector(".page");
+        const height = pageNode
+          ? Math.ceil(pageNode.getBoundingClientRect().height)
+          : Math.max(
+              document.body ? document.body.scrollHeight : 0,
+              document.documentElement ? document.documentElement.scrollHeight : 0
+            );
         window.parent.postMessage(
           {
             type: "sheet_vitrina_v1_operator_embed_height",
@@ -2281,6 +2359,55 @@
           },
           window.location.origin
         );
+      }
+
+      function findScrollableAncestor(node) {
+        let current = node && node.nodeType === 1 ? node : node && node.parentElement;
+        while (current && current !== document.body && current !== document.documentElement) {
+          const style = window.getComputedStyle(current);
+          const overflowY = String(style.overflowY || "");
+          if (/(auto|scroll)/.test(overflowY) && current.scrollHeight > current.clientHeight + 1) {
+            return current;
+          }
+          current = current.parentElement;
+        }
+        return null;
+      }
+
+      function canScrollElementInDirection(element, deltaY) {
+        if (!element || !deltaY) {
+          return false;
+        }
+        if (deltaY < 0) {
+          return element.scrollTop > 0;
+        }
+        return element.scrollTop + element.clientHeight < element.scrollHeight - 1;
+      }
+
+      function setupEmbeddedWheelRelay() {
+        if (!isEmbeddedMode || !window.parent || window.parent === window) {
+          return;
+        }
+        window.addEventListener("wheel", (event) => {
+          const scrollable = findScrollableAncestor(event.target);
+          if (scrollable && canScrollElementInDirection(scrollable, event.deltaY)) {
+            return;
+          }
+          const scrollingElement = document.scrollingElement || document.documentElement;
+          if (canScrollElementInDirection(scrollingElement, event.deltaY)) {
+            return;
+          }
+          window.parent.postMessage(
+            {
+              type: "sheet_vitrina_v1_operator_embed_wheel",
+              tab: configuredInitialTab,
+              deltaX: Number(event.deltaX) || 0,
+              deltaY: Number(event.deltaY) || 0
+            },
+            window.location.origin
+          );
+          event.preventDefault();
+        }, { passive: false });
       }
 
       function scheduleEmbeddedHeightPost() {
@@ -2883,7 +3010,7 @@
         return [
           note ? "<p class=\"field-note\">" + escapeHtml(note) + "</p>" : "",
           "<table class=\"plan-report-table\">",
-          "<thead><tr><th>Показатель</th><th>Факт</th><th>План</th><th>Отклонение</th><th>Отклонение, %</th><th>Статус</th></tr></thead>",
+          "<thead><tr><th>Показатель</th><th>Факт</th><th>План</th><th>Отклонение</th><th>Отклонение %</th></tr></thead>",
           "<tbody>",
           rows.map((metric) => [
             "<tr>",
@@ -2892,7 +3019,6 @@
             "<td>" + escapeHtml(metric.entity_key === "drr_pct" ? formatPercentValue(metric.plan) : formatNumber(metric.plan)) + "</td>",
             "<td>" + escapeHtml(metric.entity_key === "drr_pct" ? formatSignedPercentPoint(metric.delta_pp) : formatSignedNumber(metric.delta_abs)) + "</td>",
             "<td>" + escapeHtml(formatPctChange(metric.delta_pct)) + "</td>",
-            "<td><span class=\"" + planStatusBadgeClass(metric.status) + "\">" + escapeHtml(metric.status_label || "н/д") + "</span></td>",
             "</tr>"
           ].join("")).join(""),
           "</tbody>",
@@ -2930,8 +3056,9 @@
         const mtd = periods.month_to_date || {};
         const qtd = periods.quarter_to_date || {};
         const ytd = periods.year_to_date || {};
-        planReportPeriod.textContent = "Reference date: " + formatHumanDate(payload.reference_date) + ". Основной период: " + valueOrDash(payload.selected_period_label) + ".";
-        planReportLead.textContent = "Active SKU в current config: " + valueOrDash(payload.active_sku_count) + ". План по выкупу распределяется по всем календарным дням H1/H2; факт DRR считается как ads_sum / fin_buyout_rub * 100.";
+        const effectiveAsOfDate = payload.effective_as_of_date || payload.reference_date;
+        planReportPeriod.textContent = "Последний закрытый день: " + formatHumanDate(effectiveAsOfDate) + ". Основной период: " + valueOrDash(payload.selected_period_label) + ".";
+        planReportLead.textContent = "Active SKU в current config: " + valueOrDash(payload.active_sku_count) + ". Текущий незакрытый день не входит в расчёт; план распределяется по календарным дням H1/H2.";
         if (payload.status === "available") {
           planReportStatus.textContent = "Source of truth: accepted closed-day runtime snapshots fin_report_daily + ads_compact.";
           planReportStatus.className = "section-message";
@@ -3622,6 +3749,7 @@
           return;
         }
         setPlanReportValidation("");
+        persistPlanReportInputs(request);
         planReportApplyButton.disabled = true;
         planReportApplyButton.textContent = "Считаем...";
         planReportStatus.textContent = "Собираем факт и план по закрытым дням...";
@@ -4209,6 +4337,7 @@
         });
       });
 
+      restorePlanReportInputs(persistedOperatorUiState);
       activateTab(
         isEmbeddedMode ? configuredInitialTab : (persistedOperatorUiState.active_tab || DEFAULT_ACTIVE_TAB),
         { persist: !isEmbeddedMode }
@@ -4221,8 +4350,9 @@
         persistedOperatorUiState.supply_section || DEFAULT_SUPPLY_SECTION,
         { persist: !isEmbeddedMode }
       );
-      setupEmbeddedHeightObserver();
-      setActionState(null);
+          setupEmbeddedHeightObserver();
+          setupEmbeddedWheelRelay();
+          setActionState(null);
       setCompletedJob(null);
       renderSellerRecovery({
         status: "idle",

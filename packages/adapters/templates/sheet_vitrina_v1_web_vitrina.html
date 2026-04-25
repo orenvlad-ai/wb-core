@@ -93,13 +93,14 @@
       border-radius: var(--radius);
       box-shadow: var(--shadow);
       padding: 18px;
-      min-height: 520px;
+      min-height: 0;
     }
 
     .operator-embed-frame {
       display: block;
       width: 100%;
-      min-height: 900px;
+      height: 640px;
+      min-height: 0;
       border: 0;
       background: transparent;
     }
@@ -1373,11 +1374,11 @@
     </section>
 
     <section class="unified-tab-panel operator-embed-panel" data-unified-tab-panel="factory-order" hidden>
-      <iframe class="operator-embed-frame" title="Расчет поставок" data-operator-embed-frame="factory-order"></iframe>
+      <iframe class="operator-embed-frame" title="Расчет поставок" data-operator-embed-frame="factory-order" scrolling="no"></iframe>
     </section>
 
     <section class="unified-tab-panel operator-embed-panel" data-unified-tab-panel="reports" hidden>
-      <iframe class="operator-embed-frame" title="Отчеты" data-operator-embed-frame="reports"></iframe>
+      <iframe class="operator-embed-frame" title="Отчеты" data-operator-embed-frame="reports" scrolling="no"></iframe>
     </section>
   </main>
 
@@ -1664,13 +1665,20 @@
       }
       const payload = event.data || {};
       if (!payload || payload.type !== "sheet_vitrina_v1_operator_embed_height") {
+        if (payload && payload.type === "sheet_vitrina_v1_operator_embed_wheel") {
+          window.scrollBy({
+            left: Number(payload.deltaX) || 0,
+            top: Number(payload.deltaY) || 0,
+            behavior: "auto"
+          });
+        }
         return;
       }
       const tabName = normalizeUnifiedTab(payload.tab);
       const frame = operatorEmbedFrames.find(function(candidate) {
         return candidate.getAttribute("data-operator-embed-frame") === tabName;
       });
-      const height = Math.max(640, Math.min(5000, Number(payload.height) || 0));
+      const height = Math.max(320, Math.min(5000, Number(payload.height) || 0));
       if (frame && height) {
         frame.style.height = height + "px";
       }

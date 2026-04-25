@@ -49,9 +49,15 @@ def main() -> None:
         "Расчёт поставок",
         "Отчёты",
         "Ежедневные отчёты",
-        "Отчёт по остаткам",
-        "Выполнение плана",
-    ):
+            "Отчёт по остаткам",
+            "Выполнение плана",
+            "За первый квартал",
+            "За второй квартал",
+            "За третий квартал",
+            "За четвертый квартал",
+            "За первое полугодие",
+            "За второе полугодие",
+        ):
         if token not in html:
             raise AssertionError(f"reports tab chrome must keep token {token!r}")
 
@@ -111,6 +117,29 @@ def main() -> None:
         raise AssertionError("operator page must restore persisted UI state from browser storage")
     if "window.localStorage.setItem(OPERATOR_UI_STORAGE_KEY" not in html:
         raise AssertionError("operator page must persist tab/subsection/SKU state into browser storage")
+    if "restorePlanReportInputs(persistedOperatorUiState);" not in html:
+        raise AssertionError("plan-report H1/H2/DRR inputs must restore from namespaced browser storage")
+    if "writePersistedOperatorUiState({ plan_report_inputs: inputs });" not in html:
+        raise AssertionError("plan-report H1/H2/DRR inputs must persist into namespaced browser storage")
+    if '<th>Показатель</th><th>Факт</th><th>План</th><th>Отклонение</th><th>Отклонение %</th>' not in html:
+        raise AssertionError("plan-report tables must use the compact five-column layout")
+    if "<th>Статус</th>" in html:
+        raise AssertionError("plan-report metric tables must not expose a separate Status column")
+    if 'class="plan-report-card is-primary"' in html or ".plan-report-card.is-primary" in html:
+        raise AssertionError("selected plan-report card must not keep a wide primary special case")
+    if "grid-template-columns: repeat(2, minmax(0, 1fr));" not in html:
+        raise AssertionError("plan-report cards must keep the compact 2x2 grid on normal widths")
+    if "sheet_vitrina_v1_operator_embed_wheel" not in html:
+        raise AssertionError("embedded factory/reports UI must relay edge wheel gestures to the parent shell")
+    web_vitrina_template = (ROOT / "packages" / "adapters" / "templates" / "sheet_vitrina_v1_web_vitrina.html").read_text(
+        encoding="utf-8"
+    )
+    if "sheet_vitrina_v1_operator_embed_wheel" not in web_vitrina_template:
+        raise AssertionError("unified web-vitrina shell must handle embedded operator wheel relay")
+    if 'scrolling="no"' not in web_vitrina_template:
+        raise AssertionError("embedded operator iframes must not keep their own scroll surface")
+    if "min-height: 900px" in web_vitrina_template:
+        raise AssertionError("embedded operator iframe must not keep the old large minimum height")
     if "isEmbeddedMode ? configuredInitialTab : (persistedOperatorUiState.active_tab || DEFAULT_ACTIVE_TAB)" not in html:
         raise AssertionError("top-level tab must restore from persisted browser state")
     if "persistedOperatorUiState.report_section || DEFAULT_REPORT_SECTION" not in html:

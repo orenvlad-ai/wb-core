@@ -95,6 +95,12 @@ def main() -> None:
                 "Ежедневные отчёты",
                 "Отчёт по остаткам",
                 "Выполнение плана",
+                "За первый квартал",
+                "За второй квартал",
+                "За третий квартал",
+                "За четвертый квартал",
+                "За первое полугодие",
+                "За второе полугодие",
                 'data-report-section-button="plan"',
                 'data-report-section-panel="plan" hidden',
                 'id="planReportPeriodSelect"',
@@ -146,6 +152,8 @@ def main() -> None:
                 raise AssertionError(f"plan report route must return partial top-level JSON, got {report_status} {report_payload}")
             if report_payload.get("reference_date") != REFERENCE_DATE:
                 raise AssertionError(f"plan report must default to previous closed day, got {report_payload}")
+            if report_payload.get("effective_as_of_date") != REFERENCE_DATE:
+                raise AssertionError(f"plan report must disclose previous closed effective date, got {report_payload}")
             if report_payload.get("selected_period_key") != "last_30_days":
                 raise AssertionError(f"plan report must keep requested period key, got {report_payload}")
             source_of_truth = report_payload.get("source_of_truth") or {}
@@ -174,6 +182,45 @@ def main() -> None:
             ytd = (report_payload.get("periods") or {}).get("year_to_date") or {}
             if ytd.get("status") != "partial":
                 raise AssertionError(f"YTD must stay local partial before baseline, got {report_payload}")
+            fixed_periods = {
+                "yesterday": ("За вчера", "2026-04-20", "2026-04-20", 1, "closed_day_window"),
+                "last_7_days": ("За последние 7 дней", "2026-04-14", "2026-04-20", 7, "closed_day_window"),
+                "last_30_days": ("За последние 30 дней", "2026-03-22", "2026-04-20", 30, "closed_day_window"),
+                "current_month": ("За текущий месяц", "2026-04-01", "2026-04-20", 20, "closed_day_window"),
+                "current_quarter": ("За текущий квартал", "2026-04-01", "2026-04-20", 20, "closed_day_window"),
+                "current_year": ("За текущий год", "2026-01-01", "2026-04-20", 110, "closed_day_window"),
+                "first_quarter": ("За первый квартал", "2026-01-01", "2026-03-31", 90, "completed"),
+                "second_quarter": ("За второй квартал", "2026-04-01", "2026-04-20", 20, "in_progress"),
+                "third_quarter": ("За третий квартал", "2026-07-01", "2026-09-30", 0, "not_started"),
+                "fourth_quarter": ("За четвертый квартал", "2026-10-01", "2026-12-31", 0, "not_started"),
+                "first_half": ("За первое полугодие", "2026-01-01", "2026-04-20", 110, "in_progress"),
+                "second_half": ("За второе полугодие", "2026-07-01", "2026-12-31", 0, "not_started"),
+            }
+            for period_key, (label, date_from, date_to, day_count, period_state) in fixed_periods.items():
+                period_query = urllib_parse.urlencode(
+                    {
+                        "period": period_key,
+                        "h1_buyout_plan_rub": "271500",
+                        "h2_buyout_plan_rub": "552000",
+                        "plan_drr_pct": "10",
+                    }
+                )
+                period_status, period_payload = _get_json(f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_PATH}?{period_query}")
+                period_selected = (period_payload.get("periods") or {}).get("selected_period") or {}
+                if period_status != 200:
+                    raise AssertionError(f"period {period_key} must return 200, got {period_status} {period_payload}")
+                if (
+                    period_payload.get("selected_period_key") != period_key
+                    or period_selected.get("label") != label
+                    or period_selected.get("date_from") != date_from
+                    or period_selected.get("date_to") != date_to
+                    or period_selected.get("day_count") != day_count
+                    or period_selected.get("period_state") != period_state
+                    or period_selected.get("effective_as_of_date") != REFERENCE_DATE
+                ):
+                    raise AssertionError(f"period {period_key} selected block is wrong, got {period_payload}")
+                if period_state == "not_started" and period_selected.get("metrics", {}).get("buyout_rub", {}).get("plan") is not None:
+                    raise AssertionError(f"future period {period_key} must not fabricate a plan, got {period_payload}")
             legacy_query = urllib_parse.urlencode(
                 {
                     "period": "last_30_days",
