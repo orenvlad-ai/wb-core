@@ -303,12 +303,17 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - response body always contains per-block `periods.selected_period`, `periods.month_to_date`, `periods.quarter_to_date`, `periods.year_to_date`
   - root status is aggregate; UI must render available/partial blocks even when another block is unavailable
   - primary required params = `period`, `h1_buyout_plan_rub`, `h2_buyout_plan_rub`, `plan_drr_pct`; legacy complete `q1_buyout_plan_rub`..`q4_buyout_plan_rub` remains a transitional fallback only
+  - `fin_report_daily.fin_buyout_rub` and `ads_compact.ads_sum` facts come from the shared accepted temporal source slot layer; metric-specific daily coverage is transparent, so a missing ads day does not erase an available buyout day, and the block stays `partial` with source-specific missing dates
   - sibling baseline routes:
     - `GET /v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx`
     - `POST /v1/sheet-vitrina-v1/plan-report/baseline-upload`
     - `GET /v1/sheet-vitrina-v1/plan-report/baseline-status`
   - baseline upload validates `YYYY-MM` month, non-negative numeric `fin_buyout_rub`/`ads_sum`, non-empty workbook and duplicate month errors, then stores aggregates idempotently in runtime SQLite
   - route does not build a new ready snapshot, does not fetch upstream data and does not use Google Sheets/GAS
+- One-off historical consistency repair between web-vitrina and reports is handled by `apps/sheet_vitrina_v1_ready_fact_reconcile.py`:
+  - dry-run compares server-side ready snapshots against accepted temporal slots for bounded windows and reports insert/skip/diff actions;
+  - apply inserts only missing `fin_report_daily` / `ads_compact` accepted slots from daily SKU values already present in server-side ready snapshots;
+  - existing accepted snapshots are not overwritten, blank ready values are not fabricated as zero, and the path is not a recurring Google Sheets/GAS source.
 - Канонический operator live-log path:
   - `GET /v1/sheet-vitrina-v1/job`
   - default response body = current async action status + detailed postрочный live log для `refresh` или `load`

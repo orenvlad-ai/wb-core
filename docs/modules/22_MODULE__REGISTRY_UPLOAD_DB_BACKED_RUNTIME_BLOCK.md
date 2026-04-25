@@ -88,6 +88,11 @@ update_note: "Обновлён под current temporal closure seam and plan-rep
     - `closed_day_candidate_snapshot`
     - `accepted_closed_day_snapshot`
   - persisted closure retry state в `temporal_source_closure_state` с `source_key / target_date / slot_kind / attempt_count / next_retry_at / state / last_reason / accepted_at`;
+  - bounded one-off reconciliation helper `apps/sheet_vitrina_v1_ready_fact_reconcile.py`, который может materialize-ить missing accepted slots для `fin_report_daily.fin_buyout_rub` и `ads_compact.ads_sum` из уже persisted server-side `sheet_vitrina_v1_ready_snapshots`:
+    - default bounded window = `2026-03-01..2026-04-24`;
+    - dry-run показывает insert/skip/diff по source/date/metric;
+    - apply пишет только отсутствующие `accepted_closed_day_snapshot` slots и closure success metadata с `source_kind=web_vitrina_ready_snapshot_to_temporal_accepted_fact_reconcile_v1`;
+    - existing accepted snapshots с diff не перезаписываются, blank ready values не превращаются в нули;
   - separate plan-report manual monthly baseline в `sheet_vitrina_v1_plan_report_monthly_baseline`:
     - key = `month` в формате `YYYY-MM`;
     - fact fields = `fin_buyout_rub`, `ads_sum`;

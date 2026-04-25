@@ -415,6 +415,7 @@ update_note: "Обновлён под current operator report checkpoint: report
   - each block has its own `available / partial / unavailable` status, coverage details, reason, source-of-truth/source-mix and metric values when the block is available or partial;
   - missing YTD/January/February coverage must not hide an available selected period; top-level status may aggregate block state but must not make the response all-or-nothing;
   - daily facts are summed from persisted accepted closed-day temporal snapshots: `fin_report_daily.fin_buyout_rub` and `ads_compact.ads_sum`;
+  - buyout and ads daily coverage are tracked independently: if one source has a day and the other source is missing, the available metric may still contribute its own fact, while the block remains `partial` and `missing_dates_by_source`/`source_breakdown` expose the mismatch;
   - optional source mix for aggregate blocks may include `manual_monthly_plan_report_baseline` from server-side runtime SQLite for full months wholly inside the period; if a baseline month has incomplete daily precision, the monthly aggregate covers that month and overlapping daily rows are excluded from the block to prevent double-count;
   - daily accepted snapshots have precedence only when the whole month is covered by daily facts; then the monthly baseline is not added;
   - baseline is not a general historical backfill, is not Google Sheets/GAS, does not replace accepted snapshots, and is used only by this plan-report route;
@@ -423,6 +424,11 @@ update_note: "Обновлён под current operator report checkpoint: report
   - buyout plan is calendar-day based and coverage-independent: each date uses that date's H1/H2 plan divided by the number of days in the half-year, so periods crossing 30 Jun / 1 Jul use different daily plans;
   - DRR fact = `ads_sum / fin_buyout_rub * 100`; ads plan = full-calendar period buyout plan multiplied by planned DRR;
   - incomplete coverage is surfaced locally as `status=partial` with missing/covered dates instead of silent zero facts; no usable daily facts or applicable full-month baseline for a block yields block-level `status=unavailable`.
+- Bounded historical fact reconciliation for this contour is repo-owned, explicit and non-recurring:
+  - `apps/sheet_vitrina_v1_ready_fact_reconcile.py dry-run|apply` compares server-side `DATA_VITRINA` ready snapshots against accepted temporal source slots for `fin_buyout_rub` and `ads_sum`;
+  - apply mode inserts only missing accepted source slots, writes `source_kind=web_vitrina_ready_snapshot_to_temporal_accepted_fact_reconcile_v1` metadata/checksum, records closure success metadata, and refuses to overwrite existing accepted snapshots with diffs;
+  - blank ready values are not converted to zeros and do not create fake daily snapshots;
+  - the unified server-side truth layer for reports remains `temporal_source_slot_snapshots[accepted_closed_day_snapshot]`, with `sheet_vitrina_v1_ready_snapshots` allowed only as bounded reconciliation input when it is already server-side and audited.
 - Operator page keeps one compact server-driven manual block `Ручная загрузка данных`:
   - active action `Загрузить данные`
   - former Google Sheets action `Отправить данные` is archived/disabled

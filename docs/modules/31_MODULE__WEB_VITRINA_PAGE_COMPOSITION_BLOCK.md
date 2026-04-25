@@ -170,6 +170,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
 - Existing stable seams are now used end-to-end in a live read-only surface.
 - The chosen client path stays intentionally minimal and repo-owned.
 - Web-vitrina completion is verified through the server/public web surface (`/v1/sheet-vitrina-v1/web-vitrina`, optional `surface=page_composition`, and `/sheet-vitrina-v1/vitrina`); Google Sheets / GAS / `clasp` are not active verification targets for this surface.
+- Historical ready snapshots may be used as bounded, audited reconciliation input for the shared accepted temporal source layer when the read model already contains daily SKU facts that reports lack; this is done only by repo-owned dry-run/apply tooling and does not make the browser UI or Google Sheets/GAS a source of truth.
 - `Свежесть данных` stays server-owned and comes from the current read-side snapshot metadata (`refreshed_at / snapshot_id / as_of_date`), while `Последнее обновление страницы` is only the browser reread marker and is intentionally separate.
 - user-facing timestamp render is unified:
   - `Свежесть данных` now reuses the same client formatter as `Последнее обновление страницы`
