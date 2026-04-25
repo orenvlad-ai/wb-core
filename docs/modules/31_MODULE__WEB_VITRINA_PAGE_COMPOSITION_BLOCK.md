@@ -191,6 +191,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
 - Refresh and group-refresh job results may include `updated_cells` entries `{row_id, metric_key, as_of_date, source_group_id, status}`. The field is result metadata for the current UI session only: it drives transient green/yellow cell highlighting and log counters, but it is not persisted as permanent table styling.
 - `Загрузка данных` and `Лог` stay server-driven:
   - loading table is derived from the last relevant refresh/group-refresh job log and persisted source fallback; if exact job association is unavailable, page shows truthful non-OK status rather than unrelated stale run
+  - absence of transient in-memory refresh-log must not hide source-group headers/actions: the grouped controls remain visible from server-driven capabilities even when source rows are available only as persisted summary or are temporarily empty
   - loading table rows are nested under stable source-group headers while preserving source truth and canonical source labels; coverage must include all visible main-table metrics, with residual calculated/formula metrics assigned to `Прочие источники`
   - loading table uses server/business `Сегодня: <YYYY-MM-DD>` and `Вчера: <YYYY-MM-DD>` dates, short OK/not-OK cells, reason columns, Russian metric labels from the existing metric registry and secondary technical endpoint text
   - log preview and `Скачать лог` reuse the existing in-memory job/log contour and render below the loading table
@@ -203,6 +204,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - `Сбросить` only removes `as_of_date/date_from/date_to` and returns to cheap daily mode
 - period mode aggregates semantic status across the selected ready-snapshot window and must not force green merely because the window exists.
 - The page composition layer knows only page/layout/render state and does not become a second truth owner.
+- User-facing `ЕБД` / `единая база данных` means the shared server-side accepted truth/runtime layer behind web-vitrina and reports; the browser page, Google Sheets/GAS and localStorage are not data-truth owners.
 
 # 8. Что пока не является частью финальной production-сборки
 

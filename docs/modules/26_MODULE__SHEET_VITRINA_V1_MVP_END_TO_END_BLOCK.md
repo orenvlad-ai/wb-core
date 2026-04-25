@@ -314,6 +314,7 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - dry-run compares server-side ready snapshots against accepted temporal slots for bounded windows and reports insert/skip/diff actions;
   - apply inserts only missing `fin_report_daily` / `ads_compact` accepted slots from daily SKU values already present in server-side ready snapshots;
   - existing accepted snapshots are not overwritten, blank ready values are not fabricated as zero, and the path is not a recurring Google Sheets/GAS source.
+- User-facing term `ЕБД` / `единая база данных` names the shared server-side accepted truth/runtime layer for this contour: persisted accepted closed-day temporal source slots, ready snapshots and related runtime state produced by repo-owned refresh/group-refresh/reconcile paths. Web-vitrina, plan-report and future reports consume this server-side layer; Google Sheets/GAS, the HTML UI, browser `localStorage` and report-private manual tables are not the EBD.
 - Канонический operator live-log path:
   - `GET /v1/sheet-vitrina-v1/job`
   - default response body = current async action status + detailed postрочный live log для `refresh` или `load`

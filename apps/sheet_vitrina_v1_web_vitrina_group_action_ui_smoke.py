@@ -19,6 +19,73 @@ from packages.adapters.registry_upload_http_entrypoint import DEFAULT_SHEET_WEB_
 
 
 def main() -> None:
+    _assert_group_controls_survive_empty_loading_rows()
+    _assert_group_action_launch_error()
+
+
+def _assert_group_controls_survive_empty_loading_rows() -> None:
+    with LocalWebVitrinaFixtureServer(with_ready_snapshot=True) as base_url:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context(viewport={"width": 1100, "height": 900})
+
+            def empty_loading_rows(route: object) -> None:
+                response = route.fetch()
+                payload = response.json()
+                activity_surface = payload.get("activity_surface") or {}
+                upload_summary = activity_surface.get("upload_summary") or {}
+                loading_table = activity_surface.get("loading_table") or {}
+                fallback = (
+                    "Последний завершённый refresh-run в памяти сервиса пока не найден. "
+                    "Показываем только сохранённый итог по текущему срезу."
+                )
+                upload_summary["subtitle"] = "Transient refresh-log недоступен; показываем сохранённый итог по текущему срезу."
+                upload_summary["items"] = []
+                upload_summary["empty_message"] = fallback
+                loading_table["subtitle"] = upload_summary["subtitle"]
+                loading_table["rows"] = []
+                loading_table["empty_message"] = fallback
+                route.fulfill(
+                    status=response.status,
+                    content_type="application/json",
+                    body=json.dumps(payload, ensure_ascii=False),
+                )
+
+            context.route(
+                "**/v1/sheet-vitrina-v1/web-vitrina?surface=page_composition*",
+                empty_loading_rows,
+            )
+            page = context.new_page()
+            page.goto(base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, wait_until="domcontentloaded")
+            page.wait_for_selector("[data-refresh-source-group='wb_api']", timeout=20000)
+            payload = page.evaluate(
+                """() => ({
+                  shell_hidden: document.querySelector('[data-loading-table-shell]').classList.contains('is-hidden'),
+                  empty_hidden: document.querySelector('[data-loading-table-empty]').classList.contains('is-hidden'),
+                  group_count: document.querySelectorAll('[data-loading-group]').length,
+                  button_count: document.querySelectorAll('[data-refresh-source-group]').length,
+                  source_row_count: document.querySelectorAll('[data-loading-source]').length,
+                  empty_source_rows: document.querySelectorAll('[data-loading-source-empty]').length,
+                  session_controls: document.querySelectorAll('[data-session-check]').length,
+                  subtitle: document.querySelector('[data-loading-table-subtitle]').textContent.trim()
+                })"""
+            )
+            if payload != {
+                "shell_hidden": False,
+                "empty_hidden": True,
+                "group_count": 3,
+                "button_count": 3,
+                "source_row_count": 0,
+                "empty_source_rows": 3,
+                "session_controls": 1,
+                "subtitle": "Transient refresh-log недоступен; показываем сохранённый итог по текущему срезу.",
+            }:
+                raise AssertionError(f"group controls must survive empty transient loading rows, got {payload}")
+            print("web_vitrina_group_actions_empty_rows: ok -> controls remain visible")
+            browser.close()
+
+
+def _assert_group_action_launch_error() -> None:
     with LocalWebVitrinaFixtureServer(with_ready_snapshot=True) as base_url:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
