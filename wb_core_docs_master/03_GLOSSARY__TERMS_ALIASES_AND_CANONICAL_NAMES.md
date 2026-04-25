@@ -21,7 +21,7 @@ update_triggers:
   - "изменение canonical naming"
   - "появление нового публичного термина"
   - "изменение operator-visible labels"
-built_from_commit: "c5ec48eb5380d0ebc75e7cc497f33b0b163dcbfe"
+built_from_commit: "c8faa36b1eec440925a8c98b5d87eb188e5e7492"
 ---
 
 # Summary
@@ -50,10 +50,13 @@ built_from_commit: "c5ec48eb5380d0ebc75e7cc497f33b0b163dcbfe"
 | `STATUS` | `status sheet` | former Google Sheets freshness/source sheet; archive/migration-only |
 | `refresh -> web-vitrina read` | `current operator flow`, `current web-vitrina flow` | canonical current bounded operator/server scenario |
 | `group-refresh` | `Обновить группу`, `source group refresh` | date-scoped `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` for one source group and one selected date |
-| `plan-report` | `Выполнение плана` | read-only operator report over persisted closed-day facts and user-supplied plan values |
+| `plan-report` | `Выполнение плана` | read-only operator report over persisted closed-day facts, H1/H2 plan values and optional server-side monthly baseline |
+| `manual_monthly_plan_report_baseline` | `Исторические данные для отчёта`, `baseline` | separate runtime SQLite source used only by plan-report for full-month operator XLSX aggregates; not a general historical backfill |
+| `ЕБД` | `единая база данных` | user-facing alias for shared server-side accepted truth/runtime layer `wb-core`; not Google Sheets/GAS, browser UI, localStorage or report-private manual state |
 | `stock-report` | `Отчёт по остаткам` | read-only previous-closed stock report with active SKU selector |
 | `prepare -> upload -> refresh -> load` | `MVP flow`, `end-to-end flow` | historical bounded Google Sheets scenario; archived / do not use |
 | `ready snapshot` | `materialized snapshot`, `persisted sheet plan` | persisted server-side read-model for `DATA_VITRINA` / `STATUS` |
+| `ready-fact reconcile` | `historical report reconcile` | one-off repo-owned dry-run/apply helper that inserts missing accepted `fin_report_daily` / `ads_compact` slots from already persisted ready snapshots without overwrites or fake zeros |
 | `yesterday_closed / today_current` | `temporal slots`, `date columns` | server-owned bounded two-day temporal slots inside current `sheet_vitrina_v1` ready snapshot, counted in canonical business timezone `Asia/Yekaterinburg` |
 | `AI_EXPORT` | `legacy export` | compatibility/open-gap term, не новый canonical target |
 
@@ -68,7 +71,7 @@ built_from_commit: "c5ec48eb5380d0ebc75e7cc497f33b0b163dcbfe"
 
 - Final production naming для будущих hosted/runtime/deploy слоёв ещё не зафиксирован.
 - Текущий main-confirmed uploaded package уже фиксируется как `102` metrics rows / `95` enabled+show_in_data metric keys в current truth; operator-facing `DATA_VITRINA` при этом materialize-ит тот же server-driven row set как thin two-day `date_matrix` (`1631` source rows -> `1698` rendered rows на `yesterday_closed + today_current`) без локального subset path.
-- User-facing labels for current web-vitrina are now centralized around `Витрина`, `Загрузить и обновить`, `Загрузка данных`, `Обновить группу`, `Отчёты`, `Отчёт по остаткам` and `Выполнение плана`.
+- User-facing labels for current web-vitrina are now centralized around `Витрина`, `Загрузить и обновить`, `Загрузка данных`, `Обновить группу`, `Отчёты`, `Отчёт по остаткам`, `Выполнение плана`, `Исторические данные для отчёта` and `ЕБД`.
 
 # Not in scope
 

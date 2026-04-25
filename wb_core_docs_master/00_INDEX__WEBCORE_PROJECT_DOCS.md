@@ -22,7 +22,7 @@ update_triggers:
   - "изменение состава pack"
   - "изменение роли `wb_core_docs_master`"
   - "изменение policy двухслойной схемы docs"
-built_from_commit: "c5ec48eb5380d0ebc75e7cc497f33b0b163dcbfe"
+built_from_commit: "c8faa36b1eec440925a8c98b5d87eb188e5e7492"
 ---
 
 # Summary
@@ -65,7 +65,7 @@ Authoritative canonical docs остаются в:
 - Pack не включает полный legacy-корпус.
 - Upload в внешний ChatGPT Project остаётся отдельным human-only шагом после merge только для explicit derived-sync flow или transitional pack rebuild.
 - Этот index даёт только navigation pointer и не должен сам становиться carrier operational upload rules.
-- Hosted runtime deploy/probe contract теперь materialized в authoritative docs и отражается в pack как compact navigation/runbook knowledge, включая unified web-vitrina UI, grouped source refresh, plan/stock reports, seller-session session-check, safe stop semantics, per-run completion markers и hardened noVNC/launcher path, а не как hidden operational memory.
+- Hosted runtime deploy/probe contract теперь materialized в authoritative docs и отражается в pack как compact navigation/runbook knowledge, включая unified web-vitrina UI, compact toolbar/latest-four-days history, lazy source-status details, grouped source refresh, plan/stock reports, plan-report baseline routes, one-off ready-fact reconcile, seller-session session-check, safe stop semantics, per-run completion markers и hardened noVNC/launcher path, а не как hidden operational memory.
 
 # Not in scope
 
