@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+import hashlib
+import re
 from typing import Any, Callable, Mapping
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
 from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE_NAME,
     current_business_date_iso,
@@ -17,6 +20,15 @@ TEMPORAL_ROLE_ACCEPTED_CLOSED = "accepted_closed_day_snapshot"
 FIN_SOURCE_KEY = "fin_report_daily"
 ADS_SOURCE_KEY = "ads_compact"
 EPS = 1e-9
+MANUAL_MONTHLY_BASELINE_SOURCE_KIND = "manual_monthly_plan_report_baseline"
+BASELINE_TEMPLATE_FILENAME = "sheet-vitrina-v1-plan-report-baseline-template.xlsx"
+BASELINE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+BASELINE_TEMPLATE_HEADERS = [
+    "Месяц",
+    "Выкуп, руб. / fin_buyout_rub",
+    "Рекламные расходы, руб. / ads_sum",
+]
+BASELINE_TEMPLATE_MONTHS = ("2026-01", "2026-02")
 
 PERIOD_LABELS = {
     "yesterday": "За вчера",
@@ -33,7 +45,7 @@ PERSISTENT_BLOCKS = (
 )
 REPORT_NOTES = (
     "Отчёт остаётся server-side read-only path и не триггерит refresh/upstream fetch.",
-    "Факт читается только из persisted accepted closed-day runtime snapshots `fin_report_daily` + `ads_compact` по current active `config_v2`.",
+    "Факт читается из persisted accepted closed-day runtime snapshots `fin_report_daily` + `ads_compact` по current active `config_v2`; manual monthly baseline используется только для plan-report aggregate blocks и не подменяет daily snapshots.",
     "План по выкупу считается посуточно: квартальный план делится на количество календарных дней квартала, затем дневные доли суммируются по диапазону.",
     "Факт DRR считается как `ads_sum / fin_buyout_rub * 100`; плановый DRR сравнивается именно как процент, без подмены на рекламный бюджет.",
     "План рекламных расходов = `план выкупа за период * плановый DRR / 100`.",
@@ -60,6 +72,55 @@ class SheetVitrinaV1PlanReportBlock:
     ) -> None:
         self.runtime = runtime
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
+
+    def build_baseline_template(self) -> tuple[bytes, str]:
+        rows: list[list[Any]] = [BASELINE_TEMPLATE_HEADERS]
+        rows.extend([[month, "", ""] for month in BASELINE_TEMPLATE_MONTHS])
+        return build_single_sheet_workbook_bytes("План факт месяцы", rows), BASELINE_TEMPLATE_FILENAME
+
+    def build_baseline_status(self) -> dict[str, Any]:
+        return _build_baseline_status_payload(self.runtime.load_plan_report_monthly_baseline())
+
+    def upload_baseline(
+        self,
+        workbook_bytes: bytes,
+        *,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        parsed_rows = _parse_baseline_workbook(workbook_bytes)
+        uploaded_at = _timestamp_from_now(self.now_factory())
+        normalized_filename = str(uploaded_filename or "").strip() or BASELINE_TEMPLATE_FILENAME
+        normalized_content_type = str(uploaded_content_type or "").strip() or BASELINE_CONTENT_TYPE
+        workbook_checksum = hashlib.sha256(workbook_bytes).hexdigest()
+        self.runtime.save_plan_report_monthly_baseline(
+            rows=parsed_rows,
+            uploaded_at=uploaded_at,
+            source_kind=MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
+            uploaded_filename=normalized_filename,
+            uploaded_content_type=normalized_content_type,
+            workbook_checksum=workbook_checksum,
+            note=note,
+        )
+        return {
+            "status": "accepted",
+            "message": "Исторические данные для отчёта приняты.",
+            "source_kind": MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
+            "uploaded_at": uploaded_at,
+            "uploaded_filename": normalized_filename,
+            "workbook_checksum": workbook_checksum,
+            "accepted_months": [row["month"] for row in parsed_rows],
+            "row_count": len(parsed_rows),
+            "totals": {
+                "fin_buyout_rub": sum(float(row["fin_buyout_rub"]) for row in parsed_rows),
+                "ads_sum": sum(float(row["ads_sum"]) for row in parsed_rows),
+            },
+            "warnings": [
+                "Данные являются агрегированными manual monthly facts и используются только в отчёте «Выполнение плана»."
+            ],
+            "baseline": self.build_baseline_status(),
+        }
 
     def build(
         self,
@@ -117,9 +178,11 @@ class SheetVitrinaV1PlanReportBlock:
                 "plan_drr_pct": normalized_plan_drr_pct,
             },
             "source_of_truth": {
-                "read_model": "persisted_temporal_source_slot_snapshots",
+                "read_model": "persisted_temporal_source_slot_snapshots_plus_plan_report_monthly_baseline",
                 "snapshot_role": TEMPORAL_ROLE_ACCEPTED_CLOSED,
-                "sources": [FIN_SOURCE_KEY, ADS_SOURCE_KEY],
+                "daily_sources": [FIN_SOURCE_KEY, ADS_SOURCE_KEY],
+                "manual_monthly_source": MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
+                "sources": [FIN_SOURCE_KEY, ADS_SOURCE_KEY, MANUAL_MONTHLY_BASELINE_SOURCE_KIND],
                 "active_sku_source": "current_registry_config_v2",
                 "date_from": date_from,
                 "date_to": date_to,
@@ -147,6 +210,8 @@ class SheetVitrinaV1PlanReportBlock:
                 "active_sku_count": 0,
             }
 
+        baseline_rows = self.runtime.load_plan_report_monthly_baseline()
+        baseline_by_month = {str(row["month"]): row for row in baseline_rows}
         expected_dates = [item.isoformat() for item in _iter_dates(date.fromisoformat(date_from), reference_date)]
         daily_facts: dict[str, dict[str, float | None]] = {}
         active_nm_id_set = set(active_nm_ids)
@@ -200,6 +265,9 @@ class SheetVitrinaV1PlanReportBlock:
             "selected_period": _build_period_block(
                 window=selected_window,
                 daily_facts=daily_facts,
+                baseline_by_month=baseline_by_month,
+                missing_dates_by_source=missing_dates_by_source,
+                invalid_dates_by_source=invalid_dates_by_source,
                 quarter_plans=quarter_plans,
                 plan_drr_pct=normalized_plan_drr_pct,
             ),
@@ -208,6 +276,9 @@ class SheetVitrinaV1PlanReportBlock:
             period_blocks[fixed_window.key] = _build_period_block(
                 window=fixed_window,
                 daily_facts=daily_facts,
+                baseline_by_month=baseline_by_month,
+                missing_dates_by_source=missing_dates_by_source,
+                invalid_dates_by_source=invalid_dates_by_source,
                 quarter_plans=quarter_plans,
                 plan_drr_pct=normalized_plan_drr_pct,
             )
@@ -229,18 +300,52 @@ class SheetVitrinaV1PlanReportBlock:
                 f"для диапазона {date_from}..{date_to}."
             )
 
+        global_daily_covered_set = set(daily_facts)
+        global_baseline_months = _baseline_months_for_window(
+            date_from=date.fromisoformat(date_from),
+            date_to=reference_date,
+            daily_covered_dates=global_daily_covered_set,
+            baseline_by_month=baseline_by_month,
+        )
+        global_baseline_covered_dates = [
+            item.isoformat()
+            for month in global_baseline_months
+            for item in _iter_dates(_month_start(month), _month_end(month))
+        ]
+        global_baseline_covered_set = set(global_baseline_covered_dates)
+        global_covered_dates = sorted(global_daily_covered_set | global_baseline_covered_set)
+        global_missing_dates = [
+            item
+            for item in expected_dates
+            if item not in global_daily_covered_set and item not in global_baseline_covered_set
+        ]
+
         return {
             **base_payload,
             "status": report_status,
             "reason": reason,
             "active_sku_count": len(active_nm_ids),
+            "baseline": _build_baseline_status_payload(baseline_rows),
             "coverage": {
                 **base_payload["coverage"],
                 "expected_day_count": len(expected_dates),
-                "covered_day_count": len(daily_facts),
-                "covered_dates": sorted(daily_facts),
-                "missing_dates_by_source": missing_dates_by_source,
-                "invalid_dates_by_source": invalid_dates_by_source,
+                "covered_day_count": len(global_covered_dates),
+                "daily_covered_day_count": len(daily_facts),
+                "baseline_covered_day_count": len(global_baseline_covered_dates),
+                "covered_dates": global_covered_dates,
+                "daily_covered_dates": sorted(daily_facts),
+                "baseline_covered_months": global_baseline_months,
+                "missing_day_count": len(global_missing_dates),
+                "missing_dates": global_missing_dates,
+                "missing_dates_by_source": _filter_missing_dates_by_source(
+                    missing_dates_by_source=missing_dates_by_source,
+                    missing_dates=set(global_missing_dates),
+                ),
+                "invalid_dates_by_source": _filter_invalid_dates_by_source(
+                    invalid_dates_by_source=invalid_dates_by_source,
+                    dates=set(expected_dates),
+                    covered_by_baseline=global_baseline_covered_set,
+                ),
             },
             "periods": period_blocks,
         }
@@ -274,23 +379,118 @@ def _period_start_for_key(*, reference_date: date, period_key: str) -> date:
     raise ValueError(f"unsupported period key: {period_key}")
 
 
+def _baseline_months_for_window(
+    *,
+    date_from: date,
+    date_to: date,
+    daily_covered_dates: set[str],
+    baseline_by_month: Mapping[str, Mapping[str, Any]],
+) -> list[str]:
+    months: list[str] = []
+    for month in _full_months_inside_window(date_from=date_from, date_to=date_to):
+        month_dates = [item.isoformat() for item in _iter_dates(_month_start(month), _month_end(month))]
+        if any(item in daily_covered_dates for item in month_dates):
+            continue
+        if month in baseline_by_month:
+            months.append(month)
+    return months
+
+
+def _full_months_inside_window(*, date_from: date, date_to: date) -> list[str]:
+    current = date_from.replace(day=1)
+    result: list[str] = []
+    while current <= date_to:
+        month = current.strftime("%Y-%m")
+        start = _month_start(month)
+        end = _month_end(month)
+        if start >= date_from and end <= date_to:
+            result.append(month)
+        current = _add_month(current)
+    return result
+
+
+def _month_start(month: str) -> date:
+    return date.fromisoformat(f"{month}-01")
+
+
+def _month_end(month: str) -> date:
+    start = _month_start(month)
+    return _add_month(start) - timedelta(days=1)
+
+
+def _add_month(value: date) -> date:
+    if value.month == 12:
+        return value.replace(year=value.year + 1, month=1, day=1)
+    return value.replace(month=value.month + 1, day=1)
+
+
+def _filter_missing_dates_by_source(
+    *,
+    missing_dates_by_source: Mapping[str, list[str]],
+    missing_dates: set[str],
+) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for source_key, dates in missing_dates_by_source.items():
+        filtered = [item for item in dates if item in missing_dates]
+        if filtered:
+            result[source_key] = filtered
+    return result
+
+
+def _filter_invalid_dates_by_source(
+    *,
+    invalid_dates_by_source: Mapping[str, Mapping[str, str]],
+    dates: set[str],
+    covered_by_baseline: set[str],
+) -> dict[str, dict[str, str]]:
+    result: dict[str, dict[str, str]] = {}
+    for source_key, errors in invalid_dates_by_source.items():
+        filtered = {
+            item: reason
+            for item, reason in errors.items()
+            if item in dates and item not in covered_by_baseline
+        }
+        if filtered:
+            result[source_key] = filtered
+    return result
+
+
 def _build_period_block(
     *,
     window: PeriodWindow,
     daily_facts: Mapping[str, Mapping[str, float | None]],
+    baseline_by_month: Mapping[str, Mapping[str, Any]],
+    missing_dates_by_source: Mapping[str, list[str]],
+    invalid_dates_by_source: Mapping[str, Mapping[str, str]],
     quarter_plans: Mapping[int, float],
     plan_drr_pct: float,
 ) -> dict[str, Any]:
     dates = [item.isoformat() for item in _iter_dates(date.fromisoformat(window.date_from), date.fromisoformat(window.date_to))]
-    covered_dates = [item for item in dates if item in daily_facts]
-    missing_dates = [item for item in dates if item not in daily_facts]
+    daily_covered_dates = [item for item in dates if item in daily_facts]
+    daily_covered_set = set(daily_covered_dates)
+    baseline_months = _baseline_months_for_window(
+        date_from=date.fromisoformat(window.date_from),
+        date_to=date.fromisoformat(window.date_to),
+        daily_covered_dates=daily_covered_set,
+        baseline_by_month=baseline_by_month,
+    )
+    baseline_covered_dates = [
+        item.isoformat()
+        for month in baseline_months
+        for item in _iter_dates(_month_start(month), _month_end(month))
+    ]
+    baseline_covered_set = set(baseline_covered_dates)
+    covered_dates = sorted(daily_covered_set | baseline_covered_set)
+    missing_dates = [item for item in dates if item not in daily_covered_set and item not in baseline_covered_set]
     fact_buyout_rub = (
-        sum(float(daily_facts[item]["buyout_rub"] or 0.0) for item in covered_dates)
+        sum(float(daily_facts[item]["buyout_rub"] or 0.0) for item in daily_covered_dates)
+        + sum(float(baseline_by_month[month]["fin_buyout_rub"]) for month in baseline_months)
         if covered_dates
         else None
     )
     fact_ads_sum_rub = (
-        sum(float(daily_facts[item]["ads_sum_rub"] or 0.0) for item in covered_dates)
+        sum(float(daily_facts[item]["ads_sum_rub"] or 0.0) for item in daily_covered_dates)
+        + sum(float(baseline_by_month[month]["ads_sum"]) for month in baseline_months)
         if covered_dates
         else None
     )
@@ -303,11 +503,25 @@ def _build_period_block(
     )
     plan_ads_sum_rub = None if covered_plan_buyout_rub is None else covered_plan_buyout_rub * (plan_drr_pct / 100.0)
     status = "available" if not missing_dates else "partial" if covered_dates else "unavailable"
+    block_missing_by_source = _filter_missing_dates_by_source(
+        missing_dates_by_source=missing_dates_by_source,
+        missing_dates=set(missing_dates),
+    )
+    block_invalid_by_source = _filter_invalid_dates_by_source(
+        invalid_dates_by_source=invalid_dates_by_source,
+        dates=set(dates),
+        covered_by_baseline=baseline_covered_set,
+    )
     reason = ""
     if status == "partial":
-        reason = "Часть дат периода не имеет usable accepted closed-day snapshots; факт и план сравниваются только по покрытым датам."
+        reason = (
+            "Часть дат периода не имеет usable accepted closed-day snapshots или full-month baseline; "
+            "факт и план сравниваются только по покрытой части периода."
+        )
     elif status == "unavailable":
-        reason = "Для периода нет usable accepted closed-day snapshots; факт не рассчитывается."
+        reason = "Для периода нет usable accepted closed-day snapshots или применимой full-month baseline; факт не рассчитывается."
+    elif baseline_months:
+        reason = "Факт периода включает manual monthly baseline для полных месяцев без daily coverage."
     return {
         "label": window.label,
         "date_from": window.date_from,
@@ -315,12 +529,35 @@ def _build_period_block(
         "day_count": window.day_count,
         "status": status,
         "reason": reason,
+        "source_of_truth": {
+            "daily_sources": [FIN_SOURCE_KEY, ADS_SOURCE_KEY],
+            "daily_snapshot_role": TEMPORAL_ROLE_ACCEPTED_CLOSED,
+            "manual_monthly_source": MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
+        },
+        "source_mix": {
+            "daily_accepted_snapshots": {
+                "dates": daily_covered_dates,
+                "day_count": len(daily_covered_dates),
+                "source_keys": [FIN_SOURCE_KEY, ADS_SOURCE_KEY],
+            },
+            "manual_monthly_plan_report_baseline": {
+                "months": baseline_months,
+                "day_count": len(baseline_covered_dates),
+                "source_kind": MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
+            },
+        },
         "coverage": {
             "expected_day_count": len(dates),
             "covered_day_count": len(covered_dates),
+            "daily_covered_day_count": len(daily_covered_dates),
+            "baseline_covered_day_count": len(baseline_covered_dates),
             "missing_day_count": len(missing_dates),
             "covered_dates": covered_dates,
+            "daily_covered_dates": daily_covered_dates,
+            "baseline_covered_months": baseline_months,
             "missing_dates": missing_dates,
+            "missing_dates_by_source": block_missing_by_source,
+            "invalid_dates_by_source": block_invalid_by_source,
         },
         "metrics": {
             "buyout_rub": _build_buyout_metric(
@@ -531,3 +768,131 @@ def _require_non_negative_number(raw_value: float, *, field_name: str) -> float:
     if value < 0:
         raise ValueError(f"{field_name} must be >= 0")
     return value
+
+
+def _parse_baseline_workbook(workbook_bytes: bytes) -> list[dict[str, Any]]:
+    workbook_rows = read_first_sheet_rows(workbook_bytes)
+    if not workbook_rows:
+        raise ValueError("baseline XLSX must contain a header row")
+    actual_headers = [_normalize_header(item) for item in workbook_rows[0][:3]]
+    expected_headers = [_normalize_header(item) for item in BASELINE_TEMPLATE_HEADERS]
+    if actual_headers != expected_headers:
+        raise ValueError(
+            "Неверные заголовки baseline XLSX. "
+            f"Ожидались: {', '.join(BASELINE_TEMPLATE_HEADERS)}."
+        )
+    parsed_rows: list[dict[str, Any]] = []
+    seen_months: set[str] = set()
+    for row_index, row in enumerate(workbook_rows[1:], start=2):
+        padded = list(row[:3]) + [None] * max(0, 3 - len(row))
+        if _row_is_empty(padded):
+            continue
+        month = _parse_baseline_month(padded[0], row_index=row_index)
+        if month in seen_months:
+            raise ValueError(f"Строка {row_index}: месяц {month} повторяется")
+        seen_months.add(month)
+        parsed_rows.append(
+            {
+                "month": month,
+                "fin_buyout_rub": _parse_non_negative_baseline_number(
+                    padded[1],
+                    row_index=row_index,
+                    field_label="Выкуп, руб. / fin_buyout_rub",
+                ),
+                "ads_sum": _parse_non_negative_baseline_number(
+                    padded[2],
+                    row_index=row_index,
+                    field_label="Рекламные расходы, руб. / ads_sum",
+                ),
+            }
+        )
+    if not parsed_rows:
+        raise ValueError("baseline XLSX must contain at least one non-empty data row")
+    return parsed_rows
+
+
+def _build_baseline_status_payload(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {
+            "status": "missing",
+            "source_kind": MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
+            "row_count": 0,
+            "months": [],
+            "totals": {"fin_buyout_rub": 0.0, "ads_sum": 0.0},
+            "warning": "Manual monthly baseline не загружен; YTD до daily coverage может быть partial/unavailable.",
+        }
+    months = [str(row["month"]) for row in rows]
+    uploaded_values = [str(row.get("uploaded_at") or "") for row in rows if row.get("uploaded_at")]
+    latest_uploaded_at = max(uploaded_values) if uploaded_values else None
+    return {
+        "status": "uploaded",
+        "source_kind": MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
+        "row_count": len(rows),
+        "months": months,
+        "uploaded_at": latest_uploaded_at,
+        "uploaded_filename": _latest_metadata_value(rows, "uploaded_filename"),
+        "workbook_checksum": _latest_metadata_value(rows, "workbook_checksum"),
+        "totals": {
+            "fin_buyout_rub": sum(float(row["fin_buyout_rub"]) for row in rows),
+            "ads_sum": sum(float(row["ads_sum"]) for row in rows),
+        },
+        "rows": [
+            {
+                "month": row["month"],
+                "fin_buyout_rub": float(row["fin_buyout_rub"]),
+                "ads_sum": float(row["ads_sum"]),
+                "uploaded_at": row.get("uploaded_at"),
+                "source_kind": row.get("source_kind") or MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
+            }
+            for row in rows
+        ],
+        "warning": "Это агрегированные manual monthly facts только для отчёта «Выполнение плана»; daily accepted snapshots не подменяются.",
+    }
+
+
+def _latest_metadata_value(rows: list[Mapping[str, Any]], key: str) -> str | None:
+    latest_row = max(rows, key=lambda row: str(row.get("uploaded_at") or ""))
+    value = latest_row.get(key)
+    return str(value) if value else None
+
+
+def _normalize_header(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+
+def _parse_baseline_month(value: Any, *, row_index: int) -> str:
+    raw = str(value or "").strip()
+    if re.fullmatch(r"\d{4}-\d{2}", raw):
+        try:
+            date.fromisoformat(f"{raw}-01")
+        except ValueError as exc:
+            raise ValueError(f"Строка {row_index}: месяц должен быть в формате YYYY-MM") from exc
+        return raw
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        try:
+            return date.fromisoformat(raw).strftime("%Y-%m")
+        except ValueError as exc:
+            raise ValueError(f"Строка {row_index}: месяц должен быть в формате YYYY-MM") from exc
+    raise ValueError(f"Строка {row_index}: месяц должен быть в формате YYYY-MM")
+
+
+def _parse_non_negative_baseline_number(value: Any, *, row_index: int, field_label: str) -> float:
+    if value in ("", None):
+        raise ValueError(f"Строка {row_index}: заполните поле {field_label}")
+    try:
+        numeric = float(str(value).replace(",", "."))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Строка {row_index}: поле {field_label} должно быть числом") from exc
+    if numeric < 0:
+        raise ValueError(f"Строка {row_index}: поле {field_label} должно быть не меньше 0")
+    return numeric
+
+
+def _row_is_empty(row: list[Any]) -> bool:
+    return all(str(item or "").strip() == "" for item in row)
+
+
+def _timestamp_from_now(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")

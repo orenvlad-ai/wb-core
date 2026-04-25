@@ -183,6 +183,8 @@ def main() -> None:
             if public_probe["ok"] is not True:
                 raise AssertionError("public probe must succeed against local live runner")
             route_map = {item["route"]: item for item in public_probe["routes"]}
+            if route_map["operator_reports"]["http_status"] != 200:
+                raise AssertionError("operator reports embedded panel must be publicly readable")
             if route_map["load_route"]["http_status"] != 404:
                 raise AssertionError("GET load-route probe must reach app-level 404")
             if route_map["job"]["http_status"] != 404:
@@ -201,6 +203,10 @@ def main() -> None:
                 raise AssertionError("stock-report route must be publicly readable")
             if route_map["plan_report"]["http_status"] != 200:
                 raise AssertionError("plan-report route must be publicly readable")
+            if route_map["plan_report_baseline_status"]["http_status"] != 200:
+                raise AssertionError("plan-report baseline status route must be publicly readable")
+            if route_map["plan_report_baseline_template"]["http_status"] != 200:
+                raise AssertionError("plan-report baseline template route must be publicly readable")
             if route_map["plan"]["http_status"] != 200:
                 raise AssertionError("plan with seeded snapshot must be publicly readable")
             if route_map["factory_order_status"]["http_status"] != 200:
@@ -236,6 +242,8 @@ def main() -> None:
                 raise AssertionError("status with seeded snapshot must stay 200")
             if loopback_routes["web_vitrina_read"]["http_status"] != 200:
                 raise AssertionError("web-vitrina read route with seeded snapshot must stay 200")
+            if loopback_routes["operator_reports"]["http_status"] != 200:
+                raise AssertionError("operator reports embedded panel must stay 200")
             if loopback_routes["web_vitrina_page_composition"]["http_status"] != 200:
                 raise AssertionError("web-vitrina page composition surface must stay 200")
             if loopback_routes["daily_report"]["http_status"] != 200:
@@ -244,6 +252,10 @@ def main() -> None:
                 raise AssertionError("stock-report route must stay 200")
             if loopback_routes["plan_report"]["http_status"] != 200:
                 raise AssertionError("plan-report route must stay 200")
+            if loopback_routes["plan_report_baseline_status"]["http_status"] != 200:
+                raise AssertionError("plan-report baseline status route must stay 200")
+            if loopback_routes["plan_report_baseline_template"]["http_status"] != 200:
+                raise AssertionError("plan-report baseline template route must stay 200")
             if loopback_routes["plan"]["http_status"] != 200:
                 raise AssertionError("plan with seeded snapshot must stay 200")
 
@@ -255,6 +267,7 @@ def main() -> None:
                 f"{deploy_dry_run['commands']['systemd_restart'][-1]}"
             )
             print(f"public_probe_web_vitrina_page: ok -> {route_map['web_vitrina_page']['http_status']}")
+            print(f"public_probe_operator_reports: ok -> {route_map['operator_reports']['http_status']}")
             print(f"public_probe_web_vitrina_read: ok -> {route_map['web_vitrina_read']['http_status']}")
             print(
                 "public_probe_web_vitrina_page_composition: ok -> "
@@ -262,6 +275,7 @@ def main() -> None:
             )
             print(f"public_probe_stock_report: ok -> {route_map['stock_report']['http_status']}")
             print(f"public_probe_plan_report: ok -> {route_map['plan_report']['http_status']}")
+            print(f"public_probe_plan_baseline: ok -> {route_map['plan_report_baseline_status']['http_status']}/{route_map['plan_report_baseline_template']['http_status']}")
             print(f"factory_order_status: ok -> {route_map['factory_order_status']['http_status']}")
             print(f"wb_regional_status: ok -> {route_map['wb_regional_status']['http_status']}")
             print(f"loopback_probe_status: ok -> {loopback_routes['status']['http_status']}")

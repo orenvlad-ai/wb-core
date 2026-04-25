@@ -27,6 +27,7 @@ related_modules:
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/application/simple_xlsx.py"
   - "packages/application/sheet_vitrina_v1_load_bridge.py"
+  - "packages/application/sheet_vitrina_v1_plan_report.py"
   - "packages/application/sheet_vitrina_v1_web_vitrina.py"
   - "packages/application/web_vitrina_gravity_table_adapter.py"
   - "packages/application/web_vitrina_page_composition.py"
@@ -47,6 +48,9 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/daily-report"
   - "GET /v1/sheet-vitrina-v1/stock-report"
   - "GET /v1/sheet-vitrina-v1/plan-report"
+  - "GET /v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx"
+  - "POST /v1/sheet-vitrina-v1/plan-report/baseline-upload"
+  - "GET /v1/sheet-vitrina-v1/plan-report/baseline-status"
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
   - "GET /v1/sheet-vitrina-v1/job"
@@ -81,6 +85,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_daily_report_http_smoke.py"
   - "apps/sheet_vitrina_v1_plan_report_smoke.py"
   - "apps/sheet_vitrina_v1_plan_report_http_smoke.py"
+  - "apps/sheet_vitrina_v1_reports_ui_smoke.py"
   - "apps/sheet_vitrina_v1_operator_load_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
@@ -100,7 +105,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current operator report checkpoint: existing `/sheet-vitrina-v1/operator` остаётся orchestration-first control surface, reports tab теперь включает read-only `Выполнение плана` поверх `GET /v1/sheet-vitrina-v1/plan-report`, sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, default `GET /v1/sheet-vitrina-v1/web-vitrina` по-прежнему materialize-ит stable library-agnostic `web_vitrina_contract` v1, source/reporting semantics учитывают expected temporal model per source family, а bot-backed current-day sync имеет permanent operator-facing seller-session block (`session-check/start/status/stop/launcher`) поверх repo-owned localhost-only noVNC/Xvfb relogin tool."
+update_note: "Обновлён под current operator report checkpoint: reports tab включает `Выполнение плана` поверх `GET /v1/sheet-vitrina-v1/plan-report` with per-block coverage and controlled manual monthly baseline XLSX upload/status/template routes; sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, default `GET /v1/sheet-vitrina-v1/web-vitrina` по-прежнему materialize-ит stable library-agnostic `web_vitrina_contract` v1, source/reporting semantics учитывают expected temporal model per source family, а bot-backed current-day sync имеет permanent operator-facing seller-session block (`session-check/start/status/stop/launcher`) поверх repo-owned localhost-only noVNC/Xvfb relogin tool."
 ---
 
 # 1. Идентификатор и статус
@@ -163,6 +168,9 @@ update_note: "Обновлён под current operator report checkpoint: existi
   - `GET /v1/sheet-vitrina-v1/daily-report` = cheap read-only JSON summary для compact блока `Ежедневные отчёты`
   - `GET /v1/sheet-vitrina-v1/stock-report` = cheap read-only JSON summary для compact блока `Отчёт по остаткам`
   - `GET /v1/sheet-vitrina-v1/plan-report` = cheap read-only JSON summary для compact блока `Выполнение плана`
+  - `GET /v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx` = compact XLSX template for manual monthly baseline rows (`Месяц`, `Выкуп, руб. / fin_buyout_rub`, `Рекламные расходы, руб. / ads_sum`)
+  - `POST /v1/sheet-vitrina-v1/plan-report/baseline-upload` = controlled operator XLSX upload for `manual_monthly_plan_report_baseline`; validates month format, numeric non-negative facts and empty-file/duplicate-month errors, then idempotently stores monthly aggregates in runtime SQLite
+  - `GET /v1/sheet-vitrina-v1/plan-report/baseline-status` = cheap JSON status for loaded monthly baseline rows and totals
   - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
   - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result, where root `status` is semantic snapshot outcome rather than mere ready-snapshot existence
   - `GET /v1/sheet-vitrina-v1/job` = cheap poll/read surface для live operator log и async action state
@@ -404,10 +412,17 @@ update_note: "Обновлён под current operator report checkpoint: existi
   - route is read-only and does not trigger refresh/upstream fetch/backfill;
   - required query params: `period`, `q1_buyout_plan_rub`, `q2_buyout_plan_rub`, `q3_buyout_plan_rub`, `q4_buyout_plan_rub`, `plan_drr_pct`; optional `as_of_date` fixes the previous closed business day reference;
   - response always returns selected period plus `month_to_date`, `quarter_to_date`, `year_to_date` blocks when current active SKU truth is available;
-  - facts are summed only from persisted accepted closed-day temporal snapshots: `fin_report_daily.fin_buyout_rub` and `ads_compact.ads_sum`;
+  - each block has its own `available / partial / unavailable` status, coverage details, reason, source-of-truth/source-mix and metric values when the block is available or partial;
+  - missing YTD/January/February coverage must not hide an available selected period; top-level status may aggregate block state but must not make the response all-or-nothing;
+  - daily facts are summed from persisted accepted closed-day temporal snapshots: `fin_report_daily.fin_buyout_rub` and `ads_compact.ads_sum`;
+  - optional source mix for aggregate blocks may include `manual_monthly_plan_report_baseline` from server-side runtime SQLite, only for full months wholly inside the period and only when that month has no daily accepted facts;
+  - daily accepted snapshots have precedence: if any day in a month is covered by daily facts, the monthly baseline for that month is not added, preventing double-count;
+  - baseline is not a general historical backfill, is not Google Sheets/GAS, does not replace accepted snapshots, and is used only by this plan-report route;
+  - operator baseline routes are `GET /v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx`, `POST /v1/sheet-vitrina-v1/plan-report/baseline-upload`, `GET /v1/sheet-vitrina-v1/plan-report/baseline-status`;
+  - baseline XLSX uses Russian headers with backend mapping: `Месяц`, `Выкуп, руб. / fin_buyout_rub`, `Рекламные расходы, руб. / ads_sum`;
   - buyout plan is calendar-day based: each date uses that date's quarter plan divided by the number of days in the quarter, so cross-quarter periods use different daily plans;
   - DRR fact = `ads_sum / fin_buyout_rub * 100`; ads plan = covered-period buyout plan multiplied by planned DRR;
-  - incomplete coverage is surfaced as `status=partial` with missing/covered dates instead of silent zero facts; no usable accepted snapshots yields `status=unavailable`.
+  - incomplete coverage is surfaced locally as `status=partial` with missing/covered dates instead of silent zero facts; no usable daily facts or applicable full-month baseline for a block yields block-level `status=unavailable`.
 - Operator page keeps one compact server-driven manual block `Ручная загрузка данных`:
   - active action `Загрузить данные`
   - former Google Sheets action `Отправить данные` is archived/disabled

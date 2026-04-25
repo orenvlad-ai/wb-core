@@ -13,6 +13,9 @@ if str(ROOT) not in sys.path:
 
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_DAILY_REPORT_PATH,
+    DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH,
+    DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH,
+    DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH,
     DEFAULT_SHEET_PLAN_REPORT_PATH,
     DEFAULT_SHEET_STOCK_REPORT_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
@@ -72,9 +75,16 @@ def main() -> None:
         'id="planReportQ4Input"',
         'id="planReportDrrInput"',
         'id="planReportApplyButton"',
+        'id="planReportBaselineTemplateButton"',
+        'id="planReportBaselineFileInput"',
+        'id="planReportBaselineStatus"',
+        'id="planReportBaselineDetails"',
         DEFAULT_SHEET_DAILY_REPORT_PATH,
         DEFAULT_SHEET_STOCK_REPORT_PATH,
         DEFAULT_SHEET_PLAN_REPORT_PATH,
+        DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH,
+        DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH,
+        DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH,
     ):
         if token not in html:
             raise AssertionError(f"reports subsection contract must include token {token!r}")
@@ -119,6 +129,12 @@ def main() -> None:
         raise AssertionError("reports UI config must disclose current registry state as the selector source")
     if config_payload.get("plan_report_path") != DEFAULT_SHEET_PLAN_REPORT_PATH:
         raise AssertionError("reports UI config must expose the plan-report read-only route")
+    if config_payload.get("plan_report_baseline_template_path") != DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH:
+        raise AssertionError("reports UI config must expose the plan-report baseline template route")
+    if config_payload.get("plan_report_baseline_upload_path") != DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH:
+        raise AssertionError("reports UI config must expose the plan-report baseline upload route")
+    if config_payload.get("plan_report_baseline_status_path") != DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH:
+        raise AssertionError("reports UI config must expose the plan-report baseline status route")
 
     fake_rows = [
         {"nm_id": 1001, "identity_label": "SKU Alpha · nmId 1001"},
@@ -131,6 +147,7 @@ def main() -> None:
 
     print("reports_ui_sections: ok -> Обновление данных / Расчёт поставок / Отчёты")
     print("reports_ui_subsections: ok -> daily / stock / plan")
+    print("reports_ui_plan_baseline_controls: ok -> template / upload / status")
     print("reports_ui_stock_selector: ok -> full active SKU config, default=all, empty-selection validation")
     print("reports_ui_heading_dedup: ok -> no panel-body h1 duplicates")
 

@@ -1280,6 +1280,104 @@ class RegistryUploadDbBackedRuntime:
             conn.commit()
             return cursor.rowcount > 0
 
+    def save_plan_report_monthly_baseline(
+        self,
+        *,
+        rows: list[Mapping[str, Any]],
+        uploaded_at: str,
+        source_kind: str,
+        uploaded_filename: str,
+        uploaded_content_type: str,
+        workbook_checksum: str,
+        note: str | None = None,
+    ) -> None:
+        _validate_timestamp(uploaded_at, field_name="uploaded_at")
+        if not rows:
+            raise ValueError("plan-report monthly baseline rows must not be empty")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            for row in rows:
+                month = str(row.get("month", "") or "").strip()
+                _validate_month(month, field_name="month")
+                fin_buyout_rub = float(row.get("fin_buyout_rub"))
+                ads_sum = float(row.get("ads_sum"))
+                if fin_buyout_rub < 0:
+                    raise ValueError("fin_buyout_rub must be >= 0")
+                if ads_sum < 0:
+                    raise ValueError("ads_sum must be >= 0")
+                conn.execute(
+                    """
+                    INSERT INTO sheet_vitrina_v1_plan_report_monthly_baseline(
+                        month,
+                        fin_buyout_rub,
+                        ads_sum,
+                        uploaded_at,
+                        source_kind,
+                        uploaded_filename,
+                        uploaded_content_type,
+                        workbook_checksum,
+                        note
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(month) DO UPDATE SET
+                        fin_buyout_rub = excluded.fin_buyout_rub,
+                        ads_sum = excluded.ads_sum,
+                        uploaded_at = excluded.uploaded_at,
+                        source_kind = excluded.source_kind,
+                        uploaded_filename = excluded.uploaded_filename,
+                        uploaded_content_type = excluded.uploaded_content_type,
+                        workbook_checksum = excluded.workbook_checksum,
+                        note = excluded.note
+                    """,
+                    (
+                        month,
+                        fin_buyout_rub,
+                        ads_sum,
+                        uploaded_at,
+                        source_kind,
+                        uploaded_filename,
+                        uploaded_content_type,
+                        workbook_checksum,
+                        str(note or "").strip(),
+                    ),
+                )
+            conn.commit()
+
+    def load_plan_report_monthly_baseline(self) -> list[dict[str, Any]]:
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT
+                    month,
+                    fin_buyout_rub,
+                    ads_sum,
+                    uploaded_at,
+                    source_kind,
+                    uploaded_filename,
+                    uploaded_content_type,
+                    workbook_checksum,
+                    note
+                FROM sheet_vitrina_v1_plan_report_monthly_baseline
+                ORDER BY month
+                """
+            ).fetchall()
+            return [
+                {
+                    "month": row["month"],
+                    "fin_buyout_rub": float(row["fin_buyout_rub"]),
+                    "ads_sum": float(row["ads_sum"]),
+                    "uploaded_at": row["uploaded_at"],
+                    "source_kind": row["source_kind"],
+                    "uploaded_filename": str(row["uploaded_filename"] or "") or None,
+                    "uploaded_content_type": str(row["uploaded_content_type"] or "") or None,
+                    "workbook_checksum": str(row["workbook_checksum"] or "") or None,
+                    "note": str(row["note"] or "") or None,
+                }
+                for row in rows
+            ]
+
     def save_factory_order_result_state(
         self,
         *,
@@ -1746,6 +1844,13 @@ def _validate_iso_date(value: str, field_name: str) -> None:
         date.fromisoformat(value)
     except ValueError as exc:
         raise ValueError(f"{field_name} must be a valid ISO 8601 date") from exc
+
+
+def _validate_month(value: str, field_name: str) -> None:
+    try:
+        date.fromisoformat(f"{value}-01")
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be a valid ISO 8601 month YYYY-MM") from exc
 
 
 def _sheet_row_counts_from_plan(plan: SheetVitrinaV1Envelope) -> dict[str, int]:
@@ -2523,6 +2628,18 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             uploaded_filename TEXT,
             uploaded_content_type TEXT,
             workbook_blob BLOB
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_plan_report_monthly_baseline (
+            month TEXT PRIMARY KEY,
+            fin_buyout_rub REAL NOT NULL,
+            ads_sum REAL NOT NULL,
+            uploaded_at TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            uploaded_filename TEXT,
+            uploaded_content_type TEXT,
+            workbook_checksum TEXT,
+            note TEXT
         );
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_factory_order_result_state (

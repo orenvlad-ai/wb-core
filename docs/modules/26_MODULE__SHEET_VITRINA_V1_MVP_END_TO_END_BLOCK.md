@@ -24,6 +24,7 @@ related_modules:
   - "packages/application/cost_price_upload.py"
   - "packages/application/factory_order_supply.py"
   - "packages/application/simple_xlsx.py"
+  - "packages/application/sheet_vitrina_v1_plan_report.py"
   - "packages/application/sheet_vitrina_v1_live_plan.py"
   - "packages/application/sheet_vitrina_v1.py"
   - "packages/application/sheet_vitrina_v1_load_bridge.py"
@@ -55,6 +56,9 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/daily-report"
   - "GET /v1/sheet-vitrina-v1/stock-report"
   - "GET /v1/sheet-vitrina-v1/plan-report"
+  - "GET /v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx"
+  - "POST /v1/sheet-vitrina-v1/plan-report/baseline-upload"
+  - "GET /v1/sheet-vitrina-v1/plan-report/baseline-status"
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
   - "GET /v1/sheet-vitrina-v1/job"
@@ -91,6 +95,9 @@ related_runners:
   - "apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py"
   - "apps/sheet_vitrina_v1_daily_report_smoke.py"
   - "apps/sheet_vitrina_v1_daily_report_http_smoke.py"
+  - "apps/sheet_vitrina_v1_plan_report_smoke.py"
+  - "apps/sheet_vitrina_v1_plan_report_http_smoke.py"
+  - "apps/sheet_vitrina_v1_reports_ui_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py"
@@ -114,7 +121,7 @@ related_docs:
   - "docs/modules/29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md"
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под Google Sheets decommission: active contour is website/operator/public web-vitrina; former Apps Script load/upload/write path is archived/do-not-use."
+update_note: "Обновлён под Google Sheets decommission and current plan-report operator flow: active contour is website/operator/public web-vitrina; plan-report now has per-block coverage plus controlled server-side monthly baseline XLSX routes; former Apps Script load/upload/write path is archived/do-not-use."
 ---
 
 # 1. Идентификатор и статус
@@ -205,11 +212,15 @@ update_note: "Обновлён под Google Sheets decommission: active contour
   - plan-report block `Выполнение плана` остаётся read-only и server-owned:
     - route = `GET /v1/sheet-vitrina-v1/plan-report`
     - input params = quarterly buyout plans `Q1..Q4`, planned DRR percent and selected period (`yesterday`, `last_7_days`, `last_30_days`, `current_month`, `current_quarter`, `current_year`)
-    - facts use only persisted accepted closed-day snapshots for `fin_report_daily.fin_buyout_rub` and `ads_compact.ads_sum` over current active `config_v2` SKU
+    - daily facts use persisted accepted closed-day snapshots for `fin_report_daily.fin_buyout_rub` and `ads_compact.ads_sum` over current active `config_v2` SKU
+    - optional manual monthly facts come only from the separate runtime source `manual_monthly_plan_report_baseline`, uploaded through the plan-report baseline XLSX routes and used only for full baseline months inside aggregate plan-report periods
+    - daily accepted snapshots have precedence over monthly baseline; if a month has any daily accepted facts, that month baseline is not added
     - buyout plan is distributed by calendar day and crosses quarter boundaries by using the quarter plan for each individual date
     - DRR fact = `ads_sum / fin_buyout_rub * 100`; ads plan = buyout plan multiplied by planned DRR
     - response always includes selected block plus MTD/QTD/YTD blocks when active SKU truth is available
-    - incomplete temporal snapshot coverage is surfaced as `partial`/`unavailable` with missing/covered dates and never as fabricated zero fact
+    - each block carries its own `available / partial / unavailable` status, coverage details, reason, source mix and metrics; missing YTD must not hide an available selected period
+    - incomplete temporal snapshot/baseline coverage is surfaced as `partial`/`unavailable` with missing/covered dates and never as fabricated zero fact
+    - operator page exposes compact baseline controls: download template, upload filled XLSX and read current baseline status/totals/upload metadata
   - embedded compatibility panel additionally keeps compact manual block `Ручная загрузка данных` с active action `Загрузить данные`; former Google Sheets action `Отправить данные` is archived/disabled, не является active runtime/update/write/load/verify target, and appears only as archived/manual-context history
   - session controls are exposed in the unified `Витрина` loading table for `Seller Portal / бот`; the archived manual operator panel remains available only as embedded compatibility context:
     - `Проверить сессию` выполняет cheap probe against saved `storage_state.json` и truthfully различает `session_valid_canonical / session_valid_wrong_org / session_invalid / session_missing / session_probe_error`
@@ -289,7 +300,14 @@ update_note: "Обновлён под Google Sheets decommission: active contour
   - `GET /v1/sheet-vitrina-v1/plan-report`
   - response body = compact JSON summary для operator block `Выполнение плана`
   - valid query returns `200` with root `status=available/partial/unavailable`
+  - response body always contains per-block `periods.selected_period`, `periods.month_to_date`, `periods.quarter_to_date`, `periods.year_to_date`
+  - root status is aggregate; UI must render available/partial blocks even when another block is unavailable
   - required params = `period`, `q1_buyout_plan_rub`, `q2_buyout_plan_rub`, `q3_buyout_plan_rub`, `q4_buyout_plan_rub`, `plan_drr_pct`
+  - sibling baseline routes:
+    - `GET /v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx`
+    - `POST /v1/sheet-vitrina-v1/plan-report/baseline-upload`
+    - `GET /v1/sheet-vitrina-v1/plan-report/baseline-status`
+  - baseline upload validates `YYYY-MM` month, non-negative numeric `fin_buyout_rub`/`ads_sum`, non-empty workbook and duplicate month errors, then stores aggregates idempotently in runtime SQLite
   - route does not build a new ready snapshot, does not fetch upstream data and does not use Google Sheets/GAS
 - Канонический operator live-log path:
   - `GET /v1/sheet-vitrina-v1/job`

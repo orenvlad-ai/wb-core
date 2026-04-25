@@ -20,6 +20,9 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_DAILY_REPORT_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
+    DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH,
+    DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH,
+    DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH,
     DEFAULT_SHEET_PLAN_REPORT_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_STOCK_REPORT_PATH,
@@ -28,6 +31,8 @@ from packages.adapters.registry_upload_http_entrypoint import (
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.application.sheet_vitrina_v1_plan_report import BASELINE_TEMPLATE_HEADERS
+from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 
 BUNDLE_FIXTURE = (
@@ -75,37 +80,12 @@ def main() -> None:
                 raise AssertionError("fixture must expose at least one active SKU")
 
             primary_nm_id = active_nm_ids[0]
-            for snapshot_day in _iter_dates(date(2026, 1, 1), date.fromisoformat(REFERENCE_DATE)):
-                snapshot_date = snapshot_day.isoformat()
-                runtime.save_temporal_source_slot_snapshot(
-                    source_key="fin_report_daily",
-                    snapshot_date=snapshot_date,
-                    snapshot_role=ACCEPTED_ROLE,
-                    captured_at=f"{snapshot_date}T12:00:00Z",
-                    payload={
-                        "result": {
-                            "kind": "success",
-                            "snapshot_date": snapshot_date,
-                            "count": 1,
-                            "items": [{"nm_id": primary_nm_id, "fin_buyout_rub": 1500.0}],
-                            "storage_total": {"nm_id": 0, "fin_storage_fee_total": 0.0},
-                        }
-                    },
-                )
-                runtime.save_temporal_source_slot_snapshot(
-                    source_key="ads_compact",
-                    snapshot_date=snapshot_date,
-                    snapshot_role=ACCEPTED_ROLE,
-                    captured_at=f"{snapshot_date}T12:05:00Z",
-                    payload={
-                        "result": {
-                            "kind": "success",
-                            "snapshot_date": snapshot_date,
-                            "count": 1,
-                            "items": [{"nm_id": primary_nm_id, "ads_sum": 180.0}],
-                        }
-                    },
-                )
+            _seed_daily_snapshots(
+                runtime,
+                primary_nm_id=primary_nm_id,
+                date_from=date(2026, 3, 1),
+                date_to=date.fromisoformat(REFERENCE_DATE),
+            )
 
             operator_status, operator_html = _get_text(f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}?embedded_tab=reports")
             if operator_status != 200:
@@ -122,7 +102,13 @@ def main() -> None:
                 'id="planReportQ4Input"',
                 'id="planReportDrrInput"',
                 'id="planReportApplyButton"',
+                'id="planReportBaselineTemplateButton"',
+                'id="planReportBaselineFileInput"',
+                'id="planReportBaselineStatus"',
                 DEFAULT_SHEET_PLAN_REPORT_PATH,
+                DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH,
+                DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH,
+                DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH,
             ):
                 if expected not in operator_html:
                     raise AssertionError(f"operator HTML must expose plan-report token {expected!r}")
@@ -132,6 +118,20 @@ def main() -> None:
                 raise AssertionError(
                     f"plan report route must reject missing required query params, got {missing_query_status} {missing_query_payload}"
                 )
+
+            baseline_status_code, baseline_status_payload = _get_json(
+                f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH}"
+            )
+            if baseline_status_code != 200 or baseline_status_payload.get("status") != "missing":
+                raise AssertionError(
+                    f"baseline status route must return missing before upload, got {baseline_status_code} {baseline_status_payload}"
+                )
+            template_status, template_bytes = _get_bytes(f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH}")
+            if template_status != 200:
+                raise AssertionError(f"baseline template route must return 200, got {template_status}")
+            template_rows = read_first_sheet_rows(template_bytes)
+            if template_rows[0] != BASELINE_TEMPLATE_HEADERS:
+                raise AssertionError(f"baseline template route must expose expected headers, got {template_rows}")
 
             query = urllib_parse.urlencode(
                 {
@@ -144,18 +144,20 @@ def main() -> None:
                 }
             )
             report_status, report_payload = _get_json(f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_PATH}?{query}")
-            if report_status != 200 or report_payload.get("status") != "available":
-                raise AssertionError(f"plan report route must return available JSON, got {report_status} {report_payload}")
+            if report_status != 200 or report_payload.get("status") != "partial":
+                raise AssertionError(f"plan report route must return partial top-level JSON, got {report_status} {report_payload}")
             if report_payload.get("reference_date") != REFERENCE_DATE:
                 raise AssertionError(f"plan report must default to previous closed day, got {report_payload}")
             if report_payload.get("selected_period_key") != "last_30_days":
                 raise AssertionError(f"plan report must keep requested period key, got {report_payload}")
             source_of_truth = report_payload.get("source_of_truth") or {}
-            if source_of_truth.get("read_model") != "persisted_temporal_source_slot_snapshots":
+            if source_of_truth.get("read_model") != "persisted_temporal_source_slot_snapshots_plus_plan_report_monthly_baseline":
                 raise AssertionError(f"plan report must disclose its read model, got {report_payload}")
             if source_of_truth.get("snapshot_role") != ACCEPTED_ROLE:
                 raise AssertionError(f"plan report must disclose accepted slot role, got {report_payload}")
             selected = (report_payload.get("periods") or {}).get("selected_period") or {}
+            if selected.get("status") != "available":
+                raise AssertionError(f"selected period must stay available while YTD is partial, got {report_payload}")
             if selected.get("date_from") != "2026-03-22" or selected.get("day_count") != 30:
                 raise AssertionError(f"plan report selected window must cross Q1/Q2 boundary, got {report_payload}")
             buyout_metric = (selected.get("metrics") or {}).get("buyout_rub") or {}
@@ -169,6 +171,38 @@ def main() -> None:
                 raise AssertionError(f"ads spend plan must derive from buyout plan * planned DRR, got {report_payload}")
             if "month_to_date" not in report_payload.get("periods", {}) or "quarter_to_date" not in report_payload.get("periods", {}) or "year_to_date" not in report_payload.get("periods", {}):
                 raise AssertionError(f"plan report must always expose MTD/QTD/YTD blocks, got {report_payload}")
+            ytd = (report_payload.get("periods") or {}).get("year_to_date") or {}
+            if ytd.get("status") != "partial":
+                raise AssertionError(f"YTD must stay local partial before baseline, got {report_payload}")
+
+            baseline_workbook = build_single_sheet_workbook_bytes(
+                "План факт месяцы",
+                [
+                    BASELINE_TEMPLATE_HEADERS,
+                    ["2026-01", 31000.0, 3100.0],
+                    ["2026-02", 28000.0, 2800.0],
+                ],
+            )
+            baseline_upload_status, baseline_upload_payload = _post_multipart_file(
+                f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH}",
+                baseline_workbook,
+                filename="baseline.xlsx",
+            )
+            if baseline_upload_status != 200 or baseline_upload_payload.get("accepted_months") != ["2026-01", "2026-02"]:
+                raise AssertionError(
+                    f"baseline upload route must accept valid Jan/Feb XLSX, got {baseline_upload_status} {baseline_upload_payload}"
+                )
+            uploaded_status_code, uploaded_status_payload = _get_json(
+                f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH}"
+            )
+            if uploaded_status_code != 200 or uploaded_status_payload.get("status") != "uploaded":
+                raise AssertionError(
+                    f"baseline status route must return uploaded after upload, got {uploaded_status_code} {uploaded_status_payload}"
+                )
+            ytd_status, ytd_payload = _get_json(f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_PATH}?{query}")
+            ytd_block = (ytd_payload.get("periods") or {}).get("year_to_date") or {}
+            if ytd_status != 200 or ytd_block.get("status") != "available":
+                raise AssertionError(f"YTD must become available after Jan/Feb baseline, got {ytd_status} {ytd_payload}")
 
             missing_day = "2026-04-10"
             runtime.delete_temporal_source_slot_snapshots(
@@ -193,7 +227,8 @@ def main() -> None:
                 raise AssertionError(
                     f"plan report route must return partial JSON instead of 500 when coverage is incomplete, got {partial_status} {partial_payload}"
                 )
-            partial_coverage = partial_payload.get("coverage") or {}
+            partial_selected = (partial_payload.get("periods") or {}).get("selected_period") or {}
+            partial_coverage = partial_selected.get("coverage") or {}
             if (partial_coverage.get("missing_dates_by_source") or {}).get("ads_compact") != [missing_day]:
                 raise AssertionError(f"plan report route must expose missing coverage details, got {partial_payload}")
 
@@ -202,6 +237,8 @@ def main() -> None:
             print("plan_report_route: ok ->", report_payload["reference_date"], report_payload["selected_period_key"])
             print("plan_report_source: ok ->", source_of_truth["read_model"], source_of_truth["snapshot_role"])
             print("plan_report_blocks: ok ->", ", ".join(sorted(report_payload["periods"].keys())))
+            print("plan_report_baseline_routes: ok ->", template_status, baseline_upload_payload["accepted_months"])
+            print("plan_report_ytd_after_baseline: ok ->", ytd_block["status"])
             print("plan_report_partial_route: ok ->", partial_payload["status"], partial_coverage["missing_dates_by_source"])
         finally:
             server.shutdown()
@@ -222,11 +259,82 @@ def _iter_dates(date_from: date, date_to: date):
         current += timedelta(days=1)
 
 
+def _seed_daily_snapshots(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    primary_nm_id: int,
+    date_from: date,
+    date_to: date,
+) -> None:
+    for snapshot_day in _iter_dates(date_from, date_to):
+        snapshot_date = snapshot_day.isoformat()
+        runtime.save_temporal_source_slot_snapshot(
+            source_key="fin_report_daily",
+            snapshot_date=snapshot_date,
+            snapshot_role=ACCEPTED_ROLE,
+            captured_at=f"{snapshot_date}T12:00:00Z",
+            payload={
+                "result": {
+                    "kind": "success",
+                    "snapshot_date": snapshot_date,
+                    "count": 1,
+                    "items": [{"nm_id": primary_nm_id, "fin_buyout_rub": 1500.0}],
+                    "storage_total": {"nm_id": 0, "fin_storage_fee_total": 0.0},
+                }
+            },
+        )
+        runtime.save_temporal_source_slot_snapshot(
+            source_key="ads_compact",
+            snapshot_date=snapshot_date,
+            snapshot_role=ACCEPTED_ROLE,
+            captured_at=f"{snapshot_date}T12:05:00Z",
+            payload={
+                "result": {
+                    "kind": "success",
+                    "snapshot_date": snapshot_date,
+                    "count": 1,
+                    "items": [{"nm_id": primary_nm_id, "ads_sum": 180.0}],
+                }
+            },
+        )
+
+
 def _post_json(url: str, payload: dict) -> tuple[int, dict]:
     request = urllib_request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={"Content-Type": "application/json; charset=utf-8", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(request) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib_request.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _post_multipart_file(url: str, workbook_bytes: bytes, *, filename: str) -> tuple[int, dict]:
+    boundary = "----wbcore-plan-report-baseline-smoke"
+    body = b"".join(
+        [
+            f"--{boundary}\r\n".encode("utf-8"),
+            (
+                f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+                "Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n"
+                "\r\n"
+            ).encode("utf-8"),
+            workbook_bytes,
+            b"\r\n",
+            f"--{boundary}--\r\n".encode("utf-8"),
+        ]
+    )
+    request = urllib_request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Accept": "application/json",
+        },
         method="POST",
     )
     try:
@@ -243,6 +351,15 @@ def _get_json(url: str) -> tuple[int, dict]:
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib_request.HTTPError as exc:
         return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _get_bytes(url: str) -> tuple[int, bytes]:
+    request = urllib_request.Request(url)
+    try:
+        with urllib_request.urlopen(request) as response:
+            return response.status, response.read()
+    except urllib_request.HTTPError as exc:
+        return exc.code, exc.read()
 
 
 def _get_text(url: str) -> tuple[int, str]:

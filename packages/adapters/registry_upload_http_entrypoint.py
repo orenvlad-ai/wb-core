@@ -35,6 +35,9 @@ DEFAULT_SHEET_PLAN_PATH = "/v1/sheet-vitrina-v1/plan"
 DEFAULT_SHEET_DAILY_REPORT_PATH = "/v1/sheet-vitrina-v1/daily-report"
 DEFAULT_SHEET_STOCK_REPORT_PATH = "/v1/sheet-vitrina-v1/stock-report"
 DEFAULT_SHEET_PLAN_REPORT_PATH = "/v1/sheet-vitrina-v1/plan-report"
+DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH = "/v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx"
+DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH = "/v1/sheet-vitrina-v1/plan-report/baseline-upload"
+DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH = "/v1/sheet-vitrina-v1/plan-report/baseline-status"
 DEFAULT_SHEET_WEB_VITRINA_READ_PATH = "/v1/sheet-vitrina-v1/web-vitrina"
 DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE = "page_composition"
 DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH = "/v1/sheet-vitrina-v1/web-vitrina/group-refresh"
@@ -512,6 +515,31 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, recovery_payload)
                 return
 
+            if parsed.path == DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH:
+                try:
+                    upload_payload = _load_uploaded_file_payload(self)
+                    payload = entrypoint.handle_sheet_plan_report_baseline_upload_request(
+                        upload_payload["workbook_bytes"],
+                        uploaded_filename=str(upload_payload.get("filename") or ""),
+                        uploaded_content_type=str(upload_payload.get("content_type") or ""),
+                    )
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if parsed.path in {
                 DEFAULT_FACTORY_ORDER_UPLOAD_STOCK_FF_PATH,
                 DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FACTORY_PATH,
@@ -832,6 +860,39 @@ def _build_handler(
                     self,
                     HTTPStatus.OK,
                     payload,
+                )
+                return
+
+            if parsed.path == DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH:
+                try:
+                    payload = entrypoint.handle_sheet_plan_report_baseline_status_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina plan report baseline status failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH:
+                try:
+                    workbook_bytes, filename = entrypoint.handle_sheet_plan_report_baseline_template_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina plan report baseline template failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    workbook_bytes,
+                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    filename=filename,
+                    as_attachment=True,
                 )
                 return
 
@@ -1640,6 +1701,9 @@ def _render_sheet_vitrina_operator_ui(
         "daily_report_path": daily_report_path,
         "stock_report_path": stock_report_path,
         "plan_report_path": plan_report_path,
+        "plan_report_baseline_template_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH,
+        "plan_report_baseline_upload_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH,
+        "plan_report_baseline_status_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH,
         "refresh_path": refresh_path,
         "load_path": load_path,
         "legacy_google_sheets_contour": legacy_google_sheets_archive_context(),
