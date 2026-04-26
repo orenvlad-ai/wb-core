@@ -174,6 +174,11 @@ update_note: "Обновлён под current operator report checkpoint: report
   - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
   - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result, where root `status` is semantic snapshot outcome rather than mere ready-snapshot existence
   - `GET /v1/sheet-vitrina-v1/job` = cheap poll/read surface для live operator log и async action state
+- `POST /v1/sheet-vitrina-v1/refresh` additionally persists compact observability diagnostics in the ready snapshot metadata under `metadata.refresh_diagnostics` and exposes the same block in the freshly completed refresh/job result when available:
+  - refresh-level fields include `job_id`, `execution_mode`, `as_of_date`, `bundle_version`, `started_at`, `finished_at`, `duration_ms`, `semantic_status`, `technical_status`, `phase_summary` and `source_summary`
+  - `phase_summary` covers the existing server flow without changing source orchestration: effective-date resolution, registry-state read, plan build, current web-source sync, live-source load, DATA/STATUS materialization, ready snapshot save, operator-state save and job finalization
+  - `source_slots` records per-source/per-slot timing, status, semantic status, origin classification, row counters and known lightweight source counters; adapter-internal retry/sleep/batch/page/poll counters may remain `null` until the relevant adapters expose them
+  - diagnostics are observability metadata only: they must not change source fetch policy, accepted/fallback truth, temporal slot semantics, retry behavior, Google Sheets/GAS archive boundary or browser/localStorage truth
 - `GET /sheet-vitrina-v1/operator` = simple repo-owned page с top-level tabs `Обновление данных` / `Расчёт поставок` / `Отчёты`
   - route intentionally остаётся orchestration-first control surface и не получает новый heavy web-vitrina block внутрь existing HTML shell
   - block `Проверка и восстановление Seller-сессии` внутри `Обновление данных` остаётся таким же bounded operator seam, а не отдельной инженерной консолью:

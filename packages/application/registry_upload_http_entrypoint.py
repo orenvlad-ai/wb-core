@@ -6,6 +6,8 @@ import hashlib
 import importlib
 import json
 import sqlite3
+import time
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -73,6 +75,7 @@ from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope, SheetVit
 
 OperatorLogEmitter = Callable[[str], None]
 SheetLoadRunner = Callable[[SheetVitrinaV1Envelope, OperatorLogEmitter], dict[str, Any]]
+SHEET_OPERATOR_JOB_ID: ContextVar[str] = ContextVar("sheet_vitrina_v1_operator_job_id", default="")
 SHEET_VITRINA_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/refresh"
 SHEET_VITRINA_LOAD_ROUTE = "/v1/sheet-vitrina-v1/load"
 SHEET_VITRINA_GROUP_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/group-refresh"
@@ -628,6 +631,7 @@ class RegistryUploadHttpEntrypoint:
         date_to: str | None = None,
         include_source_status: bool = False,
     ) -> dict[str, Any]:
+        page_composition_started_perf = time.perf_counter()
         effective_as_of_date = as_of_date or default_business_as_of_date(self.now_factory())
         available_snapshot_dates = self.web_vitrina_block.list_readable_dates(descending=True)
         default_as_of_date = default_business_as_of_date(self.now_factory())
@@ -677,18 +681,22 @@ class RegistryUploadHttpEntrypoint:
                 if include_source_status and _is_ready_snapshot_missing_error(exc)
                 else None
             )
-            return build_web_vitrina_page_error_composition(
-                page_route=page_route,
-                read_route=read_route,
-                operator_route=operator_route,
-                as_of_date=effective_as_of_date,
-                error_message=str(exc),
-                available_snapshot_dates=available_snapshot_dates,
-                default_as_of_date=default_as_of_date,
-                selected_as_of_date=as_of_date,
-                selected_date_from=selected_date_from,
-                selected_date_to=selected_date_to,
-                activity_surface=activity_surface,
+            return _with_page_composition_diagnostics(
+                build_web_vitrina_page_error_composition(
+                    page_route=page_route,
+                    read_route=read_route,
+                    operator_route=operator_route,
+                    as_of_date=effective_as_of_date,
+                    error_message=str(exc),
+                    available_snapshot_dates=available_snapshot_dates,
+                    default_as_of_date=default_as_of_date,
+                    selected_as_of_date=as_of_date,
+                    selected_date_from=selected_date_from,
+                    selected_date_to=selected_date_to,
+                    activity_surface=activity_surface,
+                ),
+                started_perf=page_composition_started_perf,
+                include_source_status=include_source_status,
             )
 
         source_status_snapshot_as_of_date = _web_vitrina_source_status_snapshot_as_of_date(contract)
@@ -727,18 +735,22 @@ class RegistryUploadHttpEntrypoint:
                         update_message=f"update summary unavailable: {exc}",
                     )
 
-        return build_web_vitrina_page_composition(
-            contract=contract,
-            view_model=view_model,
-            adapter=adapter,
-            page_route=page_route,
-            read_route=read_route,
-            operator_route=operator_route,
-            available_snapshot_dates=available_snapshot_dates,
-            selected_as_of_date=as_of_date,
-            selected_date_from=selected_date_from,
-            selected_date_to=selected_date_to,
-            activity_surface=activity_surface,
+        return _with_page_composition_diagnostics(
+            build_web_vitrina_page_composition(
+                page_route=page_route,
+                read_route=read_route,
+                operator_route=operator_route,
+                available_snapshot_dates=available_snapshot_dates,
+                selected_as_of_date=as_of_date,
+                selected_date_from=selected_date_from,
+                selected_date_to=selected_date_to,
+                contract=contract,
+                view_model=view_model,
+                adapter=adapter,
+                activity_surface=activity_surface,
+            ),
+            started_perf=page_composition_started_perf,
+            include_source_status=include_source_status,
         )
 
     def handle_sheet_research_sku_group_comparison_options_request(
@@ -1309,13 +1321,42 @@ class RegistryUploadHttpEntrypoint:
     ) -> dict[str, Any]:
         emit = log or _noop_log
         with self._sheet_cycle_lock:
+            refresh_started_at = self.activated_at_factory()
+            refresh_started_perf = time.perf_counter()
+            refresh_diagnostics = _new_operator_refresh_diagnostics(
+                job_id=SHEET_OPERATOR_JOB_ID.get(),
+                execution_mode=execution_mode,
+                started_at=refresh_started_at,
+            )
             try:
                 requested_as_of_date = as_of_date or "default"
+                resolve_phase = _start_operator_phase(
+                    "resolve_effective_date",
+                    started_at=self.activated_at_factory(),
+                )
                 effective_as_of_date = _resolve_sheet_refresh_as_of_date(
                     as_of_date,
                     now=self.now_factory(),
                 )
+                _finish_operator_phase(
+                    refresh_diagnostics,
+                    resolve_phase,
+                    finished_at=self.activated_at_factory(),
+                    status="success",
+                )
+                load_state_phase = _start_operator_phase(
+                    "load_registry_state",
+                    started_at=self.activated_at_factory(),
+                )
                 current_state = self.runtime.load_current_state()
+                _finish_operator_phase(
+                    refresh_diagnostics,
+                    load_state_phase,
+                    finished_at=self.activated_at_factory(),
+                    status="success",
+                )
+                refresh_diagnostics["as_of_date"] = effective_as_of_date
+                refresh_diagnostics["bundle_version"] = current_state.bundle_version
                 emit(
                     _format_log_event(
                         "cycle_start",
@@ -1343,10 +1384,24 @@ class RegistryUploadHttpEntrypoint:
                         step="server_build_plan",
                     )
                 )
+                build_plan_phase = _start_operator_phase(
+                    "build_plan_total",
+                    started_at=self.activated_at_factory(),
+                )
                 plan = self.sheet_plan_block.build_plan(
                     as_of_date=effective_as_of_date,
                     log=emit,
                     execution_mode=execution_mode,
+                )
+                _finish_operator_phase(
+                    refresh_diagnostics,
+                    build_plan_phase,
+                    finished_at=self.activated_at_factory(),
+                    status="success",
+                )
+                refresh_diagnostics = _merge_refresh_diagnostics(
+                    refresh_diagnostics,
+                    _refresh_diagnostics_from_plan(plan),
                 )
                 row_counts = _sheet_row_counts(plan)
                 emit(
@@ -1371,17 +1426,49 @@ class RegistryUploadHttpEntrypoint:
                 )
                 refreshed_at = self.refreshed_at_factory()
                 plan = _with_full_refresh_metadata(plan, refreshed_at=refreshed_at)
+                save_snapshot_phase = _start_operator_phase(
+                    "save_ready_snapshot",
+                    started_at=self.activated_at_factory(),
+                )
                 refresh_result = self.runtime.save_sheet_vitrina_ready_snapshot(
                     current_state=current_state,
                     refreshed_at=refreshed_at,
                     plan=plan,
                 )
+                _finish_operator_phase(
+                    refresh_diagnostics,
+                    save_snapshot_phase,
+                    finished_at=self.activated_at_factory(),
+                    status="success",
+                )
                 refresh_outcome = _build_refresh_result_payload(refresh_result)
+                save_operator_phase = _start_operator_phase(
+                    "save_operator_state",
+                    started_at=self.activated_at_factory(),
+                )
                 if execution_mode == EXECUTION_MODE_MANUAL_OPERATOR:
                     self.runtime.save_sheet_vitrina_manual_refresh_result(
                         result_payload=refresh_outcome,
                         refreshed_at=refresh_result.refreshed_at,
                     )
+                    _finish_operator_phase(
+                        refresh_diagnostics,
+                        save_operator_phase,
+                        finished_at=self.activated_at_factory(),
+                        status="success",
+                    )
+                else:
+                    _finish_operator_phase(
+                        refresh_diagnostics,
+                        save_operator_phase,
+                        finished_at=self.activated_at_factory(),
+                        status="skipped",
+                        note_kind="non_manual_execution_mode",
+                    )
+                job_finalize_phase = _start_operator_phase(
+                    "job_finalize",
+                    started_at=self.activated_at_factory(),
+                )
                 payload = asdict(refresh_result)
                 updated_cells = _updated_cells_for_plan(plan)
                 payload["technical_status"] = payload["status"]
@@ -1393,6 +1480,41 @@ class RegistryUploadHttpEntrypoint:
                     updated_cells,
                     "latest_confirmed",
                 )
+                _finish_operator_phase(
+                    refresh_diagnostics,
+                    job_finalize_phase,
+                    finished_at=self.activated_at_factory(),
+                    status="success",
+                )
+                _complete_refresh_diagnostics(
+                    refresh_diagnostics,
+                    job_id=SHEET_OPERATOR_JOB_ID.get(),
+                    execution_mode=execution_mode,
+                    as_of_date=refresh_result.as_of_date,
+                    bundle_version=refresh_result.bundle_version,
+                    started_at=refresh_started_at,
+                    finished_at=self.activated_at_factory(),
+                    duration_ms=max(0, int(round((time.perf_counter() - refresh_started_perf) * 1000))),
+                    semantic_status=refresh_result.semantic_status,
+                    technical_status=refresh_result.status,
+                )
+                plan = _with_refresh_diagnostics_metadata(plan, refresh_diagnostics)
+                refresh_result = self.runtime.save_sheet_vitrina_ready_snapshot(
+                    current_state=current_state,
+                    refreshed_at=refreshed_at,
+                    plan=plan,
+                )
+                payload.update(asdict(refresh_result))
+                payload["technical_status"] = payload["status"]
+                payload["status_label"] = payload["semantic_label"]
+                payload["status_reason"] = payload["semantic_reason"]
+                payload["updated_cells"] = updated_cells
+                payload["updated_cell_count"] = _count_updated_cells_by_status(updated_cells, "updated")
+                payload["latest_confirmed_cell_count"] = _count_updated_cells_by_status(
+                    updated_cells,
+                    "latest_confirmed",
+                )
+                payload["refresh_diagnostics"] = refresh_diagnostics
                 payload["server_context"] = self.build_sheet_server_context()
                 payload["manual_context"] = self.build_sheet_manual_context()
                 payload["load_context"] = self.build_sheet_load_context()
@@ -1408,6 +1530,7 @@ class RegistryUploadHttpEntrypoint:
                         semantic_reason=refresh_result.semantic_reason,
                         updated_cells=payload["updated_cell_count"],
                         latest_confirmed_cells=payload["latest_confirmed_cell_count"],
+                        duration_ms=refresh_diagnostics.get("duration_ms"),
                     )
                 )
                 emit(
@@ -2859,6 +2982,7 @@ class SheetVitrinaV1OperatorJobStore:
         job_id: str,
         runner: Callable[[OperatorLogEmitter], dict[str, Any]],
     ) -> None:
+        token = SHEET_OPERATOR_JOB_ID.set(job_id)
         try:
             result = runner(lambda message: self._append_log(job_id, message))
         except Exception as exc:
@@ -2868,6 +2992,7 @@ class SheetVitrinaV1OperatorJobStore:
                 job.status = "error"
                 job.finished_at = self.timestamp_factory()
                 job.error = str(exc)
+            SHEET_OPERATOR_JOB_ID.reset(token)
             return
 
         with self._lock:
@@ -2875,6 +3000,7 @@ class SheetVitrinaV1OperatorJobStore:
             job.status = "success"
             job.finished_at = self.timestamp_factory()
             job.result = result
+        SHEET_OPERATOR_JOB_ID.reset(token)
 
     def _append_log(self, job_id: str, message: str) -> None:
         timestamp = self.timestamp_factory()
@@ -3236,6 +3362,212 @@ def _with_full_refresh_metadata(plan: SheetVitrinaV1Envelope, *, refreshed_at: s
         },
     }
     return replace(plan, metadata=metadata)
+
+
+def _new_operator_refresh_diagnostics(
+    *,
+    job_id: str,
+    execution_mode: str,
+    started_at: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "refresh_diagnostics_v1",
+        "job_id": str(job_id or ""),
+        "execution_mode": execution_mode,
+        "as_of_date": "",
+        "bundle_version": "",
+        "started_at": started_at,
+        "finished_at": "",
+        "duration_ms": None,
+        "semantic_status": "",
+        "technical_status": "",
+        "source_summary": [],
+        "source_slots": [],
+        "phase_summary": [],
+        "origin_unclassified_sources": [],
+        "counter_gaps": [],
+    }
+
+
+def _start_operator_phase(phase_key: str, *, started_at: str) -> dict[str, Any]:
+    return {
+        "phase_key": phase_key,
+        "started_at": started_at,
+        "started_perf": time.perf_counter(),
+    }
+
+
+def _finish_operator_phase(
+    diagnostics: dict[str, Any],
+    phase: Mapping[str, Any],
+    *,
+    finished_at: str,
+    status: str,
+    note_kind: str | None = None,
+) -> None:
+    item = {
+        "phase_key": str(phase.get("phase_key") or ""),
+        "started_at": str(phase.get("started_at") or ""),
+        "finished_at": finished_at,
+        "duration_ms": max(0, int(round((time.perf_counter() - float(phase.get("started_perf") or time.perf_counter())) * 1000))),
+        "status": status,
+    }
+    if note_kind:
+        item["note_kind"] = note_kind
+    diagnostics.setdefault("phase_summary", []).append(item)
+
+
+def _refresh_diagnostics_from_plan(plan: SheetVitrinaV1Envelope) -> dict[str, Any]:
+    metadata = dict(getattr(plan, "metadata", {}) or {})
+    raw = metadata.get("refresh_diagnostics")
+    return dict(raw) if isinstance(raw, Mapping) else {}
+
+
+def _merge_refresh_diagnostics(
+    operator_diagnostics: Mapping[str, Any],
+    plan_diagnostics: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged = dict(plan_diagnostics or {})
+    for key, value in operator_diagnostics.items():
+        if key == "phase_summary":
+            continue
+        if key in {"source_summary", "source_slots"} and merged.get(key):
+            continue
+        if value not in ("", None, []):
+            merged[key] = value
+        else:
+            merged.setdefault(key, value)
+    operator_phases = [
+        dict(item)
+        for item in (operator_diagnostics.get("phase_summary") or [])
+        if isinstance(item, Mapping)
+    ]
+    plan_phases = [
+        dict(item)
+        for item in (plan_diagnostics.get("phase_summary") or [])
+        if isinstance(item, Mapping)
+    ]
+    merged["phase_summary"] = [*operator_phases, *plan_phases]
+    if not merged.get("source_summary") and isinstance(merged.get("source_slots"), list):
+        merged["source_summary"] = _summarize_refresh_diagnostic_sources(merged["source_slots"])
+    return merged
+
+
+def _complete_refresh_diagnostics(
+    diagnostics: dict[str, Any],
+    *,
+    job_id: str,
+    execution_mode: str,
+    as_of_date: str,
+    bundle_version: str,
+    started_at: str,
+    finished_at: str,
+    duration_ms: int,
+    semantic_status: str,
+    technical_status: str,
+) -> None:
+    diagnostics["job_id"] = str(job_id or diagnostics.get("job_id") or "")
+    diagnostics["execution_mode"] = execution_mode
+    diagnostics["as_of_date"] = as_of_date
+    diagnostics["bundle_version"] = bundle_version
+    diagnostics["started_at"] = started_at
+    diagnostics["finished_at"] = finished_at
+    diagnostics["duration_ms"] = duration_ms
+    diagnostics["semantic_status"] = semantic_status
+    diagnostics["technical_status"] = technical_status
+    if isinstance(diagnostics.get("source_slots"), list):
+        diagnostics["source_summary"] = _summarize_refresh_diagnostic_sources(diagnostics["source_slots"])
+    diagnostics["counter_gaps"] = sorted({
+        str(item)
+        for item in (diagnostics.get("counter_gaps") or [])
+        if str(item).strip()
+    })
+
+
+def _with_refresh_diagnostics_metadata(
+    plan: SheetVitrinaV1Envelope,
+    refresh_diagnostics: Mapping[str, Any],
+) -> SheetVitrinaV1Envelope:
+    return replace(
+        plan,
+        metadata={
+            **dict(getattr(plan, "metadata", {}) or {}),
+            "refresh_diagnostics": dict(refresh_diagnostics),
+        },
+    )
+
+
+def _summarize_refresh_diagnostic_sources(raw_source_slots: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_source_slots, list):
+        return []
+    by_source: dict[str, dict[str, Any]] = {}
+    for item in raw_source_slots:
+        if not isinstance(item, Mapping):
+            continue
+        source_key = str(item.get("source_key") or "")
+        if not source_key:
+            continue
+        summary = by_source.setdefault(
+            source_key,
+            {
+                "source_key": source_key,
+                "slot_count": 0,
+                "duration_ms": 0,
+                "status_counts": {},
+                "origin_counts": {},
+                "rows_fetched": 0,
+                "rows_accepted": 0,
+                "rows_reused": 0,
+                "rows_skipped": 0,
+            },
+        )
+        summary["slot_count"] += 1
+        summary["duration_ms"] += int(item.get("duration_ms") or 0)
+        for key in ("status", "origin"):
+            value = str(item.get(key) or "")
+            counts_key = f"{key}_counts"
+            counts = summary[counts_key]
+            counts[value] = counts.get(value, 0) + 1
+        for key in ("rows_fetched", "rows_accepted", "rows_reused", "rows_skipped"):
+            summary[key] += int(item.get(key) or 0)
+    return [by_source[key] for key in sorted(by_source)]
+
+
+def _with_page_composition_diagnostics(
+    payload: Mapping[str, Any],
+    *,
+    started_perf: float,
+    include_source_status: bool,
+) -> dict[str, Any]:
+    normalized = dict(payload)
+    meta = dict(normalized.get("meta") or {})
+    table_surface = dict(normalized.get("table_surface") or {})
+    rows = list(table_surface.get("rows") or [])
+    columns = list(table_surface.get("columns") or [])
+    diagnostics = {
+        "page_composition_build_ms": max(0, int(round((time.perf_counter() - started_perf) * 1000))),
+        "payload_bytes": 0,
+        "include_source_status": bool(include_source_status),
+        "row_count": len(rows),
+        "cell_count": _page_composition_cell_count(rows=rows, columns=columns),
+    }
+    meta["page_composition_diagnostics"] = diagnostics
+    normalized["meta"] = meta
+    for _ in range(2):
+        diagnostics["payload_bytes"] = len(
+            json.dumps(normalized, ensure_ascii=False, indent=2).encode("utf-8")
+        ) + 1
+    return normalized
+
+
+def _page_composition_cell_count(*, rows: list[Any], columns: list[Any]) -> int:
+    explicit = 0
+    for row in rows:
+        if isinstance(row, Mapping) and isinstance(row.get("values"), Mapping):
+            explicit += len(row["values"])
+    if explicit:
+        return explicit
+    return len(rows) * len(columns)
 
 
 def _require_sheet(plan: SheetVitrinaV1Envelope, sheet_name: str) -> SheetVitrinaWriteTarget:

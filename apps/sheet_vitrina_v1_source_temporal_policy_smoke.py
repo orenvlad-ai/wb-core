@@ -61,7 +61,7 @@ def main() -> None:
         refresh_status = runtime.load_sheet_vitrina_refresh_status(as_of_date=AS_OF_DATE)
         if refresh_status.semantic_status != "error":
             raise AssertionError(f"aggregate semantic status must stay error because dual-day source failed, got {refresh_status}")
-        if refresh_status.source_outcome_counts != {"success": 8, "warning": 3, "error": 1}:
+        if refresh_status.source_outcome_counts != {"success": 10, "warning": 1, "error": 1}:
             raise AssertionError(f"source outcome counts mismatch, got {refresh_status.source_outcome_counts}")
         if refresh_status.source_temporal_policies.get("stocks") != "yesterday_closed_only":
             raise AssertionError(f"stocks policy must be normalized on reread, got {refresh_status.source_temporal_policies}")
@@ -87,9 +87,9 @@ def main() -> None:
             raise AssertionError(f"seller_funnel_snapshot must keep required dual-day failure red, got {source_outcomes['seller_funnel_snapshot']}")
         if source_outcomes["web_source_snapshot"]["status"] != "warning":
             raise AssertionError(f"web_source_snapshot must keep required dual-day warning, got {source_outcomes['web_source_snapshot']}")
-        if source_outcomes["prices_snapshot"]["status"] != "warning":
+        if source_outcomes["prices_snapshot"]["status"] != "success":
             raise AssertionError(f"prices_snapshot accepted-current rollover semantics must stay intact, got {source_outcomes['prices_snapshot']}")
-        if source_outcomes["ads_bids"]["status"] != "warning":
+        if source_outcomes["ads_bids"]["status"] != "success":
             raise AssertionError(f"ads_bids accepted-current rollover semantics must stay intact, got {source_outcomes['ads_bids']}")
 
         entrypoint = RegistryUploadHttpEntrypoint(
@@ -100,7 +100,7 @@ def main() -> None:
         status_payload = entrypoint.handle_sheet_status_request(as_of_date=AS_OF_DATE)
         if status_payload["status"] != "error":
             raise AssertionError(f"/status semantic payload mismatch, got {status_payload}")
-        if status_payload["source_outcome_counts"] != {"success": 8, "warning": 3, "error": 1}:
+        if status_payload["source_outcome_counts"] != {"success": 10, "warning": 1, "error": 1}:
             raise AssertionError(f"/status source_outcome_counts mismatch, got {status_payload}")
 
         contract_payload = entrypoint.handle_sheet_web_vitrina_request(
@@ -119,6 +119,7 @@ def main() -> None:
             read_route="/v1/sheet-vitrina-v1/web-vitrina",
             operator_route="/sheet-vitrina-v1/operator",
             as_of_date=AS_OF_DATE,
+            include_source_status=True,
         )
         if composition_payload["status_badge"]["tone"] != "error":
             raise AssertionError(f"top badge must follow required-slot failures only, got {composition_payload['status_badge']}")
@@ -139,10 +140,10 @@ def main() -> None:
             raise AssertionError(f"seller_funnel_snapshot card must stay red, got {item_by_source['seller_funnel_snapshot']}")
         if _loading_row_tone(item_by_source["web_source_snapshot"]) != "error":
             raise AssertionError(f"web_source_snapshot loading row must show non-OK, got {item_by_source['web_source_snapshot']}")
-        if _loading_row_tone(item_by_source["prices_snapshot"]) != "error":
-            raise AssertionError(f"prices_snapshot current-only rollover row must show non-OK, got {item_by_source['prices_snapshot']}")
-        if _loading_row_tone(item_by_source["ads_bids"]) != "error":
-            raise AssertionError(f"ads_bids current-only rollover row must show non-OK, got {item_by_source['ads_bids']}")
+        if _loading_row_tone(item_by_source["prices_snapshot"]) != "success":
+            raise AssertionError(f"prices_snapshot current-only rollover row must stay OK, got {item_by_source['prices_snapshot']}")
+        if _loading_row_tone(item_by_source["ads_bids"]) != "success":
+            raise AssertionError(f"ads_bids current-only rollover row must stay OK, got {item_by_source['ads_bids']}")
 
         print("source_temporal_policy_counts: ok ->", refresh_status.source_outcome_counts)
         print("stocks_policy_overlay: ok ->", refresh_status.source_temporal_policies["stocks"])

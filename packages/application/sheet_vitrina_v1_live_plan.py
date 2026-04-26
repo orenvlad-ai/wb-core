@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import time
 from typing import Any, Callable, Iterable, Mapping, Protocol
 
 from packages.adapters.ads_bids_block import HttpBackedAdsBidsSource
@@ -295,6 +296,288 @@ class PromoLiveSourceProtocol(Protocol):
         raise NotImplementedError
 
 
+def _new_refresh_diagnostics(*, execution_mode: str, started_at: str) -> dict[str, Any]:
+    return {
+        "schema_version": "refresh_diagnostics_v1",
+        "job_id": "",
+        "execution_mode": execution_mode,
+        "as_of_date": "",
+        "bundle_version": "",
+        "started_at": started_at,
+        "finished_at": "",
+        "duration_ms": None,
+        "semantic_status": "",
+        "technical_status": "",
+        "source_summary": [],
+        "source_slots": [],
+        "phase_summary": [],
+        "origin_unclassified_sources": [],
+        "counter_gaps": [
+            "adapter-internal retry/sleep/batch/page/poll counters are not emitted by most source adapters yet",
+        ],
+    }
+
+
+def _start_refresh_phase(
+    diagnostics: dict[str, Any] | None,
+    phase_key: str,
+    *,
+    started_at: str,
+) -> dict[str, Any] | None:
+    if diagnostics is None:
+        return None
+    return {
+        "phase_key": phase_key,
+        "started_at": started_at,
+        "started_perf": time.perf_counter(),
+    }
+
+
+def _finish_refresh_phase(
+    diagnostics: dict[str, Any] | None,
+    phase: Mapping[str, Any] | None,
+    *,
+    finished_at: str,
+    status: str,
+    note_kind: str | None = None,
+) -> None:
+    if diagnostics is None or phase is None:
+        return
+    phase_summary = diagnostics.setdefault("phase_summary", [])
+    if not isinstance(phase_summary, list):
+        return
+    item = {
+        "phase_key": str(phase.get("phase_key") or ""),
+        "started_at": str(phase.get("started_at") or ""),
+        "finished_at": finished_at,
+        "duration_ms": _elapsed_ms(float(phase.get("started_perf") or time.perf_counter())),
+        "status": status,
+    }
+    if note_kind:
+        item["note_kind"] = note_kind
+    phase_summary.append(item)
+
+
+def _start_source_slot_diagnostic(
+    *,
+    source_key: str,
+    temporal_slot: str,
+    requested_date: str,
+    started_at: str,
+) -> dict[str, Any]:
+    return {
+        "source_key": source_key,
+        "slot_kind": temporal_slot,
+        "requested_date": requested_date,
+        "started_at": started_at,
+        "started_perf": time.perf_counter(),
+    }
+
+
+def _append_source_slot_diagnostic(
+    diagnostics: dict[str, Any] | None,
+    *,
+    source_started: Mapping[str, Any],
+    finished_at: str,
+    status: LiveSourceStatus,
+    payload: Any | None,
+    origin: str,
+) -> None:
+    if diagnostics is None:
+        return
+    source_slots = diagnostics.setdefault("source_slots", [])
+    if not isinstance(source_slots, list):
+        return
+    normalized_origin = origin if origin in {
+        "accepted_slot",
+        "temporal_cache",
+        "upstream_fetch",
+        "fallback_preserved",
+        "not_supported",
+        "current_rollover",
+        "origin_unclassified",
+    } else "origin_unclassified"
+    if normalized_origin == "origin_unclassified":
+        sources = diagnostics.setdefault("origin_unclassified_sources", [])
+        if isinstance(sources, list) and status.source_key not in sources:
+            sources.append(status.source_key)
+    duration_ms = _elapsed_ms(float(source_started.get("started_perf") or time.perf_counter()))
+    rows_reused = status.covered_count if normalized_origin in {
+        "accepted_slot",
+        "temporal_cache",
+        "fallback_preserved",
+        "current_rollover",
+    } else 0
+    rows_fetched = status.covered_count if normalized_origin == "upstream_fetch" else 0
+    rows_accepted = status.covered_count if status.kind == "success" else 0
+    rows_skipped = (
+        status.requested_count
+        if normalized_origin == "not_supported"
+        else len(status.missing_nm_ids)
+    )
+    source_slots.append(
+        {
+            "source_key": status.source_key,
+            "slot_kind": status.temporal_slot,
+            "requested_date": str(source_started.get("requested_date") or status.column_date),
+            "started_at": str(source_started.get("started_at") or ""),
+            "finished_at": finished_at,
+            "duration_ms": duration_ms,
+            "status": status.kind,
+            "semantic_status": _source_diagnostic_semantic_status(status),
+            "origin": normalized_origin,
+            "rows_fetched": rows_fetched,
+            "rows_accepted": rows_accepted,
+            "rows_reused": rows_reused,
+            "rows_skipped": rows_skipped,
+            "retry_count": None,
+            "sleep_total_ms": None,
+            "batch_count": None,
+            "page_count": None,
+            "poll_count": None,
+            "note_kind": _source_diagnostic_note_kind(status),
+            "requested_count": status.requested_count,
+            "covered_count": status.covered_count,
+            "missing_count": len(status.missing_nm_ids),
+            "counter_basis": "live_source_status; adapter-internal long-tail counters are not available without adapter refactor",
+            **_known_payload_diagnostic_counters(status.source_key, payload),
+        }
+    )
+
+
+def _classify_source_diagnostic_origin(
+    status: LiveSourceStatus,
+    *,
+    source_key: str,
+    temporal_slot: str,
+) -> str:
+    note = str(status.note or "").lower()
+    if status.kind in {"not_available", "blocked"}:
+        return "not_supported"
+    if "preserved_after_invalid_attempt" in note:
+        return "fallback_preserved"
+    if temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED and source_key in CURRENT_SNAPSHOT_ONLY_ROLLOVER_SOURCE_KEYS:
+        return "current_rollover"
+    if "runtime_snapshot" in note and "accepted_" in note:
+        return "accepted_slot"
+    if "runtime_cache" in note or "cache_captured_at" in note:
+        return "temporal_cache"
+    if "accepted_closed_from_prior_current_cache" in note:
+        return "temporal_cache"
+    if "current_attempt" in note or "interval_replay" in note or status.kind in {
+        "success",
+        "empty",
+        "incomplete",
+        "missing",
+        "not_found",
+        "error",
+    }:
+        return "upstream_fetch"
+    return "origin_unclassified"
+
+
+def _source_diagnostic_note_kind(status: LiveSourceStatus) -> str | None:
+    note = str(status.note or "").lower()
+    if status.kind == "not_available":
+        return "not_supported"
+    if "preserved_after_invalid_attempt" in note:
+        return "fallback_preserved"
+    if "accepted_closed_from_prior_current_snapshot" in note:
+        return "accepted_current_rollover"
+    if "runtime_cache" in note:
+        return "temporal_cache"
+    if "interval_replay" in note:
+        return "interval_replay"
+    if "current_attempt" in note:
+        return "upstream_fetch_accepted"
+    if "current_day_web_source_sync_failed" in note:
+        return "current_web_source_sync_error"
+    if status.kind in {"missing", "not_found"}:
+        return "missing"
+    if status.kind == "error":
+        return "error"
+    if status.kind == "incomplete":
+        return "incomplete"
+    if status.kind == "empty":
+        return "empty"
+    return None
+
+
+def _source_diagnostic_semantic_status(status: LiveSourceStatus) -> str:
+    if status.kind == "success":
+        return "success"
+    if status.kind in {"blocked", "error"}:
+        return "error"
+    if status.kind == "not_available":
+        return "skipped"
+    return "warning"
+
+
+def _known_payload_diagnostic_counters(source_key: str, payload: Any | None) -> dict[str, Any]:
+    if payload is None:
+        return {}
+    if source_key != "promo_by_price":
+        return {}
+    return {
+        "promo_current_promos": getattr(payload, "current_promos", None),
+        "promo_current_promos_downloaded": getattr(payload, "current_promos_downloaded", None),
+        "promo_current_promos_blocked": getattr(payload, "current_promos_blocked", None),
+        "promo_future_promos": getattr(payload, "future_promos", None),
+        "promo_skipped_past_promos": getattr(payload, "skipped_past_promos", None),
+        "promo_ambiguous_promos": getattr(payload, "ambiguous_promos", None),
+    }
+
+
+def _build_refresh_source_summary(raw_source_slots: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_source_slots, list):
+        return []
+    by_source: dict[str, dict[str, Any]] = {}
+    for item in raw_source_slots:
+        if not isinstance(item, Mapping):
+            continue
+        source_key = str(item.get("source_key") or "")
+        if not source_key:
+            continue
+        summary = by_source.setdefault(
+            source_key,
+            {
+                "source_key": source_key,
+                "slot_count": 0,
+                "duration_ms": 0,
+                "status_counts": {},
+                "origin_counts": {},
+                "rows_fetched": 0,
+                "rows_accepted": 0,
+                "rows_reused": 0,
+                "rows_skipped": 0,
+            },
+        )
+        summary["slot_count"] += 1
+        summary["duration_ms"] += int(item.get("duration_ms") or 0)
+        for key in ("status", "origin"):
+            value = str(item.get(key) or "")
+            counts_key = f"{key}_counts"
+            counts = summary[counts_key]
+            counts[value] = counts.get(value, 0) + 1
+        for key in ("rows_fetched", "rows_accepted", "rows_reused", "rows_skipped"):
+            summary[key] += int(item.get(key) or 0)
+    return [by_source[key] for key in sorted(by_source)]
+
+
+def _duration_ms_from_phase_summary(raw_phase_summary: Any) -> int | None:
+    if not isinstance(raw_phase_summary, list) or not raw_phase_summary:
+        return None
+    return sum(
+        int(item.get("duration_ms") or 0)
+        for item in raw_phase_summary
+        if isinstance(item, Mapping)
+    )
+
+
+def _elapsed_ms(started_perf: float) -> int:
+    return max(0, int(round((time.perf_counter() - started_perf) * 1000)))
+
+
 class _SyntheticNoPromoLiveSourceBlock:
     def execute(self, request: PromoLiveSourceRequest) -> PromoLiveSourceEnvelope:
         items = [
@@ -364,6 +647,9 @@ class SheetVitrinaV1LivePlanBlock:
         self.closed_day_web_source_sync = closed_day_web_source_sync or self.current_web_source_sync
         self.now_factory = now_factory or _default_now_factory
 
+    def _diagnostic_timestamp(self) -> str:
+        return _format_runtime_timestamp(self.now_factory())
+
     def build_plan(
         self,
         as_of_date: str | None = None,
@@ -375,8 +661,14 @@ class SheetVitrinaV1LivePlanBlock:
         emit = log or _noop_live_plan_log
         selected_source_keys = {str(item).strip() for item in (source_keys or []) if str(item).strip()}
         selected_metric_keys = {str(item).strip() for item in (metric_keys or []) if str(item).strip()}
+        diagnostics = _new_refresh_diagnostics(
+            execution_mode=execution_mode,
+            started_at=self._diagnostic_timestamp(),
+        )
         current_state = self.runtime.load_current_state()
         effective_date = _resolve_as_of_date(as_of_date, now=self.now_factory())
+        diagnostics["as_of_date"] = effective_date
+        diagnostics["bundle_version"] = current_state.bundle_version
         current_date = current_business_date_iso(self.now_factory())
         temporal_slots = _build_temporal_slots(
             as_of_date=effective_date,
@@ -425,6 +717,11 @@ class SheetVitrinaV1LivePlanBlock:
 
         cost_price_state = _load_cost_price_current_state(self.runtime)
         current_web_source_sync_note = None
+        current_sync_started = _start_refresh_phase(
+            diagnostics,
+            "current_web_source_sync",
+            started_at=self._diagnostic_timestamp(),
+        )
         if not selected_source_keys or "web_source_snapshot" in selected_source_keys:
             emit(
                 _format_log_event(
@@ -435,6 +732,13 @@ class SheetVitrinaV1LivePlanBlock:
                 )
             )
             current_web_source_sync_note = self._sync_current_web_source_snapshot(current_date)
+            _finish_refresh_phase(
+                diagnostics,
+                current_sync_started,
+                finished_at=self._diagnostic_timestamp(),
+                status="error" if current_web_source_sync_note else "success",
+                note_kind="current_web_source_sync_error" if current_web_source_sync_note else None,
+            )
             emit(
                 _format_log_event(
                     "current_web_source_sync_finish",
@@ -445,6 +749,13 @@ class SheetVitrinaV1LivePlanBlock:
                 )
             )
         else:
+            _finish_refresh_phase(
+                diagnostics,
+                current_sync_started,
+                finished_at=self._diagnostic_timestamp(),
+                status="skipped",
+                note_kind="source_scope_excluded",
+            )
             emit(
                 _format_log_event(
                     "current_web_source_sync_skipped",
@@ -461,6 +772,7 @@ class SheetVitrinaV1LivePlanBlock:
             execution_mode=execution_mode,
             log=emit,
             source_keys=selected_source_keys or None,
+            diagnostics=diagnostics,
         )
         evaluator = _MetricEvaluator(
             enabled_config=enabled_config,
@@ -469,6 +781,11 @@ class SheetVitrinaV1LivePlanBlock:
             live_sources=live_sources,
         )
 
+        materialize_data_started = _start_refresh_phase(
+            diagnostics,
+            "materialize_data_vitrina",
+            started_at=self._diagnostic_timestamp(),
+        )
         data_rows: list[list[Any]] = []
         scope_row_counts = {"TOTAL": 0, "GROUP": 0, "SKU": 0}
         section_row_counts: dict[str, int] = {}
@@ -477,6 +794,12 @@ class SheetVitrinaV1LivePlanBlock:
             data_rows.extend(rows)
             scope_row_counts[metric.scope] = scope_row_counts.get(metric.scope, 0) + len(rows)
             section_row_counts[metric.section] = section_row_counts.get(metric.section, 0) + len(rows)
+        _finish_refresh_phase(
+            diagnostics,
+            materialize_data_started,
+            finished_at=self._diagnostic_timestamp(),
+            status="success",
+        )
         emit(
             _format_log_event(
                 "metric_rows_materialized",
@@ -493,6 +816,11 @@ class SheetVitrinaV1LivePlanBlock:
         )
 
         data_header = ["label", "key", *[slot.column_date for slot in temporal_slots]]
+        materialize_status_started = _start_refresh_phase(
+            diagnostics,
+            "materialize_status",
+            started_at=self._diagnostic_timestamp(),
+        )
         status_rows = _build_status_rows(
             current_state=current_state,
             displayed_metrics=displayed_metrics,
@@ -502,6 +830,12 @@ class SheetVitrinaV1LivePlanBlock:
             scope_row_counts=scope_row_counts,
             section_row_counts=section_row_counts,
             execution_mode=execution_mode,
+        )
+        _finish_refresh_phase(
+            diagnostics,
+            materialize_status_started,
+            finished_at=self._diagnostic_timestamp(),
+            status="success",
         )
         emit(
             _format_log_event(
@@ -537,10 +871,22 @@ class SheetVitrinaV1LivePlanBlock:
                 "rows": status_rows,
             },
         }
-        return build_sheet_write_plan(
+        plan = build_sheet_write_plan(
             delivery_bundle=delivery_bundle,
             data_layout=_load_json(DATA_LAYOUT_PATH),
             status_layout=_load_json(STATUS_LAYOUT_PATH),
+        )
+        diagnostics["finished_at"] = self._diagnostic_timestamp()
+        diagnostics["duration_ms"] = _duration_ms_from_phase_summary(diagnostics.get("phase_summary"))
+        diagnostics["source_summary"] = _build_refresh_source_summary(
+            diagnostics.get("source_slots"),
+        )
+        return replace(
+            plan,
+            metadata={
+                **dict(getattr(plan, "metadata", {}) or {}),
+                "refresh_diagnostics": diagnostics,
+            },
         )
 
     def list_due_closed_day_retries(self) -> list[TemporalSourceClosureState]:
@@ -586,6 +932,7 @@ class SheetVitrinaV1LivePlanBlock:
         execution_mode: str = EXECUTION_MODE_AUTO_DAILY,
         log: LivePlanLogEmitter | None = None,
         source_keys: set[str] | None = None,
+        diagnostics: dict[str, Any] | None = None,
     ) -> TemporalLiveSources:
         emit = log or _noop_live_plan_log
         selected_source_keys = {str(item).strip() for item in (source_keys or set()) if str(item).strip()}
@@ -611,6 +958,11 @@ class SheetVitrinaV1LivePlanBlock:
             for slot in temporal_slots
         }
 
+        load_live_started = _start_refresh_phase(
+            diagnostics,
+            "load_live_sources_total",
+            started_at=self._diagnostic_timestamp(),
+        )
         for slot in temporal_slots:
             current_lookups = slot_lookups[slot.slot_key]
             for source_key, loader in [
@@ -737,6 +1089,12 @@ class SheetVitrinaV1LivePlanBlock:
                     requested_nm_ids=requested_nm_ids,
                 )
                 if not _source_policy_supports_slot(temporal_policy, slot.slot_key):
+                    source_started = _start_source_slot_diagnostic(
+                        source_key=source_key,
+                        temporal_slot=slot.slot_key,
+                        requested_date=slot.column_date,
+                        started_at=self._diagnostic_timestamp(),
+                    )
                     gap_status = _build_temporal_gap_status(
                         source_key=source_key,
                         temporal_slot=slot.slot_key,
@@ -745,8 +1103,22 @@ class SheetVitrinaV1LivePlanBlock:
                         requested_count=len(requested_nm_ids),
                     )
                     statuses.append(gap_status)
+                    _append_source_slot_diagnostic(
+                        diagnostics,
+                        source_started=source_started,
+                        finished_at=self._diagnostic_timestamp(),
+                        status=gap_status,
+                        payload=None,
+                        origin="not_supported",
+                    )
                     _emit_source_status_log(emit, gap_status)
                     continue
+                source_started = _start_source_slot_diagnostic(
+                    source_key=source_key,
+                    temporal_slot=slot.slot_key,
+                    requested_date=slot.column_date,
+                    started_at=self._diagnostic_timestamp(),
+                )
                 status, payload = self._capture_slot_source(
                     source_key=source_key,
                     temporal_slot=slot.slot_key,
@@ -762,6 +1134,18 @@ class SheetVitrinaV1LivePlanBlock:
                     ),
                 )
                 statuses.append(status)
+                _append_source_slot_diagnostic(
+                    diagnostics,
+                    source_started=source_started,
+                    finished_at=self._diagnostic_timestamp(),
+                    status=status,
+                    payload=payload,
+                    origin=_classify_source_diagnostic_origin(
+                        status,
+                        source_key=source_key,
+                        temporal_slot=slot.slot_key,
+                    ),
+                )
                 _emit_source_status_log(emit, status)
                 if source_key == "seller_funnel_snapshot":
                     current_lookups.seller_funnel_lookup = _index_items_by_nm_id(payload)
@@ -802,6 +1186,12 @@ class SheetVitrinaV1LivePlanBlock:
                     requested_nm_ids=requested_nm_ids,
                     requested_groups=requested_groups,
                 )
+                source_started = _start_source_slot_diagnostic(
+                    source_key="cost_price",
+                    temporal_slot=slot.slot_key,
+                    requested_date=slot.column_date,
+                    started_at=self._diagnostic_timestamp(),
+                )
                 cost_price_status, cost_price_lookup = _build_cost_price_status(
                     current_state=cost_price_state,
                     requested_groups=requested_groups,
@@ -810,6 +1200,14 @@ class SheetVitrinaV1LivePlanBlock:
                 )
                 slot_lookups[slot.slot_key].cost_price_lookup = cost_price_lookup
                 statuses.append(cost_price_status)
+                _append_source_slot_diagnostic(
+                    diagnostics,
+                    source_started=source_started,
+                    finished_at=self._diagnostic_timestamp(),
+                    status=cost_price_status,
+                    payload=None,
+                    origin="origin_unclassified",
+                )
                 _emit_source_status_log(emit, cost_price_status)
 
         for source_key, note in BLOCKED_SOURCE_STATUSES.items():
@@ -841,8 +1239,27 @@ class SheetVitrinaV1LivePlanBlock:
                     note=note,
                 )
                 statuses.append(blocked_status)
+                _append_source_slot_diagnostic(
+                    diagnostics,
+                    source_started=_start_source_slot_diagnostic(
+                        source_key=source_key,
+                        temporal_slot=slot.slot_key,
+                        requested_date=slot.column_date,
+                        started_at=self._diagnostic_timestamp(),
+                    ),
+                    finished_at=self._diagnostic_timestamp(),
+                    status=blocked_status,
+                    payload=None,
+                    origin="not_supported",
+                )
                 _emit_source_status_log(emit, blocked_status)
 
+        _finish_refresh_phase(
+            diagnostics,
+            load_live_started,
+            finished_at=self._diagnostic_timestamp(),
+            status="success",
+        )
         return TemporalLiveSources(
             temporal_slots=temporal_slots,
             statuses=statuses,

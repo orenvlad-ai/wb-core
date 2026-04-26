@@ -217,6 +217,30 @@ def main() -> None:
                 raise AssertionError("refresh_result as_of_date mismatch")
             if refresh_payload["date_columns"] != [AS_OF_DATE, TODAY_CURRENT_DATE]:
                 raise AssertionError("refresh_result date_columns mismatch")
+            refresh_diagnostics = refresh_payload.get("refresh_diagnostics") or {}
+            if refresh_diagnostics.get("execution_mode") != "manual_operator":
+                raise AssertionError("refresh_result must expose manual refresh diagnostics")
+            if refresh_diagnostics.get("as_of_date") != AS_OF_DATE:
+                raise AssertionError("refresh diagnostics must expose the effective as_of_date")
+            required_phases = {
+                "resolve_effective_date",
+                "load_registry_state",
+                "build_plan_total",
+                "current_web_source_sync",
+                "load_live_sources_total",
+                "materialize_data_vitrina",
+                "materialize_status",
+                "save_ready_snapshot",
+                "save_operator_state",
+                "job_finalize",
+            }
+            actual_phases = {
+                str(item.get("phase_key") or "")
+                for item in refresh_diagnostics.get("phase_summary") or []
+                if isinstance(item, dict)
+            }
+            if not required_phases.issubset(actual_phases):
+                raise AssertionError(f"refresh diagnostics missing required phases: {required_phases - actual_phases}")
             if refresh_payload["server_context"] != _expected_server_context():
                 raise AssertionError("refresh_result must expose the same server_context block")
             refresh_manual_context = refresh_payload.get("manual_context") or {}
@@ -263,6 +287,20 @@ def main() -> None:
                 raise AssertionError("read endpoint must return the persisted ready snapshot")
             if plan_payload["date_columns"] != [AS_OF_DATE, TODAY_CURRENT_DATE]:
                 raise AssertionError("plan endpoint must expose both materialized dates")
+            plan_diagnostics = (plan_payload.get("metadata") or {}).get("refresh_diagnostics") or {}
+            if plan_diagnostics.get("duration_ms") is None:
+                raise AssertionError("ready snapshot metadata must persist refresh duration diagnostics")
+            source_slots = {
+                (str(item.get("source_key") or ""), str(item.get("slot_kind") or "")): item
+                for item in plan_diagnostics.get("source_slots") or []
+                if isinstance(item, dict)
+            }
+            if source_slots[("prices_snapshot", "yesterday_closed")].get("origin") != "current_rollover":
+                raise AssertionError("diagnostics must classify prices yesterday_closed as current_rollover")
+            if source_slots[("stocks", "today_current")].get("origin") != "not_supported":
+                raise AssertionError("diagnostics must classify stocks today_current as not_supported")
+            if not plan_diagnostics.get("source_summary"):
+                raise AssertionError("ready snapshot metadata must persist per-source diagnostics summary")
             if any(
                 block.request_dates != _expected_request_dates(block.source_key)
                 for block in counters.values()
