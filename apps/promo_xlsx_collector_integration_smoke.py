@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from tempfile import mkdtemp
 from pathlib import Path
 import sys
@@ -38,6 +39,16 @@ def main() -> None:
     first_handled = handled[0]
     if not first_handled.metadata_path or not Path(first_handled.metadata_path).exists():
         raise AssertionError("handled promo must persist metadata.json")
+    metadata_payload = json.loads(Path(first_handled.metadata_path).read_text(encoding="utf-8"))
+    for key in (
+        "ui_status",
+        "ui_status_confidence",
+        "download_action_state",
+        "status_evidence_sources",
+        "collector_ui_schema_version",
+    ):
+        if key not in metadata_payload:
+            raise AssertionError(f"handled promo metadata missing UI status field {key}: {metadata_payload}")
     if not first_handled.saved_path or not Path(first_handled.saved_path).exists():
         raise AssertionError("handled promo must resolve workbook.xlsx")
     print(f"run_dir: {tmp}")

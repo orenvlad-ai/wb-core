@@ -17,6 +17,7 @@ from packages.application.promo_campaign_archive import (  # noqa: E402
     ARTIFACT_STATE_AMBIGUOUS_DATE,
     ARTIFACT_STATE_COMPLETE,
     ARTIFACT_STATE_CORRUPTED,
+    ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD,
     ARTIFACT_STATE_METADATA_ONLY,
     ARTIFACT_STATE_WORKBOOK_WITHOUT_METADATA,
     audit_promo_campaign_archive,
@@ -70,6 +71,18 @@ def main() -> None:
             confidence="high",
             workbook_kind="corrupted",
         )
+        _write_promo_fixture(
+            runtime_dir=runtime_dir,
+            run_name="2026-04-26__ended-no-download",
+            promo_folder="1005__pending__ended-no-download",
+            promo_id=1005,
+            period_id=None,
+            title="Ended without download artifact",
+            confidence="high",
+            workbook_kind="missing",
+            ui_status="ended",
+            download_action_state="absent",
+        )
         sync_summary = sync_promo_campaign_archive(runtime_dir)
         orphan_dir = promo_campaign_archive_root(runtime_dir) / "orphan-workbook"
         orphan_dir.mkdir(parents=True, exist_ok=True)
@@ -82,15 +95,18 @@ def main() -> None:
             ARTIFACT_STATE_METADATA_ONLY: 1,
             ARTIFACT_STATE_AMBIGUOUS_DATE: 1,
             ARTIFACT_STATE_CORRUPTED: 1,
+            ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD: 1,
             ARTIFACT_STATE_WORKBOOK_WITHOUT_METADATA: 1,
         }
         for state, expected_count in expected.items():
             actual = int(counts.get(state, 0) or 0)
             if actual != expected_count:
                 raise AssertionError(f"{state}: expected {expected_count}, got {actual}: {audit}")
-        if int(audit.get("validation_failed_count") or 0) != 4:
-            raise AssertionError(f"expected 4 validation failures, got {audit}")
-        if len(audit.get("failure_examples") or []) != 4:
+        if int(audit.get("validation_failed_count") or 0) != 5:
+            raise AssertionError(f"expected 5 validation failures, got {audit}")
+        if int(audit.get("non_materializable_expected_count") or 0) != 1:
+            raise AssertionError(f"expected one expected non-materializable artifact, got {audit}")
+        if len(audit.get("failure_examples") or []) != 5:
             raise AssertionError(f"expected compact failure examples, got {audit}")
         result = materialize_promo_result_from_archive(
             runtime_dir=runtime_dir,
@@ -103,11 +119,16 @@ def main() -> None:
             raise AssertionError(f"invalid campaign artifacts must keep materialization incomplete, got {result}")
         result_diagnostics = result.diagnostics
         summary = result_diagnostics.get("artifact_validation_summary") or {}
-        if int(summary.get("validation_failed_count") or 0) != 3:
-            raise AssertionError(f"expected 3 covering validation failures, got {result_diagnostics}")
+        if int(summary.get("validation_failed_count") or 0) != 4:
+            raise AssertionError(f"expected 4 covering validation failures, got {result_diagnostics}")
+        if int(summary.get("non_materializable_expected_count") or 0) != 1:
+            raise AssertionError(f"expected one expected non-materializable covering campaign, got {result_diagnostics}")
         missing_campaigns = result_diagnostics.get("missing_campaign_artifacts") or []
-        if len(missing_campaigns) != 3:
+        if len(missing_campaigns) != 4:
             raise AssertionError(f"expected campaign-level missing artifacts, got {result_diagnostics}")
+        ended = [item for item in missing_campaigns if item.get("artifact_state") == ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD]
+        if not ended or ended[0].get("workbook_required") is not False:
+            raise AssertionError(f"ended no-download campaign must not require workbook, got {result_diagnostics}")
         print(
             "promo campaign archive integrity smoke passed: "
             f"states={counts}; validation_failed_count={audit.get('validation_failed_count')}"
@@ -120,10 +141,12 @@ def _write_promo_fixture(
     run_name: str,
     promo_folder: str,
     promo_id: int,
-    period_id: int,
+    period_id: int | None,
     title: str,
     confidence: str,
     workbook_kind: str,
+    ui_status: str = "active",
+    download_action_state: str = "available",
 ) -> None:
     promo_dir = runtime_dir / "promo_xlsx_collector_runs" / run_name / "promos" / promo_folder
     promo_dir.mkdir(parents=True, exist_ok=True)
@@ -147,8 +170,8 @@ def _write_promo_fixture(
         promo_start_at="2026-04-26T02:00",
         promo_end_at="2026-04-26T23:59",
         period_parse_confidence=confidence,
-        temporal_classification="current",
-        promo_status="Акция идёт",
+        temporal_classification="past" if ui_status == "ended" else "current",
+        promo_status="Акция завершилась" if ui_status == "ended" else "Акция идёт",
         promo_status_text="fixture",
         eligible_count=1,
         participating_count=1,
@@ -163,6 +186,23 @@ def _write_promo_fixture(
         workbook_header_summary=["Артикул WB", "Плановая цена для акции"] if workbook_kind == "valid" else [],
         workbook_has_date_fields=False,
         workbook_item_status_distinct_values=[],
+        ui_status=ui_status,
+        ui_status_confidence="high",
+        ui_status_raw_labels=["Акция завершилась"] if ui_status == "ended" else ["Акция идёт"],
+        download_action_state=download_action_state,
+        download_action_evidence=(
+            "configure_generate_download_buttons_absent"
+            if download_action_state == "absent"
+            else "configure_button_visible"
+        ),
+        status_evidence_sources=(
+            ["download_button_absent", "drawer_loaded", "footer_label", "title_match"]
+            if ui_status == "ended"
+            else ["drawer_loaded", "footer_label", "title_match"]
+        ),
+        ui_loaded_success=True,
+        campaign_identity_match=True,
+        collector_ui_schema_version="promo_collector_ui_status_v1",
     )
     (promo_dir / "metadata.json").write_text(
         json.dumps(metadata.__dict__, ensure_ascii=False, indent=2),

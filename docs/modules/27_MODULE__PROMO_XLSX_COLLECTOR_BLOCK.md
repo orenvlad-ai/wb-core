@@ -107,6 +107,21 @@ update_note: "Обновлён под archive-first promo semantics: collector r
   - `workbook_header_summary`
   - `workbook_has_date_fields`
   - `workbook_item_status_distinct_values`
+  - `ui_status`
+  - `ui_status_confidence`
+  - `ui_status_raw_labels`
+  - `download_action_state`
+  - `download_action_evidence`
+  - `status_evidence_sources`
+  - `ui_loaded_success`
+  - `campaign_identity_match`
+  - `collector_ui_schema_version`
+
+UI status metadata is observability/validation evidence, not metric truth:
+- `ui_status` normalizes card/drawer state as `active`, `ended`, `pending`, `future`, `unknown`, or `error`;
+- ended classification uses multi-signal evidence: loaded drawer/card, title/campaign identity match where available, sanitized status label such as `Акция завершилась`, and absent/disabled download action;
+- download action states are `available`, `absent`, `disabled`, `unknown`, and `ui_not_loaded`;
+- raw HTML, cookies, browser state, localStorage-derived data, tokens, and raw upstream payloads are not persisted in metadata.
 
 # 4. Артефакты по модулю
 

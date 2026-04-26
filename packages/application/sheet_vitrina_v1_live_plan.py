@@ -678,6 +678,14 @@ def _promo_invalid_reason(note: str) -> str | None:
         return invalid_exact
     if "missing_daily_price_truth_nm_ids" in values:
         return "missing_price_truth"
+    artifact_reason = values.get("artifact_validation_failed", "")
+    if (
+        ("metadata_only_ended_without_download" in artifact_reason or "ended_without_download" in artifact_reason)
+        and "metadata_only_true_artifact_loss" not in artifact_reason
+        and "workbook_file_missing" not in artifact_reason
+        and "workbook_unusable" not in artifact_reason
+    ):
+        return "ended_without_download"
     if "missing_campaign_artifacts" in values:
         return "workbook_or_archive_artifact_missing"
     latest_attempt_note = values.get("latest_attempt_note")
