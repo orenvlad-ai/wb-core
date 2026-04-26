@@ -1152,7 +1152,10 @@ class RegistryUploadHttpEntrypoint:
         emit = log or _noop_log
         with self._sheet_cycle_lock:
             started_at = self.activated_at_factory()
-            requested_as_of_date = as_of_date or default_business_as_of_date(self.now_factory())
+            requested_as_of_date = _resolve_sheet_refresh_as_of_date(
+                as_of_date,
+                now=self.now_factory(),
+            )
             self.runtime.mark_sheet_vitrina_auto_update_started(
                 started_at=started_at,
                 as_of_date=requested_as_of_date,
@@ -1172,7 +1175,7 @@ class RegistryUploadHttpEntrypoint:
             load_payload: dict[str, Any] | None = None
             try:
                 refresh_payload = self._run_sheet_refresh(
-                    as_of_date=as_of_date,
+                    as_of_date=requested_as_of_date,
                     log=emit,
                     execution_mode=EXECUTION_MODE_AUTO_DAILY,
                 )
@@ -1277,13 +1280,19 @@ class RegistryUploadHttpEntrypoint:
         emit = log or _noop_log
         with self._sheet_cycle_lock:
             try:
+                requested_as_of_date = as_of_date or "default"
+                effective_as_of_date = _resolve_sheet_refresh_as_of_date(
+                    as_of_date,
+                    now=self.now_factory(),
+                )
                 current_state = self.runtime.load_current_state()
                 emit(
                     _format_log_event(
                         "cycle_start",
                         cycle="refresh",
                         route=SHEET_VITRINA_REFRESH_ROUTE,
-                        requested_as_of_date=as_of_date or "default",
+                        requested_as_of_date=requested_as_of_date,
+                        effective_as_of_date=effective_as_of_date,
                         action="build_ready_snapshot_only",
                         execution_mode=execution_mode,
                     )
@@ -1305,7 +1314,7 @@ class RegistryUploadHttpEntrypoint:
                     )
                 )
                 plan = self.sheet_plan_block.build_plan(
-                    as_of_date=as_of_date,
+                    as_of_date=effective_as_of_date,
                     log=emit,
                     execution_mode=execution_mode,
                 )
@@ -2869,6 +2878,18 @@ def _normalize_source_group_id(source_group_id: str) -> str:
 
 def _source_group_config(source_group_id: str) -> Mapping[str, Any]:
     return WEB_VITRINA_SOURCE_GROUPS[_normalize_source_group_id(source_group_id)]
+
+
+def _resolve_sheet_refresh_as_of_date(value: str | None, *, now: datetime) -> str:
+    default_as_of_date = default_business_as_of_date(now)
+    normalized = str(value or "").strip() or default_as_of_date
+    try:
+        datetime.strptime(normalized, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"Дата обновления должна быть в формате YYYY-MM-DD, получено {normalized!r}") from exc
+    if normalized == current_business_date_iso(now):
+        return default_as_of_date
+    return normalized
 
 
 def _resolve_group_refresh_selected_date(value: str | None, *, now: datetime) -> str:

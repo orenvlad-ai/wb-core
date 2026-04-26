@@ -389,6 +389,7 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - manual invalid run does not blank accepted yesterday/current truth and does not create persisted due retry states.
 - Web-vitrina session highlight metadata is action-scoped:
   - full `POST /v1/sheet-vitrina-v1/refresh` emits `updated_cells` across every refreshed temporal date column, normally `yesterday_closed + today_current`;
+  - full refresh does not treat `date_from/date_to` period selection or the rightmost `today_current` table column as the ready-snapshot key; current business date input is normalized to the previous closed day before materialization;
   - `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` emits `updated_cells` only for the selected source group and selected `as_of_date`;
   - `updated` means the visible ready value changed, `latest_confirmed` means the cell was checked and filled from accepted/latest-confirmed fallback, and the browser must not persist this as styling truth.
 - Для `stocks` current checkpoint теперь обязан:
