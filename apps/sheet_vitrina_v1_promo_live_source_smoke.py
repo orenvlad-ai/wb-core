@@ -505,6 +505,14 @@ def _assert_promo_internal_diagnostics(result: object, *, expected_snapshot_date
         raise AssertionError(f"promo diagnostics must distinguish collector reuse, got {counters}")
     if counters.get("validated_workbook_usable_count") is None:
         raise AssertionError(f"promo diagnostics must expose validated workbook count, got {counters}")
+    for key in (
+        "manifest_campaign_seen_count",
+        "manifest_timeline_match_count",
+        "manifest_drawer_avoid_count",
+        "manifest_match_duration_ms",
+    ):
+        if key not in counters:
+            raise AssertionError(f"promo diagnostics must expose campaign manifest counter {key}, got {counters}")
     artifact_summary = diagnostics.get("artifact_validation_summary") or {}
     if artifact_summary.get("schema_version") != "promo_artifact_validation_v1":
         raise AssertionError(f"promo artifact validation summary missing, got {diagnostics}")

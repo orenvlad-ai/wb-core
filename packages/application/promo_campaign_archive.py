@@ -133,6 +133,13 @@ class PromoCampaignArtifactValidation:
     status_evidence_sources: list[str]
     ui_loaded_success: bool
     campaign_identity_match: bool
+    manifest_status: str | None
+    manifest_status_confidence: str | None
+    manifest_downloadability: str | None
+    manifest_match_confidence: str | None
+    manifest_decision: str | None
+    manifest_evidence_sources: list[str]
+    manifest_participation_status: str | None
 
     @property
     def is_complete(self) -> bool:
@@ -171,6 +178,13 @@ class PromoCampaignArtifactValidation:
             "status_evidence_sources": list(self.status_evidence_sources),
             "ui_loaded_success": self.ui_loaded_success,
             "campaign_identity_match": self.campaign_identity_match,
+            "manifest_status": self.manifest_status,
+            "manifest_status_confidence": self.manifest_status_confidence,
+            "manifest_downloadability": self.manifest_downloadability,
+            "manifest_match_confidence": self.manifest_match_confidence,
+            "manifest_decision": self.manifest_decision,
+            "manifest_evidence_sources": list(self.manifest_evidence_sources),
+            "manifest_participation_status": self.manifest_participation_status,
         }
 
 
@@ -354,6 +368,13 @@ def validate_promo_campaign_artifact(
         status_evidence_sources=list(record.metadata.status_evidence_sources),
         ui_loaded_success=record.metadata.ui_loaded_success,
         campaign_identity_match=record.metadata.campaign_identity_match,
+        manifest_status=record.metadata.manifest_status,
+        manifest_status_confidence=record.metadata.manifest_status_confidence,
+        manifest_downloadability=record.metadata.manifest_downloadability,
+        manifest_match_confidence=record.metadata.manifest_match_confidence,
+        manifest_decision=record.metadata.manifest_decision,
+        manifest_evidence_sources=list(record.metadata.manifest_evidence_sources),
+        manifest_participation_status=record.metadata.manifest_participation_status,
     )
 
 
@@ -1162,6 +1183,13 @@ def _validate_orphan_archive_dir(archive_dir: Path) -> PromoCampaignArtifactVali
         status_evidence_sources=_normalize_text_list(metadata_payload.get("status_evidence_sources")),
         ui_loaded_success=bool(metadata_payload.get("ui_loaded_success", False)),
         campaign_identity_match=bool(metadata_payload.get("campaign_identity_match", False)),
+        manifest_status=_normalize_optional_text(metadata_payload.get("manifest_status")),
+        manifest_status_confidence=_normalize_optional_text(metadata_payload.get("manifest_status_confidence")),
+        manifest_downloadability=_normalize_optional_text(metadata_payload.get("manifest_downloadability")),
+        manifest_match_confidence=_normalize_optional_text(metadata_payload.get("manifest_match_confidence")),
+        manifest_decision=_normalize_optional_text(metadata_payload.get("manifest_decision")),
+        manifest_evidence_sources=_normalize_text_list(metadata_payload.get("manifest_evidence_sources")),
+        manifest_participation_status=_normalize_optional_text(metadata_payload.get("manifest_participation_status")),
     )
 
 
@@ -1193,7 +1221,21 @@ def _metadata_indicates_ended_without_download(metadata: PromoMetadata) -> bool:
         and "timeline_title" in timeline_sources
         and "timeline_period_text" in timeline_sources
     )
-    return drawer_evidence or timeline_evidence
+    manifest_sources = set(metadata.manifest_evidence_sources or [])
+    manifest_evidence = (
+        str(metadata.manifest_decision or "") == "drawer_avoid_manifest_non_materializable"
+        and str(metadata.manifest_status or "") == "ended"
+        and str(metadata.manifest_status_confidence or "") == "high"
+        and str(metadata.manifest_downloadability or "") == "not_available"
+        and str(metadata.manifest_match_confidence or "") == "high"
+        and metadata.drawer_opened is False
+        and str(metadata.drawer_skip_reason or "") == "manifest_ended_non_materializable"
+        and "manifest_title_exact" in manifest_sources
+        and "manifest_period_exact" in manifest_sources
+        and "manifest_participation_status" in manifest_sources
+        and "manifest_end_date_elapsed" in manifest_sources
+    )
+    return drawer_evidence or timeline_evidence or manifest_evidence
 
 
 def _normalize_text_list(value: object) -> list[str]:
@@ -1581,6 +1623,22 @@ def _metadata_fingerprint(metadata: PromoMetadata) -> str:
         "drawer_open_reason": metadata.drawer_open_reason,
         "drawer_skip_reason": metadata.drawer_skip_reason,
         "timeline_classifier_schema_version": metadata.timeline_classifier_schema_version,
+        "manifest_schema_version": metadata.manifest_schema_version,
+        "manifest_source": metadata.manifest_source,
+        "manifest_campaign_id": metadata.manifest_campaign_id,
+        "manifest_promo_id": metadata.manifest_promo_id,
+        "manifest_title": metadata.manifest_title,
+        "manifest_period_text": metadata.manifest_period_text,
+        "manifest_status": metadata.manifest_status,
+        "manifest_status_confidence": metadata.manifest_status_confidence,
+        "manifest_downloadability": metadata.manifest_downloadability,
+        "manifest_downloadability_confidence": metadata.manifest_downloadability_confidence,
+        "manifest_match_confidence": metadata.manifest_match_confidence,
+        "manifest_decision": metadata.manifest_decision,
+        "manifest_evidence_sources": metadata.manifest_evidence_sources,
+        "manifest_drawer_skip_reason": metadata.manifest_drawer_skip_reason,
+        "manifest_drawer_required_reason": metadata.manifest_drawer_required_reason,
+        "manifest_participation_status": metadata.manifest_participation_status,
     }
     raw = json.dumps(stable_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()

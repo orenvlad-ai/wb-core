@@ -17,6 +17,8 @@ from openpyxl import load_workbook
 from packages.adapters.promo_xlsx_collector_block import PromoCollectorDriver
 from packages.application.promo_campaign_archive import resolve_reusable_campaign
 from packages.contracts.promo_xlsx_collector_block import (
+    CampaignManifestItem,
+    CampaignManifestSnapshot,
     CollectorRunSummary,
     CollectorStateSnapshot,
     DownloadArtifact,
@@ -67,11 +69,13 @@ _COMMON_EXPORT_HEADERS = {
 COLLECTOR_UI_SCHEMA_VERSION = "promo_collector_ui_status_v1"
 COLLECTOR_PREFLIGHT_SCHEMA_VERSION = "promo_collector_preflight_v1"
 TIMELINE_CLASSIFIER_SCHEMA_VERSION = "promo_timeline_classifier_v1"
+MANIFEST_SCHEMA_VERSION = "promo_campaign_manifest_v1"
 _ENDED_LABEL_KEYWORDS = ("акция завершилась", "завершилась", "акция завершена", "завершена")
 _ACTIVE_LABEL_KEYWORDS = ("акция идёт", "акция идет")
 _FUTURE_LABEL_KEYWORDS = ("запланирована", "запланировано")
 _PENDING_LABEL_KEYWORDS = ("ожидает", "на модерации")
 _TIMELINE_NON_MATERIALIZABLE_STATUSES = {"ended"}
+_MANIFEST_NON_MATERIALIZABLE_STATUSES = {"ended"}
 
 
 class PromoXlsxCollectorBlock:
@@ -125,6 +129,8 @@ class PromoXlsxCollectorBlock:
             candidates = [candidate for candidate in candidates if candidate is not None]
             summary.timeline_candidates_found = len(candidates)
             summary.timeline_card_seen_count = len(candidates)
+            manifest_snapshot = self._campaign_manifest_snapshot()
+            self._apply_manifest_snapshot_summary(summary, manifest_snapshot)
             self._write_json(run_dir / "run_summary.json", asdict(summary))
 
             downloads_seen = 0
@@ -133,7 +139,11 @@ class PromoXlsxCollectorBlock:
                 if request.max_downloads is not None and downloads_seen >= request.max_downloads:
                     break
 
-                outcome = self._process_candidate(request=request, candidate=candidate)
+                outcome = self._process_candidate(
+                    request=request,
+                    candidate=candidate,
+                    manifest_snapshot=manifest_snapshot,
+                )
                 if outcome.status == "blocked_before_card" and recovery_available:
                     current_timeline_count = self._driver.current_timeline_count()
                     if current_timeline_count <= 0:
@@ -143,7 +153,11 @@ class PromoXlsxCollectorBlock:
                         recovery_available = False
                         self._write_json(run_dir / "run_summary.json", asdict(summary))
                         if recovery.hydrated_success:
-                            outcome = self._process_candidate(request=request, candidate=candidate)
+                            outcome = self._process_candidate(
+                                request=request,
+                                candidate=candidate,
+                                manifest_snapshot=manifest_snapshot,
+                            )
 
                 summary.promos.append(outcome)
                 self._apply_outcome_preflight_summary(summary, outcome)
@@ -189,6 +203,7 @@ class PromoXlsxCollectorBlock:
         *,
         request: PromoXlsxCollectorRequest,
         candidate: TimelineCandidate,
+        manifest_snapshot: CampaignManifestSnapshot,
     ) -> PromoOutcome:
         run_dir = Path(request.output_root)
         timeline_started = time.perf_counter()
@@ -201,6 +216,27 @@ class PromoXlsxCollectorBlock:
                 request=request,
                 timeline_decision=timeline_decision,
                 timeline_shallow_duration_ms=timeline_shallow_duration_ms,
+            )
+
+        manifest_match_started = time.perf_counter()
+        manifest_decision = classify_manifest_preflight(
+            candidate=candidate,
+            manifest_snapshot=manifest_snapshot,
+        )
+        manifest_match_duration_ms = _elapsed_ms(manifest_match_started)
+        manifest_decision = {
+            **manifest_decision,
+            "manifest_match_duration_ms": manifest_match_duration_ms,
+        }
+        if manifest_decision["manifest_decision"] == "drawer_avoid_manifest_non_materializable":
+            return self._manifest_non_materializable(
+                run_dir=run_dir,
+                candidate=candidate,
+                request=request,
+                timeline_decision=timeline_decision,
+                manifest_decision=manifest_decision,
+                timeline_shallow_duration_ms=timeline_shallow_duration_ms,
+                manifest_match_duration_ms=manifest_match_duration_ms,
             )
 
         preflight_started = time.perf_counter()
@@ -263,6 +299,7 @@ class PromoXlsxCollectorBlock:
                 drawer_skip_reason=None,
                 fallback_to_full_flow_reason=timeline_decision.get("fallback_to_full_flow_reason"),
                 timeline_classifier_schema_version=TIMELINE_CLASSIFIER_SCHEMA_VERSION,
+                **_manifest_metadata_fields(manifest_snapshot, manifest_decision),
             )
             return PromoOutcome(
                 promo_title=candidate.title,
@@ -314,6 +351,8 @@ class PromoXlsxCollectorBlock:
                 timeline_candidate=candidate,
                 timeline_decision=timeline_decision,
                 drawer_opened=True,
+                manifest_snapshot=manifest_snapshot,
+                manifest_decision=manifest_decision,
             )
             metadata_path = promo_folder / "metadata.json"
             self._write_json(metadata_path, asdict(metadata))
@@ -369,6 +408,8 @@ class PromoXlsxCollectorBlock:
                 timeline_candidate=candidate,
                 timeline_decision=timeline_decision,
                 drawer_opened=True,
+                manifest_snapshot=manifest_snapshot,
+                manifest_decision=manifest_decision,
             )
             metadata_path = promo_folder / "metadata.json"
             self._write_json(metadata_path, asdict(metadata))
@@ -422,6 +463,8 @@ class PromoXlsxCollectorBlock:
                 timeline_candidate=candidate,
                 timeline_decision=timeline_decision,
                 drawer_opened=True,
+                manifest_snapshot=manifest_snapshot,
+                manifest_decision=manifest_decision,
             )
             metadata_path = promo_folder / "metadata.json"
             self._write_json(metadata_path, asdict(metadata))
@@ -464,6 +507,8 @@ class PromoXlsxCollectorBlock:
                 deep_flow_duration_ms=_elapsed_ms(deep_flow_started),
                 timeline_decision=timeline_decision,
                 drawer_open_duration_ms=drawer_open_duration_ms,
+                manifest_snapshot=manifest_snapshot,
+                manifest_decision=manifest_decision,
             )
 
         try:
@@ -481,6 +526,8 @@ class PromoXlsxCollectorBlock:
                 generate_screen_attempted=True,
                 timeline_decision=timeline_decision,
                 drawer_open_duration_ms=drawer_open_duration_ms,
+                manifest_snapshot=manifest_snapshot,
+                manifest_decision=manifest_decision,
             )
         try:
             ready_state = self._driver.generate_file_and_wait_ready(slugify(card.promo_title))
@@ -498,6 +545,8 @@ class PromoXlsxCollectorBlock:
                 generate_screen_attempted=True,
                 timeline_decision=timeline_decision,
                 drawer_open_duration_ms=drawer_open_duration_ms,
+                manifest_snapshot=manifest_snapshot,
+                manifest_decision=manifest_decision,
             )
         try:
             download = self._driver.download_current_workbook()
@@ -552,6 +601,8 @@ class PromoXlsxCollectorBlock:
             timeline_candidate=candidate,
             timeline_decision=timeline_decision,
             drawer_opened=True,
+            manifest_snapshot=manifest_snapshot,
+            manifest_decision=manifest_decision,
         )
         metadata_path = promo_folder / "metadata.json"
         self._write_json(metadata_path, asdict(metadata))
@@ -587,11 +638,67 @@ class PromoXlsxCollectorBlock:
             ),
         )
 
+    def _campaign_manifest_snapshot(self) -> CampaignManifestSnapshot:
+        snapshot_method = getattr(self._driver, "campaign_manifest_snapshot", None)
+        if not callable(snapshot_method):
+            return CampaignManifestSnapshot()
+        try:
+            snapshot = snapshot_method()
+        except Exception as exc:
+            return CampaignManifestSnapshot(
+                manifest_source="unknown",
+                manifest_loaded_success=False,
+                manifest_error_kind=f"manifest_snapshot_error={type(exc).__name__}",
+            )
+        if isinstance(snapshot, CampaignManifestSnapshot):
+            return snapshot
+        return CampaignManifestSnapshot()
+
+    @staticmethod
+    def _apply_manifest_snapshot_summary(
+        summary: CollectorRunSummary,
+        manifest_snapshot: CampaignManifestSnapshot,
+    ) -> None:
+        summary.manifest_loaded_success = bool(manifest_snapshot.manifest_loaded_success)
+        summary.manifest_source = manifest_snapshot.manifest_source
+        summary.manifest_campaign_seen_count = int(manifest_snapshot.manifest_campaign_count or 0)
+        summary.manifest_load_duration_ms = int(manifest_snapshot.manifest_load_duration_ms or 0)
+        summary.manifest_parse_duration_ms = int(manifest_snapshot.manifest_parse_duration_ms or 0)
+
     @staticmethod
     def _apply_outcome_preflight_summary(summary: CollectorRunSummary, outcome: PromoOutcome) -> None:
         metadata = outcome.metadata
         if outcome.drawer_opened is True:
             summary.opened_drawer_count += 1
+        manifest_decision = str(getattr(metadata, "manifest_decision", "") or "")
+        manifest_match_confidence = str(getattr(metadata, "manifest_match_confidence", "") or "none")
+        manifest_status = str(getattr(metadata, "manifest_status", "") or "unknown")
+        manifest_downloadability = str(getattr(metadata, "manifest_downloadability", "") or "unknown")
+        if manifest_match_confidence == "high":
+            summary.manifest_timeline_match_count += 1
+        elif manifest_match_confidence in {"medium", "low"}:
+            summary.manifest_match_low_confidence_count += 1
+        elif manifest_decision == "drawer_required_no_manifest":
+            summary.manifest_missing_for_card_count += 1
+        if manifest_status != "unknown":
+            summary.manifest_status_classified_count += 1
+        if manifest_downloadability != "unknown":
+            summary.manifest_downloadability_classified_count += 1
+        if manifest_decision == "drawer_avoid_manifest_non_materializable":
+            summary.manifest_drawer_avoid_count += 1
+            summary.drawer_open_avoided_count += 1
+            summary.heavy_flow_avoided_count += 1
+            summary.estimated_heavy_flow_avoided_count += 1
+        elif manifest_decision:
+            summary.manifest_drawer_required_count += 1
+            if manifest_decision in {
+                "drawer_required_manifest_unknown",
+                "drawer_required_no_manifest",
+            }:
+                summary.manifest_unknown_full_flow_count += 1
+            if manifest_decision == "drawer_required_manifest_low_confidence":
+                summary.manifest_low_confidence_full_flow_count += 1
+        summary.manifest_match_duration_ms += int(getattr(metadata, "manifest_match_duration_ms", 0) or 0)
         decision = str(outcome.timeline_classification_decision or "")
         if decision == "timeline_non_materializable_expected":
             summary.drawer_open_avoided_count += 1
@@ -599,7 +706,7 @@ class PromoXlsxCollectorBlock:
             summary.heavy_flow_avoided_count += 1
             summary.estimated_heavy_flow_avoided_count += 1
             _increment_count(summary.timeline_skip_reason_counts, str(outcome.drawer_skip_reason or "unknown"))
-        elif decision in {"drawer_required", "unknown_full_flow"}:
+        elif decision in {"drawer_required", "unknown_full_flow"} and manifest_decision != "drawer_avoid_manifest_non_materializable":
             summary.drawer_open_required_count += 1
             if decision == "unknown_full_flow":
                 summary.timeline_unknown_full_flow_count += 1
@@ -731,6 +838,123 @@ class PromoXlsxCollectorBlock:
             ),
         )
 
+    def _manifest_non_materializable(
+        self,
+        *,
+        run_dir: Path,
+        candidate: TimelineCandidate,
+        request: PromoXlsxCollectorRequest,
+        timeline_decision: dict[str, Any],
+        manifest_decision: dict[str, Any],
+        timeline_shallow_duration_ms: int,
+        manifest_match_duration_ms: int,
+    ) -> PromoOutcome:
+        manifest_item = manifest_decision.get("manifest_campaign")
+        promo_id = getattr(manifest_item, "promo_id", None)
+        promo_folder = run_dir / "promos" / build_promo_folder_name(promo_id, None, candidate.title)
+        promo_folder.mkdir(parents=True, exist_ok=True)
+        manifest_path = promo_folder / "manifest_card.json"
+        manifest_payload = _manifest_candidate_diagnostic(
+            candidate=candidate,
+            manifest_decision=manifest_decision,
+            drawer_opened=False,
+        )
+        self._write_json(manifest_path, manifest_payload)
+        promo_title = str(getattr(manifest_item, "title", None) or candidate.title)
+        promo_period_text = str(
+            getattr(manifest_item, "period_text", None)
+            or candidate.short_period_text
+            or ""
+        )
+        promo_start_at = getattr(manifest_item, "start_at", None)
+        promo_end_at = getattr(manifest_item, "end_at", None)
+        promo_status = str(getattr(manifest_item, "lifecycle_status", "") or "ended")
+        metadata = PromoMetadata(
+            collected_at=_now_iso(),
+            trace_run_dir=request.output_root,
+            source_tab=request.source_tab,
+            source_filter_code=request.source_filter_code,
+            calendar_url=self._driver.current_url(),
+            promo_id=promo_id,
+            period_id=None,
+            promo_title=promo_title,
+            promo_period_text=promo_period_text,
+            promo_start_at=promo_start_at,
+            promo_end_at=promo_end_at,
+            period_parse_confidence="high" if promo_start_at and promo_end_at else "low",
+            temporal_classification="past",
+            promo_status=promo_status,
+            promo_status_text=str(getattr(manifest_item, "participation_status", "") or "") or None,
+            eligible_count=getattr(manifest_item, "goods_count", None),
+            participating_count=None,
+            excluded_count=None,
+            export_kind=None,
+            original_suggested_filename=None,
+            saved_filename=None,
+            saved_path=None,
+            ui_status="unknown",
+            ui_status_confidence="low",
+            ui_status_raw_labels=[],
+            download_action_state="unknown",
+            download_action_evidence="manifest_non_materializable_no_drawer",
+            status_evidence_sources=list(getattr(manifest_item, "evidence_sources", []) or []),
+            ui_loaded_success=False,
+            campaign_identity_match=False,
+            collector_ui_schema_version=COLLECTOR_UI_SCHEMA_VERSION,
+            early_preflight_decision="manifest_non_materializable_expected",
+            heavy_flow_required=False,
+            heavy_flow_reason="manifest_high_confidence_non_materializable",
+            non_materializable_reason=str(manifest_decision.get("non_materializable_reason") or ""),
+            fallback_to_full_flow_reason=None,
+            collector_preflight_schema_version=COLLECTOR_PREFLIGHT_SCHEMA_VERSION,
+            timeline_status=candidate.timeline_status,
+            timeline_status_confidence=candidate.timeline_status_confidence,
+            timeline_status_raw_labels=list(candidate.timeline_status_raw_labels),
+            timeline_evidence_sources=list(candidate.timeline_evidence_sources),
+            timeline_period_text=candidate.short_period_text,
+            timeline_goods_count=candidate.timeline_goods_count,
+            timeline_autoaction_marker=candidate.timeline_autoaction_marker,
+            timeline_classification_decision=timeline_decision.get("timeline_classification_decision"),
+            drawer_opened=False,
+            drawer_open_reason=None,
+            drawer_skip_reason=str(manifest_decision.get("drawer_skip_reason") or "manifest_non_materializable"),
+            timeline_classifier_schema_version=TIMELINE_CLASSIFIER_SCHEMA_VERSION,
+            **_manifest_metadata_fields(
+                manifest_decision.get("manifest_snapshot"),
+                {
+                    **manifest_decision,
+                    "manifest_match_duration_ms": manifest_match_duration_ms,
+                },
+            ),
+        )
+        metadata_path = promo_folder / "metadata.json"
+        self._write_json(metadata_path, asdict(metadata))
+        return PromoOutcome(
+            promo_title=promo_title,
+            timeline_block_index=candidate.index,
+            timeline_short_period_text=candidate.short_period_text,
+            timeline_preliminary_classification=candidate.preliminary_classification,
+            status="skipped_past",
+            promo_id=promo_id,
+            period_id=None,
+            promo_folder=str(promo_folder),
+            blocker=None,
+            metadata=metadata,
+            metadata_path=str(metadata_path),
+            early_preflight_decision="manifest_non_materializable_expected",
+            heavy_flow_required=False,
+            heavy_flow_reason="manifest_high_confidence_non_materializable",
+            non_materializable_reason=str(manifest_decision.get("non_materializable_reason") or ""),
+            fallback_to_full_flow_reason=None,
+            timeline_shallow_duration_ms=timeline_shallow_duration_ms,
+            **_timeline_outcome_fields(
+                candidate,
+                timeline_decision,
+                drawer_opened=False,
+                drawer_open_duration_ms=0,
+            ),
+        )
+
     def _resolve_reusable_archive_record(
         self,
         *,
@@ -767,6 +991,8 @@ class PromoXlsxCollectorBlock:
         record,
         preflight: dict[str, Any] | None = None,
         timeline_decision: dict[str, Any] | None = None,
+        manifest_snapshot: CampaignManifestSnapshot | None = None,
+        manifest_decision: dict[str, Any] | None = None,
         early_preflight_duration_ms: int = 0,
         deep_flow_duration_ms: int = 0,
         drawer_open_duration_ms: int = 0,
@@ -816,6 +1042,8 @@ class PromoXlsxCollectorBlock:
             timeline_candidate=candidate,
             timeline_decision=timeline_decision,
             drawer_opened=True,
+            manifest_snapshot=manifest_snapshot,
+            manifest_decision=manifest_decision,
         )
         metadata_path = promo_folder / "metadata.json"
         self._write_json(metadata_path, asdict(metadata))
@@ -872,6 +1100,8 @@ class PromoXlsxCollectorBlock:
         request: PromoXlsxCollectorRequest,
         preflight: dict[str, Any] | None = None,
         timeline_decision: dict[str, Any] | None = None,
+        manifest_snapshot: CampaignManifestSnapshot | None = None,
+        manifest_decision: dict[str, Any] | None = None,
         early_preflight_duration_ms: int = 0,
         deep_flow_duration_ms: int = 0,
         drawer_open_duration_ms: int = 0,
@@ -899,6 +1129,8 @@ class PromoXlsxCollectorBlock:
             timeline_candidate=candidate,
             timeline_decision=timeline_decision,
             drawer_opened=True,
+            manifest_snapshot=manifest_snapshot,
+            manifest_decision=manifest_decision,
         )
         metadata_path = promo_folder / "metadata.json"
         self._write_json(metadata_path, asdict(metadata))
@@ -940,6 +1172,8 @@ class PromoXlsxCollectorBlock:
         blocker: str,
         preflight: dict[str, Any] | None = None,
         timeline_decision: dict[str, Any] | None = None,
+        manifest_snapshot: CampaignManifestSnapshot | None = None,
+        manifest_decision: dict[str, Any] | None = None,
         early_preflight_duration_ms: int = 0,
         deep_flow_duration_ms: int = 0,
         drawer_open_duration_ms: int = 0,
@@ -976,6 +1210,8 @@ class PromoXlsxCollectorBlock:
             timeline_candidate=candidate,
             timeline_decision=timeline_decision,
             drawer_opened=True,
+            manifest_snapshot=manifest_snapshot,
+            manifest_decision=manifest_decision,
         )
         metadata_path = promo_folder / "metadata.json"
         self._write_json(metadata_path, asdict(metadata))
@@ -1125,6 +1361,137 @@ def classify_timeline_preflight(candidate: TimelineCandidate) -> dict[str, Any]:
     if not has_period_evidence:
         return _timeline_drawer_decision("unknown_full_flow", "missing_timeline_period_evidence")
     return _timeline_drawer_decision("unknown_full_flow", "conservative_timeline_full_flow")
+
+
+def classify_manifest_preflight(
+    *,
+    candidate: TimelineCandidate,
+    manifest_snapshot: CampaignManifestSnapshot,
+) -> dict[str, Any]:
+    base = {
+        "manifest_snapshot": manifest_snapshot,
+        "manifest_campaign": None,
+        "manifest_match_confidence": "none",
+        "manifest_decision": "drawer_required_no_manifest",
+        "drawer_skip_reason": None,
+        "drawer_required_reason": "manifest_not_loaded",
+        "non_materializable_reason": None,
+        "evidence_sources": [],
+        "manifest_match_duration_ms": 0,
+    }
+    if not manifest_snapshot.manifest_loaded_success or not manifest_snapshot.campaigns:
+        return base
+
+    matches = [
+        _match_manifest_campaign(candidate=candidate, item=item)
+        for item in manifest_snapshot.campaigns
+    ]
+    matches = [match for match in matches if match["manifest_match_confidence"] != "none"]
+    if not matches:
+        return {
+            **base,
+            "manifest_decision": "drawer_required_no_manifest",
+            "drawer_required_reason": "manifest_missing_for_card",
+        }
+
+    confidence_rank = {"high": 3, "medium": 2, "low": 1, "none": 0}
+    matches.sort(
+        key=lambda match: (
+            confidence_rank.get(str(match["manifest_match_confidence"]), 0),
+            len(match.get("evidence_sources") or []),
+        ),
+        reverse=True,
+    )
+    best = matches[0]
+    same_rank_count = sum(
+        1
+        for match in matches
+        if confidence_rank.get(str(match["manifest_match_confidence"]), 0)
+        == confidence_rank.get(str(best["manifest_match_confidence"]), 0)
+    )
+    if same_rank_count > 1:
+        return {
+            **base,
+            **best,
+            "manifest_match_confidence": "low",
+            "manifest_decision": "drawer_required_manifest_low_confidence",
+            "drawer_required_reason": "ambiguous_manifest_match",
+        }
+
+    item = best["manifest_campaign"]
+    match_confidence = str(best["manifest_match_confidence"] or "none")
+    status = str(getattr(item, "lifecycle_status", "") or "unknown")
+    status_confidence = str(getattr(item, "lifecycle_status_confidence", "") or "low")
+    downloadability = str(getattr(item, "downloadability", "") or "unknown")
+    downloadability_confidence = str(getattr(item, "downloadability_confidence", "") or "low")
+    high_confidence_non_materializable = (
+        match_confidence == "high"
+        and status in _MANIFEST_NON_MATERIALIZABLE_STATUSES
+        and status_confidence == "high"
+        and downloadability == "not_available"
+        and downloadability_confidence == "high"
+    )
+    if high_confidence_non_materializable:
+        return {
+            **base,
+            **best,
+            "manifest_decision": "drawer_avoid_manifest_non_materializable",
+            "drawer_skip_reason": "manifest_ended_non_materializable",
+            "drawer_required_reason": None,
+            "non_materializable_reason": "ended_without_download",
+        }
+
+    if match_confidence != "high":
+        return {
+            **base,
+            **best,
+            "manifest_decision": "drawer_required_manifest_low_confidence",
+            "drawer_required_reason": "low_confidence_manifest_match",
+        }
+    if status in {"active", "future", "pending"} or downloadability == "available":
+        return {
+            **base,
+            **best,
+            "manifest_decision": "drawer_required_manifest_active_or_downloadable",
+            "drawer_required_reason": "manifest_active_or_downloadable",
+        }
+    return {
+        **base,
+        **best,
+        "manifest_decision": "drawer_required_manifest_unknown",
+        "drawer_required_reason": "manifest_status_or_downloadability_unknown",
+    }
+
+
+def _match_manifest_campaign(
+    *,
+    candidate: TimelineCandidate,
+    item: CampaignManifestItem,
+) -> dict[str, Any]:
+    evidence_sources: list[str] = []
+    candidate_title_key = _title_match_key(candidate.title)
+    manifest_title_key = _title_match_key(item.title)
+    title_matches = bool(candidate_title_key and candidate_title_key == manifest_title_key)
+    if title_matches:
+        evidence_sources.append("manifest_title_exact")
+    candidate_period_key = _period_match_key(candidate.short_period_text)
+    manifest_period_key = _period_match_key(item.period_text)
+    period_matches = bool(candidate_period_key and candidate_period_key == manifest_period_key)
+    if period_matches:
+        evidence_sources.append("manifest_period_exact")
+    confidence = "none"
+    if title_matches and period_matches:
+        confidence = "high"
+    elif title_matches:
+        confidence = "medium"
+    elif period_matches and _title_token_overlap(candidate.title, item.title) >= 2:
+        confidence = "low"
+        evidence_sources.append("manifest_title_token_overlap")
+    return {
+        "manifest_campaign": item,
+        "manifest_match_confidence": confidence,
+        "evidence_sources": evidence_sources,
+    }
 
 
 def _timeline_drawer_decision(decision: str, reason: str) -> dict[str, Any]:
@@ -1414,6 +1781,35 @@ def _normalize_label(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "").replace("\xa0", " ")).strip().lower()
 
 
+def _title_match_key(value: str | None) -> str:
+    normalized = _normalize_label(str(value or "").replace("ё", "е"))
+    normalized = re.sub(r"[^\w]+", " ", normalized, flags=re.UNICODE)
+    tokens = [token for token in normalized.split() if token]
+    return " ".join(tokens)
+
+
+def _period_match_key(value: str | None) -> str:
+    normalized = _normalize_label(str(value or "").replace("ё", "е"))
+    normalized = normalized.replace("→", "-").replace("—", "-")
+    normalized = re.sub(r"\s*-\s*", "-", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip()
+
+
+def _title_token_overlap(left: str | None, right: str | None) -> int:
+    left_tokens = {
+        token
+        for token in _title_match_key(left).split()
+        if len(token) >= 4 and token not in {"акция", "автоакция"}
+    }
+    right_tokens = {
+        token
+        for token in _title_match_key(right).split()
+        if len(token) >= 4 and token not in {"акция", "автоакция"}
+    }
+    return len(left_tokens & right_tokens)
+
+
 def _sanitize_label(value: str, *, limit: int = 80) -> str:
     sanitized = re.sub(r"\s+", " ", str(value or "").replace("\xa0", " ")).strip()
     return sanitized[:limit]
@@ -1536,6 +1932,8 @@ def build_metadata(
     timeline_candidate: TimelineCandidate | None = None,
     timeline_decision: dict[str, Any] | None = None,
     drawer_opened: bool | None = None,
+    manifest_snapshot: CampaignManifestSnapshot | None = None,
+    manifest_decision: dict[str, Any] | None = None,
 ) -> PromoMetadata:
     preflight = preflight or {}
     timeline_decision = timeline_decision or {}
@@ -1621,6 +2019,7 @@ def build_metadata(
             timeline_decision.get("timeline_classifier_schema_version")
             or TIMELINE_CLASSIFIER_SCHEMA_VERSION
         ),
+        **_manifest_metadata_fields(manifest_snapshot, manifest_decision),
     )
 
 
@@ -1695,6 +2094,78 @@ def _timeline_outcome_fields(
         "drawer_open_reason": timeline_decision.get("drawer_open_reason"),
         "drawer_skip_reason": timeline_decision.get("drawer_skip_reason"),
         "drawer_open_duration_ms": drawer_open_duration_ms,
+    }
+
+
+def _manifest_metadata_fields(
+    manifest_snapshot: CampaignManifestSnapshot | None,
+    manifest_decision: dict[str, Any] | None,
+) -> dict[str, Any]:
+    manifest_snapshot = manifest_snapshot or CampaignManifestSnapshot()
+    manifest_decision = manifest_decision or {}
+    item = manifest_decision.get("manifest_campaign")
+    evidence_sources = list(manifest_decision.get("evidence_sources") or [])
+    if item is not None:
+        evidence_sources.extend(list(getattr(item, "evidence_sources", []) or []))
+    evidence_sources = sorted({str(source) for source in evidence_sources if str(source or "").strip()})
+    return {
+        "manifest_schema_version": str(
+            getattr(manifest_snapshot, "manifest_schema_version", None)
+            or MANIFEST_SCHEMA_VERSION
+        ),
+        "manifest_source": str(getattr(manifest_snapshot, "manifest_source", None) or "none"),
+        "manifest_loaded_success": bool(getattr(manifest_snapshot, "manifest_loaded_success", False)),
+        "manifest_campaign_count": int(getattr(manifest_snapshot, "manifest_campaign_count", 0) or 0),
+        "manifest_campaign_id": getattr(item, "campaign_id", None),
+        "manifest_promo_id": getattr(item, "promo_id", None),
+        "manifest_title": _sanitize_label(str(getattr(item, "title", "") or ""), limit=160) or None,
+        "manifest_period_text": _sanitize_label(str(getattr(item, "period_text", "") or ""), limit=120) or None,
+        "manifest_status": str(getattr(item, "lifecycle_status", None) or "unknown"),
+        "manifest_status_confidence": str(getattr(item, "lifecycle_status_confidence", None) or "low"),
+        "manifest_downloadability": str(getattr(item, "downloadability", None) or "unknown"),
+        "manifest_downloadability_confidence": str(
+            getattr(item, "downloadability_confidence", None)
+            or "low"
+        ),
+        "manifest_match_confidence": str(
+            manifest_decision.get("manifest_match_confidence")
+            or "none"
+        ),
+        "manifest_decision": manifest_decision.get("manifest_decision"),
+        "manifest_evidence_sources": evidence_sources,
+        "manifest_loaded_at": getattr(manifest_snapshot, "manifest_loaded_at", None),
+        "manifest_drawer_skip_reason": manifest_decision.get("drawer_skip_reason"),
+        "manifest_drawer_required_reason": manifest_decision.get("drawer_required_reason"),
+        "manifest_participation_status": getattr(item, "participation_status", None),
+        "manifest_match_duration_ms": int(manifest_decision.get("manifest_match_duration_ms", 0) or 0),
+    }
+
+
+def _manifest_candidate_diagnostic(
+    *,
+    candidate: TimelineCandidate,
+    manifest_decision: dict[str, Any],
+    drawer_opened: bool,
+) -> dict[str, Any]:
+    item = manifest_decision.get("manifest_campaign")
+    return {
+        "manifest_classifier_schema_version": MANIFEST_SCHEMA_VERSION,
+        "timeline_block_index": candidate.index,
+        "timeline_title": _sanitize_label(candidate.title, limit=160),
+        "timeline_period_text": _sanitize_label(candidate.short_period_text or "", limit=120) or None,
+        "campaign_id": getattr(item, "campaign_id", None),
+        "promo_id": getattr(item, "promo_id", None),
+        "manifest_title": _sanitize_label(str(getattr(item, "title", "") or ""), limit=160) or None,
+        "manifest_period_text": _sanitize_label(str(getattr(item, "period_text", "") or ""), limit=120) or None,
+        "manifest_status": str(getattr(item, "lifecycle_status", "") or "unknown"),
+        "manifest_status_confidence": str(getattr(item, "lifecycle_status_confidence", "") or "low"),
+        "manifest_downloadability": str(getattr(item, "downloadability", "") or "unknown"),
+        "manifest_match_confidence": str(manifest_decision.get("manifest_match_confidence") or "none"),
+        "manifest_decision": manifest_decision.get("manifest_decision"),
+        "drawer_opened": drawer_opened,
+        "drawer_skip_reason": manifest_decision.get("drawer_skip_reason"),
+        "drawer_required_reason": manifest_decision.get("drawer_required_reason"),
+        "evidence_sources": list(manifest_decision.get("evidence_sources") or []),
     }
 
 

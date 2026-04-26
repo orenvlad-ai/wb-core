@@ -134,6 +134,26 @@ update_note: "Обновлён под archive-first promo semantics: collector r
   - `drawer_open_reason`
   - `drawer_skip_reason`
   - `timeline_classifier_schema_version`
+  - `manifest_schema_version`
+  - `manifest_source`
+  - `manifest_loaded_success`
+  - `manifest_campaign_count`
+  - `manifest_campaign_id`
+  - `manifest_promo_id`
+  - `manifest_title`
+  - `manifest_period_text`
+  - `manifest_status`
+  - `manifest_status_confidence`
+  - `manifest_downloadability`
+  - `manifest_downloadability_confidence`
+  - `manifest_match_confidence`
+  - `manifest_decision`
+  - `manifest_evidence_sources`
+  - `manifest_loaded_at`
+  - `manifest_drawer_skip_reason`
+  - `manifest_drawer_required_reason`
+  - `manifest_participation_status`
+  - `manifest_match_duration_ms`
 
 UI status metadata is observability/validation evidence, not metric truth:
 - `ui_status` normalizes card/drawer state as `active`, `ended`, `pending`, `future`, `unknown`, or `error`;
@@ -149,6 +169,13 @@ Collector preflight metadata is a narrow execution decision record, not a truth 
 - `heavy_flow_required=true` keeps the existing full collector path for active/downloadable campaigns and for unclear states;
 - pending/future campaign shortcutting is not enabled by this checkpoint because future archive readiness remains part of the existing source policy;
 - low-confidence status, missing drawer, identity mismatch, unclear download state, or missing status evidence must keep conservative behavior rather than suppress workbook requirements.
+
+Campaign manifest metadata is a read-only Seller Portal network observation used only to reduce drawer traversal:
+- the adapter may normalize the already-loaded `promotions/timeline` JSON response into compact campaign DTOs (`promoID`, title, local period text, lifecycle/materializability hints, participation status, goods count, evidence sources);
+- no raw network payload, raw HTML, cookies, browser state, localStorage-derived data, tokens, or full secret URLs are persisted as manifest metadata;
+- `manifest_decision=drawer_avoid_manifest_non_materializable` is allowed only when a visible timeline card matches the manifest with high confidence (title + period), the manifest lifecycle is high-confidence `ended`, and downloadability/materializability is high-confidence `not_available`;
+- manifest evidence is path control only and never metric truth; active/downloadable, future/pending, missing manifest, ambiguous match, low-confidence, or unknown status keeps the old drawer/full-flow path;
+- skipped manifest campaigns still write compact metadata with `drawer_opened=false`, explicit skip reason, and non-materializable expected state; they must not be treated as fresh upstream success.
 
 # 4. Артефакты по модулю
 

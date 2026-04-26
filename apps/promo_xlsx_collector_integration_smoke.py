@@ -56,6 +56,11 @@ def main() -> None:
         "timeline_classification_decision",
         "drawer_opened",
         "timeline_classifier_schema_version",
+        "manifest_schema_version",
+        "manifest_source",
+        "manifest_loaded_success",
+        "manifest_match_confidence",
+        "manifest_decision",
     ):
         if key not in metadata_payload:
             raise AssertionError(f"handled promo metadata missing UI status field {key}: {metadata_payload}")

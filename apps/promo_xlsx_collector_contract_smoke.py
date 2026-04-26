@@ -6,6 +6,7 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -16,7 +17,9 @@ from packages.adapters.promo_xlsx_collector_block import (  # noqa: E402
     COOKIE_ACCEPT_TEXT,
     DRAWER_CLOSE_SELECTOR,
     DRAWER_OVERLAY_SELECTOR,
+    PROMOTIONS_TIMELINE_PATH,
     TIMELINE_ACTION_SELECTOR,
+    _build_campaign_manifest_snapshot,
     is_hydrated_state,
 )
 from packages.application.promo_xlsx_collector_block import (  # noqa: E402
@@ -29,6 +32,8 @@ from packages.application.promo_xlsx_collector_block import (  # noqa: E402
     parse_period_text,
 )
 from packages.contracts.promo_xlsx_collector_block import (  # noqa: E402
+    CampaignManifestItem,
+    CampaignManifestSnapshot,
     CollectorStateSnapshot,
     DrawerResetSummary,
     PromoXlsxCollectorRequest,
@@ -142,6 +147,35 @@ def main() -> None:
     if timeline_candidate.timeline_status != "ended" or timeline_candidate.timeline_status_confidence != "high":
         raise AssertionError(f"timeline ended fixture must be high confidence, got {timeline_candidate}")
 
+    manifest_snapshot = _build_campaign_manifest_snapshot(
+        payload={
+            "data": {
+                "promotions": [
+                    {
+                        "promoID": 2307,
+                        "name": "Весенняя распродажа: хиты - автоматические скидки",
+                        "type": "AUTO_PROMO",
+                        "startDate": "2026-04-18T21:00:00Z",
+                        "endDate": "2026-04-25T20:59:59Z",
+                        "participation": {
+                            "status": "SKIPPED",
+                            "counts": {"eligible": 33},
+                        },
+                    }
+                ]
+            }
+        },
+        source_path=PROMOTIONS_TIMELINE_PATH,
+        started_perf=time.perf_counter(),
+    )
+    if not manifest_snapshot.manifest_loaded_success or manifest_snapshot.manifest_campaign_count != 1:
+        raise AssertionError(f"manifest parser must load compact campaign snapshot, got {manifest_snapshot}")
+    manifest_item = manifest_snapshot.campaigns[0]
+    if manifest_item.lifecycle_status != "ended" or manifest_item.downloadability != "not_available":
+        raise AssertionError(f"manifest parser must classify ended/non-downloadable, got {manifest_item}")
+    if manifest_item.period_text != "19 - 26 апреля":
+        raise AssertionError(f"manifest parser must preserve timeline-compatible period text, got {manifest_item}")
+
     metadata = build_metadata(
         card=PromoCardData(
             calendar_url="https://seller.wildberries.ru/dp-promo-calendar?action=2331",
@@ -250,14 +284,39 @@ def main() -> None:
     if unknown_promo.drawer_opened is not True:
         raise AssertionError(f"unknown timeline fallback must record drawer_opened=true, got {unknown_promo}")
 
+    manifest_result = PromoXlsxCollectorBlock(_ManifestEndedNoDrawerDriver()).execute(
+        PromoXlsxCollectorRequest(
+            output_root="/tmp/wb-core-promo-manifest-ended-no-drawer-smoke",
+            storage_state_path="/tmp/unused-storage-state.json",
+            hydration_attempt_budget=1,
+        )
+    )
+    if manifest_result.status != "success":
+        raise AssertionError(f"manifest shortcut run must finish successfully, got {manifest_result.status}")
+    if not manifest_result.manifest_loaded_success or manifest_result.manifest_source != "network_response":
+        raise AssertionError(f"manifest snapshot must be surfaced in summary, got {manifest_result}")
+    if manifest_result.manifest_drawer_avoid_count != 1 or manifest_result.drawer_open_avoided_count != 1:
+        raise AssertionError(f"manifest ended campaign must avoid drawer, got {manifest_result}")
+    if manifest_result.opened_drawer_count != 0 or manifest_result.drawer_open_required_count != 0:
+        raise AssertionError(f"manifest ended campaign must not open drawer, got {manifest_result}")
+    manifest_promo = manifest_result.promos[0]
+    if manifest_promo.metadata.manifest_decision != "drawer_avoid_manifest_non_materializable":
+        raise AssertionError(f"manifest decision must be recorded, got {manifest_promo}")
+    if manifest_promo.metadata.manifest_match_confidence != "high":
+        raise AssertionError(f"manifest match must be high confidence, got {manifest_promo}")
+    if manifest_promo.metadata.drawer_skip_reason != "manifest_ended_non_materializable":
+        raise AssertionError(f"manifest drawer skip reason must be explicit, got {manifest_promo}")
+
     print("sidecar_contract: ok")
     print("export_kind_classification: ok")
     print("cross_year_parse_rule: ok")
     print("entry_reset_constants: ok")
     print("ended_status_metadata: ok")
     print("timeline_status_classifier: ok")
+    print("manifest_parser: ok")
     print("ended_no_download_preflight: ok")
     print("timeline_unknown_full_flow: ok")
+    print("manifest_ended_no_drawer: ok")
     print("hydration_exception_surface: ok")
     print("smoke-check passed")
 
@@ -373,6 +432,57 @@ class _TimelineUnknownDrawerDriver(_EndedNoDownloadDriver):
             visible_tabs=["Доступные"],
             screenshot="/tmp/ended-fixture.png",
         )
+
+
+class _ManifestEndedNoDrawerDriver(_EndedNoDownloadDriver):
+    def enumerate_timeline_blocks(self, max_candidates):
+        return [
+            TimelineBlockSnapshot(
+                index=0,
+                raw_text=(
+                    "Весенняя распродажа: хиты - автоматические скидки\n"
+                    "19 - 26 апреля"
+                ),
+            )
+        ]
+
+    def campaign_manifest_snapshot(self):
+        return CampaignManifestSnapshot(
+            manifest_source="network_response",
+            manifest_loaded_success=True,
+            manifest_campaign_count=1,
+            manifest_loaded_at="2026-04-26T23:49:48+05:00",
+            manifest_source_path="/ns/calendar-api/dp-calendar/web/api/v3/promotions/timeline",
+            campaigns=[
+                CampaignManifestItem(
+                    campaign_id="2307",
+                    promo_id=2307,
+                    title="Весенняя распродажа: хиты - автоматические скидки",
+                    period_text="19 - 26 апреля",
+                    start_at="2026-04-19T02:00",
+                    end_at="2026-04-26T01:59",
+                    lifecycle_status="ended",
+                    lifecycle_status_confidence="high",
+                    participation_status="SKIPPED",
+                    downloadability="not_available",
+                    downloadability_confidence="high",
+                    goods_count=33,
+                    autoaction_marker="auto_promo",
+                    raw_status_code="SKIPPED",
+                    confidence="high",
+                    evidence_sources=[
+                        "manifest_end_date_elapsed",
+                        "manifest_participation_status",
+                        "manifest_period",
+                        "manifest_promo_id",
+                    ],
+                    loaded_at="2026-04-26T23:49:48+05:00",
+                )
+            ],
+        )
+
+    def open_timeline_candidate(self, candidate):
+        raise AssertionError("manifest high-confidence ended campaign must not open drawer")
 
 
 if __name__ == "__main__":
