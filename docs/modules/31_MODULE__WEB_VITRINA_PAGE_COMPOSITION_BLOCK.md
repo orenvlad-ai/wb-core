@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-31-WEB-VITRINA-PAGE-COMPOSITION-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded phase-4 слою `web_vitrina_page_composition_block`."
-scope: "Real page composition для `GET /sheet-vitrina-v1/vitrina`: separate sibling page shell, split page-refresh/data-freshness summary, server-driven full-width table `Загрузка данных`, secondary block `Лог`, semantic green/red truth taxonomy for today/yesterday source status, bounded `Обновить` vs `Загрузить и обновить` action semantics, compact table toolbar for period/search/filters/columns/sort, table container, truthful loading/empty/error states и minimal inline client island поверх stable server seams `web_vitrina_contract -> web_vitrina_view_model -> web_vitrina_gravity_table_adapter` без SPA/platform redesign."
+scope: "Real page composition для `GET /sheet-vitrina-v1/vitrina`: separate sibling page shell, split page-refresh/data-freshness summary, server-driven full-width table `Загрузка данных`, secondary block `Лог`, semantic green/red truth taxonomy for today/yesterday source status, bounded `Обновить` vs `Загрузить и обновить` action semantics, compact table toolbar for period/search/filters/columns/sort, вкладка `Исследования` с read-only SKU group comparison MVP, table container, truthful loading/empty/error states и minimal inline client island поверх stable server seams `web_vitrina_contract -> web_vitrina_view_model -> web_vitrina_gravity_table_adapter` без SPA/platform redesign."
 source_basis:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
@@ -28,6 +28,8 @@ related_endpoints:
   - "GET /sheet-vitrina-v1/vitrina"
   - "GET /v1/sheet-vitrina-v1/web-vitrina"
   - "GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition&include_source_status=1"
+  - "GET /v1/sheet-vitrina-v1/research/sku-group-comparison/options"
+  - "POST /v1/sheet-vitrina-v1/research/sku-group-comparison/calculate"
 related_runners:
   - "apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py"
@@ -65,7 +67,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
 # 3. Target contract и смысл результата
 
 - `GET /sheet-vitrina-v1/vitrina` теперь является реальной usable web-vitrina page:
-  - canonical entrypoint for the unified `sheet_vitrina_v1` UI; first visible tab is `Витрина`, alongside `Расчет поставок` and `Отчеты`
+  - canonical entrypoint for the unified `sheet_vitrina_v1` UI; first visible tab is `Витрина`, alongside `Расчет поставок`, `Отчеты` and `Исследования`
   - `GET /sheet-vitrina-v1/operator` remains a compatibility entry and renders the same unified shell instead of the former narrow operator-only page; embedded operator-only panels are reserved for the unified tabs and internal compatibility probes
   - compact top panel inside `Витрина`: `Загрузить и обновить` is the single primary manual action, `JSON Connect` and the old cheap `Обновить` button are not rendered, and no permanent top status badge duplicates the summary cards
   - while `Загрузить и обновить` is running, the top panel shows a minimal stage-based progress bar driven by the existing async job/log polling (`start/queued`, source fetch, prepare/materialize, load/update table, finish); after completion the progress bar disappears and the final semantic status stays in the summary/log surfaces
@@ -83,6 +85,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - table container
   - truthful `loading / empty / error` states
   - `Расчет поставок` and `Отчеты` reuse the existing operator template/actions in embedded mode, preserving factory/WB supply blocks and the internal report subsection selector (`Ежедневные отчёты`, `Отчёт по остаткам`, `Выполнение плана`) without changing business routes; embedded height is measured from the actual `.page` content rather than iframe viewport/body `100vh`, and edge wheel gestures are relayed to the parent shell so these tabs do not create large empty scroll tails or swallow the first trackpad scroll
+  - `Исследования` is a same-shell read-only tab, not an iframe and not a new truth contour; MVP block `Сравнение групп SKU` reads active SKU from current `config_v2`, selectable non-financial SKU metrics from current registry/view truth, and calculates retrospective group dynamics over persisted ready snapshots only
 - Existing `GET /v1/sheet-vitrina-v1/web-vitrina` keeps the default public contract unchanged:
   - default/no-surface path still returns `web_vitrina_contract` v1
   - optional `as_of_date` keeps one-day historical read on the same route

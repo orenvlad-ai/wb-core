@@ -665,7 +665,7 @@ def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
         "nodes => nodes.map(node => ({id: node.getAttribute('data-unified-tab-button') || '', text: (node.textContent || '').trim(), active: node.classList.contains('is-active')}))"
     )
     tab_texts = [item["text"] for item in tabs]
-    if tab_texts != ["Витрина", "Расчет поставок", "Отчеты"]:
+    if tab_texts != ["Витрина", "Расчет поставок", "Отчеты", "Исследования"]:
         raise AssertionError(f"operator route must expose the unified top tabs, got {tabs}")
     active_tabs = [item["id"] for item in tabs if item["active"]]
     if active_tabs != ["vitrina"]:
@@ -760,7 +760,7 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
           };
         }"""
     )
-    if payload["unified_tabs"] != ["Витрина", "Расчет поставок", "Отчеты"]:
+    if payload["unified_tabs"] != ["Витрина", "Расчет поставок", "Отчеты", "Исследования"]:
         raise AssertionError(f"web-vitrina must expose the unified top tabs, got {payload}")
     if payload["active_unified_tab"] != "Витрина" or payload["update_tab_count"] != 0:
         raise AssertionError(f"web-vitrina must default to Vitrina and omit update-data tab, got {payload}")
@@ -806,6 +806,60 @@ def _check_unified_tab_navigation(page: object) -> dict[str, object]:
         }""",
         timeout=5000,
     )
+    page.locator('[data-unified-tab-button="research"]').click()
+    page.wait_for_function(
+        """() => {
+          const panel = document.querySelector('[data-unified-tab-panel="research"]');
+          const active = document.querySelector('[data-unified-tab-button].is-active');
+          const title = panel ? (panel.querySelector('h2') || {}).textContent || '' : '';
+          const researchButton = panel ? panel.querySelector('[data-research-calculate]') : null;
+          return !!panel && !panel.hidden && active &&
+            (active.textContent || '').trim() === 'Исследования' &&
+            title.trim() === 'Сравнение групп SKU' &&
+            !!researchButton;
+        }""",
+        timeout=5000,
+    )
+    page.wait_for_function(
+        """() => {
+          const researchCount = ((document.querySelector('[data-research-sku-summary="research"]') || {}).textContent || '').trim();
+          const controlCount = ((document.querySelector('[data-research-sku-summary="control"]') || {}).textContent || '').trim();
+          const metricCount = ((document.querySelector('[data-research-metric-summary]') || {}).textContent || '').trim();
+          return researchCount.startsWith('Выбрано:') && controlCount.startsWith('Выбрано:') && metricCount.startsWith('Выбрано:');
+        }""",
+        timeout=10000,
+    )
+    research_flow = page.evaluate(
+        """() => {
+          const researchBoxes = Array.from(document.querySelectorAll('[data-research-sku="research"]:not(:disabled)'));
+          if (researchBoxes.length < 2) {
+            return {ok: false, reason: 'not enough research SKU checkboxes'};
+          }
+          researchBoxes[0].click();
+          const selectedResearch = researchBoxes[0].value;
+          const disabledInControl = Array.from(document.querySelectorAll('[data-research-sku="control"]'))
+            .some(node => node.value === selectedResearch && node.disabled);
+          const controlBox = Array.from(document.querySelectorAll('[data-research-sku="control"]:not(:disabled)'))
+            .find(node => node.value !== selectedResearch);
+          if (!controlBox) {
+            return {ok: false, reason: 'no available control checkbox'};
+          }
+          controlBox.click();
+          const financeMetricPresent = Array.from(document.querySelectorAll('[data-research-metric]'))
+            .some(node => (node.value || '').includes('fin_') || node.value === 'total_fin_buyout_rub');
+          return {
+            ok: disabledInControl && !financeMetricPresent,
+            disabledInControl,
+            financeMetricPresent,
+            research: selectedResearch,
+            control: controlBox.value
+          };
+        }"""
+    )
+    if not research_flow.get("ok"):
+        raise AssertionError(f"research SKU mutual exclusion / metric filter mismatch, got {research_flow}")
+    page.locator("[data-research-calculate]").click()
+    page.wait_for_selector("[data-research-result-table] tbody tr", timeout=10000)
     page.locator('[data-unified-tab-button="vitrina"]').click()
     page.wait_for_function(
         """() => {
@@ -818,6 +872,8 @@ def _check_unified_tab_navigation(page: object) -> dict[str, object]:
     return {
         "factory_order_embed": True,
         "reports_embed": True,
+        "research_tab": True,
+        "research_calculate_table": page.locator("[data-research-result-table] tbody tr").count(),
         "restored_default_tab": True,
     }
 
