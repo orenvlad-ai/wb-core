@@ -22,6 +22,8 @@ from packages.adapters.promo_xlsx_collector_block import (  # noqa: E402
 from packages.application.promo_xlsx_collector_block import (  # noqa: E402
     PromoXlsxCollectorBlock,
     build_metadata,
+    build_timeline_candidate,
+    classify_timeline_preflight,
     classify_export_kind,
     extract_card_data,
     parse_period_text,
@@ -122,6 +124,24 @@ def main() -> None:
     if ended_card.campaign_identity_match is not True:
         raise AssertionError(f"ended card must keep title-match guard, got {ended_card}")
 
+    timeline_candidate = build_timeline_candidate(
+        TimelineBlockSnapshot(
+            index=0,
+            raw_text=(
+                "Весенняя распродажа Хиты Автоматические скидки\n"
+                "19 апреля - 26 апреля\n"
+                "Акция завершилась"
+            ),
+        )
+    )
+    if timeline_candidate is None:
+        raise AssertionError("timeline ended fixture must produce a candidate")
+    timeline_decision = classify_timeline_preflight(timeline_candidate)
+    if timeline_decision["timeline_classification_decision"] != "timeline_non_materializable_expected":
+        raise AssertionError(f"timeline ended fixture must avoid drawer, got {timeline_decision}")
+    if timeline_candidate.timeline_status != "ended" or timeline_candidate.timeline_status_confidence != "high":
+        raise AssertionError(f"timeline ended fixture must be high confidence, got {timeline_candidate}")
+
     metadata = build_metadata(
         card=PromoCardData(
             calendar_url="https://seller.wildberries.ru/dp-promo-calendar?action=2331",
@@ -197,22 +217,47 @@ def main() -> None:
         raise AssertionError(f"ended preflight run must finish successfully, got {preflight_result.status}")
     if preflight_result.early_ended_no_download_count != 1:
         raise AssertionError(f"expected one early ended/no-download campaign, got {preflight_result}")
+    if preflight_result.drawer_open_avoided_count != 1 or preflight_result.opened_drawer_count != 0:
+        raise AssertionError(f"timeline ended campaign must avoid drawer, got {preflight_result}")
+    if preflight_result.timeline_non_materializable_count != 1:
+        raise AssertionError(f"expected one timeline non-materializable campaign, got {preflight_result}")
     if preflight_result.deep_workbook_flow_count != 0:
         raise AssertionError(f"ended no-download must not enter deep workbook flow, got {preflight_result}")
     if preflight_result.generate_screen_attempt_count != 0 or preflight_result.download_attempt_count != 0:
         raise AssertionError(f"ended no-download must not attempt generate/download, got {preflight_result}")
     promo = preflight_result.promos[0]
-    if promo.early_preflight_decision != "early_non_materializable":
-        raise AssertionError(f"expected early non-materializable decision, got {promo}")
+    if promo.early_preflight_decision != "timeline_non_materializable_expected":
+        raise AssertionError(f"expected timeline non-materializable decision, got {promo}")
+    if promo.drawer_opened is not False or promo.drawer_skip_reason != "timeline_ended_non_materializable":
+        raise AssertionError(f"expected drawer skip diagnostics, got {promo}")
     if promo.heavy_flow_required is not False or promo.non_materializable_reason != "ended_without_download":
         raise AssertionError(f"expected heavy flow avoided for ended/no-download, got {promo}")
+
+    unknown_timeline_result = PromoXlsxCollectorBlock(_TimelineUnknownDrawerDriver()).execute(
+        PromoXlsxCollectorRequest(
+            output_root="/tmp/wb-core-promo-timeline-unknown-full-flow-smoke",
+            storage_state_path="/tmp/unused-storage-state.json",
+            hydration_attempt_budget=1,
+        )
+    )
+    if unknown_timeline_result.status != "success":
+        raise AssertionError(f"unknown timeline fallback run must finish successfully, got {unknown_timeline_result.status}")
+    if unknown_timeline_result.drawer_open_avoided_count != 0 or unknown_timeline_result.opened_drawer_count != 1:
+        raise AssertionError(f"unknown timeline evidence must open drawer, got {unknown_timeline_result}")
+    unknown_promo = unknown_timeline_result.promos[0]
+    if unknown_promo.timeline_classification_decision != "unknown_full_flow":
+        raise AssertionError(f"unknown timeline must preserve full flow decision, got {unknown_promo}")
+    if unknown_promo.drawer_opened is not True:
+        raise AssertionError(f"unknown timeline fallback must record drawer_opened=true, got {unknown_promo}")
 
     print("sidecar_contract: ok")
     print("export_kind_classification: ok")
     print("cross_year_parse_rule: ok")
     print("entry_reset_constants: ok")
     print("ended_status_metadata: ok")
+    print("timeline_status_classifier: ok")
     print("ended_no_download_preflight: ok")
+    print("timeline_unknown_full_flow: ok")
     print("hydration_exception_surface: ok")
     print("smoke-check passed")
 
@@ -255,6 +300,50 @@ class _EndedNoDownloadDriver:
         return [
             TimelineBlockSnapshot(
                 index=0,
+                raw_text=(
+                    "Весенняя распродажа Хиты Автоматические скидки\n"
+                    "19 апреля - 26 апреля\n"
+                    "Акция завершилась"
+                ),
+            )
+        ]
+
+    def open_timeline_candidate(self, candidate):
+        raise AssertionError("timeline ended/no-download classifier must not open drawer")
+
+    def open_generate_screen(self, slug: str):
+        raise AssertionError("ended/no-download preflight must not open generate screen")
+
+    def generate_file_and_wait_ready(self, slug: str):
+        raise AssertionError("ended/no-download preflight must not generate workbook")
+
+    def download_current_workbook(self):
+        raise AssertionError("ended/no-download preflight must not download workbook")
+
+    def reset_drawer(self, label: str) -> DrawerResetSummary:
+        return DrawerResetSummary(
+            clicked=True,
+            selector="#Portal-drawer close",
+            overlay_before=1,
+            success=True,
+            after_state_path=None,
+        )
+
+    def current_timeline_count(self) -> int:
+        return 1
+
+    def current_url(self) -> str:
+        return "https://seller.wildberries.ru/dp-promo-calendar?action=2307"
+
+    def last_state_snapshot(self):
+        return None
+
+
+class _TimelineUnknownDrawerDriver(_EndedNoDownloadDriver):
+    def enumerate_timeline_blocks(self, max_candidates):
+        return [
+            TimelineBlockSnapshot(
+                index=0,
                 raw_text="Весенняя распродажа Хиты Автоматические скидки\n19 апреля - 26 апреля",
             )
         ]
@@ -284,33 +373,6 @@ class _EndedNoDownloadDriver:
             visible_tabs=["Доступные"],
             screenshot="/tmp/ended-fixture.png",
         )
-
-    def open_generate_screen(self, slug: str):
-        raise AssertionError("ended/no-download preflight must not open generate screen")
-
-    def generate_file_and_wait_ready(self, slug: str):
-        raise AssertionError("ended/no-download preflight must not generate workbook")
-
-    def download_current_workbook(self):
-        raise AssertionError("ended/no-download preflight must not download workbook")
-
-    def reset_drawer(self, label: str) -> DrawerResetSummary:
-        return DrawerResetSummary(
-            clicked=True,
-            selector="#Portal-drawer close",
-            overlay_before=1,
-            success=True,
-            after_state_path=None,
-        )
-
-    def current_timeline_count(self) -> int:
-        return 1
-
-    def current_url(self) -> str:
-        return "https://seller.wildberries.ru/dp-promo-calendar?action=2307"
-
-    def last_state_snapshot(self):
-        return None
 
 
 if __name__ == "__main__":

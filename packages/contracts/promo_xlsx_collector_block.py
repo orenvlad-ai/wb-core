@@ -12,6 +12,11 @@ TemporalClassification = Literal["current", "future", "past", "ambiguous"]
 UiStatus = Literal["active", "ended", "pending", "future", "unknown", "error"]
 UiStatusConfidence = Literal["high", "medium", "low"]
 DownloadActionState = Literal["available", "absent", "disabled", "unknown", "ui_not_loaded"]
+TimelineClassificationDecision = Literal[
+    "timeline_non_materializable_expected",
+    "drawer_required",
+    "unknown_full_flow",
+]
 PromoOutcomeStatus = Literal[
     "downloaded",
     "reused_archive",
@@ -72,6 +77,13 @@ class TimelineCandidate:
     short_period_text: str | None
     preliminary_classification: TemporalClassification
     raw_text: str
+    timeline_status: UiStatus = "unknown"
+    timeline_status_confidence: UiStatusConfidence = "low"
+    timeline_status_raw_labels: list[str] = field(default_factory=list)
+    timeline_evidence_sources: list[str] = field(default_factory=list)
+    timeline_goods_count: int | None = None
+    timeline_autoaction_marker: str | None = None
+    timeline_classifier_schema_version: str = "promo_timeline_classifier_v1"
 
 
 @dataclass(frozen=True)
@@ -204,6 +216,18 @@ class PromoMetadata:
     non_materializable_reason: str | None = None
     fallback_to_full_flow_reason: str | None = None
     collector_preflight_schema_version: str = "promo_collector_preflight_v1"
+    timeline_status: UiStatus = "unknown"
+    timeline_status_confidence: UiStatusConfidence = "low"
+    timeline_status_raw_labels: list[str] = field(default_factory=list)
+    timeline_evidence_sources: list[str] = field(default_factory=list)
+    timeline_period_text: str | None = None
+    timeline_goods_count: int | None = None
+    timeline_autoaction_marker: str | None = None
+    timeline_classification_decision: TimelineClassificationDecision | None = None
+    drawer_opened: bool | None = None
+    drawer_open_reason: str | None = None
+    drawer_skip_reason: str | None = None
+    timeline_classifier_schema_version: str = "promo_timeline_classifier_v1"
 
 
 @dataclass(frozen=True)
@@ -234,6 +258,14 @@ class PromoOutcome:
     deep_flow_duration_ms: int = 0
     generate_screen_attempted: bool = False
     download_attempted: bool = False
+    timeline_status: UiStatus = "unknown"
+    timeline_status_confidence: UiStatusConfidence = "low"
+    timeline_classification_decision: TimelineClassificationDecision | None = None
+    drawer_opened: bool | None = None
+    drawer_open_reason: str | None = None
+    drawer_skip_reason: str | None = None
+    timeline_shallow_duration_ms: int = 0
+    drawer_open_duration_ms: int = 0
 
 
 @dataclass
@@ -267,4 +299,15 @@ class CollectorRunSummary:
     estimated_heavy_flow_avoided_count: int = 0
     early_preflight_duration_ms: int = 0
     deep_flow_duration_ms: int = 0
+    timeline_card_seen_count: int = 0
+    timeline_status_classified_count: int = 0
+    drawer_open_avoided_count: int = 0
+    drawer_open_required_count: int = 0
+    timeline_unknown_full_flow_count: int = 0
+    timeline_non_materializable_count: int = 0
+    timeline_evidence_confidence_counts: dict[str, int] = field(default_factory=dict)
+    timeline_skip_reason_counts: dict[str, int] = field(default_factory=dict)
+    drawer_fallback_reason_counts: dict[str, int] = field(default_factory=dict)
+    timeline_shallow_duration_ms: int = 0
+    drawer_open_duration_ms: int = 0
     promos: list[PromoOutcome] = field(default_factory=list)

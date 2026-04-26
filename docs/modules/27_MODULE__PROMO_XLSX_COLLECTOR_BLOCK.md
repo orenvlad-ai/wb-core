@@ -122,6 +122,18 @@ update_note: "Обновлён под archive-first promo semantics: collector r
   - `non_materializable_reason`
   - `fallback_to_full_flow_reason`
   - `collector_preflight_schema_version`
+  - `timeline_status`
+  - `timeline_status_confidence`
+  - `timeline_status_raw_labels`
+  - `timeline_evidence_sources`
+  - `timeline_period_text`
+  - `timeline_goods_count`
+  - `timeline_autoaction_marker`
+  - `timeline_classification_decision`
+  - `drawer_opened`
+  - `drawer_open_reason`
+  - `drawer_skip_reason`
+  - `timeline_classifier_schema_version`
 
 UI status metadata is observability/validation evidence, not metric truth:
 - `ui_status` normalizes card/drawer state as `active`, `ended`, `pending`, `future`, `unknown`, or `error`;
@@ -130,6 +142,8 @@ UI status metadata is observability/validation evidence, not metric truth:
 - raw HTML, cookies, browser state, localStorage-derived data, tokens, and raw upstream payloads are not persisted in metadata.
 
 Collector preflight metadata is a narrow execution decision record, not a truth shortcut:
+- `timeline_classification_decision=timeline_non_materializable_expected` is allowed only from high-confidence timeline evidence: sanitized ended status label, non-empty timeline title evidence, and visible period evidence; it is path control only and never metric truth;
+- timeline-ended/no-download cards may avoid opening the drawer and still write compact sanitized metadata/diagnostics with `drawer_opened=false` and `drawer_skip_reason=timeline_ended_non_materializable`;
 - `early_preflight_decision=early_non_materializable` is allowed only after the card/drawer is loaded, identity is matched, status evidence is high-confidence `ended`, and the download action is absent/disabled;
 - ended/no-download campaigns keep metadata/card evidence and do not enter the workbook generate/download path;
 - `heavy_flow_required=true` keeps the existing full collector path for active/downloadable campaigns and for unclear states;

@@ -66,10 +66,12 @@ _COMMON_EXPORT_HEADERS = {
 }
 COLLECTOR_UI_SCHEMA_VERSION = "promo_collector_ui_status_v1"
 COLLECTOR_PREFLIGHT_SCHEMA_VERSION = "promo_collector_preflight_v1"
+TIMELINE_CLASSIFIER_SCHEMA_VERSION = "promo_timeline_classifier_v1"
 _ENDED_LABEL_KEYWORDS = ("акция завершилась", "завершилась", "акция завершена", "завершена")
 _ACTIVE_LABEL_KEYWORDS = ("акция идёт", "акция идет")
 _FUTURE_LABEL_KEYWORDS = ("запланирована", "запланировано")
 _PENDING_LABEL_KEYWORDS = ("ожидает", "на модерации")
+_TIMELINE_NON_MATERIALIZABLE_STATUSES = {"ended"}
 
 
 class PromoXlsxCollectorBlock:
@@ -122,6 +124,7 @@ class PromoXlsxCollectorBlock:
             ]
             candidates = [candidate for candidate in candidates if candidate is not None]
             summary.timeline_candidates_found = len(candidates)
+            summary.timeline_card_seen_count = len(candidates)
             self._write_json(run_dir / "run_summary.json", asdict(summary))
 
             downloads_seen = 0
@@ -188,10 +191,25 @@ class PromoXlsxCollectorBlock:
         candidate: TimelineCandidate,
     ) -> PromoOutcome:
         run_dir = Path(request.output_root)
+        timeline_started = time.perf_counter()
+        timeline_decision = classify_timeline_preflight(candidate)
+        timeline_shallow_duration_ms = _elapsed_ms(timeline_started)
+        if timeline_decision["timeline_classification_decision"] == "timeline_non_materializable_expected":
+            return self._timeline_non_materializable(
+                run_dir=run_dir,
+                candidate=candidate,
+                request=request,
+                timeline_decision=timeline_decision,
+                timeline_shallow_duration_ms=timeline_shallow_duration_ms,
+            )
+
         preflight_started = time.perf_counter()
+        drawer_open_started = time.perf_counter()
         try:
             card_state = self._driver.open_timeline_candidate(candidate)
+            drawer_open_duration_ms = _elapsed_ms(drawer_open_started)
         except Exception as exc:
+            drawer_open_duration_ms = _elapsed_ms(drawer_open_started)
             promo_folder = run_dir / "promos" / build_promo_folder_name(None, None, candidate.title)
             promo_folder.mkdir(parents=True, exist_ok=True)
             failure_path = promo_folder / "failure.json"
@@ -232,6 +250,19 @@ class PromoXlsxCollectorBlock:
                 original_suggested_filename=None,
                 saved_filename=None,
                 saved_path=None,
+                timeline_status=candidate.timeline_status,
+                timeline_status_confidence=candidate.timeline_status_confidence,
+                timeline_status_raw_labels=list(candidate.timeline_status_raw_labels),
+                timeline_evidence_sources=list(candidate.timeline_evidence_sources),
+                timeline_period_text=candidate.short_period_text,
+                timeline_goods_count=candidate.timeline_goods_count,
+                timeline_autoaction_marker=candidate.timeline_autoaction_marker,
+                timeline_classification_decision=timeline_decision["timeline_classification_decision"],
+                drawer_opened=False,
+                drawer_open_reason=timeline_decision.get("drawer_open_reason"),
+                drawer_skip_reason=None,
+                fallback_to_full_flow_reason=timeline_decision.get("fallback_to_full_flow_reason"),
+                timeline_classifier_schema_version=TIMELINE_CLASSIFIER_SCHEMA_VERSION,
             )
             return PromoOutcome(
                 promo_title=candidate.title,
@@ -244,6 +275,14 @@ class PromoXlsxCollectorBlock:
                 promo_folder=str(promo_folder),
                 blocker=str(exc),
                 metadata=metadata,
+                timeline_shallow_duration_ms=timeline_shallow_duration_ms,
+                drawer_open_duration_ms=drawer_open_duration_ms,
+                **_timeline_outcome_fields(
+                    candidate,
+                    timeline_decision,
+                    drawer_opened=False,
+                    drawer_open_duration_ms=drawer_open_duration_ms,
+                ),
             )
 
         card = extract_card_data(
@@ -272,6 +311,9 @@ class PromoXlsxCollectorBlock:
                 download=None,
                 workbook=None,
                 preflight=preflight,
+                timeline_candidate=candidate,
+                timeline_decision=timeline_decision,
+                drawer_opened=True,
             )
             metadata_path = promo_folder / "metadata.json"
             self._write_json(metadata_path, asdict(metadata))
@@ -292,6 +334,12 @@ class PromoXlsxCollectorBlock:
                 drawer_reset=drawer_reset,
                 early_preflight_duration_ms=early_preflight_duration_ms,
                 **_preflight_outcome_fields(preflight),
+                **_timeline_outcome_fields(
+                    candidate,
+                    timeline_decision,
+                    drawer_opened=True,
+                    drawer_open_duration_ms=drawer_open_duration_ms,
+                ),
             )
 
         if card.temporal_classification == "past":
@@ -318,6 +366,9 @@ class PromoXlsxCollectorBlock:
                 download=None,
                 workbook=None,
                 preflight=legacy_preflight,
+                timeline_candidate=candidate,
+                timeline_decision=timeline_decision,
+                drawer_opened=True,
             )
             metadata_path = promo_folder / "metadata.json"
             self._write_json(metadata_path, asdict(metadata))
@@ -338,6 +389,12 @@ class PromoXlsxCollectorBlock:
                 drawer_reset=drawer_reset,
                 early_preflight_duration_ms=early_preflight_duration_ms,
                 **_preflight_outcome_fields(legacy_preflight),
+                **_timeline_outcome_fields(
+                    candidate,
+                    timeline_decision,
+                    drawer_opened=True,
+                    drawer_open_duration_ms=drawer_open_duration_ms,
+                ),
             )
 
         if card.temporal_classification == "ambiguous":
@@ -362,6 +419,9 @@ class PromoXlsxCollectorBlock:
                     "heavy_flow_reason": "ambiguous_temporal_classification",
                     "non_materializable_reason": "ambiguous_temporal_classification",
                 },
+                timeline_candidate=candidate,
+                timeline_decision=timeline_decision,
+                drawer_opened=True,
             )
             metadata_path = promo_folder / "metadata.json"
             self._write_json(metadata_path, asdict(metadata))
@@ -382,6 +442,12 @@ class PromoXlsxCollectorBlock:
                 drawer_reset=drawer_reset,
                 early_preflight_duration_ms=early_preflight_duration_ms,
                 **_preflight_outcome_fields(metadata.__dict__),
+                **_timeline_outcome_fields(
+                    candidate,
+                    timeline_decision,
+                    drawer_opened=True,
+                    drawer_open_duration_ms=drawer_open_duration_ms,
+                ),
             )
 
         deep_flow_started = time.perf_counter()
@@ -396,6 +462,8 @@ class PromoXlsxCollectorBlock:
                 preflight=preflight,
                 early_preflight_duration_ms=early_preflight_duration_ms,
                 deep_flow_duration_ms=_elapsed_ms(deep_flow_started),
+                timeline_decision=timeline_decision,
+                drawer_open_duration_ms=drawer_open_duration_ms,
             )
 
         try:
@@ -411,6 +479,8 @@ class PromoXlsxCollectorBlock:
                 early_preflight_duration_ms=early_preflight_duration_ms,
                 deep_flow_duration_ms=_elapsed_ms(deep_flow_started),
                 generate_screen_attempted=True,
+                timeline_decision=timeline_decision,
+                drawer_open_duration_ms=drawer_open_duration_ms,
             )
         try:
             ready_state = self._driver.generate_file_and_wait_ready(slugify(card.promo_title))
@@ -426,6 +496,8 @@ class PromoXlsxCollectorBlock:
                 early_preflight_duration_ms=early_preflight_duration_ms,
                 deep_flow_duration_ms=_elapsed_ms(deep_flow_started),
                 generate_screen_attempted=True,
+                timeline_decision=timeline_decision,
+                drawer_open_duration_ms=drawer_open_duration_ms,
             )
         try:
             download = self._driver.download_current_workbook()
@@ -442,6 +514,8 @@ class PromoXlsxCollectorBlock:
                 deep_flow_duration_ms=_elapsed_ms(deep_flow_started),
                 generate_screen_attempted=True,
                 download_attempted=True,
+                timeline_decision=timeline_decision,
+                drawer_open_duration_ms=drawer_open_duration_ms,
             )
 
         promo_folder = run_dir / "promos" / build_promo_folder_name(card.promo_id, download.period_id, card.promo_title)
@@ -475,6 +549,9 @@ class PromoXlsxCollectorBlock:
             ),
             workbook=inspection,
             preflight=preflight,
+            timeline_candidate=candidate,
+            timeline_decision=timeline_decision,
+            drawer_opened=True,
         )
         metadata_path = promo_folder / "metadata.json"
         self._write_json(metadata_path, asdict(metadata))
@@ -502,13 +579,34 @@ class PromoXlsxCollectorBlock:
             generate_screen_attempted=True,
             download_attempted=True,
             **_preflight_outcome_fields(preflight),
+            **_timeline_outcome_fields(
+                candidate,
+                timeline_decision,
+                drawer_opened=True,
+                drawer_open_duration_ms=drawer_open_duration_ms,
+            ),
         )
 
     @staticmethod
     def _apply_outcome_preflight_summary(summary: CollectorRunSummary, outcome: PromoOutcome) -> None:
         metadata = outcome.metadata
-        if bool(getattr(metadata, "ui_loaded_success", False)):
+        if outcome.drawer_opened is True:
             summary.opened_drawer_count += 1
+        decision = str(outcome.timeline_classification_decision or "")
+        if decision == "timeline_non_materializable_expected":
+            summary.drawer_open_avoided_count += 1
+            summary.timeline_non_materializable_count += 1
+            summary.heavy_flow_avoided_count += 1
+            summary.estimated_heavy_flow_avoided_count += 1
+            _increment_count(summary.timeline_skip_reason_counts, str(outcome.drawer_skip_reason or "unknown"))
+        elif decision in {"drawer_required", "unknown_full_flow"}:
+            summary.drawer_open_required_count += 1
+            if decision == "unknown_full_flow":
+                summary.timeline_unknown_full_flow_count += 1
+            _increment_count(summary.drawer_fallback_reason_counts, str(outcome.fallback_to_full_flow_reason or "unknown"))
+        if str(outcome.timeline_status or "unknown") != "unknown":
+            summary.timeline_status_classified_count += 1
+        _increment_count(summary.timeline_evidence_confidence_counts, str(outcome.timeline_status_confidence or "low"))
         if getattr(metadata, "early_preflight_decision", None):
             summary.shallow_status_checked_count += 1
         if bool(getattr(outcome, "heavy_flow_required", False)):
@@ -532,6 +630,106 @@ class PromoXlsxCollectorBlock:
             summary.download_attempt_count += 1
         summary.early_preflight_duration_ms += int(outcome.early_preflight_duration_ms or 0)
         summary.deep_flow_duration_ms += int(outcome.deep_flow_duration_ms or 0)
+        summary.timeline_shallow_duration_ms += int(outcome.timeline_shallow_duration_ms or 0)
+        summary.drawer_open_duration_ms += int(outcome.drawer_open_duration_ms or 0)
+
+    def _timeline_non_materializable(
+        self,
+        *,
+        run_dir: Path,
+        candidate: TimelineCandidate,
+        request: PromoXlsxCollectorRequest,
+        timeline_decision: dict[str, Any],
+        timeline_shallow_duration_ms: int,
+    ) -> PromoOutcome:
+        promo_folder = run_dir / "promos" / build_promo_folder_name(None, None, candidate.title)
+        promo_folder.mkdir(parents=True, exist_ok=True)
+        timeline_path = promo_folder / "timeline_card.json"
+        timeline_payload = _timeline_candidate_diagnostic(candidate, timeline_decision, drawer_opened=False)
+        self._write_json(timeline_path, timeline_payload)
+        promo_status = candidate.timeline_status_raw_labels[0] if candidate.timeline_status_raw_labels else None
+        promo_start_at, promo_end_at, confidence = parse_period_text(
+            candidate.short_period_text or "",
+            reference_year=datetime.now(BUSINESS_TIMEZONE).year,
+        )
+        metadata = PromoMetadata(
+            collected_at=_now_iso(),
+            trace_run_dir=request.output_root,
+            source_tab=request.source_tab,
+            source_filter_code=request.source_filter_code,
+            calendar_url=self._driver.current_url(),
+            promo_id=None,
+            period_id=None,
+            promo_title=candidate.title,
+            promo_period_text=candidate.short_period_text or "",
+            promo_start_at=promo_start_at,
+            promo_end_at=promo_end_at,
+            period_parse_confidence=confidence,
+            temporal_classification=classify_temporal_status(promo_status),
+            promo_status=promo_status,
+            promo_status_text=None,
+            eligible_count=candidate.timeline_goods_count,
+            participating_count=None,
+            excluded_count=None,
+            export_kind=None,
+            original_suggested_filename=None,
+            saved_filename=None,
+            saved_path=None,
+            ui_status=candidate.timeline_status,
+            ui_status_confidence=candidate.timeline_status_confidence,
+            ui_status_raw_labels=list(candidate.timeline_status_raw_labels),
+            download_action_state="unknown",
+            download_action_evidence="timeline_shallow_no_drawer",
+            status_evidence_sources=list(candidate.timeline_evidence_sources),
+            ui_loaded_success=False,
+            campaign_identity_match=False,
+            collector_ui_schema_version=COLLECTOR_UI_SCHEMA_VERSION,
+            early_preflight_decision=str(timeline_decision.get("timeline_classification_decision") or ""),
+            heavy_flow_required=False,
+            heavy_flow_reason="timeline_high_confidence_non_materializable",
+            non_materializable_reason=str(timeline_decision.get("non_materializable_reason") or ""),
+            fallback_to_full_flow_reason=None,
+            collector_preflight_schema_version=COLLECTOR_PREFLIGHT_SCHEMA_VERSION,
+            timeline_status=candidate.timeline_status,
+            timeline_status_confidence=candidate.timeline_status_confidence,
+            timeline_status_raw_labels=list(candidate.timeline_status_raw_labels),
+            timeline_evidence_sources=list(candidate.timeline_evidence_sources),
+            timeline_period_text=candidate.short_period_text,
+            timeline_goods_count=candidate.timeline_goods_count,
+            timeline_autoaction_marker=candidate.timeline_autoaction_marker,
+            timeline_classification_decision="timeline_non_materializable_expected",
+            drawer_opened=False,
+            drawer_open_reason=None,
+            drawer_skip_reason=str(timeline_decision.get("drawer_skip_reason") or "timeline_non_materializable"),
+            timeline_classifier_schema_version=TIMELINE_CLASSIFIER_SCHEMA_VERSION,
+        )
+        metadata_path = promo_folder / "metadata.json"
+        self._write_json(metadata_path, asdict(metadata))
+        return PromoOutcome(
+            promo_title=candidate.title,
+            timeline_block_index=candidate.index,
+            timeline_short_period_text=candidate.short_period_text,
+            timeline_preliminary_classification=candidate.preliminary_classification,
+            status="skipped_past",
+            promo_id=None,
+            period_id=None,
+            promo_folder=str(promo_folder),
+            blocker=None,
+            metadata=metadata,
+            metadata_path=str(metadata_path),
+            early_preflight_decision="timeline_non_materializable_expected",
+            heavy_flow_required=False,
+            heavy_flow_reason="timeline_high_confidence_non_materializable",
+            non_materializable_reason=str(timeline_decision.get("non_materializable_reason") or ""),
+            fallback_to_full_flow_reason=None,
+            timeline_shallow_duration_ms=timeline_shallow_duration_ms,
+            **_timeline_outcome_fields(
+                candidate,
+                timeline_decision,
+                drawer_opened=False,
+                drawer_open_duration_ms=0,
+            ),
+        )
 
     def _resolve_reusable_archive_record(
         self,
@@ -568,8 +766,10 @@ class PromoXlsxCollectorBlock:
         request: PromoXlsxCollectorRequest,
         record,
         preflight: dict[str, Any] | None = None,
+        timeline_decision: dict[str, Any] | None = None,
         early_preflight_duration_ms: int = 0,
         deep_flow_duration_ms: int = 0,
+        drawer_open_duration_ms: int = 0,
     ) -> PromoOutcome:
         promo_folder = run_dir / "promos" / build_promo_folder_name(
             card.promo_id,
@@ -613,6 +813,9 @@ class PromoXlsxCollectorBlock:
             ),
             workbook=inspection,
             preflight=preflight,
+            timeline_candidate=candidate,
+            timeline_decision=timeline_decision,
+            drawer_opened=True,
         )
         metadata_path = promo_folder / "metadata.json"
         self._write_json(metadata_path, asdict(metadata))
@@ -651,6 +854,12 @@ class PromoXlsxCollectorBlock:
             early_preflight_duration_ms=early_preflight_duration_ms,
             deep_flow_duration_ms=deep_flow_duration_ms,
             **_preflight_outcome_fields(preflight),
+            **_timeline_outcome_fields(
+                candidate,
+                timeline_decision,
+                drawer_opened=True,
+                drawer_open_duration_ms=drawer_open_duration_ms,
+            ),
         )
 
     def _blocked_after_card(
@@ -662,8 +871,10 @@ class PromoXlsxCollectorBlock:
         blocker: str,
         request: PromoXlsxCollectorRequest,
         preflight: dict[str, Any] | None = None,
+        timeline_decision: dict[str, Any] | None = None,
         early_preflight_duration_ms: int = 0,
         deep_flow_duration_ms: int = 0,
+        drawer_open_duration_ms: int = 0,
         generate_screen_attempted: bool = False,
     ) -> PromoOutcome:
         promo_folder = run_dir / "promos" / build_promo_folder_name(card.promo_id, None, card.promo_title)
@@ -685,6 +896,9 @@ class PromoXlsxCollectorBlock:
             download=None,
             workbook=None,
             preflight=preflight,
+            timeline_candidate=candidate,
+            timeline_decision=timeline_decision,
+            drawer_opened=True,
         )
         metadata_path = promo_folder / "metadata.json"
         self._write_json(metadata_path, asdict(metadata))
@@ -707,6 +921,12 @@ class PromoXlsxCollectorBlock:
             deep_flow_duration_ms=deep_flow_duration_ms,
             generate_screen_attempted=generate_screen_attempted,
             **_preflight_outcome_fields(preflight),
+            **_timeline_outcome_fields(
+                candidate,
+                timeline_decision,
+                drawer_opened=True,
+                drawer_open_duration_ms=drawer_open_duration_ms,
+            ),
         )
 
     def _blocked_before_download(
@@ -719,8 +939,10 @@ class PromoXlsxCollectorBlock:
         generate_state: CollectorStateSnapshot,
         blocker: str,
         preflight: dict[str, Any] | None = None,
+        timeline_decision: dict[str, Any] | None = None,
         early_preflight_duration_ms: int = 0,
         deep_flow_duration_ms: int = 0,
+        drawer_open_duration_ms: int = 0,
         generate_screen_attempted: bool = False,
         download_attempted: bool = False,
     ) -> PromoOutcome:
@@ -751,6 +973,9 @@ class PromoXlsxCollectorBlock:
             download=None,
             workbook=None,
             preflight=preflight,
+            timeline_candidate=candidate,
+            timeline_decision=timeline_decision,
+            drawer_opened=True,
         )
         metadata_path = promo_folder / "metadata.json"
         self._write_json(metadata_path, asdict(metadata))
@@ -774,6 +999,12 @@ class PromoXlsxCollectorBlock:
             generate_screen_attempted=generate_screen_attempted,
             download_attempted=download_attempted,
             **_preflight_outcome_fields(preflight),
+            **_timeline_outcome_fields(
+                candidate,
+                timeline_decision,
+                drawer_opened=True,
+                drawer_open_duration_ms=drawer_open_duration_ms,
+            ),
         )
 
     @staticmethod
@@ -792,13 +1023,119 @@ def build_timeline_candidate(block: TimelineBlockSnapshot) -> TimelineCandidate 
     title = filtered[0]
     short_period_text = next((line for line in filtered[1:] if _looks_like_short_period(line)), None)
     preliminary = classify_timeline_period(short_period_text)
+    evidence = classify_timeline_status(lines=filtered, title=title, period_text=short_period_text)
     return TimelineCandidate(
         index=block.index,
         title=title,
         short_period_text=short_period_text,
         preliminary_classification=preliminary,
         raw_text=block.raw_text,
+        timeline_status=evidence["timeline_status"],
+        timeline_status_confidence=evidence["timeline_status_confidence"],
+        timeline_status_raw_labels=evidence["timeline_status_raw_labels"],
+        timeline_evidence_sources=evidence["timeline_evidence_sources"],
+        timeline_goods_count=evidence["timeline_goods_count"],
+        timeline_autoaction_marker=evidence["timeline_autoaction_marker"],
+        timeline_classifier_schema_version=TIMELINE_CLASSIFIER_SCHEMA_VERSION,
     )
+
+
+def classify_timeline_status(*, lines: list[str], title: str, period_text: str | None) -> dict[str, Any]:
+    normalized_lines = [_normalize_label(line) for line in lines]
+    status_labels = _status_raw_labels(lines)
+    sources: list[str] = []
+    if title.strip():
+        sources.append("timeline_title")
+    if period_text:
+        sources.append("timeline_period_text")
+    status = "unknown"
+    confidence = "low"
+    if any(_label_contains(normalized, _ENDED_LABEL_KEYWORDS) for normalized in normalized_lines):
+        status = "ended"
+        confidence = "high" if title.strip() and period_text and status_labels else "medium"
+        sources.append("timeline_status_label")
+    elif any(_label_contains(normalized, _ACTIVE_LABEL_KEYWORDS) for normalized in normalized_lines):
+        status = "active"
+        confidence = "high" if title.strip() and status_labels else "medium"
+        sources.append("timeline_status_label")
+    elif any(_label_contains(normalized, _FUTURE_LABEL_KEYWORDS) for normalized in normalized_lines):
+        status = "future"
+        confidence = "high" if title.strip() and status_labels else "medium"
+        sources.append("timeline_status_label")
+    elif any(_label_contains(normalized, _PENDING_LABEL_KEYWORDS) for normalized in normalized_lines):
+        status = "pending"
+        confidence = "medium"
+        sources.append("timeline_status_label")
+
+    goods_count, _, _ = extract_counts(lines)
+    if goods_count is not None:
+        sources.append("timeline_goods_count")
+    autoaction_marker = _timeline_autoaction_marker(lines)
+    if autoaction_marker:
+        sources.append("timeline_autoaction_marker")
+
+    return {
+        "timeline_status": status,
+        "timeline_status_confidence": confidence,
+        "timeline_status_raw_labels": status_labels,
+        "timeline_evidence_sources": sorted(set(sources)),
+        "timeline_goods_count": goods_count,
+        "timeline_autoaction_marker": autoaction_marker,
+    }
+
+
+def classify_timeline_preflight(candidate: TimelineCandidate) -> dict[str, Any]:
+    sources = set(candidate.timeline_evidence_sources or [])
+    status = str(candidate.timeline_status or "unknown")
+    confidence = str(candidate.timeline_status_confidence or "low")
+    title_present = bool(str(candidate.title or "").strip())
+    period_present = bool(str(candidate.short_period_text or "").strip())
+    has_status_evidence = "timeline_status_label" in sources
+    has_identity_evidence = title_present and "timeline_title" in sources
+    has_period_evidence = period_present and "timeline_period_text" in sources
+    high_confidence_non_materializable = (
+        status in _TIMELINE_NON_MATERIALIZABLE_STATUSES
+        and confidence == "high"
+        and has_status_evidence
+        and has_identity_evidence
+        and has_period_evidence
+    )
+    if high_confidence_non_materializable:
+        return {
+            "timeline_classification_decision": "timeline_non_materializable_expected",
+            "drawer_open_reason": None,
+            "drawer_skip_reason": "timeline_ended_non_materializable",
+            "non_materializable_reason": "ended_without_download",
+            "fallback_to_full_flow_reason": None,
+            "timeline_classifier_schema_version": TIMELINE_CLASSIFIER_SCHEMA_VERSION,
+        }
+
+    if status in {"active"} and confidence == "high" and has_status_evidence:
+        return _timeline_drawer_decision("drawer_required", "active_or_materializable")
+    if status in {"future", "pending"} and confidence == "high" and has_status_evidence:
+        return _timeline_drawer_decision("drawer_required", "future_archive_capture_policy")
+    if status == "unknown":
+        return _timeline_drawer_decision("unknown_full_flow", "timeline_status_unknown")
+    if confidence != "high":
+        return _timeline_drawer_decision("unknown_full_flow", "low_confidence_timeline_status")
+    if not has_status_evidence:
+        return _timeline_drawer_decision("unknown_full_flow", "missing_timeline_status_evidence")
+    if not has_identity_evidence:
+        return _timeline_drawer_decision("unknown_full_flow", "missing_timeline_identity_evidence")
+    if not has_period_evidence:
+        return _timeline_drawer_decision("unknown_full_flow", "missing_timeline_period_evidence")
+    return _timeline_drawer_decision("unknown_full_flow", "conservative_timeline_full_flow")
+
+
+def _timeline_drawer_decision(decision: str, reason: str) -> dict[str, Any]:
+    return {
+        "timeline_classification_decision": decision,
+        "drawer_open_reason": reason,
+        "drawer_skip_reason": None,
+        "non_materializable_reason": None,
+        "fallback_to_full_flow_reason": reason,
+        "timeline_classifier_schema_version": TIMELINE_CLASSIFIER_SCHEMA_VERSION,
+    }
 
 
 def classify_timeline_period(period_text: str | None) -> TemporalClassification:
@@ -1196,8 +1533,12 @@ def build_metadata(
     download: DownloadArtifact | None,
     workbook: WorkbookInspection | None,
     preflight: dict[str, Any] | None = None,
+    timeline_candidate: TimelineCandidate | None = None,
+    timeline_decision: dict[str, Any] | None = None,
+    drawer_opened: bool | None = None,
 ) -> PromoMetadata:
     preflight = preflight or {}
+    timeline_decision = timeline_decision or {}
     return PromoMetadata(
         collected_at=_now_iso(),
         trace_run_dir=trace_run_dir,
@@ -1245,6 +1586,41 @@ def build_metadata(
             preflight.get("collector_preflight_schema_version")
             or COLLECTOR_PREFLIGHT_SCHEMA_VERSION
         ),
+        timeline_status=(
+            timeline_candidate.timeline_status
+            if timeline_candidate is not None
+            else "unknown"
+        ),
+        timeline_status_confidence=(
+            timeline_candidate.timeline_status_confidence
+            if timeline_candidate is not None
+            else "low"
+        ),
+        timeline_status_raw_labels=(
+            list(timeline_candidate.timeline_status_raw_labels)
+            if timeline_candidate is not None
+            else []
+        ),
+        timeline_evidence_sources=(
+            list(timeline_candidate.timeline_evidence_sources)
+            if timeline_candidate is not None
+            else []
+        ),
+        timeline_period_text=timeline_candidate.short_period_text if timeline_candidate is not None else None,
+        timeline_goods_count=timeline_candidate.timeline_goods_count if timeline_candidate is not None else None,
+        timeline_autoaction_marker=(
+            timeline_candidate.timeline_autoaction_marker
+            if timeline_candidate is not None
+            else None
+        ),
+        timeline_classification_decision=timeline_decision.get("timeline_classification_decision"),
+        drawer_opened=drawer_opened,
+        drawer_open_reason=timeline_decision.get("drawer_open_reason"),
+        drawer_skip_reason=timeline_decision.get("drawer_skip_reason"),
+        timeline_classifier_schema_version=str(
+            timeline_decision.get("timeline_classifier_schema_version")
+            or TIMELINE_CLASSIFIER_SCHEMA_VERSION
+        ),
     )
 
 
@@ -1267,7 +1643,7 @@ def parse_promo_id(url: str) -> int | None:
 
 
 def _looks_like_short_period(line: str) -> bool:
-    return " - " in line and bool(re.search(r"\d", line))
+    return bool(re.search(r"\d", line)) and (" - " in line or "→" in line)
 
 
 def _extract_int(text: str, pattern: str) -> int | None:
@@ -1277,6 +1653,15 @@ def _extract_int(text: str, pattern: str) -> int | None:
 
 def _clean_lines(text: str) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _timeline_autoaction_marker(lines: list[str]) -> str | None:
+    normalized = _normalize_label(" ".join(lines))
+    if "автоматические скидки" in normalized:
+        return "auto_discount"
+    if "автоакц" in normalized:
+        return "auto_promo"
+    return None
 
 
 def _now_iso() -> str:
@@ -1292,6 +1677,56 @@ def _preflight_outcome_fields(preflight: dict[str, Any] | None) -> dict[str, Any
         "non_materializable_reason": preflight.get("non_materializable_reason"),
         "fallback_to_full_flow_reason": preflight.get("fallback_to_full_flow_reason"),
     }
+
+
+def _timeline_outcome_fields(
+    candidate: TimelineCandidate,
+    timeline_decision: dict[str, Any] | None,
+    *,
+    drawer_opened: bool,
+    drawer_open_duration_ms: int,
+) -> dict[str, Any]:
+    timeline_decision = timeline_decision or _timeline_drawer_decision("unknown_full_flow", "timeline_decision_missing")
+    return {
+        "timeline_status": candidate.timeline_status,
+        "timeline_status_confidence": candidate.timeline_status_confidence,
+        "timeline_classification_decision": timeline_decision.get("timeline_classification_decision"),
+        "drawer_opened": drawer_opened,
+        "drawer_open_reason": timeline_decision.get("drawer_open_reason"),
+        "drawer_skip_reason": timeline_decision.get("drawer_skip_reason"),
+        "drawer_open_duration_ms": drawer_open_duration_ms,
+    }
+
+
+def _timeline_candidate_diagnostic(
+    candidate: TimelineCandidate,
+    timeline_decision: dict[str, Any],
+    *,
+    drawer_opened: bool,
+) -> dict[str, Any]:
+    return {
+        "timeline_classifier_schema_version": TIMELINE_CLASSIFIER_SCHEMA_VERSION,
+        "campaign_id": None,
+        "promo_id": None,
+        "timeline_block_index": candidate.index,
+        "title": _sanitize_label(candidate.title, limit=160),
+        "timeline_period_text": _sanitize_label(candidate.short_period_text or "", limit=120) or None,
+        "timeline_status": candidate.timeline_status,
+        "timeline_status_confidence": candidate.timeline_status_confidence,
+        "timeline_status_raw_labels": list(candidate.timeline_status_raw_labels),
+        "timeline_goods_count": candidate.timeline_goods_count,
+        "timeline_autoaction_marker": candidate.timeline_autoaction_marker,
+        "classification_decision": timeline_decision.get("timeline_classification_decision"),
+        "drawer_opened": drawer_opened,
+        "drawer_open_reason": timeline_decision.get("drawer_open_reason"),
+        "drawer_skip_reason": timeline_decision.get("drawer_skip_reason"),
+        "fallback_to_full_flow_reason": timeline_decision.get("fallback_to_full_flow_reason"),
+        "evidence_sources": list(candidate.timeline_evidence_sources),
+    }
+
+
+def _increment_count(target: dict[str, int], key: str) -> None:
+    target[key] = int(target.get(key, 0) or 0) + 1
 
 
 def _elapsed_ms(started_perf: float) -> int:
