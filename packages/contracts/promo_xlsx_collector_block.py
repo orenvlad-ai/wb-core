@@ -9,6 +9,9 @@ from typing import Literal
 EntryStrategy = Literal["direct_open"]
 PeriodParseConfidence = Literal["high", "medium", "low"]
 TemporalClassification = Literal["current", "future", "past", "ambiguous"]
+UiStatus = Literal["active", "ended", "pending", "future", "unknown", "error"]
+UiStatusConfidence = Literal["high", "medium", "low"]
+DownloadActionState = Literal["available", "absent", "disabled", "unknown", "ui_not_loaded"]
 PromoOutcomeStatus = Literal[
     "downloaded",
     "reused_archive",
@@ -113,6 +116,15 @@ class PromoCardData:
     excluded_count: int | None
     raw_card_excerpt: str
     state_snapshot: CollectorStateSnapshot
+    ui_status: UiStatus = "unknown"
+    ui_status_confidence: UiStatusConfidence = "low"
+    ui_status_raw_labels: list[str] = field(default_factory=list)
+    download_action_state: DownloadActionState = "unknown"
+    download_action_evidence: str | None = None
+    status_evidence_sources: list[str] = field(default_factory=list)
+    ui_loaded_success: bool = False
+    campaign_identity_match: bool = False
+    collector_ui_schema_version: str = "promo_collector_ui_status_v1"
 
 
 @dataclass(frozen=True)
@@ -177,6 +189,15 @@ class PromoMetadata:
     workbook_header_summary: list[str] = field(default_factory=list)
     workbook_has_date_fields: bool = False
     workbook_item_status_distinct_values: list[str] = field(default_factory=list)
+    ui_status: UiStatus = "unknown"
+    ui_status_confidence: UiStatusConfidence = "low"
+    ui_status_raw_labels: list[str] = field(default_factory=list)
+    download_action_state: DownloadActionState = "unknown"
+    download_action_evidence: str | None = None
+    status_evidence_sources: list[str] = field(default_factory=list)
+    ui_loaded_success: bool = False
+    campaign_identity_match: bool = False
+    collector_ui_schema_version: str = "promo_collector_ui_status_v1"
 
 
 @dataclass(frozen=True)

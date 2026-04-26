@@ -63,6 +63,11 @@ _COMMON_EXPORT_HEADERS = {
     "Артикул WB",
     "Статус",
 }
+COLLECTOR_UI_SCHEMA_VERSION = "promo_collector_ui_status_v1"
+_ENDED_LABEL_KEYWORDS = ("акция завершилась", "завершилась", "акция завершена", "завершена")
+_ACTIVE_LABEL_KEYWORDS = ("акция идёт", "акция идет")
+_FUTURE_LABEL_KEYWORDS = ("запланирована", "запланировано")
+_PENDING_LABEL_KEYWORDS = ("ожидает", "на модерации")
 
 
 class PromoXlsxCollectorBlock:
@@ -674,6 +679,7 @@ def extract_card_data(
     lines = _clean_lines(snapshot.body_excerpt)
     promo_title = fallback_title
     matching_indexes = [idx for idx, line in enumerate(lines) if line == fallback_title]
+    title_matched = bool(matching_indexes) or _title_matches_card(fallback_title, lines)
     if matching_indexes:
         title_index = matching_indexes[-1]
     else:
@@ -682,7 +688,16 @@ def extract_card_data(
         title_index = 0
     card_lines = lines[title_index : title_index + 80]
     promo_period_text = next((line for line in card_lines[1:] if "→" in line), "")
-    promo_status = next((line for line in card_lines[1:] if line in {"Запланирована", "Акция идёт", "Завершилась"}), None)
+    ui_status_evidence = classify_card_ui_status(
+        card_lines=card_lines,
+        snapshot=snapshot,
+        title_matched=title_matched,
+    )
+    promo_status = (
+        ui_status_evidence["ui_status_raw_labels"][0]
+        if ui_status_evidence["ui_status_raw_labels"]
+        else next((line for line in card_lines[1:] if line in {"Запланирована", "Акция идёт", "Завершилась"}), None)
+    )
     promo_status_text = next((line for line in card_lines[1:] if line.startswith("Автоакция:")), None)
     promo_start_at, promo_end_at, confidence = parse_period_text(promo_period_text, reference_year=reference_year)
     temporal_classification = classify_temporal_status(promo_status)
@@ -706,6 +721,15 @@ def extract_card_data(
         excluded_count=excluded_count,
         raw_card_excerpt=raw_card_excerpt,
         state_snapshot=snapshot,
+        ui_status=ui_status_evidence["ui_status"],
+        ui_status_confidence=ui_status_evidence["ui_status_confidence"],
+        ui_status_raw_labels=ui_status_evidence["ui_status_raw_labels"],
+        download_action_state=ui_status_evidence["download_action_state"],
+        download_action_evidence=ui_status_evidence["download_action_evidence"],
+        status_evidence_sources=ui_status_evidence["status_evidence_sources"],
+        ui_loaded_success=ui_status_evidence["ui_loaded_success"],
+        campaign_identity_match=ui_status_evidence["campaign_identity_match"],
+        collector_ui_schema_version=COLLECTOR_UI_SCHEMA_VERSION,
     )
 
 
@@ -720,6 +744,69 @@ def classify_temporal_status(status: str | None) -> TemporalClassification:
     if "ид" in normalized:
         return "current"
     return "ambiguous"
+
+
+def classify_card_ui_status(
+    *,
+    card_lines: list[str],
+    snapshot: CollectorStateSnapshot,
+    title_matched: bool,
+) -> dict[str, Any]:
+    ui_loaded_success = bool(title_matched and card_lines)
+    normalized_lines = [_normalize_label(line) for line in card_lines]
+    status_labels = _status_raw_labels(card_lines)
+    status = "unknown"
+    confidence = "low"
+    sources: list[str] = []
+    if any(_label_contains(normalized, _ENDED_LABEL_KEYWORDS) for normalized in normalized_lines):
+        status = "ended"
+        confidence = "high"
+        sources.append("footer_label")
+    elif any(_label_contains(normalized, _ACTIVE_LABEL_KEYWORDS) for normalized in normalized_lines):
+        status = "active"
+        confidence = "high"
+        sources.append("footer_label")
+    elif any(_label_contains(normalized, _FUTURE_LABEL_KEYWORDS) for normalized in normalized_lines):
+        status = "future"
+        confidence = "high"
+        sources.append("footer_label")
+    elif any(_label_contains(normalized, _PENDING_LABEL_KEYWORDS) for normalized in normalized_lines):
+        status = "pending"
+        confidence = "medium"
+        sources.append("footer_label")
+
+    if ui_loaded_success:
+        sources.append("drawer_loaded")
+    if title_matched:
+        sources.append("title_match")
+
+    if not ui_loaded_success:
+        download_state = "ui_not_loaded"
+        download_evidence = "drawer_not_loaded"
+    elif snapshot.has_download:
+        download_state = "available"
+        download_evidence = "download_button_visible"
+    elif snapshot.has_generate:
+        download_state = "available"
+        download_evidence = "generate_button_visible"
+    elif snapshot.has_configure:
+        download_state = "available"
+        download_evidence = "configure_button_visible"
+    else:
+        download_state = "absent"
+        download_evidence = "configure_generate_download_buttons_absent"
+        sources.append("download_button_absent")
+
+    return {
+        "ui_status": status,
+        "ui_status_confidence": confidence,
+        "ui_status_raw_labels": status_labels,
+        "download_action_state": download_state,
+        "download_action_evidence": download_evidence,
+        "status_evidence_sources": sorted(set(sources)),
+        "ui_loaded_success": ui_loaded_success,
+        "campaign_identity_match": bool(title_matched),
+    }
 
 
 def parse_period_text(period_text: str, *, reference_year: int) -> tuple[str | None, str | None, str]:
@@ -766,6 +853,55 @@ def extract_counts(lines: list[str]) -> tuple[int | None, int | None, int | None
         participating_count = int(added_pair.group(1))
         eligible_count = int(added_pair.group(2))
     return eligible_count, participating_count, excluded_count
+
+
+def _status_raw_labels(lines: list[str], *, limit: int = 5) -> list[str]:
+    labels: list[str] = []
+    for line in lines:
+        normalized = _normalize_label(line)
+        if not normalized:
+            continue
+        if (
+            _label_contains(normalized, _ENDED_LABEL_KEYWORDS)
+            or _label_contains(normalized, _ACTIVE_LABEL_KEYWORDS)
+            or _label_contains(normalized, _FUTURE_LABEL_KEYWORDS)
+            or _label_contains(normalized, _PENDING_LABEL_KEYWORDS)
+        ):
+            labels.append(_sanitize_label(line))
+        if len(labels) >= limit:
+            break
+    return labels
+
+
+def _label_contains(normalized: str, keywords: tuple[str, ...]) -> bool:
+    return any(keyword in normalized for keyword in keywords)
+
+
+def _normalize_label(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").replace("\xa0", " ")).strip().lower()
+
+
+def _sanitize_label(value: str, *, limit: int = 80) -> str:
+    sanitized = re.sub(r"\s+", " ", str(value or "").replace("\xa0", " ")).strip()
+    return sanitized[:limit]
+
+
+def _title_matches_card(fallback_title: str, lines: list[str]) -> bool:
+    title = _normalize_label(fallback_title)
+    if not title:
+        return False
+    joined = _normalize_label(" ".join(lines[:20]))
+    if title in joined:
+        return True
+    tokens = [
+        token
+        for token in re.split(r"\W+", title, flags=re.UNICODE)
+        if len(token) >= 4 and token not in {"акция", "автоакция"}
+    ]
+    if not tokens:
+        return False
+    matched = sum(1 for token in tokens if token in joined)
+    return matched >= max(1, min(len(tokens), 2))
 
 
 def classify_export_kind(original_filename: str | None, headers: list[str]) -> ExportKind:
@@ -893,6 +1029,15 @@ def build_metadata(
         workbook_header_summary=workbook.workbook_header_summary if workbook else [],
         workbook_has_date_fields=workbook.workbook_has_date_fields if workbook else False,
         workbook_item_status_distinct_values=workbook.workbook_item_status_distinct_values if workbook else [],
+        ui_status=card.ui_status,
+        ui_status_confidence=card.ui_status_confidence,
+        ui_status_raw_labels=list(card.ui_status_raw_labels),
+        download_action_state=card.download_action_state,
+        download_action_evidence=card.download_action_evidence,
+        status_evidence_sources=list(card.status_evidence_sources),
+        ui_loaded_success=card.ui_loaded_success,
+        campaign_identity_match=card.campaign_identity_match,
+        collector_ui_schema_version=card.collector_ui_schema_version,
     )
 
 

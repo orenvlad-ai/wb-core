@@ -48,6 +48,9 @@ ARTIFACT_STATE_METADATA_ONLY = "metadata_only"
 ARTIFACT_STATE_WORKBOOK_WITHOUT_METADATA = "workbook_without_metadata"
 ARTIFACT_STATE_AMBIGUOUS_DATE = "ambiguous_date"
 ARTIFACT_STATE_UNUSABLE = "unusable"
+ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD = "ended_without_download"
+ARTIFACT_REASON_METADATA_ONLY_ENDED_WITHOUT_DOWNLOAD = "metadata_only_ended_without_download"
+ARTIFACT_REASON_METADATA_ONLY_TRUE_ARTIFACT_LOSS = "metadata_only_true_artifact_loss"
 ARTIFACT_STATES = (
     ARTIFACT_STATE_COMPLETE,
     ARTIFACT_STATE_INCOMPLETE,
@@ -58,6 +61,7 @@ ARTIFACT_STATES = (
     ARTIFACT_STATE_WORKBOOK_WITHOUT_METADATA,
     ARTIFACT_STATE_AMBIGUOUS_DATE,
     ARTIFACT_STATE_UNUSABLE,
+    ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD,
 )
 
 
@@ -119,10 +123,24 @@ class PromoCampaignArtifactValidation:
     file_size: int | None
     file_mtime: int | None
     checksum_or_fingerprint: str | None
+    workbook_required: bool
+    non_materializable_reason: str | None
+    ui_status: str | None
+    ui_status_confidence: str | None
+    ui_status_raw_labels: list[str]
+    download_action_state: str | None
+    download_action_evidence: str | None
+    status_evidence_sources: list[str]
+    ui_loaded_success: bool
+    campaign_identity_match: bool
 
     @property
     def is_complete(self) -> bool:
         return self.artifact_state == ARTIFACT_STATE_COMPLETE
+
+    @property
+    def is_expected_non_materializable(self) -> bool:
+        return self.artifact_state == ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD
 
     def to_diagnostic(self) -> dict[str, Any]:
         return {
@@ -143,6 +161,16 @@ class PromoCampaignArtifactValidation:
             "file_size": self.file_size,
             "file_mtime": self.file_mtime,
             "checksum_or_fingerprint": self.checksum_or_fingerprint,
+            "workbook_required": self.workbook_required,
+            "non_materializable_reason": self.non_materializable_reason,
+            "ui_status": self.ui_status,
+            "ui_status_confidence": self.ui_status_confidence,
+            "ui_status_raw_labels": list(self.ui_status_raw_labels),
+            "download_action_state": self.download_action_state,
+            "download_action_evidence": self.download_action_evidence,
+            "status_evidence_sources": list(self.status_evidence_sources),
+            "ui_loaded_success": self.ui_loaded_success,
+            "campaign_identity_match": self.campaign_identity_match,
         }
 
 
@@ -229,7 +257,10 @@ def validate_promo_campaign_artifact(
 
     state = ARTIFACT_STATE_COMPLETE
     reason: str | None = None
+    workbook_required = True
+    non_materializable_reason: str | None = None
     metadata_exists = metadata_path.exists()
+    ended_without_download = _metadata_indicates_ended_without_download(record.metadata)
     coverage_dates = {
         "promo_start_at": record.metadata.promo_start_at,
         "promo_end_at": record.metadata.promo_end_at,
@@ -251,18 +282,30 @@ def validate_promo_campaign_artifact(
         state = ARTIFACT_STATE_STALE
         reason = "coverage_does_not_include_requested_slot"
     elif not record_workbook_path:
-        state = ARTIFACT_STATE_METADATA_ONLY
-        reason = "workbook_index_missing"
+        if ended_without_download:
+            state = ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD
+            reason = ARTIFACT_REASON_METADATA_ONLY_ENDED_WITHOUT_DOWNLOAD
+            workbook_required = False
+            non_materializable_reason = "ended_without_download"
+        else:
+            state = ARTIFACT_STATE_METADATA_ONLY
+            reason = ARTIFACT_REASON_METADATA_ONLY_TRUE_ARTIFACT_LOSS
     elif _normalized_path(record_workbook_path) != _normalized_path(expected_workbook_path):
         state = ARTIFACT_STATE_STALE
         reason = "workbook_path_mismatch"
     elif not workbook_exists:
-        state = (
-            ARTIFACT_STATE_MISSING_WORKBOOK
-            if record.workbook_present
-            else ARTIFACT_STATE_METADATA_ONLY
-        )
-        reason = "workbook_file_missing"
+        if ended_without_download:
+            state = ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD
+            reason = ARTIFACT_REASON_METADATA_ONLY_ENDED_WITHOUT_DOWNLOAD
+            workbook_required = False
+            non_materializable_reason = "ended_without_download"
+        else:
+            state = (
+                ARTIFACT_STATE_MISSING_WORKBOOK
+                if record.workbook_present
+                else ARTIFACT_STATE_METADATA_ONLY
+            )
+            reason = "workbook_file_missing" if record.workbook_present else ARTIFACT_REASON_METADATA_ONLY_TRUE_ARTIFACT_LOSS
     elif file_size is None or file_size <= 0:
         state = ARTIFACT_STATE_CORRUPTED
         reason = "workbook_file_empty"
@@ -301,6 +344,16 @@ def validate_promo_campaign_artifact(
         file_size=file_size,
         file_mtime=file_mtime,
         checksum_or_fingerprint=checksum_or_fingerprint,
+        workbook_required=workbook_required,
+        non_materializable_reason=non_materializable_reason,
+        ui_status=record.metadata.ui_status,
+        ui_status_confidence=record.metadata.ui_status_confidence,
+        ui_status_raw_labels=list(record.metadata.ui_status_raw_labels),
+        download_action_state=record.metadata.download_action_state,
+        download_action_evidence=record.metadata.download_action_evidence,
+        status_evidence_sources=list(record.metadata.status_evidence_sources),
+        ui_loaded_success=record.metadata.ui_loaded_success,
+        campaign_identity_match=record.metadata.campaign_identity_match,
     )
 
 
@@ -330,6 +383,12 @@ def audit_promo_campaign_archive(
             validations.append(_validate_orphan_archive_dir(archive_dir))
     state_counts = _artifact_state_counts(validations)
     failures = [validation for validation in validations if not validation.is_complete]
+    expected_non_materializable = [validation for validation in validations if validation.is_expected_non_materializable]
+    metadata_only_true_artifact_loss_count = sum(
+        1
+        for validation in validations
+        if validation.validation_failure_reason == ARTIFACT_REASON_METADATA_ONLY_TRUE_ARTIFACT_LOSS
+    )
     covering_validations = (
         [
             validation
@@ -350,6 +409,11 @@ def audit_promo_campaign_archive(
         "incomplete_artifact_count": len(failures),
         "validation_failed_count": len(failures),
         "validated_workbook_usable_count": state_counts.get(ARTIFACT_STATE_COMPLETE, 0),
+        "ended_without_download_count": state_counts.get(ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD, 0),
+        "metadata_only_true_artifact_loss_count": metadata_only_true_artifact_loss_count,
+        "non_materializable_expected_count": len(expected_non_materializable),
+        "ui_status_counts": _validation_field_counts(validations, "ui_status"),
+        "download_action_state_counts": _validation_field_counts(validations, "download_action_state"),
         "covering_campaign_count": len(covering_validations),
         "covering_artifact_state_counts": _artifact_state_counts(covering_validations),
         "failure_examples": [
@@ -690,12 +754,28 @@ def _apply_artifact_validation_diagnostics(
         return
     state_counts = _artifact_state_counts(validations)
     failures = [validation for validation in validations if not validation.is_complete]
+    true_failures = [validation for validation in failures if not validation.is_expected_non_materializable]
+    expected_non_materializable = [
+        validation
+        for validation in validations
+        if validation.is_expected_non_materializable
+    ]
     missing_workbook_count = (
         state_counts.get(ARTIFACT_STATE_MISSING_WORKBOOK, 0)
         + state_counts.get(ARTIFACT_STATE_METADATA_ONLY, 0)
     )
+    ui_status_counts = _validation_field_counts(validations, "ui_status")
+    download_action_state_counts = _validation_field_counts(validations, "download_action_state")
+    ended_without_download_count = state_counts.get(ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD, 0)
+    metadata_only_true_artifact_loss_count = sum(
+        1
+        for validation in validations
+        if validation.validation_failure_reason == ARTIFACT_REASON_METADATA_ONLY_TRUE_ARTIFACT_LOSS
+    )
     diagnostics["artifact_validation_schema_version"] = ARTIFACT_VALIDATION_SCHEMA_VERSION
     diagnostics["artifact_state_counts"] = state_counts
+    diagnostics["ui_status_counts"] = ui_status_counts
+    diagnostics["download_action_state_counts"] = download_action_state_counts
     diagnostics["missing_campaign_artifacts"] = [
         validation.to_diagnostic()
         for validation in failures[:20]
@@ -706,6 +786,7 @@ def _apply_artifact_validation_diagnostics(
         "covering_campaign_count": len(validations),
         "complete_artifact_count": state_counts.get(ARTIFACT_STATE_COMPLETE, 0),
         "incomplete_artifact_count": len(failures),
+        "true_validation_failed_count": len(true_failures),
         "validated_workbook_usable_count": state_counts.get(ARTIFACT_STATE_COMPLETE, 0),
         "materializer_usable_count": state_counts.get(ARTIFACT_STATE_COMPLETE, 0),
         "validation_failed_count": len(failures),
@@ -714,6 +795,11 @@ def _apply_artifact_validation_diagnostics(
         "workbook_without_metadata_count": state_counts.get(ARTIFACT_STATE_WORKBOOK_WITHOUT_METADATA, 0),
         "corrupted_count": state_counts.get(ARTIFACT_STATE_CORRUPTED, 0),
         "ambiguous_date_count": state_counts.get(ARTIFACT_STATE_AMBIGUOUS_DATE, 0),
+        "ended_without_download_count": ended_without_download_count,
+        "metadata_only_true_artifact_loss_count": metadata_only_true_artifact_loss_count,
+        "non_materializable_expected_count": len(expected_non_materializable),
+        "ui_status_counts": ui_status_counts,
+        "download_action_state_counts": download_action_state_counts,
     }
     _set_promo_diag_counter(
         diagnostics,
@@ -746,6 +832,21 @@ def _apply_artifact_validation_diagnostics(
         diagnostics,
         "ambiguous_date_count",
         state_counts.get(ARTIFACT_STATE_AMBIGUOUS_DATE, 0),
+    )
+    _set_promo_diag_counter(
+        diagnostics,
+        "ended_without_download_count",
+        ended_without_download_count,
+    )
+    _set_promo_diag_counter(
+        diagnostics,
+        "metadata_only_true_artifact_loss_count",
+        metadata_only_true_artifact_loss_count,
+    )
+    _set_promo_diag_counter(
+        diagnostics,
+        "non_materializable_expected_count",
+        len(expected_non_materializable),
     )
     _set_promo_diag_counter(
         diagnostics,
@@ -991,6 +1092,17 @@ def _artifact_state_counts(
     return counts
 
 
+def _validation_field_counts(
+    validations: list[PromoCampaignArtifactValidation],
+    field_name: str,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for validation in validations:
+        value = str(getattr(validation, field_name, None) or "unknown")
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
 def _validate_orphan_archive_dir(archive_dir: Path) -> PromoCampaignArtifactValidation:
     metadata_path = archive_dir / ARCHIVE_METADATA_FILENAME
     expected_workbook_path = archive_dir / ARCHIVE_WORKBOOK_FILENAME
@@ -1040,6 +1152,16 @@ def _validate_orphan_archive_dir(archive_dir: Path) -> PromoCampaignArtifactVali
         file_size=file_size,
         file_mtime=file_mtime,
         checksum_or_fingerprint=checksum,
+        workbook_required=True,
+        non_materializable_reason=None,
+        ui_status=_normalize_optional_text(metadata_payload.get("ui_status")),
+        ui_status_confidence=_normalize_optional_text(metadata_payload.get("ui_status_confidence")),
+        ui_status_raw_labels=_normalize_text_list(metadata_payload.get("ui_status_raw_labels")),
+        download_action_state=_normalize_optional_text(metadata_payload.get("download_action_state")),
+        download_action_evidence=_normalize_optional_text(metadata_payload.get("download_action_evidence")),
+        status_evidence_sources=_normalize_text_list(metadata_payload.get("status_evidence_sources")),
+        ui_loaded_success=bool(metadata_payload.get("ui_loaded_success", False)),
+        campaign_identity_match=bool(metadata_payload.get("campaign_identity_match", False)),
     )
 
 
@@ -1050,6 +1172,27 @@ def _safe_int_or_none(value: object) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _metadata_indicates_ended_without_download(metadata: PromoMetadata) -> bool:
+    return (
+        str(metadata.ui_status or "") == "ended"
+        and str(metadata.ui_status_confidence or "") == "high"
+        and str(metadata.download_action_state or "") in {"absent", "disabled"}
+        and bool(metadata.ui_loaded_success)
+        and bool(metadata.campaign_identity_match)
+    )
+
+
+def _normalize_text_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text:
+            result.append(text)
+    return result
 
 
 def _record_matches_live_metadata(
@@ -1405,6 +1548,15 @@ def _metadata_fingerprint(metadata: PromoMetadata) -> str:
         "source_tab": metadata.source_tab,
         "source_filter_code": metadata.source_filter_code,
         "export_kind": metadata.export_kind,
+        "ui_status": metadata.ui_status,
+        "ui_status_confidence": metadata.ui_status_confidence,
+        "ui_status_raw_labels": metadata.ui_status_raw_labels,
+        "download_action_state": metadata.download_action_state,
+        "download_action_evidence": metadata.download_action_evidence,
+        "status_evidence_sources": metadata.status_evidence_sources,
+        "ui_loaded_success": metadata.ui_loaded_success,
+        "campaign_identity_match": metadata.campaign_identity_match,
+        "collector_ui_schema_version": metadata.collector_ui_schema_version,
     }
     raw = json.dumps(stable_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()

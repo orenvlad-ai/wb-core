@@ -23,6 +23,7 @@ from packages.application.promo_xlsx_collector_block import (  # noqa: E402
     PromoXlsxCollectorBlock,
     build_metadata,
     classify_export_kind,
+    extract_card_data,
     parse_period_text,
 )
 from packages.contracts.promo_xlsx_collector_block import (  # noqa: E402
@@ -81,6 +82,43 @@ def main() -> None:
         raise AssertionError("drawer close selector drifted")
     if DRAWER_OVERLAY_SELECTOR != '#Portal-drawer [data-testid="pages/main-page/promo-action-wizard/drawer-drawer-overlay"]':
         raise AssertionError("drawer overlay selector drifted")
+
+    ended_card = extract_card_data(
+        snapshot=CollectorStateSnapshot(
+            ts="2026-04-26T00:00:00+05:00",
+            label="ended_fixture",
+            url="https://seller.wildberries.ru/dp-promo-calendar?action=2307",
+            title="Акции WB",
+            timeline_count=35,
+            overlay_count=1,
+            has_modal_close=False,
+            modal_entry_count=0,
+            has_configure=False,
+            has_generate=False,
+            has_download=False,
+            has_ready=False,
+            has_cookie_accept=False,
+            body_excerpt=(
+                "Весенняя распродажа\n"
+                "Хиты\n"
+                "Автоматические скидки\n"
+                "19 апреля 02:00 → 26 апреля 01:59\n"
+                "Акция завершилась\n"
+            ),
+            visible_tabs=["Доступные"],
+            screenshot="/tmp/ended-fixture.png",
+        ),
+        fallback_title="Весенняя распродажа Хиты Автоматические скидки",
+        source_tab="Доступные",
+        source_filter_code="AVAILABLE",
+        reference_year=2026,
+    )
+    if ended_card.ui_status != "ended" or ended_card.ui_status_confidence != "high":
+        raise AssertionError(f"ended UI status must be high confidence, got {ended_card}")
+    if ended_card.download_action_state != "absent":
+        raise AssertionError(f"ended no-download card must record absent action, got {ended_card}")
+    if ended_card.campaign_identity_match is not True:
+        raise AssertionError(f"ended card must keep title-match guard, got {ended_card}")
 
     metadata = build_metadata(
         card=PromoCardData(
@@ -150,6 +188,7 @@ def main() -> None:
     print("export_kind_classification: ok")
     print("cross_year_parse_rule: ok")
     print("entry_reset_constants: ok")
+    print("ended_status_metadata: ok")
     print("hydration_exception_surface: ok")
     print("smoke-check passed")
 

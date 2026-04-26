@@ -52,5 +52,14 @@
   "workbook_has_date_fields": false,
   "workbook_item_status_distinct_values": [
     "Не участвует: стоит блокировка на снижение цены"
-  ]
+  ],
+  "ui_status": "unknown",
+  "ui_status_confidence": "low",
+  "ui_status_raw_labels": [],
+  "download_action_state": "unknown",
+  "download_action_evidence": null,
+  "status_evidence_sources": [],
+  "ui_loaded_success": false,
+  "campaign_identity_match": false,
+  "collector_ui_schema_version": "promo_collector_ui_status_v1"
 }
