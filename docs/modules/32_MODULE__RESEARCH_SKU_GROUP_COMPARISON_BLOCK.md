@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-32-RESEARCH-SKU-GROUP-COMPARISON-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический reference по MVP вкладке `Исследования` и read-only расчёту ретроспективного сравнения двух групп SKU."
-scope: "Top-level вкладка `Исследования` в `/sheet-vitrina-v1/vitrina`, options/calculate API для `Сравнение групп SKU`, read-only calculation over persisted ready snapshots / accepted truth, исключение финансовых метрик и operator-facing result table."
+scope: "Top-level вкладка `Исследования` в `/sheet-vitrina-v1/vitrina`, options/calculate API для `Сравнение групп SKU`, read-only calculation over persisted ready snapshots / accepted truth, UI candidate filter `Товар в акции`, компактные date-range period controls, исключение финансовых метрик и operator-facing scrollable table/grid result."
 source_basis:
   - "README.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
@@ -29,7 +29,7 @@ related_docs:
   - "26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
   - "31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Добавлен первый read-only исследовательский MVP-контур без causal claims, без Google Sheets/GAS и без отдельной fact-системы."
+update_note: "MVP-контур остаётся read-only и без causal claims; SKU selectors дополнены candidate-only promo filter по latest closed day, периоды рендерятся как date-range controls, результат выводится через существующий table/grid паттерн с горизонтальной прокруткой."
 ---
 
 # 1. Идентификатор и статус
@@ -57,10 +57,17 @@ MVP-блок:
 - title: `Сравнение групп SKU`;
 - wording: `Ретроспективное сравнение исследуемой и контрольной группы по выбранным метрикам за базовый период и период анализа.`;
 - две multi-select группы SKU с взаимным исключением;
-- обязательные периоды `Базовый период` и `Период анализа`;
+- у каждой группы есть независимый компактный chip `Товар в акции`;
+- обязательные периоды `Базовый период` и `Период анализа` рендерятся как единые date-range controls, хотя backend payload по-прежнему использует `date_from/date_to`;
 - selector `Метрики`;
 - primary action `Рассчитать`;
-- result table с базой/анализом, дельтами, отличием изменений и покрытием.
+- result table/grid с базой/анализом, дельтами, отличием изменений и покрытием; контейнер использует существующий `table-shell / table-scroll / vitrina-table` паттерн и обязан иметь горизонтальную прокрутку при узкой ширине.
+
+Chip `Товар в акции` является только UI candidate filter для dropdown SKU selector:
+- он не выбирает SKU автоматически;
+- он не удаляет уже выбранные SKU, если они не попали в текущий filtered candidate list;
+- он не добавляется в calculate payload и не меняет расчётную методологию;
+- если promo truth недоступен, chip disabled / unavailable, а результат не фабрикуется.
 
 В UI и API wording нельзя утверждать causal effect или статистическую значимость. Нормальная формулировка: `динамика`, `отличие изменений`, `ретроспективное сравнение групп`.
 
@@ -71,7 +78,15 @@ MVP-блок:
 - selectable metric options;
 - readable date capabilities;
 - deterministic `default_metric_keys`;
+- `sku_filters.in_promo_latest_closed` с `available`, `as_of_date`, `source`, `criteria`, `sku_ids`, `reason`;
+- `promo_filter_as_of_date`, `promo_filter_source`, `promo_filter_available` как stable top-level metadata для UI;
 - `source_truth = server_side_accepted_truth_ready_snapshots`.
+
+Promo filter date = latest closed business day по backend-owned time model `Asia/Yekaterinburg`; браузер не вычисляет business date самостоятельно. Criteria:
+- primary: `promo_participation > 0 OR promo_count_by_price > 0`;
+- fallback: `promo_entry_price_best > 0` только если оба primary promo flags отсутствуют в ready snapshot для SKU.
+
+Options route остаётся read-only: не запускает refresh, upstream fetch, bot/browser capture или Google Sheets/GAS. Если latest closed ready snapshot / promo truth отсутствует, route возвращает `promo_filter_available=false` и reason вместо traceback.
 
 `POST /v1/sheet-vitrina-v1/research/sku-group-comparison/calculate` принимает:
 - `research_sku_ids`;

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping
+from zoneinfo import ZoneInfo
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
@@ -14,6 +15,11 @@ RESEARCH_OPTIONS_CONTRACT_NAME = "sheet_vitrina_v1_research_sku_group_comparison
 RESEARCH_CALCULATION_CONTRACT_NAME = "sheet_vitrina_v1_research_sku_group_comparison_result"
 RESEARCH_CONTRACT_VERSION = "v1"
 RESEARCH_SOURCE_TRUTH = "server_side_accepted_truth_ready_snapshots"
+RESEARCH_BUSINESS_TIMEZONE_NAME = "Asia/Yekaterinburg"
+RESEARCH_BUSINESS_TIMEZONE = ZoneInfo(RESEARCH_BUSINESS_TIMEZONE_NAME)
+PROMO_FILTER_SOURCE = "ready_snapshot_promo_metrics_latest_closed_day"
+PROMO_FILTER_PRIMARY_METRICS = ("promo_participation", "promo_count_by_price")
+PROMO_FILTER_FALLBACK_METRIC = "promo_entry_price_best"
 
 _FINANCIAL_SECTIONS = ("финанс", "эконом")
 _FINANCIAL_TOKENS = (
@@ -102,6 +108,12 @@ class SheetVitrinaV1ResearchBlock:
         current_state = self.runtime.load_current_state()
         sku_options = _active_sku_options(current_state.config_v2)
         readable_dates = self.web_vitrina_block.list_readable_dates(descending=False)
+        promo_filter = self._build_promo_filter(
+            page_route=page_route,
+            read_route=read_route,
+            sku_options=sku_options,
+        )
+        sku_options = _attach_promo_filter_flags(sku_options, promo_filter)
         sku_metric_keys = self._current_sku_metric_keys(page_route=page_route, read_route=read_route)
         metric_options = _selectable_metric_options(
             current_state.metrics_v2,
@@ -118,9 +130,16 @@ class SheetVitrinaV1ResearchBlock:
             "metric_options": metric_options,
             "default_metric_keys": default_metric_keys,
             "date_capabilities": _date_capabilities(readable_dates),
+            "sku_filters": {
+                "in_promo_latest_closed": promo_filter,
+            },
+            "promo_filter_as_of_date": promo_filter["as_of_date"],
+            "promo_filter_source": promo_filter["source"],
+            "promo_filter_available": promo_filter["available"],
             "notes": [
                 "Расчёт читает только persisted ready snapshots / accepted truth.",
                 "Финансовый блок метрик исключён из MVP.",
+                "Фильтр `Товар в акции` сужает candidate SKU list по latest closed day и не меняет расчёт.",
                 "Результат является ретроспективным сравнением динамики, не causal proof.",
             ],
         }
@@ -247,6 +266,63 @@ class SheetVitrinaV1ResearchBlock:
             if str(row.scope_kind) == "SKU" and row.nm_id is not None
         }
 
+    def _build_promo_filter(
+        self,
+        *,
+        page_route: str,
+        read_route: str,
+        sku_options: list[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        as_of_date = _latest_closed_business_day(self.now_factory)
+        source = PROMO_FILTER_SOURCE
+        criteria = (
+            "promo_participation > 0 OR promo_count_by_price > 0; "
+            "promo_entry_price_best > 0 is used only when both primary promo flags are absent"
+        )
+        try:
+            contract = self.web_vitrina_block.build(
+                page_route=page_route,
+                read_route=read_route,
+                date_from=as_of_date,
+                date_to=as_of_date,
+            )
+        except Exception as exc:
+            return {
+                "available": False,
+                "as_of_date": as_of_date,
+                "source": source,
+                "criteria": criteria,
+                "sku_ids": [],
+                "reason": f"ready snapshot unavailable for latest closed day {as_of_date}: {exc}",
+            }
+        sku_ids = {int(item["nm_id"]) for item in sku_options}
+        values = _extract_research_values(
+            contract,
+            metric_keys={*PROMO_FILTER_PRIMARY_METRICS, PROMO_FILTER_FALLBACK_METRIC},
+            sku_ids=sku_ids,
+        )
+        promo_sku_ids: list[int] = []
+        for sku_id in sorted(sku_ids):
+            primary_values = [
+                _to_number(values.get((sku_id, metric_key)))
+                for metric_key in PROMO_FILTER_PRIMARY_METRICS
+            ]
+            has_primary_signal = any(value is not None for value in primary_values)
+            in_promo = any((value or 0) > 0 for value in primary_values if value is not None)
+            if not has_primary_signal:
+                fallback = _to_number(values.get((sku_id, PROMO_FILTER_FALLBACK_METRIC)))
+                in_promo = fallback is not None and fallback > 0
+            if in_promo:
+                promo_sku_ids.append(sku_id)
+        return {
+            "available": True,
+            "as_of_date": as_of_date,
+            "source": source,
+            "criteria": criteria,
+            "sku_ids": promo_sku_ids,
+            "reason": "",
+        }
+
     def _load_values_by_date(
         self,
         *,
@@ -355,6 +431,21 @@ def _active_sku_options(items: Iterable[ConfigV2Item]) -> list[dict[str, Any]]:
         for item in sorted(items, key=lambda row: (int(row.display_order), int(row.nm_id)))
         if item.enabled
     ]
+
+
+def _attach_promo_filter_flags(
+    sku_options: list[dict[str, Any]],
+    promo_filter: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    promo_ids = {int(item) for item in promo_filter.get("sku_ids", [])}
+    enriched: list[dict[str, Any]] = []
+    for item in sku_options:
+        copied = dict(item)
+        copied["filters"] = {
+            "in_promo_latest_closed": int(item["nm_id"]) in promo_ids,
+        }
+        enriched.append(copied)
+    return enriched
 
 
 def _selectable_metric_options(
@@ -631,3 +722,25 @@ def _date_range(date_from: str, date_to: str) -> list[str]:
         (start + timedelta(days=offset)).isoformat()
         for offset in range((end - start).days + 1)
     ]
+
+
+def _latest_closed_business_day(now_factory: Callable[[], Any] | None) -> str:
+    if now_factory is None:
+        now_value: Any = datetime.now(timezone.utc)
+    else:
+        now_value = now_factory()
+    if isinstance(now_value, str):
+        normalized = now_value.strip()
+        if normalized.endswith("Z"):
+            normalized = normalized[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(normalized)
+    elif isinstance(now_value, datetime):
+        parsed = now_value
+    elif isinstance(now_value, date):
+        parsed = datetime(now_value.year, now_value.month, now_value.day, tzinfo=RESEARCH_BUSINESS_TIMEZONE)
+    else:
+        parsed = datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    business_today = parsed.astimezone(RESEARCH_BUSINESS_TIMEZONE).date()
+    return (business_today - timedelta(days=1)).isoformat()
