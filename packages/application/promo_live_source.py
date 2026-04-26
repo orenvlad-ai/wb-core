@@ -58,7 +58,17 @@ PROMO_DIAGNOSTIC_COUNTERS = (
     "archive_miss_count",
     "workbook_download_count",
     "workbook_reuse_count",
+    "collector_reuse_count",
+    "validated_workbook_usable_count",
+    "materializer_usable_count",
     "workbook_missing_count",
+    "validation_failed_count",
+    "metadata_only_count",
+    "workbook_without_metadata_count",
+    "corrupted_count",
+    "ambiguous_date_count",
+    "complete_artifact_count",
+    "incomplete_artifact_count",
     "metadata_valid_count",
     "metadata_invalid_count",
     "candidate_row_count",
@@ -238,8 +248,8 @@ def _new_promo_diagnostics(request: PromoLiveSourceRequest) -> dict[str, Any]:
             "archive_lookup": "archive records load/filter for campaigns covering snapshot_date",
             "archive_sync": "sync promo collector run metadata/workbooks into promo_campaign_archive",
             "workbook_download": "collector summary only; download count is available, per-download timing is not emitted",
-            "workbook_reuse": "collector summary only; archive reuse count is available, per-reuse timing is not emitted",
-            "workbook_inspection": "archive workbook row inspection/materialization",
+            "workbook_reuse": "collector summary only; collector reuse count is not materializer usability",
+            "workbook_inspection": "validated archive workbook row inspection/materialization",
             "metadata_validation": "archive metadata date-confidence/materialization check",
             "price_truth_lookup": "accepted prices_snapshot lookup for exact promo snapshot_date",
             "price_truth_join": "candidate rows joined with accepted price truth",
@@ -248,6 +258,7 @@ def _new_promo_diagnostics(request: PromoLiveSourceRequest) -> dict[str, Any]:
         },
         "gaps": [
             "collector adapter does not emit per-candidate browser timing without a separate adapter refactor",
+            "collector workbook reuse means a reused archive candidate was reported; materializer usability is reported separately by artifact validation counters",
         ],
     }
 
@@ -374,6 +385,7 @@ def _apply_collector_summary_diagnostics(diagnostics: dict[str, Any], collector_
     )
     _set_promo_counter(diagnostics, "workbook_download_count", int(getattr(collector_summary, "downloaded_count", 0) or 0))
     _set_promo_counter(diagnostics, "workbook_reuse_count", int(getattr(collector_summary, "reused_archive_count", 0) or 0))
+    _set_promo_counter(diagnostics, "collector_reuse_count", int(getattr(collector_summary, "reused_archive_count", 0) or 0))
     _set_promo_counter(
         diagnostics,
         "workbook_missing_count",

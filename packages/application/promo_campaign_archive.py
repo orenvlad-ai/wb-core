@@ -38,6 +38,27 @@ ARCHIVE_WORKBOOK_FILENAME = "workbook.xlsx"
 ARCHIVE_WORKBOOK_INSPECTION_FILENAME = "workbook_inspection.json"
 PRICES_SOURCE_KEY = "prices_snapshot"
 PRICES_ACCEPTED_CURRENT_ROLE = "accepted_current_snapshot"
+ARTIFACT_VALIDATION_SCHEMA_VERSION = "promo_artifact_validation_v1"
+ARTIFACT_STATE_COMPLETE = "complete"
+ARTIFACT_STATE_INCOMPLETE = "incomplete"
+ARTIFACT_STATE_STALE = "stale"
+ARTIFACT_STATE_CORRUPTED = "corrupted"
+ARTIFACT_STATE_MISSING_WORKBOOK = "missing_workbook"
+ARTIFACT_STATE_METADATA_ONLY = "metadata_only"
+ARTIFACT_STATE_WORKBOOK_WITHOUT_METADATA = "workbook_without_metadata"
+ARTIFACT_STATE_AMBIGUOUS_DATE = "ambiguous_date"
+ARTIFACT_STATE_UNUSABLE = "unusable"
+ARTIFACT_STATES = (
+    ARTIFACT_STATE_COMPLETE,
+    ARTIFACT_STATE_INCOMPLETE,
+    ARTIFACT_STATE_STALE,
+    ARTIFACT_STATE_CORRUPTED,
+    ARTIFACT_STATE_MISSING_WORKBOOK,
+    ARTIFACT_STATE_METADATA_ONLY,
+    ARTIFACT_STATE_WORKBOOK_WITHOUT_METADATA,
+    ARTIFACT_STATE_AMBIGUOUS_DATE,
+    ARTIFACT_STATE_UNUSABLE,
+)
 
 
 @dataclass(frozen=True)
@@ -76,6 +97,53 @@ class DailyPriceTruthResolution:
     source_note: str
     captured_at: str | None = None
     fingerprint: str | None = None
+
+
+@dataclass(frozen=True)
+class PromoCampaignArtifactValidation:
+    archive_key: str
+    campaign_id: str | None
+    promo_id: int | None
+    period_id: int | None
+    normalized_artifact_key: str | None
+    artifact_state: str
+    validation_failure_reason: str | None
+    expected_workbook_path: str | None
+    actual_candidate_paths: list[str]
+    metadata_exists: bool
+    workbook_exists: bool
+    coverage_dates: dict[str, str | None]
+    date_confidence: str | None
+    temporal_classification: str | None
+    export_kind: str | None
+    file_size: int | None
+    file_mtime: int | None
+    checksum_or_fingerprint: str | None
+
+    @property
+    def is_complete(self) -> bool:
+        return self.artifact_state == ARTIFACT_STATE_COMPLETE
+
+    def to_diagnostic(self) -> dict[str, Any]:
+        return {
+            "campaign_id": self.campaign_id,
+            "promo_id": self.promo_id,
+            "period_id": self.period_id,
+            "normalized_artifact_key": self.normalized_artifact_key,
+            "artifact_state": self.artifact_state,
+            "validation_failure_reason": self.validation_failure_reason,
+            "expected_workbook_path": self.expected_workbook_path,
+            "actual_candidate_paths": list(self.actual_candidate_paths),
+            "metadata_exists": self.metadata_exists,
+            "workbook_exists": self.workbook_exists,
+            "coverage_dates": dict(self.coverage_dates),
+            "date_confidence": self.date_confidence,
+            "temporal_classification": self.temporal_classification,
+            "export_kind": self.export_kind,
+            "file_size": self.file_size,
+            "file_mtime": self.file_mtime,
+            "checksum_or_fingerprint": self.checksum_or_fingerprint,
+        }
 
 
 def promo_campaign_archive_root(runtime_dir: Path) -> Path:
@@ -132,6 +200,165 @@ def resolve_reusable_campaign(
     return matches[0]
 
 
+def validate_promo_campaign_artifact(
+    record: PromoCampaignArchiveRecord,
+    *,
+    requested_slot_date: date | None = None,
+    deep_workbook_check: bool = False,
+) -> PromoCampaignArtifactValidation:
+    archive_dir = Path(record.archive_dir)
+    archive_key = record.archive_key or archive_dir.name
+    metadata_path = archive_dir / ARCHIVE_METADATA_FILENAME
+    record_workbook_path = Path(record.workbook_path) if record.workbook_path else None
+    expected_workbook_path = archive_dir / ARCHIVE_WORKBOOK_FILENAME
+    actual_candidate_paths = _candidate_workbook_paths(
+        archive_dir=archive_dir,
+        record_workbook_path=record_workbook_path,
+        expected_workbook_path=expected_workbook_path,
+    )
+    workbook_path = _resolve_record_workbook_path(
+        record_workbook_path=record_workbook_path,
+        expected_workbook_path=expected_workbook_path,
+    )
+    workbook_exists = bool(workbook_path and workbook_path.exists())
+    file_size = _file_size(workbook_path) if workbook_exists else None
+    file_mtime = _file_mtime(workbook_path) if workbook_exists else None
+    checksum_or_fingerprint = record.workbook_fingerprint
+    if workbook_exists and not checksum_or_fingerprint and workbook_path is not None:
+        checksum_or_fingerprint = _sha256_path(workbook_path)
+
+    state = ARTIFACT_STATE_COMPLETE
+    reason: str | None = None
+    metadata_exists = metadata_path.exists()
+    coverage_dates = {
+        "promo_start_at": record.metadata.promo_start_at,
+        "promo_end_at": record.metadata.promo_end_at,
+    }
+
+    if not metadata_exists:
+        state = ARTIFACT_STATE_WORKBOOK_WITHOUT_METADATA if workbook_exists else ARTIFACT_STATE_INCOMPLETE
+        reason = "metadata_sidecar_missing"
+    elif not record.metadata.promo_start_at or not record.metadata.promo_end_at:
+        state = ARTIFACT_STATE_AMBIGUOUS_DATE
+        reason = "coverage_dates_missing"
+    elif not _record_dates_parseable(record):
+        state = ARTIFACT_STATE_AMBIGUOUS_DATE
+        reason = "coverage_dates_unparseable"
+    elif str(record.metadata.period_parse_confidence or "") != "high":
+        state = ARTIFACT_STATE_AMBIGUOUS_DATE
+        reason = "coverage_dates_not_high_confidence"
+    elif requested_slot_date is not None and not _record_covers_date_safe(record, requested_slot_date):
+        state = ARTIFACT_STATE_STALE
+        reason = "coverage_does_not_include_requested_slot"
+    elif not record_workbook_path:
+        state = ARTIFACT_STATE_METADATA_ONLY
+        reason = "workbook_index_missing"
+    elif _normalized_path(record_workbook_path) != _normalized_path(expected_workbook_path):
+        state = ARTIFACT_STATE_STALE
+        reason = "workbook_path_mismatch"
+    elif not workbook_exists:
+        state = (
+            ARTIFACT_STATE_MISSING_WORKBOOK
+            if record.workbook_present
+            else ARTIFACT_STATE_METADATA_ONLY
+        )
+        reason = "workbook_file_missing"
+    elif file_size is None or file_size <= 0:
+        state = ARTIFACT_STATE_CORRUPTED
+        reason = "workbook_file_empty"
+    else:
+        inspection_reason = _workbook_inspection_failure_reason(record)
+        if inspection_reason:
+            state = ARTIFACT_STATE_CORRUPTED
+            reason = inspection_reason
+
+    if (
+        state == ARTIFACT_STATE_COMPLETE
+        and deep_workbook_check
+        and workbook_path is not None
+    ):
+        workbook_reason = _workbook_open_failure_reason(workbook_path)
+        if workbook_reason:
+            state = ARTIFACT_STATE_CORRUPTED
+            reason = workbook_reason
+
+    return PromoCampaignArtifactValidation(
+        archive_key=archive_key,
+        campaign_id=_campaign_identity(record) if archive_key else None,
+        promo_id=record.metadata.promo_id,
+        period_id=record.metadata.period_id,
+        normalized_artifact_key=archive_key,
+        artifact_state=state,
+        validation_failure_reason=reason,
+        expected_workbook_path=str(expected_workbook_path),
+        actual_candidate_paths=actual_candidate_paths,
+        metadata_exists=metadata_exists,
+        workbook_exists=workbook_exists,
+        coverage_dates=coverage_dates,
+        date_confidence=record.metadata.period_parse_confidence,
+        temporal_classification=record.metadata.temporal_classification,
+        export_kind=record.metadata.export_kind,
+        file_size=file_size,
+        file_mtime=file_mtime,
+        checksum_or_fingerprint=checksum_or_fingerprint,
+    )
+
+
+def audit_promo_campaign_archive(
+    runtime_dir: Path,
+    *,
+    snapshot_date: str | None = None,
+    max_examples: int = 20,
+    deep_workbook_check: bool = False,
+) -> dict[str, Any]:
+    archive_root = promo_campaign_archive_root(runtime_dir)
+    slot_date = date.fromisoformat(snapshot_date) if snapshot_date else None
+    records = load_promo_campaign_archive(runtime_dir)
+    validations = [
+        validate_promo_campaign_artifact(
+            record,
+            requested_slot_date=slot_date if slot_date and _record_covers_date_safe(record, slot_date) else None,
+            deep_workbook_check=deep_workbook_check,
+        )
+        for record in records
+    ]
+    known_dirs = {_normalized_path(Path(record.archive_dir)) for record in records}
+    if archive_root.exists():
+        for archive_dir in sorted(path for path in archive_root.iterdir() if path.is_dir()):
+            if _normalized_path(archive_dir) in known_dirs:
+                continue
+            validations.append(_validate_orphan_archive_dir(archive_dir))
+    state_counts = _artifact_state_counts(validations)
+    failures = [validation for validation in validations if not validation.is_complete]
+    covering_validations = (
+        [
+            validation
+            for record, validation in zip(records, validations)
+            if slot_date is not None and _record_covers_date_safe(record, slot_date)
+        ]
+        if slot_date is not None
+        else []
+    )
+    return {
+        "artifact_validation_schema_version": ARTIFACT_VALIDATION_SCHEMA_VERSION,
+        "archive_root": str(archive_root),
+        "snapshot_date": snapshot_date,
+        "record_count": len(records),
+        "archive_dir_count": len(list(archive_root.iterdir())) if archive_root.exists() else 0,
+        "artifact_state_counts": state_counts,
+        "complete_artifact_count": state_counts.get(ARTIFACT_STATE_COMPLETE, 0),
+        "incomplete_artifact_count": len(failures),
+        "validation_failed_count": len(failures),
+        "validated_workbook_usable_count": state_counts.get(ARTIFACT_STATE_COMPLETE, 0),
+        "covering_campaign_count": len(covering_validations),
+        "covering_artifact_state_counts": _artifact_state_counts(covering_validations),
+        "failure_examples": [
+            validation.to_diagnostic()
+            for validation in failures[:max(0, int(max_examples))]
+        ],
+    }
+
+
 def sync_promo_campaign_archive(runtime_dir: Path) -> PromoCampaignArchiveSyncSummary:
     runs_root = runtime_dir / "promo_xlsx_collector_runs"
     archive_root = promo_campaign_archive_root(runtime_dir)
@@ -185,20 +412,38 @@ def materialize_promo_result_from_archive(
     requested = sorted({int(nm_id) for nm_id in requested_nm_ids})
     slot_date = date.fromisoformat(snapshot_date)
     records = load_promo_campaign_archive(runtime_dir)
-    covering = [record for record in records if _record_covers_date(record, slot_date)]
+    covering = [record for record in records if _record_covers_date_safe(record, slot_date)]
+    validation_pairs = [
+        (
+            record,
+            validate_promo_campaign_artifact(
+                record,
+                requested_slot_date=slot_date,
+                deep_workbook_check=True,
+            ),
+        )
+        for record in covering
+    ]
     usable = [
         record
-        for record in covering
-        if record.workbook_present
-        and record.workbook_path
-        and Path(record.workbook_path).exists()
+        for record, validation in validation_pairs
+        if validation.is_complete
     ]
-    missing_artifacts = [record for record in covering if record not in usable]
+    failed_artifacts = [
+        (record, validation)
+        for record, validation in validation_pairs
+        if not validation.is_complete
+    ]
+    missing_artifacts = [record for record, _validation in failed_artifacts]
+    _apply_artifact_validation_diagnostics(
+        diagnostics=diagnostics,
+        validations=[validation for _record, validation in validation_pairs],
+        snapshot_date=snapshot_date,
+    )
     _set_promo_diag_counter(diagnostics, "campaign_count", len(records), overwrite=False)
     _set_promo_diag_counter(diagnostics, "current_promo_count", len(covering))
     _set_promo_diag_counter(diagnostics, "archive_hit_count", len(usable))
     _set_promo_diag_counter(diagnostics, "archive_miss_count", len(missing_artifacts))
-    _set_promo_diag_counter(diagnostics, "workbook_missing_count", len(missing_artifacts))
     _set_promo_diag_fingerprint(
         diagnostics,
         "promo_archive_fingerprint",
@@ -258,12 +503,21 @@ def materialize_promo_result_from_archive(
         sync_state.to_note(),
         f"covering_campaigns={len(covering)}",
         f"usable_campaigns={len(usable)}",
+        f"artifact_validation_schema={ARTIFACT_VALIDATION_SCHEMA_VERSION}",
     ]
     if detail_prefix:
         detail_parts.insert(0, detail_prefix)
 
     if missing_artifacts:
         missing_keys = ",".join(record.archive_key for record in missing_artifacts[:8])
+        failure_reasons = ",".join(
+            sorted(
+                {
+                    str(validation.validation_failure_reason or validation.artifact_state)
+                    for _record, validation in failed_artifacts
+                }
+            )
+        )
         _set_promo_diag_counter(diagnostics, "candidate_row_count", 0)
         _set_promo_diag_counter(diagnostics, "eligible_row_count", 0)
         _set_promo_diag_counter(diagnostics, "accepted_row_count", 0)
@@ -276,7 +530,13 @@ def materialize_promo_result_from_archive(
             covered_count=0,
             items=[],
             missing_nm_ids=requested,
-            detail="; ".join(detail_parts + [f"missing_campaign_artifacts={missing_keys}"]),
+            detail="; ".join(
+                detail_parts
+                + [
+                    f"missing_campaign_artifacts={missing_keys}",
+                    f"artifact_validation_failed={failure_reasons}",
+                ]
+            ),
             diagnostics=_snapshot_promo_diagnostics(diagnostics),
             **common,
         )
@@ -420,6 +680,81 @@ def materialize_promo_result_from_archive(
     )
 
 
+def _apply_artifact_validation_diagnostics(
+    *,
+    diagnostics: dict[str, Any] | None,
+    validations: list[PromoCampaignArtifactValidation],
+    snapshot_date: str,
+) -> None:
+    if diagnostics is None:
+        return
+    state_counts = _artifact_state_counts(validations)
+    failures = [validation for validation in validations if not validation.is_complete]
+    missing_workbook_count = (
+        state_counts.get(ARTIFACT_STATE_MISSING_WORKBOOK, 0)
+        + state_counts.get(ARTIFACT_STATE_METADATA_ONLY, 0)
+    )
+    diagnostics["artifact_validation_schema_version"] = ARTIFACT_VALIDATION_SCHEMA_VERSION
+    diagnostics["artifact_state_counts"] = state_counts
+    diagnostics["missing_campaign_artifacts"] = [
+        validation.to_diagnostic()
+        for validation in failures[:20]
+    ]
+    diagnostics["artifact_validation_summary"] = {
+        "schema_version": ARTIFACT_VALIDATION_SCHEMA_VERSION,
+        "snapshot_date": snapshot_date,
+        "covering_campaign_count": len(validations),
+        "complete_artifact_count": state_counts.get(ARTIFACT_STATE_COMPLETE, 0),
+        "incomplete_artifact_count": len(failures),
+        "validated_workbook_usable_count": state_counts.get(ARTIFACT_STATE_COMPLETE, 0),
+        "materializer_usable_count": state_counts.get(ARTIFACT_STATE_COMPLETE, 0),
+        "validation_failed_count": len(failures),
+        "workbook_missing_count": missing_workbook_count,
+        "metadata_only_count": state_counts.get(ARTIFACT_STATE_METADATA_ONLY, 0),
+        "workbook_without_metadata_count": state_counts.get(ARTIFACT_STATE_WORKBOOK_WITHOUT_METADATA, 0),
+        "corrupted_count": state_counts.get(ARTIFACT_STATE_CORRUPTED, 0),
+        "ambiguous_date_count": state_counts.get(ARTIFACT_STATE_AMBIGUOUS_DATE, 0),
+    }
+    _set_promo_diag_counter(
+        diagnostics,
+        "validated_workbook_usable_count",
+        state_counts.get(ARTIFACT_STATE_COMPLETE, 0),
+    )
+    _set_promo_diag_counter(
+        diagnostics,
+        "materializer_usable_count",
+        state_counts.get(ARTIFACT_STATE_COMPLETE, 0),
+    )
+    _set_promo_diag_counter(diagnostics, "validation_failed_count", len(failures))
+    _set_promo_diag_counter(diagnostics, "workbook_missing_count", missing_workbook_count)
+    _set_promo_diag_counter(
+        diagnostics,
+        "metadata_only_count",
+        state_counts.get(ARTIFACT_STATE_METADATA_ONLY, 0),
+    )
+    _set_promo_diag_counter(
+        diagnostics,
+        "workbook_without_metadata_count",
+        state_counts.get(ARTIFACT_STATE_WORKBOOK_WITHOUT_METADATA, 0),
+    )
+    _set_promo_diag_counter(
+        diagnostics,
+        "corrupted_count",
+        state_counts.get(ARTIFACT_STATE_CORRUPTED, 0),
+    )
+    _set_promo_diag_counter(
+        diagnostics,
+        "ambiguous_date_count",
+        state_counts.get(ARTIFACT_STATE_AMBIGUOUS_DATE, 0),
+    )
+    _set_promo_diag_counter(
+        diagnostics,
+        "complete_artifact_count",
+        state_counts.get(ARTIFACT_STATE_COMPLETE, 0),
+    )
+    _set_promo_diag_counter(diagnostics, "incomplete_artifact_count", len(failures))
+
+
 def _sync_archive_record_from_metadata(
     *,
     metadata_path: Path,
@@ -548,6 +883,173 @@ def _record_covers_date(record: PromoCampaignArchiveRecord, slot_date: date) -> 
     start_date = date.fromisoformat(record.metadata.promo_start_at[:10])
     end_date = date.fromisoformat(record.metadata.promo_end_at[:10])
     return start_date <= slot_date <= end_date
+
+
+def _record_covers_date_safe(record: PromoCampaignArchiveRecord, slot_date: date) -> bool:
+    try:
+        return _record_covers_date(record, slot_date)
+    except Exception:
+        return False
+
+
+def _record_dates_parseable(record: PromoCampaignArchiveRecord) -> bool:
+    try:
+        if not record.metadata.promo_start_at or not record.metadata.promo_end_at:
+            return False
+        date.fromisoformat(record.metadata.promo_start_at[:10])
+        date.fromisoformat(record.metadata.promo_end_at[:10])
+    except Exception:
+        return False
+    return True
+
+
+def _candidate_workbook_paths(
+    *,
+    archive_dir: Path,
+    record_workbook_path: Path | None,
+    expected_workbook_path: Path,
+) -> list[str]:
+    candidates: list[Path] = []
+    if record_workbook_path is not None:
+        candidates.append(record_workbook_path)
+    candidates.append(expected_workbook_path)
+    if archive_dir.exists():
+        candidates.extend(sorted(archive_dir.glob("*.xlsx")))
+    seen: set[str] = set()
+    result: list[str] = []
+    for path in candidates:
+        normalized = _normalized_path(path)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if path.exists() or path == expected_workbook_path or path == record_workbook_path:
+            result.append(str(path))
+    return result[:8]
+
+
+def _resolve_record_workbook_path(
+    *,
+    record_workbook_path: Path | None,
+    expected_workbook_path: Path,
+) -> Path | None:
+    if record_workbook_path is not None and record_workbook_path.exists():
+        return record_workbook_path
+    if expected_workbook_path.exists():
+        return expected_workbook_path
+    return record_workbook_path
+
+
+def _file_size(path: Path | None) -> int | None:
+    try:
+        return int(path.stat().st_size) if path is not None else None
+    except OSError:
+        return None
+
+
+def _file_mtime(path: Path | None) -> int | None:
+    try:
+        return int(path.stat().st_mtime) if path is not None else None
+    except OSError:
+        return None
+
+
+def _workbook_inspection_failure_reason(record: PromoCampaignArchiveRecord) -> str | None:
+    if not record.workbook_inspection_path:
+        return None
+    inspection_path = Path(record.workbook_inspection_path)
+    if not inspection_path.exists():
+        return "workbook_inspection_missing"
+    try:
+        payload = json.loads(inspection_path.read_text(encoding="utf-8"))
+    except Exception:
+        return "workbook_inspection_corrupted"
+    if not isinstance(payload, dict):
+        return "workbook_inspection_not_object"
+    return None
+
+
+def _workbook_open_failure_reason(workbook_path: Path) -> str | None:
+    workbook = None
+    try:
+        workbook = load_workbook(filename=str(workbook_path), read_only=True, data_only=True)
+        find_workbook_data_sheet(workbook)
+    except Exception:
+        return "workbook_unusable"
+    finally:
+        if workbook is not None:
+            workbook.close()
+    return None
+
+
+def _artifact_state_counts(
+    validations: list[PromoCampaignArtifactValidation],
+) -> dict[str, int]:
+    counts = {state: 0 for state in ARTIFACT_STATES}
+    for validation in validations:
+        state = validation.artifact_state or ARTIFACT_STATE_UNUSABLE
+        counts[state] = counts.get(state, 0) + 1
+    return counts
+
+
+def _validate_orphan_archive_dir(archive_dir: Path) -> PromoCampaignArtifactValidation:
+    metadata_path = archive_dir / ARCHIVE_METADATA_FILENAME
+    expected_workbook_path = archive_dir / ARCHIVE_WORKBOOK_FILENAME
+    workbook_exists = expected_workbook_path.exists()
+    metadata_payload: dict[str, Any] = {}
+    if metadata_path.exists():
+        try:
+            raw_payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata_payload = raw_payload if isinstance(raw_payload, dict) else {}
+        except Exception:
+            metadata_payload = {}
+    if not metadata_path.exists() and workbook_exists:
+        state = ARTIFACT_STATE_WORKBOOK_WITHOUT_METADATA
+        reason = "archive_record_and_metadata_missing"
+    elif metadata_path.exists() and not workbook_exists:
+        state = ARTIFACT_STATE_METADATA_ONLY
+        reason = "archive_record_and_workbook_missing"
+    else:
+        state = ARTIFACT_STATE_INCOMPLETE
+        reason = "archive_record_missing"
+    file_size = _file_size(expected_workbook_path) if workbook_exists else None
+    file_mtime = _file_mtime(expected_workbook_path) if workbook_exists else None
+    checksum = _sha256_path(expected_workbook_path) if workbook_exists and file_size else None
+    return PromoCampaignArtifactValidation(
+        archive_key=archive_dir.name,
+        campaign_id=None,
+        promo_id=_safe_int_or_none(metadata_payload.get("promo_id")),
+        period_id=_safe_int_or_none(metadata_payload.get("period_id")),
+        normalized_artifact_key=archive_dir.name,
+        artifact_state=state,
+        validation_failure_reason=reason,
+        expected_workbook_path=str(expected_workbook_path),
+        actual_candidate_paths=_candidate_workbook_paths(
+            archive_dir=archive_dir,
+            record_workbook_path=None,
+            expected_workbook_path=expected_workbook_path,
+        ),
+        metadata_exists=metadata_path.exists(),
+        workbook_exists=workbook_exists,
+        coverage_dates={
+            "promo_start_at": _normalize_optional_text(metadata_payload.get("promo_start_at")),
+            "promo_end_at": _normalize_optional_text(metadata_payload.get("promo_end_at")),
+        },
+        date_confidence=_normalize_optional_text(metadata_payload.get("period_parse_confidence")),
+        temporal_classification=_normalize_optional_text(metadata_payload.get("temporal_classification")),
+        export_kind=_normalize_optional_text(metadata_payload.get("export_kind")),
+        file_size=file_size,
+        file_mtime=file_mtime,
+        checksum_or_fingerprint=checksum,
+    )
+
+
+def _safe_int_or_none(value: object) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _record_matches_live_metadata(
@@ -927,6 +1429,13 @@ def _sha256_path(path: Path) -> str:
         for chunk in iter(lambda: handle.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _normalized_path(path: Path) -> str:
+    try:
+        return str(path.resolve(strict=False))
+    except OSError:
+        return str(path)
 
 
 def _normalize_optional_text(value: object) -> str | None:
