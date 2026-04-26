@@ -3731,10 +3731,9 @@
 
     function currentActionAsOfDate() {
       const params = new URLSearchParams(window.location.search);
-      const dateTo = String(params.get("date_to") || "").trim();
-      if (dateTo) {
-        return dateTo;
-      }
+      // date_from/date_to is only a read-side window. The full refresh action
+      // must let the backend resolve the closed-day snapshot key, otherwise a
+      // window ending on today_current collapses yesterday/today highlighting.
       return String(params.get("as_of_date") || "").trim();
     }
 

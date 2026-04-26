@@ -12,17 +12,21 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from apps.sheet_vitrina_v1_web_vitrina_browser_smoke import LocalWebVitrinaFixtureServer  # noqa: E402
+from apps.sheet_vitrina_v1_web_vitrina_browser_smoke import LocalWebVitrinaFixtureServer, NOW  # noqa: E402
 from packages.adapters.registry_upload_http_entrypoint import DEFAULT_SHEET_WEB_VITRINA_UI_PATH  # noqa: E402
+from packages.application.registry_upload_http_entrypoint import _resolve_sheet_refresh_as_of_date  # noqa: E402
 
 
 def main() -> None:
+    _assert_refresh_date_resolution()
     with LocalWebVitrinaFixtureServer(with_ready_snapshot=True) as base_url:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             context = browser.new_context(viewport={"width": 1100, "height": 900})
+            refresh_requests: list[dict[str, object]] = []
 
             def launch_refresh(route: object) -> None:
+                refresh_requests.append(json.loads(route.request.post_data or "{}"))
                 route.fulfill(
                     status=202,
                     content_type="application/json",
@@ -96,6 +100,11 @@ def main() -> None:
             )
             page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
             page.locator("[data-load-refresh-button]").click()
+            if refresh_requests != [{"async": True}]:
+                raise AssertionError(
+                    "full refresh must not turn a date_from/date_to read window into as_of_date; "
+                    f"got {refresh_requests}"
+                )
             page.wait_for_selector(".cell-session-highlight-updated", timeout=10000)
             highlight_state = page.evaluate(
                 """() => ({
@@ -131,6 +140,15 @@ def main() -> None:
                 raise AssertionError(f"session highlights must disappear after reload, got {after_reload}")
             print("web_vitrina_session_highlights: ok ->", highlight_state, after_reload)
             browser.close()
+
+
+def _assert_refresh_date_resolution() -> None:
+    current_day = _resolve_sheet_refresh_as_of_date("2026-04-21", now=NOW)
+    if current_day != "2026-04-20":
+        raise AssertionError(f"current business day must resolve to previous closed day, got {current_day}")
+    historical_day = _resolve_sheet_refresh_as_of_date("2026-04-19", now=NOW)
+    if historical_day != "2026-04-19":
+        raise AssertionError(f"historical refresh date must remain explicit, got {historical_day}")
 
 
 if __name__ == "__main__":
