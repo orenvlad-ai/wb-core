@@ -41,6 +41,12 @@ DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH = "/v1/sheet-vitrina-v1/plan-repo
 DEFAULT_SHEET_WEB_VITRINA_READ_PATH = "/v1/sheet-vitrina-v1/web-vitrina"
 DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE = "page_composition"
 DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH = "/v1/sheet-vitrina-v1/web-vitrina/group-refresh"
+DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH = (
+    "/v1/sheet-vitrina-v1/research/sku-group-comparison/options"
+)
+DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_CALCULATE_PATH = (
+    "/v1/sheet-vitrina-v1/research/sku-group-comparison/calculate"
+)
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_SHEET_LOAD_PATH = "/v1/sheet-vitrina-v1/load"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
@@ -427,6 +433,32 @@ def _build_handler(
                 )
                 return
 
+            if parsed.path == DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_CALCULATE_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_sheet_research_sku_group_comparison_calculate_request(
+                        payload,
+                        page_route=DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
+                        read_route=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+                    )
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina research calculation failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
             if parsed.path == DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH:
                 try:
                     job_payload = entrypoint.start_seller_portal_session_check_job(
@@ -784,6 +816,30 @@ def _build_handler(
                     HTTPStatus.OK,
                     payload,
                 )
+                return
+
+            if parsed.path == DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH:
+                try:
+                    payload = entrypoint.handle_sheet_research_sku_group_comparison_options_request(
+                        page_route=DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
+                        read_route=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+                    )
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina research options failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
             if parsed.path == DEFAULT_SHEET_DAILY_REPORT_PATH:
@@ -1782,6 +1838,8 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "operator_path": operator_path,
         "refresh_path": refresh_path,
         "group_refresh_path": DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH,
+        "research_options_path": DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH,
+        "research_calculate_path": DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_CALCULATE_PATH,
         "job_path": job_path,
         "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
         "seller_recovery_start_path": DEFAULT_SHEET_WEB_VITRINA_SELLER_RECOVERY_START_PATH,

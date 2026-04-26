@@ -25,6 +25,7 @@ from packages.application.sheet_vitrina_v1_load_bridge import (
     load_sheet_vitrina_ready_snapshot_via_clasp,
 )
 from packages.application.sheet_vitrina_v1_plan_report import SheetVitrinaV1PlanReportBlock
+from packages.application.sheet_vitrina_v1_research import SheetVitrinaV1ResearchBlock
 from packages.application.sheet_vitrina_v1_stock_report import SheetVitrinaV1StockReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import list_active_sku_options
 from packages.application.sheet_vitrina_v1_temporal_policy import (
@@ -497,6 +498,11 @@ class RegistryUploadHttpEntrypoint:
             runtime=self.runtime,
             now_factory=self.now_factory,
         )
+        self.research_block = SheetVitrinaV1ResearchBlock(
+            runtime=self.runtime,
+            web_vitrina_block=self.web_vitrina_block,
+            now_factory=self.now_factory,
+        )
         self.sheet_load_runner = sheet_load_runner or load_sheet_vitrina_ready_snapshot_via_clasp
         self.operator_jobs = SheetVitrinaV1OperatorJobStore(timestamp_factory=self.activated_at_factory)
         self.seller_portal_recovery = seller_portal_recovery_controller or SellerPortalRecoveryController()
@@ -733,6 +739,30 @@ class RegistryUploadHttpEntrypoint:
             selected_date_from=selected_date_from,
             selected_date_to=selected_date_to,
             activity_surface=activity_surface,
+        )
+
+    def handle_sheet_research_sku_group_comparison_options_request(
+        self,
+        *,
+        page_route: str,
+        read_route: str,
+    ) -> dict[str, Any]:
+        return self.research_block.build_sku_group_comparison_options(
+            page_route=page_route,
+            read_route=read_route,
+        )
+
+    def handle_sheet_research_sku_group_comparison_calculate_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        page_route: str,
+        read_route: str,
+    ) -> dict[str, Any]:
+        return self.research_block.calculate_sku_group_comparison(
+            payload,
+            page_route=page_route,
+            read_route=read_route,
         )
 
     def handle_sheet_refresh_request(

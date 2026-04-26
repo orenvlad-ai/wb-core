@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–31`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–32`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -37,6 +37,7 @@ source_basis:
   - "docs/modules/29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md"
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
+  - "docs/modules/32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -73,6 +74,7 @@ related_docs:
   - "29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md"
   - "30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
   - "31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
+  - "32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md"
 source_of_truth_level: "navigation_only"
 update_note: "Обновлён под Google Sheets decommission: modules 17/18/19/24/25 are archive/migration-only, module 26 current contour is website/operator/web-vitrina, and Google Sheets/GAS is no longer an active runtime/update/write/load/verify target."
 ---
@@ -91,7 +93,7 @@ update_note: "Обновлён под Google Sheets decommission: modules 17/18/
 
 # 1.1 Текущий Checkpoint Main
 
-На текущем `main` main-confirmed модульные блоки доходят до `01–31`.
+На текущем `main` main-confirmed модульные блоки доходят до `01–32`.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`
@@ -115,6 +117,7 @@ update_note: "Обновлён под Google Sheets decommission: modules 17/18/
 - `web_vitrina_view_model_block` как bounded phase-2 presentation-domain слой между stable `web_vitrina_contract` и concrete grid/page layers.
 - `web_vitrina_gravity_table_adapter_block` как bounded phase-3 concrete adapter для `@gravity-ui/table` над stable `view_model`.
 - `web_vitrina_page_composition_block` как bounded phase-4 live page composition на `/sheet-vitrina-v1/vitrina` с existing read route и minimal inline client island.
+- `research_sku_group_comparison_block` как первый read-only MVP-контур вкладки `Исследования`: ретроспективное сравнение двух непересекающихся групп SKU по non-financial метрикам поверх persisted ready snapshots.
 
 Главный незакрытый gap текущей линии:
 - текущий `main` уже содержит server upload line and bounded refresh/read split for website/operator web-vitrina;
@@ -196,6 +199,7 @@ update_note: "Обновлён под Google Sheets decommission: modules 17/18/
 | `29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md` | `web_vitrina_view_model_block` | `web-vitrina` | phase-2 library-agnostic `view_model` layer поверх stable `web_vitrina_contract`, с canonical mapper/filter/sort/formatter/state schema, подтверждён и смёржен в `main` |
 | `30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md` | `web_vitrina_gravity_table_adapter_block` | `web-vitrina` | phase-3 concrete `@gravity-ui/table` adapter поверх stable `view_model`, с isolated Gravity-specific columns/rows/renderers/options/state surface, подтверждён и смёржен в `main` |
 | `31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md` | `web_vitrina_page_composition_block` | `web-vitrina` | phase-4 server-driven sibling page composition поверх existing read route, truthful reporting blocks и browser island подтверждены, смёржены в `main` |
+| `32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md` | `research_sku_group_comparison_block` | `web/operator/research` | read-only MVP вкладки `Исследования`: SKU group comparison over accepted truth / ready snapshots, non-financial metrics only |
 
 # 5. Как эта папка используется дальше
 

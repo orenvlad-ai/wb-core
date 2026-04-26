@@ -286,11 +286,15 @@ def main() -> None:
                 "Витрина",
                 "Расчет поставок",
                 "Отчеты",
+                "Исследования",
                 'data-unified-tab-button="vitrina"',
                 'data-unified-tab-button="factory-order"',
                 'data-unified-tab-button="reports"',
+                'data-unified-tab-button="research"',
                 'data-operator-embed-frame="factory-order"',
                 'data-operator-embed-frame="reports"',
+                "Сравнение групп SKU",
+                "data-research-calculate",
                 DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
                 DEFAULT_SHEET_OPERATOR_UI_PATH,
                 "surface=page_composition",
@@ -341,6 +345,7 @@ def main() -> None:
                 'data-unified-tab-button="vitrina"',
                 'data-unified-tab-button="factory-order"',
                 'data-unified-tab-button="reports"',
+                'data-unified-tab-button="research"',
             ):
                 if expected not in operator_html:
                     raise AssertionError(f"operator compat route must expose unified token {expected!r}")

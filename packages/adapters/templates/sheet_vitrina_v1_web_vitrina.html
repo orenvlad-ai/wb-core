@@ -105,6 +105,187 @@
       background: transparent;
     }
 
+    .research-panel {
+      display: grid;
+      gap: 12px;
+    }
+
+    .research-form-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(180px, 1fr));
+      gap: 10px;
+      align-items: start;
+    }
+
+    .research-field {
+      display: grid;
+      gap: 5px;
+      min-width: 0;
+    }
+
+    .research-field-wide {
+      grid-column: span 2;
+    }
+
+    .research-picker {
+      position: relative;
+      min-width: 0;
+    }
+
+    .research-picker-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 34px;
+      list-style: none;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 7px 10px;
+      background: #ffffff;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .research-picker-summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .research-picker-summary::after {
+      content: "▾";
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-size: 10px;
+    }
+
+    .research-picker[open] .research-picker-summary::after {
+      content: "▴";
+    }
+
+    .research-picker-panel {
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      z-index: 8;
+      width: min(360px, calc(100vw - 48px));
+      max-height: 320px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #ffffff;
+      box-shadow: 0 12px 24px rgba(23, 32, 45, 0.1);
+      padding: 8px;
+    }
+
+    .research-option-list {
+      display: grid;
+      gap: 6px;
+    }
+
+    .research-option {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 7px 8px;
+      background: var(--panel-subtle);
+      font-size: 12px;
+      line-height: 1.35;
+      cursor: pointer;
+    }
+
+    .research-option.is-disabled {
+      opacity: 0.48;
+      cursor: not-allowed;
+    }
+
+    .research-option input {
+      margin: 2px 0 0;
+    }
+
+    .research-option-main {
+      display: block;
+      font-weight: 600;
+      color: var(--text);
+      word-break: break-word;
+    }
+
+    .research-option-meta {
+      display: block;
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 10px;
+      word-break: break-word;
+    }
+
+    .research-validation,
+    .research-error,
+    .research-result-note {
+      margin: 0;
+      font-size: 11px;
+      line-height: 1.45;
+      color: var(--muted);
+    }
+
+    .research-validation.is-error,
+    .research-error.is-error {
+      color: var(--error-text);
+    }
+
+    .research-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .research-result-table-shell {
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #ffffff;
+    }
+
+    .research-result-table {
+      width: 100%;
+      min-width: 1040px;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+
+    .research-result-table th,
+    .research-result-table td {
+      padding: 8px 9px;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .research-result-table th {
+      background: #f0f4f8;
+      color: #334155;
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+    }
+
+    .research-result-table td[data-kind="number"] {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .research-result-table td[data-kind="coverage"] {
+      min-width: 150px;
+    }
+
     .top-panel,
     .panel {
       background: var(--panel-bg);
@@ -1348,8 +1529,13 @@
       }
 
       .activity-layout,
+      .research-form-grid,
       .history-fields {
         grid-template-columns: 1fr;
+      }
+
+      .research-field-wide {
+        grid-column: span 1;
       }
 
       .history-preset-list {
@@ -1373,6 +1559,7 @@
       <button class="unified-tab-button is-active" type="button" data-unified-tab-button="vitrina" role="tab" aria-selected="true">Витрина</button>
       <button class="unified-tab-button" type="button" data-unified-tab-button="factory-order" role="tab" aria-selected="false">Расчет поставок</button>
       <button class="unified-tab-button" type="button" data-unified-tab-button="reports" role="tab" aria-selected="false">Отчеты</button>
+      <button class="unified-tab-button" type="button" data-unified-tab-button="research" role="tab" aria-selected="false">Исследования</button>
     </nav>
 
     <section class="unified-tab-panel" data-unified-tab-panel="vitrina">
@@ -1556,6 +1743,82 @@
     <section class="unified-tab-panel operator-embed-panel" data-unified-tab-panel="reports" hidden>
       <iframe class="operator-embed-frame" title="Отчеты" data-operator-embed-frame="reports" scrolling="no"></iframe>
     </section>
+
+    <section class="unified-tab-panel" data-unified-tab-panel="research" hidden>
+      <section class="panel research-panel" data-research-panel>
+        <div class="panel-top">
+          <div>
+            <h2>Сравнение групп SKU</h2>
+            <p class="panel-note">
+              Ретроспективное сравнение исследуемой и контрольной группы по выбранным метрикам за базовый период и период анализа.
+            </p>
+          </div>
+          <p class="panel-meta" data-research-meta>Исследования: read-only</p>
+        </div>
+
+        <div class="research-form-grid">
+          <div class="research-field research-field-wide">
+            <span class="filter-label">Исследуемая группа</span>
+            <details class="research-picker" data-research-picker="research">
+              <summary class="research-picker-summary" data-research-sku-summary="research">Загрузка SKU…</summary>
+              <div class="research-picker-panel">
+                <div class="research-option-list" data-research-sku-options="research">Загрузка SKU…</div>
+              </div>
+            </details>
+            <p class="research-validation" data-research-validation="research_skus"></p>
+          </div>
+
+          <div class="research-field research-field-wide">
+            <span class="filter-label">Контрольная группа</span>
+            <details class="research-picker" data-research-picker="control">
+              <summary class="research-picker-summary" data-research-sku-summary="control">Загрузка SKU…</summary>
+              <div class="research-picker-panel">
+                <div class="research-option-list" data-research-sku-options="control">Загрузка SKU…</div>
+              </div>
+            </details>
+            <p class="research-validation" data-research-validation="control_skus"></p>
+          </div>
+
+          <label class="research-field">
+            <span class="filter-label">Базовый период · начало</span>
+            <input class="input" type="date" data-research-date="baseline_from">
+          </label>
+          <label class="research-field">
+            <span class="filter-label">Базовый период · конец</span>
+            <input class="input" type="date" data-research-date="baseline_to">
+          </label>
+          <label class="research-field">
+            <span class="filter-label">Период анализа · начало</span>
+            <input class="input" type="date" data-research-date="analysis_from">
+          </label>
+          <label class="research-field">
+            <span class="filter-label">Период анализа · конец</span>
+            <input class="input" type="date" data-research-date="analysis_to">
+          </label>
+
+          <div class="research-field research-field-wide">
+            <span class="filter-label">Метрики</span>
+            <details class="research-picker" data-research-picker="metrics">
+              <summary class="research-picker-summary" data-research-metric-summary>Загрузка метрик…</summary>
+              <div class="research-picker-panel">
+                <div class="research-option-list" data-research-metric-options>Загрузка метрик…</div>
+              </div>
+            </details>
+            <p class="research-validation" data-research-validation="metrics"></p>
+          </div>
+
+          <div class="research-field research-actions">
+            <button class="button primary" type="button" data-research-calculate disabled>Рассчитать</button>
+            <span class="research-result-note" data-research-source-note>server-side ready snapshots</span>
+          </div>
+        </div>
+
+        <p class="research-error" data-research-error></p>
+        <div data-research-result>
+          <p class="research-result-note">Заполните группы, периоды и метрики, затем нажмите «Рассчитать».</p>
+        </div>
+      </section>
+    </section>
   </main>
 
   <script>
@@ -1616,10 +1879,18 @@
     const loadRefreshButton = document.querySelector("[data-load-refresh-button]");
     const sourceStatusLoadButton = document.querySelector("[data-source-status-load]");
     const resetFiltersButton = document.querySelector("[data-reset-filters]");
+    const researchPanelNode = document.querySelector("[data-research-panel]");
+    const researchCalculateButton = document.querySelector("[data-research-calculate]");
+    const researchMetaNode = document.querySelector("[data-research-meta]");
+    const researchErrorNode = document.querySelector("[data-research-error]");
+    const researchResultNode = document.querySelector("[data-research-result]");
+    const researchSourceNoteNode = document.querySelector("[data-research-source-note]");
 
     const ALL_VALUE = "__all__";
     const DEFAULT_UNIFIED_TAB = "vitrina";
-    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports"]);
+    const RESEARCH_UNIFIED_TAB = "research";
+    const EMBEDDED_UNIFIED_TABS = new Set(["factory-order", "reports"]);
+    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", RESEARCH_UNIFIED_TAB]);
     const formattersById = new Map();
     const renderersById = new Map();
     const sortOptionsByValue = new Map();
@@ -1665,6 +1936,21 @@
       sourceStatus: {
         loaded: false,
         requestSequence: 0
+      },
+      research: {
+        loaded: false,
+        loading: false,
+        calculating: false,
+        requestSequence: 0,
+        options: null,
+        selectedResearchSkus: new Set(),
+        selectedControlSkus: new Set(),
+        selectedMetrics: new Set(),
+        baselineFrom: "",
+        baselineTo: "",
+        analysisFrom: "",
+        analysisTo: "",
+        error: ""
       },
       sessionHighlights: {}
     };
@@ -1714,6 +2000,13 @@
       });
     });
     window.addEventListener("message", handleOperatorEmbedMessage);
+
+    if (researchPanelNode) {
+      researchPanelNode.addEventListener("change", handleResearchInputChange);
+    }
+    if (researchCalculateButton) {
+      researchCalculateButton.addEventListener("click", calculateResearchComparison);
+    }
 
     loadingTableBodyNode.addEventListener("click", function(event) {
       const groupButton = event.target.closest("[data-refresh-source-group]");
@@ -1858,7 +2151,10 @@
         return queryTab;
       }
       const hashTab = normalizeUnifiedTab(String(window.location.hash || "").replace(/^#/, ""));
-      return hashTab;
+      if (hashTab !== DEFAULT_UNIFIED_TAB) {
+        return hashTab;
+      }
+      return readPersistedUnifiedTab();
     }
 
     function activateUnifiedTab(tabName, options) {
@@ -1871,8 +2167,11 @@
       unifiedTabPanels.forEach(function(panel) {
         panel.hidden = panel.getAttribute("data-unified-tab-panel") !== activeTab;
       });
-      if (activeTab !== DEFAULT_UNIFIED_TAB) {
+      if (EMBEDDED_UNIFIED_TABS.has(activeTab)) {
         ensureOperatorEmbed(activeTab);
+      }
+      if (activeTab === RESEARCH_UNIFIED_TAB) {
+        ensureResearchOptionsLoaded();
       }
       if (!options || options.persist !== false) {
         const url = new URL(window.location.href);
@@ -1886,8 +2185,39 @@
           url.hash = "";
         }
         window.history.replaceState({}, "", url.toString());
+        persistUnifiedTab(activeTab);
       }
       return activeTab;
+    }
+
+    function unifiedTabStorageKey() {
+      const namespace = String(
+        (state.composition && state.composition.meta && state.composition.meta.state_namespace) ||
+        "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1"
+      );
+      return namespace + ":active-tab:v1";
+    }
+
+    function readPersistedUnifiedTab() {
+      if (!window || !window.localStorage) {
+        return DEFAULT_UNIFIED_TAB;
+      }
+      try {
+        return normalizeUnifiedTab(window.localStorage.getItem(unifiedTabStorageKey()));
+      } catch (error) {
+        return DEFAULT_UNIFIED_TAB;
+      }
+    }
+
+    function persistUnifiedTab(activeTab) {
+      if (!window || !window.localStorage) {
+        return;
+      }
+      try {
+        window.localStorage.setItem(unifiedTabStorageKey(), normalizeUnifiedTab(activeTab));
+      } catch (error) {
+        // Browser-local tab persistence is a convenience only.
+      }
     }
 
     function ensureOperatorEmbed(tabName) {
@@ -3727,6 +4057,462 @@
       } catch (error) {
         throw new Error(fallbackErrorText);
       }
+    }
+
+    async function ensureResearchOptionsLoaded() {
+      if (!researchPanelNode || state.research.loaded || state.research.loading) {
+        return;
+      }
+      const requestId = state.research.requestSequence + 1;
+      state.research.requestSequence = requestId;
+      state.research.loading = true;
+      state.research.error = "";
+      renderResearchPanel();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.research_options_path, {
+          method: "GET",
+          headers: {"Accept": "application/json"}
+        });
+        const payload = await readJsonResponse(response, "non-json response from research options route");
+        if (requestId !== state.research.requestSequence) {
+          return;
+        }
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "research options route returned " + response.status);
+        }
+        state.research.options = payload;
+        state.research.loaded = true;
+        state.research.loading = false;
+        applyResearchDefaults(payload);
+        renderResearchPanel();
+      } catch (error) {
+        if (requestId !== state.research.requestSequence) {
+          return;
+        }
+        state.research.loading = false;
+        state.research.loaded = false;
+        state.research.error = String(error && error.message ? error.message : error);
+        renderResearchPanel();
+      }
+    }
+
+    function applyResearchDefaults(payload) {
+      const defaults = payload || {};
+      if (!state.research.selectedMetrics.size) {
+        (defaults.default_metric_keys || []).forEach(function(metricKey) {
+          state.research.selectedMetrics.add(String(metricKey || ""));
+        });
+      }
+      const dateCapabilities = defaults.date_capabilities || {};
+      const baseline = dateCapabilities.default_baseline_period || {};
+      const analysis = dateCapabilities.default_analysis_period || {};
+      state.research.baselineFrom = state.research.baselineFrom || String(baseline.date_from || "");
+      state.research.baselineTo = state.research.baselineTo || String(baseline.date_to || "");
+      state.research.analysisFrom = state.research.analysisFrom || String(analysis.date_from || "");
+      state.research.analysisTo = state.research.analysisTo || String(analysis.date_to || "");
+    }
+
+    function renderResearchPanel() {
+      if (!researchPanelNode) {
+        return;
+      }
+      const options = state.research.options || {};
+      const skuOptions = Array.isArray(options.sku_options) ? options.sku_options : [];
+      const metricOptions = Array.isArray(options.metric_options) ? options.metric_options : [];
+      if (researchMetaNode) {
+        researchMetaNode.textContent = state.research.loading
+          ? "Загружаем options…"
+          : "read-only · server-side ready snapshots";
+      }
+      if (researchSourceNoteNode) {
+        researchSourceNoteNode.textContent = "read-only over accepted truth / ready snapshots";
+      }
+      renderResearchSkuPicker("research", skuOptions);
+      renderResearchSkuPicker("control", skuOptions);
+      renderResearchMetricPicker(metricOptions);
+      syncResearchDateInputs();
+      syncResearchValidation();
+      if (researchErrorNode) {
+        researchErrorNode.textContent = state.research.error || "";
+        researchErrorNode.classList.toggle("is-error", !!state.research.error);
+      }
+    }
+
+    function renderResearchSkuPicker(kind, skuOptions) {
+      const selectedSet = kind === "research" ? state.research.selectedResearchSkus : state.research.selectedControlSkus;
+      const oppositeSet = kind === "research" ? state.research.selectedControlSkus : state.research.selectedResearchSkus;
+      const summaryNode = document.querySelector('[data-research-sku-summary="' + kind + '"]');
+      const optionsNode = document.querySelector('[data-research-sku-options="' + kind + '"]');
+      if (summaryNode) {
+        summaryNode.textContent = state.research.loading
+          ? "Загрузка SKU…"
+          : ("Выбрано: " + selectedSet.size);
+      }
+      if (!optionsNode) {
+        return;
+      }
+      if (state.research.loading) {
+        optionsNode.textContent = "Загрузка SKU…";
+        return;
+      }
+      if (!skuOptions.length) {
+        optionsNode.innerHTML = '<p class="research-result-note">Активные SKU не найдены.</p>';
+        return;
+      }
+      optionsNode.innerHTML = skuOptions.map(function(item) {
+        const nmId = String(item.nm_id || "");
+        const checked = selectedSet.has(nmId);
+        const disabled = oppositeSet.has(nmId);
+        return [
+          '<label class="research-option' + (disabled ? " is-disabled" : "") + '">',
+          '<input type="checkbox" data-research-sku="' + escapeHtml(kind) + '" value="' + escapeHtml(nmId) + '"' +
+            (checked ? " checked" : "") +
+            (disabled ? " disabled" : "") +
+          '>',
+          '<span>',
+          '<span class="research-option-main">' + escapeHtml(item.label || nmId) + '</span>',
+          '<span class="research-option-meta">nmId ' + escapeHtml(nmId) + (item.group ? " · " + escapeHtml(item.group) : "") + '</span>',
+          '</span>',
+          '</label>'
+        ].join("");
+      }).join("");
+    }
+
+    function renderResearchMetricPicker(metricOptions) {
+      const summaryNode = document.querySelector("[data-research-metric-summary]");
+      const optionsNode = document.querySelector("[data-research-metric-options]");
+      if (summaryNode) {
+        summaryNode.textContent = state.research.loading
+          ? "Загрузка метрик…"
+          : ("Выбрано: " + state.research.selectedMetrics.size);
+      }
+      if (!optionsNode) {
+        return;
+      }
+      if (state.research.loading) {
+        optionsNode.textContent = "Загрузка метрик…";
+        return;
+      }
+      if (!metricOptions.length) {
+        optionsNode.innerHTML = '<p class="research-result-note">Нефинансовые SKU-метрики не найдены.</p>';
+        return;
+      }
+      optionsNode.innerHTML = metricOptions.map(function(item) {
+        const metricKey = String(item.metric_key || "");
+        const checked = state.research.selectedMetrics.has(metricKey);
+        return [
+          '<label class="research-option">',
+          '<input type="checkbox" data-research-metric value="' + escapeHtml(metricKey) + '"' + (checked ? " checked" : "") + '>',
+          '<span>',
+          '<span class="research-option-main">' + escapeHtml(item.metric_label || metricKey) + '</span>',
+          '<span class="research-option-meta">' + escapeHtml(item.section || "") + " · " + escapeHtml(item.aggregation_method || "") + '</span>',
+          '</span>',
+          '</label>'
+        ].join("");
+      }).join("");
+    }
+
+    function syncResearchDateInputs() {
+      const dateCapabilities = ((state.research.options || {}).date_capabilities || {});
+      const minDate = String(dateCapabilities.available_date_min || "");
+      const maxDate = String(dateCapabilities.available_date_max || "");
+      [
+        ["baseline_from", "baselineFrom"],
+        ["baseline_to", "baselineTo"],
+        ["analysis_from", "analysisFrom"],
+        ["analysis_to", "analysisTo"]
+      ].forEach(function(pair) {
+        const node = document.querySelector('[data-research-date="' + pair[0] + '"]');
+        if (!node) {
+          return;
+        }
+        node.value = state.research[pair[1]] || "";
+        node.min = minDate;
+        node.max = maxDate;
+        node.disabled = state.research.loading || !state.research.loaded;
+      });
+    }
+
+    function handleResearchInputChange(event) {
+      const skuNode = event.target.closest("[data-research-sku]");
+      if (skuNode) {
+        updateResearchSkuSelection(
+          String(skuNode.getAttribute("data-research-sku") || ""),
+          String(skuNode.value || ""),
+          !!skuNode.checked
+        );
+        clearResearchResult();
+        renderResearchPanel();
+        return;
+      }
+      const metricNode = event.target.closest("[data-research-metric]");
+      if (metricNode) {
+        updateResearchMetricSelection(String(metricNode.value || ""), !!metricNode.checked);
+        clearResearchResult();
+        renderResearchPanel();
+        return;
+      }
+      const dateNode = event.target.closest("[data-research-date]");
+      if (dateNode) {
+        const key = String(dateNode.getAttribute("data-research-date") || "");
+        const mapping = {
+          baseline_from: "baselineFrom",
+          baseline_to: "baselineTo",
+          analysis_from: "analysisFrom",
+          analysis_to: "analysisTo"
+        };
+        if (mapping[key]) {
+          state.research[mapping[key]] = String(dateNode.value || "").trim();
+          clearResearchResult();
+          syncResearchValidation();
+        }
+      }
+    }
+
+    function updateResearchSkuSelection(kind, nmId, checked) {
+      if (!nmId) {
+        return;
+      }
+      const selectedSet = kind === "control" ? state.research.selectedControlSkus : state.research.selectedResearchSkus;
+      const oppositeSet = kind === "control" ? state.research.selectedResearchSkus : state.research.selectedControlSkus;
+      if (checked) {
+        oppositeSet.delete(nmId);
+        selectedSet.add(nmId);
+      } else {
+        selectedSet.delete(nmId);
+      }
+    }
+
+    function updateResearchMetricSelection(metricKey, checked) {
+      if (!metricKey) {
+        return;
+      }
+      if (checked) {
+        state.research.selectedMetrics.add(metricKey);
+      } else {
+        state.research.selectedMetrics.delete(metricKey);
+      }
+    }
+
+    function syncResearchValidation() {
+      const validation = validateResearchInputs();
+      setResearchValidationText("research_skus", validation.research_skus || "");
+      setResearchValidationText("control_skus", validation.control_skus || "");
+      setResearchValidationText("metrics", validation.metrics || validation.periods || "");
+      if (researchCalculateButton) {
+        researchCalculateButton.disabled = state.research.loading || state.research.calculating || !!validation.firstError;
+        researchCalculateButton.textContent = state.research.calculating ? "Расчёт…" : "Рассчитать";
+      }
+      return validation;
+    }
+
+    function setResearchValidationText(key, text) {
+      const node = document.querySelector('[data-research-validation="' + key + '"]');
+      if (!node) {
+        return;
+      }
+      node.textContent = text;
+      node.classList.toggle("is-error", !!text);
+    }
+
+    function validateResearchInputs() {
+      const errors = {};
+      if (!state.research.loaded) {
+        errors.firstError = state.research.loading ? "Options загружаются" : "Options не загружены";
+        return errors;
+      }
+      if (!state.research.selectedResearchSkus.size) {
+        errors.research_skus = "Выберите хотя бы один SKU в исследуемой группе";
+      }
+      if (!state.research.selectedControlSkus.size) {
+        errors.control_skus = "Выберите хотя бы один SKU в контрольной группе";
+      }
+      if (!state.research.selectedMetrics.size) {
+        errors.metrics = "Выберите хотя бы одну метрику";
+      }
+      if (!state.research.baselineFrom || !state.research.baselineTo || !state.research.analysisFrom || !state.research.analysisTo) {
+        errors.periods = "Укажите базовый период и период анализа";
+      } else if (state.research.baselineFrom > state.research.baselineTo) {
+        errors.periods = "Базовый период: начало должно быть не позже конца";
+      } else if (state.research.analysisFrom > state.research.analysisTo) {
+        errors.periods = "Период анализа: начало должно быть не позже конца";
+      }
+      errors.firstError = errors.research_skus || errors.control_skus || errors.metrics || errors.periods || "";
+      return errors;
+    }
+
+    function clearResearchResult() {
+      if (researchResultNode) {
+        researchResultNode.innerHTML = '<p class="research-result-note">Изменены inputs. Нажмите «Рассчитать», чтобы получить свежий результат.</p>';
+      }
+      state.research.error = "";
+      if (researchErrorNode) {
+        researchErrorNode.textContent = "";
+        researchErrorNode.classList.remove("is-error");
+      }
+    }
+
+    async function calculateResearchComparison() {
+      const validation = syncResearchValidation();
+      if (validation.firstError) {
+        clearResearchResult();
+        if (researchErrorNode) {
+          researchErrorNode.textContent = validation.firstError;
+          researchErrorNode.classList.add("is-error");
+        }
+        return;
+      }
+      state.research.calculating = true;
+      state.research.error = "";
+      syncResearchValidation();
+      if (researchResultNode) {
+        researchResultNode.innerHTML = '<p class="research-result-note">Считаем ретроспективное сравнение…</p>';
+      }
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.research_calculate_path, {
+          method: "POST",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json; charset=utf-8"
+          },
+          body: JSON.stringify(buildResearchPayload())
+        });
+        const payload = await readJsonResponse(response, "non-json response from research calculate route");
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "research calculate route returned " + response.status);
+        }
+        renderResearchResult(payload);
+      } catch (error) {
+        state.research.error = String(error && error.message ? error.message : error);
+        if (researchResultNode) {
+          researchResultNode.innerHTML = '<p class="research-result-note">Результат не построен.</p>';
+        }
+      } finally {
+        state.research.calculating = false;
+        renderResearchPanel();
+      }
+    }
+
+    function buildResearchPayload() {
+      return {
+        research_sku_ids: Array.from(state.research.selectedResearchSkus).map(Number),
+        control_sku_ids: Array.from(state.research.selectedControlSkus).map(Number),
+        metric_keys: Array.from(state.research.selectedMetrics),
+        baseline_period: {
+          date_from: state.research.baselineFrom,
+          date_to: state.research.baselineTo
+        },
+        analysis_period: {
+          date_from: state.research.analysisFrom,
+          date_to: state.research.analysisTo
+        }
+      };
+    }
+
+    function renderResearchResult(payload) {
+      const rows = Array.isArray(payload && payload.rows) ? payload.rows : [];
+      if (!researchResultNode) {
+        return;
+      }
+      if (!rows.length) {
+        researchResultNode.innerHTML = '<p class="research-result-note">Расчёт не вернул строк.</p>';
+        return;
+      }
+      const warnings = (payload.warnings || []).map(function(item) {
+        return '<p class="research-result-note">' + escapeHtml(item) + '</p>';
+      }).join("");
+      researchResultNode.innerHTML = [
+        warnings,
+        '<div class="research-result-table-shell">',
+        '<table class="research-result-table" data-research-result-table>',
+        '<thead><tr>',
+        [
+          "Метрика",
+          "Агрегация",
+          "Исследуемая · база",
+          "Исследуемая · анализ",
+          "Δ исследуемая",
+          "Δ% исследуемая",
+          "Контроль · база",
+          "Контроль · анализ",
+          "Δ контроль",
+          "Δ% контроль",
+          "Разница изменений",
+          "Покрытие"
+        ].map(function(label) { return "<th>" + escapeHtml(label) + "</th>"; }).join(""),
+        "</tr></thead>",
+        "<tbody>",
+        rows.map(renderResearchResultRow).join(""),
+        "</tbody></table></div>"
+      ].join("");
+    }
+
+    function renderResearchResultRow(row) {
+      return [
+        "<tr>",
+        "<td>" + escapeHtml(row.metric_label || row.metric_key || "") + "</td>",
+        "<td>" + escapeHtml(researchAggregationLabel(row.aggregation_method)) + "</td>",
+        researchNumberCell(row.research_baseline_value, row),
+        researchNumberCell(row.research_analysis_value, row),
+        researchNumberCell(row.research_delta_abs, row),
+        researchNumberCell(row.research_delta_pct, {metric_format: "percent"}),
+        researchNumberCell(row.control_baseline_value, row),
+        researchNumberCell(row.control_analysis_value, row),
+        researchNumberCell(row.control_delta_abs, row),
+        researchNumberCell(row.control_delta_pct, {metric_format: "percent"}),
+        researchNumberCell(row.diff_in_diff_abs, row),
+        '<td data-kind="coverage">' + escapeHtml(researchCoverageText(row.coverage || {})) + "</td>",
+        "</tr>"
+      ].join("");
+    }
+
+    function researchNumberCell(value, metric) {
+      return '<td data-kind="number">' + escapeHtml(formatResearchValue(value, metric || {})) + "</td>";
+    }
+
+    function formatResearchValue(value, metric) {
+      if (value === null || typeof value === "undefined") {
+        return "—";
+      }
+      const numberValue = Number(value);
+      if (!Number.isFinite(numberValue)) {
+        return "—";
+      }
+      const metricFormat = String(metric.metric_format || "").toLowerCase();
+      if (metricFormat === "percent") {
+        return formatNumber(numberValue * 100, 2, true) + "%";
+      }
+      if (metricFormat === "rub") {
+        return formatNumber(numberValue, 0, true) + " ₽";
+      }
+      return formatNumber(numberValue, Number.isInteger(numberValue) ? 0 : 2, true);
+    }
+
+    function researchAggregationLabel(value) {
+      if (value === "mean_observed_values") {
+        return "среднее по observed SKU/date";
+      }
+      if (value === "sum_observed_values") {
+        return "сумма observed SKU/date";
+      }
+      return value || "observed values";
+    }
+
+    function researchCoverageText(coverage) {
+      const buckets = [
+        coverage.research_baseline,
+        coverage.research_analysis,
+        coverage.control_baseline,
+        coverage.control_analysis
+      ].filter(Boolean);
+      if (!buckets.length) {
+        return "—";
+      }
+      const observed = buckets.reduce(function(total, item) { return total + Number(item.observed_points || 0); }, 0);
+      const expected = buckets.reduce(function(total, item) { return total + Number(item.expected_points || 0); }, 0);
+      const pct = expected ? observed / expected : null;
+      const statuses = Array.from(new Set(buckets.map(function(item) { return String(item.status || ""); }).filter(Boolean)));
+      return (pct === null ? "—" : formatNumber(pct * 100, 0, true) + "%") + " · " + statuses.join("/");
     }
 
     function currentActionAsOfDate() {
