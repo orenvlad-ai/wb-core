@@ -11,6 +11,7 @@ source_basis:
   - "packages/application/promo_live_source.py"
   - "packages/application/sheet_vitrina_v1_live_plan.py"
   - "packages/application/registry_upload_http_entrypoint.py"
+  - "apps/promo_campaign_archive_integrity_smoke.py"
   - "apps/sheet_vitrina_v1_promo_live_source_smoke.py"
   - "apps/sheet_vitrina_v1_promo_live_source_integration_smoke.py"
 related_modules:
@@ -27,6 +28,7 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/status"
   - "GET /v1/sheet-vitrina-v1/plan"
 related_runners:
+  - "apps/promo_campaign_archive_integrity_smoke.py"
   - "apps/sheet_vitrina_v1_promo_live_source_smoke.py"
   - "apps/sheet_vitrina_v1_promo_live_source_integration_smoke.py"
 related_docs:
@@ -84,6 +86,8 @@ update_note: "Обновлён под archive-first / interval-based promo seman
 Refresh diagnostics для `promo_by_price` дополнительно surface-ятся как observability-only metadata внутри already existing ready snapshot path:
 - `metadata.refresh_diagnostics.source_slots[].promo_diagnostics` для source slot `promo_by_price[*]`;
 - для `today_current` этот block содержит internal `phase_summary` по promo chain (`collector_total`, archive lookup/sync, workbook inspection, price truth lookup/join, source payload build, acceptance/fallback policy markers), lightweight counters, fingerprints, fallback/invalid reason fields и dry-run-only skip opportunity marker;
+- artifact validation writes `artifact_validation_schema_version=promo_artifact_validation_v1`, `artifact_state_counts`, `artifact_validation_summary`, and compact `missing_campaign_artifacts` examples for problematic covering campaigns;
+- materializer counters distinguish collector-reported reuse (`collector_reuse_count` / legacy `workbook_reuse_count`) from archive artifacts validated as usable (`validated_workbook_usable_count` / `materializer_usable_count`);
 - эти diagnostics не являются data truth, не меняют source fetch policy, acceptance/fallback semantics, temporal policy, retry behavior, Google Sheets/GAS archive boundary или browser/localStorage truth;
 - browser collector currently emits only total collector runtime plus summary counters; per-candidate browser/download timings stay an explicit observability gap until a separate adapter refactor.
 
@@ -128,7 +132,29 @@ Refresh diagnostics для `promo_by_price` дополнительно surface-�
 - Workbook alone не считается sufficient:
   - promo title / period / promo status / promo_id / period_id идут из sidecar/card truth
   - workbook inspection нужен для export-kind reporting и artifact debugging, но не для вычисления seller discounted price
-  - workbook reuse is preferred over redundant repeated downloads when metadata/content did not change
+  - collector workbook reuse remains a fetch-side observation and is not treated as materializer truth until archive artifact validation marks the metadata+workbook unit as `complete`
+
+# 5.1. Promo archive artifact validation
+
+Materializer-level validation checks the atomic campaign artifact unit before row materialization:
+- `metadata.json` sidecar exists and carries parseable campaign coverage fields;
+- `archive_record.json` workbook path points to the canonical archive workbook path;
+- workbook file physically exists, is non-empty, has mtime/size and fingerprint evidence, and can be opened for plan-price sheet inspection during materialization;
+- `period_parse_confidence=high` and requested exact date is inside `promo_start_at..promo_end_at`;
+- workbook inspection JSON is parsed when present, but raw workbook/upstream payloads, cookies, tokens, browser state and localStorage-derived data are not persisted in diagnostics.
+
+Artifact states are:
+- `complete`
+- `incomplete`
+- `stale`
+- `corrupted`
+- `missing_workbook`
+- `metadata_only`
+- `workbook_without_metadata`
+- `ambiguous_date`
+- `unusable`
+
+Invalid or incomplete current artifacts still produce `PromoLiveSourceIncomplete`; temporal policy continues to preserve accepted current/closed truth rather than writing fake zeros/blanks or accepting low-confidence dates. `apps/promo_campaign_archive_integrity_smoke.py` is a dry-run audit fixture: it counts archive artifact states and examples without deleting, repairing, downloading, or changing runtime accepted truth.
 
 # 6. Кодовые части
 

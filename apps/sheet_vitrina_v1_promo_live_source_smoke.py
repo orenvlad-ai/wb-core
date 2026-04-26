@@ -501,6 +501,16 @@ def _assert_promo_internal_diagnostics(result: object, *, expected_snapshot_date
         raise AssertionError(f"promo diagnostics must expose candidate_row_count, got {counters}")
     if counters.get("price_truth_available_count") is None:
         raise AssertionError(f"promo diagnostics must expose price truth count, got {counters}")
+    if "collector_reuse_count" not in counters:
+        raise AssertionError(f"promo diagnostics must distinguish collector reuse, got {counters}")
+    if counters.get("validated_workbook_usable_count") is None:
+        raise AssertionError(f"promo diagnostics must expose validated workbook count, got {counters}")
+    artifact_summary = diagnostics.get("artifact_validation_summary") or {}
+    if artifact_summary.get("schema_version") != "promo_artifact_validation_v1":
+        raise AssertionError(f"promo artifact validation summary missing, got {diagnostics}")
+    artifact_state_counts = diagnostics.get("artifact_state_counts") or {}
+    if "complete" not in artifact_state_counts:
+        raise AssertionError(f"promo artifact state counts missing, got {diagnostics}")
     dry_run = diagnostics.get("dry_run_skip") or {}
     if dry_run.get("would_skip_if_fingerprint_unchanged") is not False:
         raise AssertionError(f"promo dry-run skip marker must not change behavior, got {dry_run}")

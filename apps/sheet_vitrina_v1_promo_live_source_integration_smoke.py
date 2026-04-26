@@ -223,6 +223,16 @@ def _assert_payload_diagnostics(payload: object, snapshot_date: str) -> None:
     counters = diagnostics.get("counters") or {}
     if counters.get("candidate_row_count") is None or counters.get("eligible_row_count") is None:
         raise AssertionError(f"{snapshot_date}: promo diagnostics counters missing, got {counters}")
+    if counters.get("validated_workbook_usable_count") is None:
+        raise AssertionError(f"{snapshot_date}: validated workbook counter missing, got {counters}")
+    if "collector_reuse_count" not in counters:
+        raise AssertionError(f"{snapshot_date}: collector reuse counter missing, got {counters}")
+    artifact_summary = diagnostics.get("artifact_validation_summary") or {}
+    if artifact_summary.get("schema_version") != "promo_artifact_validation_v1":
+        raise AssertionError(f"{snapshot_date}: artifact validation summary missing, got {diagnostics}")
+    artifact_state_counts = diagnostics.get("artifact_state_counts") or {}
+    if int(artifact_state_counts.get("complete", 0) or 0) <= 0:
+        raise AssertionError(f"{snapshot_date}: complete artifact count missing, got {artifact_state_counts}")
     fingerprints = diagnostics.get("fingerprints") or {}
     if not fingerprints.get("promo_archive_fingerprint"):
         raise AssertionError(f"{snapshot_date}: promo archive fingerprint missing, got {fingerprints}")
