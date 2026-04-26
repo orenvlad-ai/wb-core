@@ -59,6 +59,20 @@ def main() -> None:
         metric_options = options["metric_options"]
         if len(sku_options) < 2:
             raise AssertionError(f"research options must expose active SKU list, got {options}")
+        promo_filter = options.get("sku_filters", {}).get("in_promo_latest_closed", {})
+        if options.get("promo_filter_as_of_date") != "2026-04-20":
+            raise AssertionError(f"promo filter date must be latest closed business day, got {options}")
+        if options.get("promo_filter_source") != "ready_snapshot_promo_metrics_latest_closed_day":
+            raise AssertionError(f"promo filter source mismatch, got {options}")
+        if options.get("promo_filter_available") is not True or promo_filter.get("available") is not True:
+            raise AssertionError(f"promo filter must be available in the fixture, got {options}")
+        promo_ids = {int(item) for item in promo_filter.get("sku_ids") or []}
+        if int(sku_options[0]["nm_id"]) not in promo_ids or int(sku_options[1]["nm_id"]) in promo_ids:
+            raise AssertionError(f"promo filter must derive SKU ids from latest closed ready snapshot, got {promo_filter}")
+        if sku_options[0].get("filters", {}).get("in_promo_latest_closed") is not True:
+            raise AssertionError(f"SKU options must carry promo filter flag, got {sku_options[0]}")
+        if sku_options[1].get("filters", {}).get("in_promo_latest_closed") is not False:
+            raise AssertionError(f"SKU options must carry false promo flag for non-promo SKU, got {sku_options[1]}")
         metric_keys = {item["metric_key"] for item in metric_options}
         if "total_fin_buyout_rub" in metric_keys:
             raise AssertionError(f"financial metrics must be excluded from research options, got {metric_options}")
@@ -122,10 +136,21 @@ def main() -> None:
             "Базовый период",
         )
 
+    with LocalResearchFixtureServer(include_latest_closed_snapshot=False) as base_url:
+        missing_options = _get_json(base_url + DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH)
+        missing_filter = missing_options.get("sku_filters", {}).get("in_promo_latest_closed", {})
+        if missing_options.get("promo_filter_available") is not False or missing_filter.get("available") is not False:
+            raise AssertionError(f"missing latest closed promo truth must be graceful unavailable, got {missing_options}")
+        if "ready snapshot unavailable" not in str(missing_filter.get("reason") or ""):
+            raise AssertionError(f"missing promo truth must return actionable reason, got {missing_filter}")
+
     print("sheet_vitrina_v1_research_sku_group_comparison: ok")
 
 
 class LocalResearchFixtureServer:
+    def __init__(self, *, include_latest_closed_snapshot: bool = True) -> None:
+        self.include_latest_closed_snapshot = include_latest_closed_snapshot
+
     def __enter__(self) -> str:
         bundle = json.loads(BUNDLE_FIXTURE.read_text(encoding="utf-8"))
         self.runtime_dir_obj = TemporaryDirectory(prefix="sheet-vitrina-research-")
@@ -139,6 +164,8 @@ class LocalResearchFixtureServer:
         start_date = datetime(2026, 4, 14, tzinfo=timezone.utc).date()
         for offset in range(7):
             snapshot_date = (start_date + timedelta(days=offset)).isoformat()
+            if not self.include_latest_closed_snapshot and snapshot_date == "2026-04-20":
+                continue
             runtime.save_sheet_vitrina_ready_snapshot(
                 current_state=current_state,
                 refreshed_at=f"{snapshot_date}T15:05:00Z",
@@ -192,6 +219,8 @@ def _build_plan(
     second_price = 1100 + offset * 5
     first_views = 100 + offset
     second_views = 80 + offset * 2
+    first_in_promo = 1 if as_of_date == "2026-04-20" else 0
+    second_in_promo = 0
     return SheetVitrinaV1Envelope(
         plan_version="delivery_contract_v1__sheet_scaffold_v1",
         snapshot_id=f"research-fixture-{as_of_date}",
@@ -209,7 +238,7 @@ def _build_plan(
             SheetVitrinaWriteTarget(
                 sheet_name="DATA_VITRINA",
                 write_start_cell="A1",
-                write_rect="A1:C9",
+                write_rect="A1:C15",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
@@ -221,10 +250,16 @@ def _build_plan(
                     [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|avg_price_seller_discounted", second_price],
                     [f"SKU A: Показы", f"SKU:{first_nm_id}|total_view_count", first_views],
                     [f"SKU B: Показы", f"SKU:{second_nm_id}|total_view_count", second_views],
+                    [f"SKU A: Акция", f"SKU:{first_nm_id}|promo_participation", first_in_promo],
+                    [f"SKU B: Акция", f"SKU:{second_nm_id}|promo_participation", second_in_promo],
+                    [f"SKU A: Акции count", f"SKU:{first_nm_id}|promo_count_by_price", first_in_promo],
+                    [f"SKU B: Акции count", f"SKU:{second_nm_id}|promo_count_by_price", second_in_promo],
+                    [f"SKU A: Акции вход", f"SKU:{first_nm_id}|promo_entry_price_best", 500 if first_in_promo else ""],
+                    [f"SKU B: Акции вход", f"SKU:{second_nm_id}|promo_entry_price_best", ""],
                     [f"SKU A: Финансы", f"SKU:{first_nm_id}|total_fin_buyout_rub", 999999],
                     [f"SKU B: Финансы", f"SKU:{second_nm_id}|total_fin_buyout_rub", 888888],
                 ],
-                row_count=8,
+                row_count=14,
                 column_count=3,
             ),
             SheetVitrinaWriteTarget(

@@ -829,30 +829,96 @@ def _check_unified_tab_navigation(page: object) -> dict[str, object]:
         }""",
         timeout=10000,
     )
+    range_controls = page.evaluate(
+        """() => ({
+          researchChipCount: document.querySelectorAll('[data-research-promo-filter]').length,
+          rangeToggleCount: document.querySelectorAll('[data-research-range-toggle]').length,
+          legacyDateInputs: document.querySelectorAll('[data-research-date]').length,
+          baselineLabel: (document.querySelector('[data-research-range-label="baseline"]') || {}).textContent || '',
+          analysisLabel: (document.querySelector('[data-research-range-label="analysis"]') || {}).textContent || ''
+        })"""
+    )
+    if (
+        range_controls["researchChipCount"] != 2
+        or range_controls["rangeToggleCount"] != 2
+        or range_controls["legacyDateInputs"] != 0
+        or " - " in range_controls["baselineLabel"]
+    ):
+        raise AssertionError(f"research period controls must be compact range pickers with promo chips, got {range_controls}")
+    page.locator('[data-research-range-toggle="baseline"]').click()
+    page.wait_for_selector('[data-research-range-popover="baseline"]:not([hidden])', timeout=5000)
+    page.locator('[data-research-range-day="baseline"][data-date="2026-04-14"]').click()
+    page.wait_for_function(
+        """() => document.querySelector('[data-research-calculate]').disabled &&
+          ((document.querySelector('[data-research-range-label="baseline"]') || {}).textContent || '').includes('Период не выбран')""",
+        timeout=5000,
+    )
+    page.locator('[data-research-range-day="baseline"][data-date="2026-04-15"]').click()
+    page.wait_for_function(
+        """() => ((document.querySelector('[data-research-range-label="baseline"]') || {}).textContent || '').includes('14.04.2026') &&
+          ((document.querySelector('[data-research-range-label="baseline"]') || {}).textContent || '').includes('15.04.2026')""",
+        timeout=5000,
+    )
+    page.locator('[data-research-range-toggle="analysis"]').click()
+    page.wait_for_selector('[data-research-range-popover="analysis"]:not([hidden])', timeout=5000)
+    page.locator('[data-research-range-day="analysis"][data-date="2026-04-19"]').click()
+    page.locator('[data-research-range-day="analysis"][data-date="2026-04-20"]').click()
     research_flow = page.evaluate(
         """() => {
+          const researchChip = document.querySelector('[data-research-promo-filter="research"]');
+          const controlChip = document.querySelector('[data-research-promo-filter="control"]');
+          if (!researchChip || !controlChip) {
+            return {ok: false, reason: 'promo chips missing'};
+          }
+          const fullResearchBoxes = Array.from(document.querySelectorAll('[data-research-sku="research"]:not(:disabled)'));
+          const nonPromoResearchBox = fullResearchBoxes.find(node => !(node.closest('label').textContent || '').includes('товар в акции'));
+          if (!nonPromoResearchBox) {
+            return {ok: false, reason: 'no non-promo SKU checkbox for filter preservation'};
+          }
+          nonPromoResearchBox.click();
+          const selectedResearch = nonPromoResearchBox.value;
+          researchChip.click();
+          const activeResearchChip = researchChip.classList.contains('is-active');
+          const filteredResearchBoxes = Array.from(document.querySelectorAll('[data-research-sku="research"]'));
+          const selectedSummary = (document.querySelector('[data-research-sku-options="research"]') || {}).textContent || '';
+          const selectedPreserved = selectedSummary.includes(nonPromoResearchBox.closest('label').querySelector('.research-option-main').textContent || selectedResearch);
+          researchChip.click();
+          const restoredResearchBoxes = Array.from(document.querySelectorAll('[data-research-sku="research"]:not(:disabled)'));
+          controlChip.click();
+          const filteredControlBoxes = Array.from(document.querySelectorAll('[data-research-sku="control"]:not(:disabled)'));
+          const controlBox = filteredControlBoxes.find(node => node.value !== selectedResearch);
+          if (!controlBox) {
+            return {ok: false, reason: 'no available promo control checkbox'};
+          }
+          controlBox.click();
+          const selectedControl = controlBox.value;
+          researchChip.click();
+          const disabledInResearchWhileFilterActive = Array.from(document.querySelectorAll('[data-research-sku="research"]'))
+            .some(node => node.value === selectedControl && node.disabled);
+          researchChip.click();
+          controlChip.click();
           const researchBoxes = Array.from(document.querySelectorAll('[data-research-sku="research"]:not(:disabled)'));
           if (researchBoxes.length < 2) {
             return {ok: false, reason: 'not enough research SKU checkboxes'};
           }
-          researchBoxes[0].click();
-          const selectedResearch = researchBoxes[0].value;
           const disabledInControl = Array.from(document.querySelectorAll('[data-research-sku="control"]'))
             .some(node => node.value === selectedResearch && node.disabled);
-          const controlBox = Array.from(document.querySelectorAll('[data-research-sku="control"]:not(:disabled)'))
-            .find(node => node.value !== selectedResearch);
-          if (!controlBox) {
-            return {ok: false, reason: 'no available control checkbox'};
-          }
-          controlBox.click();
           const financeMetricPresent = Array.from(document.querySelectorAll('[data-research-metric]'))
             .some(node => (node.value || '').includes('fin_') || node.value === 'total_fin_buyout_rub');
           return {
-            ok: disabledInControl && !financeMetricPresent,
+            ok: activeResearchChip && selectedPreserved && filteredResearchBoxes.length < fullResearchBoxes.length &&
+              restoredResearchBoxes.length === fullResearchBoxes.length &&
+              disabledInResearchWhileFilterActive && disabledInControl && !financeMetricPresent,
+            activeResearchChip,
+            filteredResearchCount: filteredResearchBoxes.length,
+            fullResearchCount: fullResearchBoxes.length,
+            restoredResearchCount: restoredResearchBoxes.length,
+            selectedPreserved,
+            disabledInResearchWhileFilterActive,
             disabledInControl,
             financeMetricPresent,
             research: selectedResearch,
-            control: controlBox.value
+            control: selectedControl
           };
         }"""
     )
@@ -860,6 +926,42 @@ def _check_unified_tab_navigation(page: object) -> dict[str, object]:
         raise AssertionError(f"research SKU mutual exclusion / metric filter mismatch, got {research_flow}")
     page.locator("[data-research-calculate]").click()
     page.wait_for_selector("[data-research-result-table] tbody tr", timeout=10000)
+    result_grid = page.evaluate(
+        """() => {
+          const shell = document.querySelector('[data-research-result-grid]');
+          const scroll = document.querySelector('[data-research-result-scroll]');
+          const headers = Array.from(document.querySelectorAll('[data-research-result-table] th')).map(node => (node.textContent || '').trim());
+          return {
+            shell: !!shell,
+            gridLibrary: shell ? shell.getAttribute('data-grid-library') : '',
+            scroll: !!scroll,
+            maxScrollLeft: scroll ? Math.max(0, scroll.scrollWidth - scroll.clientWidth) : 0,
+            headers
+          };
+        }"""
+    )
+    expected_research_headers = {
+        "Метрика",
+        "Агрегация",
+        "Исследуемая · база",
+        "Исследуемая · анализ",
+        "Δ исследуемая",
+        "Δ% исследуемая",
+        "Контроль · база",
+        "Контроль · анализ",
+        "Δ контроль",
+        "Δ% контроль",
+        "Разница изменений",
+        "Покрытие",
+    }
+    if (
+        not result_grid["shell"]
+        or result_grid["gridLibrary"] != "@gravity-ui/table"
+        or not result_grid["scroll"]
+        or result_grid["maxScrollLeft"] <= 0
+        or expected_research_headers.difference(set(result_grid["headers"]))
+    ):
+        raise AssertionError(f"research result must use scrollable table/grid pattern, got {result_grid}")
     page.locator('[data-unified-tab-button="vitrina"]').click()
     page.wait_for_function(
         """() => {
@@ -874,6 +976,9 @@ def _check_unified_tab_navigation(page: object) -> dict[str, object]:
         "reports_embed": True,
         "research_tab": True,
         "research_calculate_table": page.locator("[data-research-result-table] tbody tr").count(),
+        "research_promo_filter": research_flow,
+        "research_range_controls": range_controls,
+        "research_result_grid": result_grid,
         "restored_default_tab": True,
     }
 
@@ -1255,6 +1360,8 @@ def _build_plan(
     second_nm_id: int,
     first_group: str,
 ) -> SheetVitrinaV1Envelope:
+    first_in_promo = 1 if as_of_date == "2026-04-20" else 0
+    second_in_promo = 0
     return SheetVitrinaV1Envelope(
         plan_version="delivery_contract_v1__sheet_scaffold_v1",
         snapshot_id=f"web-vitrina-browser-fixture-{as_of_date}",
@@ -1272,7 +1379,7 @@ def _build_plan(
             SheetVitrinaWriteTarget(
                 sheet_name="DATA_VITRINA",
                 write_start_cell="A1",
-                write_rect="A1:C7",
+                write_rect="A1:C9",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
@@ -1284,8 +1391,10 @@ def _build_plan(
                     [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|avg_price_seller_discounted", 1090],
                     [f"SKU A: Конверсия в корзину", f"SKU:{first_nm_id}|avg_addToCartConversion", 0.115],
                     [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 0.105],
+                    [f"SKU A: Акция", f"SKU:{first_nm_id}|promo_participation", first_in_promo],
+                    [f"SKU B: Акция", f"SKU:{second_nm_id}|promo_participation", second_in_promo],
                 ],
-                row_count=6,
+                row_count=8,
                 column_count=3,
             ),
             SheetVitrinaWriteTarget(

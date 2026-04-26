@@ -108,6 +108,11 @@
     .research-panel {
       display: grid;
       gap: 12px;
+      min-width: 0;
+    }
+
+    .research-panel > * {
+      min-width: 0;
     }
 
     .research-form-grid {
@@ -125,6 +130,47 @@
 
     .research-field-wide {
       grid-column: span 2;
+    }
+
+    .research-field-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .research-filter-chip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 24px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: #f7f9fc;
+      color: var(--muted);
+      padding: 3px 9px;
+      font: inherit;
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+
+    .research-filter-chip:hover:not(:disabled) {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .research-filter-chip.is-active {
+      border-color: var(--accent);
+      background: #eaf1ff;
+      color: #1d4ed8;
+    }
+
+    .research-filter-chip:disabled {
+      opacity: 0.48;
+      cursor: not-allowed;
     }
 
     .research-picker {
@@ -148,6 +194,62 @@
       font-weight: 600;
       cursor: pointer;
       user-select: none;
+    }
+
+    .research-range-picker {
+      position: relative;
+      min-width: 0;
+    }
+
+    .research-range-control {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      width: 100%;
+      min-height: 34px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 7px 10px;
+      background: #ffffff;
+      color: var(--text);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 1px 2px rgba(23, 32, 45, 0.04);
+    }
+
+    .research-range-control:hover {
+      border-color: var(--accent);
+    }
+
+    .research-range-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .research-range-popover {
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      z-index: 9;
+      width: min(320px, calc(100vw - 48px));
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #ffffff;
+      box-shadow: 0 14px 30px rgba(23, 32, 45, 0.14);
+      padding: 10px;
+    }
+
+    .research-range-popover[hidden] {
+      display: none;
+    }
+
+    .research-range-calendar {
+      display: block;
     }
 
     .research-picker-summary::-webkit-details-marker {
@@ -245,35 +347,28 @@
     }
 
     .research-result-table-shell {
-      overflow: auto;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: #ffffff;
+      margin-top: 8px;
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
+    }
+
+    .research-result-table-scroll {
+      width: 100%;
+      max-width: 100%;
+      overflow-x: auto;
+      max-height: none;
     }
 
     .research-result-table {
-      width: 100%;
-      min-width: 1040px;
-      border-collapse: collapse;
-      font-size: 11px;
+      width: 1320px;
+      min-width: 1320px;
     }
 
     .research-result-table th,
     .research-result-table td {
-      padding: 8px 9px;
-      border-bottom: 1px solid var(--border);
-      text-align: left;
       vertical-align: top;
-    }
-
-    .research-result-table th {
-      background: #f0f4f8;
-      color: #334155;
-      font-size: 10px;
-      font-weight: 800;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      white-space: nowrap;
     }
 
     .research-result-table td[data-kind="number"] {
@@ -1528,6 +1623,12 @@
         overflow: auto;
       }
 
+      .research-range-popover {
+        width: min(320px, calc(100vw - 24px));
+        max-height: min(82vh, 520px);
+        overflow: auto;
+      }
+
       .activity-layout,
       .research-form-grid,
       .history-fields {
@@ -1758,7 +1859,10 @@
 
         <div class="research-form-grid">
           <div class="research-field research-field-wide">
-            <span class="filter-label">Исследуемая группа</span>
+            <div class="research-field-head">
+              <span class="filter-label">Исследуемая группа</span>
+              <button class="research-filter-chip" type="button" data-research-promo-filter="research">Товар в акции</button>
+            </div>
             <details class="research-picker" data-research-picker="research">
               <summary class="research-picker-summary" data-research-sku-summary="research">Загрузка SKU…</summary>
               <div class="research-picker-panel">
@@ -1769,7 +1873,10 @@
           </div>
 
           <div class="research-field research-field-wide">
-            <span class="filter-label">Контрольная группа</span>
+            <div class="research-field-head">
+              <span class="filter-label">Контрольная группа</span>
+              <button class="research-filter-chip" type="button" data-research-promo-filter="control">Товар в акции</button>
+            </div>
             <details class="research-picker" data-research-picker="control">
               <summary class="research-picker-summary" data-research-sku-summary="control">Загрузка SKU…</summary>
               <div class="research-picker-panel">
@@ -1779,22 +1886,45 @@
             <p class="research-validation" data-research-validation="control_skus"></p>
           </div>
 
-          <label class="research-field">
-            <span class="filter-label">Базовый период · начало</span>
-            <input class="input" type="date" data-research-date="baseline_from">
-          </label>
-          <label class="research-field">
-            <span class="filter-label">Базовый период · конец</span>
-            <input class="input" type="date" data-research-date="baseline_to">
-          </label>
-          <label class="research-field">
-            <span class="filter-label">Период анализа · начало</span>
-            <input class="input" type="date" data-research-date="analysis_from">
-          </label>
-          <label class="research-field">
-            <span class="filter-label">Период анализа · конец</span>
-            <input class="input" type="date" data-research-date="analysis_to">
-          </label>
+          <div class="research-field research-field-wide" data-research-range-field="baseline">
+            <span class="filter-label">Базовый период</span>
+            <div class="research-range-picker">
+              <button class="research-range-control" type="button" data-research-range-toggle="baseline" aria-expanded="false">
+                <span class="research-range-label" data-research-range-label="baseline">Период не выбран</span>
+                <span aria-hidden="true">📅</span>
+              </button>
+              <div class="research-range-popover" data-research-range-popover="baseline" hidden>
+                <div class="history-picker-head">
+                  <button class="history-month-nav" type="button" data-research-range-prev="baseline" aria-label="Предыдущий месяц">‹</button>
+                  <p class="history-month-label" data-research-range-month-label="baseline">месяц</p>
+                  <button class="history-month-nav" type="button" data-research-range-next="baseline" aria-label="Следующий месяц">›</button>
+                </div>
+                <div class="research-range-calendar" data-research-range-calendar="baseline"></div>
+                <p class="research-validation" data-research-range-error="baseline"></p>
+              </div>
+            </div>
+            <p class="research-validation" data-research-validation="periods_baseline"></p>
+          </div>
+
+          <div class="research-field research-field-wide" data-research-range-field="analysis">
+            <span class="filter-label">Период анализа</span>
+            <div class="research-range-picker">
+              <button class="research-range-control" type="button" data-research-range-toggle="analysis" aria-expanded="false">
+                <span class="research-range-label" data-research-range-label="analysis">Период не выбран</span>
+                <span aria-hidden="true">📅</span>
+              </button>
+              <div class="research-range-popover" data-research-range-popover="analysis" hidden>
+                <div class="history-picker-head">
+                  <button class="history-month-nav" type="button" data-research-range-prev="analysis" aria-label="Предыдущий месяц">‹</button>
+                  <p class="history-month-label" data-research-range-month-label="analysis">месяц</p>
+                  <button class="history-month-nav" type="button" data-research-range-next="analysis" aria-label="Следующий месяц">›</button>
+                </div>
+                <div class="research-range-calendar" data-research-range-calendar="analysis"></div>
+                <p class="research-validation" data-research-range-error="analysis"></p>
+              </div>
+            </div>
+            <p class="research-validation" data-research-validation="periods_analysis"></p>
+          </div>
 
           <div class="research-field research-field-wide">
             <span class="filter-label">Метрики</span>
@@ -1950,6 +2080,17 @@
         baselineTo: "",
         analysisFrom: "",
         analysisTo: "",
+        promoFilterResearch: false,
+        promoFilterControl: false,
+        activeRangePicker: "",
+        rangeAwaitingEnd: {
+          baseline: false,
+          analysis: false
+        },
+        rangeVisibleMonthStart: {
+          baseline: "",
+          analysis: ""
+        },
         error: ""
       },
       sessionHighlights: {}
@@ -1981,10 +2122,14 @@
       if (!historyPanelNode.contains(event.target)) {
         setHistoryPopoverOpen(false);
       }
+      if (researchPanelNode && !event.target.closest("[data-research-range-field]")) {
+        closeResearchRangePickers();
+      }
     });
     document.addEventListener("keydown", function(event) {
       if (event.key === "Escape") {
         setHistoryPopoverOpen(false);
+        closeResearchRangePickers();
       }
     });
     historyPrevMonthButton.addEventListener("click", function() {
@@ -2003,6 +2148,7 @@
 
     if (researchPanelNode) {
       researchPanelNode.addEventListener("change", handleResearchInputChange);
+      researchPanelNode.addEventListener("click", handleResearchClick);
     }
     if (researchCalculateButton) {
       researchCalculateButton.addEventListener("click", calculateResearchComparison);
@@ -4110,6 +4256,12 @@
       state.research.baselineTo = state.research.baselineTo || String(baseline.date_to || "");
       state.research.analysisFrom = state.research.analysisFrom || String(analysis.date_from || "");
       state.research.analysisTo = state.research.analysisTo || String(analysis.date_to || "");
+      if (!state.research.rangeVisibleMonthStart.baseline && (state.research.baselineTo || state.research.baselineFrom)) {
+        state.research.rangeVisibleMonthStart.baseline = startOfMonthIso(state.research.baselineTo || state.research.baselineFrom);
+      }
+      if (!state.research.rangeVisibleMonthStart.analysis && (state.research.analysisTo || state.research.analysisFrom)) {
+        state.research.rangeVisibleMonthStart.analysis = startOfMonthIso(state.research.analysisTo || state.research.analysisFrom);
+      }
     }
 
     function renderResearchPanel() {
@@ -4130,7 +4282,7 @@
       renderResearchSkuPicker("research", skuOptions);
       renderResearchSkuPicker("control", skuOptions);
       renderResearchMetricPicker(metricOptions);
-      syncResearchDateInputs();
+      renderResearchRangePickers();
       syncResearchValidation();
       if (researchErrorNode) {
         researchErrorNode.textContent = state.research.error || "";
@@ -4141,12 +4293,23 @@
     function renderResearchSkuPicker(kind, skuOptions) {
       const selectedSet = kind === "research" ? state.research.selectedResearchSkus : state.research.selectedControlSkus;
       const oppositeSet = kind === "research" ? state.research.selectedControlSkus : state.research.selectedResearchSkus;
+      const filterEnabled = kind === "research" ? state.research.promoFilterResearch : state.research.promoFilterControl;
+      const promoFilter = ((state.research.options || {}).sku_filters || {}).in_promo_latest_closed || {};
+      const promoAvailable = !!promoFilter.available;
       const summaryNode = document.querySelector('[data-research-sku-summary="' + kind + '"]');
       const optionsNode = document.querySelector('[data-research-sku-options="' + kind + '"]');
+      const chipNode = document.querySelector('[data-research-promo-filter="' + kind + '"]');
+      if (chipNode) {
+        chipNode.classList.toggle("is-active", filterEnabled && promoAvailable);
+        chipNode.disabled = state.research.loading || !state.research.loaded || !promoAvailable;
+        chipNode.title = promoAvailable
+          ? ("По последнему закрытому дню: " + String(promoFilter.as_of_date || ""))
+          : String(promoFilter.reason || "Promo-фильтр пока недоступен");
+      }
       if (summaryNode) {
         summaryNode.textContent = state.research.loading
           ? "Загрузка SKU…"
-          : ("Выбрано: " + selectedSet.size);
+          : ("Выбрано: " + selectedSet.size + (filterEnabled && promoAvailable ? " · акция" : ""));
       }
       if (!optionsNode) {
         return;
@@ -4159,7 +4322,17 @@
         optionsNode.innerHTML = '<p class="research-result-note">Активные SKU не найдены.</p>';
         return;
       }
-      optionsNode.innerHTML = skuOptions.map(function(item) {
+      const visibleSkuOptions = filterEnabled && promoAvailable
+        ? skuOptions.filter(function(item) {
+            return !!(item.filters && item.filters.in_promo_latest_closed);
+          })
+        : skuOptions;
+      const selectedMarkup = researchSelectedSkuSummaryMarkup(selectedSet, skuOptions);
+      if (filterEnabled && promoAvailable && !visibleSkuOptions.length) {
+        optionsNode.innerHTML = selectedMarkup + '<p class="research-result-note">Нет товаров в акции на последний закрытый день</p>';
+        return;
+      }
+      optionsNode.innerHTML = selectedMarkup + visibleSkuOptions.map(function(item) {
         const nmId = String(item.nm_id || "");
         const checked = selectedSet.has(nmId);
         const disabled = oppositeSet.has(nmId);
@@ -4171,11 +4344,27 @@
           '>',
           '<span>',
           '<span class="research-option-main">' + escapeHtml(item.label || nmId) + '</span>',
-          '<span class="research-option-meta">nmId ' + escapeHtml(nmId) + (item.group ? " · " + escapeHtml(item.group) : "") + '</span>',
+          '<span class="research-option-meta">nmId ' + escapeHtml(nmId) + (item.group ? " · " + escapeHtml(item.group) : "") +
+            ((item.filters && item.filters.in_promo_latest_closed) ? " · товар в акции" : "") +
+          '</span>',
           '</span>',
           '</label>'
         ].join("");
       }).join("");
+    }
+
+    function researchSelectedSkuSummaryMarkup(selectedSet, skuOptions) {
+      if (!selectedSet.size) {
+        return "";
+      }
+      const optionsById = new Map(skuOptions.map(function(item) {
+        return [String(item.nm_id || ""), item];
+      }));
+      const chips = Array.from(selectedSet).map(function(nmId) {
+        const item = optionsById.get(String(nmId)) || {};
+        return '<span class="status-pill">' + escapeHtml(item.label || nmId) + '</span>';
+      }).join(" ");
+      return '<p class="research-result-note">Выбрано: ' + chips + '</p>';
     }
 
     function renderResearchMetricPicker(metricOptions) {
@@ -4212,25 +4401,264 @@
       }).join("");
     }
 
-    function syncResearchDateInputs() {
+    function renderResearchRangePickers() {
+      renderResearchRangePicker("baseline");
+      renderResearchRangePicker("analysis");
+    }
+
+    function renderResearchRangePicker(kind) {
       const dateCapabilities = ((state.research.options || {}).date_capabilities || {});
       const minDate = String(dateCapabilities.available_date_min || "");
       const maxDate = String(dateCapabilities.available_date_max || "");
-      [
-        ["baseline_from", "baselineFrom"],
-        ["baseline_to", "baselineTo"],
-        ["analysis_from", "analysisFrom"],
-        ["analysis_to", "analysisTo"]
-      ].forEach(function(pair) {
-        const node = document.querySelector('[data-research-date="' + pair[0] + '"]');
-        if (!node) {
+      const fields = researchRangeFields(kind);
+      const labelNode = document.querySelector('[data-research-range-label="' + kind + '"]');
+      const popoverNode = document.querySelector('[data-research-range-popover="' + kind + '"]');
+      const toggleNode = document.querySelector('[data-research-range-toggle="' + kind + '"]');
+      const calendarNode = document.querySelector('[data-research-range-calendar="' + kind + '"]');
+      const monthLabelNode = document.querySelector('[data-research-range-month-label="' + kind + '"]');
+      const prevButton = document.querySelector('[data-research-range-prev="' + kind + '"]');
+      const nextButton = document.querySelector('[data-research-range-next="' + kind + '"]');
+      const errorNode = document.querySelector('[data-research-range-error="' + kind + '"]');
+      const fromValue = state.research[fields.from] || "";
+      const toValue = state.research[fields.to] || "";
+      if (labelNode) {
+        labelNode.textContent = fromValue && toValue
+          ? formatBusinessDateDisplay(fromValue) + " — " + formatBusinessDateDisplay(toValue)
+          : "Период не выбран";
+      }
+      if (toggleNode) {
+        const disabled = state.research.loading || !state.research.loaded || !minDate || !maxDate;
+        toggleNode.disabled = disabled;
+        toggleNode.setAttribute("aria-expanded", state.research.activeRangePicker === kind ? "true" : "false");
+      }
+      if (popoverNode) {
+        popoverNode.hidden = state.research.activeRangePicker !== kind;
+      }
+      if (!calendarNode) {
+        return;
+      }
+      if (!minDate || !maxDate) {
+        calendarNode.innerHTML = '<p class="research-result-note">Ready snapshots для выбора периода пока недоступны.</p>';
+        if (errorNode) {
+          errorNode.textContent = "";
+        }
+        return;
+      }
+      if (!state.research.rangeVisibleMonthStart[kind]) {
+        state.research.rangeVisibleMonthStart[kind] = clampResearchRangeMonthStart(kind, startOfMonthIso(toValue || maxDate));
+      }
+      state.research.rangeVisibleMonthStart[kind] = clampResearchRangeMonthStart(kind, state.research.rangeVisibleMonthStart[kind]);
+      const monthStart = state.research.rangeVisibleMonthStart[kind];
+      if (monthLabelNode) {
+        monthLabelNode.textContent = monthStart ? capitalizeFirst(formatHistoryMonthLabel(monthStart)) : "месяц";
+      }
+      if (prevButton) {
+        prevButton.disabled = !canShiftResearchRangeMonth(kind, -1);
+      }
+      if (nextButton) {
+        nextButton.disabled = !canShiftResearchRangeMonth(kind, 1);
+      }
+      calendarNode.innerHTML = buildResearchRangeCalendarMarkup(kind, monthStart);
+      if (errorNode) {
+        errorNode.textContent = researchRangeValidationMessage(kind);
+        errorNode.classList.toggle("is-error", !!errorNode.textContent);
+      }
+    }
+
+    function researchRangeFields(kind) {
+      return kind === "analysis"
+        ? {from: "analysisFrom", to: "analysisTo", label: "Период анализа"}
+        : {from: "baselineFrom", to: "baselineTo", label: "Базовый период"};
+    }
+
+    function buildResearchRangeCalendarMarkup(kind, monthStart) {
+      if (!monthStart) {
+        return "";
+      }
+      const fields = researchRangeFields(kind);
+      const dateCapabilities = ((state.research.options || {}).date_capabilities || {});
+      const readableDates = Array.isArray(dateCapabilities.readable_dates) ? dateCapabilities.readable_dates : [];
+      const readableSet = new Set(readableDates.map(String));
+      const monthStartDate = parseIsoDate(monthStart);
+      const monthIndex = monthStartDate.getUTCMonth();
+      const dayCells = [];
+      for (let offset = 0; offset < mondayFirstWeekdayIndex(monthStartDate); offset += 1) {
+        dayCells.push('<div class="history-day-empty" aria-hidden="true"></div>');
+      }
+      let cursor = new Date(monthStartDate.getTime());
+      while (cursor.getUTCMonth() === monthIndex) {
+        const isoDate = formatIsoDate(cursor);
+        const isAvailable = readableSet.has(isoDate);
+        const isStart = isoDate === state.research[fields.from];
+        const isEnd = isoDate === state.research[fields.to];
+        const isInRange = state.research[fields.from] && state.research[fields.to] && isoDate >= state.research[fields.from] && isoDate <= state.research[fields.to];
+        const classes = ["history-day"];
+        if (isInRange) {
+          classes.push("in-range");
+        }
+        if (isStart || isEnd) {
+          classes.push("range-edge");
+        }
+        dayCells.push(
+          '<button class="' + classes.join(" ") + '" type="button" data-research-range-day="' +
+          escapeHtml(kind) + '" data-date="' + escapeHtml(isoDate) + '"' +
+          (isAvailable ? "" : " disabled") +
+          '>' + escapeHtml(String(cursor.getUTCDate())) + '</button>'
+        );
+        cursor = shiftDate(cursor, 1);
+      }
+      return [
+        '<section class="history-month" data-research-range-month="' + escapeHtml(monthStart) + '">',
+        '<div class="history-weekdays">',
+        ["пн", "вт", "ср", "чт", "пт", "сб", "вс"].map(function(label) {
+          return '<div class="history-weekday">' + escapeHtml(label) + "</div>";
+        }).join(""),
+        "</div>",
+        '<div class="history-days">',
+        dayCells.join(""),
+        "</div></section>"
+      ].join("");
+    }
+
+    function researchRangeValidationMessage(kind) {
+      const fields = researchRangeFields(kind);
+      if (!state.research[fields.from] && !state.research[fields.to]) {
+        return "";
+      }
+      if (!state.research[fields.from] || !state.research[fields.to] || state.research.rangeAwaitingEnd[kind]) {
+        return "Выберите начало и конец периода.";
+      }
+      if (state.research[fields.from] > state.research[fields.to]) {
+        return "Начало периода должно быть не позже конца.";
+      }
+      return "";
+    }
+
+    function closeResearchRangePickers() {
+      if (!state.research.activeRangePicker) {
+        return;
+      }
+      state.research.activeRangePicker = "";
+      renderResearchRangePickers();
+    }
+
+    function toggleResearchRangePicker(kind) {
+      if (state.research.activeRangePicker === kind) {
+        state.research.activeRangePicker = "";
+      } else {
+        state.research.activeRangePicker = kind;
+        const fields = researchRangeFields(kind);
+        const dateCapabilities = ((state.research.options || {}).date_capabilities || {});
+        const maxDate = String(dateCapabilities.available_date_max || "");
+        const anchorDate = state.research[fields.to] || maxDate;
+        if (anchorDate) {
+          state.research.rangeVisibleMonthStart[kind] = clampResearchRangeMonthStart(kind, startOfMonthIso(anchorDate));
+        }
+      }
+      renderResearchRangePickers();
+    }
+
+    function selectResearchRangeDay(kind, dateValue) {
+      const fields = researchRangeFields(kind);
+      if (!state.research[fields.from] || (state.research[fields.from] && state.research[fields.to] && !state.research.rangeAwaitingEnd[kind])) {
+        state.research[fields.from] = dateValue;
+        state.research[fields.to] = "";
+        state.research.rangeAwaitingEnd[kind] = true;
+      } else if (dateValue < state.research[fields.from]) {
+        state.research[fields.to] = state.research[fields.from];
+        state.research[fields.from] = dateValue;
+        state.research.rangeAwaitingEnd[kind] = false;
+      } else {
+        state.research[fields.to] = dateValue;
+        state.research.rangeAwaitingEnd[kind] = false;
+      }
+      state.research.rangeVisibleMonthStart[kind] = clampResearchRangeMonthStart(kind, startOfMonthIso(dateValue));
+      clearResearchResult();
+      renderResearchPanel();
+    }
+
+    function shiftResearchRangeVisibleMonth(kind, deltaMonths) {
+      const current = state.research.rangeVisibleMonthStart[kind] || "";
+      if (!current) {
+        return;
+      }
+      state.research.rangeVisibleMonthStart[kind] = clampResearchRangeMonthStart(kind, addMonthsIso(current, deltaMonths));
+      renderResearchRangePicker(kind);
+    }
+
+    function canShiftResearchRangeMonth(kind, deltaMonths) {
+      const current = state.research.rangeVisibleMonthStart[kind] || "";
+      if (!current) {
+        return false;
+      }
+      return clampResearchRangeMonthStart(kind, addMonthsIso(current, deltaMonths)) !== current;
+    }
+
+    function clampResearchRangeMonthStart(kind, monthStart) {
+      const dateCapabilities = ((state.research.options || {}).date_capabilities || {});
+      const minDate = String(dateCapabilities.available_date_min || "");
+      const maxDate = String(dateCapabilities.available_date_max || "");
+      if (!minDate || !maxDate || !monthStart) {
+        return "";
+      }
+      const minMonth = startOfMonthIso(minDate);
+      const maxMonth = startOfMonthIso(maxDate);
+      if (monthStart < minMonth) {
+        return minMonth;
+      }
+      if (monthStart > maxMonth) {
+        return maxMonth;
+      }
+      return monthStart;
+    }
+
+    function handleResearchClick(event) {
+      const promoChip = event.target.closest("[data-research-promo-filter]");
+      if (promoChip) {
+        event.preventDefault();
+        const kind = String(promoChip.getAttribute("data-research-promo-filter") || "");
+        const promoFilter = ((state.research.options || {}).sku_filters || {}).in_promo_latest_closed || {};
+        if (!promoFilter.available) {
           return;
         }
-        node.value = state.research[pair[1]] || "";
-        node.min = minDate;
-        node.max = maxDate;
-        node.disabled = state.research.loading || !state.research.loaded;
-      });
+        if (kind === "control") {
+          state.research.promoFilterControl = !state.research.promoFilterControl;
+        } else {
+          state.research.promoFilterResearch = !state.research.promoFilterResearch;
+        }
+        renderResearchPanel();
+        return;
+      }
+      const rangeToggle = event.target.closest("[data-research-range-toggle]");
+      if (rangeToggle) {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleResearchRangePicker(String(rangeToggle.getAttribute("data-research-range-toggle") || ""));
+        return;
+      }
+      const rangePrev = event.target.closest("[data-research-range-prev]");
+      if (rangePrev) {
+        event.preventDefault();
+        event.stopPropagation();
+        shiftResearchRangeVisibleMonth(String(rangePrev.getAttribute("data-research-range-prev") || ""), -1);
+        return;
+      }
+      const rangeNext = event.target.closest("[data-research-range-next]");
+      if (rangeNext) {
+        event.preventDefault();
+        event.stopPropagation();
+        shiftResearchRangeVisibleMonth(String(rangeNext.getAttribute("data-research-range-next") || ""), 1);
+        return;
+      }
+      const rangeDay = event.target.closest("[data-research-range-day]");
+      if (rangeDay) {
+        event.preventDefault();
+        event.stopPropagation();
+        selectResearchRangeDay(
+          String(rangeDay.getAttribute("data-research-range-day") || ""),
+          String(rangeDay.getAttribute("data-date") || "")
+        );
+      }
     }
 
     function handleResearchInputChange(event) {
@@ -4251,21 +4679,6 @@
         clearResearchResult();
         renderResearchPanel();
         return;
-      }
-      const dateNode = event.target.closest("[data-research-date]");
-      if (dateNode) {
-        const key = String(dateNode.getAttribute("data-research-date") || "");
-        const mapping = {
-          baseline_from: "baselineFrom",
-          baseline_to: "baselineTo",
-          analysis_from: "analysisFrom",
-          analysis_to: "analysisTo"
-        };
-        if (mapping[key]) {
-          state.research[mapping[key]] = String(dateNode.value || "").trim();
-          clearResearchResult();
-          syncResearchValidation();
-        }
       }
     }
 
@@ -4298,7 +4711,9 @@
       const validation = validateResearchInputs();
       setResearchValidationText("research_skus", validation.research_skus || "");
       setResearchValidationText("control_skus", validation.control_skus || "");
-      setResearchValidationText("metrics", validation.metrics || validation.periods || "");
+      setResearchValidationText("metrics", validation.metrics || "");
+      setResearchValidationText("periods_baseline", validation.periods_baseline || "");
+      setResearchValidationText("periods_analysis", validation.periods_analysis || "");
       if (researchCalculateButton) {
         researchCalculateButton.disabled = state.research.loading || state.research.calculating || !!validation.firstError;
         researchCalculateButton.textContent = state.research.calculating ? "Расчёт…" : "Рассчитать";
@@ -4330,14 +4745,17 @@
       if (!state.research.selectedMetrics.size) {
         errors.metrics = "Выберите хотя бы одну метрику";
       }
-      if (!state.research.baselineFrom || !state.research.baselineTo || !state.research.analysisFrom || !state.research.analysisTo) {
-        errors.periods = "Укажите базовый период и период анализа";
+      if (!state.research.baselineFrom || !state.research.baselineTo || state.research.rangeAwaitingEnd.baseline) {
+        errors.periods_baseline = "Выберите базовый период";
       } else if (state.research.baselineFrom > state.research.baselineTo) {
-        errors.periods = "Базовый период: начало должно быть не позже конца";
-      } else if (state.research.analysisFrom > state.research.analysisTo) {
-        errors.periods = "Период анализа: начало должно быть не позже конца";
+        errors.periods_baseline = "Базовый период: начало должно быть не позже конца";
       }
-      errors.firstError = errors.research_skus || errors.control_skus || errors.metrics || errors.periods || "";
+      if (!state.research.analysisFrom || !state.research.analysisTo || state.research.rangeAwaitingEnd.analysis) {
+        errors.periods_analysis = "Выберите период анализа";
+      } else if (state.research.analysisFrom > state.research.analysisTo) {
+        errors.periods_analysis = "Период анализа: начало должно быть не позже конца";
+      }
+      errors.firstError = errors.research_skus || errors.control_skus || errors.metrics || errors.periods_baseline || errors.periods_analysis || "";
       return errors;
     }
 
@@ -4423,8 +4841,9 @@
       }).join("");
       researchResultNode.innerHTML = [
         warnings,
-        '<div class="research-result-table-shell">',
-        '<table class="research-result-table" data-research-result-table>',
+        '<div class="table-shell research-result-table-shell" data-research-result-grid data-grid-library="@gravity-ui/table">',
+        '<div class="table-scroll research-result-table-scroll" data-research-result-scroll>',
+        '<table class="vitrina-table research-result-table" data-research-result-table>',
         '<thead><tr>',
         [
           "Метрика",
@@ -4443,7 +4862,7 @@
         "</tr></thead>",
         "<tbody>",
         rows.map(renderResearchResultRow).join(""),
-        "</tbody></table></div>"
+        "</tbody></table></div></div>"
       ].join("");
     }
 
