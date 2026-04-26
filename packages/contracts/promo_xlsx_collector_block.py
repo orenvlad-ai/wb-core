@@ -17,6 +17,18 @@ TimelineClassificationDecision = Literal[
     "drawer_required",
     "unknown_full_flow",
 ]
+ManifestSource = Literal["network_response", "hydrated_state", "dom_dataset", "none", "unknown"]
+ManifestStatus = Literal["active", "ended", "pending", "future", "unknown"]
+ManifestDownloadability = Literal["available", "not_available", "unknown"]
+ManifestConfidence = Literal["high", "medium", "low"]
+ManifestMatchConfidence = Literal["high", "medium", "low", "none"]
+ManifestDecision = Literal[
+    "drawer_avoid_manifest_non_materializable",
+    "drawer_required_manifest_active_or_downloadable",
+    "drawer_required_manifest_unknown",
+    "drawer_required_manifest_low_confidence",
+    "drawer_required_no_manifest",
+]
 PromoOutcomeStatus = Literal[
     "downloaded",
     "reused_archive",
@@ -84,6 +96,41 @@ class TimelineCandidate:
     timeline_goods_count: int | None = None
     timeline_autoaction_marker: str | None = None
     timeline_classifier_schema_version: str = "promo_timeline_classifier_v1"
+
+
+@dataclass(frozen=True)
+class CampaignManifestItem:
+    campaign_id: str | None
+    promo_id: int | None
+    title: str
+    period_text: str | None
+    start_at: str | None
+    end_at: str | None
+    lifecycle_status: ManifestStatus = "unknown"
+    lifecycle_status_confidence: ManifestConfidence = "low"
+    participation_status: str | None = None
+    downloadability: ManifestDownloadability = "unknown"
+    downloadability_confidence: ManifestConfidence = "low"
+    goods_count: int | None = None
+    autoaction_marker: str | None = None
+    raw_status_code: str | None = None
+    confidence: ManifestConfidence = "low"
+    evidence_sources: list[str] = field(default_factory=list)
+    loaded_at: str | None = None
+
+
+@dataclass(frozen=True)
+class CampaignManifestSnapshot:
+    manifest_schema_version: str = "promo_campaign_manifest_v1"
+    manifest_source: ManifestSource = "none"
+    manifest_loaded_success: bool = False
+    manifest_campaign_count: int = 0
+    manifest_loaded_at: str | None = None
+    manifest_error_kind: str | None = None
+    manifest_source_path: str | None = None
+    manifest_load_duration_ms: int = 0
+    manifest_parse_duration_ms: int = 0
+    campaigns: list[CampaignManifestItem] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -228,6 +275,26 @@ class PromoMetadata:
     drawer_open_reason: str | None = None
     drawer_skip_reason: str | None = None
     timeline_classifier_schema_version: str = "promo_timeline_classifier_v1"
+    manifest_schema_version: str = "promo_campaign_manifest_v1"
+    manifest_source: ManifestSource = "none"
+    manifest_loaded_success: bool = False
+    manifest_campaign_count: int = 0
+    manifest_campaign_id: str | None = None
+    manifest_promo_id: int | None = None
+    manifest_title: str | None = None
+    manifest_period_text: str | None = None
+    manifest_status: ManifestStatus = "unknown"
+    manifest_status_confidence: ManifestConfidence = "low"
+    manifest_downloadability: ManifestDownloadability = "unknown"
+    manifest_downloadability_confidence: ManifestConfidence = "low"
+    manifest_match_confidence: ManifestMatchConfidence = "none"
+    manifest_decision: ManifestDecision | None = None
+    manifest_evidence_sources: list[str] = field(default_factory=list)
+    manifest_loaded_at: str | None = None
+    manifest_drawer_skip_reason: str | None = None
+    manifest_drawer_required_reason: str | None = None
+    manifest_participation_status: str | None = None
+    manifest_match_duration_ms: int = 0
 
 
 @dataclass(frozen=True)
@@ -310,4 +377,19 @@ class CollectorRunSummary:
     drawer_fallback_reason_counts: dict[str, int] = field(default_factory=dict)
     timeline_shallow_duration_ms: int = 0
     drawer_open_duration_ms: int = 0
+    manifest_loaded_success: bool = False
+    manifest_source: ManifestSource = "none"
+    manifest_campaign_seen_count: int = 0
+    manifest_timeline_match_count: int = 0
+    manifest_match_low_confidence_count: int = 0
+    manifest_missing_for_card_count: int = 0
+    manifest_status_classified_count: int = 0
+    manifest_downloadability_classified_count: int = 0
+    manifest_drawer_avoid_count: int = 0
+    manifest_drawer_required_count: int = 0
+    manifest_unknown_full_flow_count: int = 0
+    manifest_low_confidence_full_flow_count: int = 0
+    manifest_load_duration_ms: int = 0
+    manifest_parse_duration_ms: int = 0
+    manifest_match_duration_ms: int = 0
     promos: list[PromoOutcome] = field(default_factory=list)

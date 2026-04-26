@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -16,6 +16,8 @@ from zoneinfo import ZoneInfo
 from playwright.sync_api import Browser, BrowserContext, Download, Page, Playwright, sync_playwright
 
 from packages.contracts.promo_xlsx_collector_block import (
+    CampaignManifestItem,
+    CampaignManifestSnapshot,
     CollectorStateSnapshot,
     DownloadArtifact,
     DrawerResetSummary,
@@ -47,6 +49,24 @@ DOWNLOAD_BUTTON_TEXT = "Скачать файл"
 READY_TEXT = "Файл сформирован"
 VISIBLE_TABS = ("Доступные", "Участвую", "Не участвую", "Акции WB", "Мои акции", "Скидка лояльности")
 BUSINESS_TIMEZONE = ZoneInfo("Asia/Yekaterinburg")
+PROMOTIONS_TIMELINE_PATH = "/ns/calendar-api/dp-calendar/web/api/v3/promotions/timeline"
+_ENDED_PARTICIPATION_STATUSES = {"PARTICIPATED", "SKIPPED"}
+_ACTIVE_PARTICIPATION_STATUSES = {"PARTICIPATING", "SKIPPING"}
+_FUTURE_PARTICIPATION_STATUSES = {"WILL_PARTICIPATE"}
+_MONTH_GENITIVE = {
+    1: "января",
+    2: "февраля",
+    3: "марта",
+    4: "апреля",
+    5: "мая",
+    6: "июня",
+    7: "июля",
+    8: "августа",
+    9: "сентября",
+    10: "октября",
+    11: "ноября",
+    12: "декабря",
+}
 
 
 class PromoCollectorDriver(Protocol):
@@ -86,6 +106,9 @@ class PromoCollectorDriver(Protocol):
     def last_state_snapshot(self) -> CollectorStateSnapshot | None:
         raise NotImplementedError
 
+    def campaign_manifest_snapshot(self) -> CampaignManifestSnapshot:
+        raise NotImplementedError
+
 
 class PlaywrightPromoCollectorDriver:
     def __init__(self, output_root: Path) -> None:
@@ -100,9 +123,11 @@ class PlaywrightPromoCollectorDriver:
         self._request: PromoXlsxCollectorRequest | None = None
         self._last_state: CollectorStateSnapshot | None = None
         self._latest_period_id: int | None = None
+        self._campaign_manifest_snapshot = CampaignManifestSnapshot()
 
     def start(self, request: PromoXlsxCollectorRequest) -> None:
         self._request = request
+        self._campaign_manifest_snapshot = CampaignManifestSnapshot()
         self._artifacts_dir.mkdir(parents=True, exist_ok=True)
         self._logs_dir.mkdir(parents=True, exist_ok=True)
         self._downloads_dir.mkdir(parents=True, exist_ok=True)
@@ -309,6 +334,9 @@ class PlaywrightPromoCollectorDriver:
     def last_state_snapshot(self) -> CollectorStateSnapshot | None:
         return self._last_state
 
+    def campaign_manifest_snapshot(self) -> CampaignManifestSnapshot:
+        return self._campaign_manifest_snapshot
+
     def capture_state(self, label: str, *, persist: bool = True) -> CollectorStateSnapshot:
         page = self._require_page()
         body_text = page.locator("body").inner_text()
@@ -459,6 +487,7 @@ class PlaywrightPromoCollectorDriver:
         period_id = _parse_period_id(response.url)
         if period_id is not None:
             self._latest_period_id = period_id
+        self._capture_campaign_manifest_response(response)
         self._append_jsonl(
             self._logs_dir / "responses.jsonl",
             {
@@ -469,6 +498,42 @@ class PlaywrightPromoCollectorDriver:
                 "period_id": period_id,
             },
         )
+
+    def _capture_campaign_manifest_response(self, response: Any) -> None:
+        parsed_url = urllib_parse.urlparse(str(getattr(response, "url", "") or ""))
+        if parsed_url.path != PROMOTIONS_TIMELINE_PATH:
+            return
+        if int(getattr(response, "status", 0) or 0) != 200:
+            return
+        content_type = str(getattr(response, "headers", {}).get("content-type", "") or "")
+        if "json" not in content_type.lower():
+            return
+        started = time.perf_counter()
+        try:
+            payload = response.json()
+        except Exception as exc:
+            self._campaign_manifest_snapshot = CampaignManifestSnapshot(
+                manifest_source="network_response",
+                manifest_loaded_success=False,
+                manifest_error_kind=f"manifest_json_error={type(exc).__name__}",
+                manifest_source_path=parsed_url.path,
+                manifest_load_duration_ms=_elapsed_ms(started),
+                manifest_parse_duration_ms=_elapsed_ms(started),
+            )
+            return
+        snapshot = _build_campaign_manifest_snapshot(
+            payload=payload,
+            source_path=parsed_url.path,
+            started_perf=started,
+        )
+        self._campaign_manifest_snapshot = snapshot
+        self._write_campaign_manifest_snapshot(snapshot)
+
+    def _write_campaign_manifest_snapshot(self, snapshot: CampaignManifestSnapshot) -> None:
+        payload = asdict(snapshot)
+        path = self._logs_dir / "campaign_manifest.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     @staticmethod
     def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
@@ -486,6 +551,172 @@ def _parse_period_id(url: str) -> int | None:
         return int(values[0])
     except (TypeError, ValueError):
         return None
+
+
+def _build_campaign_manifest_snapshot(
+    *,
+    payload: Any,
+    source_path: str,
+    started_perf: float,
+) -> CampaignManifestSnapshot:
+    loaded_at = _now_iso()
+    promotions = []
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict):
+            raw_promotions = data.get("promotions")
+            if isinstance(raw_promotions, list):
+                promotions = raw_promotions
+    campaigns = [
+        item
+        for item in (_campaign_manifest_item(raw, loaded_at=loaded_at) for raw in promotions)
+        if item is not None
+    ]
+    elapsed = _elapsed_ms(started_perf)
+    return CampaignManifestSnapshot(
+        manifest_source="network_response",
+        manifest_loaded_success=bool(campaigns),
+        manifest_campaign_count=len(campaigns),
+        manifest_loaded_at=loaded_at,
+        manifest_error_kind=None if campaigns else "manifest_promotions_empty_or_unrecognized",
+        manifest_source_path=source_path,
+        manifest_load_duration_ms=elapsed,
+        manifest_parse_duration_ms=elapsed,
+        campaigns=campaigns,
+    )
+
+
+def _campaign_manifest_item(raw: Any, *, loaded_at: str) -> CampaignManifestItem | None:
+    if not isinstance(raw, dict):
+        return None
+    promo_id = _safe_int(raw.get("promoID"))
+    title = _sanitize_manifest_label(raw.get("name"), limit=160)
+    if not title:
+        return None
+    start_dt = _parse_wb_utc_datetime(raw.get("startDate"))
+    end_dt = _parse_wb_utc_datetime(raw.get("endDate"))
+    start_at = _local_minute_iso(start_dt)
+    end_at = _local_minute_iso(end_dt)
+    participation = raw.get("participation") if isinstance(raw.get("participation"), dict) else {}
+    participation_status = _sanitize_manifest_label(participation.get("status"), limit=80)
+    counts = participation.get("counts") if isinstance(participation.get("counts"), dict) else {}
+    lifecycle_status, lifecycle_confidence, downloadability, downloadability_confidence, sources = (
+        _classify_manifest_campaign(
+            participation_status=participation_status,
+            start_dt=start_dt,
+            end_dt=end_dt,
+        )
+    )
+    promo_type = _sanitize_manifest_label(raw.get("type"), limit=80)
+    autoaction_marker = None
+    if promo_type == "AUTO_PROMO":
+        autoaction_marker = "auto_promo"
+    elif "автоматические скидки" in title.lower():
+        autoaction_marker = "auto_discount"
+    if promo_id is not None:
+        sources.append("manifest_promo_id")
+    if start_dt and end_dt:
+        sources.append("manifest_period")
+    if participation_status:
+        sources.append("manifest_participation_status")
+    return CampaignManifestItem(
+        campaign_id=str(promo_id) if promo_id is not None else None,
+        promo_id=promo_id,
+        title=title,
+        period_text=_manifest_period_text(start_dt, end_dt),
+        start_at=start_at,
+        end_at=end_at,
+        lifecycle_status=lifecycle_status,
+        lifecycle_status_confidence=lifecycle_confidence,
+        participation_status=participation_status or None,
+        downloadability=downloadability,
+        downloadability_confidence=downloadability_confidence,
+        goods_count=_safe_int(counts.get("eligible")),
+        autoaction_marker=autoaction_marker,
+        raw_status_code=participation_status or None,
+        confidence=lifecycle_confidence,
+        evidence_sources=sorted(set(sources)),
+        loaded_at=loaded_at,
+    )
+
+
+def _classify_manifest_campaign(
+    *,
+    participation_status: str,
+    start_dt: datetime | None,
+    end_dt: datetime | None,
+) -> tuple[str, str, str, str, list[str]]:
+    now = datetime.now(BUSINESS_TIMEZONE)
+    status_code = str(participation_status or "").strip().upper()
+    sources: list[str] = []
+    if end_dt is not None and end_dt <= now:
+        sources.append("manifest_end_date_elapsed")
+        if status_code in _ENDED_PARTICIPATION_STATUSES:
+            return "ended", "high", "not_available", "high", sources
+    if start_dt is not None and start_dt > now:
+        sources.append("manifest_start_date_future")
+        if status_code in _FUTURE_PARTICIPATION_STATUSES:
+            return "future", "high", "unknown", "low", sources
+    if start_dt is not None and end_dt is not None and start_dt <= now <= end_dt:
+        sources.append("manifest_current_date_window")
+        if status_code in _ACTIVE_PARTICIPATION_STATUSES:
+            return "active", "high", "available", "medium", sources
+        if status_code in _FUTURE_PARTICIPATION_STATUSES:
+            return "pending", "medium", "unknown", "low", sources
+    if status_code in _ACTIVE_PARTICIPATION_STATUSES:
+        return "active", "medium", "available", "low", sources
+    if status_code in _FUTURE_PARTICIPATION_STATUSES:
+        return "future", "medium", "unknown", "low", sources
+    return "unknown", "low", "unknown", "low", sources
+
+
+def _parse_wb_utc_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(BUSINESS_TIMEZONE)
+
+
+def _local_minute_iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.strftime("%Y-%m-%dT%H:%M")
+
+
+def _manifest_period_text(start_dt: datetime | None, end_dt: datetime | None) -> str | None:
+    if start_dt is None or end_dt is None:
+        return None
+    start_month = _MONTH_GENITIVE.get(start_dt.month, "")
+    end_month = _MONTH_GENITIVE.get(end_dt.month, "")
+    if not start_month or not end_month:
+        return None
+    if start_dt.month == end_dt.month:
+        return f"{start_dt.day:02d} - {end_dt.day:02d} {end_month}"
+    return f"{start_dt.day:02d} {start_month} - {end_dt.day:02d} {end_month}"
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sanitize_manifest_label(value: Any, *, limit: int) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").replace("\xa0", " ")).strip()
+    return text[:limit]
+
+
+def _elapsed_ms(started_perf: float) -> int:
+    return max(0, int(round((time.perf_counter() - started_perf) * 1000)))
 
 
 def is_hydrated_state(state: CollectorStateSnapshot) -> bool:
