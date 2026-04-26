@@ -325,6 +325,7 @@ def main() -> None:
                 "Проверить сессию",
                 "Восстановить сессию",
                 "Скачать лаунчер",
+                "seller_recovery_status_path",
                 "Лог",
             ):
                 if expected not in page_html:

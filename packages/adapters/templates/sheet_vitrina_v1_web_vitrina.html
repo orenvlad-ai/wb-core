@@ -2061,6 +2061,13 @@
         tone: "neutral",
         checkedAt: ""
       },
+      sellerRecovery: {
+        launcherEnabled: false,
+        launcherPath: WEB_VITRINA_CONFIG.seller_recovery_launcher_path || "",
+        statusLabel: "",
+        tone: "neutral",
+        checkedAt: ""
+      },
       groupActions: {},
       groupRefreshDates: {},
       sourceStatus: {
@@ -2168,6 +2175,11 @@
       const recoveryStartButton = event.target.closest("[data-session-recovery-start]");
       if (recoveryStartButton) {
         runSellerRecoveryStart();
+        return;
+      }
+      const launcherButton = event.target.closest("[data-session-launcher]");
+      if (launcherButton) {
+        downloadSellerRecoveryLauncher();
       }
     });
 
@@ -2907,11 +2919,13 @@
       if (!group.session_controls) {
         return "";
       }
+      const launcherPath = state.sellerRecovery.launcherPath || WEB_VITRINA_CONFIG.seller_recovery_launcher_path || "";
+      const launcherDisabled = state.sellerRecovery.launcherEnabled ? "" : " disabled";
       return [
         '<span class="seller-session-controls" data-seller-session-controls>',
         '<button class="button secondary seller-session-button" type="button" data-session-check>Проверить сессию</button>',
         '<button class="button secondary seller-session-button" type="button" data-session-recovery-start>Восстановить сессию</button>',
-        '<a class="button secondary seller-session-button" data-session-launcher href="' + escapeHtml(WEB_VITRINA_CONFIG.seller_recovery_launcher_path || "#") + '" download>Скачать лаунчер</a>',
+        '<button class="button secondary seller-session-button" type="button" data-session-launcher data-launcher-path="' + escapeHtml(launcherPath) + '"' + launcherDisabled + '>Скачать лаунчер</button>',
         '</span>'
       ].join("");
     }
@@ -4205,6 +4219,14 @@
       }
     }
 
+    function filenameFromDisposition(value) {
+      if (!value) {
+        return "";
+      }
+      const match = /filename=\"?([^\";]+)\"?/i.exec(value);
+      return match ? match[1] : "";
+    }
+
     async function ensureResearchOptionsLoaded() {
       if (!researchPanelNode || state.research.loaded || state.research.loading) {
         return;
@@ -5490,6 +5512,7 @@
         if (!finalJob || finalJob.status !== "success") {
           throw new Error((finalJob && (finalJob.error || finalJob.status)) || "seller recovery start job failed");
         }
+        applySellerRecoveryPayload((finalJob && finalJob.result) || payload || {}, {render: false});
         setStatusBadge({label: "Запущено", tone: "warning", detail: "recovery flow requested"});
         await loadPageComposition({includeSourceStatus: state.sourceStatus.loaded});
       } catch (error) {
@@ -5513,7 +5536,110 @@
         tone: ok ? "success" : "error",
         checkedAt: checkedAt
       };
+      applySellerRecoveryPayload(result || {}, {render: false});
       renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
+    }
+
+    function applySellerRecoveryPayload(payload, options) {
+      const normalized = payload || {};
+      state.sellerRecovery = {
+        launcherEnabled: Boolean(normalized.launcher_enabled),
+        launcherPath: String(normalized.launcher_download_path || WEB_VITRINA_CONFIG.seller_recovery_launcher_path || ""),
+        statusLabel: String(normalized.run_status_label || normalized.status_label || normalized.status || ""),
+        tone: normalizeTone(normalized.run_status_tone || normalized.status_tone || "neutral"),
+        checkedAt: String(normalized.updated_at || normalized.checked_at || new Date().toISOString())
+      };
+      if (!options || options.render !== false) {
+        renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
+      }
+    }
+
+    async function fetchSellerRecoveryStatus(options) {
+      const statusPath = String(WEB_VITRINA_CONFIG.seller_recovery_status_path || "");
+      if (!statusPath) {
+        throw new Error("seller recovery status path is missing");
+      }
+      const response = await fetch(statusPath, {
+        method: "GET",
+        headers: {"Accept": "application/json"}
+      });
+      const payload = await readJsonResponse(response, "non-json response from seller recovery status route");
+      if (!response.ok) {
+        throw new Error((payload && payload.error) ? payload.error : "seller recovery status route returned " + response.status);
+      }
+      applySellerRecoveryPayload(payload, options);
+      return payload;
+    }
+
+    async function refreshSellerRecoveryStatus() {
+      try {
+        await fetchSellerRecoveryStatus();
+      } catch (error) {
+        applySellerRecoveryPayload({launcher_enabled: false}, {render: true});
+      }
+    }
+
+    async function downloadSellerRecoveryLauncher() {
+      const actionId = state.actionSequence + 1;
+      state.actionSequence = actionId;
+      setActionButtonsDisabled(true);
+      setStatusBadge({label: "Launcher", tone: "warning", detail: "проверяем готовность recovery launcher"});
+      try {
+        const statusPayload = await fetchSellerRecoveryStatus({render: false});
+        if (actionId !== state.actionSequence) {
+          return;
+        }
+        if (!statusPayload.launcher_enabled) {
+          throw new Error(String(statusPayload.summary || statusPayload.status_label || statusPayload.status || "launcher is not ready"));
+        }
+        const downloadPath = String(statusPayload.launcher_download_path || state.sellerRecovery.launcherPath || WEB_VITRINA_CONFIG.seller_recovery_launcher_path || "");
+        if (!downloadPath) {
+          throw new Error("launcher download path is missing");
+        }
+        const response = await fetch(downloadPath, {
+          method: "GET"
+        });
+        if (!response.ok) {
+          let message = "seller recovery launcher route returned " + response.status;
+          try {
+            const payload = await readJsonResponse(response, "non-json response from seller recovery launcher route");
+            message = String((payload && payload.error) || message);
+          } catch (error) {
+            // Keep the HTTP status when the server returned a non-JSON failure page.
+          }
+          throw new Error(message);
+        }
+        const blob = await response.blob();
+        const disposition = response.headers.get("Content-Disposition");
+        const objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = objectUrl;
+        link.download = filenameFromDisposition(disposition) || "seller-portal-relogin-macos.zip";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(objectUrl);
+        appendVisibleActionLogLine(
+          "Launcher для Seller Portal recovery скачан.",
+          {statusLabel: "Успешно", tone: "success", detail: "launcher downloaded"}
+        );
+        setStatusBadge({label: "Launcher", tone: "success", detail: "скачан"});
+      } catch (error) {
+        if (actionId !== state.actionSequence) {
+          return;
+        }
+        const message = String(error && error.message ? error.message : error);
+        appendVisibleActionLogLine(
+          "Не удалось скачать launcher: " + message,
+          {statusLabel: "Ошибка", tone: "error", detail: message}
+        );
+        setStatusBadge({label: "Ошибка", tone: "error", detail: message});
+      } finally {
+        if (actionId === state.actionSequence) {
+          setActionButtonsDisabled(false);
+          renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
+        }
+      }
     }
 
     async function loadPageComposition(options) {
@@ -5550,6 +5676,7 @@
         }
         resetFilterState(payload);
         renderPage(payload);
+        refreshSellerRecoveryStatus();
       } catch (error) {
         if (requestId !== state.requestSequence) {
           return;

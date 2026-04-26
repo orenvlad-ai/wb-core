@@ -1842,6 +1842,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "research_calculate_path": DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_CALCULATE_PATH,
         "job_path": job_path,
         "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
+        "seller_recovery_status_path": DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
         "seller_recovery_start_path": DEFAULT_SHEET_WEB_VITRINA_SELLER_RECOVERY_START_PATH,
         "seller_recovery_launcher_path": DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
         "page_composition_surface": DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
