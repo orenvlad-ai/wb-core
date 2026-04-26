@@ -46,6 +46,10 @@ def main() -> None:
         "download_action_state",
         "status_evidence_sources",
         "collector_ui_schema_version",
+        "early_preflight_decision",
+        "heavy_flow_required",
+        "heavy_flow_reason",
+        "collector_preflight_schema_version",
     ):
         if key not in metadata_payload:
             raise AssertionError(f"handled promo metadata missing UI status field {key}: {metadata_payload}")

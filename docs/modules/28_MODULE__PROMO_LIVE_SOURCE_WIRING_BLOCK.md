@@ -89,8 +89,11 @@ Refresh diagnostics для `promo_by_price` дополнительно surface-�
 - artifact validation writes `artifact_validation_schema_version=promo_artifact_validation_v1`, `artifact_state_counts`, `artifact_validation_summary`, and compact `missing_campaign_artifacts` examples for problematic covering campaigns;
 - materializer counters distinguish collector-reported reuse (`collector_reuse_count` / legacy `workbook_reuse_count`) from archive artifacts validated as usable (`validated_workbook_usable_count` / `materializer_usable_count`);
 - status-aware validation also surfaces `ui_status_counts`, `download_action_state_counts`, `ended_without_download_count`, `metadata_only_true_artifact_loss_count`, and `non_materializable_expected_count`;
+- collector preflight diagnostics additionally surface `opened_drawer_count`, `shallow_status_checked_count`, `deep_workbook_flow_count`, `early_ended_no_download_count`, `early_non_materializable_count`, `unknown_status_full_flow_count`, `active_downloadable_full_flow_count`, `download_attempt_count`, `generate_screen_attempt_count`, `heavy_flow_avoided_count`, `estimated_heavy_flow_avoided_count`, `early_preflight_duration_ms`, `deep_flow_duration_ms`, and compact `collector_preflight_campaigns`;
+- high-confidence `ended` + absent/disabled download campaigns may avoid the deep workbook generate/download path, but this is not a blind collector skip: the collector still opens the card/drawer and records sanitized status evidence before narrowing the path;
+- active/downloadable, low-confidence, unknown, UI-not-loaded, identity-mismatch and unclear download states retain conservative behavior;
 - эти diagnostics не являются data truth, не меняют source fetch policy, acceptance/fallback semantics, temporal policy, retry behavior, Google Sheets/GAS archive boundary или browser/localStorage truth;
-- browser collector currently emits only total collector runtime plus summary counters; per-candidate browser/download timings stay an explicit observability gap until a separate adapter refactor.
+- browser collector now emits aggregate preflight/deep-flow timing, but selector-level browser timings stay an explicit observability gap until a separate adapter refactor.
 
 `STATUS.note` обязан нести minimum debug facts:
 - `trace_run_dir`

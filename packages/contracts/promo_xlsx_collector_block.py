@@ -198,6 +198,12 @@ class PromoMetadata:
     ui_loaded_success: bool = False
     campaign_identity_match: bool = False
     collector_ui_schema_version: str = "promo_collector_ui_status_v1"
+    early_preflight_decision: str | None = None
+    heavy_flow_required: bool | None = None
+    heavy_flow_reason: str | None = None
+    non_materializable_reason: str | None = None
+    fallback_to_full_flow_reason: str | None = None
+    collector_preflight_schema_version: str = "promo_collector_preflight_v1"
 
 
 @dataclass(frozen=True)
@@ -219,6 +225,15 @@ class PromoOutcome:
     original_suggested_filename: str | None = None
     export_kind: ExportKind | None = None
     drawer_reset: DrawerResetSummary | None = None
+    early_preflight_decision: str | None = None
+    heavy_flow_required: bool | None = None
+    heavy_flow_reason: str | None = None
+    non_materializable_reason: str | None = None
+    fallback_to_full_flow_reason: str | None = None
+    early_preflight_duration_ms: int = 0
+    deep_flow_duration_ms: int = 0
+    generate_screen_attempted: bool = False
+    download_attempted: bool = False
 
 
 @dataclass
@@ -238,4 +253,18 @@ class CollectorRunSummary:
     blocked_before_download_count: int = 0
     ambiguous_count: int = 0
     export_kinds: list[ExportKind] = field(default_factory=list)
+    opened_drawer_count: int = 0
+    shallow_status_checked_count: int = 0
+    deep_workbook_flow_count: int = 0
+    early_ended_no_download_count: int = 0
+    early_non_materializable_count: int = 0
+    non_materializable_expected_count: int = 0
+    unknown_status_full_flow_count: int = 0
+    active_downloadable_full_flow_count: int = 0
+    download_attempt_count: int = 0
+    generate_screen_attempt_count: int = 0
+    heavy_flow_avoided_count: int = 0
+    estimated_heavy_flow_avoided_count: int = 0
+    early_preflight_duration_ms: int = 0
+    deep_flow_duration_ms: int = 0
     promos: list[PromoOutcome] = field(default_factory=list)

@@ -7,7 +7,7 @@
   "promo_id": 2331,
   "period_id": 2266,
   "promo_title": "Весенняя распродажа: растим заказы (автоматические скидки)",
-  "promo_period_text": "25 апреля 02:00 \u2192 01 мая 01:59",
+  "promo_period_text": "25 апреля 02:00 → 01 мая 01:59",
   "promo_start_at": "2026-04-25T02:00",
   "promo_end_at": "2026-05-01T01:59",
   "period_parse_confidence": "high",
@@ -61,5 +61,11 @@
   "status_evidence_sources": [],
   "ui_loaded_success": false,
   "campaign_identity_match": false,
-  "collector_ui_schema_version": "promo_collector_ui_status_v1"
+  "collector_ui_schema_version": "promo_collector_ui_status_v1",
+  "early_preflight_decision": null,
+  "heavy_flow_required": null,
+  "heavy_flow_reason": null,
+  "non_materializable_reason": null,
+  "fallback_to_full_flow_reason": null,
+  "collector_preflight_schema_version": "promo_collector_preflight_v1"
 }

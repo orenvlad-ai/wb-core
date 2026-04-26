@@ -70,6 +70,19 @@ PROMO_DIAGNOSTIC_COUNTERS = (
     "ended_without_download_count",
     "metadata_only_true_artifact_loss_count",
     "non_materializable_expected_count",
+    "opened_drawer_count",
+    "shallow_status_checked_count",
+    "deep_workbook_flow_count",
+    "early_ended_no_download_count",
+    "early_non_materializable_count",
+    "unknown_status_full_flow_count",
+    "active_downloadable_full_flow_count",
+    "download_attempt_count",
+    "generate_screen_attempt_count",
+    "heavy_flow_avoided_count",
+    "estimated_heavy_flow_avoided_count",
+    "early_preflight_duration_ms",
+    "deep_flow_duration_ms",
     "complete_artifact_count",
     "incomplete_artifact_count",
     "metadata_valid_count",
@@ -252,6 +265,7 @@ def _new_promo_diagnostics(request: PromoLiveSourceRequest) -> dict[str, Any]:
             "archive_sync": "sync promo collector run metadata/workbooks into promo_campaign_archive",
             "workbook_download": "collector summary only; download count is available, per-download timing is not emitted",
             "workbook_reuse": "collector summary only; collector reuse count is not materializer usability",
+            "collector_preflight": "collector summary and per-campaign status preflight decisions before workbook/generate/download path",
             "workbook_inspection": "validated archive workbook row inspection/materialization",
             "metadata_validation": "archive metadata date-confidence/materialization check",
             "price_truth_lookup": "accepted prices_snapshot lookup for exact promo snapshot_date",
@@ -260,7 +274,7 @@ def _new_promo_diagnostics(request: PromoLiveSourceRequest) -> dict[str, Any]:
             "fallback_preserve": "deferred to sheet_vitrina_v1 temporal preservation policy",
         },
         "gaps": [
-            "collector adapter does not emit per-candidate browser timing without a separate adapter refactor",
+            "collector emits aggregate preflight/deep-flow timing; adapter-level selector timing still requires a separate adapter refactor",
             "collector workbook reuse means a reused archive candidate was reported; materializer usability is reported separately by artifact validation counters",
         ],
     }
@@ -389,6 +403,23 @@ def _apply_collector_summary_diagnostics(diagnostics: dict[str, Any], collector_
     _set_promo_counter(diagnostics, "workbook_download_count", int(getattr(collector_summary, "downloaded_count", 0) or 0))
     _set_promo_counter(diagnostics, "workbook_reuse_count", int(getattr(collector_summary, "reused_archive_count", 0) or 0))
     _set_promo_counter(diagnostics, "collector_reuse_count", int(getattr(collector_summary, "reused_archive_count", 0) or 0))
+    for key in (
+        "opened_drawer_count",
+        "shallow_status_checked_count",
+        "deep_workbook_flow_count",
+        "early_ended_no_download_count",
+        "early_non_materializable_count",
+        "non_materializable_expected_count",
+        "unknown_status_full_flow_count",
+        "active_downloadable_full_flow_count",
+        "download_attempt_count",
+        "generate_screen_attempt_count",
+        "heavy_flow_avoided_count",
+        "estimated_heavy_flow_avoided_count",
+        "early_preflight_duration_ms",
+        "deep_flow_duration_ms",
+    ):
+        _set_promo_counter(diagnostics, key, int(getattr(collector_summary, key, 0) or 0), overwrite=False)
     _set_promo_counter(
         diagnostics,
         "workbook_missing_count",
@@ -412,8 +443,19 @@ def _apply_collector_summary_diagnostics(diagnostics: dict[str, Any], collector_
             "blocked_after_card_count": int(getattr(collector_summary, "blocked_after_card_count", 0) or 0),
             "blocked_before_download_count": int(getattr(collector_summary, "blocked_before_download_count", 0) or 0),
             "export_kinds": sorted(str(item) for item in (getattr(collector_summary, "export_kinds", []) or [])),
+            "opened_drawer_count": int(getattr(collector_summary, "opened_drawer_count", 0) or 0),
+            "shallow_status_checked_count": int(getattr(collector_summary, "shallow_status_checked_count", 0) or 0),
+            "deep_workbook_flow_count": int(getattr(collector_summary, "deep_workbook_flow_count", 0) or 0),
+            "early_non_materializable_count": int(getattr(collector_summary, "early_non_materializable_count", 0) or 0),
+            "heavy_flow_avoided_count": int(getattr(collector_summary, "heavy_flow_avoided_count", 0) or 0),
+            "early_preflight_duration_ms": int(getattr(collector_summary, "early_preflight_duration_ms", 0) or 0),
+            "deep_flow_duration_ms": int(getattr(collector_summary, "deep_flow_duration_ms", 0) or 0),
         },
     )
+    diagnostics["collector_preflight_campaigns"] = [
+        _collector_preflight_campaign_diagnostic(promo)
+        for promo in promos[:50]
+    ]
     _set_promo_fingerprint(
         diagnostics,
         "promo_discovery_fingerprint",
@@ -434,6 +476,26 @@ def _apply_collector_summary_diagnostics(diagnostics: dict[str, Any], collector_
     _append_instant_promo_phase(diagnostics, "promo_list_traversal", status="summary_only", note_kind="collector_summary_only")
     _append_instant_promo_phase(diagnostics, "workbook_download", status="summary_only", note_kind="collector_summary_only")
     _append_instant_promo_phase(diagnostics, "workbook_reuse", status="summary_only", note_kind="collector_summary_only")
+
+
+def _collector_preflight_campaign_diagnostic(promo: Any) -> dict[str, Any]:
+    metadata = getattr(promo, "metadata", None)
+    return {
+        "campaign_id": str(getattr(promo, "promo_id", "") or "") or None,
+        "promo_id": getattr(promo, "promo_id", None),
+        "period_id": getattr(promo, "period_id", None),
+        "status": str(getattr(promo, "status", "") or ""),
+        "ui_status": str(getattr(metadata, "ui_status", "") or "unknown"),
+        "ui_status_confidence": str(getattr(metadata, "ui_status_confidence", "") or "low"),
+        "download_action_state": str(getattr(metadata, "download_action_state", "") or "unknown"),
+        "early_preflight_decision": getattr(metadata, "early_preflight_decision", None),
+        "heavy_flow_required": getattr(metadata, "heavy_flow_required", None),
+        "heavy_flow_reason": getattr(metadata, "heavy_flow_reason", None),
+        "non_materializable_reason": getattr(metadata, "non_materializable_reason", None),
+        "fallback_to_full_flow_reason": getattr(metadata, "fallback_to_full_flow_reason", None),
+        "generate_screen_attempted": bool(getattr(promo, "generate_screen_attempted", False)),
+        "download_attempted": bool(getattr(promo, "download_attempted", False)),
+    }
 
 
 def _promo_temporal_classification(promo: Any) -> str:

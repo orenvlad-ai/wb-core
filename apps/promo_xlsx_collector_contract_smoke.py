@@ -28,8 +28,10 @@ from packages.application.promo_xlsx_collector_block import (  # noqa: E402
 )
 from packages.contracts.promo_xlsx_collector_block import (  # noqa: E402
     CollectorStateSnapshot,
+    DrawerResetSummary,
     PromoXlsxCollectorRequest,
     PromoCardData,
+    TimelineBlockSnapshot,
 )
 
 ARTIFACTS = ROOT / "artifacts" / "promo_xlsx_collector_block" / "fixture"
@@ -184,11 +186,33 @@ def main() -> None:
     if "hydration_exception=synthetic goto timeout" not in blocker:
         raise AssertionError(f"unexpected hydration exception blocker: {blocker}")
 
+    preflight_result = PromoXlsxCollectorBlock(_EndedNoDownloadDriver()).execute(
+        PromoXlsxCollectorRequest(
+            output_root="/tmp/wb-core-promo-ended-preflight-smoke",
+            storage_state_path="/tmp/unused-storage-state.json",
+            hydration_attempt_budget=1,
+        )
+    )
+    if preflight_result.status != "success":
+        raise AssertionError(f"ended preflight run must finish successfully, got {preflight_result.status}")
+    if preflight_result.early_ended_no_download_count != 1:
+        raise AssertionError(f"expected one early ended/no-download campaign, got {preflight_result}")
+    if preflight_result.deep_workbook_flow_count != 0:
+        raise AssertionError(f"ended no-download must not enter deep workbook flow, got {preflight_result}")
+    if preflight_result.generate_screen_attempt_count != 0 or preflight_result.download_attempt_count != 0:
+        raise AssertionError(f"ended no-download must not attempt generate/download, got {preflight_result}")
+    promo = preflight_result.promos[0]
+    if promo.early_preflight_decision != "early_non_materializable":
+        raise AssertionError(f"expected early non-materializable decision, got {promo}")
+    if promo.heavy_flow_required is not False or promo.non_materializable_reason != "ended_without_download":
+        raise AssertionError(f"expected heavy flow avoided for ended/no-download, got {promo}")
+
     print("sidecar_contract: ok")
     print("export_kind_classification: ok")
     print("cross_year_parse_rule: ok")
     print("entry_reset_constants: ok")
     print("ended_status_metadata: ok")
+    print("ended_no_download_preflight: ok")
     print("hydration_exception_surface: ok")
     print("smoke-check passed")
 
@@ -202,6 +226,91 @@ class _HydrationExceptionDriver:
 
     def attempt_hydration(self, attempt_num: int, label_prefix: str = "initial"):
         raise TimeoutError("synthetic goto timeout")
+
+
+class _EndedNoDownloadDriver:
+    def start(self, request: PromoXlsxCollectorRequest) -> None:
+        Path("/tmp/ended-fixture.png").write_bytes(b"fixture")
+        return
+
+    def stop(self) -> None:
+        return
+
+    def attempt_hydration(self, attempt_num: int, label_prefix: str = "initial"):
+        from packages.contracts.promo_xlsx_collector_block import HydrationAttemptSummary
+
+        return HydrationAttemptSummary(
+            attempt_num=attempt_num,
+            entry_strategy="direct_open",
+            cookie_clicked=False,
+            hydrated_success=True,
+            title="Акции WB",
+            url="https://seller.wildberries.ru/dp-promo-calendar",
+            timeline_count=1,
+            overlay_count=0,
+            time_to_hydrated_sec=0.1,
+        )
+
+    def enumerate_timeline_blocks(self, max_candidates):
+        return [
+            TimelineBlockSnapshot(
+                index=0,
+                raw_text="Весенняя распродажа Хиты Автоматические скидки\n19 апреля - 26 апреля",
+            )
+        ]
+
+    def open_timeline_candidate(self, candidate):
+        return CollectorStateSnapshot(
+            ts="2026-04-26T00:00:00+05:00",
+            label="ended_fixture",
+            url="https://seller.wildberries.ru/dp-promo-calendar?action=2307",
+            title="Акции WB",
+            timeline_count=1,
+            overlay_count=1,
+            has_modal_close=False,
+            modal_entry_count=0,
+            has_configure=False,
+            has_generate=False,
+            has_download=False,
+            has_ready=False,
+            has_cookie_accept=False,
+            body_excerpt=(
+                "Весенняя распродажа\n"
+                "Хиты\n"
+                "Автоматические скидки\n"
+                "19 апреля 02:00 → 26 апреля 01:59\n"
+                "Акция завершилась\n"
+            ),
+            visible_tabs=["Доступные"],
+            screenshot="/tmp/ended-fixture.png",
+        )
+
+    def open_generate_screen(self, slug: str):
+        raise AssertionError("ended/no-download preflight must not open generate screen")
+
+    def generate_file_and_wait_ready(self, slug: str):
+        raise AssertionError("ended/no-download preflight must not generate workbook")
+
+    def download_current_workbook(self):
+        raise AssertionError("ended/no-download preflight must not download workbook")
+
+    def reset_drawer(self, label: str) -> DrawerResetSummary:
+        return DrawerResetSummary(
+            clicked=True,
+            selector="#Portal-drawer close",
+            overlay_before=1,
+            success=True,
+            after_state_path=None,
+        )
+
+    def current_timeline_count(self) -> int:
+        return 1
+
+    def current_url(self) -> str:
+        return "https://seller.wildberries.ru/dp-promo-calendar?action=2307"
+
+    def last_state_snapshot(self):
+        return None
 
 
 if __name__ == "__main__":
