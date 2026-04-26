@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 import hashlib
 import json
 from pathlib import Path
 import re
 import shutil
-from typing import Iterable
+import time
+from typing import Any, Iterable
 
 from openpyxl import load_workbook
 
@@ -73,6 +74,8 @@ class PromoCampaignArchiveSyncSummary:
 class DailyPriceTruthResolution:
     price_by_nm_id: dict[int, float]
     source_note: str
+    captured_at: str | None = None
+    fingerprint: str | None = None
 
 
 def promo_campaign_archive_root(runtime_dir: Path) -> Path:
@@ -168,8 +171,16 @@ def materialize_promo_result_from_archive(
     sync_summary: PromoCampaignArchiveSyncSummary | None = None,
     trace_run_dir: str | None = None,
     detail_prefix: str | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> PromoLiveSourceSuccess | PromoLiveSourceIncomplete:
-    sync_state = sync_summary or sync_promo_campaign_archive(runtime_dir)
+    if sync_summary is None:
+        sync_phase = _start_promo_diag_phase(diagnostics, "archive_sync")
+        sync_state = sync_promo_campaign_archive(runtime_dir)
+        _finish_promo_diag_phase(diagnostics, sync_phase, status="success")
+    else:
+        sync_state = sync_summary
+
+    archive_lookup_phase = _start_promo_diag_phase(diagnostics, "archive_lookup")
     archive_root = promo_campaign_archive_root(runtime_dir)
     requested = sorted({int(nm_id) for nm_id in requested_nm_ids})
     slot_date = date.fromisoformat(snapshot_date)
@@ -183,6 +194,43 @@ def materialize_promo_result_from_archive(
         and Path(record.workbook_path).exists()
     ]
     missing_artifacts = [record for record in covering if record not in usable]
+    _set_promo_diag_counter(diagnostics, "campaign_count", len(records), overwrite=False)
+    _set_promo_diag_counter(diagnostics, "current_promo_count", len(covering))
+    _set_promo_diag_counter(diagnostics, "archive_hit_count", len(usable))
+    _set_promo_diag_counter(diagnostics, "archive_miss_count", len(missing_artifacts))
+    _set_promo_diag_counter(diagnostics, "workbook_missing_count", len(missing_artifacts))
+    _set_promo_diag_fingerprint(
+        diagnostics,
+        "promo_archive_fingerprint",
+        _archive_records_fingerprint(covering),
+    )
+    _set_promo_diag_fingerprint(
+        diagnostics,
+        "workbook_metadata_fingerprint",
+        _record_field_fingerprint(usable, "metadata_fingerprint"),
+    )
+    _set_promo_diag_fingerprint(
+        diagnostics,
+        "workbook_file_fingerprint",
+        _record_field_fingerprint(usable, "workbook_fingerprint"),
+    )
+    _set_promo_diag_fingerprint(
+        diagnostics,
+        "workbook_file_size_total",
+        _workbook_file_size_total(usable),
+    )
+    _set_promo_diag_fingerprint(
+        diagnostics,
+        "workbook_file_mtime_max",
+        _workbook_file_mtime_max(usable),
+    )
+    _finish_promo_diag_phase(diagnostics, archive_lookup_phase, status="success")
+
+    metadata_phase = _start_promo_diag_phase(diagnostics, "metadata_validation")
+    metadata_valid_count = sum(1 for record in records if record.metadata.promo_start_at and record.metadata.promo_end_at)
+    _set_promo_diag_counter(diagnostics, "metadata_valid_count", metadata_valid_count)
+    _set_promo_diag_counter(diagnostics, "metadata_invalid_count", max(0, len(records) - metadata_valid_count))
+    _finish_promo_diag_phase(diagnostics, metadata_phase, status="success")
 
     common = dict(
         snapshot_date=snapshot_date,
@@ -216,12 +264,20 @@ def materialize_promo_result_from_archive(
 
     if missing_artifacts:
         missing_keys = ",".join(record.archive_key for record in missing_artifacts[:8])
+        _set_promo_diag_counter(diagnostics, "candidate_row_count", 0)
+        _set_promo_diag_counter(diagnostics, "eligible_row_count", 0)
+        _set_promo_diag_counter(diagnostics, "accepted_row_count", 0)
+        _set_promo_diag_counter(diagnostics, "skipped_row_count", len(requested))
+        _set_promo_diag_counter(diagnostics, "price_truth_missing_count", None)
+        _set_promo_diag_counter(diagnostics, "price_truth_available_count", None)
+        _finish_source_payload_build_phase(diagnostics, status="incomplete", note_kind="missing_campaign_artifacts")
         return PromoLiveSourceIncomplete(
             kind="incomplete",
             covered_count=0,
             items=[],
             missing_nm_ids=requested,
             detail="; ".join(detail_parts + [f"missing_campaign_artifacts={missing_keys}"]),
+            diagnostics=_snapshot_promo_diagnostics(diagnostics),
             **common,
         )
 
@@ -229,6 +285,7 @@ def materialize_promo_result_from_archive(
         nm_id: []
         for nm_id in requested
     }
+    workbook_phase = _start_promo_diag_phase(diagnostics, "workbook_inspection")
     candidate_row_count = 0
     for record in usable:
         candidate_row_count += _merge_archive_workbook_rows(
@@ -237,6 +294,8 @@ def materialize_promo_result_from_archive(
             requested_nm_ids=requested,
             campaign_identity=_campaign_identity(record),
         )
+    _set_promo_diag_counter(diagnostics, "candidate_row_count", candidate_row_count)
+    _finish_promo_diag_phase(diagnostics, workbook_phase, status="success")
     detail_parts.append(f"requested_candidate_rows={candidate_row_count}")
 
     requested_nm_ids_with_candidates = sorted(
@@ -245,6 +304,12 @@ def materialize_promo_result_from_archive(
         if candidate_rows
     )
     if not requested_nm_ids_with_candidates:
+        _set_promo_diag_counter(diagnostics, "eligible_row_count", 0)
+        _set_promo_diag_counter(diagnostics, "accepted_row_count", len(requested))
+        _set_promo_diag_counter(diagnostics, "skipped_row_count", len(requested))
+        _set_promo_diag_counter(diagnostics, "price_truth_missing_count", 0)
+        _set_promo_diag_counter(diagnostics, "price_truth_available_count", 0)
+        _finish_source_payload_build_phase(diagnostics, status="success", note_kind="no_covering_campaign_rows")
         return PromoLiveSourceSuccess(
             kind="success",
             covered_count=len(requested),
@@ -256,13 +321,24 @@ def materialize_promo_result_from_archive(
                     "no_covering_campaign_rows_for_requested_nm_ids=true",
                 ]
             ),
+            diagnostics=_snapshot_promo_diagnostics(diagnostics),
             **common,
         )
 
+    price_truth_phase = _start_promo_diag_phase(diagnostics, "price_truth_lookup")
     price_truth = _load_daily_price_truth(
         runtime_dir=runtime_dir,
         snapshot_date=snapshot_date,
         requested_nm_ids=requested_nm_ids_with_candidates,
+    )
+    _set_promo_diag_fingerprint(diagnostics, "accepted_price_truth_date", snapshot_date if price_truth.price_by_nm_id else None)
+    _set_promo_diag_fingerprint(diagnostics, "accepted_price_truth_version", price_truth.captured_at)
+    _set_promo_diag_fingerprint(diagnostics, "accepted_price_truth_fingerprint", price_truth.fingerprint)
+    _finish_promo_diag_phase(
+        diagnostics,
+        price_truth_phase,
+        status="success" if price_truth.price_by_nm_id else "missing",
+        note_kind="accepted_price_truth" if price_truth.price_by_nm_id else "missing_price_truth",
     )
     detail_parts.append(price_truth.source_note)
     missing_price_truth_nm_ids = sorted(
@@ -275,6 +351,8 @@ def materialize_promo_result_from_archive(
     truthful_zero_no_candidate_nm_ids: list[int] = []
     truthful_zero_ineligible_nm_ids: list[int] = []
     eligible_nm_ids: list[int] = []
+    eligible_row_count = 0
+    price_join_phase = _start_promo_diag_phase(diagnostics, "price_truth_join")
     for nm_id in requested:
         candidate_rows = candidate_rows_by_nm_id[nm_id]
         item, evaluation = _build_item_from_candidate_rows(
@@ -288,8 +366,18 @@ def materialize_promo_result_from_archive(
             truthful_zero_no_candidate_nm_ids.append(nm_id)
         elif evaluation.eligible_campaign_identities:
             eligible_nm_ids.append(nm_id)
+            eligible_row_count += len(evaluation.eligible_campaign_identities)
         elif nm_id not in missing_price_truth_nm_ids:
             truthful_zero_ineligible_nm_ids.append(nm_id)
+    _set_promo_diag_counter(diagnostics, "eligible_row_count", eligible_row_count)
+    _set_promo_diag_counter(diagnostics, "price_truth_available_count", len(price_truth.price_by_nm_id))
+    _set_promo_diag_counter(diagnostics, "price_truth_missing_count", len(missing_price_truth_nm_ids))
+    _set_promo_diag_counter(
+        diagnostics,
+        "skipped_row_count",
+        len(truthful_zero_no_candidate_nm_ids) + len(truthful_zero_ineligible_nm_ids) + len(missing_price_truth_nm_ids),
+    )
+    _finish_promo_diag_phase(diagnostics, price_join_phase, status="success")
 
     detail_parts.extend(
         _promo_metric_coverage_detail_parts(
@@ -301,6 +389,8 @@ def materialize_promo_result_from_archive(
     )
     archive_keys = ",".join(record.archive_key for record in usable[:8])
     if missing_price_truth_nm_ids:
+        _set_promo_diag_counter(diagnostics, "accepted_row_count", 0)
+        _finish_source_payload_build_phase(diagnostics, status="incomplete", note_kind="missing_price_truth")
         return PromoLiveSourceIncomplete(
             kind="incomplete",
             covered_count=len(requested) - len(missing_price_truth_nm_ids),
@@ -315,13 +405,17 @@ def materialize_promo_result_from_archive(
                     f"archive_keys={archive_keys}",
                 ]
             ),
+            diagnostics=_snapshot_promo_diagnostics(diagnostics),
             **common,
         )
+    _set_promo_diag_counter(diagnostics, "accepted_row_count", len(requested))
+    _finish_source_payload_build_phase(diagnostics, status="success")
     return PromoLiveSourceSuccess(
         kind="success",
         covered_count=len(requested),
         items=materialized_items,
         detail="; ".join(detail_parts + [f"archive_keys={archive_keys}"]),
+        diagnostics=_snapshot_promo_diagnostics(diagnostics),
         **common,
     )
 
@@ -530,12 +624,15 @@ def _load_daily_price_truth(
         note = "daily_price_source=prices_snapshot.accepted_current_snapshot"
         if captured_at:
             note = f"{note}; daily_price_captured_at={captured_at}"
+        price_by_nm_id = _extract_price_by_nm_id(
+            payload=payload,
+            requested_nm_ids=requested_nm_ids,
+        )
         return DailyPriceTruthResolution(
-            price_by_nm_id=_extract_price_by_nm_id(
-                payload=payload,
-                requested_nm_ids=requested_nm_ids,
-            ),
+            price_by_nm_id=price_by_nm_id,
             source_note=note,
+            captured_at=captured_at,
+            fingerprint=_json_fingerprint(price_by_nm_id) if price_by_nm_id else None,
         )
 
     return DailyPriceTruthResolution(
@@ -651,6 +748,141 @@ def _format_nm_id_sample(nm_ids: list[int], *, limit: int = 20) -> str:
     if len(unique) > limit:
         sample = f"{sample},...(+{len(unique) - limit})"
     return sample
+
+
+def _start_promo_diag_phase(
+    diagnostics: dict[str, Any] | None,
+    phase_key: str,
+) -> dict[str, Any] | None:
+    if diagnostics is None:
+        return None
+    return {
+        "phase_key": phase_key,
+        "started_at": _diag_now_iso(),
+        "started_perf": time.perf_counter(),
+    }
+
+
+def _finish_promo_diag_phase(
+    diagnostics: dict[str, Any] | None,
+    phase: dict[str, Any] | None,
+    *,
+    status: str,
+    note_kind: str | None = None,
+    error_kind: str | None = None,
+) -> None:
+    if diagnostics is None or phase is None:
+        return
+    item = {
+        "phase_key": str(phase.get("phase_key") or ""),
+        "started_at": str(phase.get("started_at") or ""),
+        "finished_at": _diag_now_iso(),
+        "duration_ms": max(0, int(round((time.perf_counter() - float(phase.get("started_perf") or time.perf_counter())) * 1000))),
+        "status": status,
+    }
+    if note_kind:
+        item["note_kind"] = note_kind
+    if error_kind:
+        item["error_kind"] = error_kind
+    diagnostics.setdefault("phase_summary", []).append(item)
+
+
+def _finish_source_payload_build_phase(
+    diagnostics: dict[str, Any] | None,
+    *,
+    status: str,
+    note_kind: str | None = None,
+) -> None:
+    phase = _start_promo_diag_phase(diagnostics, "source_payload_build")
+    _finish_promo_diag_phase(diagnostics, phase, status=status, note_kind=note_kind)
+
+
+def _set_promo_diag_counter(
+    diagnostics: dict[str, Any] | None,
+    key: str,
+    value: Any,
+    *,
+    overwrite: bool = True,
+) -> None:
+    if diagnostics is None:
+        return
+    counters = diagnostics.setdefault("counters", {})
+    if not isinstance(counters, dict):
+        return
+    if overwrite or key not in counters or counters.get(key) is None:
+        counters[key] = value
+
+
+def _set_promo_diag_fingerprint(
+    diagnostics: dict[str, Any] | None,
+    key: str,
+    value: Any,
+) -> None:
+    if diagnostics is None:
+        return
+    fingerprints = diagnostics.setdefault("fingerprints", {})
+    if not isinstance(fingerprints, dict):
+        return
+    fingerprints[key] = value
+
+
+def _snapshot_promo_diagnostics(diagnostics: dict[str, Any] | None) -> dict[str, Any]:
+    if diagnostics is None:
+        return {}
+    return dict(diagnostics)
+
+
+def _archive_records_fingerprint(records: list[PromoCampaignArchiveRecord]) -> str | None:
+    payload = [
+        {
+            "archive_key": record.archive_key,
+            "metadata_fingerprint": record.metadata_fingerprint,
+            "workbook_fingerprint": record.workbook_fingerprint,
+            "workbook_present": record.workbook_present,
+        }
+        for record in records
+    ]
+    return _json_fingerprint(payload) if payload else None
+
+
+def _record_field_fingerprint(records: list[PromoCampaignArchiveRecord], field_name: str) -> str | None:
+    values = [
+        str(getattr(record, field_name, "") or "")
+        for record in records
+        if str(getattr(record, field_name, "") or "").strip()
+    ]
+    return _json_fingerprint(sorted(values)) if values else None
+
+
+def _workbook_file_size_total(records: list[PromoCampaignArchiveRecord]) -> int | None:
+    total = 0
+    seen = False
+    for record in records:
+        path = Path(record.workbook_path) if record.workbook_path else None
+        if path is None or not path.exists():
+            continue
+        seen = True
+        total += path.stat().st_size
+    return total if seen else None
+
+
+def _workbook_file_mtime_max(records: list[PromoCampaignArchiveRecord]) -> int | None:
+    mtimes: list[int] = []
+    for record in records:
+        path = Path(record.workbook_path) if record.workbook_path else None
+        if path is None or not path.exists():
+            continue
+        mtimes.append(int(path.stat().st_mtime))
+    return max(mtimes) if mtimes else None
+
+
+def _json_fingerprint(value: Any) -> str:
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _diag_now_iso() -> str:
+    return datetime.now().astimezone().replace(microsecond=0).isoformat()
 
 
 def _metadata_fingerprint(metadata: PromoMetadata) -> str:

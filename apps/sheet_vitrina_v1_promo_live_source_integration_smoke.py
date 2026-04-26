@@ -110,6 +110,7 @@ def main() -> None:
                 raise AssertionError(f"{column_date}: expected success status, got {status}")
             if payload is None:
                 raise AssertionError(f"{column_date}: expected payload")
+            _assert_payload_diagnostics(payload, column_date)
             item_index = {item.nm_id: item for item in payload.items}
             probe = item_index[requested_nm_ids[0]]
             expected = diagnostics_by_date[column_date]
@@ -196,6 +197,35 @@ def _request_date(request: object) -> str:
         if isinstance(value, str) and value:
             return value
     raise AssertionError("synthetic request must carry a date field")
+
+
+def _assert_payload_diagnostics(payload: object, snapshot_date: str) -> None:
+    diagnostics = getattr(payload, "diagnostics", None)
+    if not isinstance(diagnostics, dict):
+        raise AssertionError(f"{snapshot_date}: promo diagnostics must be a dict, got {diagnostics}")
+    phase_keys = {
+        str(item.get("phase_key") or "")
+        for item in diagnostics.get("phase_summary", [])
+        if isinstance(item, dict)
+    }
+    for required in (
+        "promo_total",
+        "collector_total",
+        "archive_sync",
+        "archive_lookup",
+        "workbook_inspection",
+        "price_truth_lookup",
+        "price_truth_join",
+        "source_payload_build",
+    ):
+        if required not in phase_keys:
+            raise AssertionError(f"{snapshot_date}: promo diagnostics missing phase {required}: {diagnostics}")
+    counters = diagnostics.get("counters") or {}
+    if counters.get("candidate_row_count") is None or counters.get("eligible_row_count") is None:
+        raise AssertionError(f"{snapshot_date}: promo diagnostics counters missing, got {counters}")
+    fingerprints = diagnostics.get("fingerprints") or {}
+    if not fingerprints.get("promo_archive_fingerprint"):
+        raise AssertionError(f"{snapshot_date}: promo archive fingerprint missing, got {fingerprints}")
 
 
 def _seed_neighbor_date_archive(runtime_dir: Path, requested_nm_ids: list[int]) -> None:

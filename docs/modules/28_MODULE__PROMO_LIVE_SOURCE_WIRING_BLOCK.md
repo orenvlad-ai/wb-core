@@ -81,6 +81,12 @@ update_note: "Обновлён под archive-first / interval-based promo seman
 - `incomplete`
 - `missing`
 
+Refresh diagnostics для `promo_by_price` дополнительно surface-ятся как observability-only metadata внутри already existing ready snapshot path:
+- `metadata.refresh_diagnostics.source_slots[].promo_diagnostics` для source slot `promo_by_price[*]`;
+- для `today_current` этот block содержит internal `phase_summary` по promo chain (`collector_total`, archive lookup/sync, workbook inspection, price truth lookup/join, source payload build, acceptance/fallback policy markers), lightweight counters, fingerprints, fallback/invalid reason fields и dry-run-only skip opportunity marker;
+- эти diagnostics не являются data truth, не меняют source fetch policy, acceptance/fallback semantics, temporal policy, retry behavior, Google Sheets/GAS archive boundary или browser/localStorage truth;
+- browser collector currently emits only total collector runtime plus summary counters; per-candidate browser/download timings stay an explicit observability gap until a separate adapter refactor.
+
 `STATUS.note` обязан нести minimum debug facts:
 - `trace_run_dir`
 - `collector_status`
