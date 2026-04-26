@@ -1175,13 +1175,25 @@ def _safe_int_or_none(value: object) -> int | None:
 
 
 def _metadata_indicates_ended_without_download(metadata: PromoMetadata) -> bool:
-    return (
+    drawer_evidence = (
         str(metadata.ui_status or "") == "ended"
         and str(metadata.ui_status_confidence or "") == "high"
         and str(metadata.download_action_state or "") in {"absent", "disabled"}
         and bool(metadata.ui_loaded_success)
         and bool(metadata.campaign_identity_match)
     )
+    timeline_sources = set(metadata.timeline_evidence_sources or [])
+    timeline_evidence = (
+        str(metadata.timeline_classification_decision or "") == "timeline_non_materializable_expected"
+        and str(metadata.timeline_status or "") == "ended"
+        and str(metadata.timeline_status_confidence or "") == "high"
+        and metadata.drawer_opened is False
+        and str(metadata.drawer_skip_reason or "") == "timeline_ended_non_materializable"
+        and "timeline_status_label" in timeline_sources
+        and "timeline_title" in timeline_sources
+        and "timeline_period_text" in timeline_sources
+    )
+    return drawer_evidence or timeline_evidence
 
 
 def _normalize_text_list(value: object) -> list[str]:
@@ -1557,6 +1569,18 @@ def _metadata_fingerprint(metadata: PromoMetadata) -> str:
         "ui_loaded_success": metadata.ui_loaded_success,
         "campaign_identity_match": metadata.campaign_identity_match,
         "collector_ui_schema_version": metadata.collector_ui_schema_version,
+        "timeline_status": metadata.timeline_status,
+        "timeline_status_confidence": metadata.timeline_status_confidence,
+        "timeline_status_raw_labels": metadata.timeline_status_raw_labels,
+        "timeline_evidence_sources": metadata.timeline_evidence_sources,
+        "timeline_period_text": metadata.timeline_period_text,
+        "timeline_goods_count": metadata.timeline_goods_count,
+        "timeline_autoaction_marker": metadata.timeline_autoaction_marker,
+        "timeline_classification_decision": metadata.timeline_classification_decision,
+        "drawer_opened": metadata.drawer_opened,
+        "drawer_open_reason": metadata.drawer_open_reason,
+        "drawer_skip_reason": metadata.drawer_skip_reason,
+        "timeline_classifier_schema_version": metadata.timeline_classifier_schema_version,
     }
     raw = json.dumps(stable_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()

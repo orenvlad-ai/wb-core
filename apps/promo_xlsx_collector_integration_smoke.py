@@ -50,6 +50,12 @@ def main() -> None:
         "heavy_flow_required",
         "heavy_flow_reason",
         "collector_preflight_schema_version",
+        "timeline_status",
+        "timeline_status_confidence",
+        "timeline_evidence_sources",
+        "timeline_classification_decision",
+        "drawer_opened",
+        "timeline_classifier_schema_version",
     ):
         if key not in metadata_payload:
             raise AssertionError(f"handled promo metadata missing UI status field {key}: {metadata_payload}")

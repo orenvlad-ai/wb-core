@@ -67,5 +67,17 @@
   "heavy_flow_reason": null,
   "non_materializable_reason": null,
   "fallback_to_full_flow_reason": null,
-  "collector_preflight_schema_version": "promo_collector_preflight_v1"
+  "collector_preflight_schema_version": "promo_collector_preflight_v1",
+  "timeline_status": "unknown",
+  "timeline_status_confidence": "low",
+  "timeline_status_raw_labels": [],
+  "timeline_evidence_sources": [],
+  "timeline_period_text": null,
+  "timeline_goods_count": null,
+  "timeline_autoaction_marker": null,
+  "timeline_classification_decision": null,
+  "drawer_opened": null,
+  "drawer_open_reason": null,
+  "drawer_skip_reason": null,
+  "timeline_classifier_schema_version": "promo_timeline_classifier_v1"
 }
