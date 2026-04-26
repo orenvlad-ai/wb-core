@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import time
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -64,6 +65,7 @@ _COMMON_EXPORT_HEADERS = {
     "Статус",
 }
 COLLECTOR_UI_SCHEMA_VERSION = "promo_collector_ui_status_v1"
+COLLECTOR_PREFLIGHT_SCHEMA_VERSION = "promo_collector_preflight_v1"
 _ENDED_LABEL_KEYWORDS = ("акция завершилась", "завершилась", "акция завершена", "завершена")
 _ACTIVE_LABEL_KEYWORDS = ("акция идёт", "акция идет")
 _FUTURE_LABEL_KEYWORDS = ("запланирована", "запланировано")
@@ -141,6 +143,7 @@ class PromoXlsxCollectorBlock:
                             outcome = self._process_candidate(request=request, candidate=candidate)
 
                 summary.promos.append(outcome)
+                self._apply_outcome_preflight_summary(summary, outcome)
                 summary.card_confirmed_count += 1 if outcome.card_path else 0
                 if outcome.status == "downloaded":
                     summary.downloaded_count += 1
@@ -185,6 +188,7 @@ class PromoXlsxCollectorBlock:
         candidate: TimelineCandidate,
     ) -> PromoOutcome:
         run_dir = Path(request.output_root)
+        preflight_started = time.perf_counter()
         try:
             card_state = self._driver.open_timeline_candidate(candidate)
         except Exception as exc:
@@ -249,8 +253,10 @@ class PromoXlsxCollectorBlock:
             source_filter_code=request.source_filter_code,
             reference_year=datetime.now(BUSINESS_TIMEZONE).year,
         )
+        preflight = classify_collector_preflight(card)
+        early_preflight_duration_ms = _elapsed_ms(preflight_started)
 
-        if card.temporal_classification == "past":
+        if preflight["early_preflight_decision"] == "early_non_materializable":
             promo_folder = run_dir / "promos" / build_promo_folder_name(card.promo_id, None, card.promo_title)
             promo_folder.mkdir(parents=True, exist_ok=True)
             card_path = promo_folder / "card.json"
@@ -265,6 +271,53 @@ class PromoXlsxCollectorBlock:
                 export_kind=None,
                 download=None,
                 workbook=None,
+                preflight=preflight,
+            )
+            metadata_path = promo_folder / "metadata.json"
+            self._write_json(metadata_path, asdict(metadata))
+            drawer_reset = self._driver.reset_drawer(f"early_non_materializable__{slugify(card.promo_title)}")
+            return PromoOutcome(
+                promo_title=card.promo_title,
+                timeline_block_index=candidate.index,
+                timeline_short_period_text=candidate.short_period_text,
+                timeline_preliminary_classification=candidate.preliminary_classification,
+                status="skipped_past",
+                promo_id=card.promo_id,
+                period_id=None,
+                promo_folder=str(promo_folder),
+                blocker=None,
+                metadata=metadata,
+                card_path=str(card_path),
+                metadata_path=str(metadata_path),
+                drawer_reset=drawer_reset,
+                early_preflight_duration_ms=early_preflight_duration_ms,
+                **_preflight_outcome_fields(preflight),
+            )
+
+        if card.temporal_classification == "past":
+            promo_folder = run_dir / "promos" / build_promo_folder_name(card.promo_id, None, card.promo_title)
+            promo_folder.mkdir(parents=True, exist_ok=True)
+            card_path = promo_folder / "card.json"
+            card_png = promo_folder / "card.png"
+            shutil.copy2(card.state_snapshot.screenshot, card_png)
+            self._write_json(card_path, asdict(card))
+            legacy_preflight = {
+                **preflight,
+                "early_preflight_decision": "legacy_past_skip",
+                "heavy_flow_required": False,
+                "heavy_flow_reason": "past_temporal_classification",
+                "non_materializable_reason": "past_campaign",
+                "fallback_to_full_flow_reason": None,
+            }
+            metadata = build_metadata(
+                card=card,
+                trace_run_dir=request.output_root,
+                source_tab=request.source_tab,
+                source_filter_code=request.source_filter_code,
+                export_kind=None,
+                download=None,
+                workbook=None,
+                preflight=legacy_preflight,
             )
             metadata_path = promo_folder / "metadata.json"
             self._write_json(metadata_path, asdict(metadata))
@@ -283,6 +336,8 @@ class PromoXlsxCollectorBlock:
                 card_path=str(card_path),
                 metadata_path=str(metadata_path),
                 drawer_reset=drawer_reset,
+                early_preflight_duration_ms=early_preflight_duration_ms,
+                **_preflight_outcome_fields(legacy_preflight),
             )
 
         if card.temporal_classification == "ambiguous":
@@ -300,6 +355,13 @@ class PromoXlsxCollectorBlock:
                 export_kind=None,
                 download=None,
                 workbook=None,
+                preflight={
+                    **preflight,
+                    "early_preflight_decision": "legacy_ambiguous_skip",
+                    "heavy_flow_required": False,
+                    "heavy_flow_reason": "ambiguous_temporal_classification",
+                    "non_materializable_reason": "ambiguous_temporal_classification",
+                },
             )
             metadata_path = promo_folder / "metadata.json"
             self._write_json(metadata_path, asdict(metadata))
@@ -318,8 +380,11 @@ class PromoXlsxCollectorBlock:
                 card_path=str(card_path),
                 metadata_path=str(metadata_path),
                 drawer_reset=drawer_reset,
+                early_preflight_duration_ms=early_preflight_duration_ms,
+                **_preflight_outcome_fields(metadata.__dict__),
             )
 
+        deep_flow_started = time.perf_counter()
         reusable = self._resolve_reusable_archive_record(request=request, card=card)
         if reusable is not None:
             return self._reused_from_archive(
@@ -328,6 +393,9 @@ class PromoXlsxCollectorBlock:
                 card=card,
                 request=request,
                 record=reusable,
+                preflight=preflight,
+                early_preflight_duration_ms=early_preflight_duration_ms,
+                deep_flow_duration_ms=_elapsed_ms(deep_flow_started),
             )
 
         try:
@@ -339,6 +407,10 @@ class PromoXlsxCollectorBlock:
                 card=card,
                 blocker=str(exc),
                 request=request,
+                preflight=preflight,
+                early_preflight_duration_ms=early_preflight_duration_ms,
+                deep_flow_duration_ms=_elapsed_ms(deep_flow_started),
+                generate_screen_attempted=True,
             )
         try:
             ready_state = self._driver.generate_file_and_wait_ready(slugify(card.promo_title))
@@ -350,6 +422,10 @@ class PromoXlsxCollectorBlock:
                 request=request,
                 generate_state=generate_state,
                 blocker=str(exc),
+                preflight=preflight,
+                early_preflight_duration_ms=early_preflight_duration_ms,
+                deep_flow_duration_ms=_elapsed_ms(deep_flow_started),
+                generate_screen_attempted=True,
             )
         try:
             download = self._driver.download_current_workbook()
@@ -361,6 +437,11 @@ class PromoXlsxCollectorBlock:
                 request=request,
                 generate_state=ready_state,
                 blocker=str(exc),
+                preflight=preflight,
+                early_preflight_duration_ms=early_preflight_duration_ms,
+                deep_flow_duration_ms=_elapsed_ms(deep_flow_started),
+                generate_screen_attempted=True,
+                download_attempted=True,
             )
 
         promo_folder = run_dir / "promos" / build_promo_folder_name(card.promo_id, download.period_id, card.promo_title)
@@ -393,6 +474,7 @@ class PromoXlsxCollectorBlock:
                 period_id=download.period_id,
             ),
             workbook=inspection,
+            preflight=preflight,
         )
         metadata_path = promo_folder / "metadata.json"
         self._write_json(metadata_path, asdict(metadata))
@@ -415,7 +497,41 @@ class PromoXlsxCollectorBlock:
             original_suggested_filename=download.original_suggested_filename,
             export_kind=export_kind,
             drawer_reset=drawer_reset,
+            early_preflight_duration_ms=early_preflight_duration_ms,
+            deep_flow_duration_ms=_elapsed_ms(deep_flow_started),
+            generate_screen_attempted=True,
+            download_attempted=True,
+            **_preflight_outcome_fields(preflight),
         )
+
+    @staticmethod
+    def _apply_outcome_preflight_summary(summary: CollectorRunSummary, outcome: PromoOutcome) -> None:
+        metadata = outcome.metadata
+        if bool(getattr(metadata, "ui_loaded_success", False)):
+            summary.opened_drawer_count += 1
+        if getattr(metadata, "early_preflight_decision", None):
+            summary.shallow_status_checked_count += 1
+        if bool(getattr(outcome, "heavy_flow_required", False)):
+            summary.deep_workbook_flow_count += 1
+        if getattr(outcome, "non_materializable_reason", None):
+            summary.non_materializable_expected_count += 1
+        if getattr(outcome, "non_materializable_reason", None) == "ended_without_download":
+            summary.early_ended_no_download_count += 1
+        if getattr(outcome, "early_preflight_decision", None) == "early_non_materializable":
+            summary.early_non_materializable_count += 1
+            summary.heavy_flow_avoided_count += 1
+            summary.estimated_heavy_flow_avoided_count += 1
+        if bool(getattr(outcome, "heavy_flow_required", False)):
+            if str(getattr(metadata, "ui_status", "") or "") == "unknown":
+                summary.unknown_status_full_flow_count += 1
+            if str(getattr(metadata, "download_action_state", "") or "") == "available":
+                summary.active_downloadable_full_flow_count += 1
+        if outcome.generate_screen_attempted:
+            summary.generate_screen_attempt_count += 1
+        if outcome.download_attempted:
+            summary.download_attempt_count += 1
+        summary.early_preflight_duration_ms += int(outcome.early_preflight_duration_ms or 0)
+        summary.deep_flow_duration_ms += int(outcome.deep_flow_duration_ms or 0)
 
     def _resolve_reusable_archive_record(
         self,
@@ -451,6 +567,9 @@ class PromoXlsxCollectorBlock:
         card: PromoCardData,
         request: PromoXlsxCollectorRequest,
         record,
+        preflight: dict[str, Any] | None = None,
+        early_preflight_duration_ms: int = 0,
+        deep_flow_duration_ms: int = 0,
     ) -> PromoOutcome:
         promo_folder = run_dir / "promos" / build_promo_folder_name(
             card.promo_id,
@@ -493,6 +612,7 @@ class PromoXlsxCollectorBlock:
                 period_id=record.metadata.period_id,
             ),
             workbook=inspection,
+            preflight=preflight,
         )
         metadata_path = promo_folder / "metadata.json"
         self._write_json(metadata_path, asdict(metadata))
@@ -528,6 +648,9 @@ class PromoXlsxCollectorBlock:
             original_suggested_filename=metadata.original_suggested_filename,
             export_kind=metadata.export_kind,
             drawer_reset=drawer_reset,
+            early_preflight_duration_ms=early_preflight_duration_ms,
+            deep_flow_duration_ms=deep_flow_duration_ms,
+            **_preflight_outcome_fields(preflight),
         )
 
     def _blocked_after_card(
@@ -538,6 +661,10 @@ class PromoXlsxCollectorBlock:
         card: PromoCardData,
         blocker: str,
         request: PromoXlsxCollectorRequest,
+        preflight: dict[str, Any] | None = None,
+        early_preflight_duration_ms: int = 0,
+        deep_flow_duration_ms: int = 0,
+        generate_screen_attempted: bool = False,
     ) -> PromoOutcome:
         promo_folder = run_dir / "promos" / build_promo_folder_name(card.promo_id, None, card.promo_title)
         promo_folder.mkdir(parents=True, exist_ok=True)
@@ -557,6 +684,7 @@ class PromoXlsxCollectorBlock:
             export_kind=None,
             download=None,
             workbook=None,
+            preflight=preflight,
         )
         metadata_path = promo_folder / "metadata.json"
         self._write_json(metadata_path, asdict(metadata))
@@ -575,6 +703,10 @@ class PromoXlsxCollectorBlock:
             card_path=str(card_path),
             metadata_path=str(metadata_path),
             drawer_reset=drawer_reset,
+            early_preflight_duration_ms=early_preflight_duration_ms,
+            deep_flow_duration_ms=deep_flow_duration_ms,
+            generate_screen_attempted=generate_screen_attempted,
+            **_preflight_outcome_fields(preflight),
         )
 
     def _blocked_before_download(
@@ -586,6 +718,11 @@ class PromoXlsxCollectorBlock:
         request: PromoXlsxCollectorRequest,
         generate_state: CollectorStateSnapshot,
         blocker: str,
+        preflight: dict[str, Any] | None = None,
+        early_preflight_duration_ms: int = 0,
+        deep_flow_duration_ms: int = 0,
+        generate_screen_attempted: bool = False,
+        download_attempted: bool = False,
     ) -> PromoOutcome:
         promo_folder = run_dir / "promos" / build_promo_folder_name(card.promo_id, None, card.promo_title)
         promo_folder.mkdir(parents=True, exist_ok=True)
@@ -613,6 +750,7 @@ class PromoXlsxCollectorBlock:
             export_kind=None,
             download=None,
             workbook=None,
+            preflight=preflight,
         )
         metadata_path = promo_folder / "metadata.json"
         self._write_json(metadata_path, asdict(metadata))
@@ -631,6 +769,11 @@ class PromoXlsxCollectorBlock:
             card_path=str(card_path),
             metadata_path=str(metadata_path),
             drawer_reset=drawer_reset,
+            early_preflight_duration_ms=early_preflight_duration_ms,
+            deep_flow_duration_ms=deep_flow_duration_ms,
+            generate_screen_attempted=generate_screen_attempted,
+            download_attempted=download_attempted,
+            **_preflight_outcome_fields(preflight),
         )
 
     @staticmethod
@@ -806,6 +949,59 @@ def classify_card_ui_status(
         "status_evidence_sources": sorted(set(sources)),
         "ui_loaded_success": ui_loaded_success,
         "campaign_identity_match": bool(title_matched),
+    }
+
+
+def classify_collector_preflight(card: PromoCardData) -> dict[str, Any]:
+    ui_status = str(card.ui_status or "unknown")
+    confidence = str(card.ui_status_confidence or "low")
+    download_action_state = str(card.download_action_state or "unknown")
+    loaded = bool(card.ui_loaded_success)
+    identity_matched = bool(card.campaign_identity_match)
+    status_sources = set(card.status_evidence_sources or [])
+    has_status_evidence = bool(status_sources & {"footer_label", "badge"})
+
+    high_confidence_non_materializable = (
+        ui_status == "ended"
+        and confidence == "high"
+        and download_action_state in {"absent", "disabled"}
+        and loaded
+        and identity_matched
+        and has_status_evidence
+    )
+    if high_confidence_non_materializable:
+        return {
+            "early_preflight_decision": "early_non_materializable",
+            "heavy_flow_required": False,
+            "heavy_flow_reason": "high_confidence_non_materializable",
+            "non_materializable_reason": "ended_without_download",
+            "fallback_to_full_flow_reason": None,
+            "collector_preflight_schema_version": COLLECTOR_PREFLIGHT_SCHEMA_VERSION,
+        }
+
+    fallback_reason = None
+    if not loaded:
+        fallback_reason = "ui_not_loaded"
+    elif not identity_matched:
+        fallback_reason = "campaign_identity_mismatch"
+    elif confidence != "high":
+        fallback_reason = "low_confidence_status"
+    elif download_action_state in {"unknown", "ui_not_loaded"}:
+        fallback_reason = "unclear_download_action"
+    elif not has_status_evidence:
+        fallback_reason = "missing_status_evidence"
+    elif download_action_state == "available":
+        fallback_reason = "download_action_available"
+    else:
+        fallback_reason = "conservative_full_flow"
+
+    return {
+        "early_preflight_decision": "full_flow",
+        "heavy_flow_required": True,
+        "heavy_flow_reason": "materializable_or_unclear",
+        "non_materializable_reason": None,
+        "fallback_to_full_flow_reason": fallback_reason,
+        "collector_preflight_schema_version": COLLECTOR_PREFLIGHT_SCHEMA_VERSION,
     }
 
 
@@ -999,7 +1195,9 @@ def build_metadata(
     export_kind: ExportKind | None,
     download: DownloadArtifact | None,
     workbook: WorkbookInspection | None,
+    preflight: dict[str, Any] | None = None,
 ) -> PromoMetadata:
+    preflight = preflight or {}
     return PromoMetadata(
         collected_at=_now_iso(),
         trace_run_dir=trace_run_dir,
@@ -1038,6 +1236,15 @@ def build_metadata(
         ui_loaded_success=card.ui_loaded_success,
         campaign_identity_match=card.campaign_identity_match,
         collector_ui_schema_version=card.collector_ui_schema_version,
+        early_preflight_decision=preflight.get("early_preflight_decision"),
+        heavy_flow_required=preflight.get("heavy_flow_required"),
+        heavy_flow_reason=preflight.get("heavy_flow_reason"),
+        non_materializable_reason=preflight.get("non_materializable_reason"),
+        fallback_to_full_flow_reason=preflight.get("fallback_to_full_flow_reason"),
+        collector_preflight_schema_version=str(
+            preflight.get("collector_preflight_schema_version")
+            or COLLECTOR_PREFLIGHT_SCHEMA_VERSION
+        ),
     )
 
 
@@ -1074,3 +1281,18 @@ def _clean_lines(text: str) -> list[str]:
 
 def _now_iso() -> str:
     return datetime.now(BUSINESS_TIMEZONE).isoformat(timespec="seconds")
+
+
+def _preflight_outcome_fields(preflight: dict[str, Any] | None) -> dict[str, Any]:
+    preflight = preflight or {}
+    return {
+        "early_preflight_decision": preflight.get("early_preflight_decision"),
+        "heavy_flow_required": preflight.get("heavy_flow_required"),
+        "heavy_flow_reason": preflight.get("heavy_flow_reason"),
+        "non_materializable_reason": preflight.get("non_materializable_reason"),
+        "fallback_to_full_flow_reason": preflight.get("fallback_to_full_flow_reason"),
+    }
+
+
+def _elapsed_ms(started_perf: float) -> int:
+    return max(0, int(round((time.perf_counter() - started_perf) * 1000)))

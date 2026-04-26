@@ -116,12 +116,25 @@ update_note: "Обновлён под archive-first promo semantics: collector r
   - `ui_loaded_success`
   - `campaign_identity_match`
   - `collector_ui_schema_version`
+  - `early_preflight_decision`
+  - `heavy_flow_required`
+  - `heavy_flow_reason`
+  - `non_materializable_reason`
+  - `fallback_to_full_flow_reason`
+  - `collector_preflight_schema_version`
 
 UI status metadata is observability/validation evidence, not metric truth:
 - `ui_status` normalizes card/drawer state as `active`, `ended`, `pending`, `future`, `unknown`, or `error`;
 - ended classification uses multi-signal evidence: loaded drawer/card, title/campaign identity match where available, sanitized status label such as `Акция завершилась`, and absent/disabled download action;
 - download action states are `available`, `absent`, `disabled`, `unknown`, and `ui_not_loaded`;
 - raw HTML, cookies, browser state, localStorage-derived data, tokens, and raw upstream payloads are not persisted in metadata.
+
+Collector preflight metadata is a narrow execution decision record, not a truth shortcut:
+- `early_preflight_decision=early_non_materializable` is allowed only after the card/drawer is loaded, identity is matched, status evidence is high-confidence `ended`, and the download action is absent/disabled;
+- ended/no-download campaigns keep metadata/card evidence and do not enter the workbook generate/download path;
+- `heavy_flow_required=true` keeps the existing full collector path for active/downloadable campaigns and for unclear states;
+- pending/future campaign shortcutting is not enabled by this checkpoint because future archive readiness remains part of the existing source policy;
+- low-confidence status, missing drawer, identity mismatch, unclear download state, or missing status evidence must keep conservative behavior rather than suppress workbook requirements.
 
 # 4. Артефакты по модулю
 
