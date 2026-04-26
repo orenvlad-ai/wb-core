@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -248,6 +248,7 @@ class LiveSourceStatus:
     covered_count: int
     missing_nm_ids: list[int]
     note: str
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class SlotLookups:
@@ -415,34 +416,42 @@ def _append_source_slot_diagnostic(
         if normalized_origin == "not_supported"
         else len(status.missing_nm_ids)
     )
-    source_slots.append(
-        {
-            "source_key": status.source_key,
-            "slot_kind": status.temporal_slot,
-            "requested_date": str(source_started.get("requested_date") or status.column_date),
-            "started_at": str(source_started.get("started_at") or ""),
-            "finished_at": finished_at,
-            "duration_ms": duration_ms,
-            "status": status.kind,
-            "semantic_status": _source_diagnostic_semantic_status(status),
-            "origin": normalized_origin,
-            "rows_fetched": rows_fetched,
-            "rows_accepted": rows_accepted,
-            "rows_reused": rows_reused,
-            "rows_skipped": rows_skipped,
-            "retry_count": None,
-            "sleep_total_ms": None,
-            "batch_count": None,
-            "page_count": None,
-            "poll_count": None,
-            "note_kind": _source_diagnostic_note_kind(status),
-            "requested_count": status.requested_count,
-            "covered_count": status.covered_count,
-            "missing_count": len(status.missing_nm_ids),
-            "counter_basis": "live_source_status; adapter-internal long-tail counters are not available without adapter refactor",
-            **_known_payload_diagnostic_counters(status.source_key, payload),
-        }
+    item = {
+        "source_key": status.source_key,
+        "slot_kind": status.temporal_slot,
+        "requested_date": str(source_started.get("requested_date") or status.column_date),
+        "started_at": str(source_started.get("started_at") or ""),
+        "finished_at": finished_at,
+        "duration_ms": duration_ms,
+        "status": status.kind,
+        "semantic_status": _source_diagnostic_semantic_status(status),
+        "origin": normalized_origin,
+        "rows_fetched": rows_fetched,
+        "rows_accepted": rows_accepted,
+        "rows_reused": rows_reused,
+        "rows_skipped": rows_skipped,
+        "retry_count": None,
+        "sleep_total_ms": None,
+        "batch_count": None,
+        "page_count": None,
+        "poll_count": None,
+        "note_kind": _source_diagnostic_note_kind(status),
+        "requested_count": status.requested_count,
+        "covered_count": status.covered_count,
+        "missing_count": len(status.missing_nm_ids),
+        "counter_basis": "live_source_status; adapter-internal long-tail counters are not available without adapter refactor",
+        **_known_payload_diagnostic_counters(status.source_key, payload),
+    }
+    promo_diagnostics = _promo_slot_diagnostics(
+        status=status,
+        payload=payload,
+        origin=normalized_origin,
+        finished_at=finished_at,
+        duration_ms=duration_ms,
     )
+    if promo_diagnostics:
+        item["promo_diagnostics"] = promo_diagnostics
+    source_slots.append(item)
 
 
 def _classify_source_diagnostic_origin(
@@ -526,6 +535,178 @@ def _known_payload_diagnostic_counters(source_key: str, payload: Any | None) -> 
         "promo_skipped_past_promos": getattr(payload, "skipped_past_promos", None),
         "promo_ambiguous_promos": getattr(payload, "ambiguous_promos", None),
     }
+
+
+def _promo_slot_diagnostics(
+    *,
+    status: LiveSourceStatus,
+    payload: Any | None,
+    origin: str,
+    finished_at: str,
+    duration_ms: int,
+) -> dict[str, Any]:
+    if status.source_key != "promo_by_price":
+        return {}
+    diagnostics = _plain_jsonable(status.diagnostics)
+    if not isinstance(diagnostics, dict) or not diagnostics:
+        diagnostics = _payload_diagnostics(payload) if payload is not None else {}
+    diagnostics = dict(diagnostics) if isinstance(diagnostics, dict) else {}
+    note_values = _note_key_values(status.note)
+    fallback = dict(diagnostics.get("fallback") or {})
+    latest_attempt_kind = str(note_values.get("latest_attempt_kind") or "").strip()
+    current_attempt_status = latest_attempt_kind or status.kind
+    fallback["attempted_current_fetch"] = bool(
+        fallback.get("attempted_current_fetch")
+        or (
+            status.temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT
+            and origin in {"upstream_fetch", "fallback_preserved"}
+        )
+        or latest_attempt_kind
+    )
+    candidate_accepted = (
+        "accepted_current_current_attempt" in str(status.note)
+        or "accepted_closed_current_attempt" in str(status.note)
+        or (origin == "upstream_fetch" and status.kind == "success")
+    )
+    if origin == "fallback_preserved":
+        candidate_accepted = False
+    fallback["candidate_accepted"] = candidate_accepted
+    fallback["candidate_rejected"] = bool(origin == "fallback_preserved" or (current_attempt_status and current_attempt_status != "success"))
+    fallback["invalid_reason"] = _promo_invalid_reason(status.note) or fallback.get("invalid_reason")
+    fallback["fallback_reason"] = (
+        "accepted_current_preserved_after_invalid_attempt"
+        if origin == "fallback_preserved" and status.temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT
+        else (
+            "accepted_closed_preserved_after_invalid_attempt"
+            if origin == "fallback_preserved"
+            else fallback.get("fallback_reason")
+        )
+    )
+    if origin == "fallback_preserved":
+        fallback["preserved_snapshot_date"] = status.snapshot_date or status.column_date
+        fallback["preserved_snapshot_role"] = (
+            TEMPORAL_ROLE_ACCEPTED_CURRENT
+            if status.temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT
+            else TEMPORAL_ROLE_ACCEPTED_CLOSED
+        )
+        fallback["preserved_origin"] = "accepted_slot"
+        accepted_at = note_values.get("accepted_at")
+        fallback["preserved_snapshot_age_ms"] = _timestamp_age_ms(accepted_at, finished_at) if accepted_at else None
+    fallback["current_attempt_status"] = current_attempt_status
+    fallback["current_attempt_semantic_status"] = _promo_attempt_semantic_status(current_attempt_status)
+    diagnostics["fallback"] = fallback
+
+    dry_run = dict(diagnostics.get("dry_run_skip") or {})
+    fingerprints = diagnostics.get("fingerprints") if isinstance(diagnostics.get("fingerprints"), dict) else {}
+    would_not_skip_reason = "comparison_not_available"
+    if not fingerprints.get("promo_discovery_fingerprint") and not fingerprints.get("promo_archive_fingerprint"):
+        would_not_skip_reason = "missing_fingerprint"
+    elif not fingerprints.get("accepted_price_truth_fingerprint"):
+        would_not_skip_reason = "missing_price_truth_fingerprint"
+    elif origin == "fallback_preserved":
+        would_not_skip_reason = "candidate_rejected"
+    dry_run.update(
+        {
+            "would_skip_if_fingerprint_unchanged": False,
+            "would_skip_reason": None,
+            "would_not_skip_reason": would_not_skip_reason,
+            "estimated_avoidable_ms": None,
+        }
+    )
+    diagnostics["dry_run_skip"] = dry_run
+    _upsert_promo_phase(
+        diagnostics,
+        "acceptance_decision",
+        status="accepted" if candidate_accepted else "rejected",
+        note_kind="temporal_policy_layer",
+    )
+    _upsert_promo_phase(
+        diagnostics,
+        "fallback_preserve",
+        status="success" if origin == "fallback_preserved" else "skipped",
+        note_kind="fallback_preserved" if origin == "fallback_preserved" else "not_needed",
+    )
+    diagnostics["slot_observed_duration_ms"] = duration_ms
+    return diagnostics
+
+
+def _upsert_promo_phase(
+    diagnostics: dict[str, Any],
+    phase_key: str,
+    *,
+    status: str,
+    note_kind: str,
+) -> None:
+    phase_summary = diagnostics.setdefault("phase_summary", [])
+    if not isinstance(phase_summary, list):
+        return
+    for item in phase_summary:
+        if isinstance(item, dict) and item.get("phase_key") == phase_key:
+            item["status"] = status
+            item["note_kind"] = note_kind
+            item.setdefault("duration_ms", 0)
+            return
+    ts = str(diagnostics.get("finished_at") or "")
+    phase_summary.append(
+        {
+            "phase_key": phase_key,
+            "started_at": ts,
+            "finished_at": ts,
+            "duration_ms": 0,
+            "status": status,
+            "note_kind": note_kind,
+        }
+    )
+
+
+def _note_key_values(note: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for part in str(note or "").split(";"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        key = key.strip()
+        if key:
+            values[key] = value.strip()
+    return values
+
+
+def _promo_invalid_reason(note: str) -> str | None:
+    values = _note_key_values(note)
+    invalid_exact = values.get("invalid_exact_snapshot")
+    if invalid_exact:
+        return invalid_exact
+    if "missing_daily_price_truth_nm_ids" in values:
+        return "missing_price_truth"
+    if "missing_campaign_artifacts" in values:
+        return "workbook_or_archive_artifact_missing"
+    latest_attempt_note = values.get("latest_attempt_note")
+    if latest_attempt_note and latest_attempt_note != note:
+        return _promo_invalid_reason(latest_attempt_note)
+    if "promo_live_source_incomplete" in str(note):
+        return "promo_live_source_incomplete"
+    return None
+
+
+def _promo_attempt_semantic_status(kind: str) -> str | None:
+    if not kind:
+        return None
+    if kind == "success":
+        return "success"
+    if kind in {"blocked", "error"}:
+        return "error"
+    return "warning"
+
+
+def _timestamp_age_ms(older: str | None, newer: str | None) -> int | None:
+    try:
+        if not older or not newer:
+            return None
+        older_dt = _parse_runtime_timestamp(str(older))
+        newer_dt = _parse_runtime_timestamp(str(newer))
+        return max(0, int(round((newer_dt - older_dt).total_seconds() * 1000)))
+    except Exception:
+        return None
 
 
 def _build_refresh_source_summary(raw_source_slots: Any) -> list[dict[str, Any]]:
@@ -2535,6 +2716,7 @@ def _capture_live_source(
         )
 
     kind = str(getattr(payload, "kind", "missing"))
+    payload_diagnostics = _payload_diagnostics(payload)
     if kind == "incomplete":
         missing_nm_ids = list(getattr(payload, "missing_nm_ids", []))
         requested_count = int(getattr(payload, "requested_count", len(requested_nm_ids)))
@@ -2555,6 +2737,7 @@ def _capture_live_source(
                 covered_count=covered_count,
                 missing_nm_ids=missing_nm_ids,
                 note=str(getattr(payload, "detail", "") or ""),
+                diagnostics=payload_diagnostics,
             ),
             payload,
         )
@@ -2578,6 +2761,7 @@ def _capture_live_source(
             covered_count=len(covered_nm_ids),
             missing_nm_ids=sorted(set(requested_nm_ids) - set(covered_nm_ids)),
             note=_status_note_from_payload(payload),
+            diagnostics=payload_diagnostics,
         ),
         payload,
     )
@@ -2865,7 +3049,63 @@ def _build_preserved_accepted_status(
     note_parts.append(f"latest_attempt_kind={latest_status.kind}")
     if latest_status.note:
         note_parts.append(f"latest_attempt_note={latest_status.note}")
-    return _append_status_note(accepted_status, "; ".join(note_parts))
+    return _append_status_note(
+        replace(
+            accepted_status,
+            diagnostics=_preserved_status_diagnostics(
+                accepted_status=accepted_status,
+                latest_status=latest_status,
+                accepted_at=accepted_at,
+                temporal_slot=temporal_slot,
+            ),
+        ),
+        "; ".join(note_parts),
+    )
+
+
+def _preserved_status_diagnostics(
+    *,
+    accepted_status: LiveSourceStatus,
+    latest_status: LiveSourceStatus,
+    accepted_at: str | None,
+    temporal_slot: str,
+) -> dict[str, Any]:
+    if accepted_status.source_key != "promo_by_price":
+        return dict(accepted_status.diagnostics or {})
+    accepted_diagnostics = _plain_jsonable(accepted_status.diagnostics)
+    latest_diagnostics = _plain_jsonable(latest_status.diagnostics)
+    diagnostics = dict(latest_diagnostics) if isinstance(latest_diagnostics, dict) and latest_diagnostics else {}
+    if not diagnostics and isinstance(accepted_diagnostics, dict):
+        diagnostics = dict(accepted_diagnostics)
+    if isinstance(accepted_diagnostics, dict) and accepted_diagnostics:
+        diagnostics["preserved_payload_diagnostics"] = accepted_diagnostics
+    fallback = dict(diagnostics.get("fallback") or {})
+    fallback.update(
+        {
+            "attempted_current_fetch": True,
+            "candidate_accepted": False,
+            "candidate_rejected": True,
+            "invalid_reason": _promo_invalid_reason(latest_status.note),
+            "fallback_reason": (
+                "accepted_current_preserved_after_invalid_attempt"
+                if temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT
+                else "accepted_closed_preserved_after_invalid_attempt"
+            ),
+            "preserved_snapshot_date": accepted_status.snapshot_date or accepted_status.column_date,
+            "preserved_snapshot_role": (
+                TEMPORAL_ROLE_ACCEPTED_CURRENT
+                if temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT
+                else TEMPORAL_ROLE_ACCEPTED_CLOSED
+            ),
+            "preserved_snapshot_captured_at": accepted_at,
+            "preserved_snapshot_age_ms": None,
+            "preserved_origin": "accepted_slot",
+            "current_attempt_status": latest_status.kind,
+            "current_attempt_semantic_status": _promo_attempt_semantic_status(latest_status.kind),
+        }
+    )
+    diagnostics["fallback"] = fallback
+    return diagnostics
 
 
 def _coerce_invalid_temporal_candidate_status(
@@ -2894,6 +3134,27 @@ def _status_note_from_payload(payload: Any) -> str:
         if fee_total is not None:
             parts.append(f"fin_storage_fee_total={round(float(fee_total), 6)}")
     return "; ".join(parts)
+
+
+def _payload_diagnostics(payload: Any) -> dict[str, Any]:
+    raw = getattr(payload, "diagnostics", None)
+    normalized = _plain_jsonable(raw)
+    return normalized if isinstance(normalized, dict) else {}
+
+
+def _plain_jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _plain_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_jsonable(item) for item in value]
+    if hasattr(value, "__dict__"):
+        return {
+            str(key): _plain_jsonable(item)
+            for key, item in vars(value).items()
+        }
+    return str(value)
 
 
 def _resolve_freshness(payload: Any) -> str:

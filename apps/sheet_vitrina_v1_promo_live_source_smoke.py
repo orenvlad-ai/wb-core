@@ -218,6 +218,14 @@ def _assert_accepted_current_preserved_after_invalid_attempt(
         note = str(evening_status[10])
         if "accepted_current_preserved_after_invalid_attempt" not in note:
             raise AssertionError(f"preserved promo current snapshot must explain accepted preservation, got {evening_status}")
+        promo_slot_diagnostics = _promo_source_slot_diagnostics(evening_plan, "promo_by_price", "today_current")
+        fallback = promo_slot_diagnostics.get("fallback") or {}
+        if fallback.get("candidate_rejected") is not True:
+            raise AssertionError(f"promo fallback diagnostics must mark candidate_rejected, got {fallback}")
+        if fallback.get("fallback_reason") != "accepted_current_preserved_after_invalid_attempt":
+            raise AssertionError(f"promo fallback diagnostics reason mismatch, got {fallback}")
+        if (promo_slot_diagnostics.get("dry_run_skip") or {}).get("would_skip_if_fingerprint_unchanged") is not False:
+            raise AssertionError(f"promo dry-run skip marker must stay observation-only false, got {promo_slot_diagnostics}")
         evening_rows = _data_rows(evening_plan)
         if _today_value(evening_rows[f"SKU:{requested_nm_ids[0]}|promo_count_by_price"]) != baseline:
             raise AssertionError("invalid later promo attempt must not overwrite accepted current values")
@@ -459,6 +467,45 @@ def _evaluate_metric_truth_case(
     )
 
 
+def _assert_promo_internal_diagnostics(result: object, *, expected_snapshot_date: str) -> None:
+    diagnostics = getattr(result, "diagnostics", None)
+    if not isinstance(diagnostics, dict):
+        raise AssertionError(f"promo result diagnostics must be a dict, got {diagnostics}")
+    if diagnostics.get("schema_version") != "promo_by_price_diagnostics_v1":
+        raise AssertionError(f"promo diagnostics schema mismatch, got {diagnostics}")
+    if diagnostics.get("snapshot_date") != expected_snapshot_date:
+        raise AssertionError(f"promo diagnostics snapshot date mismatch, got {diagnostics}")
+    phase_keys = {
+        str(item.get("phase_key") or "")
+        for item in diagnostics.get("phase_summary", [])
+        if isinstance(item, dict)
+    }
+    required = {
+        "promo_total",
+        "collector_total",
+        "archive_lookup",
+        "archive_sync",
+        "workbook_inspection",
+        "metadata_validation",
+        "price_truth_lookup",
+        "price_truth_join",
+        "source_payload_build",
+        "acceptance_decision",
+        "fallback_preserve",
+    }
+    missing = sorted(required - phase_keys)
+    if missing:
+        raise AssertionError(f"promo diagnostics missing phases {missing}: {diagnostics}")
+    counters = diagnostics.get("counters") or {}
+    if counters.get("candidate_row_count") is None:
+        raise AssertionError(f"promo diagnostics must expose candidate_row_count, got {counters}")
+    if counters.get("price_truth_available_count") is None:
+        raise AssertionError(f"promo diagnostics must expose price truth count, got {counters}")
+    dry_run = diagnostics.get("dry_run_skip") or {}
+    if dry_run.get("would_skip_if_fingerprint_unchanged") is not False:
+        raise AssertionError(f"promo dry-run skip marker must not change behavior, got {dry_run}")
+
+
 def _assert_canonical_eligible_set_cases(requested_nm_ids: list[int]) -> str:
     with TemporaryDirectory(prefix="sheet-vitrina-promo-canonical-cases-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
@@ -496,6 +543,8 @@ def _assert_canonical_eligible_set_cases(requested_nm_ids: list[int]) -> str:
             raise AssertionError(f"outside-interval case must stay truthful empty success, got {outside_result}")
         if missing_price_result.kind != "incomplete":
             raise AssertionError(f"missing price truth case must be incomplete, got {missing_price_result}")
+        _assert_promo_internal_diagnostics(single_result, expected_snapshot_date="2026-04-20")
+        _assert_promo_internal_diagnostics(missing_price_result, expected_snapshot_date="2026-04-24")
 
         single_items = {item.nm_id: item for item in single_result.items}
         multiple_items = {item.nm_id: item for item in multiple_result.items}
@@ -1105,6 +1154,18 @@ def _status_rows(plan) -> dict[str, list[Any]]:
 def _data_rows(plan) -> dict[str, list[Any]]:
     data_sheet = next(sheet for sheet in plan.sheets if sheet.sheet_name == "DATA_VITRINA")
     return {row[1]: row for row in data_sheet.rows}
+
+
+def _promo_source_slot_diagnostics(plan, source_key: str, slot_kind: str) -> dict[str, Any]:
+    refresh_diagnostics = (plan.metadata or {}).get("refresh_diagnostics") or {}
+    for item in refresh_diagnostics.get("source_slots", []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("source_key") == source_key and item.get("slot_kind") == slot_kind:
+            diagnostics = item.get("promo_diagnostics")
+            if isinstance(diagnostics, dict):
+                return diagnostics
+    raise AssertionError(f"promo diagnostics not found for {source_key}[{slot_kind}]")
 
 
 def _yesterday_value(row: list[Any]) -> Any:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 
 PromoLiveSourceKind = Literal["success", "incomplete"]
@@ -50,6 +50,7 @@ class PromoLiveSourceSuccess:
     skipped_past_promos: int
     ambiguous_promos: int
     current_download_export_kinds: list[str] = field(default_factory=list)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,7 @@ class PromoLiveSourceIncomplete:
     ambiguous_promos: int
     missing_nm_ids: list[int]
     current_download_export_kinds: list[str] = field(default_factory=list)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 PromoLiveSourceResult = PromoLiveSourceSuccess | PromoLiveSourceIncomplete
