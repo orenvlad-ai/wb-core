@@ -95,6 +95,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - optional `surface=page_composition` now returns a server-driven page payload for the live page shell; by default it keeps source-status details unloaded
   - optional `include_source_status=1` on that page-composition surface returns the detailed grouped loading table without triggering refresh/upstream fetch
   - page-composition `meta` exposes the explicit server-owned time model: `business_timezone`, `snapshot_as_of_date`, `yesterday_closed_date`, `today_current_date`, `visible_date_columns`, `server_now_business_tz` and `generated_at`. Business dates remain backend-owned; browser timezone is used only for readable timestamp display.
+  - page-composition `meta.page_composition_diagnostics` exposes lightweight read-side diagnostics: server build duration, payload bytes, `include_source_status`, row count and cell count. This field is observability-only and does not create a new read contract, source-status endpoint, slim payload mode or browser-owned truth layer.
 - `page_composition` is server-owned and assembled only from:
   - `web_vitrina_contract`
   - `web_vitrina_view_model`

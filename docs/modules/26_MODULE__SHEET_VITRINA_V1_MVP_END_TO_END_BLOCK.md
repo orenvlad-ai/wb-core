@@ -160,6 +160,10 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition&include_source_status=1`
   - `GET /sheet-vitrina-v1/operator`
   - `GET /sheet-vitrina-v1/vitrina`
+- Current refresh observability is persisted server-side with the ready snapshot:
+  - `metadata.refresh_diagnostics` carries compact refresh/phase/source-slot timing and origin metadata for the most recently materialized snapshot
+  - freshly completed refresh/job results may expose the same diagnostics for operator inspection
+  - diagnostics are not business truth and must not change accepted source semantics, fallback/preservation behavior, temporal slot policy, retry behavior, Google Sheets/GAS archive boundary or browser/localStorage boundary
 - Former Google Sheets operator flow `prepare/upload/refresh/load DATA_VITRINA` is archived:
   - GAS functions fail fast through `ArchiveGuard.gs`;
   - `POST /v1/sheet-vitrina-v1/load` returns archived/gone in the current default runtime;
