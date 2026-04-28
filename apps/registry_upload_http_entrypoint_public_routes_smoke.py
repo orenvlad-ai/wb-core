@@ -41,6 +41,8 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/plan-report/baseline-status",
         "/v1/sheet-vitrina-v1/seller-portal-session/check",
         "/v1/sheet-vitrina-v1/feedbacks",
+        "/v1/sheet-vitrina-v1/feedbacks/ai-prompt",
+        "/v1/sheet-vitrina-v1/feedbacks/ai-analyze",
         "/v1/sheet-vitrina-v1/supply/factory-order/",
         "/v1/sheet-vitrina-v1/supply/wb-regional/",
     }
@@ -54,6 +56,10 @@ def main() -> None:
     )
     if rendered.count("location = /v1/sheet-vitrina-v1/feedbacks {") != 1:
         raise AssertionError("rendered nginx block must include feedbacks exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/feedbacks/ai-prompt {") != 1:
+        raise AssertionError("rendered nginx block must include feedbacks AI prompt exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/feedbacks/ai-analyze {") != 1:
+        raise AssertionError("rendered nginx block must include feedbacks AI analyze exactly once")
     if rendered.count("location ^~ /v1/sheet-vitrina-v1/supply/factory-order/ {") != 1:
         raise AssertionError("rendered nginx block must include factory-order prefix exactly once")
 

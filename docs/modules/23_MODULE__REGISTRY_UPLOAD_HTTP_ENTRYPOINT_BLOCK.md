@@ -29,11 +29,13 @@ related_modules:
   - "packages/application/sheet_vitrina_v1_load_bridge.py"
   - "packages/application/sheet_vitrina_v1_plan_report.py"
   - "packages/application/sheet_vitrina_v1_feedbacks.py"
+  - "packages/application/sheet_vitrina_v1_feedbacks_ai.py"
   - "packages/application/sheet_vitrina_v1_web_vitrina.py"
   - "packages/application/web_vitrina_gravity_table_adapter.py"
   - "packages/application/web_vitrina_page_composition.py"
   - "packages/adapters/registry_upload_http_entrypoint.py"
   - "packages/adapters/wb_feedbacks.py"
+  - "packages/adapters/openai_feedbacks_ai.py"
   - "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"
 related_tables:
   - "CONFIG_V2"
@@ -54,6 +56,9 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/plan-report/baseline-upload"
   - "GET /v1/sheet-vitrina-v1/plan-report/baseline-status"
   - "GET /v1/sheet-vitrina-v1/feedbacks"
+  - "GET /v1/sheet-vitrina-v1/feedbacks/ai-prompt"
+  - "POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt"
+  - "POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze"
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
   - "GET /v1/sheet-vitrina-v1/job"
@@ -98,6 +103,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_web_vitrina_reason_sanitization_smoke.py"
   - "apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py"
   - "apps/sheet_vitrina_v1_feedbacks_http_smoke.py"
+  - "apps/sheet_vitrina_v1_feedbacks_ai_smoke.py"
   - "apps/sheet_vitrina_v1_feedbacks_browser_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_integration_smoke.py"
@@ -112,7 +118,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под repo-owned hosted public route publication: deploy runner теперь читает manifest `artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`, рендерит managed nginx block для public routes including `GET /v1/sheet-vitrina-v1/feedbacks`, делает backup, `nginx -t` и reload вместо ручной live nginx правки."
+update_note: "Обновлён под AI-assisted feedback review MVP: `Отзывы` получает server-side prompt storage, public `feedbacks/ai-prompt` + `feedbacks/ai-analyze` routes and OpenAI Responses API structured-output adapter via `OPENAI_API_KEY`; AI labels stay transient UI/session output and are not complaint submission, Seller Portal automation, ЕБД/accepted truth or Google Sheets/GAS."
 ---
 
 # 1. Идентификатор и статус
@@ -185,6 +191,8 @@ update_note: "Обновлён под repo-owned hosted public route publication
   - `POST /v1/sheet-vitrina-v1/plan-report/baseline-upload` = controlled operator XLSX upload for `manual_monthly_plan_report_baseline`; validates month format, numeric non-negative facts and empty-file/duplicate-month errors, then idempotently stores monthly aggregates in runtime SQLite
   - `GET /v1/sheet-vitrina-v1/plan-report/baseline-status` = cheap JSON status for loaded monthly baseline rows and totals
   - `GET /v1/sheet-vitrina-v1/feedbacks` = read-only JSON contract for unified tab `Отзывы`; it calls official WB API `GET /api/v1/feedbacks` through canonical `WB_API_TOKEN`, passes `dateFrom/dateTo` as Unix timestamps, uses `order=dateDesc`, bounded `take/skip` pagination and the required `isAnswered` parameter (`all` reads `false` and `true` streams, then merges/sorts). The route normalizes rows for the browser table, supports `stars` and `is_answered` filters, surfaces friendly 401/403/429/5xx errors and never writes runtime DB, ready snapshots, Google Sheets/GAS or browser-local truth.
+  - `GET /v1/sheet-vitrina-v1/feedbacks/ai-prompt` / `POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt` = server-side operational prompt config for the same `Отзывы` tab. Prompt storage is an atomic JSON file inside runtime dir, validates non-empty prompt with bounded length and is not accepted truth, ЕБД persistence, ready snapshot truth or browser-local source of truth.
+  - `POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze` = bounded AI analysis over rows already loaded by the operator. It reads the saved prompt, sends only trimmed feedback fields to OpenAI through `OPENAI_API_KEY`, enforces max rows/batch/text/rate limits, returns structured per-`feedback_id` transient labels (`Да / Проверить / Нет`, category, reason, confidence) and does not submit complaints, call Seller Portal, train on manual confirmation, write runtime DB or Google Sheets/GAS.
   - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
   - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result, where root `status` is semantic snapshot outcome rather than mere ready-snapshot existence
   - `GET /v1/sheet-vitrina-v1/job` = cheap poll/read surface для live operator log и async action state

@@ -14,7 +14,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.sheet_vitrina_v1_web_vitrina_browser_smoke import LocalWebVitrinaFixtureServer  # noqa: E402
-from packages.adapters.registry_upload_http_entrypoint import DEFAULT_SHEET_WEB_VITRINA_UI_PATH  # noqa: E402
+from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH,
+    DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH,
+    DEFAULT_SHEET_FEEDBACKS_PATH,
+    DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
+)
 
 
 def main() -> None:
@@ -38,6 +43,7 @@ def main() -> None:
 
 def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str, object]:
     captured_urls: list[str] = []
+    ai_analyze_called = False
     page_url = base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -55,12 +61,39 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 body=json.dumps(_feedbacks_payload(), ensure_ascii=False),
             )
 
-        context.route("**/v1/sheet-vitrina-v1/feedbacks**", fulfill_feedbacks)
+        def fulfill_prompt(route: object) -> None:
+            if route.request.method == "GET":
+                route.fulfill(
+                    status=200,
+                    headers={"Content-Type": "application/json; charset=utf-8"},
+                    body=json.dumps(_prompt_payload(status="missing"), ensure_ascii=False),
+                )
+                return
+            route.fulfill(
+                status=200,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                body=json.dumps(_prompt_payload(status="ready"), ensure_ascii=False),
+            )
+
+        def fulfill_ai_analyze(route: object) -> None:
+            nonlocal ai_analyze_called
+            ai_analyze_called = True
+            route.fulfill(
+                status=200,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                body=json.dumps(_ai_payload(), ensure_ascii=False),
+            )
+
+        context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH, fulfill_prompt)
+        context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH, fulfill_ai_analyze)
+        context.route("**" + DEFAULT_SHEET_FEEDBACKS_PATH + "?**", fulfill_feedbacks)
         try:
             page.goto(page_url, wait_until="domcontentloaded")
             page.wait_for_selector("[data-unified-tab-button='feedbacks']")
             page.locator("[data-unified-tab-button='feedbacks']").click()
             page.wait_for_selector("[data-feedbacks-panel]")
+            page.wait_for_selector("[data-feedbacks-subtab='reviews']")
+            page.wait_for_selector("[data-feedbacks-subtab='prompt']")
 
             range_toggle = page.locator("[data-feedbacks-range-toggle]")
             range_popover = page.locator("[data-feedbacks-range-popover]")
@@ -73,18 +106,50 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             first_star.click()
             if first_star.is_checked():
                 raise AssertionError("feedbacks star checkbox must update selection")
+            if page.locator("[data-feedbacks-ai-analyze]").is_enabled():
+                raise AssertionError("AI analyze button must be disabled before feedbacks load")
 
             page.locator("[data-feedbacks-load]").click()
             page.wait_for_selector("[data-feedbacks-table] tbody tr")
             row_count = page.locator("[data-feedbacks-table] tbody tr").count()
-            if row_count != 1:
-                raise AssertionError(f"feedbacks fixture must render one table row, got {row_count}")
+            if row_count != 24:
+                raise AssertionError(f"feedbacks fixture must render 24 table rows, got {row_count}")
+            if not page.locator("[data-feedbacks-table-scroll]").evaluate("node => node.scrollHeight > node.clientHeight"):
+                raise AssertionError("feedbacks table must use an internal scroll container")
+            for expected_header in ("Подходит для жалобы", "Категория", "Причина", "Уверенность"):
+                if expected_header not in page.locator("[data-feedbacks-table] thead").inner_text():
+                    raise AssertionError(f"feedbacks table must include AI header {expected_header!r}")
+            if not page.locator("[data-feedbacks-ai-analyze]").is_enabled():
+                raise AssertionError("AI analyze button must become enabled after feedbacks load")
+            page.locator("[data-feedbacks-ai-analyze]").click()
+            page.wait_for_selector("[data-feedbacks-prompt-textarea]")
+            if "Сначала сохраните промпт разбора" not in page.locator("[data-feedbacks-error]").inner_text():
+                raise AssertionError("AI analyze without saved prompt must show prompt-required message")
+            page.locator("[data-feedbacks-prompt-textarea]").fill("Новый промпт разбора отзывов")
+            page.locator("[data-feedbacks-prompt-save]").click()
+            page.wait_for_function(
+                "() => document.querySelector('[data-feedbacks-prompt-status]')?.textContent.includes('Сохранён')"
+            )
+            page.locator("[data-feedbacks-back-to-reviews]").click()
             if "WB API / feedbacks" not in page.locator("[data-feedbacks-meta]").inner_text():
                 raise AssertionError("feedbacks tab must expose read-only WB API source context")
             if not captured_urls:
                 raise AssertionError("feedbacks tab must call the feedbacks route after manual load")
             if "stars=2%2C3%2C4%2C5" not in captured_urls[-1] and "stars=2,3,4,5" not in captured_urls[-1]:
                 raise AssertionError(f"feedbacks route query must include selected stars, got {captured_urls[-1]}")
+            page.locator("[data-feedbacks-ai-analyze]").click()
+            page.wait_for_function(
+                "() => document.querySelector('[data-feedbacks-table] tbody tr td:nth-child(3)')?.textContent.includes('Да')"
+            )
+            if not ai_analyze_called:
+                raise AssertionError("feedbacks AI analyze route must be called")
+            first_fit = page.locator("[data-feedbacks-table] tbody tr").nth(0).locator("td").nth(2).inner_text()
+            if "Да" not in first_fit:
+                raise AssertionError(f"AI-positive feedbacks must sort first, got {first_fit!r}")
+            page.locator("[data-feedbacks-ai-filter]").select_option("yes")
+            filtered_count = page.locator("[data-feedbacks-table] tbody tr").count()
+            if filtered_count != 1:
+                raise AssertionError(f"AI filter yes must leave one row, got {filtered_count}")
         finally:
             browser.close()
 
@@ -93,7 +158,9 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "feedbacks_tab_present": True,
         "range_outside_click_closes": True,
         "star_filter_changes_query": True,
-        "table_rows": 1,
+        "table_rows": 24,
+        "ai_columns_present": True,
+        "ai_filter_works": True,
     }
 
 
@@ -109,29 +176,77 @@ def _feedbacks_payload() -> dict[str, object]:
             "source": "WB API / feedbacks",
         },
         "summary": {
-            "total": 1,
-            "by_star": {"1": 0, "2": 0, "3": 0, "4": 0, "5": 1},
+            "total": 24,
+            "by_star": {"1": 0, "2": 0, "3": 0, "4": 0, "5": 24},
             "answered": 0,
-            "unanswered": 1,
+            "unanswered": 24,
         },
         "schema": {"columns": []},
         "rows": [
             {
-                "feedback_id": "browser-1",
-                "created_at": "2026-04-29T07:00:00Z",
-                "created_date": "2026-04-29",
+                "feedback_id": f"browser-{index}",
+                "created_at": f"2026-04-{29 - min(index, 20):02d}T07:00:00Z",
+                "created_date": f"2026-04-{29 - min(index, 20):02d}",
                 "product_valuation": 5,
                 "answer_status": "Без ответа",
                 "is_answered": False,
-                "nm_id": 210183919,
-                "supplier_article": "WB-1",
+                "nm_id": 210183919 + index,
+                "supplier_article": f"WB-{index}",
                 "product_name": "Товар A",
                 "brand_name": "Brand",
-                "text": "Текст отзыва",
+                "text": "Текст отзыва " + ("длинный фрагмент " * 8),
                 "pros": "Плюсы",
                 "cons": "",
                 "answer_text": "",
             }
+            for index in range(1, 25)
+        ],
+    }
+
+
+def _prompt_payload(*, status: str) -> dict[str, object]:
+    prompt = "Сохранённый промпт" if status == "ready" else ""
+    return {
+        "contract_name": "sheet_vitrina_v1_feedbacks_ai_prompt",
+        "contract_version": "v1",
+        "prompt": prompt,
+        "starter_prompt": "Стартовый промпт разбора отзывов",
+        "updated_at": "2026-04-29T09:00:00Z" if status == "ready" else None,
+        "status": status,
+    }
+
+
+def _ai_payload() -> dict[str, object]:
+    return {
+        "contract_name": "sheet_vitrina_v1_feedbacks_ai_analysis",
+        "contract_version": "v1",
+        "meta": {"analyzed_at": "2026-04-29T09:00:00Z", "row_count": 24},
+        "results": [
+            {
+                "feedback_id": "browser-24",
+                "complaint_fit": "yes",
+                "complaint_fit_label": "Да",
+                "category": "profanity_or_insult",
+                "category_label": "Мат, оскорбления или угрозы",
+                "reason": "Есть оскорбление",
+                "confidence": "high",
+                "confidence_label": "Высокая",
+                "evidence": "фрагмент",
+            }
+        ]
+        + [
+            {
+                "feedback_id": f"browser-{index}",
+                "complaint_fit": "no",
+                "complaint_fit_label": "Нет",
+                "category": "product_quality_claim",
+                "category_label": "Претензия к товару",
+                "reason": "Обычная претензия к товару",
+                "confidence": "medium",
+                "confidence_label": "Средняя",
+                "evidence": "",
+            }
+            for index in range(1, 24)
         ],
     }
 

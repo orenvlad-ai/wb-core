@@ -78,6 +78,18 @@
       "methods": ["GET"]
     },
     {
+      "name": "sheet_vitrina_feedbacks_ai_prompt",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/ai-prompt",
+      "methods": ["GET", "POST"]
+    },
+    {
+      "name": "sheet_vitrina_feedbacks_ai_analyze",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/ai-analyze",
+      "methods": ["POST"]
+    },
+    {
       "name": "sheet_vitrina_web_vitrina",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/web-vitrina",

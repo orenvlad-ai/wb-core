@@ -21,6 +21,7 @@ from packages.application.promo_live_source import PromoLiveSourceBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_daily_report import SheetVitrinaV1DailyReportBlock
 from packages.application.sheet_vitrina_v1_feedbacks import SheetVitrinaV1FeedbacksBlock
+from packages.application.sheet_vitrina_v1_feedbacks_ai import SheetVitrinaV1FeedbacksAiBlock
 from packages.application.sheet_vitrina_v1_load_bridge import (
     LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE,
     LegacyGoogleSheetsContourArchivedError,
@@ -477,6 +478,7 @@ class RegistryUploadHttpEntrypoint:
         sheet_load_runner: SheetLoadRunner | None = None,
         seller_portal_recovery_controller: SellerPortalRecoveryController | None = None,
         feedbacks_block: SheetVitrinaV1FeedbacksBlock | None = None,
+        feedbacks_ai_block: SheetVitrinaV1FeedbacksAiBlock | None = None,
     ) -> None:
         self.runtime = runtime or RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
         self.activated_at_factory = activated_at_factory or _default_activated_at_factory
@@ -509,6 +511,10 @@ class RegistryUploadHttpEntrypoint:
             now_factory=self.now_factory,
         )
         self.feedbacks_block = feedbacks_block or SheetVitrinaV1FeedbacksBlock(now_factory=self.now_factory)
+        self.feedbacks_ai_block = feedbacks_ai_block or SheetVitrinaV1FeedbacksAiBlock(
+            runtime_dir=self.runtime.runtime_dir,
+            now_factory=self.now_factory,
+        )
         self.sheet_load_runner = sheet_load_runner or load_sheet_vitrina_ready_snapshot_via_clasp
         self.operator_jobs = SheetVitrinaV1OperatorJobStore(timestamp_factory=self.activated_at_factory)
         self.seller_portal_recovery = seller_portal_recovery_controller or SellerPortalRecoveryController()
@@ -794,6 +800,15 @@ class RegistryUploadHttpEntrypoint:
             stars=stars,
             is_answered=is_answered,
         )
+
+    def handle_sheet_feedbacks_ai_prompt_get_request(self) -> dict[str, Any]:
+        return self.feedbacks_ai_block.get_prompt()
+
+    def handle_sheet_feedbacks_ai_prompt_save_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.feedbacks_ai_block.save_prompt(payload)
+
+    def handle_sheet_feedbacks_ai_analyze_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.feedbacks_ai_block.analyze(payload)
 
     def handle_sheet_refresh_request(
         self,

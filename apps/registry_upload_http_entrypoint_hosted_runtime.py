@@ -81,6 +81,7 @@ RUNTIME_ENV_CONTRACT = [
 ]
 REQUIRED_SECRET_CONTRACT = [
     "WB_API_TOKEN",
+    "OPENAI_API_KEY",
 ]
 OPTIONAL_RUNTIME_CONTRACT = [
     "WB_OFFICIAL_API_BASE_URL",
@@ -88,6 +89,9 @@ OPTIONAL_RUNTIME_CONTRACT = [
     "WB_SELLER_ANALYTICS_API_BASE_URL",
     "WB_STATISTICS_API_BASE_URL",
     "WB_FEEDBACKS_API_BASE_URL",
+    "OPENAI_MODEL",
+    "OPENAI_API_BASE_URL",
+    "OPENAI_TIMEOUT_SECONDS",
     "PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH",
     "SELLER_PORTAL_CANONICAL_SUPPLIER_ID",
     "SELLER_PORTAL_CANONICAL_SUPPLIER_LABEL",
@@ -1242,6 +1246,8 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             'data-operator-embed-frame="reports"',
             DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
             DEFAULT_SHEET_FEEDBACKS_PATH,
+            "/v1/sheet-vitrina-v1/feedbacks/ai-prompt",
+            "/v1/sheet-vitrina-v1/feedbacks/ai-analyze",
             "surface=page_composition",
             route_paths["SHEET_VITRINA_REFRESH_HTTP_PATH"],
             DEFAULT_SHEET_JOB_PATH,
@@ -1337,7 +1343,11 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Скачать лаунчер",
             "Отзывы",
             "Загрузить отзывы",
+            "AI-промпт разбора",
+            "AI-разбор отзывов",
             DEFAULT_SHEET_FEEDBACKS_PATH,
+            "/v1/sheet-vitrina-v1/feedbacks/ai-prompt",
+            "/v1/sheet-vitrina-v1/feedbacks/ai-analyze",
             "Лог",
         ]
         missing_tokens = [token for token in tokens if token not in body]
