@@ -33,6 +33,7 @@ related_endpoints:
 related_runners:
   - "apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py"
+  - "apps/sheet_vitrina_v1_popup_outside_click_browser_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_reason_sanitization_smoke.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime.py"
@@ -74,6 +75,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - compact summary with separate `Последнее обновление страницы` and `Свежесть данных`
   - compact historical period control now sits in the primary table toolbar, between summary/action context and the table; the old always-expanded `История` block is not rendered by default, so the operator sees the table immediately after a narrow date-range strip
   - table controls are one compact toolbar above the table, not a separate `Фильтры и настройки` section: `Диапазон`, `Поиск`, `Секции`, `Группа`, `Scope`, `Метрики`, `Столбцы`, `Сортировка` share the same line/wrapping strip and reuse the existing local filter/search/sort/column-visibility state
+  - custom browser floating controls in the unified shell close on outside click and `Escape`: historical period popover, column multiselect, research SKU/metric multiselects, research date-range pickers and embedded operator stock-report SKU selector. Inside clicks for checkbox multiselects/date-range selection stay inside the control, and the rule is browser-only UX state, not backend/data truth.
   - main table display headers are Russian (`Раздел`, `Метрика`, `Обновлено`, etc.); backend/API keys stay stable, while `Обновлено` surfaces per-row last successful update timestamp from snapshot metadata
   - `Загрузить и обновить` = canonical server-side refresh from external sources + page reread, without Google Sheet write path
   - two server-driven action-adjacent information blocks:
@@ -104,6 +106,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - render the received page payload
   - keep only local filter/search/sort state
   - keep only browser-owned page reread timestamp for `Последнее обновление страницы`
+  - keep only transient browser-owned popup open/closed state; outside-click/`Escape` close behavior never creates server-side user state and never changes metric/source truth
   - keep only session-local cell highlighting for the last refresh result: `updated` cells render as soft green, `latest_confirmed`/fallback cells render as soft yellow, full refresh highlights every refreshed temporal date column (`yesterday_closed` and `today_current` when both are in scope), group refresh highlights only the selected group/date, and the highlight disappears on browser reload
   - never derive the full-refresh `as_of_date` from `date_from/date_to` or the rightmost `today_current` column; period selection is a read-side window, while `Загрузить и обновить` lets the backend resolve the current closed-day snapshot key
   - keep only session-local source-status load state for `Загрузка данных`: `not_loaded`, `loading`, `loaded`, `empty`, `error`; this state controls visibility of the detailed table and retry button but never becomes source truth
@@ -169,6 +172,8 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - confirms `composition_name/version`, source chain, state namespace, filter surface, timestamp-format hint for `Свежесть данных` and human-readable activity payload fields
 - `apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py`
   - confirms real page render, visible table, lazy source-status initial state, explicit `Загрузить` details flow, filter controls, Russian activity labels/reasons, unified readable freshness timestamp without raw ISO artefacts, empty state on no-match search, reset recovery, period selector UX (`calendar + presets + date_from/date_to + save/reset`) and truthful error state when the ready snapshot is absent
+- `apps/sheet_vitrina_v1_popup_outside_click_browser_smoke.py`
+  - confirms outside-click/`Escape` close behavior for custom browser floating controls across `Витрина`, `Отчеты` embedded stock-report selector and `Исследования`, while checkbox multiselects and date-range first-click selection remain usable
 - `apps/sheet_vitrina_v1_web_vitrina_http_smoke.py`
   - confirms default `web_vitrina_contract` path stays stable, optional `date_from/date_to` works as bounded period window and optional `surface=page_composition` works on the same route with severity-sorted human activity items
 - `apps/sheet_vitrina_v1_web_vitrina_highlight_ui_smoke.py`

@@ -2021,6 +2021,7 @@
     const RESEARCH_UNIFIED_TAB = "research";
     const EMBEDDED_UNIFIED_TABS = new Set(["factory-order", "reports"]);
     const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", RESEARCH_UNIFIED_TAB]);
+    const FLOATING_DETAILS_SELECTOR = "details[data-column-manager], details[data-research-picker]";
     const formattersById = new Map();
     const renderersById = new Map();
     const sortOptionsByValue = new Map();
@@ -2118,27 +2119,10 @@
     sourceStatusLoadButton.addEventListener("click", function() {
       loadSourceStatusDetails();
     });
-    historyToggleButton.addEventListener("click", function(event) {
-      event.stopPropagation();
+    historyToggleButton.addEventListener("click", function() {
       setHistoryPopoverOpen(historyPopoverNode.hidden);
     });
-    historyPopoverNode.addEventListener("click", function(event) {
-      event.stopPropagation();
-    });
-    document.addEventListener("click", function(event) {
-      if (!historyPanelNode.contains(event.target)) {
-        setHistoryPopoverOpen(false);
-      }
-      if (researchPanelNode && !event.target.closest("[data-research-range-field]")) {
-        closeResearchRangePickers();
-      }
-    });
-    document.addEventListener("keydown", function(event) {
-      if (event.key === "Escape") {
-        setHistoryPopoverOpen(false);
-        closeResearchRangePickers();
-      }
-    });
+    setupFloatingControlListeners();
     historyPrevMonthButton.addEventListener("click", function() {
       shiftHistoryVisibleMonth(-1);
     });
@@ -2315,8 +2299,125 @@
       return readPersistedUnifiedTab();
     }
 
+    function setupFloatingControlListeners() {
+      document.querySelectorAll(FLOATING_DETAILS_SELECTOR).forEach(function(detailsNode) {
+        syncDetailsPopoverAria(detailsNode);
+        detailsNode.addEventListener("toggle", function() {
+          syncDetailsPopoverAria(detailsNode);
+          if (detailsNode.open) {
+            closeAllFloatingControls({exceptRoot: detailsNode});
+          }
+        });
+      });
+      document.addEventListener("pointerdown", function(event) {
+        if (!isInsideAnyOpenFloatingControl(event.target)) {
+          closeAllFloatingControls();
+        }
+      }, true);
+      document.addEventListener("keydown", function(event) {
+        if (event.key === "Escape") {
+          closeAllFloatingControls();
+        }
+      });
+    }
+
+    function syncDetailsPopoverAria(detailsNode) {
+      const summaryNode = detailsNode ? detailsNode.querySelector("summary") : null;
+      if (summaryNode) {
+        summaryNode.setAttribute("aria-expanded", detailsNode.open ? "true" : "false");
+      }
+    }
+
+    function setDetailsPopoverOpen(detailsNode, open) {
+      if (!detailsNode) {
+        return;
+      }
+      detailsNode.open = Boolean(open);
+      syncDetailsPopoverAria(detailsNode);
+    }
+
+    function sameFloatingScope(leftNode, rightNode) {
+      if (!leftNode || !rightNode) {
+        return false;
+      }
+      return leftNode === rightNode || leftNode.contains(rightNode) || rightNode.contains(leftNode);
+    }
+
+    function researchRangeFieldNode(kind) {
+      const normalizedKind = String(kind || "");
+      return Array.from(document.querySelectorAll("[data-research-range-field]")).find(function(fieldNode) {
+        return String(fieldNode.getAttribute("data-research-range-field") || "") === normalizedKind;
+      }) || null;
+    }
+
+    function openFloatingControlRoots() {
+      const roots = [];
+      if (historyPanelNode && historyPopoverNode && !historyPopoverNode.hidden) {
+        roots.push(historyPanelNode);
+      }
+      document.querySelectorAll(FLOATING_DETAILS_SELECTOR).forEach(function(detailsNode) {
+        if (detailsNode.open) {
+          roots.push(detailsNode);
+        }
+      });
+      if (state.research.activeRangePicker) {
+        const rangeFieldNode = researchRangeFieldNode(state.research.activeRangePicker);
+        if (rangeFieldNode) {
+          roots.push(rangeFieldNode);
+        }
+      }
+      return roots;
+    }
+
+    function isInsideAnyOpenFloatingControl(targetNode) {
+      if (!(targetNode instanceof Node)) {
+        return false;
+      }
+      return openFloatingControlRoots().some(function(rootNode) {
+        return rootNode.contains(targetNode);
+      });
+    }
+
+    function closeAllFloatingControls(options) {
+      const exceptRoot = (options && options.exceptRoot) || null;
+      if (historyPanelNode && !sameFloatingScope(historyPanelNode, exceptRoot)) {
+        setHistoryPopoverOpen(false, {skipCloseAll: true});
+      }
+      document.querySelectorAll(FLOATING_DETAILS_SELECTOR).forEach(function(detailsNode) {
+        if (!sameFloatingScope(detailsNode, exceptRoot)) {
+          setDetailsPopoverOpen(detailsNode, false);
+        }
+      });
+      if (state.research.activeRangePicker) {
+        const activeRangeFieldNode = researchRangeFieldNode(state.research.activeRangePicker);
+        if (!sameFloatingScope(activeRangeFieldNode, exceptRoot)) {
+          closeResearchRangePickers();
+        }
+      }
+      if (!options || options.skipEmbedded !== true) {
+        closeEmbeddedOperatorPopovers();
+      }
+    }
+
+    function closeEmbeddedOperatorPopovers() {
+      operatorEmbedFrames.forEach(function(frame) {
+        if (!frame || !frame.contentWindow) {
+          return;
+        }
+        try {
+          frame.contentWindow.postMessage(
+            {type: "sheet_vitrina_v1_close_popovers"},
+            window.location.origin
+          );
+        } catch (error) {
+          // Embedded frames are same-origin in the hosted runtime; ignore unloaded frames.
+        }
+      });
+    }
+
     function activateUnifiedTab(tabName, options) {
       const activeTab = normalizeUnifiedTab(tabName);
+      closeAllFloatingControls();
       unifiedTabButtons.forEach(function(button) {
         const selected = button.getAttribute("data-unified-tab-button") === activeTab;
         button.classList.toggle("is-active", selected);
@@ -2395,6 +2496,10 @@
         return;
       }
       const payload = event.data || {};
+      if (payload && payload.type === "sheet_vitrina_v1_operator_embed_pointerdown") {
+        closeAllFloatingControls({skipEmbedded: true});
+        return;
+      }
       if (!payload || payload.type !== "sheet_vitrina_v1_operator_embed_height") {
         if (payload && payload.type === "sheet_vitrina_v1_operator_embed_wheel") {
           window.scrollBy({
@@ -3329,9 +3434,12 @@
       historyLabelNode.textContent = "Период не выбран";
     }
 
-    function setHistoryPopoverOpen(open) {
+    function setHistoryPopoverOpen(open, options) {
       if (!historyPopoverNode || !historyToggleButton) {
         return;
+      }
+      if (open && (!options || options.skipCloseAll !== true)) {
+        closeAllFloatingControls({exceptRoot: historyPanelNode});
       }
       historyPopoverNode.hidden = !open;
       historyToggleButton.setAttribute("aria-expanded", open ? "true" : "false");
@@ -4568,6 +4676,7 @@
       if (state.research.activeRangePicker === kind) {
         state.research.activeRangePicker = "";
       } else {
+        closeAllFloatingControls({exceptRoot: researchRangeFieldNode(kind)});
         state.research.activeRangePicker = kind;
         const fields = researchRangeFields(kind);
         const dateCapabilities = ((state.research.options || {}).date_capabilities || {});
@@ -4595,6 +4704,9 @@
         state.research.rangeAwaitingEnd[kind] = false;
       }
       state.research.rangeVisibleMonthStart[kind] = clampResearchRangeMonthStart(kind, startOfMonthIso(dateValue));
+      if (state.research[fields.from] && state.research[fields.to] && !state.research.rangeAwaitingEnd[kind]) {
+        state.research.activeRangePicker = "";
+      }
       clearResearchResult();
       renderResearchPanel();
     }

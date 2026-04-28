@@ -25,6 +25,7 @@ related_endpoints:
 related_runners:
   - "apps/sheet_vitrina_v1_research_sku_group_comparison_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py"
+  - "apps/sheet_vitrina_v1_popup_outside_click_browser_smoke.py"
 related_docs:
   - "26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
   - "31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
@@ -62,6 +63,8 @@ MVP-блок:
 - selector `Метрики`;
 - primary action `Рассчитать`;
 - result table/grid с базой/анализом, дельтами, отличием изменений и покрытием; контейнер использует существующий `table-shell / table-scroll / vitrina-table` паттерн и обязан иметь горизонтальную прокрутку при узкой ширине.
+
+Research SKU/metric selectors and date-range pickers are browser-only floating controls: outside click and `Escape` close the active control, while checkbox clicks and the first date-range click do not close it prematurely. This behavior does not change the options/calculate API, accepted truth, ready snapshots or Google Sheets/GAS boundary.
 
 Chip `Товар в акции` является только UI candidate filter для dropdown SKU selector:
 - он не выбирает SKU автоматически;
