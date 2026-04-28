@@ -173,6 +173,13 @@ For current web-vitrina work, final verification is the server/public web surfac
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition`
 - `GET /sheet-vitrina-v1/vitrina`
 
+Promo current correctness guard:
+- run `python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py` after hosted deploys or live/public verification tasks where current promo correctness must be proven, and after any change touching `promo_by_price` materialization, promo archive/artifact validation, promo collector diagnostics/status handling, expected `ended_without_download` / non-materializable campaign handling, `sheet_vitrina_v1` refresh orchestration, promo temporal acceptance/fallback, promo source-status reduction, or web-vitrina read/page-composition code that can affect promo metric row visibility.
+- The smoke is read-only: it reads public `status`, `web-vitrina` and `plan` surfaces and does not call `/v1/sheet-vitrina-v1/load`, Google Sheets/GAS, browser `localStorage`, or a refresh endpoint.
+- It validates that `metadata.refresh_diagnostics.source_slots[]` contains `promo_by_price[today_current]`, source status/origin and `requested_count / covered_count` are coherent, `fatal_missing_artifact_count == 0` and `true_artifact_loss_count == 0` when exposed, expected ended/no-download artifacts remain diagnostic-only with `workbook_required=false` instead of fatal, current promo metric rows are present and not all blank, and truthful zero rows for ineligible SKU remain valid.
+- Preferred command: `python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py`.
+- If the local machine cannot validate the selleros certificate chain, the accepted diagnostic-only fallback is `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1 python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py`. This is only a local CA verification fallback; route timeouts, non-200 responses or bad payloads are real blockers.
+
 Google Sheets, GAS, `clasp`, `/v1/sheet-vitrina-v1/load` and `invalid_grant` are not active blockers for web-vitrina completion. If a task explicitly changes archived Apps Script guard code, verify blocked/archived behavior only.
 
 `deploy-and-verify` may be used as one combined step when access is already safe and available.
@@ -264,6 +271,7 @@ If the task introduces or changes temporal closed-day retry behavior for `sheet_
 
 If the local machine cannot validate the current selleros certificate chain, public probe may reuse the existing bounded diagnostic fallback:
 - `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py public-probe ...`
+- `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1 python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py` when the required promo current invariant guard is the failing local-CA step.
 
 This fallback is only for local diagnostic reachability. It is not a statement that live runtime should run insecurely.
 

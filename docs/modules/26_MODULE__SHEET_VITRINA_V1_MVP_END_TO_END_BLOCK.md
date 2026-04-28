@@ -106,6 +106,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py"
+  - "apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_integration_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_view_model_smoke.py"
@@ -555,6 +556,8 @@ Bounded допущение:
   - `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py loopback-probe`
   - `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py public-probe`
 - Этот runner применим и к current branch/PR without merge-before-verify, потому что деплоит current checked-out worktree, а не требует сначала merge в `main`.
+- Promo current correctness checklist: additionally run `python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py` after changes touching `promo_by_price`, promo archive/artifact validation, promo collector diagnostics/status handling, expected `ended_without_download` campaign handling, refresh orchestration, promo temporal acceptance/fallback, promo source-status reduction, or web-vitrina read/page-composition paths that can affect promo metric row visibility. If local CA verification blocks the public read, use `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1 python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py` only as the accepted local diagnostic fallback; route timeout or bad payload remains a blocker.
+- This guard verifies public `status` / `web-vitrina` / `plan`, `promo_by_price[today_current]` diagnostics, coherent `requested_count / covered_count`, zero fatal/true artifact loss counters when exposed, diagnostic-only ended/no-download artifacts and non-blank current promo rows. It does not use `/load`, Google Sheets/GAS, Sheets or browser/localStorage truth.
 - Если `clasp` credentials для archived guard publish, live runtime access или publish rights недоступны, final handoff обязан явно назвать blocker и не маркировать задачу как fully complete.
 
 # 4. Артефакты и wiring по модулю
@@ -595,6 +598,7 @@ Bounded допущение:
 - `apps/web_source_temporal_adapter_smoke.py`
 - `apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py`
 - `apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py`
+- `apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py`
 
 # 6. Какой smoke подтверждён
 
@@ -610,6 +614,7 @@ Bounded допущение:
 - Подтверждён targeted auto scheduler/status smoke через `apps/sheet_vitrina_v1_auto_update_smoke.py`.
 - Подтверждён integration smoke для retry/acceptance cycle через `apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py`.
 - Подтверждён targeted server-driven smoke через `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`, включая same-day blank overwrite, который обязан затирать stale sheet cell вместо сохранения старого значения.
+- Подтверждён live/public invariant smoke через `apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py` для защиты current promo rows после изменений в `promo_by_price`, refresh orchestration или web-vitrina read surface.
 - Smoke проверяет:
   - что `prepare` поднимает operator seed `33 / 102 / 7`;
   - что upload из sheet-side trigger сохраняет current truth в existing runtime без усечения `metrics_v2`;
@@ -633,6 +638,7 @@ Bounded допущение:
   - что later invalid auto/manual current-only attempt не перетирает already accepted same-day snapshot;
   - что manual refresh не создаёт persisted long-retry tail;
   - что `STATUS` фиксирует live sources per temporal slot, `cost_price[*]` coverage и current/closed promo source facts `promo_by_price[*]` with collector trace/debug note;
+  - что public `promo_by_price[today_current]` diagnostics не превращают expected ended/no-download campaign в fatal missing artifact и что current promo metric rows не становятся all blank;
   - что service/status block `CONFIG!H:I` сохраняется и не перезаписывается при load.
 
 # 7. Что уже доказано по модулю
