@@ -51,7 +51,7 @@ _DISTRICT_NAME_BY_KEY = {key: name for key, name, _ in _DISTRICT_SPECS}
 _DISTRICT_FIELD_BY_KEY = {key: field_name for key, _, field_name in _DISTRICT_SPECS}
 _DISTRICT_ORDER_INDEX = {key: index for index, key in enumerate(DISTRICT_KEYS)}
 _SHARED_STOCK_LABEL = "Остатки ФФ"
-_DISTRICT_FILE_HEADERS = ["nmId", "SKU", "Количество к поставке"]
+_DISTRICT_FILE_HEADERS = ["nmId", "SKU", "Количество к поставке", "Дефицит"]
 _WEIGHT_COEFFICIENT = 0.08593
 _VOLUME_DIVISOR = 204.38
 _DEFAULT_SALES_AVG_PERIOD_DAYS = 14
@@ -437,12 +437,16 @@ class WbRegionalSupplyBlock:
 
     def _build_district_workbook_bytes(self, district: WbRegionalSupplyDistrictResult) -> bytes:
         rows: list[list[Any]] = [
-            ["Федеральный округ", district.district_name_ru, ""],
+            ["Федеральный округ", district.district_name_ru, "", ""],
             [],
             _DISTRICT_FILE_HEADERS,
         ]
         rows.extend(
-            [[row.nm_id, row.sku_comment, row.allocated_qty] for row in district.rows if row.allocated_qty > 0]
+            [
+                [row.nm_id, row.sku_comment, row.allocated_qty, row.deficit_qty]
+                for row in district.rows
+                if row.allocated_qty > 0 or row.deficit_qty > 0
+            ]
         )
         sheet_name = _truncate_sheet_name(district.district_name_ru)
         return build_single_sheet_workbook_bytes(sheet_name, rows)

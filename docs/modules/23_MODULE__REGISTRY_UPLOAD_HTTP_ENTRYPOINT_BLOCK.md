@@ -332,9 +332,9 @@ update_note: "Обновлён под current operator report checkpoint: report
   - итоговые summary/result values (`Общее количество`, `Расчётный вес`, `Расчётный объём`, recommendation XLSX) остаются server-driven и не вычисляются в browser или sheet.
 - Для regional supply block result contract теперь также server-driven:
   - top summary surface = `Статус`, `Дата отчёта`, `Цикл поставок, дней`, `Активных SKU`, `Общее количество`, `Расчётный вес`, `Расчётный объём`;
-  - compact district table = `Федеральный округ / Общее количество в поставке / Дефицит`;
+  - compact district table = `Федеральный округ / Общее количество / Дефицит / Скачать Excel`; district XLSX action находится в строке округа, без отдельного нижнего блока-списка;
   - server хранит и публикует отдельный XLSX на каждый округ, а не один общий recommendation workbook;
-  - district XLSX содержит district identification + compact operator rows `nmId / SKU / Количество к поставке` именно по фактически аллоцированному количеству после ограничения `stock_ff`.
+  - district XLSX содержит district identification + compact operator rows `nmId / SKU / Количество к поставке / Дефицит`; quantity берётся из фактической allocation после ограничения `stock_ff`, а `Дефицит` берётся из уже рассчитанного row-level backend deficit.
 - Current repo state не имел другого authoritative source для legacy parity term `FO_INBOUND_FF_TO_WB`, поэтому entrypoint получил narrow explicit upload contract `Товары в пути от ФФ на Wildberries`; silent drop этого члена формулы считается некорректным.
 - Operator page keeps narrow Russian chrome for operator-visible labels: compact manual block `Ручная загрузка данных` with active action `Загрузить данные`; former Google Sheets send/load action `Отправить данные` is archived/disabled and is not a runtime/update/write/load/verify target. The page keeps two persisted manual-success timestamp fields `Последняя удачная загрузка` / `Последняя удачная отправка` plus short persisted semantic summaries for the latest manual refresh/archived-load state, separate `Лог` block and separate compact auto block `Автообновления`; page reload must not present persisted refresh metadata as standalone proof of a Google Sheets write.
 - Operator page добавляет отдельный top-level tab `Отчёты` с одним sibling selector по образцу supply tab:
