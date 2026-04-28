@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-23-REGISTRY-UPLOAD-HTTP-ENTRYPOINT-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `registry_upload_http_entrypoint_block`."
-scope: "Первый live inbound HTTP entrypoint для V2-реестров, separate `COST_PRICE` upload contour и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, sibling cost-price request, thin request -> runtime -> response wiring, server-side `activated_at`, separated refresh/load actions, date-aware plan/status read, compact read-only daily/stock/plan-execution report surfaces, repo-owned orchestration-first operator page, sibling phase-4 web-vitrina page composition поверх stable seams и existing read route, plus bounded server-side factory-order supply contour без SPA/build pipeline."
+scope: "Первый live inbound HTTP entrypoint для V2-реестров, separate `COST_PRICE` upload contour и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, sibling cost-price request, thin request -> runtime -> response wiring, server-side `activated_at`, separated refresh/load actions, date-aware plan/status read, compact read-only daily/stock/plan-execution report surfaces, repo-owned orchestration-first operator page, sibling phase-4 web-vitrina page composition поверх stable seams и existing read route, read-only `Отзывы` tab/feedbacks route over official WB API, plus bounded server-side factory-order supply contour без SPA/build pipeline."
 source_basis:
   - "migration/86_registry_upload_contract.md"
   - "migration/89_registry_upload_db_backed_runtime.md"
@@ -28,10 +28,12 @@ related_modules:
   - "packages/application/simple_xlsx.py"
   - "packages/application/sheet_vitrina_v1_load_bridge.py"
   - "packages/application/sheet_vitrina_v1_plan_report.py"
+  - "packages/application/sheet_vitrina_v1_feedbacks.py"
   - "packages/application/sheet_vitrina_v1_web_vitrina.py"
   - "packages/application/web_vitrina_gravity_table_adapter.py"
   - "packages/application/web_vitrina_page_composition.py"
   - "packages/adapters/registry_upload_http_entrypoint.py"
+  - "packages/adapters/wb_feedbacks.py"
   - "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"
 related_tables:
   - "CONFIG_V2"
@@ -51,6 +53,7 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx"
   - "POST /v1/sheet-vitrina-v1/plan-report/baseline-upload"
   - "GET /v1/sheet-vitrina-v1/plan-report/baseline-status"
+  - "GET /v1/sheet-vitrina-v1/feedbacks"
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
   - "GET /v1/sheet-vitrina-v1/job"
@@ -93,6 +96,8 @@ related_runners:
   - "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_reason_sanitization_smoke.py"
   - "apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py"
+  - "apps/sheet_vitrina_v1_feedbacks_http_smoke.py"
+  - "apps/sheet_vitrina_v1_feedbacks_browser_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_integration_smoke.py"
   - "apps/cost_price_upload_http_entrypoint_smoke.py"
@@ -106,7 +111,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current operator report checkpoint: reports tab включает `Выполнение плана` поверх `GET /v1/sheet-vitrina-v1/plan-report` with per-block coverage and controlled manual monthly baseline XLSX upload/status/template routes; sibling page route фиксирован как `/sheet-vitrina-v1/vitrina`, default `GET /v1/sheet-vitrina-v1/web-vitrina` по-прежнему materialize-ит stable library-agnostic `web_vitrina_contract` v1, source/reporting semantics учитывают expected temporal model per source family, а bot-backed current-day sync имеет permanent operator-facing seller-session block (`session-check/start/status/stop/launcher`) поверх repo-owned localhost-only noVNC/Xvfb relogin tool."
+update_note: "Обновлён под read-only feedbacks MVP: unified `/sheet-vitrina-v1/vitrina` содержит вкладку `Отзывы`, а HTTP entrypoint добавляет `GET /v1/sheet-vitrina-v1/feedbacks` поверх official WB API `/api/v1/feedbacks` через canonical `WB_API_TOKEN`; route не пишет runtime state, не использует Google Sheets/GAS и не меняет web-vitrina truth contracts."
 ---
 
 # 1. Идентификатор и статус
@@ -172,6 +177,7 @@ update_note: "Обновлён под current operator report checkpoint: report
   - `GET /v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx` = compact XLSX template for manual monthly baseline rows (`Месяц`, `Выкуп, руб. / fin_buyout_rub`, `Рекламные расходы, руб. / ads_sum`)
   - `POST /v1/sheet-vitrina-v1/plan-report/baseline-upload` = controlled operator XLSX upload for `manual_monthly_plan_report_baseline`; validates month format, numeric non-negative facts and empty-file/duplicate-month errors, then idempotently stores monthly aggregates in runtime SQLite
   - `GET /v1/sheet-vitrina-v1/plan-report/baseline-status` = cheap JSON status for loaded monthly baseline rows and totals
+  - `GET /v1/sheet-vitrina-v1/feedbacks` = read-only JSON contract for unified tab `Отзывы`; it calls official WB API `GET /api/v1/feedbacks` through canonical `WB_API_TOKEN`, passes `dateFrom/dateTo` as Unix timestamps, uses `order=dateDesc`, bounded `take/skip` pagination and the required `isAnswered` parameter (`all` reads `false` and `true` streams, then merges/sorts). The route normalizes rows for the browser table, supports `stars` and `is_answered` filters, surfaces friendly 401/403/429/5xx errors and never writes runtime DB, ready snapshots, Google Sheets/GAS or browser-local truth.
   - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
   - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result, where root `status` is semantic snapshot outcome rather than mere ready-snapshot existence
   - `GET /v1/sheet-vitrina-v1/job` = cheap poll/read surface для live operator log и async action state
@@ -181,7 +187,7 @@ update_note: "Обновлён под current operator report checkpoint: report
   - `source_slots` records per-source/per-slot timing, status, semantic status, origin classification, row counters and known lightweight source counters; adapter-internal retry/sleep/batch/page/poll counters may remain `null` until the relevant adapters expose them
   - for `promo_by_price` source slots, `source_slots[].promo_diagnostics` may additionally include promo-specific internal phase timings, counters, observation-only fingerprints, current-attempt acceptance/fallback reason fields and a dry-run-only skip marker; this nested block is diagnostics-only and must not be used as browser/localStorage truth or as a skip/reuse gate
   - diagnostics are observability metadata only: they must not change source fetch policy, accepted/fallback truth, temporal slot semantics, retry behavior, Google Sheets/GAS archive boundary or browser/localStorage truth
-- `GET /sheet-vitrina-v1/operator` = simple repo-owned page с top-level tabs `Обновление данных` / `Расчёт поставок` / `Отчёты`
+- `GET /sheet-vitrina-v1/operator` = compatibility entry to the same unified shell as `/sheet-vitrina-v1/vitrina`; active top-level tabs include `Витрина` / `Расчёт поставок` / `Отчёты` / `Отзывы` / `Исследования`, while former standalone `Обновление данных` is not a separate top-level tab
   - route intentionally остаётся orchestration-first control surface и не получает новый heavy web-vitrina block внутрь existing HTML shell
   - block `Проверка и восстановление Seller-сессии` внутри `Обновление данных` остаётся таким же bounded operator seam, а не отдельной инженерной консолью:
     - `GET /v1/sheet-vitrina-v1/seller-portal-session/check` читает current seller storage state, запускает current session probe, проверяет canonical supplier/org и возвращает truthful short result (`session_valid_canonical / session_valid_wrong_org / session_invalid / session_missing / session_probe_error`) без запуска Xvfb/noVNC

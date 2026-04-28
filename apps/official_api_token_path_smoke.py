@@ -17,6 +17,7 @@ from packages.adapters.sales_funnel_history_block import HttpBackedSalesFunnelHi
 from packages.adapters.sf_period_block import HttpBackedSfPeriodSource
 from packages.adapters.spp_block import HttpBackedSppSource
 from packages.adapters.stocks_block import HistoricalCsvBackedStocksSource, HttpBackedStocksSource
+from packages.adapters.wb_feedbacks import HttpBackedWbFeedbacksSource
 
 
 def main() -> None:
@@ -30,6 +31,7 @@ def main() -> None:
         "sales_funnel_history": HttpBackedSalesFunnelHistorySource(),
         "ads_compact": HttpBackedAdsCompactSource(),
         "fin_report_daily": HttpBackedFinReportDailySource(),
+        "wb_feedbacks": HttpBackedWbFeedbacksSource(),
     }
     for source_key, source in sources.items():
         token_env_var = getattr(source, "_token_env_var", None)
