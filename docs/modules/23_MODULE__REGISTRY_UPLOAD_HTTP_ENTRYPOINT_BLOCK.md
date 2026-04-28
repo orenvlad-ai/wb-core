@@ -78,6 +78,7 @@ related_runners:
   - "apps/registry_upload_http_entrypoint_hosted_runtime.py"
   - "apps/registry_upload_http_entrypoint_smoke.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"
+  - "apps/registry_upload_http_entrypoint_public_routes_smoke.py"
   - "apps/sheet_vitrina_v1_seller_portal_recovery_http_smoke.py"
   - "apps/sheet_vitrina_v1_operator_ui_persistence_smoke.py"
   - "apps/factory_order_sales_history_smoke.py"
@@ -111,7 +112,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под read-only feedbacks MVP: unified `/sheet-vitrina-v1/vitrina` содержит вкладку `Отзывы`, а HTTP entrypoint добавляет `GET /v1/sheet-vitrina-v1/feedbacks` поверх official WB API `/api/v1/feedbacks` через canonical `WB_API_TOKEN`; route не пишет runtime state, не использует Google Sheets/GAS и не меняет web-vitrina truth contracts."
+update_note: "Обновлён под repo-owned hosted public route publication: deploy runner теперь читает manifest `artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`, рендерит managed nginx block для public routes including `GET /v1/sheet-vitrina-v1/feedbacks`, делает backup, `nginx -t` и reload вместо ручной live nginx правки."
 ---
 
 # 1. Идентификатор и статус
@@ -151,6 +152,12 @@ update_note: "Обновлён под read-only feedbacks MVP: unified `/sheet-v
   - `activated_at`
 - HTTP boundary не должен навязывать fixed row-count presets для `config_v2 / metrics_v2 / formulas_v2`.
 - `accepted_counts` обязаны отражать фактические длины списков из request body после successful ingest.
+- Hosted/public publication boundary теперь repo-owned:
+  - canonical allowlist живёт в `artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`;
+  - `apps/registry_upload_http_entrypoint_hosted_runtime.py deploy` применяет его к configured nginx server config as one managed block `WB-CORE MANAGED PUBLIC ROUTES`;
+  - перед изменением server config создаётся timestamped backup, затем выполняется `nginx -t`, и nginx reload происходит только после successful validation;
+  - repeated deploy replaces the same managed block and matching legacy/manual locations instead of duplicating route locations;
+  - new public routes in this contour must be added to the manifest and covered by `apps/registry_upload_http_entrypoint_public_routes_smoke.py`, not manually edited on the live host.
 - COST_PRICE contour не подмешивается в main compact registry bundle и хранится в runtime как отдельный authoritative dataset/current-state seam.
 - Existing `POST /v1/cost-price/upload` остаётся единственным write path для себестоимостей, а existing `POST /v1/sheet-vitrina-v1/refresh` / `GET /v1/sheet-vitrina-v1/plan` / `GET /v1/sheet-vitrina-v1/status` используют этот current state только server-side:
   - match по `group`;

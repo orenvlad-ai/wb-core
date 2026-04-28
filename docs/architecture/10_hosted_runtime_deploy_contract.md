@@ -61,6 +61,9 @@ Canonical repo-owned systemd artifacts for this contour:
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.service`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
 
+Canonical repo-owned public route allowlist:
+- `artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`
+
 Runner работает от current checked-out worktree и поэтому применим к незамёрженному branch/PR without merge-before-verify, если доступны safe deploy rights.
 
 Supported commands:
@@ -85,6 +88,7 @@ Checked-in target template фиксирует field names, которые бол
 - `systemd_unit_directory`
 - `systemd_units_source_dir`
 - `managed_systemd_units`
+- `nginx_public_routes`
 - `runtime_env`
 
 Known selleros target values теперь зафиксированы repo-owned:
@@ -100,6 +104,10 @@ Known selleros target values теперь зафиксированы repo-owned:
 - `systemd_unit_directory = /etc/systemd/system`
 - `systemd_units_source_dir = artifacts/registry_upload_http_entrypoint/systemd`
 - `managed_systemd_units = refresh.service + refresh.timer + closure-retry.service + closure-retry.timer`
+- `nginx_public_routes.server_config_path = /etc/nginx/sites-enabled/wb-ai`
+- `nginx_public_routes.manifest_path = artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`
+- `nginx_public_routes.test_command = nginx -t`
+- `nginx_public_routes.reload_command = systemctl reload nginx`
 - route paths inside `runtime_env` follow current entrypoint defaults
 
 Secrets and mutable credentials по-прежнему не хранятся в Git. Repo stores only non-secret target wiring and unit artifacts.
@@ -195,8 +203,11 @@ Current deploy contract note:
   - sync current checkout;
   - ensure required hosted runtime python packages are present (`openpyxl==3.1.5`, `playwright==1.58.0`);
   - install/update repo-owned systemd units when configured;
+  - render the repo-owned nginx public route allowlist into the configured server block, create a timestamped backup before changing the file, validate with `nginx -t`, and reload nginx only after validation succeeds;
   - restart runtime;
   - only after that run loopback/public verification.
+- nginx public route publishing is idempotent: the runner removes prior `WB-CORE MANAGED PUBLIC ROUTES` block and matching legacy/manual locations from the configured server config, then inserts one generated block from `artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`. New public routes for this contour must be added to that manifest and verified through the deploy runner; manual live nginx edits are not the completion path.
+- The allowlist intentionally uses exact locations plus narrow route-family prefixes such as `/v1/sheet-vitrina-v1/supply/factory-order/`, `/v1/sheet-vitrina-v1/supply/wb-regional/` and `/v1/sheet-vitrina-v1/research/`; broad catch-all publication is not part of the current contract.
 
 If deploy / publish / restart / probe / required verify steps are safe and available, Codex обязана выполнить их в том же bounded execution. `clasp` is part of this list only for archived Apps Script guard changes.
 If any of these steps are unavailable or unsafe, execution must return incomplete with an exact blocker instead of a vague ops-gap.

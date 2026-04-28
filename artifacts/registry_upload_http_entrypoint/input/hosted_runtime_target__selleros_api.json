@@ -10,6 +10,14 @@
   "environment_file": "/opt/wb-ai/.env",
   "systemd_unit_directory": "/etc/systemd/system",
   "systemd_units_source_dir": "artifacts/registry_upload_http_entrypoint/systemd",
+  "nginx_public_routes": {
+    "server_config_path": "/etc/nginx/sites-enabled/wb-ai",
+    "backup_dir": "/etc/nginx/sites-enabled",
+    "test_command": "nginx -t",
+    "reload_command": "systemctl reload nginx",
+    "manifest_path": "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json",
+    "managed_block_label": "WB-CORE MANAGED PUBLIC ROUTES"
+  },
   "managed_systemd_units": [
     {
       "name": "wb-core-sheet-vitrina-refresh.service",
