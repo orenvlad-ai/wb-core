@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from io import BytesIO
 import json
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+
+from openpyxl import load_workbook
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -147,11 +150,15 @@ def main() -> None:
             raise AssertionError("central district filename must be operator-friendly and Russian")
         if central_rows[0][:2] != ["Федеральный округ", "Центральный федеральный округ"]:
             raise AssertionError("district workbook must start with district identification")
-        if central_rows[2] != ["nmId", "SKU", "Количество к поставке"]:
-            raise AssertionError("district workbook must keep compact Russian headers")
+        if central_rows[2] != ["nmId", "SKU", "Количество к поставке", "Дефицит"]:
+            raise AssertionError("district workbook must keep compact Russian headers with deficit")
+        load_workbook(BytesIO(central_workbook), data_only=True)
         central_allocated_sum = sum(int(row[2]) for row in central_rows[3:] if len(row) >= 3 and str(row[2]).strip())
+        central_deficit_sum = sum(int(row[3]) for row in central_rows[3:] if len(row) >= 4 and str(row[3]).strip())
         if central_allocated_sum != districts["central"].total_qty:
             raise AssertionError("district workbook sum must equal district total in summary")
+        if central_deficit_sum != districts["central"].deficit_qty:
+            raise AssertionError("district workbook deficit sum must equal district deficit in summary")
 
         far_workbook, far_filename = regional_block.download_district_recommendation("far_siberia")
         far_rows = read_first_sheet_rows(far_workbook)
@@ -159,12 +166,14 @@ def main() -> None:
             raise AssertionError("far_siberia filename must follow the Russian district label")
         if len(far_rows) != 3:
             raise AssertionError("district with zero allocation must still materialize an empty operator-friendly workbook")
+        load_workbook(BytesIO(far_workbook), data_only=True)
 
         print(f"shared_stock_ff_reuse: ok -> {regional_status.shared_datasets['stock_ff'].uploaded_filename}")
         print(f"regional_total_qty: ok -> {result.summary.total_qty}")
         print(f"central_deficit: ok -> {districts['central'].deficit_qty}")
         print(f"northwest_deficit: ok -> {districts['northwest'].deficit_qty}")
         print(f"district_xlsx_sum: ok -> {central_allocated_sum}")
+        print(f"district_xlsx_deficit_sum: ok -> {central_deficit_sum}")
 
 
 def _seed_runtime_sales_history(runtime: RegistryUploadDbBackedRuntime, *, active_nm_ids: list[int]) -> None:

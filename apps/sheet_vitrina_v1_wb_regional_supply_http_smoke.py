@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from io import BytesIO
 import json
 from pathlib import Path
 import socket
@@ -11,6 +12,8 @@ from tempfile import TemporaryDirectory
 import threading
 from types import SimpleNamespace
 from urllib import error, request as urllib_request
+
+from openpyxl import load_workbook
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -124,10 +127,17 @@ def main() -> None:
                 "Доставка до склада Wildberries, дней",
                 "Рассчитать поставку на Wildberries",
                 "Сводка по федеральным округам",
-                "XLSX по округам",
+                "Скачать Excel",
+                "<th>Общее количество</th>",
+                "<th>Дефицит</th>",
+                "<th>Скачать Excel</th>",
+                "data-regional-district-download",
             ):
                 if expected not in operator_html:
                     raise AssertionError(f"operator page must expose {expected!r}")
+            for removed in ("XLSX по округам", "Excel по округам", "regionalDistrictDownloads", "district-download-list"):
+                if removed in operator_html:
+                    raise AssertionError(f"regional UI must not render duplicated district download block token {removed!r}")
             if "https://docs.google.com/spreadsheets/d/" in operator_html:
                 raise AssertionError("wb-regional supply surface must not expose legacy Google Sheets as an active link")
             if "value=\"14\"" not in operator_html or "value=\"15\"" not in operator_html or "value=\"250\"" not in operator_html:
@@ -190,10 +200,16 @@ def main() -> None:
             district_status, district_bytes, district_headers = _get_bytes(f"{base_url}{central_download_path}")
             if district_status != 200 or "spreadsheetml.sheet" not in str(district_headers.get("Content-Type", "")):
                 raise AssertionError("district download route must return XLSX")
+            load_workbook(BytesIO(district_bytes), data_only=True)
             district_rows = read_first_sheet_rows(district_bytes)
+            if district_rows[2] != ["nmId", "SKU", "Количество к поставке", "Дефицит"]:
+                raise AssertionError(f"district XLSX must expose the deficit column, got {district_rows[2]}")
             district_qty_sum = sum(int(row[2]) for row in district_rows[3:] if len(row) >= 3 and str(row[2]).strip())
+            district_deficit_sum = sum(int(row[3]) for row in district_rows[3:] if len(row) >= 4 and str(row[3]).strip())
             if district_qty_sum != districts["central"]["total_qty"]:
                 raise AssertionError("district XLSX must match the regional summary total for the same district")
+            if district_deficit_sum != districts["central"]["deficit_qty"]:
+                raise AssertionError("district XLSX deficit must match the regional summary deficit for the same district")
 
             delete_status, delete_payload = _delete_json(f"{base_url}{DEFAULT_FACTORY_ORDER_DELETE_STOCK_FF_PATH}")
             if delete_status != 200 or delete_payload.get("status") != "deleted":
@@ -216,6 +232,7 @@ def main() -> None:
             print(f"regional_summary_total: ok -> {calc_payload.get('summary', {}).get('total_qty')}")
             print(f"regional_central_deficit: ok -> {districts['central']['deficit_qty']}")
             print(f"regional_district_xlsx_sum: ok -> {district_qty_sum}")
+            print(f"regional_district_xlsx_deficit_sum: ok -> {district_deficit_sum}")
             print(f"regional_missing_shared_blocker: ok -> {blocked_payload.get('error')}")
         finally:
             server.shutdown()

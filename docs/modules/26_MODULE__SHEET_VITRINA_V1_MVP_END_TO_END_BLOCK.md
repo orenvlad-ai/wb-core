@@ -274,7 +274,8 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - factory-order coverage includes `stock_total`, uploaded `stock_ff`, inbound from factory to FF inside horizon and the parity-critical uploaded inbound `ФФ -> Wildberries`
   - result surface gives both downloadable XLSX recommendation and the same `Общее количество` / `Расчётный вес` / `Расчётный объём` summary directly in UI
   - regional block does not materialize inbound `ФФ -> Wildberries`; this input stays outside the current bounded scope
-  - regional result surface gives server-driven summary, a compact district deficit table and separate district XLSX files keyed by the six canonical federal districts
+  - regional result surface gives server-driven summary and a compact district table `Федеральный округ / Общее количество / Дефицит / Скачать Excel`; each row links to the existing district XLSX route for that federal district, so a duplicated lower `Excel/XLSX по округам` list is not rendered
+  - district XLSX files are keyed by the six canonical federal districts and include Russian headers `nmId / SKU / Количество к поставке / Дефицит`; the `Дефицит` value comes from the already calculated backend row-level deficit, not from browser/UI recomputation
 - Канонический prepare output:
   - `CONFIG` с uploaded compact rows
   - `METRICS` с uploaded compact rows

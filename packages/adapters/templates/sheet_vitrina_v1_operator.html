@@ -1250,37 +1250,6 @@
       border-bottom: 0;
     }
 
-    .district-downloads {
-      display: grid;
-      gap: 10px;
-    }
-
-    .district-download-list {
-      display: grid;
-      gap: 10px;
-    }
-
-    .district-download-item {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      flex-wrap: wrap;
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      background: #ffffff;
-      padding: 14px 16px;
-    }
-
-    .district-download-item strong {
-      font-size: 14px;
-    }
-
-    .district-download-item span {
-      font-size: 13px;
-      color: var(--muted);
-    }
-
     @media (max-width: 760px) {
       .page {
         padding: 28px 16px;
@@ -1933,28 +1902,17 @@
                 <thead>
                   <tr>
                     <th>Федеральный округ</th>
-                    <th>Общее количество в поставке</th>
+                    <th>Общее количество</th>
                     <th>Дефицит</th>
+                    <th>Скачать Excel</th>
                   </tr>
                 </thead>
                 <tbody id="regionalDistrictTableBody">
                   <tr>
-                    <td colspan="3">Результат ещё не подготовлен.</td>
+                    <td colspan="4">Результат ещё не подготовлен.</td>
                   </tr>
                 </tbody>
               </table>
-            </div>
-          </section>
-
-          <section class="block" aria-labelledby="regional-downloads-title" style="margin-top: 28px;">
-            <div class="block-header">
-              <h2 id="regional-downloads-title" class="block-title">XLSX по округам</h2>
-            </div>
-            <div id="regionalDistrictDownloads" class="district-download-list">
-              <div class="district-download-item">
-                <strong>Файлы будут доступны после расчёта</strong>
-                <span>Сервер подготовит отдельный XLSX для каждого федерального округа.</span>
-              </div>
             </div>
           </section>
         </section>
@@ -2118,7 +2076,6 @@
       const regionalActiveSkuCount = document.getElementById("regionalActiveSkuCount");
       const regionalMessage = document.getElementById("regionalMessage");
       const regionalDistrictTableBody = document.getElementById("regionalDistrictTableBody");
-      const regionalDistrictDownloads = document.getElementById("regionalDistrictDownloads");
       const calculateRegionalSupplyButton = document.getElementById("calculateRegionalSupplyButton");
 
       const actionLabels = {
@@ -3611,37 +3568,23 @@
       function renderRegionalDistricts(districts) {
         const items = Array.isArray(districts) ? districts : [];
         if (!items.length) {
-          regionalDistrictTableBody.innerHTML = "<tr><td colspan=\"3\">Результат ещё не подготовлен.</td></tr>";
-          regionalDistrictDownloads.innerHTML = [
-            "<div class=\"district-download-item\">",
-            "<strong>Файлы будут доступны после расчёта</strong>",
-            "<span>Сервер подготовит отдельный XLSX для каждого федерального округа.</span>",
-            "</div>"
-          ].join("");
+          regionalDistrictTableBody.innerHTML = "<tr><td colspan=\"4\">Результат ещё не подготовлен.</td></tr>";
           return;
         }
-        regionalDistrictTableBody.innerHTML = items.map((item) => [
-          "<tr>",
-          "<td>" + valueOrDash(item.district_name_ru) + "</td>",
-          "<td>" + valueOrDash(item.total_qty) + "</td>",
-          "<td>" + valueOrDash(item.deficit_qty) + "</td>",
-          "</tr>"
-        ].join("")).join("");
-        regionalDistrictDownloads.innerHTML = items.map((item) => {
+        regionalDistrictTableBody.innerHTML = items.map((item) => {
           const downloadPath = valueOrDash(item.download_path) === "-" ? "" : String(item.download_path || "");
           const disabled = downloadPath ? "" : " disabled";
           const filename = valueOrDash(item.filename);
           return [
-            "<div class=\"district-download-item\">",
-            "<div>",
-            "<strong>" + valueOrDash(item.district_name_ru) + "</strong>",
-            "<span>" + filename + "</span>",
-            "</div>",
-            "<button class=\"action-button secondary-button regional-download-button\" type=\"button\" data-download-path=\"" + downloadPath + "\"" + disabled + ">Скачать XLSX</button>",
-            "</div>"
+            "<tr>",
+            "<td>" + valueOrDash(item.district_name_ru) + "</td>",
+            "<td>" + valueOrDash(item.total_qty) + "</td>",
+            "<td>" + valueOrDash(item.deficit_qty) + "</td>",
+            "<td><button class=\"action-button secondary-button regional-download-button\" type=\"button\" data-regional-district-download=\"" + escapeHtml(valueOrDash(item.district_key)) + "\" data-download-path=\"" + escapeHtml(downloadPath) + "\" data-download-filename=\"" + escapeHtml(filename) + "\"" + disabled + ">Скачать Excel</button></td>",
+            "</tr>"
           ].join("");
         }).join("");
-        Array.from(regionalDistrictDownloads.querySelectorAll(".regional-download-button")).forEach((button) => {
+        Array.from(regionalDistrictTableBody.querySelectorAll(".regional-download-button")).forEach((button) => {
           button.addEventListener("click", async () => {
             const downloadPath = button.dataset.downloadPath || "";
             if (!downloadPath) {
@@ -3649,7 +3592,7 @@
             }
             await downloadBinary(
               downloadPath,
-              "regional-supply-district.xlsx",
+              button.dataset.downloadFilename || "regional-supply-district.xlsx",
               "Файл округа скачан.",
               setRegionalMessage
             );
