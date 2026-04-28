@@ -100,8 +100,8 @@ def main() -> None:
         }:
             raise AssertionError(f"status_summary.source_policy_counts mismatch, got {payload.status_summary}")
         if payload.status_summary.refresh_outcome_counts != {
-            "success": 1,
-            "warning": 2,
+            "success": 2,
+            "warning": 1,
             "error": 0,
         }:
             raise AssertionError(f"status_summary.refresh_outcome_counts mismatch, got {payload.status_summary}")

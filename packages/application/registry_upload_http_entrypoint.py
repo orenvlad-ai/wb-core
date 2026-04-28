@@ -20,6 +20,7 @@ from packages.application.factory_order_supply import FactoryOrderSupplyBlock
 from packages.application.promo_live_source import PromoLiveSourceBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_daily_report import SheetVitrinaV1DailyReportBlock
+from packages.application.sheet_vitrina_v1_feedbacks import SheetVitrinaV1FeedbacksBlock
 from packages.application.sheet_vitrina_v1_load_bridge import (
     LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE,
     LegacyGoogleSheetsContourArchivedError,
@@ -475,6 +476,7 @@ class RegistryUploadHttpEntrypoint:
         now_factory: Callable[[], datetime] | None = None,
         sheet_load_runner: SheetLoadRunner | None = None,
         seller_portal_recovery_controller: SellerPortalRecoveryController | None = None,
+        feedbacks_block: SheetVitrinaV1FeedbacksBlock | None = None,
     ) -> None:
         self.runtime = runtime or RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
         self.activated_at_factory = activated_at_factory or _default_activated_at_factory
@@ -506,6 +508,7 @@ class RegistryUploadHttpEntrypoint:
             web_vitrina_block=self.web_vitrina_block,
             now_factory=self.now_factory,
         )
+        self.feedbacks_block = feedbacks_block or SheetVitrinaV1FeedbacksBlock(now_factory=self.now_factory)
         self.sheet_load_runner = sheet_load_runner or load_sheet_vitrina_ready_snapshot_via_clasp
         self.operator_jobs = SheetVitrinaV1OperatorJobStore(timestamp_factory=self.activated_at_factory)
         self.seller_portal_recovery = seller_portal_recovery_controller or SellerPortalRecoveryController()
@@ -775,6 +778,21 @@ class RegistryUploadHttpEntrypoint:
             payload,
             page_route=page_route,
             read_route=read_route,
+        )
+
+    def handle_sheet_feedbacks_request(
+        self,
+        *,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        stars: list[int] | None = None,
+        is_answered: str = "all",
+    ) -> dict[str, Any]:
+        return self.feedbacks_block.build(
+            date_from=date_from,
+            date_to=date_to,
+            stars=stars,
+            is_answered=is_answered,
         )
 
     def handle_sheet_refresh_request(

@@ -16,6 +16,7 @@
 - `sales_funnel_history_block`
 - `ads_compact_block`
 - `fin_report_daily_block`
+- `wb_feedbacks` / `sheet_vitrina_v1_feedbacks` read-only route
 
 `web_source_snapshot_block` и `seller_funnel_snapshot_block` не используют direct WB token path: они ходят в repo-owned `api.selleros.pro` contour.
 
@@ -61,3 +62,5 @@
 - какие operator steps использованы для его доставки.
 
 Следствие: module adapter получает secret только через runtime boundary, а не строит собственную secret-loading схему.
+
+Для feedbacks MVP это означает: `GET /v1/sheet-vitrina-v1/feedbacks` использует тот же `WB_API_TOKEN` через adapter boundary `packages/adapters/wb_feedbacks.py`; отсутствие прав WB token на категорию feedbacks должно surface-иться как явная 401/403 upstream error, а не как fallback на другой secret name.

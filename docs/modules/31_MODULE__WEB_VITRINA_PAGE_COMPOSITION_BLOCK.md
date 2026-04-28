@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-31-WEB-VITRINA-PAGE-COMPOSITION-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded phase-4 слою `web_vitrina_page_composition_block`."
-scope: "Real page composition для `GET /sheet-vitrina-v1/vitrina`: separate sibling page shell, split page-refresh/data-freshness summary, server-driven full-width table `Загрузка данных`, secondary block `Лог`, semantic green/red truth taxonomy for today/yesterday source status, bounded `Обновить` vs `Загрузить и обновить` action semantics, compact table toolbar for period/search/filters/columns/sort, вкладка `Исследования` с read-only SKU group comparison MVP, promo candidate chips, compact research date-range controls, scrollable table/grid result, table container, truthful loading/empty/error states и minimal inline client island поверх stable server seams `web_vitrina_contract -> web_vitrina_view_model -> web_vitrina_gravity_table_adapter` без SPA/platform redesign."
+scope: "Real page composition для `GET /sheet-vitrina-v1/vitrina`: separate sibling page shell, split page-refresh/data-freshness summary, server-driven full-width table `Загрузка данных`, secondary block `Лог`, semantic green/red truth taxonomy for today/yesterday source status, bounded `Обновить` vs `Загрузить и обновить` action semantics, compact table toolbar for period/search/filters/columns/sort, вкладка `Отзывы` с manual read-only WB API feedbacks load/filter table, вкладка `Исследования` с read-only SKU group comparison MVP, promo candidate chips, compact research date-range controls, scrollable table/grid result, table container, truthful loading/empty/error states и minimal inline client island поверх stable server seams `web_vitrina_contract -> web_vitrina_view_model -> web_vitrina_gravity_table_adapter` без SPA/platform redesign."
 source_basis:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
@@ -28,6 +28,7 @@ related_endpoints:
   - "GET /sheet-vitrina-v1/vitrina"
   - "GET /v1/sheet-vitrina-v1/web-vitrina"
   - "GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition&include_source_status=1"
+  - "GET /v1/sheet-vitrina-v1/feedbacks"
   - "GET /v1/sheet-vitrina-v1/research/sku-group-comparison/options"
   - "POST /v1/sheet-vitrina-v1/research/sku-group-comparison/calculate"
 related_runners:
@@ -37,6 +38,8 @@ related_runners:
   - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_reason_sanitization_smoke.py"
   - "apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py"
+  - "apps/sheet_vitrina_v1_feedbacks_http_smoke.py"
+  - "apps/sheet_vitrina_v1_feedbacks_browser_smoke.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime.py"
 related_docs:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
@@ -45,7 +48,7 @@ related_docs:
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Phase 4 live page composition остаётся server-driven, current status semantics stay source-aware instead of naive two-slot worst-case, а bot-backed auth barrier теперь humanize-ится explicitly: invalid seller-portal browser session surfaces as short Russian reason about required re-login instead of raw Playwright timeout/traceback."
+update_note: "Phase 4 live page composition остаётся server-driven; добавлена bounded вкладка `Отзывы`, которая вручную читает official WB API feedbacks через новый read-only route, переиспользует compact date-range UX/table pattern и не становится source-of-truth/persistence layer."
 ---
 
 # 1. Идентификатор и статус
@@ -69,14 +72,14 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
 # 3. Target contract и смысл результата
 
 - `GET /sheet-vitrina-v1/vitrina` теперь является реальной usable web-vitrina page:
-  - canonical entrypoint for the unified `sheet_vitrina_v1` UI; first visible tab is `Витрина`, alongside `Расчет поставок`, `Отчеты` and `Исследования`
+  - canonical entrypoint for the unified `sheet_vitrina_v1` UI; first visible tab is `Витрина`, alongside `Расчет поставок`, `Отчеты`, `Отзывы` and `Исследования`
   - `GET /sheet-vitrina-v1/operator` remains a compatibility entry and renders the same unified shell instead of the former narrow operator-only page; embedded operator-only panels are reserved for the unified tabs and internal compatibility probes
   - compact top panel inside `Витрина`: `Загрузить и обновить` is the single primary manual action, `JSON Connect` and the old cheap `Обновить` button are not rendered, and no permanent top status badge duplicates the summary cards
   - while `Загрузить и обновить` is running, the top panel shows a minimal stage-based progress bar driven by the existing async job/log polling (`start/queued`, source fetch, prepare/materialize, load/update table, finish); after completion the progress bar disappears and the final semantic status stays in the summary/log surfaces
   - compact summary with separate `Последнее обновление страницы` and `Свежесть данных`
   - compact historical period control now sits in the primary table toolbar, between summary/action context and the table; the old always-expanded `История` block is not rendered by default, so the operator sees the table immediately after a narrow date-range strip
   - table controls are one compact toolbar above the table, not a separate `Фильтры и настройки` section: `Диапазон`, `Поиск`, `Секции`, `Группа`, `Scope`, `Метрики`, `Столбцы`, `Сортировка` share the same line/wrapping strip and reuse the existing local filter/search/sort/column-visibility state
-  - custom browser floating controls in the unified shell close on outside click and `Escape`: historical period popover, column multiselect, research SKU/metric multiselects, research date-range pickers and embedded operator stock-report SKU selector. Inside clicks for checkbox multiselects/date-range selection stay inside the control, and the rule is browser-only UX state, not backend/data truth.
+  - custom browser floating controls in the unified shell close on outside click and `Escape`: historical period popover, column multiselect, feedbacks date-range picker, research SKU/metric multiselects, research date-range pickers and embedded operator stock-report SKU selector. Inside clicks for checkbox multiselects/date-range selection stay inside the control, and the rule is browser-only UX state, not backend/data truth.
   - main table display headers are Russian (`Раздел`, `Метрика`, `Обновлено`, etc.); backend/API keys stay stable, while `Обновлено` surfaces per-row last successful update timestamp from snapshot metadata
   - `Загрузить и обновить` = canonical server-side refresh from external sources + page reread, without Google Sheet write path
   - two server-driven action-adjacent information blocks:
@@ -88,6 +91,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - table container
   - truthful `loading / empty / error` states
   - `Расчет поставок` and `Отчеты` reuse the existing operator template/actions in embedded mode, preserving factory/WB supply blocks and the internal report subsection selector (`Ежедневные отчёты`, `Отчёт по остаткам`, `Выполнение плана`) without changing business routes; embedded height is measured from the actual `.page` content rather than iframe viewport/body `100vh`, and edge wheel gestures are relayed to the parent shell so these tabs do not create large empty scroll tails or swallow the first trackpad scroll
+  - `Отзывы` is a same-shell manual read-only tab over `GET /v1/sheet-vitrina-v1/feedbacks`: the operator chooses a bounded date range with the same compact calendar/popover style, selects stars and answered/unanswered filter, then explicitly loads a normalized table from official WB API feedbacks. The browser stores only transient selection/loading state; it does not persist feedbacks, does not write ЕБД/ready snapshots, does not submit complaints and does not use Google Sheets/GAS.
   - `Исследования` is a same-shell read-only tab, not an iframe and not a new truth contour; MVP block `Сравнение групп SKU` reads active SKU from current `config_v2`, selectable non-financial SKU metrics from current registry/view truth, and calculates retrospective group dynamics over persisted ready snapshots only
   - research SKU selectors include independent compact `Товар в акции` chips; the options route derives the candidate-only promo filter from latest closed-day ready snapshot promo metrics and returns unavailable metadata instead of fabricating a filtered list when promo truth is absent
   - research period controls are compact date-range pickers in the browser, while the calculate contract remains explicit `date_from/date_to`; result rendering uses the same `table-shell / table-scroll / vitrina-table` page pattern with horizontal scroll rather than a card layout
@@ -112,6 +116,7 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - keep only session-local cell highlighting for the last refresh result: `updated` cells render as soft green, `latest_confirmed`/fallback cells render as soft yellow, full refresh highlights every refreshed temporal date column (`yesterday_closed` and `today_current` when both are in scope), group refresh highlights only the selected group/date, and the highlight disappears on browser reload
   - never derive the full-refresh `as_of_date` from `date_from/date_to` or the rightmost `today_current` column; period selection is a read-side window, while `Загрузить и обновить` lets the backend resolve the current closed-day snapshot key
   - keep only session-local source-status load state for `Загрузка данных`: `not_loaded`, `loading`, `loaded`, `empty`, `error`; this state controls visibility of the detailed table and retry button but never becomes source truth
+  - keep only session-local feedbacks filters/result payload for the current manual load; feedback rows are read-through WB API output and are not accepted truth, ready snapshot facts or browser-local source of truth
   - keep zero ownership over job/log/status truth for `Лог` or `Загрузка данных`
   - never assemble canonical truth
   - never compute business metrics
@@ -165,6 +170,9 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
   - `apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py`
 - HTTP integration smoke:
   - `apps/sheet_vitrina_v1_web_vitrina_http_smoke.py`
+- feedbacks route/UI smokes:
+  - `apps/sheet_vitrina_v1_feedbacks_http_smoke.py`
+  - `apps/sheet_vitrina_v1_feedbacks_browser_smoke.py`
 - hosted deploy/probe contract:
   - `apps/registry_upload_http_entrypoint_hosted_runtime.py`
 
@@ -175,9 +183,13 @@ update_note: "Phase 4 live page composition остаётся server-driven, curr
 - `apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py`
   - confirms real page render, visible table, lazy source-status initial state, explicit `Загрузить` details flow, filter controls, Russian activity labels/reasons, unified readable freshness timestamp without raw ISO artefacts, empty state on no-match search, reset recovery, period selector UX (`calendar + presets + date_from/date_to + save/reset`) and truthful error state when the ready snapshot is absent
 - `apps/sheet_vitrina_v1_popup_outside_click_browser_smoke.py`
-  - confirms outside-click/`Escape` close behavior for custom browser floating controls across `Витрина`, `Отчеты` embedded stock-report selector and `Исследования`, while checkbox multiselects and date-range first-click selection remain usable
+  - confirms outside-click/`Escape` close behavior for custom browser floating controls across `Витрина`, `Отзывы`, `Отчеты` embedded stock-report selector and `Исследования`, while checkbox multiselects and date-range first-click selection remain usable
 - `apps/sheet_vitrina_v1_web_vitrina_http_smoke.py`
   - confirms default `web_vitrina_contract` path stays stable, optional `date_from/date_to` works as bounded period window and optional `surface=page_composition` works on the same route with severity-sorted human activity items
+- `apps/sheet_vitrina_v1_feedbacks_http_smoke.py`
+  - confirms `GET /v1/sheet-vitrina-v1/feedbacks` returns normalized `sheet_vitrina_v1_feedbacks` JSON, default `is_answered=all` reads both required WB streams, star filtering/summaries work, invalid query values fail cleanly and the unified HTML shell exposes the `Отзывы` tab/route wiring
+- `apps/sheet_vitrina_v1_feedbacks_browser_smoke.py`
+  - confirms the `Отзывы` tab opens in the unified shell, the compact feedbacks range picker closes on outside click, star filter changes the route query, and a manual read-only feedbacks payload renders in the table without using `/load`
 - `apps/sheet_vitrina_v1_web_vitrina_highlight_ui_smoke.py`
   - confirms full refresh session highlighting covers both touched temporal dates, keeps green for changed cells, yellow for latest-confirmed cells and clears on browser reload
 - `apps/sheet_vitrina_v1_web_vitrina_source_status_smoke.py`

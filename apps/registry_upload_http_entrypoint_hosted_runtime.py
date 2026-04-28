@@ -35,6 +35,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
     DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH,
     DEFAULT_SHEET_DAILY_REPORT_PATH,
+    DEFAULT_SHEET_FEEDBACKS_PATH,
     DEFAULT_SHEET_JOB_PATH,
     DEFAULT_SHEET_LOAD_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
@@ -785,6 +786,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Витрина",
             "Расчет поставок",
             "Отчеты",
+            "Отзывы",
             "Загрузить и обновить",
             "Загрузка данных",
             "Действия и состояния",
@@ -794,9 +796,11 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             'data-unified-tab-button="vitrina"',
             'data-unified-tab-button="factory-order"',
             'data-unified-tab-button="reports"',
+            'data-unified-tab-button="feedbacks"',
             'data-operator-embed-frame="factory-order"',
             'data-operator-embed-frame="reports"',
             DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+            DEFAULT_SHEET_FEEDBACKS_PATH,
             "surface=page_composition",
             route_paths["SHEET_VITRINA_REFRESH_HTTP_PATH"],
             DEFAULT_SHEET_JOB_PATH,
@@ -890,6 +894,9 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Проверить сессию",
             "Восстановить сессию",
             "Скачать лаунчер",
+            "Отзывы",
+            "Загрузить отзывы",
+            DEFAULT_SHEET_FEEDBACKS_PATH,
             "Лог",
         ]
         missing_tokens = [token for token in tokens if token not in body]
@@ -1090,6 +1097,24 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             if evaluation["ok"]
             else "expected 200 XLSX plan-report baseline template route"
         )
+        return evaluation
+
+    if route == "feedbacks":
+        evaluation["ok"], evaluation["detail"] = _validate_json_result(
+            status,
+            payload,
+            success_keys=[
+                "contract_name",
+                "contract_version",
+                "meta",
+                "summary",
+                "schema",
+                "rows",
+            ],
+        )
+        if evaluation["ok"] and payload.get("contract_name") != "sheet_vitrina_v1_feedbacks":
+            evaluation["ok"] = False
+            evaluation["detail"] = f"expected sheet_vitrina_v1_feedbacks contract, got {payload.get('contract_name')!r}"
         return evaluation
 
     if route == "plan":

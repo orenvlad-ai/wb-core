@@ -381,6 +381,45 @@
       min-width: 150px;
     }
 
+    .feedbacks-toolbar {
+      grid-template-columns: repeat(5, minmax(150px, 1fr));
+    }
+
+    .feedbacks-star-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .feedbacks-star-option {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-height: 34px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #ffffff;
+      padding: 6px 8px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .feedbacks-star-option input {
+      margin: 0;
+    }
+
+    .feedbacks-table-shell {
+      margin-top: 8px;
+    }
+
+    .feedbacks-text-cell {
+      max-width: 300px;
+      min-width: 180px;
+      white-space: normal;
+      line-height: 1.35;
+    }
+
     .top-panel,
     .panel {
       background: var(--panel-bg);
@@ -1630,6 +1669,7 @@
       }
 
       .activity-layout,
+      .feedbacks-toolbar,
       .research-form-grid,
       .history-fields {
         grid-template-columns: 1fr;
@@ -1660,6 +1700,7 @@
       <button class="unified-tab-button is-active" type="button" data-unified-tab-button="vitrina" role="tab" aria-selected="true">Витрина</button>
       <button class="unified-tab-button" type="button" data-unified-tab-button="factory-order" role="tab" aria-selected="false">Расчет поставок</button>
       <button class="unified-tab-button" type="button" data-unified-tab-button="reports" role="tab" aria-selected="false">Отчеты</button>
+      <button class="unified-tab-button" type="button" data-unified-tab-button="feedbacks" role="tab" aria-selected="false">Отзывы</button>
       <button class="unified-tab-button" type="button" data-unified-tab-button="research" role="tab" aria-selected="false">Исследования</button>
     </nav>
 
@@ -1845,6 +1886,91 @@
       <iframe class="operator-embed-frame" title="Отчеты" data-operator-embed-frame="reports" scrolling="no"></iframe>
     </section>
 
+    <section class="unified-tab-panel" data-unified-tab-panel="feedbacks" hidden>
+      <section class="panel research-panel feedbacks-panel" data-feedbacks-panel>
+        <div class="panel-top">
+          <div>
+            <h2>Отзывы</h2>
+            <p class="panel-note">
+              Ручное read-only чтение официального WB API feedbacks по выбранному периоду.
+            </p>
+          </div>
+          <p class="panel-meta" data-feedbacks-meta>Отзывы: read-only</p>
+        </div>
+
+        <div class="research-form-grid feedbacks-toolbar">
+          <div class="research-field research-field-wide" data-feedbacks-range-field>
+            <span class="filter-label">Период отзывов</span>
+            <div class="research-range-picker">
+              <button class="research-range-control" type="button" data-feedbacks-range-toggle aria-expanded="false">
+                <span class="research-range-label" data-feedbacks-range-label>Период не выбран</span>
+                <span aria-hidden="true">▾</span>
+              </button>
+              <div class="research-range-popover" data-feedbacks-range-popover hidden>
+                <div class="history-picker-head">
+                  <button class="history-month-nav" type="button" data-feedbacks-range-prev aria-label="Предыдущий месяц">‹</button>
+                  <p class="history-month-label" data-feedbacks-range-month-label>месяц</p>
+                  <button class="history-month-nav" type="button" data-feedbacks-range-next aria-label="Следующий месяц">›</button>
+                </div>
+                <div class="research-range-calendar" data-feedbacks-range-calendar></div>
+                <div class="history-presets-panel">
+                  <div class="history-preset-list" data-feedbacks-presets></div>
+                </div>
+                <div class="history-fields">
+                  <label class="filter-card">
+                    <span class="filter-label">Начало периода</span>
+                    <input class="input" type="date" data-feedbacks-date-from>
+                  </label>
+                  <label class="filter-card">
+                    <span class="filter-label">Конец периода</span>
+                    <input class="input" type="date" data-feedbacks-date-to>
+                  </label>
+                </div>
+                <div class="filters-footer">
+                  <p class="filter-summary" data-feedbacks-range-summary>Период не выбран</p>
+                  <div class="history-actions">
+                    <button class="button secondary" type="button" data-feedbacks-range-reset>Сбросить</button>
+                    <button class="button primary" type="button" data-feedbacks-range-save>Сохранить</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="research-field research-field-wide">
+            <span class="filter-label">Звёзды</span>
+            <div class="feedbacks-star-list" data-feedbacks-star-list>
+              <label class="feedbacks-star-option"><input type="checkbox" data-feedbacks-star value="1" checked>1</label>
+              <label class="feedbacks-star-option"><input type="checkbox" data-feedbacks-star value="2" checked>2</label>
+              <label class="feedbacks-star-option"><input type="checkbox" data-feedbacks-star value="3" checked>3</label>
+              <label class="feedbacks-star-option"><input type="checkbox" data-feedbacks-star value="4" checked>4</label>
+              <label class="feedbacks-star-option"><input type="checkbox" data-feedbacks-star value="5" checked>5</label>
+            </div>
+          </div>
+
+          <label class="research-field">
+            <span class="filter-label">Ответ</span>
+            <select class="select" data-feedbacks-is-answered>
+              <option value="all">Все</option>
+              <option value="false">Без ответа</option>
+              <option value="true">С ответом</option>
+            </select>
+          </label>
+
+          <div class="research-field research-actions">
+            <button class="button primary" type="button" data-feedbacks-load>Загрузить отзывы</button>
+            <span class="research-result-note" data-feedbacks-source-note>WB API / feedbacks</span>
+          </div>
+        </div>
+
+        <p class="research-error" data-feedbacks-error></p>
+        <div class="summary-grid" data-feedbacks-summary></div>
+        <div data-feedbacks-result>
+          <p class="research-result-note">Выберите период и нажмите «Загрузить отзывы».</p>
+        </div>
+      </section>
+    </section>
+
     <section class="unified-tab-panel" data-unified-tab-panel="research" hidden>
       <section class="panel research-panel" data-research-panel>
         <div class="panel-top">
@@ -2015,12 +2141,36 @@
     const researchErrorNode = document.querySelector("[data-research-error]");
     const researchResultNode = document.querySelector("[data-research-result]");
     const researchSourceNoteNode = document.querySelector("[data-research-source-note]");
+    const feedbacksPanelNode = document.querySelector("[data-feedbacks-panel]");
+    const feedbacksMetaNode = document.querySelector("[data-feedbacks-meta]");
+    const feedbacksRangeFieldNode = document.querySelector("[data-feedbacks-range-field]");
+    const feedbacksRangeToggleButton = document.querySelector("[data-feedbacks-range-toggle]");
+    const feedbacksRangePopoverNode = document.querySelector("[data-feedbacks-range-popover]");
+    const feedbacksRangeLabelNode = document.querySelector("[data-feedbacks-range-label]");
+    const feedbacksRangeMonthLabelNode = document.querySelector("[data-feedbacks-range-month-label]");
+    const feedbacksRangeCalendarNode = document.querySelector("[data-feedbacks-range-calendar]");
+    const feedbacksRangePrevButton = document.querySelector("[data-feedbacks-range-prev]");
+    const feedbacksRangeNextButton = document.querySelector("[data-feedbacks-range-next]");
+    const feedbacksPresetsNode = document.querySelector("[data-feedbacks-presets]");
+    const feedbacksDateFromNode = document.querySelector("[data-feedbacks-date-from]");
+    const feedbacksDateToNode = document.querySelector("[data-feedbacks-date-to]");
+    const feedbacksRangeSummaryNode = document.querySelector("[data-feedbacks-range-summary]");
+    const feedbacksRangeSaveButton = document.querySelector("[data-feedbacks-range-save]");
+    const feedbacksRangeResetButton = document.querySelector("[data-feedbacks-range-reset]");
+    const feedbacksStarListNode = document.querySelector("[data-feedbacks-star-list]");
+    const feedbacksIsAnsweredNode = document.querySelector("[data-feedbacks-is-answered]");
+    const feedbacksLoadButton = document.querySelector("[data-feedbacks-load]");
+    const feedbacksSourceNoteNode = document.querySelector("[data-feedbacks-source-note]");
+    const feedbacksErrorNode = document.querySelector("[data-feedbacks-error]");
+    const feedbacksSummaryNode = document.querySelector("[data-feedbacks-summary]");
+    const feedbacksResultNode = document.querySelector("[data-feedbacks-result]");
 
     const ALL_VALUE = "__all__";
     const DEFAULT_UNIFIED_TAB = "vitrina";
+    const FEEDBACKS_UNIFIED_TAB = "feedbacks";
     const RESEARCH_UNIFIED_TAB = "research";
     const EMBEDDED_UNIFIED_TABS = new Set(["factory-order", "reports"]);
-    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", RESEARCH_UNIFIED_TAB]);
+    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", FEEDBACKS_UNIFIED_TAB, RESEARCH_UNIFIED_TAB]);
     const FLOATING_DETAILS_SELECTOR = "details[data-column-manager], details[data-research-picker]";
     const formattersById = new Map();
     const renderersById = new Map();
@@ -2101,6 +2251,25 @@
         },
         error: ""
       },
+      feedbacks: {
+        initialized: false,
+        loading: false,
+        loaded: false,
+        requestSequence: 0,
+        dateFrom: "",
+        dateTo: "",
+        draftDateFrom: "",
+        draftDateTo: "",
+        activeRangePicker: false,
+        rangeAwaitingEnd: false,
+        rangeVisibleMonthStart: "",
+        selectedStars: new Set(["1", "2", "3", "4", "5"]),
+        isAnswered: "all",
+        rows: [],
+        summary: null,
+        meta: null,
+        error: ""
+      },
       sessionHighlights: {}
     };
 
@@ -2143,6 +2312,35 @@
     }
     if (researchCalculateButton) {
       researchCalculateButton.addEventListener("click", calculateResearchComparison);
+    }
+    if (feedbacksPanelNode) {
+      feedbacksPanelNode.addEventListener("click", handleFeedbacksClick);
+      feedbacksPanelNode.addEventListener("change", handleFeedbacksInputChange);
+    }
+    if (feedbacksLoadButton) {
+      feedbacksLoadButton.addEventListener("click", loadFeedbacks);
+    }
+    if (feedbacksRangeSaveButton) {
+      feedbacksRangeSaveButton.addEventListener("click", saveFeedbacksRangeDraft);
+    }
+    if (feedbacksRangeResetButton) {
+      feedbacksRangeResetButton.addEventListener("click", resetFeedbacksRangeToDefault);
+    }
+    if (feedbacksDateFromNode) {
+      feedbacksDateFromNode.addEventListener("change", function() {
+        state.feedbacks.draftDateFrom = normalizeIsoDate(feedbacksDateFromNode.value);
+        state.feedbacks.rangeAwaitingEnd = false;
+        syncFeedbacksRangeFields();
+        renderFeedbacksRangePicker();
+      });
+    }
+    if (feedbacksDateToNode) {
+      feedbacksDateToNode.addEventListener("change", function() {
+        state.feedbacks.draftDateTo = normalizeIsoDate(feedbacksDateToNode.value);
+        state.feedbacks.rangeAwaitingEnd = false;
+        syncFeedbacksRangeFields();
+        renderFeedbacksRangePicker();
+      });
     }
 
     loadingTableBodyNode.addEventListener("click", function(event) {
@@ -2366,6 +2564,9 @@
           roots.push(rangeFieldNode);
         }
       }
+      if (state.feedbacks.activeRangePicker && feedbacksRangeFieldNode) {
+        roots.push(feedbacksRangeFieldNode);
+      }
       return roots;
     }
 
@@ -2393,6 +2594,9 @@
         if (!sameFloatingScope(activeRangeFieldNode, exceptRoot)) {
           closeResearchRangePickers();
         }
+      }
+      if (state.feedbacks.activeRangePicker && !sameFloatingScope(feedbacksRangeFieldNode, exceptRoot)) {
+        closeFeedbacksRangePicker();
       }
       if (!options || options.skipEmbedded !== true) {
         closeEmbeddedOperatorPopovers();
@@ -2431,6 +2635,9 @@
       }
       if (activeTab === RESEARCH_UNIFIED_TAB) {
         ensureResearchOptionsLoaded();
+      }
+      if (activeTab === FEEDBACKS_UNIFIED_TAB) {
+        ensureFeedbacksInitialized();
       }
       if (!options || options.persist !== false) {
         const url = new URL(window.location.href);
@@ -4325,6 +4532,476 @@
       } catch (error) {
         throw new Error(fallbackErrorText);
       }
+    }
+
+    function ensureFeedbacksInitialized() {
+      if (!feedbacksPanelNode) {
+        return;
+      }
+      if (!state.feedbacks.initialized) {
+        applyFeedbacksDefaultRange();
+        state.feedbacks.initialized = true;
+      }
+      renderFeedbacksPanel();
+    }
+
+    function feedbacksDefaultEndDate() {
+      const meta = ((state.composition || {}).meta || {});
+      return normalizeIsoDate(meta.today_current_date || meta.snapshot_as_of_date || "") || formatIsoDate(new Date());
+    }
+
+    function applyFeedbacksDefaultRange() {
+      const endDate = feedbacksDefaultEndDate();
+      const startDate = shiftIsoDate(endDate, -6);
+      state.feedbacks.dateFrom = startDate;
+      state.feedbacks.dateTo = endDate;
+      state.feedbacks.draftDateFrom = startDate;
+      state.feedbacks.draftDateTo = endDate;
+      state.feedbacks.rangeVisibleMonthStart = startOfMonthIso(endDate);
+      state.feedbacks.rangeAwaitingEnd = false;
+    }
+
+    function renderFeedbacksPanel() {
+      if (!feedbacksPanelNode) {
+        return;
+      }
+      renderFeedbacksRangePicker();
+      syncFeedbacksStarInputs();
+      if (feedbacksIsAnsweredNode) {
+        feedbacksIsAnsweredNode.value = state.feedbacks.isAnswered;
+      }
+      if (feedbacksMetaNode) {
+        feedbacksMetaNode.textContent = state.feedbacks.loading
+          ? "Загружаем отзывы…"
+          : "read-only · WB API / feedbacks";
+      }
+      if (feedbacksSourceNoteNode) {
+        feedbacksSourceNoteNode.textContent = state.feedbacks.loaded
+          ? ("Загружено: " + formatFeedbacksPeriodLabel(state.feedbacks.dateFrom, state.feedbacks.dateTo))
+          : "WB API / feedbacks";
+      }
+      if (feedbacksLoadButton) {
+        feedbacksLoadButton.disabled = state.feedbacks.loading || !state.feedbacks.dateFrom || !state.feedbacks.dateTo || !state.feedbacks.selectedStars.size;
+        feedbacksLoadButton.textContent = state.feedbacks.loading ? "Загрузка…" : "Загрузить отзывы";
+      }
+      if (feedbacksErrorNode) {
+        feedbacksErrorNode.textContent = state.feedbacks.error || "";
+        feedbacksErrorNode.classList.toggle("is-error", !!state.feedbacks.error);
+      }
+      renderFeedbacksSummary();
+      renderFeedbacksResult();
+    }
+
+    function renderFeedbacksRangePicker() {
+      if (!feedbacksRangeLabelNode) {
+        return;
+      }
+      feedbacksRangeLabelNode.textContent = state.feedbacks.dateFrom && state.feedbacks.dateTo
+        ? formatFeedbacksPeriodLabel(state.feedbacks.dateFrom, state.feedbacks.dateTo)
+        : "Период не выбран";
+      if (feedbacksRangeToggleButton) {
+        feedbacksRangeToggleButton.setAttribute("aria-expanded", state.feedbacks.activeRangePicker ? "true" : "false");
+      }
+      if (feedbacksRangePopoverNode) {
+        feedbacksRangePopoverNode.hidden = !state.feedbacks.activeRangePicker;
+      }
+      syncFeedbacksRangeFields();
+      renderFeedbacksPresets();
+      const monthStart = state.feedbacks.rangeVisibleMonthStart || startOfMonthIso(state.feedbacks.draftDateTo || feedbacksDefaultEndDate());
+      state.feedbacks.rangeVisibleMonthStart = monthStart;
+      if (feedbacksRangeMonthLabelNode) {
+        feedbacksRangeMonthLabelNode.textContent = capitalizeFirst(formatHistoryMonthLabel(monthStart));
+      }
+      if (feedbacksRangePrevButton) {
+        feedbacksRangePrevButton.disabled = false;
+      }
+      if (feedbacksRangeNextButton) {
+        feedbacksRangeNextButton.disabled = addMonthsIso(monthStart, 1) > startOfMonthIso(feedbacksDefaultEndDate());
+      }
+      if (feedbacksRangeCalendarNode) {
+        feedbacksRangeCalendarNode.innerHTML = buildFeedbacksCalendarMarkup(monthStart);
+      }
+      renderFeedbacksRangeStatus();
+    }
+
+    function syncFeedbacksRangeFields() {
+      if (feedbacksDateFromNode) {
+        feedbacksDateFromNode.value = state.feedbacks.draftDateFrom || "";
+        feedbacksDateFromNode.max = feedbacksDefaultEndDate();
+      }
+      if (feedbacksDateToNode) {
+        feedbacksDateToNode.value = state.feedbacks.draftDateTo || "";
+        feedbacksDateToNode.max = feedbacksDefaultEndDate();
+      }
+    }
+
+    function renderFeedbacksPresets() {
+      if (!feedbacksPresetsNode || feedbacksPresetsNode.childElementCount) {
+        return;
+      }
+      const presets = [
+        {id: "week", label: "Неделя", days: 7},
+        {id: "two_weeks", label: "2 недели", days: 14},
+        {id: "month", label: "Месяц", days: 31}
+      ];
+      feedbacksPresetsNode.innerHTML = presets.map(function(preset) {
+        return '<button class="button secondary history-preset-button" type="button" data-feedbacks-preset="' +
+          escapeHtml(preset.id) + '">' + escapeHtml(preset.label) + "</button>";
+      }).join("");
+      feedbacksPresetsNode.querySelectorAll("[data-feedbacks-preset]").forEach(function(node) {
+        node.addEventListener("click", function() {
+          const selected = presets.find(function(preset) {
+            return preset.id === node.getAttribute("data-feedbacks-preset");
+          });
+          if (!selected) {
+            return;
+          }
+          const endDate = state.feedbacks.draftDateTo || feedbacksDefaultEndDate();
+          state.feedbacks.draftDateTo = endDate;
+          state.feedbacks.draftDateFrom = shiftIsoDate(endDate, -(selected.days - 1));
+          state.feedbacks.rangeAwaitingEnd = false;
+          state.feedbacks.rangeVisibleMonthStart = startOfMonthIso(endDate);
+          renderFeedbacksRangePicker();
+        });
+      });
+    }
+
+    function buildFeedbacksCalendarMarkup(monthStart) {
+      if (!monthStart) {
+        return "";
+      }
+      const monthStartDate = parseIsoDate(monthStart);
+      const monthIndex = monthStartDate.getUTCMonth();
+      const maxDate = feedbacksDefaultEndDate();
+      const dayCells = [];
+      for (let offset = 0; offset < mondayFirstWeekdayIndex(monthStartDate); offset += 1) {
+        dayCells.push('<div class="history-day-empty" aria-hidden="true"></div>');
+      }
+      let cursor = new Date(monthStartDate.getTime());
+      while (cursor.getUTCMonth() === monthIndex) {
+        const isoDate = formatIsoDate(cursor);
+        const isStart = isoDate === state.feedbacks.draftDateFrom;
+        const isEnd = isoDate === state.feedbacks.draftDateTo;
+        const isInRange = state.feedbacks.draftDateFrom && state.feedbacks.draftDateTo && isoDate >= state.feedbacks.draftDateFrom && isoDate <= state.feedbacks.draftDateTo;
+        const classes = ["history-day"];
+        if (isInRange) {
+          classes.push("in-range");
+        }
+        if (isStart || isEnd) {
+          classes.push("range-edge");
+        }
+        dayCells.push(
+          '<button class="' + classes.join(" ") + '" type="button" data-feedbacks-range-day="' +
+          escapeHtml(isoDate) + '"' + (isoDate > maxDate ? " disabled" : "") + '>' +
+          escapeHtml(String(cursor.getUTCDate())) + "</button>"
+        );
+        cursor = shiftDate(cursor, 1);
+      }
+      return [
+        '<section class="history-month" data-feedbacks-range-month="' + escapeHtml(monthStart) + '">',
+        '<div class="history-weekdays">',
+        ["пн", "вт", "ср", "чт", "пт", "сб", "вс"].map(function(label) {
+          return '<div class="history-weekday">' + escapeHtml(label) + "</div>";
+        }).join(""),
+        "</div>",
+        '<div class="history-days">',
+        dayCells.join(""),
+        "</div></section>"
+      ].join("");
+    }
+
+    function renderFeedbacksRangeStatus() {
+      const error = feedbacksRangeValidationMessage();
+      if (feedbacksRangeSaveButton) {
+        feedbacksRangeSaveButton.disabled = !!error || !state.feedbacks.draftDateFrom || !state.feedbacks.draftDateTo;
+      }
+      if (feedbacksRangeSummaryNode) {
+        feedbacksRangeSummaryNode.textContent = error || (
+          state.feedbacks.draftDateFrom && state.feedbacks.draftDateTo
+            ? "Диапазон: " + formatFeedbacksPeriodLabel(state.feedbacks.draftDateFrom, state.feedbacks.draftDateTo)
+            : "Период не выбран"
+        );
+      }
+    }
+
+    function feedbacksRangeValidationMessage() {
+      if (!state.feedbacks.draftDateFrom || !state.feedbacks.draftDateTo || state.feedbacks.rangeAwaitingEnd) {
+        return "Выберите начало и конец периода.";
+      }
+      if (state.feedbacks.draftDateFrom > state.feedbacks.draftDateTo) {
+        return "Начало периода должно быть не позже конца.";
+      }
+      if (state.feedbacks.draftDateTo > feedbacksDefaultEndDate()) {
+        return "Конец периода не должен быть позже текущей даты.";
+      }
+      let days = 1;
+      let cursor = state.feedbacks.draftDateFrom;
+      while (cursor < state.feedbacks.draftDateTo) {
+        days += 1;
+        cursor = shiftIsoDate(cursor, 1);
+        if (days > 31) {
+          return "MVP загрузки отзывов ограничен периодом до 31 дня.";
+        }
+      }
+      return "";
+    }
+
+    function formatFeedbacksPeriodLabel(dateFrom, dateTo) {
+      return formatBusinessDateDisplay(dateFrom) + " - " + formatBusinessDateDisplay(dateTo);
+    }
+
+    function closeFeedbacksRangePicker() {
+      if (!state.feedbacks.activeRangePicker) {
+        return;
+      }
+      state.feedbacks.activeRangePicker = false;
+      renderFeedbacksRangePicker();
+    }
+
+    function toggleFeedbacksRangePicker() {
+      if (state.feedbacks.activeRangePicker) {
+        state.feedbacks.activeRangePicker = false;
+      } else {
+        closeAllFloatingControls({exceptRoot: feedbacksRangeFieldNode});
+        state.feedbacks.activeRangePicker = true;
+        state.feedbacks.draftDateFrom = state.feedbacks.dateFrom;
+        state.feedbacks.draftDateTo = state.feedbacks.dateTo;
+        state.feedbacks.rangeVisibleMonthStart = startOfMonthIso(state.feedbacks.draftDateTo || feedbacksDefaultEndDate());
+      }
+      renderFeedbacksRangePicker();
+    }
+
+    function selectFeedbacksRangeDay(dateValue) {
+      if (!state.feedbacks.draftDateFrom || (state.feedbacks.draftDateFrom && state.feedbacks.draftDateTo && !state.feedbacks.rangeAwaitingEnd)) {
+        state.feedbacks.draftDateFrom = dateValue;
+        state.feedbacks.draftDateTo = "";
+        state.feedbacks.rangeAwaitingEnd = true;
+      } else if (dateValue < state.feedbacks.draftDateFrom) {
+        state.feedbacks.draftDateTo = state.feedbacks.draftDateFrom;
+        state.feedbacks.draftDateFrom = dateValue;
+        state.feedbacks.rangeAwaitingEnd = false;
+      } else {
+        state.feedbacks.draftDateTo = dateValue;
+        state.feedbacks.rangeAwaitingEnd = false;
+      }
+      state.feedbacks.rangeVisibleMonthStart = startOfMonthIso(dateValue);
+      renderFeedbacksRangePicker();
+    }
+
+    function saveFeedbacksRangeDraft() {
+      const error = feedbacksRangeValidationMessage();
+      if (error) {
+        if (feedbacksRangeSummaryNode) {
+          feedbacksRangeSummaryNode.textContent = error;
+        }
+        return;
+      }
+      state.feedbacks.dateFrom = state.feedbacks.draftDateFrom;
+      state.feedbacks.dateTo = state.feedbacks.draftDateTo;
+      state.feedbacks.activeRangePicker = false;
+      state.feedbacks.error = "";
+      renderFeedbacksPanel();
+    }
+
+    function resetFeedbacksRangeToDefault() {
+      applyFeedbacksDefaultRange();
+      state.feedbacks.activeRangePicker = false;
+      state.feedbacks.error = "";
+      renderFeedbacksPanel();
+    }
+
+    function handleFeedbacksClick(event) {
+      const toggle = event.target.closest("[data-feedbacks-range-toggle]");
+      if (toggle) {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleFeedbacksRangePicker();
+        return;
+      }
+      const previous = event.target.closest("[data-feedbacks-range-prev]");
+      if (previous) {
+        event.preventDefault();
+        event.stopPropagation();
+        state.feedbacks.rangeVisibleMonthStart = addMonthsIso(state.feedbacks.rangeVisibleMonthStart || startOfMonthIso(feedbacksDefaultEndDate()), -1);
+        renderFeedbacksRangePicker();
+        return;
+      }
+      const next = event.target.closest("[data-feedbacks-range-next]");
+      if (next) {
+        event.preventDefault();
+        event.stopPropagation();
+        const nextMonth = addMonthsIso(state.feedbacks.rangeVisibleMonthStart || startOfMonthIso(feedbacksDefaultEndDate()), 1);
+        if (nextMonth <= startOfMonthIso(feedbacksDefaultEndDate())) {
+          state.feedbacks.rangeVisibleMonthStart = nextMonth;
+        }
+        renderFeedbacksRangePicker();
+        return;
+      }
+      const day = event.target.closest("[data-feedbacks-range-day]");
+      if (day) {
+        event.preventDefault();
+        event.stopPropagation();
+        selectFeedbacksRangeDay(String(day.getAttribute("data-feedbacks-range-day") || ""));
+      }
+    }
+
+    function handleFeedbacksInputChange(event) {
+      const starNode = event.target.closest("[data-feedbacks-star]");
+      if (starNode) {
+        const value = String(starNode.value || "");
+        if (starNode.checked) {
+          state.feedbacks.selectedStars.add(value);
+        } else {
+          state.feedbacks.selectedStars.delete(value);
+        }
+        renderFeedbacksPanel();
+        return;
+      }
+      if (event.target === feedbacksIsAnsweredNode) {
+        state.feedbacks.isAnswered = String(feedbacksIsAnsweredNode.value || "all");
+        renderFeedbacksPanel();
+      }
+    }
+
+    function syncFeedbacksStarInputs() {
+      if (!feedbacksStarListNode) {
+        return;
+      }
+      feedbacksStarListNode.querySelectorAll("[data-feedbacks-star]").forEach(function(node) {
+        node.checked = state.feedbacks.selectedStars.has(String(node.value || ""));
+      });
+    }
+
+    async function loadFeedbacks() {
+      ensureFeedbacksInitialized();
+      const stars = Array.from(state.feedbacks.selectedStars).sort();
+      if (!stars.length) {
+        state.feedbacks.error = "Выберите хотя бы одну оценку.";
+        renderFeedbacksPanel();
+        return;
+      }
+      const requestId = state.feedbacks.requestSequence + 1;
+      state.feedbacks.requestSequence = requestId;
+      state.feedbacks.loading = true;
+      state.feedbacks.error = "";
+      renderFeedbacksPanel();
+      try {
+        const url = new URL(WEB_VITRINA_CONFIG.feedbacks_path, window.location.origin);
+        url.searchParams.set("date_from", state.feedbacks.dateFrom);
+        url.searchParams.set("date_to", state.feedbacks.dateTo);
+        url.searchParams.set("stars", stars.join(","));
+        url.searchParams.set("is_answered", state.feedbacks.isAnswered || "all");
+        const response = await fetch(url.toString(), {
+          method: "GET",
+          headers: {"Accept": "application/json"}
+        });
+        const payload = await readJsonResponse(response, "non-json response from feedbacks route");
+        if (requestId !== state.feedbacks.requestSequence) {
+          return;
+        }
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "feedbacks route returned " + response.status);
+        }
+        if (!payload || payload.contract_name !== "sheet_vitrina_v1_feedbacks") {
+          throw new Error("unexpected feedbacks payload");
+        }
+        state.feedbacks.rows = Array.isArray(payload.rows) ? payload.rows : [];
+        state.feedbacks.summary = payload.summary || null;
+        state.feedbacks.meta = payload.meta || null;
+        state.feedbacks.loaded = true;
+      } catch (error) {
+        if (requestId !== state.feedbacks.requestSequence) {
+          return;
+        }
+        state.feedbacks.error = String(error && error.message ? error.message : error);
+        state.feedbacks.loaded = false;
+      } finally {
+        if (requestId === state.feedbacks.requestSequence) {
+          state.feedbacks.loading = false;
+          renderFeedbacksPanel();
+        }
+      }
+    }
+
+    function renderFeedbacksSummary() {
+      if (!feedbacksSummaryNode) {
+        return;
+      }
+      if (!state.feedbacks.loaded || !state.feedbacks.summary) {
+        feedbacksSummaryNode.innerHTML = "";
+        return;
+      }
+      const summary = state.feedbacks.summary || {};
+      feedbacksSummaryNode.innerHTML = [
+        {label: "Всего", value: formatNumber(Number(summary.total || 0), 0, true), detail: formatFeedbacksPeriodLabel(state.feedbacks.dateFrom, state.feedbacks.dateTo)},
+        {label: "Без ответа", value: formatNumber(Number(summary.unanswered || 0), 0, true), detail: "требуют ручной обработки"},
+        {label: "С ответом", value: formatNumber(Number(summary.answered || 0), 0, true), detail: "уже закрыты ответом"},
+        {label: "1-2 звезды", value: formatNumber(Number((summary.by_star || {})["1"] || 0) + Number((summary.by_star || {})["2"] || 0), 0, true), detail: "низкая оценка"}
+      ].map(function(item) {
+        return [
+          '<article class="summary-card">',
+          '<p class="summary-card-label">' + escapeHtml(item.label) + "</p>",
+          '<p class="summary-card-value">' + escapeHtml(item.value) + "</p>",
+          '<p class="summary-card-detail">' + escapeHtml(item.detail) + "</p>",
+          "</article>"
+        ].join("");
+      }).join("");
+    }
+
+    function renderFeedbacksResult() {
+      if (!feedbacksResultNode) {
+        return;
+      }
+      if (state.feedbacks.loading) {
+        feedbacksResultNode.innerHTML = '<p class="research-result-note">Загружаем отзывы из WB API…</p>';
+        return;
+      }
+      if (state.feedbacks.error) {
+        feedbacksResultNode.innerHTML = '<p class="research-result-note">Загрузка не выполнена.</p>';
+        return;
+      }
+      if (!state.feedbacks.loaded) {
+        feedbacksResultNode.innerHTML = '<p class="research-result-note">Выберите период и нажмите «Загрузить отзывы».</p>';
+        return;
+      }
+      const rows = state.feedbacks.rows || [];
+      if (!rows.length) {
+        feedbacksResultNode.innerHTML = '<p class="research-result-note">За выбранный период и фильтры отзывы не найдены.</p>';
+        return;
+      }
+      const columns = [
+        ["created_date", "Дата"],
+        ["product_valuation", "Звёзды"],
+        ["answer_status", "Статус"],
+        ["nm_id", "Артикул WB"],
+        ["supplier_article", "Артикул продавца"],
+        ["product_name", "Товар"],
+        ["brand_name", "Бренд"],
+        ["text", "Отзыв"],
+        ["pros", "Плюсы"],
+        ["cons", "Минусы"],
+        ["answer_text", "Ответ"]
+      ];
+      feedbacksResultNode.innerHTML = [
+        '<div class="table-shell feedbacks-table-shell" data-feedbacks-table-shell data-grid-library="@gravity-ui/table">',
+        '<div class="table-scroll">',
+        '<table class="vitrina-table" data-feedbacks-table>',
+        '<thead><tr>',
+        columns.map(function(column) { return "<th>" + escapeHtml(column[1]) + "</th>"; }).join(""),
+        "</tr></thead><tbody>",
+        rows.map(function(row) { return renderFeedbacksRow(row, columns); }).join(""),
+        "</tbody></table></div></div>"
+      ].join("");
+    }
+
+    function renderFeedbacksRow(row, columns) {
+      return "<tr>" + columns.map(function(column) {
+        const key = column[0];
+        const isText = ["text", "pros", "cons", "answer_text", "product_name"].includes(key);
+        const rawValue = row[key];
+        const value = rawValue === null || typeof rawValue === "undefined" || rawValue === "" ? "—" : String(rawValue);
+        return '<td' + (isText ? ' class="feedbacks-text-cell"' : "") + ">" + escapeHtml(value) + "</td>";
+      }).join("") + "</tr>";
     }
 
     function filenameFromDisposition(value) {

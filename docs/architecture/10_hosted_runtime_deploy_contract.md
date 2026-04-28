@@ -22,6 +22,7 @@ Contract покрывает hosted contour на `api.selleros.pro` для routes
 - `GET /v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx`
 - `POST /v1/sheet-vitrina-v1/plan-report/baseline-upload`
 - `GET /v1/sheet-vitrina-v1/plan-report/baseline-status`
+- `GET /v1/sheet-vitrina-v1/feedbacks`
 - `GET /v1/sheet-vitrina-v1/plan`
 - `GET /v1/sheet-vitrina-v1/status`
 - `GET /v1/sheet-vitrina-v1/job`
@@ -124,6 +125,7 @@ Optional runtime overrides remain the same as in current official-api boundary:
 - `WB_ADVERT_API_BASE_URL`
 - `WB_SELLER_ANALYTICS_API_BASE_URL`
 - `WB_STATISTICS_API_BASE_URL`
+- `WB_FEEDBACKS_API_BASE_URL`
 - `PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH`
 - `SELLER_PORTAL_CANONICAL_SUPPLIER_ID`
 - `SELLER_PORTAL_CANONICAL_SUPPLIER_LABEL`
@@ -180,6 +182,10 @@ Promo current correctness guard:
 - Preferred command: `python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py`.
 - If the local machine cannot validate the selleros certificate chain, the accepted diagnostic-only fallback is `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1 python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py`. This is only a local CA verification fallback; route timeouts, non-200 responses or bad payloads are real blockers.
 
+Feedbacks tab/route guard:
+- run `python3 apps/sheet_vitrina_v1_feedbacks_http_smoke.py` and `python3 apps/sheet_vitrina_v1_feedbacks_browser_smoke.py` after changes touching the `Отзывы` tab, `GET /v1/sheet-vitrina-v1/feedbacks`, official feedbacks adapter/token path or feedbacks date/filter/table UI.
+- Live/public closure must read `/sheet-vitrina-v1/vitrina` and one bounded `GET /v1/sheet-vitrina-v1/feedbacks?...` on the hosted runtime. This verifies route wiring, `WB_API_TOKEN` permission for feedbacks, friendly upstream error surfacing and normalized JSON shape without `/load`, Google Sheets/GAS, Seller Portal bot or persistence.
+
 Google Sheets, GAS, `clasp`, `/v1/sheet-vitrina-v1/load` and `invalid_grant` are not active blockers for web-vitrina completion. If a task explicitly changes archived Apps Script guard code, verify blocked/archived behavior only.
 
 `deploy-and-verify` may be used as one combined step when access is already safe and available.
@@ -200,9 +206,9 @@ If any of these steps are unavailable or unsafe, execution must return incomplet
 Loopback/runtime probe validates the hosted process behind the reverse proxy or equivalent publish layer.
 
 Public probe validates:
-- `GET /sheet-vitrina-v1/operator` returns `200` + `text/html` for the unified shell; public probe also checks `GET /sheet-vitrina-v1/operator?embedded_tab=reports` for the embedded report panel. Together they must contain compact operator tokens for the three top-level sections, server refresh, truthful manual-vs-auto blocks, bounded seller-session block, report subsections, plan-report baseline controls and both bounded supply subsections (`Обновление данных`, `Ручная загрузка данных`, `Проверка и восстановление Seller-сессии`, `Проверить сессию`, `Восстановить сессию`, `Скачать launcher для Mac`, `Остановить восстановление`, `Текущий запуск`, `Финал запуска`, `Статус сессии`, `Расчёт поставок`, `Отчёты`, `Загрузить данные`, `Legacy Google Sheets`, `Ежедневные отчёты`, `Отчёт по остаткам`, `Выполнение плана`, `Исторические данные для отчёта`, `planReportApplyButton`, `planReportBaselineTemplateButton`, `planReportBaselineFileInput`, `Total Order Sum`, `Негативные факторы`, `Позитивные факторы`, `Скачать лог`, `Лог`, `Автообновления`, `Часовой пояс`, `Автоцепочка`, `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление`, `Общий вход для двух расчётов`, `Заказ на фабрике`, `Поставка на Wildberries`, `Цикл заказов`, `Цикл поставок`)
+- `GET /sheet-vitrina-v1/operator` returns `200` + `text/html` for the unified shell; public probe also checks `GET /sheet-vitrina-v1/operator?embedded_tab=reports` for the embedded report panel. Together they must contain compact operator tokens for the top-level sections, server refresh, truthful manual-vs-auto blocks, bounded seller-session block, report subsections, plan-report baseline controls, feedbacks tab and both bounded supply subsections (`Обновление данных`, `Ручная загрузка данных`, `Проверка и восстановление Seller-сессии`, `Проверить сессию`, `Восстановить сессию`, `Скачать launcher для Mac`, `Остановить восстановление`, `Текущий запуск`, `Финал запуска`, `Статус сессии`, `Расчёт поставок`, `Отчёты`, `Отзывы`, `Загрузить отзывы`, `Загрузить данные`, `Legacy Google Sheets`, `Ежедневные отчёты`, `Отчёт по остаткам`, `Выполнение плана`, `Исторические данные для отчёта`, `planReportApplyButton`, `planReportBaselineTemplateButton`, `planReportBaselineFileInput`, `Total Order Sum`, `Негативные факторы`, `Позитивные факторы`, `Скачать лог`, `Лог`, `Автообновления`, `Часовой пояс`, `Автоцепочка`, `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление`, `Общий вход для двух расчётов`, `Заказ на фабрике`, `Поставка на Wildberries`, `Цикл заказов`, `Цикл поставок`)
 - `GET /v1/sheet-vitrina-v1/seller-portal-session/check` returns `200` + JSON with one truthful status from `session_valid_canonical / session_valid_wrong_org / session_invalid / session_missing / session_probe_error`
-- `GET /sheet-vitrina-v1/vitrina` returns `200` + `text/html` as a real operator-grade web-vitrina page shell: page must contain `Web-витрина`, `Операторский сайт`, primary `Загрузить и обновить`, canonical JSON route token `/v1/sheet-vitrina-v1/web-vitrina`, explicit `surface=page_composition` wiring, bottom `Действия и состояния`, grouped date-scoped `Обновить группу` controls and Seller Portal session controls; `JSON Connect`, the old cheap top-panel `Обновить` button and the permanent top status badge are not rendered
+- `GET /sheet-vitrina-v1/vitrina` returns `200` + `text/html` as a real operator-grade web-vitrina page shell: page must contain `Web-витрина`, `Операторский сайт`, primary `Загрузить и обновить`, top-level tab `Отзывы`, canonical JSON route token `/v1/sheet-vitrina-v1/web-vitrina`, feedbacks route token `/v1/sheet-vitrina-v1/feedbacks`, explicit `surface=page_composition` wiring, bottom `Действия и состояния`, grouped date-scoped `Обновить группу` controls and Seller Portal session controls; `JSON Connect`, the old cheap top-panel `Обновить` button and the permanent top status badge are not rendered
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition` returns `200` + JSON `web_vitrina_page_composition` v1 with `meta`, `summary_cards`, `filter_surface`, `table_surface`, `status_summary`, `capabilities`; route stays read-only and must not trigger refresh/upstream fetch from the public read path
   - summary/card tone must follow semantic source truth of the visible snapshot or selected period, not mere snapshot existence
   - main table must render before filters/history/actions, use Russian visible headers and expose per-row `Обновлено` timestamp without renaming backend/API field keys
@@ -215,6 +221,7 @@ Public probe validates:
   - `200` + JSON `web_vitrina_contract` v1 when a ready snapshot is present, with root fields `contract_name`, `contract_version`, `page_route`, `read_route`, `meta`, `status_summary`, `schema`, `rows`, `capabilities`
   - truthful `422 {"error": ...}` when the ready snapshot is absent
   - route remains read-only, optional `as_of_date` override stays on the same boundary and must not trigger refresh/upstream fetch
+- `GET /v1/sheet-vitrina-v1/feedbacks` returns `200` + JSON `sheet_vitrina_v1_feedbacks` v1 for a bounded valid query (`date_from`, `date_to`, optional `stars`, `is_answered`). It is read-only over official WB `GET /api/v1/feedbacks` with canonical `WB_API_TOKEN`; it must not trigger refresh, `/load`, Google Sheets/GAS, complaint submission or runtime persistence. If the hosted token lacks feedbacks permission, 401/403 is a real live blocker for the `Отзывы` feature rather than a deploy-script success.
 - `GET /v1/sheet-vitrina-v1/daily-report` returns `200` + JSON for both states:
   - `status=available` when ready snapshots for `default_business_as_of_date(now)` and `default_business_as_of_date(now)-1 day` are present and their `yesterday_closed` slots are comparable;
   - `status=unavailable` with truthful `reason` when one of those ready snapshots is missing or structurally unusable;

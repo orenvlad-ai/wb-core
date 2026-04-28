@@ -15,6 +15,7 @@ from typing import Any, Mapping
 from urllib import parse as urllib_parse
 
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.application.sheet_vitrina_v1_feedbacks import SheetVitrinaV1FeedbacksError
 from packages.application.sheet_vitrina_v1_load_bridge import LegacyGoogleSheetsContourArchivedError
 from packages.application.sheet_vitrina_v1_load_bridge import legacy_google_sheets_archive_context
 from packages.contracts.factory_order_supply import (
@@ -47,6 +48,7 @@ DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH = (
 DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_CALCULATE_PATH = (
     "/v1/sheet-vitrina-v1/research/sku-group-comparison/calculate"
 )
+DEFAULT_SHEET_FEEDBACKS_PATH = "/v1/sheet-vitrina-v1/feedbacks"
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_SHEET_LOAD_PATH = "/v1/sheet-vitrina-v1/load"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
@@ -842,6 +844,35 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if parsed.path == DEFAULT_SHEET_FEEDBACKS_PATH:
+                try:
+                    feedbacks_query = _resolve_feedbacks_query(parsed.query)
+                    payload = entrypoint.handle_sheet_feedbacks_request(**feedbacks_query)
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                except SheetVitrinaV1FeedbacksError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus(exc.http_status),
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina feedbacks runtime failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if parsed.path == DEFAULT_SHEET_DAILY_REPORT_PATH:
                 try:
                     payload = entrypoint.handle_sheet_daily_report_request()
@@ -1425,6 +1456,31 @@ def _resolve_web_vitrina_period_window_from_query(query_string: str) -> tuple[st
     return date_from, date_to
 
 
+def _resolve_feedbacks_query(query_string: str) -> dict[str, Any]:
+    query = urllib_parse.parse_qs(query_string, keep_blank_values=False)
+    date_from = str(query.get("date_from", [""])[0]).strip() or None
+    date_to = str(query.get("date_to", [""])[0]).strip() or None
+    is_answered = str(query.get("is_answered", ["all"])[0]).strip() or "all"
+    raw_stars = str(query.get("stars", [""])[0]).strip()
+    stars: list[int] | None = None
+    if raw_stars:
+        stars = []
+        for raw_value in raw_stars.split(","):
+            value = raw_value.strip()
+            if not value:
+                continue
+            try:
+                stars.append(int(value))
+            except ValueError as exc:
+                raise ValueError("stars query parameter must be a comma-separated list of integers") from exc
+    return {
+        "date_from": date_from,
+        "date_to": date_to,
+        "stars": stars,
+        "is_answered": is_answered,
+    }
+
+
 def _resolve_job_id_from_query(query_string: str) -> str:
     query = urllib_parse.parse_qs(query_string)
     job_id = str(query.get("job_id", [""])[0]).strip()
@@ -1840,6 +1896,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "group_refresh_path": DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH,
         "research_options_path": DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH,
         "research_calculate_path": DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_CALCULATE_PATH,
+        "feedbacks_path": DEFAULT_SHEET_FEEDBACKS_PATH,
         "job_path": job_path,
         "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
         "seller_recovery_status_path": DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
