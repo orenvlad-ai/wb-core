@@ -16,6 +16,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH,
+    DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH,
     DEFAULT_SHEET_FEEDBACKS_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
@@ -160,8 +162,12 @@ def main() -> None:
                 'data-unified-tab-button="feedbacks"',
                 'data-unified-tab-panel="feedbacks"',
                 'data-feedbacks-load',
+                'data-feedbacks-ai-analyze',
+                'data-feedbacks-subtab="prompt"',
                 'data-feedbacks-range-toggle',
                 '"feedbacks_path": "/v1/sheet-vitrina-v1/feedbacks"',
+                f'"feedbacks_ai_prompt_path": "{DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH}"',
+                f'"feedbacks_ai_analyze_path": "{DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH}"',
             ):
                 if expected not in ui_html:
                     raise AssertionError(f"feedbacks UI must contain {expected!r}")

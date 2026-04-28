@@ -23,6 +23,9 @@ Contract покрывает hosted contour на `api.selleros.pro` для routes
 - `POST /v1/sheet-vitrina-v1/plan-report/baseline-upload`
 - `GET /v1/sheet-vitrina-v1/plan-report/baseline-status`
 - `GET /v1/sheet-vitrina-v1/feedbacks`
+- `GET /v1/sheet-vitrina-v1/feedbacks/ai-prompt`
+- `POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt`
+- `POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze`
 - `GET /v1/sheet-vitrina-v1/plan`
 - `GET /v1/sheet-vitrina-v1/status`
 - `GET /v1/sheet-vitrina-v1/job`
@@ -127,6 +130,7 @@ Hosted service должна предоставлять current repo entrypoint e
 
 Current required upstream secret contract stays:
 - `WB_API_TOKEN`
+- `OPENAI_API_KEY`
 
 Optional runtime overrides remain the same as in current official-api boundary:
 - `WB_OFFICIAL_API_BASE_URL`
@@ -134,6 +138,9 @@ Optional runtime overrides remain the same as in current official-api boundary:
 - `WB_SELLER_ANALYTICS_API_BASE_URL`
 - `WB_STATISTICS_API_BASE_URL`
 - `WB_FEEDBACKS_API_BASE_URL`
+- `OPENAI_MODEL`
+- `OPENAI_API_BASE_URL`
+- `OPENAI_TIMEOUT_SECONDS`
 - `PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH`
 - `SELLER_PORTAL_CANONICAL_SUPPLIER_ID`
 - `SELLER_PORTAL_CANONICAL_SUPPLIER_LABEL`
@@ -191,8 +198,8 @@ Promo current correctness guard:
 - If the local machine cannot validate the selleros certificate chain, the accepted diagnostic-only fallback is `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1 python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py`. This is only a local CA verification fallback; route timeouts, non-200 responses or bad payloads are real blockers.
 
 Feedbacks tab/route guard:
-- run `python3 apps/sheet_vitrina_v1_feedbacks_http_smoke.py` and `python3 apps/sheet_vitrina_v1_feedbacks_browser_smoke.py` after changes touching the `Отзывы` tab, `GET /v1/sheet-vitrina-v1/feedbacks`, official feedbacks adapter/token path or feedbacks date/filter/table UI.
-- Live/public closure must read `/sheet-vitrina-v1/vitrina` and one bounded `GET /v1/sheet-vitrina-v1/feedbacks?...` on the hosted runtime. This verifies route wiring, `WB_API_TOKEN` permission for feedbacks, friendly upstream error surfacing and normalized JSON shape without `/load`, Google Sheets/GAS, Seller Portal bot or persistence.
+- run `python3 apps/sheet_vitrina_v1_feedbacks_http_smoke.py`, `python3 apps/sheet_vitrina_v1_feedbacks_ai_smoke.py` and `python3 apps/sheet_vitrina_v1_feedbacks_browser_smoke.py` after changes touching the `Отзывы` tab, `GET /v1/sheet-vitrina-v1/feedbacks`, `feedbacks/ai-prompt`, `feedbacks/ai-analyze`, official feedbacks adapter/token path, OpenAI adapter path, server-side prompt storage or feedbacks date/filter/table UI.
+- Live/public closure must read `/sheet-vitrina-v1/vitrina`, one bounded `GET /v1/sheet-vitrina-v1/feedbacks?...`, `GET/POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt` and one bounded small `POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze` on the hosted runtime when AI feedback analysis changes. This verifies route wiring, `WB_API_TOKEN` permission for feedbacks, `OPENAI_API_KEY` visibility to the service without printing the key, friendly upstream error surfacing and normalized JSON shape without `/load`, Google Sheets/GAS, Seller Portal bot, complaint submission or accepted-truth persistence.
 
 Google Sheets, GAS, `clasp`, `/v1/sheet-vitrina-v1/load` and `invalid_grant` are not active blockers for web-vitrina completion. If a task explicitly changes archived Apps Script guard code, verify blocked/archived behavior only.
 
@@ -233,6 +240,8 @@ Public probe validates:
   - truthful `422 {"error": ...}` when the ready snapshot is absent
   - route remains read-only, optional `as_of_date` override stays on the same boundary and must not trigger refresh/upstream fetch
 - `GET /v1/sheet-vitrina-v1/feedbacks` returns `200` + JSON `sheet_vitrina_v1_feedbacks` v1 for a bounded valid query (`date_from`, `date_to`, optional `stars`, `is_answered`). It is read-only over official WB `GET /api/v1/feedbacks` with canonical `WB_API_TOKEN`; it must not trigger refresh, `/load`, Google Sheets/GAS, complaint submission or runtime persistence. If the hosted token lacks feedbacks permission, 401/403 is a real live blocker for the `Отзывы` feature rather than a deploy-script success.
+- `GET /v1/sheet-vitrina-v1/feedbacks/ai-prompt` and `POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt` manage server-side operational prompt config in the hosted runtime dir. This prompt is not ЕБД, accepted truth, ready snapshot truth or browser-local truth.
+- `POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze` runs a bounded OpenAI Responses API structured-output call over operator-supplied loaded feedback rows. It returns per-`feedback_id` transient analysis for the current UI session and must not persist AI labels, submit complaints, call Seller Portal or write Google Sheets/GAS.
 - `GET /v1/sheet-vitrina-v1/daily-report` returns `200` + JSON for both states:
   - `status=available` when ready snapshots for `default_business_as_of_date(now)` and `default_business_as_of_date(now)-1 day` are present and their `yesterday_closed` slots are comparable;
   - `status=unavailable` with truthful `reason` when one of those ready snapshots is missing or structurally unusable;

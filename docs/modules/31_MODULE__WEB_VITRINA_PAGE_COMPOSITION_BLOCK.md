@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-31-WEB-VITRINA-PAGE-COMPOSITION-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded phase-4 слою `web_vitrina_page_composition_block`."
-scope: "Real page composition для `GET /sheet-vitrina-v1/vitrina`: separate sibling page shell, split page-refresh/data-freshness summary, server-driven full-width table `Загрузка данных`, secondary block `Лог`, semantic green/red truth taxonomy for today/yesterday source status, bounded `Обновить` vs `Загрузить и обновить` action semantics, compact table toolbar for period/search/filters/columns/sort, вкладка `Отзывы` с manual read-only WB API feedbacks load/filter table, вкладка `Исследования` с read-only SKU group comparison MVP, promo candidate chips, compact research date-range controls, scrollable table/grid result, table container, truthful loading/empty/error states и minimal inline client island поверх stable server seams `web_vitrina_contract -> web_vitrina_view_model -> web_vitrina_gravity_table_adapter` без SPA/platform redesign."
+scope: "Real page composition для `GET /sheet-vitrina-v1/vitrina`: separate sibling page shell, split page-refresh/data-freshness summary, server-driven full-width table `Загрузка данных`, secondary block `Лог`, semantic green/red truth taxonomy for today/yesterday source status, bounded `Обновить` vs `Загрузить и обновить` action semantics, compact table toolbar for period/search/filters/columns/sort, вкладка `Отзывы` с manual read-only WB API feedbacks load/filter table плюс transient AI-assisted разбора отзывов через server-side prompt/OpenAI route, вкладка `Исследования` с read-only SKU group comparison MVP, promo candidate chips, compact research date-range controls, scrollable table/grid result, table container, truthful loading/empty/error states и minimal inline client island поверх stable server seams `web_vitrina_contract -> web_vitrina_view_model -> web_vitrina_gravity_table_adapter` без SPA/platform redesign."
 source_basis:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
@@ -29,6 +29,9 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/web-vitrina"
   - "GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition&include_source_status=1"
   - "GET /v1/sheet-vitrina-v1/feedbacks"
+  - "GET /v1/sheet-vitrina-v1/feedbacks/ai-prompt"
+  - "POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt"
+  - "POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze"
   - "GET /v1/sheet-vitrina-v1/research/sku-group-comparison/options"
   - "POST /v1/sheet-vitrina-v1/research/sku-group-comparison/calculate"
 related_runners:
@@ -39,6 +42,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_web_vitrina_reason_sanitization_smoke.py"
   - "apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py"
   - "apps/sheet_vitrina_v1_feedbacks_http_smoke.py"
+  - "apps/sheet_vitrina_v1_feedbacks_ai_smoke.py"
   - "apps/sheet_vitrina_v1_feedbacks_browser_smoke.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime.py"
 related_docs:
@@ -48,7 +52,7 @@ related_docs:
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Phase 4 live page composition остаётся server-driven; добавлена bounded вкладка `Отзывы`, которая вручную читает official WB API feedbacks через новый read-only route, переиспользует compact date-range UX/table pattern и не становится source-of-truth/persistence layer."
+update_note: "Phase 4 live page composition остаётся server-driven; вкладка `Отзывы` теперь содержит подразделы `Отзывы` и `AI-промпт разбора`, compact scrollable feedback table with AI columns/filter/sort and transient OpenAI-backed analysis via saved server-side prompt. AI output is not complaint submission, ЕБД/accepted truth, ready snapshot truth, Seller Portal automation or Google Sheets/GAS."
 ---
 
 # 1. Идентификатор и статус
@@ -91,7 +95,9 @@ update_note: "Phase 4 live page composition остаётся server-driven; до
   - table container
   - truthful `loading / empty / error` states
   - `Расчет поставок` and `Отчеты` reuse the existing operator template/actions in embedded mode, preserving factory/WB supply blocks and the internal report subsection selector (`Ежедневные отчёты`, `Отчёт по остаткам`, `Выполнение плана`) without changing business routes; embedded height is measured from the actual `.page` content rather than iframe viewport/body `100vh`, and edge wheel gestures are relayed to the parent shell so these tabs do not create large empty scroll tails or swallow the first trackpad scroll
-  - `Отзывы` is a same-shell manual read-only tab over `GET /v1/sheet-vitrina-v1/feedbacks`: the operator chooses a bounded date range with the same compact calendar/popover style, selects stars and answered/unanswered filter, then explicitly loads a normalized table from official WB API feedbacks. The browser stores only transient selection/loading state; it does not persist feedbacks, does not write ЕБД/ready snapshots, does not submit complaints and does not use Google Sheets/GAS.
+  - `Отзывы` is a same-shell manual read-only tab over `GET /v1/sheet-vitrina-v1/feedbacks`: the operator chooses a bounded date range with the same compact calendar/popover style, selects stars and answered/unanswered filter, then explicitly loads a normalized table from official WB API feedbacks. The table is internally scrollable around the operator-visible row window, keeps long feedback/pros/cons/answer text bounded, and includes AI columns (`Подходит для жалобы`, `Категория`, `Причина`, `Уверенность`) that show `Не разобрано` before analysis.
+  - The same tab has a nested `AI-промпт разбора` subsection backed by `GET/POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt`. The UI shows an editable starter prompt when no saved prompt exists, but only a saved server-side prompt enables real analysis. `POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze` fills the existing feedback table, adds AI filter (`Все / Подходит для жалобы / На проверку / Не подходит / Не разобрано`) and sorts analyzed rows as `Да`, `Проверить`, `Нет`, `Не разобрано` while preserving review date desc inside each group.
+  - Feedbacks AI output is transient browser/session display over a server-side OpenAI call; it does not persist AI labels, does not write accepted truth/ready snapshots/ЕБД, does not submit complaints, does not call Seller Portal and does not use Google Sheets/GAS.
   - `Исследования` is a same-shell read-only tab, not an iframe and not a new truth contour; MVP block `Сравнение групп SKU` reads active SKU from current `config_v2`, selectable non-financial SKU metrics from current registry/view truth, and calculates retrospective group dynamics over persisted ready snapshots only
   - research SKU selectors include independent compact `Товар в акции` chips; the options route derives the candidate-only promo filter from latest closed-day ready snapshot promo metrics and returns unavailable metadata instead of fabricating a filtered list when promo truth is absent
   - research period controls are compact date-range pickers in the browser, while the calculate contract remains explicit `date_from/date_to`; result rendering uses the same `table-shell / table-scroll / vitrina-table` page pattern with horizontal scroll rather than a card layout
@@ -187,9 +193,11 @@ update_note: "Phase 4 live page composition остаётся server-driven; до
 - `apps/sheet_vitrina_v1_web_vitrina_http_smoke.py`
   - confirms default `web_vitrina_contract` path stays stable, optional `date_from/date_to` works as bounded period window and optional `surface=page_composition` works on the same route with severity-sorted human activity items
 - `apps/sheet_vitrina_v1_feedbacks_http_smoke.py`
-  - confirms `GET /v1/sheet-vitrina-v1/feedbacks` returns normalized `sheet_vitrina_v1_feedbacks` JSON, default `is_answered=all` reads both required WB streams, star filtering/summaries work, invalid query values fail cleanly and the unified HTML shell exposes the `Отзывы` tab/route wiring
+  - confirms `GET /v1/sheet-vitrina-v1/feedbacks` returns normalized `sheet_vitrina_v1_feedbacks` JSON, default `is_answered=all` reads both required WB streams, star filtering/summaries work, invalid query values fail cleanly and the unified HTML shell exposes the `Отзывы` tab/route wiring including AI prompt/analyze endpoints
+- `apps/sheet_vitrina_v1_feedbacks_ai_smoke.py`
+  - confirms server-side prompt get/save validation, fake-provider AI analyze shape, invalid provider output surfacing, Russian category/fit/confidence labels and HTTP prompt/analyze routes without live OpenAI calls
 - `apps/sheet_vitrina_v1_feedbacks_browser_smoke.py`
-  - confirms the `Отзывы` tab opens in the unified shell, the compact feedbacks range picker closes on outside click, star filter changes the route query, and a manual read-only feedbacks payload renders in the table without using `/load`
+  - confirms the `Отзывы` tab opens in the unified shell, nested feedbacks/prompt subsections render, the compact feedbacks range picker closes on outside click, star filter changes the route query, the feedback table is internally scrollable, AI columns render in the same table, saved prompt enables AI analysis, AI filter works and positive complaint-fit rows sort first without using `/load`
 - `apps/sheet_vitrina_v1_web_vitrina_highlight_ui_smoke.py`
   - confirms full refresh session highlighting covers both touched temporal dates, keeps green for changed cells, yellow for latest-confirmed cells and clears on browser reload
 - `apps/sheet_vitrina_v1_web_vitrina_source_status_smoke.py`
