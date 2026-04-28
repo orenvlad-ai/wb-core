@@ -25,6 +25,8 @@ from packages.application.promo_campaign_archive import (  # noqa: E402
     promo_campaign_archive_root,
     sync_promo_campaign_archive,
 )
+from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
+from packages.contracts.prices_snapshot_block import PricesSnapshotItem, PricesSnapshotSuccess  # noqa: E402
 from packages.contracts.promo_xlsx_collector_block import PromoMetadata  # noqa: E402
 
 
@@ -108,31 +110,171 @@ def main() -> None:
             raise AssertionError(f"expected one expected non-materializable artifact, got {audit}")
         if len(audit.get("failure_examples") or []) != 5:
             raise AssertionError(f"expected compact failure examples, got {audit}")
-        result = materialize_promo_result_from_archive(
+        _assert_mixed_invalid_archive_stays_incomplete(
             runtime_dir=runtime_dir,
-            snapshot_date="2026-04-26",
-            requested_nm_ids=[123456],
             sync_summary=sync_summary,
-            diagnostics={},
         )
-        if result.kind != "incomplete":
-            raise AssertionError(f"invalid campaign artifacts must keep materialization incomplete, got {result}")
-        result_diagnostics = result.diagnostics
-        summary = result_diagnostics.get("artifact_validation_summary") or {}
-        if int(summary.get("validation_failed_count") or 0) != 4:
-            raise AssertionError(f"expected 4 covering validation failures, got {result_diagnostics}")
-        if int(summary.get("non_materializable_expected_count") or 0) != 1:
-            raise AssertionError(f"expected one expected non-materializable covering campaign, got {result_diagnostics}")
-        missing_campaigns = result_diagnostics.get("missing_campaign_artifacts") or []
-        if len(missing_campaigns) != 4:
-            raise AssertionError(f"expected campaign-level missing artifacts, got {result_diagnostics}")
-        ended = [item for item in missing_campaigns if item.get("artifact_state") == ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD]
-        if not ended or ended[0].get("workbook_required") is not False:
-            raise AssertionError(f"ended no-download campaign must not require workbook, got {result_diagnostics}")
+        _assert_expected_non_materializable_is_not_fatal(Path(tmp) / "case-a")
+        _assert_true_artifact_loss_remains_fatal(Path(tmp) / "case-b")
+        _assert_only_expected_non_materializable_stays_incomplete(Path(tmp) / "case-c")
         print(
             "promo campaign archive integrity smoke passed: "
             f"states={counts}; validation_failed_count={audit.get('validation_failed_count')}"
         )
+
+
+def _assert_mixed_invalid_archive_stays_incomplete(
+    *,
+    runtime_dir: Path,
+    sync_summary,
+) -> None:
+    result = materialize_promo_result_from_archive(
+        runtime_dir=runtime_dir,
+        snapshot_date="2026-04-26",
+        requested_nm_ids=[123456],
+        sync_summary=sync_summary,
+        diagnostics={},
+    )
+    if result.kind != "incomplete":
+        raise AssertionError(f"invalid campaign artifacts must keep materialization incomplete, got {result}")
+    result_diagnostics = result.diagnostics
+    summary = result_diagnostics.get("artifact_validation_summary") or {}
+    if int(summary.get("validation_failed_count") or 0) != 4:
+        raise AssertionError(f"expected 4 covering validation failures, got {result_diagnostics}")
+    if int(summary.get("fatal_missing_artifact_count") or 0) != 3:
+        raise AssertionError(f"expected 3 fatal covering validation failures, got {result_diagnostics}")
+    if int(summary.get("non_materializable_expected_count") or 0) != 1:
+        raise AssertionError(f"expected one expected non-materializable covering campaign, got {result_diagnostics}")
+    missing_campaigns = result_diagnostics.get("missing_campaign_artifacts") or []
+    if len(missing_campaigns) != 4:
+        raise AssertionError(f"expected campaign-level missing artifacts, got {result_diagnostics}")
+    fatal_campaigns = result_diagnostics.get("fatal_missing_artifacts") or []
+    if len(fatal_campaigns) != 3:
+        raise AssertionError(f"expected only true failures in fatal diagnostics, got {result_diagnostics}")
+    ended = [
+        item
+        for item in (result_diagnostics.get("expected_non_materializable_artifacts") or [])
+        if item.get("artifact_state") == ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD
+    ]
+    if not ended or ended[0].get("workbook_required") is not False:
+        raise AssertionError(f"ended no-download campaign must not require workbook, got {result_diagnostics}")
+
+
+def _assert_expected_non_materializable_is_not_fatal(runtime_dir: Path) -> None:
+    for idx, promo_id in enumerate((2101, 2102, 2103), start=1):
+        _write_promo_fixture(
+            runtime_dir=runtime_dir,
+            run_name=f"2026-04-26__complete-{idx}",
+            promo_folder=f"{promo_id}__{3100 + idx}__complete",
+            promo_id=promo_id,
+            period_id=3100 + idx,
+            title=f"Complete artifact {idx}",
+            confidence="high",
+            workbook_kind="valid",
+        )
+    _write_promo_fixture(
+        runtime_dir=runtime_dir,
+        run_name="2026-04-26__ended-no-download-2242",
+        promo_folder="2242__pending__повышаем-заказы-автоматические-скидки",
+        promo_id=2242,
+        period_id=None,
+        title="Повышаем заказы: автоматические скидки",
+        confidence="high",
+        workbook_kind="missing",
+        ui_status="ended",
+        download_action_state="absent",
+    )
+    _write_price_truth(runtime_dir=runtime_dir, snapshot_date="2026-04-26", nm_id=123456, discounted_price=900)
+    result = materialize_promo_result_from_archive(
+        runtime_dir=runtime_dir,
+        snapshot_date="2026-04-26",
+        requested_nm_ids=[123456],
+        sync_summary=sync_promo_campaign_archive(runtime_dir),
+        diagnostics={},
+    )
+    if result.kind != "success":
+        raise AssertionError(f"expected non-materializable campaign must not make payload incomplete, got {result}")
+    if result.covered_count != 1 or len(result.items) != 1:
+        raise AssertionError(f"usable campaigns must materialize requested rows, got {result}")
+    item = result.items[0]
+    if item.promo_count_by_price != 3.0 or item.promo_participation != 1.0 or item.promo_entry_price_best != 999.0:
+        raise AssertionError(f"expected values from three usable campaigns only, got {item}")
+    diagnostics = result.diagnostics
+    summary = diagnostics.get("artifact_validation_summary") or {}
+    if int(summary.get("fatal_missing_artifact_count") or 0) != 0:
+        raise AssertionError(f"ended/no-download must not be fatal, got {diagnostics}")
+    if int(summary.get("non_materializable_expected_count") or 0) != 1:
+        raise AssertionError(f"expected ended/no-download diagnostic count, got {diagnostics}")
+    if int(summary.get("materializable_campaigns") or 0) != 3:
+        raise AssertionError(f"expected three usable campaigns, got {diagnostics}")
+    expected = diagnostics.get("expected_non_materializable_artifacts") or []
+    if not expected or expected[0].get("workbook_required") is not False:
+        raise AssertionError(f"campaign 2242 must stay visible as workbook_required=false, got {diagnostics}")
+    if "2242__pending__повышаем-заказы-автоматические-скидки" not in (result.detail or ""):
+        raise AssertionError(f"detail must keep excluded campaign evidence, got {result.detail}")
+
+
+def _assert_true_artifact_loss_remains_fatal(runtime_dir: Path) -> None:
+    _write_promo_fixture(
+        runtime_dir=runtime_dir,
+        run_name="2026-04-26__active-missing",
+        promo_folder="2201__3201__active-missing",
+        promo_id=2201,
+        period_id=3201,
+        title="Active missing workbook artifact",
+        confidence="high",
+        workbook_kind="missing",
+        ui_status="active",
+        download_action_state="available",
+    )
+    result = materialize_promo_result_from_archive(
+        runtime_dir=runtime_dir,
+        snapshot_date="2026-04-26",
+        requested_nm_ids=[123456],
+        sync_summary=sync_promo_campaign_archive(runtime_dir),
+        diagnostics={},
+    )
+    if result.kind != "incomplete" or result.covered_count != 0 or result.items:
+        raise AssertionError(f"true artifact loss must remain safe incomplete, got {result}")
+    diagnostics = result.diagnostics
+    summary = diagnostics.get("artifact_validation_summary") or {}
+    if int(summary.get("fatal_missing_artifact_count") or 0) != 1:
+        raise AssertionError(f"active missing workbook must remain fatal, got {diagnostics}")
+    if int(summary.get("non_materializable_expected_count") or 0) != 0:
+        raise AssertionError(f"active missing workbook must not be expected non-materializable, got {diagnostics}")
+
+
+def _assert_only_expected_non_materializable_stays_incomplete(runtime_dir: Path) -> None:
+    for idx, promo_id in enumerate((2301, 2302), start=1):
+        _write_promo_fixture(
+            runtime_dir=runtime_dir,
+            run_name=f"2026-04-26__ended-only-{idx}",
+            promo_folder=f"{promo_id}__pending__ended-only-{idx}",
+            promo_id=promo_id,
+            period_id=None,
+            title=f"Ended only artifact {idx}",
+            confidence="high",
+            workbook_kind="missing",
+            ui_status="ended",
+            download_action_state="absent",
+        )
+    result = materialize_promo_result_from_archive(
+        runtime_dir=runtime_dir,
+        snapshot_date="2026-04-26",
+        requested_nm_ids=[123456],
+        sync_summary=sync_promo_campaign_archive(runtime_dir),
+        diagnostics={},
+    )
+    if result.kind != "incomplete" or result.covered_count != 0 or result.items:
+        raise AssertionError(f"only expected non-materializable campaigns must not fake zero-success, got {result}")
+    diagnostics = result.diagnostics
+    summary = diagnostics.get("artifact_validation_summary") or {}
+    if int(summary.get("fatal_missing_artifact_count") or 0) != 0:
+        raise AssertionError(f"ended-only case must not have fatal artifacts, got {diagnostics}")
+    if int(summary.get("non_materializable_expected_count") or 0) != 2:
+        raise AssertionError(f"ended-only case must expose expected non-materializable artifacts, got {diagnostics}")
+    if "no_materializable_campaign_artifacts=true" not in (result.detail or ""):
+        raise AssertionError(f"ended-only incomplete detail missing explicit reason, got {result.detail}")
 
 
 def _write_promo_fixture(
@@ -217,6 +359,34 @@ def _write_valid_workbook(path: Path) -> None:
     sheet.append(["Артикул WB", "Плановая цена для акции"])
     sheet.append([123456, 999.0])
     workbook.save(path)
+
+
+def _write_price_truth(
+    *,
+    runtime_dir: Path,
+    snapshot_date: str,
+    nm_id: int,
+    discounted_price: int,
+) -> None:
+    runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+    runtime.save_temporal_source_slot_snapshot(
+        source_key="prices_snapshot",
+        snapshot_date=snapshot_date,
+        snapshot_role="accepted_current_snapshot",
+        captured_at=f"{snapshot_date}T08:00:00Z",
+        payload=PricesSnapshotSuccess(
+            kind="success",
+            snapshot_date=snapshot_date,
+            count=1,
+            items=[
+                PricesSnapshotItem(
+                    nm_id=nm_id,
+                    price_seller=discounted_price + 100,
+                    price_seller_discounted=discounted_price,
+                )
+            ],
+        ),
+    )
 
 
 if __name__ == "__main__":

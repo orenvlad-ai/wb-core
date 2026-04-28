@@ -519,7 +519,17 @@ def materialize_promo_result_from_archive(
         for record, validation in validation_pairs
         if not validation.is_complete
     ]
-    missing_artifacts = [record for record, _validation in failed_artifacts]
+    expected_non_materializable_artifacts = [
+        (record, validation)
+        for record, validation in failed_artifacts
+        if validation.is_expected_non_materializable
+    ]
+    fatal_artifact_failures = [
+        (record, validation)
+        for record, validation in failed_artifacts
+        if not validation.is_expected_non_materializable
+    ]
+    missing_artifacts = [record for record, _validation in fatal_artifact_failures]
     _apply_artifact_validation_diagnostics(
         diagnostics=diagnostics,
         validations=[validation for _record, validation in validation_pairs],
@@ -527,8 +537,18 @@ def materialize_promo_result_from_archive(
     )
     _set_promo_diag_counter(diagnostics, "campaign_count", len(records), overwrite=False)
     _set_promo_diag_counter(diagnostics, "current_promo_count", len(covering))
+    _set_promo_diag_counter(diagnostics, "requested_count", len(requested))
+    _set_promo_diag_counter(diagnostics, "covering_campaigns", len(covering))
+    _set_promo_diag_counter(diagnostics, "usable_campaigns", len(usable))
+    _set_promo_diag_counter(diagnostics, "materializable_campaigns", len(usable))
     _set_promo_diag_counter(diagnostics, "archive_hit_count", len(usable))
     _set_promo_diag_counter(diagnostics, "archive_miss_count", len(missing_artifacts))
+    _set_promo_diag_counter(diagnostics, "fatal_missing_artifact_count", len(fatal_artifact_failures))
+    _set_promo_diag_counter(
+        diagnostics,
+        "excluded_non_materializable_campaign_count",
+        len(expected_non_materializable_artifacts),
+    )
     _set_promo_diag_fingerprint(
         diagnostics,
         "promo_archive_fingerprint",
@@ -588,10 +608,29 @@ def materialize_promo_result_from_archive(
         sync_state.to_note(),
         f"covering_campaigns={len(covering)}",
         f"usable_campaigns={len(usable)}",
+        f"materializable_campaigns={len(usable)}",
+        f"excluded_non_materializable_campaigns={len(expected_non_materializable_artifacts)}",
+        f"fatal_missing_artifacts={len(missing_artifacts)}",
         f"artifact_validation_schema={ARTIFACT_VALIDATION_SCHEMA_VERSION}",
     ]
     if detail_prefix:
         detail_parts.insert(0, detail_prefix)
+    if expected_non_materializable_artifacts:
+        detail_parts.append(
+            "expected_non_materializable_artifacts="
+            + ",".join(record.archive_key for record, _validation in expected_non_materializable_artifacts[:8])
+        )
+        detail_parts.append(
+            "expected_non_materializable_reasons="
+            + ",".join(
+                sorted(
+                    {
+                        str(validation.validation_failure_reason or validation.artifact_state)
+                        for _record, validation in expected_non_materializable_artifacts
+                    }
+                )
+            )
+        )
 
     if missing_artifacts:
         missing_keys = ",".join(record.archive_key for record in missing_artifacts[:8])
@@ -599,13 +638,14 @@ def materialize_promo_result_from_archive(
             sorted(
                 {
                     str(validation.validation_failure_reason or validation.artifact_state)
-                    for _record, validation in failed_artifacts
+                    for _record, validation in fatal_artifact_failures
                 }
             )
         )
         _set_promo_diag_counter(diagnostics, "candidate_row_count", 0)
         _set_promo_diag_counter(diagnostics, "eligible_row_count", 0)
         _set_promo_diag_counter(diagnostics, "accepted_row_count", 0)
+        _set_promo_diag_counter(diagnostics, "covered_count", 0)
         _set_promo_diag_counter(diagnostics, "skipped_row_count", len(requested))
         _set_promo_diag_counter(diagnostics, "price_truth_missing_count", None)
         _set_promo_diag_counter(diagnostics, "price_truth_available_count", None)
@@ -630,6 +670,45 @@ def materialize_promo_result_from_archive(
         nm_id: []
         for nm_id in requested
     }
+
+    if covering and not usable:
+        excluded_keys = ",".join(record.archive_key for record, _validation in expected_non_materializable_artifacts[:8])
+        excluded_reasons = ",".join(
+            sorted(
+                {
+                    str(validation.validation_failure_reason or validation.artifact_state)
+                    for _record, validation in expected_non_materializable_artifacts
+                }
+            )
+        )
+        _set_promo_diag_counter(diagnostics, "candidate_row_count", 0)
+        _set_promo_diag_counter(diagnostics, "eligible_row_count", 0)
+        _set_promo_diag_counter(diagnostics, "accepted_row_count", 0)
+        _set_promo_diag_counter(diagnostics, "covered_count", 0)
+        _set_promo_diag_counter(diagnostics, "skipped_row_count", len(requested))
+        _set_promo_diag_counter(diagnostics, "price_truth_missing_count", None)
+        _set_promo_diag_counter(diagnostics, "price_truth_available_count", None)
+        _finish_source_payload_build_phase(
+            diagnostics,
+            status="incomplete",
+            note_kind="only_expected_non_materializable_artifacts",
+        )
+        return PromoLiveSourceIncomplete(
+            kind="incomplete",
+            covered_count=0,
+            items=[],
+            missing_nm_ids=requested,
+            detail="; ".join(
+                detail_parts
+                + [
+                    "no_materializable_campaign_artifacts=true",
+                    f"expected_non_materializable_artifacts={excluded_keys}",
+                    f"expected_non_materializable_reasons={excluded_reasons}",
+                ]
+            ),
+            diagnostics=_snapshot_promo_diagnostics(diagnostics),
+            **common,
+        )
     workbook_phase = _start_promo_diag_phase(diagnostics, "workbook_inspection")
     candidate_row_count = 0
     for record in usable:
@@ -651,6 +730,7 @@ def materialize_promo_result_from_archive(
     if not requested_nm_ids_with_candidates:
         _set_promo_diag_counter(diagnostics, "eligible_row_count", 0)
         _set_promo_diag_counter(diagnostics, "accepted_row_count", len(requested))
+        _set_promo_diag_counter(diagnostics, "covered_count", len(requested))
         _set_promo_diag_counter(diagnostics, "skipped_row_count", len(requested))
         _set_promo_diag_counter(diagnostics, "price_truth_missing_count", 0)
         _set_promo_diag_counter(diagnostics, "price_truth_available_count", 0)
@@ -735,6 +815,7 @@ def materialize_promo_result_from_archive(
     archive_keys = ",".join(record.archive_key for record in usable[:8])
     if missing_price_truth_nm_ids:
         _set_promo_diag_counter(diagnostics, "accepted_row_count", 0)
+        _set_promo_diag_counter(diagnostics, "covered_count", len(requested) - len(missing_price_truth_nm_ids))
         _finish_source_payload_build_phase(diagnostics, status="incomplete", note_kind="missing_price_truth")
         return PromoLiveSourceIncomplete(
             kind="incomplete",
@@ -754,6 +835,7 @@ def materialize_promo_result_from_archive(
             **common,
         )
     _set_promo_diag_counter(diagnostics, "accepted_row_count", len(requested))
+    _set_promo_diag_counter(diagnostics, "covered_count", len(requested))
     _finish_source_payload_build_phase(diagnostics, status="success")
     return PromoLiveSourceSuccess(
         kind="success",
@@ -801,6 +883,14 @@ def _apply_artifact_validation_diagnostics(
         validation.to_diagnostic()
         for validation in failures[:20]
     ]
+    diagnostics["fatal_missing_artifacts"] = [
+        validation.to_diagnostic()
+        for validation in true_failures[:20]
+    ]
+    diagnostics["expected_non_materializable_artifacts"] = [
+        validation.to_diagnostic()
+        for validation in expected_non_materializable[:20]
+    ]
     diagnostics["artifact_validation_summary"] = {
         "schema_version": ARTIFACT_VALIDATION_SCHEMA_VERSION,
         "snapshot_date": snapshot_date,
@@ -808,8 +898,12 @@ def _apply_artifact_validation_diagnostics(
         "complete_artifact_count": state_counts.get(ARTIFACT_STATE_COMPLETE, 0),
         "incomplete_artifact_count": len(failures),
         "true_validation_failed_count": len(true_failures),
+        "fatal_missing_artifact_count": len(true_failures),
+        "true_artifact_loss_count": metadata_only_true_artifact_loss_count,
         "validated_workbook_usable_count": state_counts.get(ARTIFACT_STATE_COMPLETE, 0),
         "materializer_usable_count": state_counts.get(ARTIFACT_STATE_COMPLETE, 0),
+        "materializable_campaigns": state_counts.get(ARTIFACT_STATE_COMPLETE, 0),
+        "excluded_non_materializable_campaigns": len(expected_non_materializable),
         "validation_failed_count": len(failures),
         "workbook_missing_count": missing_workbook_count,
         "metadata_only_count": state_counts.get(ARTIFACT_STATE_METADATA_ONLY, 0),
@@ -863,6 +957,21 @@ def _apply_artifact_validation_diagnostics(
         diagnostics,
         "metadata_only_true_artifact_loss_count",
         metadata_only_true_artifact_loss_count,
+    )
+    _set_promo_diag_counter(
+        diagnostics,
+        "true_artifact_loss_count",
+        metadata_only_true_artifact_loss_count,
+    )
+    _set_promo_diag_counter(
+        diagnostics,
+        "fatal_missing_artifact_count",
+        len(true_failures),
+    )
+    _set_promo_diag_counter(
+        diagnostics,
+        "excluded_non_materializable_campaign_count",
+        len(expected_non_materializable),
     )
     _set_promo_diag_counter(
         diagnostics,
