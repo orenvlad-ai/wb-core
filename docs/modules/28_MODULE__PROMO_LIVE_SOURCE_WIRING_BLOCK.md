@@ -14,6 +14,7 @@ source_basis:
   - "apps/promo_campaign_archive_integrity_smoke.py"
   - "apps/sheet_vitrina_v1_promo_live_source_smoke.py"
   - "apps/sheet_vitrina_v1_promo_live_source_integration_smoke.py"
+  - "apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py"
 related_modules:
   - "packages/contracts/promo_live_source.py"
   - "packages/application/promo_campaign_archive.py"
@@ -31,6 +32,7 @@ related_runners:
   - "apps/promo_campaign_archive_integrity_smoke.py"
   - "apps/sheet_vitrina_v1_promo_live_source_smoke.py"
   - "apps/sheet_vitrina_v1_promo_live_source_integration_smoke.py"
+  - "apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py"
 related_docs:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
@@ -178,6 +180,8 @@ Invalid or incomplete current artifacts still produce `PromoLiveSourceIncomplete
   - `apps/sheet_vitrina_v1_promo_live_source_smoke.py`
 - bounded integration smoke:
   - `apps/sheet_vitrina_v1_promo_live_source_integration_smoke.py`
+- live/public invariant smoke:
+  - `apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py`
 
 # 7. Какой smoke подтверждён
 
@@ -191,6 +195,12 @@ Invalid or incomplete current artifacts still produce `PromoLiveSourceIncomplete
   - existing refresh/runtime/read-side contour реально materialize-ит `promo_by_price[today_current]` как `success`
   - `DATA_VITRINA` получает non-zero promo-backed values
   - collector trace и downloaded promo folders truthfully surface-ятся в runtime note/output
+- Live/public invariant smoke подтверждает на already refreshed public payload:
+  - public `status`, `web-vitrina` и `plan` routes доступны read-only;
+  - `metadata.refresh_diagnostics.source_slots[]` содержит `promo_by_price[today_current]` без fatal expected non-materializable artifacts;
+  - `fatal_missing_artifact_count=0` и `true_artifact_loss_count=0`, когда эти counters представлены;
+  - ended/no-download artifacts, including campaign `2242` when present, остаются `workbook_required=false` diagnostics и не входят в `fatal_missing_artifacts`;
+  - current promo metric rows are present in public `web-vitrina` and are not all blank, while truthful zero rows for ineligible SKU remain valid.
 - Hosted live closure additionally depends on one bounded runtime dependency seam:
   - remote system python must have `openpyxl==3.1.5` and `playwright==1.58.0`;
   - canonical repo-owned hosted deploy contract now installs these python packages before service restart instead of leaving them as hidden host drift;
