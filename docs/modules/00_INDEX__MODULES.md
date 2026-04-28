@@ -109,7 +109,7 @@ update_note: "Обновлён под Google Sheets decommission: modules 17/18/
 - `registry_upload_bundle_v1_block` как первый artifact-backed upload bundle и local validator для V2-реестров.
 - `registry_upload_file_backed_service_block` как первый file-backed accept/store/activate слой для V2-реестров.
 - `registry_upload_db_backed_runtime_block` как первый DB-backed runtime ingest и current-truth слой для V2-реестров.
-- `registry_upload_http_entrypoint_block` как первый live HTTP entrypoint для V2-реестров.
+- `registry_upload_http_entrypoint_block` как первый live HTTP entrypoint для V2-реестров and repo-owned hosted public route allowlist/deploy publication boundary.
 - archived `sheet_vitrina_v1_registry_upload_trigger_block` как former Apps Script trigger отправки `CONFIG / METRICS / FORMULAS`.
 - archived `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` как former compact v3 bootstrap для Google Sheets.
 - `promo_xlsx_collector_block` как bounded repo-owned local collector precursor для promo XLSX + metadata sidecar.
@@ -190,7 +190,7 @@ update_note: "Обновлён под Google Sheets decommission: modules 17/18/
 | `20_MODULE__REGISTRY_UPLOAD_BUNDLE_V1_BLOCK.md` | `registry_upload_bundle_v1_block` | `registry` | artifact-backed bundle и validator подтверждены, смёржены в `main` |
 | `21_MODULE__REGISTRY_UPLOAD_FILE_BACKED_SERVICE_BLOCK.md` | `registry_upload_file_backed_service_block` | `registry` | file-backed accept/store/activate/result подтверждены, смёржены в `main` |
 | `22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md` | `registry_upload_db_backed_runtime_block` | `registry` | DB-backed runtime ingest, role-aware temporal slot cache и persisted closure-retry state подтверждены, смёржены в `main` |
-| `23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md` | `registry_upload_http_entrypoint_block` | `registry` | live HTTP entrypoint, thin runtime wiring, source-aware web-source closed-day acceptance/retry, explicit seller-session probe и permanent operator-facing seller-session block (`session-check/start/status/stop/launcher`, safe stop, per-run `run_id`/final outcome, hardened noVNC launcher) подтверждены, смёржены в `main` |
+| `23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md` | `registry_upload_http_entrypoint_block` | `registry` | live HTTP entrypoint, hosted public route allowlist/deploy publication, thin runtime wiring, source-aware web-source closed-day acceptance/retry, explicit seller-session probe и permanent operator-facing seller-session block (`session-check/start/status/stop/launcher`, safe stop, per-run `run_id`/final outcome, hardened noVNC launcher) подтверждены, смёржены в `main` |
 | `24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md` | `sheet_vitrina_v1_registry_upload_trigger_block` | `sheet-side` | archived / do not use; former Apps Script upload trigger retained as migration evidence |
 | `25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` | `sheet-side` | archived / do not use; former compact v3 bootstrap retained as migration evidence |
 | `26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md` | `sheet_vitrina_v1_mvp_end_to_end_block` | `web/operator` | current website/operator/web-vitrina contour active, including compact supply district XLSX actions and read-only `Отзывы` tab; former Google Sheets load/write path archived |

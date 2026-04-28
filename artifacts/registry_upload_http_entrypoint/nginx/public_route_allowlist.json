@@ -1,0 +1,165 @@
+{
+  "manifest_name": "wb_core_hosted_public_routes",
+  "contract_version": "v1",
+  "description": "Repo-owned nginx allowlist for wb-core hosted registry/sheet-vitrina public routes.",
+  "proxy_read_timeout": "180s",
+  "proxy_send_timeout": "180s",
+  "routes": [
+    {
+      "name": "registry_upload_bundle",
+      "match": "exact",
+      "path": "/v1/registry-upload/bundle",
+      "methods": ["POST"]
+    },
+    {
+      "name": "cost_price_upload",
+      "match": "exact",
+      "path": "/v1/cost-price/upload",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_plan",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/plan",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_refresh",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/refresh",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_status",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/status",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_daily_report",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/daily-report",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_stock_report",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/stock-report",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_plan_report",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/plan-report",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_plan_report_baseline_template",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_plan_report_baseline_upload",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/plan-report/baseline-upload",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_plan_report_baseline_status",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/plan-report/baseline-status",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_feedbacks",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_web_vitrina",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/web-vitrina",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_research",
+      "match": "prefix",
+      "path": "/v1/sheet-vitrina-v1/research/",
+      "methods": ["GET", "POST"]
+    },
+    {
+      "name": "sheet_vitrina_web_vitrina_group_refresh",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/web-vitrina/group-refresh",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_vitrina_page",
+      "match": "exact",
+      "path": "/sheet-vitrina-v1/vitrina",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_load_archived",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/load",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_job",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/job",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_seller_session_check",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/seller-portal-session/check",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_seller_recovery_status",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/seller-portal-recovery/status",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_seller_recovery_start",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/seller-portal-recovery/start",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_seller_recovery_stop",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/seller-portal-recovery/stop",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_seller_recovery_launcher",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_supply_factory_order",
+      "match": "prefix",
+      "path": "/v1/sheet-vitrina-v1/supply/factory-order/",
+      "methods": ["GET", "POST", "DELETE"]
+    },
+    {
+      "name": "sheet_vitrina_supply_wb_regional",
+      "match": "prefix",
+      "path": "/v1/sheet-vitrina-v1/supply/wb-regional/",
+      "methods": ["GET", "POST"]
+    },
+    {
+      "name": "sheet_vitrina_operator_page",
+      "match": "exact",
+      "path": "/sheet-vitrina-v1/operator",
+      "methods": ["GET"]
+    }
+  ]
+}

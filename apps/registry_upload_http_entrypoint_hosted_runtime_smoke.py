@@ -61,6 +61,14 @@ def main() -> None:
             "environment_file": "/etc/wb-core/registry-upload.env",
             "systemd_unit_directory": "/etc/systemd/system",
             "systemd_units_source_dir": "artifacts/registry_upload_http_entrypoint/systemd",
+            "nginx_public_routes": {
+                "server_config_path": "/etc/nginx/sites-enabled/wb-ai",
+                "backup_dir": "/etc/nginx/sites-enabled",
+                "test_command": "nginx -t",
+                "reload_command": "systemctl reload nginx",
+                "manifest_path": "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json",
+                "managed_block_label": "WB-CORE MANAGED PUBLIC ROUTES",
+            },
             "managed_systemd_units": [
                 {
                     "name": "wb-core-sheet-vitrina-refresh.service",
@@ -137,6 +145,11 @@ def main() -> None:
                 raise AssertionError("print-plan must expose seller recovery SSH destination contract")
             if len(print_plan["deploy_plan"]["managed_systemd_units"]) != 2:
                 raise AssertionError("print-plan must expose managed systemd units when configured")
+            nginx_routes = print_plan["deploy_plan"].get("nginx_public_routes") or {}
+            if nginx_routes.get("route_count", 0) < 20:
+                raise AssertionError("print-plan must expose nginx public route allowlist")
+            if "/v1/sheet-vitrina-v1/feedbacks" not in {item["path"] for item in nginx_routes.get("routes", [])}:
+                raise AssertionError("nginx public route allowlist must include feedbacks route")
 
             deploy_dry_run = _run_json(
                 [
@@ -167,6 +180,8 @@ def main() -> None:
                 raise AssertionError("deploy --dry-run must expose systemd enable command")
             if "restart" not in " ".join(deploy_dry_run["commands"]["systemd_restart"]):
                 raise AssertionError("deploy --dry-run must expose systemd restart command")
+            if "apply-nginx-routes" not in " ".join(deploy_dry_run["commands"]["nginx_public_routes_update"]):
+                raise AssertionError("deploy --dry-run must expose nginx public route update command")
 
             public_probe = _run_json(
                 [
@@ -265,6 +280,10 @@ def main() -> None:
             print(
                 "deploy_dry_run_systemd: ok -> "
                 f"{deploy_dry_run['commands']['systemd_restart'][-1]}"
+            )
+            print(
+                "deploy_dry_run_nginx_routes: ok -> "
+                f"{deploy_dry_run['commands']['nginx_public_routes_update'][-1]}"
             )
             print(f"public_probe_web_vitrina_page: ok -> {route_map['web_vitrina_page']['http_status']}")
             print(f"public_probe_operator_reports: ok -> {route_map['operator_reports']['http_status']}")

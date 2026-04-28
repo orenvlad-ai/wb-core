@@ -10,6 +10,14 @@
   "environment_file": "__SET_ME__",
   "systemd_unit_directory": "__SET_ME__",
   "systemd_units_source_dir": "artifacts/registry_upload_http_entrypoint/systemd",
+  "nginx_public_routes": {
+    "server_config_path": "__SET_ME__",
+    "backup_dir": "__SET_ME__",
+    "test_command": "nginx -t",
+    "reload_command": "systemctl reload nginx",
+    "manifest_path": "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json",
+    "managed_block_label": "WB-CORE MANAGED PUBLIC ROUTES"
+  },
   "managed_systemd_units": [
     {
       "name": "wb-core-sheet-vitrina-refresh.service",

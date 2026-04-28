@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import ssl
 import subprocess
@@ -59,9 +60,13 @@ from packages.adapters.registry_upload_http_entrypoint import (
 DEFAULT_TARGET_FILE = (
     ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "hosted_runtime_target__example.json"
 )
+DEFAULT_PUBLIC_ROUTE_ALLOWLIST_FILE = (
+    ROOT / "artifacts" / "registry_upload_http_entrypoint" / "nginx" / "public_route_allowlist.json"
+)
 TARGET_FILE_ENV = "WB_CORE_HOSTED_RUNTIME_TARGET_FILE"
 SSH_IDENTITY_FILE_ENV = "WB_CORE_HOSTED_RUNTIME_SSH_IDENTITY_FILE"
 SSH_OPTIONS_ENV = "WB_CORE_HOSTED_RUNTIME_SSH_OPTIONS"
+DEFAULT_NGINX_MANAGED_BLOCK_LABEL = "WB-CORE MANAGED PUBLIC ROUTES"
 
 RUNTIME_ENV_CONTRACT = [
     "REGISTRY_UPLOAD_HTTP_HOST",
@@ -82,6 +87,7 @@ OPTIONAL_RUNTIME_CONTRACT = [
     "WB_ADVERT_API_BASE_URL",
     "WB_SELLER_ANALYTICS_API_BASE_URL",
     "WB_STATISTICS_API_BASE_URL",
+    "WB_FEEDBACKS_API_BASE_URL",
     "PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH",
     "SELLER_PORTAL_CANONICAL_SUPPLIER_ID",
     "SELLER_PORTAL_CANONICAL_SUPPLIER_LABEL",
@@ -119,6 +125,16 @@ class ManagedSystemdUnit:
 
 
 @dataclass(frozen=True)
+class NginxPublicRoutesConfig:
+    server_config_path: str
+    backup_dir: str
+    test_command: str
+    reload_command: str
+    manifest_path: str
+    managed_block_label: str = DEFAULT_NGINX_MANAGED_BLOCK_LABEL
+
+
+@dataclass(frozen=True)
 class HostedRuntimeTarget:
     target_id: str
     public_base_url: str
@@ -133,6 +149,7 @@ class HostedRuntimeTarget:
     systemd_unit_directory: str = ""
     systemd_units_source_dir: str = ""
     managed_systemd_units: tuple[ManagedSystemdUnit, ...] = field(default_factory=tuple)
+    nginx_public_routes: NginxPublicRoutesConfig | None = None
 
     @property
     def route_paths(self) -> dict[str, str]:
@@ -144,6 +161,10 @@ class HostedRuntimeTarget:
     @property
     def has_managed_systemd_units(self) -> bool:
         return bool(self.managed_systemd_units)
+
+    @property
+    def has_nginx_public_routes(self) -> bool:
+        return self.nginx_public_routes is not None
 
     @property
     def remote_systemd_units_source_dir(self) -> str:
@@ -176,6 +197,27 @@ def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
                 restart=bool(raw_unit.get("restart", False)),
             )
         )
+    raw_nginx_public_routes = payload.get("nginx_public_routes")
+    nginx_public_routes: NginxPublicRoutesConfig | None = None
+    if raw_nginx_public_routes is not None:
+        if not isinstance(raw_nginx_public_routes, dict):
+            raise ValueError("nginx_public_routes must be a JSON object")
+        nginx_public_routes = NginxPublicRoutesConfig(
+            server_config_path=str(raw_nginx_public_routes.get("server_config_path", "")).strip(),
+            backup_dir=str(raw_nginx_public_routes.get("backup_dir", "")).strip(),
+            test_command=str(raw_nginx_public_routes.get("test_command", "")).strip(),
+            reload_command=str(raw_nginx_public_routes.get("reload_command", "")).strip(),
+            manifest_path=str(
+                raw_nginx_public_routes.get(
+                    "manifest_path",
+                    "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json",
+                )
+            ).strip(),
+            managed_block_label=str(
+                raw_nginx_public_routes.get("managed_block_label", DEFAULT_NGINX_MANAGED_BLOCK_LABEL)
+            ).strip()
+            or DEFAULT_NGINX_MANAGED_BLOCK_LABEL,
+        )
 
     return HostedRuntimeTarget(
         target_id=str(payload.get("target_id", "")).strip(),
@@ -191,6 +233,7 @@ def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
         systemd_unit_directory=str(payload.get("systemd_unit_directory", "")).strip(),
         systemd_units_source_dir=str(payload.get("systemd_units_source_dir", "")).strip(),
         managed_systemd_units=tuple(managed_systemd_units),
+        nginx_public_routes=nginx_public_routes,
     )
 
 
@@ -234,6 +277,10 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
                 "daemon-reload systemd and apply managed unit changes",
             ]
         )
+    if target.has_nginx_public_routes:
+        deploy_sequence.append(
+            "render repo-owned nginx public route allowlist, backup server config, validate nginx config and reload nginx"
+        )
     deploy_sequence.extend(
         [
             "restart hosted runtime via restart_command",
@@ -252,6 +299,7 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
         "systemd_unit_directory": target.systemd_unit_directory or None,
         "systemd_units_source_dir": target.systemd_units_source_dir or None,
         "managed_systemd_units": _describe_managed_systemd_units(target),
+        "nginx_public_routes": _describe_nginx_public_routes(target),
         "route_paths": target.route_paths,
         "runtime_env_contract": RUNTIME_ENV_CONTRACT,
         "required_secret_contract": REQUIRED_SECRET_CONTRACT,
@@ -268,6 +316,9 @@ def collect_public_surface(
     route_paths: dict[str, str],
     as_of_date: str | None,
     include_refresh: bool,
+    include_feedbacks: bool = False,
+    feedbacks_date_from: str | None = None,
+    feedbacks_date_to: str | None = None,
     timeout_seconds: float,
 ) -> list[dict[str, Any]]:
     results = [
@@ -422,6 +473,27 @@ def collect_public_surface(
             timeout_seconds=timeout_seconds,
         ),
     ]
+    if include_feedbacks:
+        date_from, date_to = _default_feedbacks_probe_window(
+            date_from=feedbacks_date_from,
+            date_to=feedbacks_date_to,
+        )
+        results.append(
+            _collect_http_probe(
+                name="feedbacks",
+                method="GET",
+                url=_append_query_params(
+                    f"{base_url}{DEFAULT_SHEET_FEEDBACKS_PATH}",
+                    {
+                        "date_from": date_from,
+                        "date_to": date_to,
+                        "stars": "1,2,3,4,5",
+                        "is_answered": "all",
+                    },
+                ),
+                timeout_seconds=timeout_seconds,
+            )
+        )
     if include_refresh:
         refresh_payload = {"as_of_date": as_of_date} if as_of_date else {}
         results.append(
@@ -449,6 +521,9 @@ def collect_loopback_surface(
     *,
     as_of_date: str | None,
     include_refresh: bool,
+    include_feedbacks: bool = False,
+    feedbacks_date_from: str | None = None,
+    feedbacks_date_to: str | None = None,
     timeout_seconds: float,
 ) -> dict[str, Any]:
     if target.ssh_destination:
@@ -456,6 +531,9 @@ def collect_loopback_surface(
             target,
             as_of_date=as_of_date,
             include_refresh=include_refresh,
+            include_feedbacks=include_feedbacks,
+            feedbacks_date_from=feedbacks_date_from,
+            feedbacks_date_to=feedbacks_date_to,
             timeout_seconds=timeout_seconds,
         )
         transport = "ssh"
@@ -465,6 +543,9 @@ def collect_loopback_surface(
             route_paths=target.route_paths,
             as_of_date=as_of_date,
             include_refresh=include_refresh,
+            include_feedbacks=include_feedbacks,
+            feedbacks_date_from=feedbacks_date_from,
+            feedbacks_date_to=feedbacks_date_to,
             timeout_seconds=timeout_seconds,
         )
         transport = "local"
@@ -477,6 +558,7 @@ def collect_loopback_surface(
 def deploy_current_checkout(
     target: HostedRuntimeTarget,
     *,
+    target_file: Path | None,
     dry_run: bool,
     allow_dirty: bool,
 ) -> dict[str, Any]:
@@ -505,6 +587,7 @@ def deploy_current_checkout(
     )
     runtime_pip_install_command = _build_runtime_pip_install_command(target)
     systemd_commands = _build_managed_systemd_commands(target)
+    nginx_public_routes_command = _build_nginx_public_routes_command(target, target_file=target_file, dry_run=dry_run)
     status_command = (
         _remote_shell_command(
             target,
@@ -526,6 +609,7 @@ def deploy_current_checkout(
             "restart": restart_command,
             "systemd_enable": systemd_commands["enable"],
             "systemd_restart": systemd_commands["restart"],
+            "nginx_public_routes_update": nginx_public_routes_command,
             "status": status_command,
         },
     }
@@ -538,6 +622,8 @@ def deploy_current_checkout(
     if systemd_commands["install"]:
         _run_command(systemd_commands["install"])
         _run_command(systemd_commands["daemon_reload"])
+    if nginx_public_routes_command:
+        _run_command(nginx_public_routes_command)
     _run_command(restart_command)
     if systemd_commands["enable"]:
         _run_command(systemd_commands["enable"])
@@ -556,6 +642,317 @@ def _build_runtime_pip_install_command(target: HostedRuntimeTarget) -> list[str]
     return _remote_shell_command(target, command)
 
 
+def apply_nginx_public_routes(target: HostedRuntimeTarget, *, dry_run: bool) -> dict[str, Any]:
+    if not target.nginx_public_routes:
+        return {
+            "ok": True,
+            "configured": False,
+            "changed": False,
+            "detail": "nginx public route publisher is not configured for this target",
+        }
+
+    config = target.nginx_public_routes
+    manifest = load_public_route_manifest(_resolve_repo_relative_path(config.manifest_path))
+    routes = _validated_public_routes(manifest)
+    proxy_pass_url = _normalize_proxy_pass_url(target.loopback_base_url)
+    managed_block = render_nginx_public_route_block(
+        manifest,
+        proxy_pass_url=proxy_pass_url,
+        managed_block_label=config.managed_block_label,
+    )
+    server_path = Path(config.server_config_path)
+    if not server_path.exists():
+        raise FileNotFoundError(f"nginx server config path not found: {server_path}")
+    current_text = server_path.read_text(encoding="utf-8")
+    next_text = apply_managed_nginx_public_routes_to_text(
+        current_text,
+        managed_block=managed_block,
+        routes=routes,
+        server_name=_server_name_from_public_base_url(target.public_base_url),
+        managed_block_label=config.managed_block_label,
+    )
+    changed = current_text != next_text
+    summary: dict[str, Any] = {
+        "ok": True,
+        "configured": True,
+        "dry_run": dry_run,
+        "changed": changed,
+        "server_config_path": config.server_config_path,
+        "manifest_path": config.manifest_path,
+        "route_count": len(routes),
+        "managed_block_label": config.managed_block_label,
+        "proxy_pass_url": proxy_pass_url,
+    }
+    if dry_run:
+        return summary
+    backup_path = None
+    if changed:
+        backup_dir = Path(config.backup_dir or str(server_path.parent))
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup_path = backup_dir / f"{server_path.name}.bak_wb_core_routes_{timestamp}"
+        backup_path.write_text(current_text, encoding="utf-8")
+        server_path.write_text(next_text, encoding="utf-8")
+    test_result = _run_shell_command(config.test_command)
+    if test_result.returncode != 0:
+        if changed:
+            server_path.write_text(current_text, encoding="utf-8")
+        raise RuntimeError(
+            "nginx config validation failed"
+            f"\nstdout:\n{test_result.stdout}\nstderr:\n{test_result.stderr}"
+        )
+    reload_result = _run_shell_command(config.reload_command)
+    if reload_result.returncode != 0:
+        raise RuntimeError(
+            "nginx reload failed"
+            f"\nstdout:\n{reload_result.stdout}\nstderr:\n{reload_result.stderr}"
+        )
+    summary["backup_path"] = str(backup_path) if backup_path else None
+    summary["nginx_test_stdout"] = test_result.stdout.strip()
+    summary["nginx_test_stderr"] = test_result.stderr.strip()
+    summary["nginx_reload_stdout"] = reload_result.stdout.strip()
+    summary["nginx_reload_stderr"] = reload_result.stderr.strip()
+    return summary
+
+
+def load_public_route_manifest(path: Path = DEFAULT_PUBLIC_ROUTE_ALLOWLIST_FILE) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("public route allowlist manifest must contain a JSON object")
+    _validated_public_routes(payload)
+    return payload
+
+
+def render_nginx_public_route_block(
+    manifest: dict[str, Any],
+    *,
+    proxy_pass_url: str,
+    managed_block_label: str = DEFAULT_NGINX_MANAGED_BLOCK_LABEL,
+) -> str:
+    routes = _validated_public_routes(manifest)
+    read_timeout = _nginx_scalar(str(manifest.get("proxy_read_timeout") or "180s"))
+    send_timeout = _nginx_scalar(str(manifest.get("proxy_send_timeout") or "180s"))
+    lines = [
+        f"    # BEGIN {managed_block_label}",
+        "    # Generated by wb-core deploy runner from repo-owned public route allowlist.",
+        "    # Do not edit this block manually; edit the manifest and redeploy.",
+    ]
+    for route in routes:
+        modifier = "=" if route["match"] == "exact" else "^~"
+        methods = ", ".join(route.get("methods") or [])
+        lines.extend(
+            [
+                f"    # {route['name']} ({methods})",
+                f"    location {modifier} {route['path']} {{",
+                f"        proxy_pass {proxy_pass_url};",
+                "        proxy_set_header Host $host;",
+                "        proxy_set_header X-Real-IP $remote_addr;",
+                "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+                f"        proxy_read_timeout {read_timeout};",
+                f"        proxy_send_timeout {send_timeout};",
+                "    }",
+                "",
+            ]
+        )
+    lines.append(f"    # END {managed_block_label}")
+    return "\n".join(lines) + "\n"
+
+
+def apply_managed_nginx_public_routes_to_text(
+    text: str,
+    *,
+    managed_block: str,
+    routes: list[dict[str, Any]],
+    server_name: str,
+    managed_block_label: str = DEFAULT_NGINX_MANAGED_BLOCK_LABEL,
+) -> str:
+    route_keys = {_nginx_route_key(route) for route in routes}
+    route_keys.update(("", str(route["path"])) for route in routes)
+    without_managed = _remove_managed_nginx_block(text, managed_block_label)
+    without_route_blocks = _remove_nginx_location_blocks(without_managed, route_keys)
+    return _insert_managed_nginx_block(
+        without_route_blocks,
+        managed_block=managed_block,
+        server_name=server_name,
+    )
+
+
+def _build_nginx_public_routes_command(
+    target: HostedRuntimeTarget,
+    *,
+    target_file: Path | None,
+    dry_run: bool,
+) -> list[str] | None:
+    if not target.has_nginx_public_routes:
+        return None
+    try:
+        remote_target_file = _remote_repo_relative_path(target, target_file or DEFAULT_TARGET_FILE)
+    except ValueError:
+        if not dry_run:
+            raise
+        remote_target_file = (
+            f"{target.target_dir.rstrip('/')}/"
+            "artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__example.json"
+        )
+    command = (
+        f"cd {shlex.quote(target.target_dir)} && "
+        "python3 apps/registry_upload_http_entrypoint_hosted_runtime.py "
+        f"--target-file {shlex.quote(remote_target_file)} apply-nginx-routes"
+    )
+    return _remote_shell_command(target, command)
+
+
+def _describe_nginx_public_routes(target: HostedRuntimeTarget) -> dict[str, Any] | None:
+    if not target.nginx_public_routes:
+        return None
+    manifest = load_public_route_manifest(_resolve_repo_relative_path(target.nginx_public_routes.manifest_path))
+    routes = _validated_public_routes(manifest)
+    return {
+        "server_config_path": target.nginx_public_routes.server_config_path,
+        "backup_dir": target.nginx_public_routes.backup_dir,
+        "test_command": target.nginx_public_routes.test_command,
+        "reload_command": target.nginx_public_routes.reload_command,
+        "manifest_path": target.nginx_public_routes.manifest_path,
+        "managed_block_label": target.nginx_public_routes.managed_block_label,
+        "route_count": len(routes),
+        "routes": [
+            {
+                "name": route["name"],
+                "match": route["match"],
+                "path": route["path"],
+                "methods": route.get("methods") or [],
+            }
+            for route in routes
+        ],
+    }
+
+
+def _validated_public_routes(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_routes = manifest.get("routes")
+    if not isinstance(raw_routes, list) or not raw_routes:
+        raise ValueError("public route allowlist manifest must contain a non-empty routes array")
+    routes: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, raw_route in enumerate(raw_routes):
+        if not isinstance(raw_route, dict):
+            raise ValueError(f"public route #{index + 1} must be a JSON object")
+        name = _safe_route_name(raw_route.get("name"))
+        match = str(raw_route.get("match") or "").strip()
+        path = _safe_nginx_path(raw_route.get("path"))
+        if match not in {"exact", "prefix"}:
+            raise ValueError(f"public route {name} must use match exact or prefix")
+        if match == "prefix" and not path.endswith("/"):
+            raise ValueError(f"public route {name} prefix path must end with /")
+        methods = raw_route.get("methods") or []
+        if not isinstance(methods, list) or not methods:
+            raise ValueError(f"public route {name} must include methods")
+        normalized_methods = []
+        for method in methods:
+            normalized_method = str(method).strip().upper()
+            if not re.fullmatch(r"[A-Z]+", normalized_method):
+                raise ValueError(f"public route {name} has invalid method {method!r}")
+            normalized_methods.append(normalized_method)
+        key = (match, path)
+        if key in seen:
+            raise ValueError(f"duplicate public route location for {match} {path}")
+        seen.add(key)
+        routes.append(
+            {
+                "name": name,
+                "match": match,
+                "path": path,
+                "methods": normalized_methods,
+            }
+        )
+    return routes
+
+
+def _safe_route_name(value: Any) -> str:
+    name = str(value or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+        raise ValueError(f"invalid public route name {value!r}")
+    return name
+
+
+def _safe_nginx_path(value: Any) -> str:
+    path = str(value or "").strip()
+    if not path.startswith("/") or re.search(r"[\s{};]", path):
+        raise ValueError(f"invalid public route path {value!r}")
+    return path
+
+
+def _nginx_scalar(value: str) -> str:
+    normalized = value.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]+", normalized):
+        raise ValueError(f"invalid nginx scalar value {value!r}")
+    return normalized
+
+
+def _nginx_route_key(route: dict[str, Any]) -> tuple[str, str]:
+    modifier = "=" if route["match"] == "exact" else "^~"
+    return modifier, str(route["path"])
+
+
+def _remove_managed_nginx_block(text: str, managed_block_label: str) -> str:
+    pattern = re.compile(
+        rf"\n?[ \t]*# BEGIN {re.escape(managed_block_label)}\n.*?[ \t]*# END {re.escape(managed_block_label)}\n?",
+        re.DOTALL,
+    )
+    return pattern.sub("\n", text)
+
+
+def _remove_nginx_location_blocks(text: str, route_keys: set[tuple[str, str]]) -> str:
+    location_pattern = re.compile(
+        r"(?ms)^[ \t]*location\s+(?:(=|\^~)\s+)?(/[^ \t{]+)\s*\{\n.*?^[ \t]*\}\n?"
+    )
+
+    def replace(match: re.Match[str]) -> str:
+        modifier = match.group(1) or ""
+        path = match.group(2)
+        key = (modifier, path)
+        if key in route_keys:
+            return ""
+        return match.group(0)
+
+    return location_pattern.sub(replace, text)
+
+
+def _insert_managed_nginx_block(text: str, *, managed_block: str, server_name: str) -> str:
+    pattern = re.compile(rf"(?m)^([ \t]*server_name\s+{re.escape(server_name)};[ \t]*)$")
+    match = pattern.search(text)
+    if not match:
+        raise ValueError(f"server_name {server_name!r} not found in nginx server config")
+    insertion_point = match.end()
+    tail = re.sub(r"^\n+", "\n", text[insertion_point:])
+    return text[:insertion_point] + "\n\n" + managed_block + tail
+
+
+def _normalize_proxy_pass_url(loopback_base_url: str) -> str:
+    parsed = urllib_parse.urlparse(loopback_base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"invalid loopback_base_url for nginx proxy_pass: {loopback_base_url!r}")
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _server_name_from_public_base_url(public_base_url: str) -> str:
+    parsed = urllib_parse.urlparse(public_base_url)
+    if not parsed.hostname:
+        raise ValueError(f"invalid public_base_url for nginx server_name: {public_base_url!r}")
+    return parsed.hostname
+
+
+def _run_shell_command(command: str) -> subprocess.CompletedProcess[str]:
+    if _is_placeholder(command):
+        raise ValueError("nginx command is not configured")
+    return subprocess.run(
+        command,
+        shell=True,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
 def run_public_probe_command(args: argparse.Namespace) -> int:
     target = load_hosted_runtime_target(args.target_file)
     raw_results = collect_public_surface(
@@ -563,6 +960,9 @@ def run_public_probe_command(args: argparse.Namespace) -> int:
         route_paths=target.route_paths,
         as_of_date=args.as_of_date,
         include_refresh=not args.skip_refresh,
+        include_feedbacks=args.include_feedbacks,
+        feedbacks_date_from=args.feedbacks_date_from,
+        feedbacks_date_to=args.feedbacks_date_to,
         timeout_seconds=args.timeout_seconds,
     )
     payload = {
@@ -570,6 +970,7 @@ def run_public_probe_command(args: argparse.Namespace) -> int:
         "base_url": target.public_base_url,
         "as_of_date": args.as_of_date,
         "include_refresh": not args.skip_refresh,
+        "include_feedbacks": args.include_feedbacks,
         **evaluate_surface_results(raw_results, route_paths=target.route_paths),
     }
     _print_json(payload)
@@ -582,10 +983,14 @@ def run_loopback_probe_command(args: argparse.Namespace) -> int:
         "target_id": target.target_id,
         "as_of_date": args.as_of_date,
         "include_refresh": not args.skip_refresh,
+        "include_feedbacks": args.include_feedbacks,
         **collect_loopback_surface(
             target,
             as_of_date=args.as_of_date,
             include_refresh=not args.skip_refresh,
+            include_feedbacks=args.include_feedbacks,
+            feedbacks_date_from=args.feedbacks_date_from,
+            feedbacks_date_to=args.feedbacks_date_to,
             timeout_seconds=args.timeout_seconds,
         ),
     }
@@ -604,11 +1009,13 @@ def run_print_plan_command(args: argparse.Namespace) -> int:
 
 
 def run_deploy_command(args: argparse.Namespace) -> int:
-    target = load_hosted_runtime_target(args.target_file)
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
     payload = {
         "target_id": target.target_id,
         **deploy_current_checkout(
             target,
+            target_file=target_file,
             dry_run=args.dry_run,
             allow_dirty=args.allow_dirty,
         ),
@@ -618,9 +1025,11 @@ def run_deploy_command(args: argparse.Namespace) -> int:
 
 
 def run_deploy_and_verify_command(args: argparse.Namespace) -> int:
-    target = load_hosted_runtime_target(args.target_file)
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
     deploy_summary = deploy_current_checkout(
         target,
+        target_file=target_file,
         dry_run=args.dry_run,
         allow_dirty=args.allow_dirty,
     )
@@ -628,6 +1037,9 @@ def run_deploy_and_verify_command(args: argparse.Namespace) -> int:
         target,
         as_of_date=args.as_of_date,
         include_refresh=not args.skip_refresh,
+        include_feedbacks=args.include_feedbacks,
+        feedbacks_date_from=args.feedbacks_date_from,
+        feedbacks_date_to=args.feedbacks_date_to,
         timeout_seconds=args.timeout_seconds,
     )
     public_summary = evaluate_surface_results(
@@ -636,6 +1048,9 @@ def run_deploy_and_verify_command(args: argparse.Namespace) -> int:
             route_paths=target.route_paths,
             as_of_date=args.as_of_date,
             include_refresh=not args.skip_refresh,
+            include_feedbacks=args.include_feedbacks,
+            feedbacks_date_from=args.feedbacks_date_from,
+            feedbacks_date_to=args.feedbacks_date_to,
             timeout_seconds=args.timeout_seconds,
         ),
         route_paths=target.route_paths,
@@ -648,10 +1063,22 @@ def run_deploy_and_verify_command(args: argparse.Namespace) -> int:
             "base_url": target.public_base_url,
             "as_of_date": args.as_of_date,
             "include_refresh": not args.skip_refresh,
+            "include_feedbacks": args.include_feedbacks,
             **public_summary,
         },
         "ok": deploy_summary["ok"] and loopback_summary["ok"] and public_summary["ok"],
     }
+    _print_json(payload)
+    return 0 if payload["ok"] else 1
+
+
+def run_apply_nginx_routes_command(args: argparse.Namespace) -> int:
+    target = load_hosted_runtime_target(args.target_file)
+    payload = {
+        "target_id": target.target_id,
+        "nginx_public_routes": apply_nginx_public_routes(target, dry_run=args.dry_run),
+    }
+    payload["ok"] = bool(payload["nginx_public_routes"].get("ok"))
     _print_json(payload)
     return 0 if payload["ok"] else 1
 
@@ -684,6 +1111,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--allow-dirty", action="store_true", help="Allow deploy from dirty checkout.")
     deploy.set_defaults(handler=run_deploy_command)
 
+    apply_nginx_routes = subparsers.add_parser(
+        "apply-nginx-routes",
+        help="Apply repo-owned nginx public route allowlist on this host.",
+    )
+    apply_nginx_routes.add_argument("--dry-run", action="store_true", help="Render/compare without writing nginx config.")
+    apply_nginx_routes.set_defaults(handler=run_apply_nginx_routes_command)
+
     deploy_and_verify = subparsers.add_parser(
         "deploy-and-verify",
         help="Deploy current checkout, then probe loopback and public routes.",
@@ -699,6 +1133,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def _add_probe_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--as-of-date", default=None, help="Optional as_of_date for plan/status/refresh probes.")
     parser.add_argument("--skip-refresh", action="store_true", help="Skip POST /v1/sheet-vitrina-v1/refresh.")
+    parser.add_argument(
+        "--include-feedbacks",
+        action="store_true",
+        help="Also probe GET /v1/sheet-vitrina-v1/feedbacks with a bounded date query.",
+    )
+    parser.add_argument("--feedbacks-date-from", default=None, help="YYYY-MM-DD start date for feedbacks probe.")
+    parser.add_argument("--feedbacks-date-to", default=None, help="YYYY-MM-DD end date for feedbacks probe.")
     parser.add_argument("--timeout-seconds", type=float, default=180.0, help="HTTP probe timeout in seconds.")
 
 
@@ -1261,6 +1702,9 @@ def _collect_remote_loopback_surface(
     *,
     as_of_date: str | None,
     include_refresh: bool,
+    include_feedbacks: bool,
+    feedbacks_date_from: str | None,
+    feedbacks_date_to: str | None,
     timeout_seconds: float,
 ) -> list[dict[str, Any]]:
     script = _build_remote_probe_script(
@@ -1268,6 +1712,9 @@ def _collect_remote_loopback_surface(
         route_paths=target.route_paths,
         as_of_date=as_of_date,
         include_refresh=include_refresh,
+        include_feedbacks=include_feedbacks,
+        feedbacks_date_from=feedbacks_date_from,
+        feedbacks_date_to=feedbacks_date_to,
         timeout_seconds=timeout_seconds,
     )
     command = _ssh_command() + [target.ssh_destination, "python3", "-"]
@@ -1303,13 +1750,26 @@ def _build_remote_probe_script(
     route_paths: dict[str, str],
     as_of_date: str | None,
     include_refresh: bool,
+    include_feedbacks: bool,
+    feedbacks_date_from: str | None,
+    feedbacks_date_to: str | None,
     timeout_seconds: float,
 ) -> str:
+    normalized_feedbacks_date_from = None
+    normalized_feedbacks_date_to = None
+    if include_feedbacks:
+        normalized_feedbacks_date_from, normalized_feedbacks_date_to = _default_feedbacks_probe_window(
+            date_from=feedbacks_date_from,
+            date_to=feedbacks_date_to,
+        )
     payload = {
         "base_url": base_url,
         "route_paths": route_paths,
         "as_of_date": as_of_date,
         "include_refresh": include_refresh,
+        "include_feedbacks": include_feedbacks,
+        "feedbacks_date_from": normalized_feedbacks_date_from,
+        "feedbacks_date_to": normalized_feedbacks_date_to,
         "timeout_seconds": timeout_seconds,
     }
     payload_json = json.dumps(payload, ensure_ascii=True)
@@ -1441,6 +1901,22 @@ results = [
     _collect("wb_regional_status", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/wb-regional/status"),
     _collect("wb_regional_district_central", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/wb-regional/district/central.xlsx"),
 ]
+if PAYLOAD["include_feedbacks"]:
+    results.append(
+        _collect(
+            "feedbacks",
+            "GET",
+            _append_query_params(
+                PAYLOAD["base_url"] + {DEFAULT_SHEET_FEEDBACKS_PATH!r},
+                {{
+                    "date_from": PAYLOAD["feedbacks_date_from"],
+                    "date_to": PAYLOAD["feedbacks_date_to"],
+                    "stars": "1,2,3,4,5",
+                    "is_answered": "all",
+                }},
+            ),
+        )
+    )
 if PAYLOAD["include_refresh"]:
     results.append(
         _collect(
@@ -1472,6 +1948,20 @@ def _build_plan_report_probe_params(as_of_date: str | None) -> dict[str, str]:
     if as_of_date:
         params["as_of_date"] = as_of_date
     return params
+
+
+def _default_feedbacks_probe_window(
+    *,
+    date_from: str | None,
+    date_to: str | None,
+) -> tuple[str, str]:
+    if bool(date_from) != bool(date_to):
+        raise ValueError("feedbacks probe requires both --feedbacks-date-from and --feedbacks-date-to")
+    if date_from and date_to:
+        return date_from, date_to
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=6)
+    return start.isoformat(), end.isoformat()
 
 
 def _append_query_params(url: str, params: dict[str, str | None]) -> str:
@@ -1618,6 +2108,22 @@ def _missing_for_deploy(target: HostedRuntimeTarget) -> list[str]:
         for unit in target.managed_systemd_units:
             if _is_placeholder(unit.name):
                 missing.append("managed_systemd_units[].name")
+    if target.nginx_public_routes:
+        nginx_required = {
+            "nginx_public_routes.server_config_path": target.nginx_public_routes.server_config_path,
+            "nginx_public_routes.backup_dir": target.nginx_public_routes.backup_dir,
+            "nginx_public_routes.test_command": target.nginx_public_routes.test_command,
+            "nginx_public_routes.reload_command": target.nginx_public_routes.reload_command,
+            "nginx_public_routes.manifest_path": target.nginx_public_routes.manifest_path,
+        }
+        for key, value in nginx_required.items():
+            if _is_placeholder(value):
+                missing.append(key)
+        if not _is_placeholder(target.nginx_public_routes.manifest_path):
+            try:
+                _resolve_repo_relative_path(target.nginx_public_routes.manifest_path)
+            except Exception:
+                missing.append("nginx_public_routes.manifest_path")
     return missing
 
 
@@ -1636,6 +2142,25 @@ def _resolve_repo_relative_dir(raw_value: str) -> Path:
     if relative_path.is_absolute():
         raise ValueError("managed systemd unit source dir must be repo-relative")
     return ROOT / relative_path
+
+
+def _resolve_repo_relative_path(raw_value: str) -> Path:
+    relative_path = Path(raw_value.strip())
+    if relative_path.is_absolute():
+        raise ValueError("repo-owned path must be repo-relative")
+    path = ROOT / relative_path
+    if not path.exists():
+        raise FileNotFoundError(f"repo-owned path not found: {path}")
+    return path
+
+
+def _remote_repo_relative_path(target: HostedRuntimeTarget, path: Path) -> str:
+    resolved = path.resolve()
+    try:
+        relative_path = resolved.relative_to(ROOT.resolve())
+    except ValueError as exc:
+        raise ValueError(f"target file must be inside repo for remote deploy: {path}") from exc
+    return f"{target.target_dir.rstrip('/')}/{str(relative_path)}"
 
 
 def _remote_systemd_unit_source_path(target: HostedRuntimeTarget, unit_name: str) -> str:
