@@ -92,6 +92,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_reason_sanitization_smoke.py"
+  - "apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_integration_smoke.py"
   - "apps/cost_price_upload_http_entrypoint_smoke.py"
@@ -608,6 +609,7 @@ update_note: "Обновлён под current operator report checkpoint: report
 - Подтверждён targeted closed-day source freshness smoke через `apps/web_source_current_sync_closed_day_freshness_smoke.py`.
 - Подтверждён targeted truthful temporal closure retry smoke через `apps/sheet_vitrina_v1_temporal_closure_retry_smoke.py`.
 - Подтверждён integration smoke для strict web-source temporal refresh через `apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py`.
+- Подтверждён live/public promo current invariant smoke через `apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py`; hosted/public checklist requires it after changes to promo materialization/artifact validation/collector diagnostics, refresh orchestration, promo source-status reduction or web-vitrina read paths that can affect current promo metric row visibility.
 - Smoke проверяет:
   - что HTTP entrypoint реально поднимается и принимает `POST`;
   - что request body попадает в существующий DB-backed runtime, а не в дублирующую ingest-логику;
@@ -616,6 +618,7 @@ update_note: "Обновлён под current operator report checkpoint: report
   - что operator page `GET /sheet-vitrina-v1/operator` отдается тем же contour и публикует правильные refresh/load/status/job paths;
   - что sibling page `GET /sheet-vitrina-v1/vitrina` отдается тем же contour, но остаётся отдельным thin shell и публикует canonical read route `GET /v1/sheet-vitrina-v1/web-vitrina`;
   - что `GET /v1/sheet-vitrina-v1/web-vitrina` возвращает stable `web_vitrina_contract` v1 с `meta / status_summary / schema / rows / capabilities` и honors optional `as_of_date`;
+  - что public `status` / `web-vitrina` / `plan` expose healthy `promo_by_price[today_current]`, coherent coverage counters, no fatal expected ended/no-download artifacts and non-blank current promo rows when promo correctness is in scope;
   - что operator page рендерит compact blocks `Ручная загрузка данных` и `Автообновления` с русскими labels и truthful manual-vs-auto semantics, а не hardcoded status copy;
   - что `GET /v1/sheet-vitrina-v1/status` до refresh честно возвращает `ready snapshot missing`;
   - что `GET /v1/sheet-vitrina-v1/status` до refresh всё равно несёт `server_context` с `Asia/Yekaterinburg` и current scheduler trigger metadata;

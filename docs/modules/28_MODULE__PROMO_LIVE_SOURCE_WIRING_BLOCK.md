@@ -47,7 +47,7 @@ update_note: "Обновлён под archive-first / interval-based promo seman
 - `module_id`: `promo_live_source_wiring_block`
 - `family`: `browser-capture -> live source wiring`
 - `status_transfer`: repo-owned wiring materialized
-- `status_verification`: targeted smoke и bounded live integration smoke подтверждены
+- `status_verification`: targeted smoke, bounded live integration smoke и live/public invariant smoke подтверждены
 - `status_checkpoint`: текущий `main` уже wire-ит `promo_by_price` в refresh/runtime/read-side contour
 - `status_main`: модуль смёржен в `main`
 
@@ -201,6 +201,9 @@ Invalid or incomplete current artifacts still produce `PromoLiveSourceIncomplete
   - `fatal_missing_artifact_count=0` и `true_artifact_loss_count=0`, когда эти counters представлены;
   - ended/no-download artifacts, including campaign `2242` when present, остаются `workbook_required=false` diagnostics и не входят в `fatal_missing_artifacts`;
   - current promo metric rows are present in public `web-vitrina` and are not all blank, while truthful zero rows for ineligible SKU remain valid.
+- Required checklist rule: run `python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py` after changes touching `promo_by_price` materialization, promo archive/artifact validation, promo collector diagnostics/status handling, `ended_without_download` / expected non-materializable campaign handling, `sheet_vitrina_v1` refresh orchestration, temporal source acceptance/fallback around promo, promo source-status reduction, web-vitrina read/page-composition paths that affect promo row visibility, or hosted deploys where current promo correctness must be verified.
+- If local CA verification blocks the live read while the route is otherwise reachable, the accepted local-only fallback is `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1 python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py`; timeout, non-200 route status or bad payload remains a real blocker.
+- This smoke is read-only and must not be replaced by `/v1/sheet-vitrina-v1/load`, Google Sheets/GAS, browser `localStorage` truth or a runtime refresh unless a separate task explicitly requires a controlled refresh.
 - Hosted live closure additionally depends on one bounded runtime dependency seam:
   - remote system python must have `openpyxl==3.1.5` and `playwright==1.58.0`;
   - canonical repo-owned hosted deploy contract now installs these python packages before service restart instead of leaving them as hidden host drift;
