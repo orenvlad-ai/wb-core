@@ -820,6 +820,9 @@ class RegistryUploadHttpEntrypoint:
             is_answered=is_answered,
         )
 
+    def handle_sheet_feedbacks_export_request(self, payload: Mapping[str, Any]) -> tuple[bytes, str]:
+        return self.feedbacks_block.build_export(payload)
+
     def handle_sheet_feedbacks_ai_prompt_get_request(self) -> dict[str, Any]:
         return self.feedbacks_ai_block.get_prompt()
 

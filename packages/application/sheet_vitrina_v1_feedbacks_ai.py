@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import threading
 import time
@@ -24,6 +25,8 @@ MAX_ROWS_PER_RUN = 3
 BATCH_SIZE = 3
 MAX_TEXT_CHARS_PER_REVIEW = 1400
 MIN_ANALYZE_INTERVAL_SECONDS = 3.0
+DEFAULT_FEEDBACKS_AI_MODEL = "gpt-5-mini"
+AVAILABLE_FEEDBACKS_AI_MODELS = ("gpt-5-mini", "gpt-5")
 
 COMPLAINT_FIT_LABELS = {
     "yes": "Да",
@@ -68,6 +71,7 @@ class FeedbacksAiProvider(Protocol):
         self,
         *,
         prompt: str,
+        model: str,
         rows: list[Mapping[str, Any]],
         schema: Mapping[str, Any],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -83,6 +87,7 @@ class SheetVitrinaV1FeedbacksAiError(RuntimeError):
 @dataclass(frozen=True)
 class FeedbacksAiPromptState:
     prompt: str
+    model: str
     updated_at: str | None
 
 
@@ -93,7 +98,7 @@ class JsonFileFeedbacksAiPromptStore:
 
     def read(self) -> FeedbacksAiPromptState:
         if not self.path.exists():
-            return FeedbacksAiPromptState(prompt="", updated_at=None)
+            return FeedbacksAiPromptState(prompt="", model=_default_feedbacks_ai_model(), updated_at=None)
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -102,22 +107,25 @@ class JsonFileFeedbacksAiPromptStore:
             raise SheetVitrinaV1FeedbacksAiError("saved AI prompt storage has invalid shape", http_status=500)
         return FeedbacksAiPromptState(
             prompt=str(payload.get("prompt") or ""),
+            model=_normalize_model(payload.get("model") or _default_feedbacks_ai_model()),
             updated_at=str(payload.get("updated_at") or "") or None,
         )
 
-    def write(self, *, prompt: str, updated_at: str) -> FeedbacksAiPromptState:
+    def write(self, *, prompt: str, model: str, updated_at: str) -> FeedbacksAiPromptState:
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "contract_name": PROMPT_CONTRACT_NAME,
                 "contract_version": CONTRACT_VERSION,
                 "prompt": prompt,
+                "model": model,
+                "available_models": list(AVAILABLE_FEEDBACKS_AI_MODELS),
                 "updated_at": updated_at,
             }
             temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
             temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             temp_path.replace(self.path)
-        return FeedbacksAiPromptState(prompt=prompt, updated_at=updated_at)
+        return FeedbacksAiPromptState(prompt=prompt, model=model, updated_at=updated_at)
 
 
 class SheetVitrinaV1FeedbacksAiBlock:
@@ -145,8 +153,9 @@ class SheetVitrinaV1FeedbacksAiBlock:
 
     def save_prompt(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         prompt = _normalize_prompt(payload.get("prompt"))
+        model = _normalize_model(payload.get("model"))
         updated_at = self.now_factory().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-        return _prompt_payload(self.prompt_store.write(prompt=prompt, updated_at=updated_at))
+        return _prompt_payload(self.prompt_store.write(prompt=prompt, model=model, updated_at=updated_at))
 
     def analyze(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         prompt_state = self.prompt_store.read()
@@ -161,6 +170,7 @@ class SheetVitrinaV1FeedbacksAiBlock:
                 batch = rows[batch_start : batch_start + BATCH_SIZE]
                 raw_results, meta = self.provider.analyze_batch(
                     prompt=prompt_state.prompt,
+                    model=prompt_state.model,
                     rows=batch,
                     schema=analysis_json_schema(),
                 )
@@ -180,6 +190,7 @@ class SheetVitrinaV1FeedbacksAiBlock:
                 "batch_size": BATCH_SIZE,
                 "batch_count": len(provider_meta),
                 "prompt_updated_at": prompt_state.updated_at,
+                "model": prompt_state.model,
                 "provider_batches": provider_meta,
                 "persistence": "not_persisted",
             },
@@ -206,6 +217,8 @@ def _prompt_payload(state: FeedbacksAiPromptState) -> dict[str, Any]:
         "contract_name": PROMPT_CONTRACT_NAME,
         "contract_version": CONTRACT_VERSION,
         "prompt": state.prompt,
+        "model": state.model,
+        "available_models": list(AVAILABLE_FEEDBACKS_AI_MODELS),
         "starter_prompt": STARTER_PROMPT,
         "updated_at": state.updated_at,
         "status": "ready" if state.prompt.strip() else "missing",
@@ -225,6 +238,20 @@ def _normalize_prompt(value: Any) -> str:
     if len(prompt) > MAX_PROMPT_LENGTH:
         raise ValueError(f"prompt must be at most {MAX_PROMPT_LENGTH} characters")
     return prompt
+
+
+def _default_feedbacks_ai_model() -> str:
+    raw = os.environ.get("OPENAI_MODEL", "").strip()
+    return raw if raw in AVAILABLE_FEEDBACKS_AI_MODELS else DEFAULT_FEEDBACKS_AI_MODEL
+
+
+def _normalize_model(value: Any) -> str:
+    model = str(value or "").strip() or _default_feedbacks_ai_model()
+    if model not in AVAILABLE_FEEDBACKS_AI_MODELS:
+        raise ValueError(
+            "model must be one of: " + ", ".join(AVAILABLE_FEEDBACKS_AI_MODELS)
+        )
+    return model
 
 
 def _normalize_input_rows(value: Any) -> list[dict[str, Any]]:

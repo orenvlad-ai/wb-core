@@ -17,6 +17,7 @@ from apps.sheet_vitrina_v1_web_vitrina_browser_smoke import LocalWebVitrinaFixtu
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH,
     DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH,
+    DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH,
     DEFAULT_SHEET_FEEDBACKS_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
 )
@@ -44,8 +45,11 @@ def main() -> None:
 def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str, object]:
     captured_urls: list[str] = []
     ai_request_batches: list[list[str]] = []
+    export_requests: list[dict[str, object]] = []
     failed_once: set[str] = set()
     large_feedbacks_mode = False
+    prompt_saved = False
+    selected_model = "gpt-5-mini"
     page_url = base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -60,21 +64,40 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             route.fulfill(
                 status=200,
                 headers={"Content-Type": "application/json; charset=utf-8"},
-                body=json.dumps(_feedbacks_payload(row_count=26 if large_feedbacks_mode else 24), ensure_ascii=False),
+                body=json.dumps(_feedbacks_payload(row_count=650 if large_feedbacks_mode else 24), ensure_ascii=False),
             )
 
         def fulfill_prompt(route: object) -> None:
+            nonlocal prompt_saved, selected_model
             if route.request.method == "GET":
                 route.fulfill(
                     status=200,
                     headers={"Content-Type": "application/json; charset=utf-8"},
-                    body=json.dumps(_prompt_payload(status="missing"), ensure_ascii=False),
+                    body=json.dumps(_prompt_payload(status="ready" if prompt_saved else "missing", model=selected_model), ensure_ascii=False),
                 )
                 return
+            payload = json.loads(route.request.post_data or "{}")
+            selected_model = str(payload.get("model") or "gpt-5-mini")
+            prompt_saved = True
             route.fulfill(
                 status=200,
                 headers={"Content-Type": "application/json; charset=utf-8"},
-                body=json.dumps(_prompt_payload(status="ready"), ensure_ascii=False),
+                body=json.dumps(_prompt_payload(status="ready", model=selected_model), ensure_ascii=False),
+            )
+
+        def fulfill_export(route: object) -> None:
+            payload = json.loads(route.request.post_data or "{}")
+            rows = payload.get("rows") if isinstance(payload, dict) else None
+            if not isinstance(rows, list) or not rows:
+                raise AssertionError("feedbacks export must send current visible rows")
+            export_requests.append({"row_count": len(rows), "first_id": str((rows[0] or {}).get("feedback_id") or "")})
+            route.fulfill(
+                status=200,
+                headers={
+                    "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "Content-Disposition": "attachment; filename=\"wb_feedbacks_2026-04-23_2026-04-29.xlsx\"",
+                },
+                body=b"PK\x03\x04fake-xlsx-for-browser-smoke",
             )
 
         def fulfill_ai_analyze(route: object) -> None:
@@ -103,6 +126,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
 
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH, fulfill_prompt)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH, fulfill_ai_analyze)
+        context.route("**" + DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH, fulfill_export)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_PATH + "?**", fulfill_feedbacks)
         try:
             page.goto(page_url, wait_until="domcontentloaded")
@@ -125,6 +149,8 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 raise AssertionError("feedbacks star checkbox must update selection")
             if page.locator("[data-feedbacks-ai-analyze]").is_enabled():
                 raise AssertionError("AI analyze button must be disabled before feedbacks load")
+            if page.locator("[data-feedbacks-export]").is_enabled():
+                raise AssertionError("Excel export button must be disabled before feedbacks load")
 
             page.locator("[data-feedbacks-load]").click()
             page.wait_for_selector("[data-feedbacks-table] tbody tr")
@@ -138,12 +164,36 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                     raise AssertionError(f"feedbacks table must include AI header {expected_header!r}")
             if not page.locator("[data-feedbacks-ai-analyze]").is_enabled():
                 raise AssertionError("AI analyze button must become enabled after feedbacks load")
+            if not page.locator("[data-feedbacks-export]").is_enabled():
+                raise AssertionError("Excel export button must become enabled after feedbacks load")
+            with page.expect_download() as download_info:
+                page.locator("[data-feedbacks-export]").click()
+            download = download_info.value
+            if not download.suggested_filename.endswith(".xlsx"):
+                raise AssertionError(f"feedbacks export download must be xlsx, got {download.suggested_filename!r}")
+            if not export_requests or export_requests[-1]["row_count"] != 24:
+                raise AssertionError(f"feedbacks export must use current visible rows, got {export_requests}")
+            page.locator('[data-feedbacks-star][value="2"]').click()
+            if page.locator("[data-feedbacks-table]").count() != 0:
+                raise AssertionError("changing feedback filters must clear stale loaded table before next load")
+            if page.locator("[data-feedbacks-export]").is_enabled():
+                raise AssertionError("Excel export must disable after filters invalidate loaded rows")
+            page.locator('[data-feedbacks-star][value="2"]').click()
+            page.locator("[data-feedbacks-load]").click()
+            page.wait_for_selector("[data-feedbacks-table] tbody tr")
             if page.locator("[data-feedbacks-ai-select]").count() != 0:
                 raise AssertionError("feedbacks AI queue must not require manual row checkboxes")
             page.locator("[data-feedbacks-ai-analyze]").click()
             page.wait_for_selector("[data-feedbacks-prompt-textarea]")
             if "Сначала сохраните промпт разбора" not in page.locator("[data-feedbacks-error]").inner_text():
                 raise AssertionError("AI analyze without saved prompt must show prompt-required message")
+            if page.locator("[data-feedbacks-model]").count() != 1:
+                raise AssertionError("feedbacks prompt panel must expose model selector")
+            prompt_width = page.locator("[data-feedbacks-prompt-textarea]").evaluate("node => node.getBoundingClientRect().width")
+            panel_width = page.locator("[data-feedbacks-panel]").evaluate("node => node.getBoundingClientRect().width")
+            if prompt_width < panel_width * 0.72:
+                raise AssertionError(f"feedbacks prompt textarea must be materially wide, got {prompt_width} of {panel_width}")
+            page.locator("[data-feedbacks-model]").select_option("gpt-5")
             page.locator("[data-feedbacks-prompt-textarea]").fill("Новый промпт разбора отзывов")
             page.locator("[data-feedbacks-prompt-save]").click()
             page.wait_for_function(
@@ -156,6 +206,28 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 raise AssertionError("feedbacks tab must call the feedbacks route after manual load")
             if "stars=2%2C3%2C4%2C5" not in captured_urls[-1] and "stars=2,3,4,5" not in captured_urls[-1]:
                 raise AssertionError(f"feedbacks route query must include selected stars, got {captured_urls[-1]}")
+            if page.locator("[data-feedbacks-column-resize]").count() == 0:
+                raise AssertionError("feedbacks table must expose column resize handles")
+            first_handle = page.locator("[data-feedbacks-column-resize='created_date']").first
+            before_width = page.locator("[data-feedbacks-column-key='created_date']").first.evaluate("node => node.getBoundingClientRect().width")
+            handle_box = first_handle.bounding_box()
+            if not handle_box:
+                raise AssertionError("feedbacks column resize handle must have a bounding box")
+            page.mouse.move(handle_box["x"] + handle_box["width"] / 2, handle_box["y"] + handle_box["height"] / 2)
+            page.mouse.down()
+            page.mouse.move(handle_box["x"] + handle_box["width"] / 2 + 90, handle_box["y"] + handle_box["height"] / 2)
+            page.mouse.up()
+            after_width = page.locator("[data-feedbacks-column-key='created_date']").first.evaluate("node => node.getBoundingClientRect().width")
+            if after_width <= before_width:
+                raise AssertionError(f"feedbacks column resize must increase width, got {before_width} -> {after_width}")
+            page.reload(wait_until="domcontentloaded")
+            page.wait_for_selector("[data-unified-tab-button='feedbacks']")
+            page.locator("[data-unified-tab-button='feedbacks']").click()
+            page.locator("[data-feedbacks-load]").click()
+            page.wait_for_selector("[data-feedbacks-table] tbody tr")
+            persisted_width = page.locator("[data-feedbacks-column-key='created_date']").first.evaluate("node => node.getBoundingClientRect().width")
+            if persisted_width < after_width - 2:
+                raise AssertionError("feedbacks column width must persist in localStorage across reload")
             page.locator("[data-feedbacks-ai-analyze]").click()
             page.wait_for_function(
                 "() => document.querySelector('[data-feedbacks-error]')?.textContent.includes('ошибками')"
@@ -184,7 +256,9 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
 
             large_feedbacks_mode = True
             page.locator("[data-feedbacks-load]").click()
-            page.wait_for_function("() => document.querySelectorAll('[data-feedbacks-table] tbody tr').length === 26")
+            page.wait_for_function("() => document.querySelectorAll('[data-feedbacks-table] tbody tr').length === 650")
+            if page.locator("[data-feedbacks-table-scroll]").evaluate("node => node.scrollHeight <= node.clientHeight"):
+                raise AssertionError("large feedbacks table must stay inside internal scroll container")
             request_count_before_large_queue = len(ai_request_batches)
             page.locator("[data-feedbacks-ai-analyze]").click()
             page.wait_for_function(
@@ -204,6 +278,9 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "ai_columns_present": True,
         "ai_request_batches": len(ai_request_batches),
         "ai_request_max_batch_size": max((len(batch) for batch in ai_request_batches), default=0),
+        "export_requests": len(export_requests),
+        "large_table_rows": 650,
+        "resizable_columns": True,
         "ai_retry_requests": 1,
         "large_queue_blocked": True,
         "ai_filter_works": True,
@@ -250,12 +327,14 @@ def _feedbacks_payload(*, row_count: int) -> dict[str, object]:
     }
 
 
-def _prompt_payload(*, status: str) -> dict[str, object]:
+def _prompt_payload(*, status: str, model: str = "gpt-5-mini") -> dict[str, object]:
     prompt = "Сохранённый промпт" if status == "ready" else ""
     return {
         "contract_name": "sheet_vitrina_v1_feedbacks_ai_prompt",
         "contract_version": "v1",
         "prompt": prompt,
+        "model": model,
+        "available_models": ["gpt-5-mini", "gpt-5"],
         "starter_prompt": "Стартовый промпт разбора отзывов",
         "updated_at": "2026-04-29T09:00:00Z" if status == "ready" else None,
         "status": status,

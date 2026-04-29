@@ -78,6 +78,12 @@
       "methods": ["GET"]
     },
     {
+      "name": "sheet_vitrina_feedbacks_export",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/export.xlsx",
+      "methods": ["POST"]
+    },
+    {
       "name": "sheet_vitrina_feedbacks_ai_prompt",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/feedbacks/ai-prompt",
