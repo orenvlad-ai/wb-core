@@ -24,6 +24,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 PROBE_BODY_LIMIT_BYTES = 768 * 1024
+PROBE_SYSTEM_CA_FILE_CANDIDATES = (
+    "/etc/ssl/cert.pem",
+    "/private/etc/ssl/cert.pem",
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/ca-bundle.pem",
+    "/opt/homebrew/etc/ca-certificates/cert.pem",
+)
 
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_COST_PRICE_UPLOAD_PATH,
@@ -2292,6 +2300,18 @@ def _open_request(request: urllib_request.Request, *, timeout_seconds: float):
         return urllib_request.urlopen(request, timeout=timeout_seconds)
     except urllib_error.URLError as exc:
         ssl_reason = getattr(exc, "reason", None)
+        if isinstance(ssl_reason, ssl.SSLCertVerificationError):
+            system_ca_context = _probe_system_ca_context()
+            if system_ca_context is not None:
+                try:
+                    return urllib_request.urlopen(
+                        request,
+                        timeout=timeout_seconds,
+                        context=system_ca_context,
+                    )
+                except urllib_error.URLError as retry_exc:
+                    exc = retry_exc
+                    ssl_reason = getattr(retry_exc, "reason", None)
         if (
             os.environ.get("SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK", "").strip() == "1"
             and isinstance(ssl_reason, ssl.SSLCertVerificationError)
@@ -2301,7 +2321,24 @@ def _open_request(request: urllib_request.Request, *, timeout_seconds: float):
                 timeout=timeout_seconds,
                 context=ssl._create_unverified_context(),
             )
-        raise
+        raise exc
+
+
+def _probe_system_ca_context() -> ssl.SSLContext | None:
+    seen: set[str] = set()
+    for candidate in (os.environ.get("SSL_CERT_FILE", ""), *PROBE_SYSTEM_CA_FILE_CANDIDATES):
+        ca_file = str(candidate or "").strip()
+        if not ca_file or ca_file in seen:
+            continue
+        seen.add(ca_file)
+        path = Path(ca_file)
+        if not path.is_file():
+            continue
+        try:
+            return ssl.create_default_context(cafile=str(path))
+        except (OSError, ssl.SSLError):
+            continue
+    return None
 
 
 def _ssh_command() -> list[str]:
