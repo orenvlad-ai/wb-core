@@ -29,12 +29,15 @@ def build_web_vitrina_page_composition(
     selected_date_from: str | None,
     selected_date_to: str | None,
     activity_surface: Mapping[str, Any] | None = None,
+    include_table_data: bool = True,
 ) -> dict[str, Any]:
     contract_payload = _to_payload(contract)
     view_model_payload = _to_payload(view_model)
     adapter_payload = _to_payload(adapter)
 
     rows = list(adapter_payload.get("rows") or [])
+    table_rows = rows if include_table_data else []
+    table_groupings = list(adapter_payload.get("groupings") or []) if include_table_data else []
     columns = list(adapter_payload.get("columns") or [])
     current_state = str(adapter_payload["state_surface"]["current_state"])
     date_column_ids = [
@@ -179,14 +182,17 @@ def build_web_vitrina_page_composition(
         },
         "table_surface": {
             "columns": columns,
-            "rows": rows,
-            "groupings": list(adapter_payload.get("groupings") or []),
+            "rows": table_rows,
+            "groupings": table_groupings,
             "renderers": list(adapter_payload.get("renderers") or []),
             "formatters": list(view_model_payload.get("formatters") or []),
             "sorts": list(adapter_payload.get("sorts") or []),
             "filters": list(adapter_payload.get("filters") or []),
             "state_surface": dict(adapter_payload["state_surface"]),
             "total_row_count": len(rows),
+            "returned_row_count": len(table_rows),
+            "table_data_state": "included" if include_table_data else "deferred",
+            "deferred_table_data_query": {"include_table_data": "1"} if not include_table_data else {},
             "date_column_ids": date_column_ids,
             "column_labels": column_labels,
         },
@@ -304,6 +310,9 @@ def build_web_vitrina_page_error_composition(
                 "error_message": error_message,
             },
             "total_row_count": 0,
+            "returned_row_count": 0,
+            "table_data_state": "included",
+            "deferred_table_data_query": {},
             "date_column_ids": [],
             "column_labels": {},
         },

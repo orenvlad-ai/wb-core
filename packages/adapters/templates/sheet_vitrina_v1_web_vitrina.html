@@ -2650,6 +2650,9 @@
       if (normalizedOptions.includeSourceStatus) {
         url.searchParams.set("include_source_status", "1");
       }
+      if (normalizedOptions.includeTableData) {
+        url.searchParams.set("include_table_data", "1");
+      }
       return url;
     }
 
@@ -4242,9 +4245,7 @@
       }
     }
 
-    function renderPage(payload) {
-      state.composition = payload;
-      state.page.lastRenderedAt = new Date();
+    function registerTableSurfaceAssets(payload) {
       formattersById.clear();
       renderersById.clear();
       ((payload.table_surface && payload.table_surface.formatters) || []).forEach(function(item) {
@@ -4253,6 +4254,12 @@
       ((payload.table_surface && payload.table_surface.renderers) || []).forEach(function(item) {
         renderersById.set(item.renderer_id, item);
       });
+    }
+
+    function renderPage(payload) {
+      state.composition = payload;
+      state.page.lastRenderedAt = new Date();
+      registerTableSurfaceAssets(payload);
       setStatusBadge(payload);
       renderSummaryCards(payload.summary_cards || []);
       renderActivitySurface(payload.activity_surface || {});
@@ -4295,10 +4302,11 @@
         return;
       }
 
-      const filteredRows = sortRows(applyFilters(payload.table_surface.rows || []), payload);
-      const allColumns = (payload.table_surface && payload.table_surface.columns) || [];
+      const tableSurface = payload.table_surface || {};
+      const tableDataState = String(tableSurface.table_data_state || "included");
+      const allColumns = tableSurface.columns || [];
       const columns = visibleColumns(allColumns);
-      const totalRows = (payload.table_surface && payload.table_surface.total_row_count) || 0;
+      const totalRows = tableSurface.total_row_count || 0;
       tableMetaNode.textContent =
         "grid library: " +
         valueOrDash(payload.meta && payload.meta.grid_library_name) +
@@ -4308,6 +4316,12 @@
         columns.length +
         "/" +
         allColumns.length;
+      if (tableDataState === "deferred") {
+        filterSummaryNode.textContent = "Загрузка таблицы…";
+        setStateBox("warning", "Загрузка таблицы…", "Строки таблицы загружаются отдельным read-only запросом.");
+        return;
+      }
+      const filteredRows = sortRows(applyFilters(tableSurface.rows || []), payload);
       filterSummaryNode.textContent = filteredRows.length + " из " + totalRows + " строк";
       if (!columns.length) {
         setStateBox("warning", "Нет видимых столбцов", "Сбросьте настройки столбцов, чтобы вернуть полный вид таблицы.");
@@ -6882,6 +6896,58 @@
       }
     }
 
+    async function loadDeferredTableData(requestId) {
+      try {
+        const response = await fetch(
+          buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {
+            includeTableData: true
+          }).toString(),
+          {
+            method: "GET",
+            headers: {"Accept": "application/json"}
+          }
+        );
+        const payload = await readJsonResponse(response, "non-json response from table data route");
+        if (requestId !== state.requestSequence) {
+          return;
+        }
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "table data route returned " + response.status);
+        }
+        if (!payload || payload.composition_name !== "web_vitrina_page_composition") {
+          throw new Error("unexpected table data payload");
+        }
+        const tableSurface = payload.table_surface || {};
+        if (String(tableSurface.table_data_state || "included") !== "included") {
+          throw new Error("table data payload did not include rows");
+        }
+        if (state.composition) {
+          state.composition.table_surface = tableSurface;
+          state.composition.filter_surface = payload.filter_surface || state.composition.filter_surface;
+          state.composition.status_summary = payload.status_summary || state.composition.status_summary;
+          state.composition.capabilities = payload.capabilities || state.composition.capabilities;
+          state.composition.meta = Object.assign({}, state.composition.meta || {}, payload.meta || {});
+          registerTableSurfaceAssets(state.composition);
+          renderFilterControls(state.composition);
+          initializeColumnVisibility(state.composition);
+          if (!state.filters.sort) {
+            state.filters.sort = (state.composition.filter_surface && state.composition.filter_surface.default_sort_value) || "";
+          }
+          renderTable();
+        }
+      } catch (error) {
+        if (requestId !== state.requestSequence) {
+          return;
+        }
+        const message = String(error && error.message ? error.message : error);
+        appendVisibleActionLogLine(
+          "Не удалось загрузить строки таблицы: " + message,
+          {statusLabel: "Ошибка", tone: "error", detail: message}
+        );
+        setStateBox("error", "Не удалось загрузить строки таблицы", escapeHtml(message));
+      }
+    }
+
     async function loadPageComposition(options) {
       const normalizedOptions = options || {};
       const requestId = state.requestSequence + 1;
@@ -6916,6 +6982,10 @@
         }
         resetFilterState(payload);
         renderPage(payload);
+        const tableSurface = payload.table_surface || {};
+        if (String(tableSurface.table_data_state || "included") === "deferred") {
+          loadDeferredTableData(requestId);
+        }
         refreshSellerRecoveryStatus();
       } catch (error) {
         if (requestId !== state.requestSequence) {

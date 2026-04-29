@@ -149,6 +149,16 @@ def main() -> None:
                 raise AssertionError(f"web-vitrina page composition state mismatch, got {composition_payload}")
             if composition_payload.get("table_surface", {}).get("total_row_count") != 4:
                 raise AssertionError(f"web-vitrina page composition row count mismatch, got {composition_payload}")
+            composition_table = composition_payload.get("table_surface") or {}
+            if composition_table.get("table_data_state") != "deferred":
+                raise AssertionError(f"default page composition must defer heavy table rows, got {composition_table}")
+            if composition_table.get("rows") or composition_table.get("groupings"):
+                raise AssertionError(f"default page composition must not inline table rows/groupings, got {composition_table}")
+            if composition_table.get("returned_row_count") != 0:
+                raise AssertionError(f"default page composition returned row count mismatch, got {composition_table}")
+            composition_payload_bytes = len(json.dumps(composition_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            if composition_payload_bytes > 90000:
+                raise AssertionError(f"default page composition payload must stay bounded, got {composition_payload_bytes} bytes")
             composition_meta = composition_payload.get("meta", {})
             for required_meta_key in (
                 "snapshot_as_of_date",
@@ -200,11 +210,25 @@ def main() -> None:
             if initial_loading_table.get("rows") or initial_loading_table.get("groups"):
                 raise AssertionError(f"initial page composition must not expose source group shells, got {initial_loading_table}")
 
+            full_table_status, full_table_payload = _get_json(
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&include_table_data=1"
+            )
+            if full_table_status != 200:
+                raise AssertionError(f"web-vitrina explicit table-data route must return 200, got {full_table_status}")
+            full_table_surface = full_table_payload.get("table_surface") or {}
+            if full_table_surface.get("table_data_state") != "included":
+                raise AssertionError(f"explicit table-data route must include rows, got {full_table_surface}")
+            if len(full_table_surface.get("rows") or []) != 4 or full_table_surface.get("returned_row_count") != 4:
+                raise AssertionError(f"explicit table-data row shape mismatch, got {full_table_surface}")
+
             details_status, details_payload = _get_json(
                 f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&include_source_status=1"
             )
             if details_status != 200:
                 raise AssertionError(f"web-vitrina source status details route must return 200, got {details_status}")
+            details_table = details_payload.get("table_surface") or {}
+            if details_table.get("table_data_state") != "deferred" or details_table.get("rows"):
+                raise AssertionError(f"source status details route must keep table rows deferred, got {details_table}")
 
             missing_status, missing_payload = _get_json(
                 f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&include_source_status=1&as_of_date=2099-01-01"
@@ -361,7 +385,7 @@ def main() -> None:
 
             print("web_vitrina_read_route: ok ->", contract_payload["meta"]["snapshot_id"])
             print("web_vitrina_period_route: ok ->", period_payload["meta"]["date_columns"])
-            print("web_vitrina_page_composition_surface: ok ->", composition_payload["composition_name"], composition_payload["meta"]["current_state"])
+            print("web_vitrina_page_composition_surface: ok ->", composition_payload["composition_name"], composition_payload["meta"]["current_state"], composition_payload_bytes)
             print("web_vitrina_history_selector_surface: ok ->", historical_access["current_mode"], historical_access["supported_query_mode"], len(historical_access["options"]))
             print("web_vitrina_activity_surface: ok ->", len(upload_items), activity_surface["log_block"]["status_label"])
             print("web_vitrina_page_route: ok ->", DEFAULT_SHEET_WEB_VITRINA_UI_PATH)
