@@ -114,6 +114,37 @@ def main() -> None:
     if pre_cutover_apply.count("server_name ") != 1:
         raise AssertionError("managed nginx output must rewrite the target server_name line without duplicating it")
 
+    tls_config = hosted_runtime.NginxTlsConfig(
+        listen=("443 ssl",),
+        certificate_path="/etc/letsencrypt/live/api.selleros.pro/fullchain.pem",
+        certificate_key_path="/etc/letsencrypt/live/api.selleros.pro/privkey.pem",
+    )
+    tls_rendered = hosted_runtime.render_nginx_tls_block(tls_config)
+    pre_cutover_https_apply = hosted_runtime.apply_managed_nginx_public_routes_to_text(
+        pre_cutover_nginx,
+        managed_block=rendered,
+        tls_block=tls_rendered,
+        routes=routes,
+        server_names=("89.191.226.88", "api.selleros.pro"),
+    )
+    second_https_apply = hosted_runtime.apply_managed_nginx_public_routes_to_text(
+        pre_cutover_https_apply,
+        managed_block=rendered,
+        tls_block=tls_rendered,
+        routes=routes,
+        server_names=("89.191.226.88", "api.selleros.pro"),
+    )
+    if pre_cutover_https_apply != second_https_apply:
+        raise AssertionError("managed nginx TLS + route application must be idempotent")
+    if pre_cutover_https_apply.count("# BEGIN WB-CORE MANAGED TLS") != 1:
+        raise AssertionError("managed nginx output must include one TLS block")
+    if "listen 443 ssl;" not in pre_cutover_https_apply:
+        raise AssertionError("managed nginx output must listen on 443 ssl")
+    if "ssl_certificate /etc/letsencrypt/live/api.selleros.pro/fullchain.pem;" not in pre_cutover_https_apply:
+        raise AssertionError("managed nginx output must include configured certificate path")
+    if "ssl_certificate_key /etc/letsencrypt/live/api.selleros.pro/privkey.pem;" not in pre_cutover_https_apply:
+        raise AssertionError("managed nginx output must include configured certificate key path")
+
     with TemporaryDirectory(prefix="hosted-public-routes-smoke-") as tmp:
         target_file = Path(tmp) / "target.json"
         target_file.write_text(
@@ -137,6 +168,11 @@ def main() -> None:
                         "reload_command": "systemctl reload nginx",
                         "manifest_path": "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json",
                         "server_names": ["127.0.0.1", "api.selleros.pro"],
+                        "tls": {
+                            "listen": ["443 ssl"],
+                            "certificate_path": "/etc/letsencrypt/live/api.selleros.pro/fullchain.pem",
+                            "certificate_key_path": "/etc/letsencrypt/live/api.selleros.pro/privkey.pem",
+                        },
                     },
                     "managed_systemd_units": [],
                     "runtime_env": {
@@ -157,6 +193,9 @@ def main() -> None:
         plan_server_names = print_plan["deploy_plan"]["nginx_public_routes"]["server_names"]
         if plan_server_names != ["127.0.0.1", "api.selleros.pro"]:
             raise AssertionError(f"print-plan must expose configured nginx server_names, got {plan_server_names}")
+        plan_tls = print_plan["deploy_plan"]["nginx_public_routes"]["tls"]
+        if not plan_tls["configured"] or plan_tls["listen"] != ["443 ssl"]:
+            raise AssertionError(f"print-plan must expose configured nginx TLS, got {plan_tls}")
         dry_run = _run_json(
             [
                 sys.executable,
@@ -176,6 +215,7 @@ def main() -> None:
     print("public_route_render: ok -> feedbacks and supply prefixes included")
     print("public_route_apply_idempotent: ok")
     print("public_route_server_names: ok -> explicit IP and future host names rendered")
+    print("public_route_tls: ok -> explicit managed 443 ssl block rendered")
     print("public_route_deploy_dry_run: ok")
 
 

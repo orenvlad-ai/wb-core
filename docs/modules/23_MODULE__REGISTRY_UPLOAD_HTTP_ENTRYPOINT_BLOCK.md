@@ -162,8 +162,9 @@ update_note: "Обновлён под AI-assisted feedback review MVP: `Отзы
   - canonical allowlist живёт в `artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`;
   - `apps/registry_upload_http_entrypoint_hosted_runtime.py deploy` применяет его к configured nginx server config as one managed block `WB-CORE MANAGED PUBLIC ROUTES`;
   - target may set explicit `nginx_public_routes.server_names` for the same server block, e.g. EU pre-cutover accepts both `89.191.226.88` and future `api.selleros.pro` Host without DNS switch;
+  - target may set optional `nginx_public_routes.tls` for the same server block; current EU pre-cutover uses `listen 443 ssl` plus already transferred `api.selleros.pro` certificate paths, while certbot issuance/renewal remains out of the repo-owned deploy step until DNS cutover;
   - перед изменением server config создаётся timestamped backup, затем выполняется `nginx -t`, и nginx reload происходит только после successful validation;
-  - repeated deploy replaces the same managed block and matching legacy/manual locations instead of duplicating route locations;
+  - repeated deploy replaces the same managed route/TLS blocks and matching legacy/manual locations instead of duplicating route locations;
   - new public routes in this contour must be added to the manifest and covered by `apps/registry_upload_http_entrypoint_public_routes_smoke.py`, not manually edited on the live host.
 - COST_PRICE contour не подмешивается в main compact registry bundle и хранится в runtime как отдельный authoritative dataset/current-state seam.
 - Existing `POST /v1/cost-price/upload` остаётся единственным write path для себестоимостей, а existing `POST /v1/sheet-vitrina-v1/refresh` / `GET /v1/sheet-vitrina-v1/plan` / `GET /v1/sheet-vitrina-v1/status` используют этот current state только server-side:
