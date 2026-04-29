@@ -18,7 +18,7 @@ from packages.application.seller_funnel_snapshot_block import SellerFunnelSnapsh
 from packages.contracts.seller_funnel_snapshot_block import SellerFunnelSnapshotRequest
 
 
-LATEST_DAILY_URL = "https://api.selleros.pro/v1/sales-funnel/daily"
+LATEST_DAILY_URL = "http://89.191.226.88/v1/sales-funnel/daily"
 
 
 def _resolve_latest_date() -> str:

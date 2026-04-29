@@ -76,8 +76,10 @@ update_note: "Обновлён под archive-first promo semantics: collector r
   - `saved_path` указывает на already archived workbook artifact
 - Archive-first invariant:
   - stable campaign identity = `promo_id` + `period_id` + canonical title slug
-  - archive root хранит `archive_record.json`, normalized `metadata.json`, `workbook.xlsx` и optional `workbook_inspection.json`
+  - archive root хранит `archive_record.json`, normalized `metadata.json`, `workbook.xlsx`, `campaign_rows.jsonl`, `campaign_rows_manifest.json` и optional `workbook_inspection.json`
+  - `campaign_rows.jsonl` is the minimal normalized replay archive: campaign identity/title/period, SKU, `Плановая цена для акции`, workbook fingerprint, row count/column signature via manifest, `collected_at`, `source_run_id` and trace metadata
   - unchanged campaign metadata must reuse existing workbook artifact instead of generating a new download
+  - raw workbook retention may be reduced only after normalized rows + manifest exist and replay without raw workbook is proven by smoke; unknown/incomplete parse state is preserved, not deleted
 - Canonical metadata fields:
   - `collected_at`
   - `trace_run_dir`
@@ -207,6 +209,10 @@ Campaign manifest metadata is a read-only Seller Portal network observation used
 - Bounded live integration smoke подтверждён через `apps/promo_xlsx_collector_integration_smoke.py`:
   - one current/future download with sidecar against existing session reuse path
   - canonical `direct_open -> cookie -> hydrated DOM -> modal close` entry
+- Archive integrity smoke подтверждает normalized replay guard через `apps/promo_campaign_archive_integrity_smoke.py`:
+  - archive sync writes `campaign_rows.jsonl` + `campaign_rows_manifest.json`
+  - temp fixture hides raw `workbook.xlsx`
+  - interval replay still returns the same promo candidate/eligible metrics from normalized rows
 
 # 7. Что уже доказано по модулю
 
@@ -215,6 +221,7 @@ Campaign manifest metadata is a read-only Seller Portal network observation used
 - Collector теперь archive-first, а не download-everything:
   - unchanged campaign artifacts reuse-ятся из `promo_campaign_archive`
   - workbook redownload допускается только когда metadata/content changed or archive artifact missing
+  - raw workbook copies are not a GC target until normalized row replay has passed; duplicate workbook copies may be planned only after hash proof and normalized archive proof
 - Export kinds truthfully materialize-ятся как:
   - `exclude_list_template`
   - `eligible_items_report`

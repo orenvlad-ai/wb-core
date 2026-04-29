@@ -16,11 +16,16 @@ from typing import Any, Iterable
 from openpyxl import load_workbook
 
 from packages.application.promo_metric_truth import (
+    HEADER_NM_ID,
+    HEADER_PLAN_PRICE,
     PromoCandidateRow,
     PromoEligibilityEvaluation,
     evaluate_candidate_rows,
     find_workbook_data_sheet,
+    header_index_from_row,
     iter_workbook_plan_rows,
+    parse_float,
+    parse_int,
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.contracts.promo_live_source import (
@@ -36,6 +41,9 @@ ARCHIVE_RECORD_FILENAME = "archive_record.json"
 ARCHIVE_METADATA_FILENAME = "metadata.json"
 ARCHIVE_WORKBOOK_FILENAME = "workbook.xlsx"
 ARCHIVE_WORKBOOK_INSPECTION_FILENAME = "workbook_inspection.json"
+ARCHIVE_NORMALIZED_ROWS_FILENAME = "campaign_rows.jsonl"
+ARCHIVE_NORMALIZED_ROWS_MANIFEST_FILENAME = "campaign_rows_manifest.json"
+NORMALIZED_CAMPAIGN_ROWS_SCHEMA_VERSION = "promo_campaign_rows_v1"
 PRICES_SOURCE_KEY = "prices_snapshot"
 PRICES_ACCEPTED_CURRENT_ROLE = "accepted_current_snapshot"
 ARTIFACT_VALIDATION_SCHEMA_VERSION = "promo_artifact_validation_v1"
@@ -192,6 +200,18 @@ def promo_campaign_archive_root(runtime_dir: Path) -> Path:
     return runtime_dir / PROMO_CAMPAIGN_ARCHIVE_DIRNAME
 
 
+def promo_campaign_rows_archive_path(archive_dir: Path) -> Path:
+    return archive_dir / ARCHIVE_NORMALIZED_ROWS_FILENAME
+
+
+def promo_campaign_rows_manifest_path(archive_dir: Path) -> Path:
+    return archive_dir / ARCHIVE_NORMALIZED_ROWS_MANIFEST_FILENAME
+
+
+def promo_campaign_has_normalized_rows(record: PromoCampaignArchiveRecord) -> bool:
+    return _normalized_row_archive_failure_reason(record) is None
+
+
 def load_promo_campaign_archive(runtime_dir: Path) -> list[PromoCampaignArchiveRecord]:
     archive_root = promo_campaign_archive_root(runtime_dir)
     if not archive_root.exists():
@@ -268,10 +288,12 @@ def validate_promo_campaign_artifact(
     checksum_or_fingerprint = record.workbook_fingerprint
     if workbook_exists and not checksum_or_fingerprint and workbook_path is not None:
         checksum_or_fingerprint = _sha256_path(workbook_path)
+    normalized_rows_reason = _normalized_row_archive_failure_reason(record)
+    normalized_rows_available = normalized_rows_reason is None
 
     state = ARTIFACT_STATE_COMPLETE
     reason: str | None = None
-    workbook_required = True
+    workbook_required = not normalized_rows_available
     non_materializable_reason: str | None = None
     metadata_exists = metadata_path.exists()
     ended_without_download = _metadata_indicates_ended_without_download(record.metadata)
@@ -301,6 +323,9 @@ def validate_promo_campaign_artifact(
             reason = ARTIFACT_REASON_METADATA_ONLY_ENDED_WITHOUT_DOWNLOAD
             workbook_required = False
             non_materializable_reason = "ended_without_download"
+        elif normalized_rows_available:
+            state = ARTIFACT_STATE_COMPLETE
+            workbook_required = False
         else:
             state = ARTIFACT_STATE_METADATA_ONLY
             reason = ARTIFACT_REASON_METADATA_ONLY_TRUE_ARTIFACT_LOSS
@@ -313,6 +338,9 @@ def validate_promo_campaign_artifact(
             reason = ARTIFACT_REASON_METADATA_ONLY_ENDED_WITHOUT_DOWNLOAD
             workbook_required = False
             non_materializable_reason = "ended_without_download"
+        elif normalized_rows_available:
+            state = ARTIFACT_STATE_COMPLETE
+            workbook_required = False
         else:
             state = (
                 ARTIFACT_STATE_MISSING_WORKBOOK
@@ -333,6 +361,7 @@ def validate_promo_campaign_artifact(
         state == ARTIFACT_STATE_COMPLETE
         and deep_workbook_check
         and workbook_path is not None
+        and workbook_exists
     ):
         workbook_reason = _workbook_open_failure_reason(workbook_path)
         if workbook_reason:
@@ -410,6 +439,7 @@ def audit_promo_campaign_archive(
         for validation in validations
         if validation.validation_failure_reason == ARTIFACT_REASON_METADATA_ONLY_TRUE_ARTIFACT_LOSS
     )
+    normalized_row_archive_count = sum(1 for record in records if promo_campaign_has_normalized_rows(record))
     covering_validations = (
         [
             validation
@@ -430,6 +460,8 @@ def audit_promo_campaign_archive(
         "incomplete_artifact_count": len(failures),
         "validation_failed_count": len(failures),
         "validated_workbook_usable_count": state_counts.get(ARTIFACT_STATE_COMPLETE, 0),
+        "normalized_row_archive_count": normalized_row_archive_count,
+        "normalized_row_archive_missing_count": max(0, len(records) - normalized_row_archive_count),
         "ended_without_download_count": state_counts.get(ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD, 0),
         "metadata_only_true_artifact_loss_count": metadata_only_true_artifact_loss_count,
         "non_materializable_expected_count": len(expected_non_materializable),
@@ -467,6 +499,14 @@ def sync_promo_campaign_archive(runtime_dir: Path) -> PromoCampaignArchiveSyncSu
             updated += 1
         else:
             unchanged += 1
+    for record in load_promo_campaign_archive(runtime_dir):
+        if not record.workbook_path:
+            continue
+        workbook_path = Path(record.workbook_path)
+        if not workbook_path.exists() or promo_campaign_has_normalized_rows(record):
+            continue
+        if _ensure_normalized_campaign_rows_archive(record=record, workbook_path=workbook_path):
+            updated += 1
     return PromoCampaignArchiveSyncSummary(
         scanned_promo_dirs=scanned,
         created_records=created,
@@ -573,6 +613,16 @@ def materialize_promo_result_from_archive(
         diagnostics,
         "workbook_file_mtime_max",
         _workbook_file_mtime_max(usable),
+    )
+    _set_promo_diag_fingerprint(
+        diagnostics,
+        "normalized_campaign_rows_fingerprint",
+        _record_normalized_rows_fingerprint(usable),
+    )
+    _set_promo_diag_counter(
+        diagnostics,
+        "normalized_campaign_row_archive_count",
+        sum(1 for record in usable if promo_campaign_has_normalized_rows(record)),
     )
     _finish_promo_diag_phase(diagnostics, archive_lookup_phase, status="success")
 
@@ -712,9 +762,9 @@ def materialize_promo_result_from_archive(
     workbook_phase = _start_promo_diag_phase(diagnostics, "workbook_inspection")
     candidate_row_count = 0
     for record in usable:
-        candidate_row_count += _merge_archive_workbook_rows(
+        candidate_row_count += _merge_archive_candidate_rows(
             candidate_rows_by_nm_id=candidate_rows_by_nm_id,
-            workbook_path=Path(str(record.workbook_path)),
+            record=record,
             requested_nm_ids=requested,
             campaign_identity=_campaign_identity(record),
         )
@@ -1064,6 +1114,14 @@ def _sync_archive_record_from_metadata(
         ),
         metadata=normalized_metadata,
     )
+    if archive_workbook_path.exists() and workbook_fingerprint:
+        record_changed = (
+            _ensure_normalized_campaign_rows_archive(
+                record=record,
+                workbook_path=archive_workbook_path,
+            )
+            or record_changed
+        )
     record_payload = json.dumps(asdict(record), ensure_ascii=False, indent=2).encode("utf-8")
     record_path = archive_dir / ARCHIVE_RECORD_FILENAME
     existing_record_bytes = record_path.read_bytes() if record_path.exists() else None
@@ -1106,6 +1164,162 @@ def _normalize_metadata_for_archive(
         payload["saved_path"] = str(workbook_path)
         payload["saved_filename"] = workbook_path.name
     return PromoMetadata(**payload)
+
+
+def _ensure_normalized_campaign_rows_archive(
+    *,
+    record: PromoCampaignArchiveRecord,
+    workbook_path: Path,
+) -> bool:
+    try:
+        rows, manifest = _build_normalized_campaign_rows_archive(
+            record=record,
+            workbook_path=workbook_path,
+        )
+    except Exception:
+        return False
+
+    archive_dir = Path(record.archive_dir)
+    rows_path = promo_campaign_rows_archive_path(archive_dir)
+    manifest_path = promo_campaign_rows_manifest_path(archive_dir)
+    rows_payload = "".join(
+        json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+        for row in rows
+    ).encode("utf-8")
+    manifest_payload = json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
+    changed = False
+    if not rows_path.exists() or rows_path.read_bytes() != rows_payload:
+        rows_path.write_bytes(rows_payload)
+        changed = True
+    if not manifest_path.exists() or manifest_path.read_bytes() != manifest_payload:
+        manifest_path.write_bytes(manifest_payload)
+        changed = True
+    return changed
+
+
+def _build_normalized_campaign_rows_archive(
+    *,
+    record: PromoCampaignArchiveRecord,
+    workbook_path: Path,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    workbook = load_workbook(filename=str(workbook_path), read_only=False, data_only=True)
+    try:
+        sheet, header_row_index = find_workbook_data_sheet(workbook)
+        header = list(
+            next(
+                sheet.iter_rows(
+                    min_row=header_row_index,
+                    max_row=header_row_index,
+                    values_only=True,
+                )
+            )
+        )
+        header_index = header_index_from_row(header)
+        for required in (HEADER_NM_ID, HEADER_PLAN_PRICE):
+            if required not in header_index:
+                raise ValueError(f"promo workbook missing required header: {required}")
+        column_signature = _json_fingerprint(
+            [str(value).strip() for value in header if value not in (None, "")]
+        )
+        source_run_id = _source_run_id(record.metadata.trace_run_dir)
+        rows: list[dict[str, Any]] = []
+        for row_index, row in enumerate(
+            sheet.iter_rows(min_row=header_row_index + 1, values_only=True),
+            start=header_row_index + 1,
+        ):
+            nm_id = parse_int(row[header_index[HEADER_NM_ID]])
+            plan_price = parse_float(row[header_index[HEADER_PLAN_PRICE]])
+            if nm_id is None or plan_price is None:
+                continue
+            rows.append(
+                {
+                    "schema_version": NORMALIZED_CAMPAIGN_ROWS_SCHEMA_VERSION,
+                    "campaign_id": _campaign_identity(record),
+                    "promo_id": record.metadata.promo_id,
+                    "period_id": record.metadata.period_id,
+                    "campaign_title": record.metadata.promo_title,
+                    "start_date": record.metadata.promo_start_at,
+                    "end_date": record.metadata.promo_end_at,
+                    "sku": nm_id,
+                    "nm_id": nm_id,
+                    "plan_price": float(plan_price),
+                    "workbook_fingerprint": record.workbook_fingerprint,
+                    "workbook_row_index": row_index,
+                    "collected_at": record.metadata.collected_at,
+                    "source_run_id": source_run_id,
+                    "source_trace_run_dir": record.metadata.trace_run_dir,
+                }
+            )
+        manifest = {
+            "schema_version": NORMALIZED_CAMPAIGN_ROWS_SCHEMA_VERSION,
+            "archive_key": record.archive_key,
+            "campaign_id": _campaign_identity(record),
+            "promo_id": record.metadata.promo_id,
+            "period_id": record.metadata.period_id,
+            "campaign_title": record.metadata.promo_title,
+            "start_date": record.metadata.promo_start_at,
+            "end_date": record.metadata.promo_end_at,
+            "workbook_fingerprint": record.workbook_fingerprint,
+            "metadata_fingerprint": record.metadata_fingerprint,
+            "row_count": len(rows),
+            "column_signature": column_signature,
+            "columns": [str(value).strip() for value in header if value not in (None, "")],
+            "collected_at": record.metadata.collected_at,
+            "source_run_id": source_run_id,
+            "source_trace_run_dir": record.metadata.trace_run_dir,
+        }
+        return rows, manifest
+    finally:
+        workbook.close()
+
+
+def _normalized_row_archive_failure_reason(record: PromoCampaignArchiveRecord) -> str | None:
+    archive_dir = Path(record.archive_dir)
+    rows_path = promo_campaign_rows_archive_path(archive_dir)
+    manifest_path = promo_campaign_rows_manifest_path(archive_dir)
+    if not rows_path.exists() or not manifest_path.exists():
+        return "normalized_campaign_rows_missing"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return "normalized_campaign_rows_manifest_corrupted"
+    if not isinstance(manifest, dict):
+        return "normalized_campaign_rows_manifest_not_object"
+    if manifest.get("schema_version") != NORMALIZED_CAMPAIGN_ROWS_SCHEMA_VERSION:
+        return "normalized_campaign_rows_schema_mismatch"
+    if record.workbook_fingerprint and manifest.get("workbook_fingerprint") != record.workbook_fingerprint:
+        return "normalized_campaign_rows_workbook_fingerprint_mismatch"
+    if record.metadata_fingerprint and manifest.get("metadata_fingerprint") != record.metadata_fingerprint:
+        return "normalized_campaign_rows_metadata_fingerprint_mismatch"
+    try:
+        row_count = int(manifest.get("row_count"))
+    except (TypeError, ValueError):
+        return "normalized_campaign_rows_count_invalid"
+    if row_count < 0:
+        return "normalized_campaign_rows_count_invalid"
+    try:
+        actual_count = 0
+        with rows_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    payload = json.loads(line)
+                    if not isinstance(payload, dict):
+                        return "normalized_campaign_rows_not_object"
+                    if payload.get("schema_version") != NORMALIZED_CAMPAIGN_ROWS_SCHEMA_VERSION:
+                        return "normalized_campaign_rows_schema_mismatch"
+                    actual_count += 1
+    except Exception:
+        return "normalized_campaign_rows_corrupted"
+    if actual_count != row_count:
+        return "normalized_campaign_rows_count_mismatch"
+    return None
+
+
+def _source_run_id(trace_run_dir: str | None) -> str | None:
+    text = str(trace_run_dir or "").strip()
+    if not text:
+        return None
+    return Path(text).name
 
 
 def _record_covers_date(record: PromoCampaignArchiveRecord, slot_date: date) -> bool:
@@ -1386,6 +1600,65 @@ def _record_matches_live_metadata(
     )
 
 
+def _merge_archive_candidate_rows(
+    *,
+    candidate_rows_by_nm_id: dict[int, list[PromoCandidateRow]],
+    record: PromoCampaignArchiveRecord,
+    requested_nm_ids: Iterable[int],
+    campaign_identity: str,
+) -> int:
+    workbook_path = Path(record.workbook_path) if record.workbook_path else None
+    if workbook_path is not None and workbook_path.exists():
+        return _merge_archive_workbook_rows(
+            candidate_rows_by_nm_id=candidate_rows_by_nm_id,
+            workbook_path=workbook_path,
+            requested_nm_ids=requested_nm_ids,
+            campaign_identity=campaign_identity,
+        )
+    return _merge_archive_normalized_rows(
+        candidate_rows_by_nm_id=candidate_rows_by_nm_id,
+        record=record,
+        requested_nm_ids=requested_nm_ids,
+        campaign_identity=campaign_identity,
+    )
+
+
+def _merge_archive_normalized_rows(
+    *,
+    candidate_rows_by_nm_id: dict[int, list[PromoCandidateRow]],
+    record: PromoCampaignArchiveRecord,
+    requested_nm_ids: Iterable[int],
+    campaign_identity: str,
+) -> int:
+    rows_path = promo_campaign_rows_archive_path(Path(record.archive_dir))
+    requested = {int(nm_id) for nm_id in requested_nm_ids}
+    row_count = 0
+    with rows_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("schema_version") != NORMALIZED_CAMPAIGN_ROWS_SCHEMA_VERSION:
+                continue
+            nm_id = parse_int(payload.get("nm_id") or payload.get("sku"))
+            if nm_id is None or nm_id not in requested:
+                continue
+            plan_price = parse_float(payload.get("plan_price"))
+            if plan_price is None:
+                continue
+            candidate_rows_by_nm_id.setdefault(nm_id, []).append(
+                PromoCandidateRow(
+                    nm_id=nm_id,
+                    campaign_identity=campaign_identity,
+                    plan_price=plan_price,
+                )
+            )
+            row_count += 1
+    return row_count
+
+
 def _merge_archive_workbook_rows(
     *,
     candidate_rows_by_nm_id: dict[int, list[PromoCandidateRow]],
@@ -1659,6 +1932,32 @@ def _record_field_fingerprint(records: list[PromoCampaignArchiveRecord], field_n
         for record in records
         if str(getattr(record, field_name, "") or "").strip()
     ]
+    return _json_fingerprint(sorted(values)) if values else None
+
+
+def _record_normalized_rows_fingerprint(records: list[PromoCampaignArchiveRecord]) -> str | None:
+    values: list[str] = []
+    for record in records:
+        manifest_path = promo_campaign_rows_manifest_path(Path(record.archive_dir))
+        if not manifest_path.exists():
+            continue
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        values.append(
+            "|".join(
+                [
+                    str(record.archive_key),
+                    str(payload.get("metadata_fingerprint") or ""),
+                    str(payload.get("workbook_fingerprint") or ""),
+                    str(payload.get("row_count") or 0),
+                    str(payload.get("column_signature") or ""),
+                ]
+            )
+        )
     return _json_fingerprint(sorted(values)) if values else None
 
 

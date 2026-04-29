@@ -36,9 +36,9 @@ class ArtifactBackedSellerFunnelSnapshotSource:
 
 
 class HttpBackedSellerFunnelSnapshotSource:
-    """Минимальный HTTP adapter к legacy daily endpoint."""
+    """Минимальный HTTP adapter к hosted daily endpoint."""
 
-    def __init__(self, base_url: str = "https://api.selleros.pro") -> None:
+    def __init__(self, base_url: str = "http://89.191.226.88") -> None:
         self._base_url = base_url.rstrip("/")
 
     def fetch(self, request: SellerFunnelSnapshotRequest) -> Mapping[str, Any]:

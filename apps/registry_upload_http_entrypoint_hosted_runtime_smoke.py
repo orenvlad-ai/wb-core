@@ -47,9 +47,11 @@ def main() -> None:
         runtime_dir.mkdir(parents=True, exist_ok=True)
         target_file = Path(tmp) / "target.json"
         deploy_target_file = Path(tmp) / "deploy_target.json"
+        archived_target_file = Path(tmp) / "archived_target.json"
         port = _reserve_free_port()
         base_url = f"http://127.0.0.1:{port}"
         base_target_payload = {
+            "target_status": "local_test",
             "target_id": "local_smoke_target",
             "public_base_url": base_url,
             "loopback_base_url": base_url,
@@ -98,9 +100,36 @@ def main() -> None:
             encoding="utf-8",
         )
         deploy_target_payload = dict(base_target_payload)
-        deploy_target_payload["ssh_destination"] = "example-host"
+        deploy_target_payload.update(
+            {
+                "target_status": "active",
+                "public_base_url": "http://89.191.226.88",
+                "ssh_destination": "wb-core-eu-root",
+                "target_dir": "/opt/wb-core-runtime/app",
+                "service_name": "wb-core-registry-http.service",
+                "restart_command": "systemctl restart wb-core-registry-http.service",
+                "status_command": "systemctl status --no-pager --full wb-core-registry-http.service",
+            }
+        )
+        deploy_target_payload["runtime_env"] = {
+            **base_target_payload["runtime_env"],
+            "REGISTRY_UPLOAD_RUNTIME_DIR": "/opt/wb-core-runtime/state",
+        }
         deploy_target_file.write_text(
             json.dumps(deploy_target_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        archived_target_payload = dict(deploy_target_payload)
+        archived_target_payload.update(
+            {
+                "target_status": "archived",
+                "target_id": "archived_selleros_target",
+                "public_base_url": "https://api.selleros.pro",
+                "ssh_destination": "selleros-root",
+            }
+        )
+        archived_target_file.write_text(
+            json.dumps(archived_target_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
@@ -166,7 +195,7 @@ def main() -> None:
                 raise AssertionError("deploy --dry-run must stay dry-run")
             if "rsync" not in " ".join(deploy_dry_run["commands"]["rsync"]):
                 raise AssertionError("deploy --dry-run must expose rsync command")
-            if "chown -R root:root /srv/wb-core" not in " ".join(
+            if "chown -R root:root /opt/wb-core-runtime/app" not in " ".join(
                 deploy_dry_run["commands"]["chown_target_dir"]
             ):
                 raise AssertionError("deploy --dry-run must expose target_dir ownership normalization")
@@ -186,6 +215,27 @@ def main() -> None:
                 raise AssertionError("deploy --dry-run must expose systemd restart command")
             if "apply-nginx-routes" not in " ".join(deploy_dry_run["commands"]["nginx_public_routes_update"]):
                 raise AssertionError("deploy --dry-run must expose nginx public route update command")
+
+            archived_deploy = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--target-file",
+                    str(archived_target_file),
+                    "deploy",
+                    "--dry-run",
+                    "--allow-dirty",
+                ],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if archived_deploy.returncode == 0:
+                raise AssertionError("archived selleros deploy target must fail fast")
+            archived_output = archived_deploy.stdout + archived_deploy.stderr
+            if "refused for non-active hosted runtime target" not in archived_output:
+                raise AssertionError("archived target failure must name the active-target guard")
 
             public_probe = _run_json(
                 [
@@ -289,6 +339,7 @@ def main() -> None:
                 "deploy_dry_run_nginx_routes: ok -> "
                 f"{deploy_dry_run['commands']['nginx_public_routes_update'][-1]}"
             )
+            print("archived_target_guard: ok -> deploy refused")
             print(f"public_probe_web_vitrina_page: ok -> {route_map['web_vitrina_page']['http_status']}")
             print(f"public_probe_operator_reports: ok -> {route_map['operator_reports']['http_status']}")
             print(f"public_probe_web_vitrina_read: ok -> {route_map['web_vitrina_read']['http_status']}")

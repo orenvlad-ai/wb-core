@@ -58,7 +58,7 @@ STATUS_HEADER = [
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Browser smoke-check the web-vitrina page.")
-    parser.add_argument("--base-url", default="", help="Existing base URL, for example https://api.selleros.pro")
+    parser.add_argument("--base-url", default="", help="Existing base URL, for example http://89.191.226.88")
     parser.add_argument("--as-of-date", default="", help="Optional as_of_date query parameter for historical read-side checks.")
     parser.add_argument(
         "--ignore-https-errors",

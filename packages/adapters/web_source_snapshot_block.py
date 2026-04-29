@@ -36,9 +36,9 @@ class ArtifactBackedWebSourceSnapshotSource:
 
 
 class HttpBackedWebSourceSnapshotSource:
-    """Минимальный HTTP adapter к legacy snapshot endpoint."""
+    """Минимальный HTTP adapter к hosted snapshot endpoint."""
 
-    def __init__(self, base_url: str = "https://api.selleros.pro") -> None:
+    def __init__(self, base_url: str = "http://89.191.226.88") -> None:
         self._base_url = base_url.rstrip("/")
 
     def fetch(self, request: WebSourceSnapshotRequest) -> Mapping[str, Any]:

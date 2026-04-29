@@ -50,6 +50,7 @@ DEFAULT_JOB_URL = "http://127.0.0.1:8765/v1/sheet-vitrina-v1/job"
 DEFAULT_STATUS_URL = "http://127.0.0.1:8765/v1/sheet-vitrina-v1/status"
 DEFAULT_PAGE_URL = "http://127.0.0.1:8765/v1/sheet-vitrina-v1/web-vitrina?surface=page_composition"
 DEFAULT_SELLER_URL = "https://seller.wildberries.ru"
+DEFAULT_SSH_DESTINATION = "wb-core-eu-root"
 DEFAULT_NOVNC_WEB_DIR = Path("/usr/share/novnc")
 DEFAULT_CANONICAL_SUPPLIER_ID = ""
 DEFAULT_CANONICAL_SUPPLIER_LABEL = ""
@@ -96,7 +97,7 @@ class ReloginSessionConfig:
     status_url: str = DEFAULT_STATUS_URL
     page_composition_url: str = DEFAULT_PAGE_URL
     seller_url: str = DEFAULT_SELLER_URL
-    ssh_destination: str = "selleros-root"
+    ssh_destination: str = DEFAULT_SSH_DESTINATION
     novnc_web_dir: Path = DEFAULT_NOVNC_WEB_DIR
     canonical_supplier_id: str = DEFAULT_CANONICAL_SUPPLIER_ID
     canonical_supplier_label: str = DEFAULT_CANONICAL_SUPPLIER_LABEL
@@ -729,8 +730,8 @@ def load_relogin_session_config_from_env() -> ReloginSessionConfig:
         ),
         seller_url=str(os.environ.get("SELLER_PORTAL_RELOGIN_SELLER_URL", DEFAULT_SELLER_URL)).strip() or DEFAULT_SELLER_URL,
         ssh_destination=(
-            str(os.environ.get("SELLER_PORTAL_RELOGIN_SSH_DESTINATION", "selleros-root")).strip()
-            or "selleros-root"
+            str(os.environ.get("SELLER_PORTAL_RELOGIN_SSH_DESTINATION", DEFAULT_SSH_DESTINATION)).strip()
+            or DEFAULT_SSH_DESTINATION
         ),
         novnc_web_dir=Path(
             str(os.environ.get("SELLER_PORTAL_RELOGIN_NOVNC_WEB_DIR", DEFAULT_NOVNC_WEB_DIR)).strip()

@@ -161,8 +161,8 @@ update_note: "Обновлён под AI-assisted feedback review MVP: `Отзы
 - Hosted/public publication boundary теперь repo-owned:
   - canonical allowlist живёт в `artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`;
   - `apps/registry_upload_http_entrypoint_hosted_runtime.py deploy` применяет его к configured nginx server config as one managed block `WB-CORE MANAGED PUBLIC ROUTES`;
-  - target may set explicit `nginx_public_routes.server_names` for the same server block, e.g. EU pre-cutover accepts both `89.191.226.88` and future `api.selleros.pro` Host without DNS switch;
-  - target may set optional `nginx_public_routes.tls` for the same server block; current EU pre-cutover uses `listen 443 ssl` plus already transferred `api.selleros.pro` certificate paths, while certbot issuance/renewal remains out of the repo-owned deploy step until DNS cutover;
+  - active EU target sets explicit `nginx_public_routes.server_names=["89.191.226.88"]`; `api.selleros.pro` remains archived legacy target evidence until a separate DNS/TLS contract update;
+  - target may set optional `nginx_public_routes.tls` for the same server block, but current active EU target is IP/http-based and does not rely on TLS domain publication;
   - перед изменением server config создаётся timestamped backup, затем выполняется `nginx -t`, и nginx reload происходит только после successful validation;
   - repeated deploy replaces the same managed route/TLS blocks and matching legacy/manual locations instead of duplicating route locations;
   - new public routes in this contour must be added to the manifest and covered by `apps/registry_upload_http_entrypoint_public_routes_smoke.py`, not manually edited on the live host.
@@ -559,6 +559,7 @@ update_note: "Обновлён под AI-assisted feedback review MVP: `Отзы
 - Hosted runtime contract теперь materialized в repo:
   - `apps/registry_upload_http_entrypoint_hosted_runtime.py`
   - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__example.json`
+  - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json`
   - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__selleros_api.json`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-registry-http.service`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.service`
@@ -567,10 +568,11 @@ update_note: "Обновлён под AI-assisted feedback review MVP: `Отзы
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
   - `docs/architecture/10_hosted_runtime_deploy_contract.md`
 - Этот contract фиксирует:
-  - canonical public base URL `https://api.selleros.pro`;
+  - canonical active public base URL `http://89.191.226.88`;
   - canonical loopback base URL `http://127.0.0.1:8765`;
   - canonical route paths через existing entrypoint env names;
-  - checked-in selleros target values `ssh_destination=selleros-root`, `target_dir=/opt/wb-core-runtime/app`, `service_name=wb-core-registry-http.service`, `restart_command=systemctl restart wb-core-registry-http.service`, `status_command=systemctl status --no-pager --full wb-core-registry-http.service`, `environment_file=/opt/wb-ai/.env`, `REGISTRY_UPLOAD_RUNTIME_DIR=/opt/wb-core-runtime/state`;
+  - checked-in active EU target values `target_status=active`, `ssh_destination=wb-core-eu-root`, `target_dir=/opt/wb-core-runtime/app`, `service_name=wb-core-registry-http.service`, `restart_command=systemctl restart wb-core-registry-http.service`, `status_command=systemctl status --no-pager --full wb-core-registry-http.service`, `environment_file=/opt/wb-ai/.env`, `REGISTRY_UPLOAD_RUNTIME_DIR=/opt/wb-core-runtime/state`;
+  - checked-in archived selleros target values only as migration evidence: `target_status=archived`, `ssh_destination=selleros-root`, `public_base_url=https://api.selleros.pro`; runner deploy/probe paths fail fast for this target;
   - repo-owned systemd unit artifacts for the daily refresh timer and closure-retry timer;
   - one repo-owned sequence `deploy -> install units -> daemon-reload -> restart runtime -> loopback-probe -> public-probe`.
 - Secrets по-прежнему не invent-ятся и не хранятся в repo; если deploy rights недоступны, live task обязана завершаться точным blocker-ом, а не vague ссылкой на “external operational knowledge”.
@@ -585,6 +587,7 @@ update_note: "Обновлён под AI-assisted feedback review MVP: `Отзы
   - `artifacts/registry_upload_http_entrypoint/target/current_state__fixture.json`
 - hosted target artifacts:
   - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__example.json`
+  - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json`
   - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__selleros_api.json`
 - hosted systemd artifacts:
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-registry-http.service`

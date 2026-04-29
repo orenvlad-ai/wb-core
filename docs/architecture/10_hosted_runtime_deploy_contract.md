@@ -11,7 +11,7 @@
 
 ## Canonical Scope
 
-Contract покрывает hosted contour на `api.selleros.pro` для routes:
+Contract покрывает active EU hosted contour на `http://89.191.226.88` для routes:
 - `POST /v1/registry-upload/bundle`
 - `POST /v1/cost-price/upload`
 - `POST /v1/sheet-vitrina-v1/refresh`
@@ -55,17 +55,21 @@ Canonical runner:
 Canonical target template:
 - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__example.json`
 
-Canonical live target for the current selleros host:
-- `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__selleros_api.json`
-
-Canonical pre-cutover target for the EU VPS migration preparation:
+Canonical active target for the current EU hosted runtime:
 - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json`
+- `target_status = active`
 - `ssh_destination = wb-core-eu-root`
 - `public_base_url = http://89.191.226.88`
-- nginx `server_names = 89.191.226.88 + api.selleros.pro` so pre-cutover `--resolve api.selleros.pro:80:89.191.226.88` checks exercise the same explicit future production Host without switching DNS.
-- nginx TLS is target-owned for the EU pre-cutover host: the runner can render `listen 443 ssl` for `api.selleros.pro` using already transferred certificate files, without issuing or renewing certificates before DNS cutover.
+- `runtime_env.REGISTRY_UPLOAD_RUNTIME_DIR = /opt/wb-core-runtime/state`
+- `service_name = wb-core-registry-http.service`
+- nginx `server_names = 89.191.226.88`
 
-The EU target is intentionally IP-based until DNS cutover. The old selleros target remains the rollback/live contour and must not be changed as part of EU host preparation.
+Archived legacy target:
+- `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__selleros_api.json`
+- `target_status = archived`
+- `ssh_destination = selleros-root`
+- `public_base_url = https://api.selleros.pro`
+- This target is migration evidence only and must not be used for deploy, probe, audit, GC or hosted runtime tasks. The runner fail-fast rejects archived/legacy target hosts.
 
 Canonical repo-owned systemd artifacts for this contour:
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-registry-http.service`
@@ -104,15 +108,16 @@ Checked-in target template фиксирует field names, которые бол
 - `nginx_public_routes`
   - optional `server_names` array may pin concrete nginx hostnames/IP names for the server block; when omitted, the runner derives the single name from `public_base_url`
   - optional `tls` object may render a managed TLS block into that same server block:
-    - `listen` = explicit nginx listen directives, current EU value `["443 ssl"]`
+    - `listen` = explicit nginx listen directives
     - `certificate_path` = public certificate chain path
     - `certificate_key_path` = private key path reference only; deploy output must not print key content
 - `runtime_env`
 
-Known selleros target values теперь зафиксированы repo-owned:
-- `public_base_url = https://api.selleros.pro`
+Known active EU target values теперь зафиксированы repo-owned:
+- `target_status = active`
+- `public_base_url = http://89.191.226.88`
 - `loopback_base_url = http://127.0.0.1:8765`
-- `ssh_destination = selleros-root`
+- `ssh_destination = wb-core-eu-root`
 - `target_dir = /opt/wb-core-runtime/app`
 - `service_name = wb-core-registry-http.service`
 - `restart_command = systemctl restart wb-core-registry-http.service`
@@ -126,14 +131,13 @@ Known selleros target values теперь зафиксированы repo-owned:
 - `nginx_public_routes.manifest_path = artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`
 - `nginx_public_routes.test_command = nginx -t`
 - `nginx_public_routes.reload_command = systemctl reload nginx`
-- `nginx_public_routes.server_names` is omitted because `public_base_url` already resolves to `api.selleros.pro`
+- `nginx_public_routes.server_names = ["89.191.226.88"]`
 - route paths inside `runtime_env` follow current entrypoint defaults
 
-EU pre-cutover target note:
-- the blank EU host also manages `wb-core-registry-http.service` from the repo-owned systemd artifact, then enables it for boot and restarts it through the existing `restart_command`;
-- the EU nginx server block explicitly accepts both the IP pre-cutover name and `api.selleros.pro`; this is not a DNS switch;
-- the EU target may enable HTTPS with an existing transferred certificate through `nginx_public_routes.tls`; certbot issuance/renewal stays manual/out-of-scope until DNS points at the EU host;
-- the old selleros rollback target may keep using the already installed host service and must not be changed during EU preparation.
+Archived selleros target note:
+- `selleros-root`, `api.selleros.pro` and host `178.72.152.177` are not active runtime targets after the EU VPS cutover.
+- If `WB_CORE_HOSTED_RUNTIME_TARGET_FILE` points to archived selleros JSON or any target with `ssh_destination=selleros-root`, deploy/probe commands must fail fast instead of silently touching the old VPS.
+- Future DNS/TLS changes require an explicit target-contract update before `api.selleros.pro` can be considered active again.
 
 Secrets and mutable credentials по-прежнему не хранятся в Git. Repo stores only non-secret target wiring and unit artifacts.
 
@@ -318,16 +322,12 @@ If the task introduces or changes temporal closed-day retry behavior for `sheet_
 - verify the repo-owned timer/service artifacts are installed on host as `wb-core-sheet-vitrina-closure-retry.service` / `.timer`;
 - verify at least one affected `as_of_date` where a strict closed-day-capable source either transitions to `success` after retry or stays in a truthful retry/exhausted/blocker state without fake closed values in the visible slot.
 
-If the local machine cannot validate the current selleros certificate chain, public probe may reuse the existing bounded diagnostic fallback:
-- `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py public-probe ...`
-- `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1 python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py` when the required promo current invariant guard is the failing local-CA step.
-
-This fallback is only for local diagnostic reachability. It is not a statement that live runtime should run insecurely.
+The current active public probe target is `http://89.191.226.88`. `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1` remains a diagnostic-only legacy TLS escape hatch for historical domain-based checks and is not part of the active EU target closure.
 
 ## Human-Only Boundary
 
 One minimal human-only step remains allowed only when repo-owned contract still cannot execute due missing access:
-- grant deploy access for `selleros-root` / `api.selleros.pro`
+- grant deploy access for `wb-core-eu-root` / `89.191.226.88`
 
 Without that step a live/public task stays `live-complete = blocked`; reporting only `repo-complete` is insufficient. For GAS/sheet-only scope the blocker is tracked as `sheet-complete = blocked`.
 The blocker must name the concrete missing access/value and must not be phrased as unspecified operational uncertainty.

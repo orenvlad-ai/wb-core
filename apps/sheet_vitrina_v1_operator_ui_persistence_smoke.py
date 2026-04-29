@@ -47,7 +47,7 @@ ACTIVE_SKUS = [
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Smoke-check operator UI persistence.")
-    parser.add_argument("--base-url", default="", help="Existing operator base URL, for example https://api.selleros.pro")
+    parser.add_argument("--base-url", default="", help="Existing operator base URL, for example http://89.191.226.88")
     parser.add_argument(
         "--ignore-https-errors",
         action="store_true",
