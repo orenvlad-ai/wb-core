@@ -161,9 +161,9 @@ update_note: "Обновлён под AI-assisted feedback review MVP: `Отзы
 - Hosted/public publication boundary теперь repo-owned:
   - canonical allowlist живёт в `artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`;
   - `apps/registry_upload_http_entrypoint_hosted_runtime.py deploy` применяет его к configured nginx server config as one managed block `WB-CORE MANAGED PUBLIC ROUTES`;
-  - active EU target is explicitly marked `target_role=primary_live`, `target_lifecycle=current_live`, `mutation_policy=routine_writes_allowed` and sets `nginx_public_routes.server_names=["89.191.226.88"]`; `api.selleros.pro` is allowed as current live DNS name, but target identity for deploy safety is `wb-core-eu-root` / `89.191.226.88` plus target/runtime/service metadata;
+  - active EU target is explicitly marked `target_role=primary_live`, `target_lifecycle=current_live`, `mutation_policy=routine_writes_allowed`, sets `public_base_url=https://api.selleros.pro`, and publishes `nginx_public_routes.server_names=["89.191.226.88","api.selleros.pro"]`; target identity for deploy safety is `wb-core-eu-root` / `89.191.226.88` plus target/runtime/service metadata;
   - selleros rollback target is explicitly marked `target_role=rollback_only`, `target_lifecycle=deprecated_live_target`, `mutation_policy=do_not_deploy_without_emergency_rollback_override`; real deploy/apply-nginx/restart/update writes fail fast before SSH/rsync/nginx/systemd unless `WB_CORE_ALLOW_ROLLBACK_TARGET_WRITE=I_UNDERSTAND_SELLEROS_IS_ROLLBACK_ONLY` is intentionally set;
-  - target may set optional `nginx_public_routes.tls` for the same server block, but current active EU target is IP/http-based and does not rely on TLS domain publication;
+  - current active EU target sets `nginx_public_routes.tls` for the same server block, using the repo-owned certificate path references for `api.selleros.pro`; deploy output must never print private key contents;
   - перед изменением server config создаётся timestamped backup, затем выполняется `nginx -t`, и nginx reload происходит только после successful validation;
   - repeated deploy replaces the same managed route/TLS blocks and matching legacy/manual locations instead of duplicating route locations;
   - new public routes in this contour must be added to the manifest and covered by `apps/registry_upload_http_entrypoint_public_routes_smoke.py`, not manually edited on the live host.
@@ -569,7 +569,7 @@ update_note: "Обновлён под AI-assisted feedback review MVP: `Отзы
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
   - `docs/architecture/10_hosted_runtime_deploy_contract.md`
 - Этот contract фиксирует:
-  - canonical active public base URL `http://89.191.226.88`;
+  - canonical active public base URL `https://api.selleros.pro`;
   - canonical loopback base URL `http://127.0.0.1:8765`;
   - canonical route paths через existing entrypoint env names;
   - checked-in active EU target values `target_status=active`, `target_role=primary_live`, `target_lifecycle=current_live`, `mutation_policy=routine_writes_allowed`, `ssh_destination=wb-core-eu-root`, `target_dir=/opt/wb-core-runtime/app`, `service_name=wb-core-registry-http.service`, `restart_command=systemctl restart wb-core-registry-http.service`, `status_command=systemctl status --no-pager --full wb-core-registry-http.service`, `environment_file=/opt/wb-ai/.env`, `REGISTRY_UPLOAD_RUNTIME_DIR=/opt/wb-core-runtime/state`;
