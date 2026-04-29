@@ -224,6 +224,9 @@ def main() -> None:
     count_b = int((period_b.get("summary") or {}).get("total") or 0)
     if count_a != 12 or count_b != 24 or count_b <= count_a:
         raise AssertionError(f"longer 1-star period must be a truthful superset, got A={count_a}, B={count_b}")
+    large_window = period_block.build(date_from="2026-03-24", date_to="2026-04-24", stars=[1], is_answered="false")
+    if (large_window.get("summary") or {}).get("total") != 25 or (large_window.get("meta") or {}).get("chunk_count") != 32:
+        raise AssertionError(f"feedbacks backend must allow bounded >31 day windows, got: {large_window.get('meta')}")
     for result, start, end in ((period_a, "2026-04-13", "2026-04-24"), (period_b, "2026-04-01", "2026-04-24")):
         for row in result.get("rows") or []:
             if not (start <= str(row.get("created_date")) <= end):

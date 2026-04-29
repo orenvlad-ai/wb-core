@@ -26,7 +26,19 @@ BATCH_SIZE = 3
 MAX_TEXT_CHARS_PER_REVIEW = 1400
 MIN_ANALYZE_INTERVAL_SECONDS = 3.0
 DEFAULT_FEEDBACKS_AI_MODEL = "gpt-5-mini"
-AVAILABLE_FEEDBACKS_AI_MODELS = ("gpt-5-mini", "gpt-5")
+PREFERRED_FEEDBACKS_AI_MODELS = (
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.4-nano",
+    "gpt-5.2",
+    "gpt-5.2-pro",
+    "gpt-5",
+    "gpt-5-mini",
+    "gpt-5-nano",
+)
+FALLBACK_FEEDBACKS_AI_MODELS = ("gpt-5-mini", "gpt-5")
+AVAILABLE_FEEDBACKS_AI_MODELS = FALLBACK_FEEDBACKS_AI_MODELS
 
 COMPLAINT_FIT_LABELS = {
     "yes": "Да",
@@ -77,6 +89,9 @@ class FeedbacksAiProvider(Protocol):
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         raise NotImplementedError
 
+    def list_models(self) -> list[str]:
+        raise NotImplementedError
+
 
 class SheetVitrinaV1FeedbacksAiError(RuntimeError):
     def __init__(self, message: str, *, http_status: int = 502) -> None:
@@ -91,6 +106,15 @@ class FeedbacksAiPromptState:
     updated_at: str | None
 
 
+@dataclass(frozen=True)
+class FeedbacksAiModelCatalog:
+    available_models: tuple[str, ...]
+    preferred_models: tuple[str, ...]
+    unavailable_models: tuple[dict[str, str], ...]
+    discovery_status: str
+    discovery_error: str | None = None
+
+
 class JsonFileFeedbacksAiPromptStore:
     def __init__(self, runtime_dir: Path, *, filename: str = "sheet_vitrina_v1_feedbacks_ai_prompt.json") -> None:
         self.path = runtime_dir / filename
@@ -98,7 +122,7 @@ class JsonFileFeedbacksAiPromptStore:
 
     def read(self) -> FeedbacksAiPromptState:
         if not self.path.exists():
-            return FeedbacksAiPromptState(prompt="", model=_default_feedbacks_ai_model(), updated_at=None)
+            return FeedbacksAiPromptState(prompt="", model=_configured_default_feedbacks_ai_model(), updated_at=None)
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -107,11 +131,18 @@ class JsonFileFeedbacksAiPromptStore:
             raise SheetVitrinaV1FeedbacksAiError("saved AI prompt storage has invalid shape", http_status=500)
         return FeedbacksAiPromptState(
             prompt=str(payload.get("prompt") or ""),
-            model=_normalize_model(payload.get("model") or _default_feedbacks_ai_model()),
+            model=str(payload.get("model") or _configured_default_feedbacks_ai_model()).strip(),
             updated_at=str(payload.get("updated_at") or "") or None,
         )
 
-    def write(self, *, prompt: str, model: str, updated_at: str) -> FeedbacksAiPromptState:
+    def write(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        updated_at: str,
+        catalog: FeedbacksAiModelCatalog | None = None,
+    ) -> FeedbacksAiPromptState:
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
@@ -119,7 +150,10 @@ class JsonFileFeedbacksAiPromptStore:
                 "contract_version": CONTRACT_VERSION,
                 "prompt": prompt,
                 "model": model,
-                "available_models": list(AVAILABLE_FEEDBACKS_AI_MODELS),
+                "available_models": list(catalog.available_models if catalog else FALLBACK_FEEDBACKS_AI_MODELS),
+                "preferred_models": list(PREFERRED_FEEDBACKS_AI_MODELS),
+                "unavailable_models": list(catalog.unavailable_models if catalog else ()),
+                "model_discovery_status": catalog.discovery_status if catalog else "fallback",
                 "updated_at": updated_at,
             }
             temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -149,18 +183,24 @@ class SheetVitrinaV1FeedbacksAiBlock:
 
     def get_prompt(self) -> dict[str, Any]:
         state = self.prompt_store.read()
-        return _prompt_payload(state)
+        catalog = _discover_model_catalog(self.provider)
+        resolved_state, model_source = _resolve_prompt_state_model(state, catalog)
+        return _prompt_payload(resolved_state, catalog=catalog, model_source=model_source)
 
     def save_prompt(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         prompt = _normalize_prompt(payload.get("prompt"))
-        model = _normalize_model(payload.get("model"))
+        catalog = _discover_model_catalog(self.provider)
+        model = _normalize_model(payload.get("model"), catalog)
         updated_at = self.now_factory().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-        return _prompt_payload(self.prompt_store.write(prompt=prompt, model=model, updated_at=updated_at))
+        state = self.prompt_store.write(prompt=prompt, model=model, updated_at=updated_at, catalog=catalog)
+        return _prompt_payload(state, catalog=catalog, model_source="saved")
 
     def analyze(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         prompt_state = self.prompt_store.read()
         if not prompt_state.prompt.strip():
             raise SheetVitrinaV1FeedbacksAiError("Сначала сохраните промпт разбора", http_status=409)
+        catalog = _discover_model_catalog(self.provider)
+        prompt_state, model_source = _resolve_prompt_state_model(prompt_state, catalog)
         rows = _normalize_input_rows(payload.get("rows"))
         self._enforce_rate_limit()
         batch_results: list[dict[str, Any]] = []
@@ -191,6 +231,7 @@ class SheetVitrinaV1FeedbacksAiBlock:
                 "batch_count": len(provider_meta),
                 "prompt_updated_at": prompt_state.updated_at,
                 "model": prompt_state.model,
+                "model_source": model_source,
                 "provider_batches": provider_meta,
                 "persistence": "not_persisted",
             },
@@ -212,13 +253,23 @@ class SheetVitrinaV1FeedbacksAiBlock:
             self._last_analyze_started_at = now
 
 
-def _prompt_payload(state: FeedbacksAiPromptState) -> dict[str, Any]:
+def _prompt_payload(
+    state: FeedbacksAiPromptState,
+    *,
+    catalog: FeedbacksAiModelCatalog,
+    model_source: str,
+) -> dict[str, Any]:
     return {
         "contract_name": PROMPT_CONTRACT_NAME,
         "contract_version": CONTRACT_VERSION,
         "prompt": state.prompt,
         "model": state.model,
-        "available_models": list(AVAILABLE_FEEDBACKS_AI_MODELS),
+        "available_models": list(catalog.available_models),
+        "preferred_models": list(catalog.preferred_models),
+        "unavailable_models": list(catalog.unavailable_models),
+        "model_source": model_source,
+        "model_discovery_status": catalog.discovery_status,
+        "model_discovery_error": catalog.discovery_error or "",
         "starter_prompt": STARTER_PROMPT,
         "updated_at": state.updated_at,
         "status": "ready" if state.prompt.strip() else "missing",
@@ -240,18 +291,111 @@ def _normalize_prompt(value: Any) -> str:
     return prompt
 
 
-def _default_feedbacks_ai_model() -> str:
+def _configured_default_feedbacks_ai_model() -> str:
     raw = os.environ.get("OPENAI_MODEL", "").strip()
-    return raw if raw in AVAILABLE_FEEDBACKS_AI_MODELS else DEFAULT_FEEDBACKS_AI_MODEL
+    return raw or DEFAULT_FEEDBACKS_AI_MODEL
 
 
-def _normalize_model(value: Any) -> str:
-    model = str(value or "").strip() or _default_feedbacks_ai_model()
-    if model not in AVAILABLE_FEEDBACKS_AI_MODELS:
+def _discover_model_catalog(provider: FeedbacksAiProvider) -> FeedbacksAiModelCatalog:
+    preferred = tuple(PREFERRED_FEEDBACKS_AI_MODELS)
+    list_models = getattr(provider, "list_models", None)
+    if callable(list_models):
+        try:
+            model_ids = {str(model_id).strip() for model_id in list_models() if str(model_id).strip()}
+        except Exception as exc:
+            return _fallback_model_catalog(
+                discovery_status="fallback",
+                discovery_error="models endpoint unavailable: " + _short_error(exc),
+            )
+        available = tuple(model for model in preferred if model in model_ids)
+        configured_default = _configured_default_feedbacks_ai_model()
+        if configured_default in model_ids and configured_default not in available:
+            available = (configured_default, *available)
+        unavailable = tuple(
+            {"model": model, "reason": "not returned by /v1/models for current key"}
+            for model in preferred
+            if model not in model_ids
+        )
+        if available:
+            return FeedbacksAiModelCatalog(
+                available_models=available,
+                preferred_models=preferred,
+                unavailable_models=unavailable,
+                discovery_status="available",
+            )
+        return _fallback_model_catalog(
+            discovery_status="fallback_no_preferred",
+            discovery_error="models endpoint returned no preferred feedbacks AI models",
+            unavailable_models=unavailable,
+        )
+    return _fallback_model_catalog(
+        discovery_status="fallback",
+        discovery_error="provider does not expose model discovery",
+    )
+
+
+def _fallback_model_catalog(
+    *,
+    discovery_status: str,
+    discovery_error: str,
+    unavailable_models: tuple[dict[str, str], ...] | None = None,
+) -> FeedbacksAiModelCatalog:
+    fallback = tuple(
+        dict.fromkeys(
+            [
+                _configured_default_feedbacks_ai_model(),
+                *FALLBACK_FEEDBACKS_AI_MODELS,
+            ]
+        )
+    )
+    unavailable = unavailable_models or tuple(
+        {"model": model, "reason": discovery_error}
+        for model in PREFERRED_FEEDBACKS_AI_MODELS
+        if model not in fallback
+    )
+    return FeedbacksAiModelCatalog(
+        available_models=fallback,
+        preferred_models=tuple(PREFERRED_FEEDBACKS_AI_MODELS),
+        unavailable_models=unavailable,
+        discovery_status=discovery_status,
+        discovery_error=discovery_error,
+    )
+
+
+def _resolve_prompt_state_model(
+    state: FeedbacksAiPromptState,
+    catalog: FeedbacksAiModelCatalog,
+) -> tuple[FeedbacksAiPromptState, str]:
+    raw_model = str(state.model or "").strip()
+    if raw_model and raw_model in catalog.available_models:
+        return state, "saved" if state.updated_at else "default"
+    default_model = _configured_default_feedbacks_ai_model()
+    if default_model in catalog.available_models:
+        return FeedbacksAiPromptState(prompt=state.prompt, model=default_model, updated_at=state.updated_at), "default"
+    if DEFAULT_FEEDBACKS_AI_MODEL in catalog.available_models:
+        return FeedbacksAiPromptState(prompt=state.prompt, model=DEFAULT_FEEDBACKS_AI_MODEL, updated_at=state.updated_at), "default"
+    fallback = catalog.available_models[0]
+    return FeedbacksAiPromptState(prompt=state.prompt, model=fallback, updated_at=state.updated_at), "fallback"
+
+
+def _normalize_model(value: Any, catalog: FeedbacksAiModelCatalog) -> str:
+    model = str(value or "").strip()
+    if not model:
+        return _resolve_prompt_state_model(
+            FeedbacksAiPromptState(prompt="", model="", updated_at=None),
+            catalog,
+        )[0].model
+    if model not in catalog.available_models:
         raise ValueError(
-            "model must be one of: " + ", ".join(AVAILABLE_FEEDBACKS_AI_MODELS)
+            "model is not available for the current OpenAI key; available models: "
+            + ", ".join(catalog.available_models)
         )
     return model
+
+
+def _short_error(exc: Exception) -> str:
+    text = str(exc).strip() or exc.__class__.__name__
+    return text[:240]
 
 
 def _normalize_input_rows(value: Any) -> list[dict[str, Any]]:

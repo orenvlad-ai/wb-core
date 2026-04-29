@@ -128,8 +128,9 @@ def main() -> None:
 
 
 class LocalWebVitrinaFixtureServer:
-    def __init__(self, *, with_ready_snapshot: bool) -> None:
+    def __init__(self, *, with_ready_snapshot: bool, now: datetime | None = None) -> None:
         self.with_ready_snapshot = with_ready_snapshot
+        self.now = now or NOW
         self.server = None
         self.thread: threading.Thread | None = None
         self.base_url = ""
@@ -166,7 +167,7 @@ class LocalWebVitrinaFixtureServer:
             runtime=runtime,
             activated_at_factory=lambda: "2026-04-21T15:00:00Z",
             refreshed_at_factory=self._next_refreshed_at,
-            now_factory=lambda: NOW,
+            now_factory=lambda: self.now,
             sheet_load_runner=_stub_sheet_load_runner,
         )
         entrypoint.handle_sheet_refresh_request = lambda as_of_date=None, auto_load=False: _stub_sheet_refresh_request(
@@ -211,7 +212,7 @@ class LocalWebVitrinaFixtureServer:
         self.runtime_dir_obj.cleanup()
 
     def _next_refreshed_at(self) -> str:
-        refreshed_at = NOW + timedelta(minutes=10 + self._refresh_counter)
+        refreshed_at = self.now + timedelta(minutes=10 + self._refresh_counter)
         self._refresh_counter += 1
         return refreshed_at.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 

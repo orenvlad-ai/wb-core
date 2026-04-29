@@ -537,14 +537,21 @@
 
     .feedbacks-prompt-editor {
       display: grid;
+      grid-template-columns: minmax(0, 1fr);
       gap: 10px;
+      width: 100%;
+      max-width: none;
+    }
+
+    .feedbacks-prompt-field {
+      grid-column: 1 / -1;
       width: 100%;
       max-width: none;
     }
 
     .feedbacks-prompt-textarea {
       width: 100%;
-      min-height: 460px;
+      min-height: 520px;
       resize: both;
       font: inherit;
       font-size: 13px;
@@ -654,7 +661,7 @@
     }
 
     .button:disabled {
-      cursor: wait;
+      cursor: not-allowed;
       opacity: 0.7;
       transform: none;
     }
@@ -2131,11 +2138,11 @@
 
 	        <section class="feedbacks-subpanel" data-feedbacks-subpanel="prompt" hidden>
 	          <div class="feedbacks-prompt-editor">
-	            <label class="research-field research-field-wide">
+	            <label class="research-field feedbacks-prompt-field">
 	              <span class="filter-label">Модель AI</span>
 	              <select class="select" data-feedbacks-model></select>
 	            </label>
-	            <label class="research-field research-field-wide">
+	            <label class="research-field feedbacks-prompt-field">
 	              <span class="filter-label">Активный промпт</span>
 	              <textarea class="input feedbacks-prompt-textarea" data-feedbacks-prompt-textarea spellcheck="true"></textarea>
 	            </label>
@@ -2358,6 +2365,7 @@
     const DEFAULT_UNIFIED_TAB = "vitrina";
     const FEEDBACKS_UNIFIED_TAB = "feedbacks";
     const FEEDBACKS_AI_MAX_QUEUE_ROWS = 25;
+    const FEEDBACKS_MAX_RANGE_DAYS = 62;
     const FEEDBACKS_COLUMN_WIDTHS_STORAGE_KEY = "wb_core_feedbacks_column_widths_v1";
     const FEEDBACKS_MIN_COLUMN_WIDTH = 72;
     const FEEDBACKS_DEFAULT_COLUMN_WIDTHS = {
@@ -2474,6 +2482,10 @@
         promptUpdatedAt: "",
         model: "gpt-5-mini",
         availableModels: ["gpt-5-mini", "gpt-5"],
+        preferredModels: [],
+        unavailableModels: [],
+        modelDiscoveryStatus: "fallback",
+        modelDiscoveryError: "",
         promptDraft: "",
         savedPrompt: "",
         starterPrompt: "",
@@ -4855,7 +4867,11 @@
 
     function feedbacksDefaultEndDate() {
       const meta = ((state.composition || {}).meta || {});
-      return normalizeIsoDate(meta.today_current_date || meta.snapshot_as_of_date || "") || formatIsoDate(new Date());
+      return normalizeIsoDate(meta.server_now_business_tz || "")
+        || normalizeIsoDate(String(meta.server_now_business_tz || "").slice(0, 10))
+        || normalizeIsoDate(meta.generated_at || "")
+        || normalizeIsoDate(String(meta.generated_at || "").slice(0, 10))
+        || formatIsoDate(new Date());
     }
 
     function applyFeedbacksDefaultRange() {
@@ -5068,8 +5084,8 @@
       while (cursor < state.feedbacks.draftDateTo) {
         days += 1;
         cursor = shiftIsoDate(cursor, 1);
-        if (days > 31) {
-          return "MVP загрузки отзывов ограничен периодом до 31 дня.";
+        if (days > FEEDBACKS_MAX_RANGE_DAYS) {
+          return "Загрузка отзывов ограничена периодом до " + FEEDBACKS_MAX_RANGE_DAYS + " дней за один запрос.";
         }
       }
       return "";
@@ -5472,6 +5488,14 @@
         state.feedbacks.availableModels = Array.isArray(payload.available_models) && payload.available_models.length
           ? payload.available_models.map(function(item) { return String(item); })
           : ["gpt-5-mini", "gpt-5"];
+        state.feedbacks.preferredModels = Array.isArray(payload.preferred_models)
+          ? payload.preferred_models.map(function(item) { return String(item); })
+          : [];
+        state.feedbacks.unavailableModels = Array.isArray(payload.unavailable_models)
+          ? payload.unavailable_models
+          : [];
+        state.feedbacks.modelDiscoveryStatus = String(payload.model_discovery_status || "fallback");
+        state.feedbacks.modelDiscoveryError = String(payload.model_discovery_error || "");
         state.feedbacks.promptDraft = state.feedbacks.savedPrompt || state.feedbacks.starterPrompt;
         state.feedbacks.promptLoaded = true;
       } catch (error) {
@@ -5513,6 +5537,14 @@
         state.feedbacks.availableModels = Array.isArray(payload.available_models) && payload.available_models.length
           ? payload.available_models.map(function(item) { return String(item); })
           : state.feedbacks.availableModels;
+        state.feedbacks.preferredModels = Array.isArray(payload.preferred_models)
+          ? payload.preferred_models.map(function(item) { return String(item); })
+          : state.feedbacks.preferredModels;
+        state.feedbacks.unavailableModels = Array.isArray(payload.unavailable_models)
+          ? payload.unavailable_models
+          : state.feedbacks.unavailableModels;
+        state.feedbacks.modelDiscoveryStatus = String(payload.model_discovery_status || state.feedbacks.modelDiscoveryStatus || "fallback");
+        state.feedbacks.modelDiscoveryError = String(payload.model_discovery_error || "");
         state.feedbacks.promptLoaded = true;
       } catch (error) {
         state.feedbacks.error = String(error && error.message ? error.message : error);
@@ -5769,12 +5801,15 @@
         feedbacksPromptSaveButton.textContent = state.feedbacks.promptSaving ? "Сохранение…" : "Сохранить промпт";
       }
       if (feedbacksPromptStatusNode) {
+        const discoverySuffix = state.feedbacks.modelDiscoveryStatus && state.feedbacks.modelDiscoveryStatus !== "available"
+          ? " · discovery: " + state.feedbacks.modelDiscoveryStatus
+          : "";
         if (state.feedbacks.promptLoading) {
           feedbacksPromptStatusNode.textContent = "Загружаем промпт…";
         } else if (state.feedbacks.promptStatus === "ready") {
-          feedbacksPromptStatusNode.textContent = "Сохранён: " + formatTimestampDisplay(state.feedbacks.promptUpdatedAt) + " · модель: " + (state.feedbacks.model || "gpt-5-mini");
+          feedbacksPromptStatusNode.textContent = "Сохранён: " + formatTimestampDisplay(state.feedbacks.promptUpdatedAt) + " · модель: " + (state.feedbacks.model || "gpt-5-mini") + discoverySuffix;
         } else {
-          feedbacksPromptStatusNode.textContent = "Сохранённого промпта нет, показан стартовый текст · модель: " + (state.feedbacks.model || "gpt-5-mini");
+          feedbacksPromptStatusNode.textContent = "Сохранённого промпта нет, показан стартовый текст · модель: " + (state.feedbacks.model || "gpt-5-mini") + discoverySuffix;
         }
       }
     }

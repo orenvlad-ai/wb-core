@@ -88,6 +88,46 @@ class OpenAiFeedbacksAnalysisProvider:
             "usage": response_payload.get("usage") if isinstance(response_payload.get("usage"), Mapping) else None,
         }
 
+    def list_models(self) -> list[str]:
+        api_key = self._api_key()
+        request = urllib_request.Request(
+            url=f"{self._base_url()}/v1/models",
+            method="GET",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urllib_request.urlopen(request, timeout=self._timeout_seconds()) as response:
+                decoded = response.read().decode("utf-8")
+        except error.HTTPError as exc:
+            detail = _friendly_openai_http_error(exc.code, exc.read().decode("utf-8", errors="replace"))
+            raise OpenAiFeedbacksAnalysisError(detail) from exc
+        except error.URLError as exc:
+            raise OpenAiFeedbacksAnalysisError(f"OpenAI API transport failed: {exc}") from exc
+        try:
+            payload = json.loads(decoded)
+        except json.JSONDecodeError as exc:
+            raise OpenAiFeedbacksAnalysisError("OpenAI models endpoint returned non-JSON response") from exc
+        if not isinstance(payload, Mapping):
+            raise OpenAiFeedbacksAnalysisError("OpenAI models endpoint returned invalid response shape")
+        if payload.get("error"):
+            raise OpenAiFeedbacksAnalysisError(_friendly_openai_error_payload(payload.get("error")))
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise OpenAiFeedbacksAnalysisError("OpenAI models endpoint did not return a model list")
+        model_ids = sorted(
+            {
+                str(item.get("id") or "").strip()
+                for item in data
+                if isinstance(item, Mapping) and str(item.get("id") or "").strip()
+            }
+        )
+        if not model_ids:
+            raise OpenAiFeedbacksAnalysisError("OpenAI models endpoint returned an empty model list")
+        return model_ids
+
     def _build_payload(
         self,
         *,
