@@ -17,6 +17,13 @@ import apps.registry_upload_http_entrypoint_hosted_runtime as hosted_runtime  # 
 
 SCRIPT = ROOT / "apps" / "registry_upload_http_entrypoint_hosted_runtime.py"
 MANIFEST = ROOT / "artifacts" / "registry_upload_http_entrypoint" / "nginx" / "public_route_allowlist.json"
+EU_TARGET = (
+    ROOT
+    / "artifacts"
+    / "registry_upload_http_entrypoint"
+    / "input"
+    / "hosted_runtime_target__europe_api.json"
+)
 
 
 def main() -> None:
@@ -212,12 +219,43 @@ def main() -> None:
         if "apply-nginx-routes" not in command_text:
             raise AssertionError("deploy dry-run must include nginx route update command")
 
+    eu_target = hosted_runtime.load_hosted_runtime_target(EU_TARGET)
+    if eu_target.public_base_url != "https://api.selleros.pro":
+        raise AssertionError(f"EU target must probe the current HTTPS domain, got {eu_target.public_base_url}")
+    if eu_target.nginx_public_routes is None:
+        raise AssertionError("EU target must publish managed nginx public routes")
+    eu_server_names = list(hosted_runtime._nginx_server_names_for_target(eu_target))
+    if eu_server_names != ["89.191.226.88", "api.selleros.pro"]:
+        raise AssertionError(f"EU target must publish IP and current domain server_names, got {eu_server_names}")
+    eu_tls = eu_target.nginx_public_routes.tls
+    if eu_tls is None or eu_tls.listen != ("443 ssl",):
+        raise AssertionError(f"EU target must publish managed TLS on 443 ssl, got {eu_tls}")
+    if eu_tls.certificate_path != "/etc/letsencrypt/live/api.selleros.pro/fullchain.pem":
+        raise AssertionError("EU target must reference the api.selleros.pro certificate chain path")
+    if eu_tls.certificate_key_path != "/etc/letsencrypt/live/api.selleros.pro/privkey.pem":
+        raise AssertionError("EU target must reference the api.selleros.pro private key path without reading it")
+    eu_print_plan = _run_json(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--target-file",
+            str(EU_TARGET),
+            "print-plan",
+        ]
+    )
+    eu_plan_routes = eu_print_plan["deploy_plan"]["nginx_public_routes"]
+    if eu_plan_routes["server_names"] != ["89.191.226.88", "api.selleros.pro"]:
+        raise AssertionError("EU print-plan must expose current domain and IP server_names")
+    if eu_plan_routes["tls"]["configured"] is not True:
+        raise AssertionError("EU print-plan must expose configured managed TLS")
+
     print(f"public_route_manifest: ok -> {len(routes)} routes")
     print("public_route_render: ok -> feedbacks and supply prefixes included")
     print("public_route_apply_idempotent: ok")
     print("public_route_server_names: ok -> explicit active IP host names rendered")
     print("public_route_tls: ok -> explicit managed 443 ssl block rendered")
     print("public_route_deploy_dry_run: ok")
+    print("public_route_eu_target_https_domain: ok -> api.selleros.pro + TLS configured")
 
 
 def _run_json(command: list[str]) -> dict[str, object]:

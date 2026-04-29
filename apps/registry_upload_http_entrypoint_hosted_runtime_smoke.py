@@ -104,7 +104,7 @@ def main() -> None:
         deploy_target_payload.update(
             {
                 "target_status": "active",
-                "public_base_url": "http://89.191.226.88",
+                "public_base_url": "https://api.selleros.pro",
                 "ssh_destination": "wb-core-eu-root",
                 "target_dir": "/opt/wb-core-runtime/app",
                 "service_name": "wb-core-registry-http.service",

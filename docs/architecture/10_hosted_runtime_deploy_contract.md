@@ -11,7 +11,7 @@
 
 ## Canonical Scope
 
-Contract покрывает active EU hosted contour на `http://89.191.226.88` для routes:
+Contract покрывает active EU hosted contour на `https://api.selleros.pro` через EU host `89.191.226.88` для routes:
 - `POST /v1/registry-upload/bundle`
 - `POST /v1/cost-price/upload`
 - `POST /v1/sheet-vitrina-v1/refresh`
@@ -64,11 +64,12 @@ Canonical active target for the current EU hosted runtime:
 - `host_ip = 89.191.226.88`
 - `public_domain = api.selleros.pro`
 - `ssh_destination = wb-core-eu-root`
-- `public_base_url = http://89.191.226.88`
+- `public_base_url = https://api.selleros.pro`
 - current live DNS name = `api.selleros.pro`
 - `runtime_env.REGISTRY_UPLOAD_RUNTIME_DIR = /opt/wb-core-runtime/state`
 - `service_name = wb-core-registry-http.service`
-- nginx `server_names = 89.191.226.88`
+- nginx `server_names = 89.191.226.88 api.selleros.pro`
+- nginx managed TLS = `/etc/letsencrypt/live/api.selleros.pro/fullchain.pem` + `/etc/letsencrypt/live/api.selleros.pro/privkey.pem`
 
 Archived legacy target:
 - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__selleros_api.json`
@@ -143,7 +144,7 @@ Known active EU target values теперь зафиксированы repo-owned
 - `mutation_policy = routine_writes_allowed`
 - `host_ip = 89.191.226.88`
 - `public_domain = api.selleros.pro`
-- `public_base_url = http://89.191.226.88`
+- `public_base_url = https://api.selleros.pro`
 - current live DNS name = `api.selleros.pro`
 - `loopback_base_url = http://127.0.0.1:8765`
 - `ssh_destination = wb-core-eu-root`
@@ -160,7 +161,10 @@ Known active EU target values теперь зафиксированы repo-owned
 - `nginx_public_routes.manifest_path = artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`
 - `nginx_public_routes.test_command = nginx -t`
 - `nginx_public_routes.reload_command = systemctl reload nginx`
-- `nginx_public_routes.server_names = ["89.191.226.88"]`
+- `nginx_public_routes.server_names = ["89.191.226.88", "api.selleros.pro"]`
+- `nginx_public_routes.tls.listen = ["443 ssl"]`
+- `nginx_public_routes.tls.certificate_path = /etc/letsencrypt/live/api.selleros.pro/fullchain.pem`
+- `nginx_public_routes.tls.certificate_key_path = /etc/letsencrypt/live/api.selleros.pro/privkey.pem`
 - route paths inside `runtime_env` follow current entrypoint defaults
 
 Archived selleros target note:
@@ -170,7 +174,7 @@ Archived selleros target note:
 - If `WB_CORE_HOSTED_RUNTIME_TARGET_FILE` points to archived selleros JSON or any target with `ssh_destination=selleros-root`, mutating commands must fail fast before SSH/rsync/nginx/systemd writes instead of silently touching the old VPS.
 - Emergency rollback writes require the exact explicit override `WB_CORE_ALLOW_ROLLBACK_TARGET_WRITE=I_UNDERSTAND_SELLEROS_IS_ROLLBACK_ONLY`; the runner prints a warning and still does not print secrets.
 - `print-plan` and dry-run command planning may remain available for rollback evidence because they do not mutate the old VPS.
-- Future DNS/TLS changes require an explicit target-contract update before `api.selleros.pro` can be considered active again.
+- DNS/TLS publication for `api.selleros.pro` is part of the current EU target contract; future DNS/TLS changes still require an explicit target-contract update before deploy.
 
 Secrets and mutable credentials по-прежнему не хранятся в Git. Repo stores only non-secret target wiring and unit artifacts.
 
@@ -356,7 +360,7 @@ If the task introduces or changes temporal closed-day retry behavior for `sheet_
 - verify the repo-owned timer/service artifacts are installed on host as `wb-core-sheet-vitrina-closure-retry.service` / `.timer`;
 - verify at least one affected `as_of_date` where a strict closed-day-capable source either transitions to `success` after retry or stays in a truthful retry/exhausted/blocker state without fake closed values in the visible slot.
 
-The current active public probe target is `http://89.191.226.88`. `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1` remains a diagnostic-only legacy TLS escape hatch for historical domain-based checks and is not part of the active EU target closure.
+The current active public probe target is `https://api.selleros.pro`. `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1` remains a diagnostic-only legacy TLS escape hatch for historical checks and is not part of the active EU target closure.
 
 ## Human-Only Boundary
 

@@ -6,7 +6,7 @@
   "host_ip": "89.191.226.88",
   "public_domain": "api.selleros.pro",
   "target_id": "wb_core_eu_hosted_runtime_active",
-  "public_base_url": "http://89.191.226.88",
+  "public_base_url": "https://api.selleros.pro",
   "loopback_base_url": "http://127.0.0.1:8765",
   "ssh_destination": "wb-core-eu-root",
   "target_dir": "/opt/wb-core-runtime/app",
@@ -24,8 +24,16 @@
     "manifest_path": "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json",
     "managed_block_label": "WB-CORE MANAGED PUBLIC ROUTES",
     "server_names": [
-      "89.191.226.88"
-    ]
+      "89.191.226.88",
+      "api.selleros.pro"
+    ],
+    "tls": {
+      "listen": [
+        "443 ssl"
+      ],
+      "certificate_path": "/etc/letsencrypt/live/api.selleros.pro/fullchain.pem",
+      "certificate_key_path": "/etc/letsencrypt/live/api.selleros.pro/privkey.pem"
+    }
   },
   "managed_systemd_units": [
     {
