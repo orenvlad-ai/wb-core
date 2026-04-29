@@ -28,7 +28,7 @@ Legacy-репозитории остаются рабочими, но счита
 - bounded promo line в двух шагах:
   - `promo_xlsx_collector_block` как thin browser-capture precursor для promo XLSX + metadata sidecar;
   - `promo_live_source_wiring_block` как current live wiring обратно в `sheet_vitrina_v1` refresh/runtime/read-side contour для `promo_by_price` и promo-backed numeric rows;
-- вкладка `Отзывы` в active website/operator contour: read-only WB feedbacks load/filter table со строгими server-side `date_from/date_to/stars/is_answered` фильтрами, chunked `take/skip` загрузкой без тихого row cap, diagnostic meta, Excel export текущей таблицы, resizable columns и bounded AI-assisted разбором через server-side prompt+model config и OpenAI route; AI-разметка не является accepted truth/ЕБД persistence и не отправляет жалобы;
+- вкладка `Отзывы` в active website/operator contour: read-only WB feedbacks load/filter table со строгими server-side `date_from/date_to/stars/is_answered` фильтрами, bounded 62-day feedback date picker independent from ready-snapshot dates, chunked `take/skip` загрузкой без тихого row cap, diagnostic meta, Excel export текущей таблицы, resizable columns и bounded AI-assisted разбором через server-side prompt+model config, OpenAI model discovery и OpenAI route; AI-разметка не является accepted truth/ЕБД persistence и не отправляет жалобы;
 - первый bounded end-to-end MVP history `prepare -> upload -> refresh -> load` сохранён как archive/migration reference; current active contour = website/operator `sheet_vitrina_v1` и public web-витрина без Google Sheets completion blocker;
 - evidence и module docs по этим шагам.
 
@@ -76,7 +76,7 @@ Legacy-репозитории остаются рабочими, но счита
 16. Первый repo-owned bounded `promo_xlsx_collector_block`: canonical hydration/modal/drawer seams, truthful metadata sidecar, workbook inspection и bounded live integration smoke поверх existing seller session reuse path.
 17. Bounded live wiring `promo_live_source_wiring_block`: `promo_by_price` больше не blocked gap, а current server-owned source seam внутри existing `refresh -> runtime -> STATUS/DATA_VITRINA` contour с accepted snapshot preservation и truthful low-confidence cross-year handling.
 18. Legacy Google Sheets/GAS contour переведён в `ARCHIVED / DO NOT USE`; current contour = hosted website/operator/web-vitrina runtime.
-19. В active `/sheet-vitrina-v1/vitrina` добавлены read-only `Отзывы`, compact supply/report/research operator surfaces and bounded AI-assisted feedback review over OpenAI with server-side prompt/model config, strict feedback period/star filters, Excel export and resizable feedback columns.
+19. В active `/sheet-vitrina-v1/vitrina` добавлены read-only `Отзывы`, compact supply/report/research operator surfaces and bounded AI-assisted feedback review over OpenAI with server-side prompt/model config, live model discovery, strict feedback period/star filters, Excel export and resizable feedback columns.
 20. После этого остаются full parity archive questions и hosted runtime hardening вокруг current web/operator contour.
 21. Docs governance переведён в authoritative/derived режим: ordinary task-flow обновляет затронутые canonical docs при truth change, а `wb_core_docs_master` пересобирается отдельным derived-sync flow.
 

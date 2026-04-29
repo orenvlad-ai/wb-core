@@ -35,9 +35,15 @@ NOW = datetime(2026, 4, 29, 9, 0, tzinfo=timezone.utc)
 
 
 class FakeAiProvider:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, models_fail: bool = False) -> None:
         self.fail = fail
+        self.models_fail = models_fail
         self.calls: list[dict[str, Any]] = []
+
+    def list_models(self) -> list[str]:
+        if self.models_fail:
+            raise RuntimeError("models endpoint unavailable in fixture")
+        return ["gpt-5.5", "gpt-5.4-mini", "gpt-5", "gpt-5-mini"]
 
     def analyze_batch(
         self,
@@ -88,8 +94,10 @@ def main() -> None:
         initial = block.get_prompt()
         if initial.get("status") != "missing" or not initial.get("starter_prompt"):
             raise AssertionError(f"initial prompt must expose missing status and starter prompt: {initial}")
-        if initial.get("model") != "gpt-5-mini" or initial.get("available_models") != ["gpt-5-mini", "gpt-5"]:
-            raise AssertionError(f"initial prompt must expose default model/allowlist: {initial}")
+        if initial.get("model") != "gpt-5-mini" or "gpt-5.5" not in (initial.get("available_models") or []):
+            raise AssertionError(f"initial prompt must expose default model and discovered models: {initial}")
+        if initial.get("preferred_models", [None])[0] != "gpt-5.5" or initial.get("model_discovery_status") != "available":
+            raise AssertionError(f"initial prompt must expose preferred/discovery metadata: {initial}")
         if (initial.get("analysis_limits") or {}).get("max_rows_per_run") != 3:
             raise AssertionError(f"initial prompt must expose AI row cap, got: {initial}")
         try:
@@ -101,12 +109,12 @@ def main() -> None:
         try:
             block.save_prompt({"prompt": "Разбери отзывы по правилам.", "model": "not-a-model"})
         except ValueError as exc:
-            if "model must be one of" not in str(exc):
+            if "model is not available" not in str(exc):
                 raise AssertionError(f"invalid model must fail clearly, got: {exc}") from exc
         else:
             raise AssertionError("invalid model must be rejected")
-        saved = block.save_prompt({"prompt": "Разбери отзывы по правилам.", "model": "gpt-5"})
-        if saved.get("status") != "ready" or saved.get("prompt") != "Разбери отзывы по правилам." or saved.get("model") != "gpt-5":
+        saved = block.save_prompt({"prompt": "Разбери отзывы по правилам.", "model": "gpt-5.5"})
+        if saved.get("status") != "ready" or saved.get("prompt") != "Разбери отзывы по правилам." or saved.get("model") != "gpt-5.5":
             raise AssertionError(f"saved prompt payload mismatch: {saved}")
         analysis = block.analyze({"rows": _rows()})
         if analysis.get("contract_name") != "sheet_vitrina_v1_feedbacks_ai_analysis":
@@ -115,7 +123,7 @@ def main() -> None:
             raise AssertionError(f"analysis result order/mapping mismatch: {analysis}")
         if analysis["results"][0]["category_label"] != "Мат, оскорбления или угрозы":
             raise AssertionError(f"category label mismatch: {analysis}")
-        if fake_provider.calls[-1]["model"] != "gpt-5" or analysis["meta"]["model"] != "gpt-5":
+        if fake_provider.calls[-1]["model"] != "gpt-5.5" or analysis["meta"]["model"] != "gpt-5.5":
             raise AssertionError(f"selected model must be passed to provider and metadata: {fake_provider.calls} {analysis}")
         try:
             block.analyze({"rows": _rows() + [_extra_row()]})
@@ -124,6 +132,16 @@ def main() -> None:
                 raise AssertionError(f"AI row cap must surface clearly, got: {exc}") from exc
         else:
             raise AssertionError("AI row cap must reject too many rows")
+
+        fallback = SheetVitrinaV1FeedbacksAiBlock(
+            runtime_dir=runtime_dir / "fallback",
+            provider=FakeAiProvider(models_fail=True),
+            now_factory=lambda: NOW,
+            min_analyze_interval_seconds=0,
+        )
+        fallback_prompt = fallback.get_prompt()
+        if fallback_prompt.get("model_discovery_status") != "fallback" or fallback_prompt.get("available_models")[:2] != ["gpt-5-mini", "gpt-5"]:
+            raise AssertionError(f"models endpoint failure must expose safe fallback allowlist: {fallback_prompt}")
 
         failing = SheetVitrinaV1FeedbacksAiBlock(
             runtime_dir=runtime_dir,
@@ -174,7 +192,7 @@ def main() -> None:
             analyze_status, analyze_payload = _post_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH}", {"rows": _rows()})
             if analyze_status != 200 or len(analyze_payload.get("results") or []) != 3:
                 raise AssertionError(f"AI analyze route mismatch: {analyze_status} {analyze_payload}")
-            if analyze_payload.get("meta", {}).get("model") != "gpt-5":
+            if analyze_payload.get("meta", {}).get("model") != "gpt-5.5":
                 raise AssertionError(f"AI analyze route must expose selected model, got: {analyze_payload}")
             capped_status, capped_payload = _post_json(
                 f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH}",
