@@ -166,6 +166,10 @@ def main() -> None:
                 raise AssertionError("deploy --dry-run must stay dry-run")
             if "rsync" not in " ".join(deploy_dry_run["commands"]["rsync"]):
                 raise AssertionError("deploy --dry-run must expose rsync command")
+            if "chown -R root:root /srv/wb-core" not in " ".join(
+                deploy_dry_run["commands"]["chown_target_dir"]
+            ):
+                raise AssertionError("deploy --dry-run must expose target_dir ownership normalization")
             if "openpyxl==3.1.5" not in " ".join(deploy_dry_run["commands"]["runtime_pip_install"]):
                 raise AssertionError("deploy --dry-run must expose runtime pip install command for openpyxl")
             if "playwright==1.58.0" not in " ".join(deploy_dry_run["commands"]["runtime_pip_install"]):

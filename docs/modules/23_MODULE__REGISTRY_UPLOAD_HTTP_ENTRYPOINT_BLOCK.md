@@ -558,6 +558,7 @@ update_note: "Обновлён под AI-assisted feedback review MVP: `Отзы
   - `apps/registry_upload_http_entrypoint_hosted_runtime.py`
   - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__example.json`
   - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__selleros_api.json`
+  - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-registry-http.service`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.service`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.service`
@@ -584,6 +585,7 @@ update_note: "Обновлён под AI-assisted feedback review MVP: `Отзы
   - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__example.json`
   - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__selleros_api.json`
 - hosted systemd artifacts:
+  - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-registry-http.service`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.service`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.service`

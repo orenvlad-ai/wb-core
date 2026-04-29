@@ -585,6 +585,7 @@ def deploy_current_checkout(
         f"{target.ssh_destination}:{target.target_dir.rstrip('/')}/",
     ]
     mkdir_command = _remote_shell_command(target, f"mkdir -p {shlex.quote(target.target_dir)}")
+    chown_target_dir_command = _remote_shell_command(target, f"chown -R root:root {shlex.quote(target.target_dir)}")
     restart_command = _remote_shell_command(
         target,
         f"cd {shlex.quote(target.target_dir)} && {target.restart_command}",
@@ -607,6 +608,7 @@ def deploy_current_checkout(
         "commands": {
             "mkdir": mkdir_command,
             "rsync": rsync_plan,
+            "chown_target_dir": chown_target_dir_command,
             "runtime_pip_install": runtime_pip_install_command,
             "systemd_install": systemd_commands["install"],
             "systemd_daemon_reload": systemd_commands["daemon_reload"],
@@ -622,6 +624,7 @@ def deploy_current_checkout(
 
     _run_command(mkdir_command)
     _run_command(rsync_plan)
+    _run_command(chown_target_dir_command)
     _run_command(runtime_pip_install_command)
     if systemd_commands["install"]:
         _run_command(systemd_commands["install"])

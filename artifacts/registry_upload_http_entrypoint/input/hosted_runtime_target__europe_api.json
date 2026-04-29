@@ -20,6 +20,11 @@
   },
   "managed_systemd_units": [
     {
+      "name": "wb-core-registry-http.service",
+      "enable": true,
+      "restart": false
+    },
+    {
       "name": "wb-core-sheet-vitrina-refresh.service",
       "enable": false,
       "restart": false
