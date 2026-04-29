@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "5ed568cf0ca49559b5fd21510b5e0da7e3cc927e"
+built_from_commit: "fea50f1cb627a9723b14e4b9c6281d7453e93224"
 ---
 
 # Summary
@@ -41,7 +41,7 @@ built_from_commit: "5ed568cf0ca49559b5fd21510b5e0da7e3cc927e"
 | `11–12` | `rule-based` | смёржены в `main` |
 | `13–16` | `table-facing` / `projection` / `wide-matrix` | смёржены в `main` |
 | `17–19` | `archived sheet-side scaffold/write/presentation` | Google Sheets contour archived / do not use; retained only as migration evidence |
-| `20–23` | `registry upload line` | смёржены в `main` до live HTTP entrypoint plus hosted public-route allowlist/deploy publication boundary |
+| `20–23` | `registry upload line` | смёржены в `main` до live HTTP entrypoint plus hosted public-route allowlist/deploy publication boundary, EU current-live target metadata and rollback-only selleros write guard |
 | `24–26` | `web/operator + archived sheet-side history` | current web/operator contour active; Google Sheets/GAS side archived |
 | `27` | `browser-capture collector` | смёржен в `main` как bounded local promo XLSX collector contour |
 | `28` | `browser-capture live wiring` | смёржен в `main` как promo live source seam inside refresh/runtime/read-side |
@@ -113,6 +113,8 @@ Current live promo source flow:
 - `promo_by_price[yesterday_closed]` now attempts corrective interval replay first on every refresh
 - accepted/runtime-cached exact-date promo truth stays only as bounded fallback when replay is unavailable or non-exact
 - `STATUS` and ready snapshot now expose truthful promo source facts instead of a permanent blocked gap
+- normalized campaign row archive (`campaign_rows.jsonl` + `campaign_rows_manifest.json`) preserves replay-critical campaign truth with workbook fingerprint/source metadata, so raw workbook/debug artifacts are no longer the only historical replay substrate
+- refresh-integrated `promo_refresh_light_gc_v1` runs after normalized archive + ready snapshot persistence, deletes only guarded old/debug/duplicate candidates, protects current run and unknown/incomplete artifacts, and records a structured `promo_artifact_gc` summary
 
 Current repo-owned unified web/operator surface:
 - primary route = `GET /sheet-vitrina-v1/vitrina`; first/default tab = `Витрина`, sibling tabs = `Расчет поставок`, `Отчеты`, `Отзывы` and `Исследования`
@@ -156,6 +158,7 @@ Current repo-owned unified web/operator surface:
 - job/log surface is detailed and machine-useful: source/module/adapter/endpoint steps, source result kinds/counts, metric batch summaries and write results stay server-driven and can be exported per completed run through `GET /v1/sheet-vitrina-v1/job?job_id=...&format=text&download=1`
 - server-side business timezone = `Asia/Yekaterinburg` for default `as_of_date`, `today_current` and operator-facing freshness dates
 - live daily auto-refresh = repo-owned artifacts `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.{service,timer}` -> installed on host as `wb-core-sheet-vitrina-refresh.timer` -> existing `POST /v1/sheet-vitrina-v1/refresh` at `11:00, 20:00 Asia/Yekaterinburg` (`06:00 UTC` and `15:00 UTC` on current host) with `{"auto_refresh": true}`; daily path builds server-side ready snapshot only and never loads Google Sheets
+- active hosted target = `wb-core-eu-root` / `89.191.226.88` / `/opt/wb-core-runtime/state`; `api.selleros.pro` may be current live DNS, while old `selleros-root` / `178.72.152.177` is rollback-only and routine writes are blocked before SSH/rsync/nginx/systemd
 - source matrix is explicit: group A bot/web-source historical, group B WB API historical/date-period capable, group C WB API current-snapshot-only, group D other/manual/browser-collector overlays
 - `seller_funnel_snapshot` materialization can receive enabled/relevant `nm_ids`; strict validation is applied after relevant-row filtering, so invalid non-relevant rows are logged as `ignored_non_relevant_invalid_rows` instead of poisoning the snapshot
 - bot-backed current-day sync probes `/opt/wb-web-bot/storage_state.json` before seller portal capture; invalidated browser state surfaces as `seller_portal_session_invalid` / human `сессия seller portal больше не действует; требуется повторный вход`

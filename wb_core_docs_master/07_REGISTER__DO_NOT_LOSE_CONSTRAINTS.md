@@ -25,7 +25,7 @@ update_triggers:
   - "изменение migration boundary"
   - "изменение operator/runtime invariant"
   - "изменение docs governance"
-built_from_commit: "5ed568cf0ca49559b5fd21510b5e0da7e3cc927e"
+built_from_commit: "fea50f1cb627a9723b14e4b9c6281d7453e93224"
 ---
 
 # Summary
@@ -68,6 +68,8 @@ built_from_commit: "5ed568cf0ca49559b5fd21510b5e0da7e3cc927e"
 | `C-25` | `Отзывы` and feedbacks AI stay read-only/transient: they must not submit complaints, write Google Sheets/GAS, persist AI labels as accepted truth/ЕБД, or call Seller Portal automation. |
 | `C-26` | `Исследования` / SKU group comparison is read-only over accepted truth / persisted ready snapshots, excludes financial metrics in the MVP, makes no causal/statistical claims, and must not trigger refresh/upstream fetch/backfill/reconcile. |
 | `C-27` | Promo preflight/manifest/artifact diagnostics and promo current invariant smoke are observability/guard surfaces only; expected ended/no-download non-materializable campaigns must not become fatal missing-artifact blockers, and diagnostics must not become metric truth. |
+| `C-28` | Promo historical truth must survive raw artifact retention: normalized campaign rows and manifest/fingerprint metadata are replay-critical, raw XLSX/HAR/screenshots/traces are short-lived debug artifacts, and GC may delete only guarded candidates after replay-critical persistence is proven. |
+| `C-29` | Current hosted writes target only the EU runtime (`wb-core-eu-root` / `89.191.226.88` / `/opt/wb-core-runtime/state`). Old selleros (`selleros-root` / `178.72.152.177`) is rollback-only/read-only evidence; routine deploy/apply-nginx/restart/update/GC mutations must fail fast before remote side effects unless the explicit emergency rollback override is set. |
 
 # Known gaps
 

@@ -22,7 +22,7 @@ update_triggers:
   - "изменение состава pack"
   - "изменение роли `wb_core_docs_master`"
   - "изменение policy двухслойной схемы docs"
-built_from_commit: "5ed568cf0ca49559b5fd21510b5e0da7e3cc927e"
+built_from_commit: "fea50f1cb627a9723b14e4b9c6281d7453e93224"
 ---
 
 # Summary
@@ -65,7 +65,7 @@ Authoritative canonical docs остаются в:
 - Pack не включает полный legacy-корпус.
 - Upload в внешний ChatGPT Project остаётся отдельным human-only шагом после merge только для explicit derived-sync flow или transitional pack rebuild.
 - Этот index даёт только navigation pointer и не должен сам становиться carrier operational upload rules.
-- Hosted runtime deploy/probe contract теперь materialized в authoritative docs и отражается в pack как compact navigation/runbook knowledge, включая managed nginx public-route allowlist, unified web-vitrina UI, feedbacks tab/AI prompt-analyze routes, research SKU-group comparison tab, compact toolbar/latest-four-days history, lazy source-status details, grouped source refresh, promo current invariant guard, plan/stock reports, plan-report baseline routes, one-off ready-fact reconcile, seller-session session-check, safe stop semantics, per-run completion markers и hardened noVNC/launcher path, а не как hidden operational memory.
+- Hosted runtime deploy/probe contract теперь materialized в authoritative docs и отражается в pack как compact navigation/runbook knowledge, включая active EU target `wb-core-eu-root` / `89.191.226.88`, `api.selleros.pro` как current live DNS name, rollback-only old selleros guard, managed nginx public-route allowlist, unified web-vitrina UI, feedbacks tab/AI prompt-analyze routes, research SKU-group comparison tab, compact toolbar/latest-four-days history, lazy source-status details, grouped source refresh, normalized promo archive + artifact GC, promo current invariant guard, plan/stock reports, plan-report baseline routes, one-off ready-fact reconcile, seller-session session-check, safe stop semantics, per-run completion markers и hardened noVNC/launcher path, а не как hidden operational memory.
 
 # Not in scope
 

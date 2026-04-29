@@ -39,7 +39,7 @@ update_triggers:
   - "изменение current main-confirmed contour"
   - "merge нового bounded модуля"
   - "смена главного project gap"
-built_from_commit: "5ed568cf0ca49559b5fd21510b5e0da7e3cc927e"
+built_from_commit: "fea50f1cb627a9723b14e4b9c6281d7453e93224"
 ---
 
 # Summary
@@ -95,6 +95,8 @@ Confirmed contour на текущем `main`:
   - invalid later attempts do not overwrite accepted current/closed promo truth
   - low-confidence cross-year labels keep `promo_start_at/end_at = null`
   - high-confidence ended/no-download promo evidence is path/diagnostic metadata only: it can avoid drawer/deep workbook flow and exclude expected non-materializable artifacts from fatal gating, but it does not create metric truth.
+  - normalized campaign rows (`campaign_rows.jsonl` + manifest/fingerprint metadata) make historical replay possible without retaining raw workbook forever; raw XLSX/HAR/screenshots/traces remain a short-lived debug layer, not the historical truth layer.
+  - hosted refresh runs bounded `promo_refresh_light_gc_v1` only after normalized promo archive and ready snapshot persistence; current/unknown/replay-critical artifacts are protected and GC summary is surfaced in refresh diagnostics/job log.
 - unified web-vitrina/operator surface:
   - primary manual action `Загрузить и обновить` refreshes server-side ready snapshot without Google Sheets `/load`;
   - compact table toolbar combines period/search/filter/column/sort controls; default no-query history opens the latest four server-readable business dates ending on backend-owned `today_current_date` when available;
@@ -108,6 +110,10 @@ Confirmed contour на текущем `main`:
   - supply tab keeps server-driven factory-order and regional calculations; regional result now uses compact district rows with per-district XLSX action and district files include `nmId / SKU / Количество к поставке / Дефицит`;
   - seller-funnel materialization filters raw rows to enabled/relevant `nm_ids` before strict field validation and logs ignored invalid non-relevant rows.
 - User-facing `ЕБД` / `единая база данных` now means the shared server-side accepted truth/runtime layer behind web-vitrina, plan-report and future reports; it is not Google Sheets/GAS, browser UI/localStorage or a private report-only manual table.
+- Hosted runtime target governance:
+  - current live target = `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json`, `wb-core-eu-root`, `89.191.226.88`, runtime `/opt/wb-core-runtime/state`, service `wb-core-registry-http.service`;
+  - `api.selleros.pro` is allowed as current live DNS name for the EU contour, but it is not itself old-VPS identity;
+  - old selleros identity = `selleros-root` / `178.72.152.177`; its target JSON is rollback-only/deprecated and mutating deploy/apply-nginx/restart/update paths fail fast unless the explicit emergency rollback override is set.
 
 ## Authoritative source of truth
 
@@ -122,7 +128,7 @@ Confirmed contour на текущем `main`:
 # Known gaps
 
 - full legacy parity по всем historical metric sections и registry rows;
-- repo-owned hosted deploy/probe contract around current website/operator runtime is documented and includes managed public-route publishing; production storage binding, final auth-hardening and actual live access remain separate completion boundaries;
+- repo-owned hosted deploy/probe contract around current website/operator runtime is documented and includes EU current-live target metadata, managed public-route publishing and rollback-only old selleros write guards; production storage binding and final auth-hardening remain separate completion boundaries;
 - окончательная судьба `AI_EXPORT` как compatibility contract;
 - materialized `packages/domain`, `infra/`, `tests/`, `api/`, `jobs/`, `db/`.
 

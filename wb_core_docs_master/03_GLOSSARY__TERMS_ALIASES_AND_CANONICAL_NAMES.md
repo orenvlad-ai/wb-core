@@ -21,7 +21,7 @@ update_triggers:
   - "изменение canonical naming"
   - "появление нового публичного термина"
   - "изменение operator-visible labels"
-built_from_commit: "5ed568cf0ca49559b5fd21510b5e0da7e3cc927e"
+built_from_commit: "fea50f1cb627a9723b14e4b9c6281d7453e93224"
 ---
 
 # Summary
@@ -56,7 +56,12 @@ built_from_commit: "5ed568cf0ca49559b5fd21510b5e0da7e3cc927e"
 | `feedbacks AI` | `AI анализ отзывов`, `feedbacks/ai-prompt`, `feedbacks/ai-analyze` | transient operator review aid over loaded feedback rows via server-side prompt + OpenAI call; not `AI_EXPORT`, not ЕБД and not complaint automation |
 | `research_sku_group_comparison` | `Исследования`, `Сравнение групп SKU` | read-only retrospective comparison of two SKU groups over persisted ready snapshots; no causal/statistical claims |
 | `promo current invariant smoke` | `promo invariant guard` | read-only live/public guard for current promo row visibility and expected ended/no-download artifact handling |
+| `normalized promo archive` | `campaign_rows.jsonl`, `campaign_rows_manifest.json` | normalized campaign-row truth for historical promo replay without permanent raw workbook dependency |
+| `promo_refresh_light_gc_v1` | `promo artifact light GC`, `refresh-integrated GC` | bounded refresh-time cleanup after normalized archive + ready snapshot persistence; protects current/unknown/replay-critical artifacts |
 | `public route allowlist` | `nginx allowlist`, `managed public routes` | repo-owned hosted nginx route publication manifest for the current wb-core hosted contour |
+| `EU hosted runtime target` | `wb-core-eu-root`, `89.191.226.88`, `current live target` | current primary hosted runtime target for deploy/probe/GC/runtime writes |
+| `selleros rollback target` | `selleros-root`, `178.72.152.177`, `old selleros VPS` | rollback-only/read-only legacy target; routine mutating writes are blocked by hosted runner guard |
+| `api.selleros.pro` | `current live DNS name` | allowed DNS name for current EU hosted contour; not by itself proof that a target is old selleros |
 | `ЕБД` | `единая база данных` | user-facing alias for shared server-side accepted truth/runtime layer `wb-core`; not Google Sheets/GAS, browser UI, localStorage or report-private manual state |
 | `stock-report` | `Отчёт по остаткам` | read-only previous-closed stock report with active SKU selector |
 | `prepare -> upload -> refresh -> load` | `MVP flow`, `end-to-end flow` | historical bounded Google Sheets scenario; archived / do not use |
