@@ -43,8 +43,9 @@ def main() -> None:
 
 def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str, object]:
     captured_urls: list[str] = []
-    ai_analyze_called = False
-    ai_request_rows: list[dict[str, object]] = []
+    ai_request_batches: list[list[str]] = []
+    failed_once: set[str] = set()
+    large_feedbacks_mode = False
     page_url = base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -59,7 +60,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             route.fulfill(
                 status=200,
                 headers={"Content-Type": "application/json; charset=utf-8"},
-                body=json.dumps(_feedbacks_payload(), ensure_ascii=False),
+                body=json.dumps(_feedbacks_payload(row_count=26 if large_feedbacks_mode else 24), ensure_ascii=False),
             )
 
         def fulfill_prompt(route: object) -> None:
@@ -77,17 +78,27 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             )
 
         def fulfill_ai_analyze(route: object) -> None:
-            nonlocal ai_analyze_called
-            ai_analyze_called = True
             payload = json.loads(route.request.post_data or "{}")
             rows = payload.get("rows") if isinstance(payload, dict) else None
             if not isinstance(rows, list):
                 raise AssertionError("feedbacks AI analyze request must include rows array")
-            ai_request_rows[:] = [row for row in rows if isinstance(row, dict)]
+            if len(rows) != 1:
+                raise AssertionError(f"feedbacks AI queue must send exactly one row per request, got {len(rows)}")
+            row = rows[0] if isinstance(rows[0], dict) else {}
+            feedback_id = str(row.get("feedback_id") or "")
+            ai_request_batches.append([feedback_id])
+            if feedback_id == "browser-2" and feedback_id not in failed_once:
+                failed_once.add(feedback_id)
+                route.fulfill(
+                    status=502,
+                    headers={"Content-Type": "application/json; charset=utf-8"},
+                    body=json.dumps({"error": "temporary AI failure"}, ensure_ascii=False),
+                )
+                return
             route.fulfill(
                 status=200,
                 headers={"Content-Type": "application/json; charset=utf-8"},
-                body=json.dumps(_ai_payload(ai_request_rows), ensure_ascii=False),
+                body=json.dumps(_ai_payload([row]), ensure_ascii=False),
             )
 
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH, fulfill_prompt)
@@ -127,6 +138,8 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                     raise AssertionError(f"feedbacks table must include AI header {expected_header!r}")
             if not page.locator("[data-feedbacks-ai-analyze]").is_enabled():
                 raise AssertionError("AI analyze button must become enabled after feedbacks load")
+            if page.locator("[data-feedbacks-ai-select]").count() != 0:
+                raise AssertionError("feedbacks AI queue must not require manual row checkboxes")
             page.locator("[data-feedbacks-ai-analyze]").click()
             page.wait_for_selector("[data-feedbacks-prompt-textarea]")
             if "Сначала сохраните промпт разбора" not in page.locator("[data-feedbacks-error]").inner_text():
@@ -145,19 +158,40 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 raise AssertionError(f"feedbacks route query must include selected stars, got {captured_urls[-1]}")
             page.locator("[data-feedbacks-ai-analyze]").click()
             page.wait_for_function(
-                "() => document.querySelector('[data-feedbacks-table] tbody tr td:nth-child(4)')?.textContent.includes('Да')"
+                "() => document.querySelector('[data-feedbacks-error]')?.textContent.includes('ошибками')"
             )
-            if not ai_analyze_called:
-                raise AssertionError("feedbacks AI analyze route must be called")
-            if len(ai_request_rows) != 1 or ai_request_rows[0].get("feedback_id") != "browser-1":
-                raise AssertionError(f"feedbacks AI analyze must default to one selected row, got {ai_request_rows}")
-            first_fit = page.locator("[data-feedbacks-table] tbody tr").nth(0).locator("td").nth(3).inner_text()
+            if len(ai_request_batches) != 24:
+                raise AssertionError(f"feedbacks AI queue must process all visible rows, got {ai_request_batches}")
+            if any(len(batch) != 1 for batch in ai_request_batches):
+                raise AssertionError(f"feedbacks AI queue must send one row per request, got {ai_request_batches}")
+            if ai_request_batches[0] != ["browser-1"] or ai_request_batches[1] != ["browser-2"]:
+                raise AssertionError(f"feedbacks AI queue must follow visible row order, got {ai_request_batches[:3]}")
+            first_fit = page.locator("[data-feedbacks-table] tbody tr").nth(0).locator("td").nth(2).inner_text()
             if "Да" not in first_fit:
                 raise AssertionError(f"AI-positive feedbacks must sort first, got {first_fit!r}")
+            if "Ошибка" not in page.locator("[data-feedbacks-table] tbody").inner_text():
+                raise AssertionError("row-level AI failure must be visible in the feedbacks table")
+            page.locator("[data-feedbacks-ai-analyze]").click()
+            page.wait_for_function(
+                "() => document.querySelector('[data-feedbacks-source-note]')?.textContent.includes('AI готово')"
+            )
+            if len(ai_request_batches) != 25 or ai_request_batches[-1] != ["browser-2"]:
+                raise AssertionError(f"feedbacks AI retry must process only failed/unresolved rows, got {ai_request_batches}")
             page.locator("[data-feedbacks-ai-filter]").select_option("yes")
             filtered_count = page.locator("[data-feedbacks-table] tbody tr").count()
-            if filtered_count != 1:
-                raise AssertionError(f"AI filter yes must leave one row, got {filtered_count}")
+            if filtered_count != 24:
+                raise AssertionError(f"AI filter yes must leave analyzed queue rows, got {filtered_count}")
+
+            large_feedbacks_mode = True
+            page.locator("[data-feedbacks-load]").click()
+            page.wait_for_function("() => document.querySelectorAll('[data-feedbacks-table] tbody tr').length === 26")
+            request_count_before_large_queue = len(ai_request_batches)
+            page.locator("[data-feedbacks-ai-analyze]").click()
+            page.wait_for_function(
+                "() => document.querySelector('[data-feedbacks-error]')?.textContent.includes('максимум очереди')"
+            )
+            if len(ai_request_batches) != request_count_before_large_queue:
+                raise AssertionError("oversized feedbacks AI queue must fail before sending row requests")
         finally:
             browser.close()
 
@@ -168,12 +202,15 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "star_filter_changes_query": True,
         "table_rows": 24,
         "ai_columns_present": True,
-        "ai_request_rows": len(ai_request_rows),
+        "ai_request_batches": len(ai_request_batches),
+        "ai_request_max_batch_size": max((len(batch) for batch in ai_request_batches), default=0),
+        "ai_retry_requests": 1,
+        "large_queue_blocked": True,
         "ai_filter_works": True,
     }
 
 
-def _feedbacks_payload() -> dict[str, object]:
+def _feedbacks_payload(*, row_count: int) -> dict[str, object]:
     return {
         "contract_name": "sheet_vitrina_v1_feedbacks",
         "contract_version": "v1",
@@ -185,10 +222,10 @@ def _feedbacks_payload() -> dict[str, object]:
             "source": "WB API / feedbacks",
         },
         "summary": {
-            "total": 24,
-            "by_star": {"1": 0, "2": 0, "3": 0, "4": 0, "5": 24},
+            "total": row_count,
+            "by_star": {"1": 0, "2": 0, "3": 0, "4": 0, "5": row_count},
             "answered": 0,
-            "unanswered": 24,
+            "unanswered": row_count,
         },
         "schema": {"columns": []},
         "rows": [
@@ -208,7 +245,7 @@ def _feedbacks_payload() -> dict[str, object]:
                 "cons": "",
                 "answer_text": "",
             }
-            for index in range(1, 25)
+            for index in range(1, row_count + 1)
         ],
     }
 
