@@ -52,7 +52,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "fea50f1cb627a9723b14e4b9c6281d7453e93224"
+built_from_commit: "863184041a619b3a940f94c38d60e0dfce6bc6d9"
 ---
 
 # Summary
@@ -253,6 +253,11 @@ SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1 \
   python3 apps/registry_upload_http_entrypoint_hosted_runtime.py public-probe --as-of-date AUTO_YESTERDAY
 ```
 
+Norm:
+- `public-probe` for current live uses the HTTPS production URL `https://api.selleros.pro`;
+- the runner should use secure verification first, including system-CA fallback for local trust-store gaps;
+- `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1` is diagnostic-only and must not redefine the production contour as insecure.
+
 Required local env for the runner itself:
 - `WB_CORE_HOSTED_RUNTIME_TARGET_FILE`
 - optional `WB_CORE_HOSTED_RUNTIME_SSH_IDENTITY_FILE`
@@ -266,6 +271,9 @@ Canonical target template:
   - `ssh_destination = wb-core-eu-root`
   - `host_ip = 89.191.226.88`
   - `public_domain = api.selleros.pro`
+  - `public_base_url = https://api.selleros.pro`
+  - `server_names = ["89.191.226.88", "api.selleros.pro"]`
+  - TLS must be enabled with LetsEncrypt cert/key paths under `/etc/letsencrypt/live/api.selleros.pro/`
   - `runtime_dir = /opt/wb-core-runtime/state`
   - `service_name = wb-core-registry-http.service`
 - rollback-only old selleros target:
@@ -280,6 +288,12 @@ Canonical target template:
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
 - repo-owned nginx public route allowlist:
   - `artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`
+
+Current-live nginx invariant:
+- rendered nginx must include `server_name 89.191.226.88 api.selleros.pro;`;
+- rendered nginx must include `listen 443 ssl`;
+- losing `api.selleros.pro` or `443 ssl` is a production outage, not acceptable drift;
+- `deploy`, `deploy-and-verify` and `apply-nginx-routes` must fail locally before SSH/rsync/nginx/systemd mutation if this invariant is broken.
 
 Current canonical WB secret path for official adapters:
 - `WB_API_TOKEN`
@@ -395,6 +409,8 @@ Current verification targets:
 - `GET /sheet-vitrina-v1/operator`
 - server-side refresh/status/read probes.
 
+For current hosted/public website tasks, these checks use `https://api.selleros.pro`; IP-only HTTP probes are not sufficient production verification.
+
 If a task explicitly changes archived GAS guard code, closure is `clasp push` plus a guard-only check that archived functions fail fast. Do not run former prepare/upload/load flows as success criteria.
 
 ## GitHub PR closure
@@ -448,6 +464,8 @@ Operational rule:
   - `GET /v1/sheet-vitrina-v1/web-vitrina`
   - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition`
   - `GET /sheet-vitrina-v1/vitrina`
+  - `GET /sheet-vitrina-v1/operator`
+  - public URL must be `https://api.selleros.pro`, not IP-only HTTP;
   - content-level verify по affected SKU/date rows в payload/table surface;
   - Google Sheets / GAS / `clasp` / `invalid_grant` не входят в active completion path.
   - current live `sheet_vitrina_v1` contour:

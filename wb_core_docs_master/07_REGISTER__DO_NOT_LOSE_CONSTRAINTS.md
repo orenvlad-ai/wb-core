@@ -25,7 +25,7 @@ update_triggers:
   - "изменение migration boundary"
   - "изменение operator/runtime invariant"
   - "изменение docs governance"
-built_from_commit: "fea50f1cb627a9723b14e4b9c6281d7453e93224"
+built_from_commit: "863184041a619b3a940f94c38d60e0dfce6bc6d9"
 ---
 
 # Summary
@@ -70,6 +70,7 @@ built_from_commit: "fea50f1cb627a9723b14e4b9c6281d7453e93224"
 | `C-27` | Promo preflight/manifest/artifact diagnostics and promo current invariant smoke are observability/guard surfaces only; expected ended/no-download non-materializable campaigns must not become fatal missing-artifact blockers, and diagnostics must not become metric truth. |
 | `C-28` | Promo historical truth must survive raw artifact retention: normalized campaign rows and manifest/fingerprint metadata are replay-critical, raw XLSX/HAR/screenshots/traces are short-lived debug artifacts, and GC may delete only guarded candidates after replay-critical persistence is proven. |
 | `C-29` | Current hosted writes target only the EU runtime (`wb-core-eu-root` / `89.191.226.88` / `/opt/wb-core-runtime/state`). Old selleros (`selleros-root` / `178.72.152.177`) is rollback-only/read-only evidence; routine deploy/apply-nginx/restart/update/GC mutations must fail fast before remote side effects unless the explicit emergency rollback override is set. |
+| `C-30` | Current-live EU publication must be production HTTPS, not IP-only/HTTP-only: `public_base_url=https://api.selleros.pro`, nginx `server_name 89.191.226.88 api.selleros.pro;`, `listen 443 ssl` and LetsEncrypt cert/key paths for `api.selleros.pro` are hard invariants. Losing domain/443 is production outage drift, and mutating deploy/apply-nginx must fail locally before remote changes if the invariant is broken. |
 
 # Known gaps
 

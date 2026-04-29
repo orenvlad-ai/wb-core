@@ -39,7 +39,7 @@ update_triggers:
   - "изменение current main-confirmed contour"
   - "merge нового bounded модуля"
   - "смена главного project gap"
-built_from_commit: "fea50f1cb627a9723b14e4b9c6281d7453e93224"
+built_from_commit: "863184041a619b3a940f94c38d60e0dfce6bc6d9"
 ---
 
 # Summary
@@ -112,7 +112,8 @@ Confirmed contour на текущем `main`:
 - User-facing `ЕБД` / `единая база данных` now means the shared server-side accepted truth/runtime layer behind web-vitrina, plan-report and future reports; it is not Google Sheets/GAS, browser UI/localStorage or a private report-only manual table.
 - Hosted runtime target governance:
   - current live target = `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json`, `wb-core-eu-root`, `89.191.226.88`, runtime `/opt/wb-core-runtime/state`, service `wb-core-registry-http.service`;
-  - `api.selleros.pro` is allowed as current live DNS name for the EU contour, but it is not itself old-VPS identity;
+  - current production endpoint = `https://api.selleros.pro`; current-live EU nginx must publish both `server_name 89.191.226.88 api.selleros.pro;` and `listen 443 ssl` with LetsEncrypt cert/key paths for `api.selleros.pro`;
+  - IP-only or HTTP-only EU publication is production outage drift; `deploy`, `deploy-and-verify` and `apply-nginx-routes` fail locally before mutation when current-live hostname/TLS invariants are broken;
   - old selleros identity = `selleros-root` / `178.72.152.177`; its target JSON is rollback-only/deprecated and mutating deploy/apply-nginx/restart/update paths fail fast unless the explicit emergency rollback override is set.
 
 ## Authoritative source of truth
@@ -128,7 +129,7 @@ Confirmed contour на текущем `main`:
 # Known gaps
 
 - full legacy parity по всем historical metric sections и registry rows;
-- repo-owned hosted deploy/probe contract around current website/operator runtime is documented and includes EU current-live target metadata, managed public-route publishing and rollback-only old selleros write guards; production storage binding and final auth-hardening remain separate completion boundaries;
+- repo-owned hosted deploy/probe contract around current website/operator runtime is documented and includes EU current-live target metadata, managed public-route publishing, HTTPS domain/TLS invariants, secure public-probe system-CA fallback and rollback-only old selleros write guards; production storage binding and final auth-hardening remain separate completion boundaries;
 - окончательная судьба `AI_EXPORT` как compatibility contract;
 - materialized `packages/domain`, `infra/`, `tests/`, `api/`, `jobs/`, `db/`.
 
