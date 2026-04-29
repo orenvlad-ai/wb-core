@@ -80,6 +80,7 @@ update_note: "Обновлён под archive-first promo semantics: collector r
   - `campaign_rows.jsonl` is the minimal normalized replay archive: campaign identity/title/period, SKU, `Плановая цена для акции`, workbook fingerprint, row count/column signature via manifest, `collected_at`, `source_run_id` and trace metadata
   - unchanged campaign metadata must reuse existing workbook artifact instead of generating a new download
   - raw workbook retention may be reduced only after normalized rows + manifest exist and replay without raw workbook is proven by smoke; unknown/incomplete parse state is preserved, not deleted
+  - hosted refresh runs automatic light retention only after normalized archive and ready snapshot persistence; it protects the current run, archive metadata/fingerprints and normalized rows/manifests, and deletes only old successful debug traces or hash-proven duplicate workbook copies
 - Canonical metadata fields:
   - `collected_at`
   - `trace_run_dir`
@@ -222,6 +223,7 @@ Campaign manifest metadata is a read-only Seller Portal network observation used
   - unchanged campaign artifacts reuse-ятся из `promo_campaign_archive`
   - workbook redownload допускается только когда metadata/content changed or archive artifact missing
   - raw workbook copies are not a GC target until normalized row replay has passed; duplicate workbook copies may be planned only after hash proof and normalized archive proof
+  - refresh-integrated light GC is covered by `apps/sheet_vitrina_v1_refresh_promo_artifact_gc_smoke.py`
 - Export kinds truthfully materialize-ятся как:
   - `exclude_list_template`
   - `eligible_items_report`

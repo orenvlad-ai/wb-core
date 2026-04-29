@@ -30,6 +30,10 @@ from packages.application.promo_campaign_archive import (  # noqa: E402
 
 PROMO_RUNS_DIRNAME = "promo_xlsx_collector_runs"
 REPORT_SCHEMA_VERSION = "promo_campaign_archive_gc_report_v1"
+LIGHT_GC_POLICY_NAME = "promo_refresh_light_gc_v1"
+LIGHT_GC_SUCCESS_DEBUG_TTL_DAYS = 3.0
+LIGHT_GC_FAILED_DEBUG_TTL_DAYS = 14.0
+LIGHT_GC_MAX_DURATION_SECONDS = 20.0
 DELETE_DEBUG_EXTENSIONS = {".har", ".png", ".jpg", ".jpeg", ".webp", ".jsonl", ".log", ".txt", ".out", ".err"}
 PROTECTED_FILENAMES = {
     ARCHIVE_RECORD_FILENAME,
@@ -108,6 +112,7 @@ def build_gc_report(
                 runs=runs,
                 success_debug_ttl_days=success_debug_ttl_days,
                 failed_debug_ttl_days=failed_debug_ttl_days,
+                protected_run_dirs=(),
                 skipped=skipped,
             )
         )
@@ -117,6 +122,7 @@ def build_gc_report(
                 runs_root=runs_root,
                 archive_root=archive_root,
                 safe_archive_hashes=safe_archive_hashes,
+                protected_run_dirs=(),
                 skipped=skipped,
             )
         )
@@ -129,6 +135,121 @@ def build_gc_report(
         "runs_root": str(runs_root),
         "mode_is_read_only": not include_plan,
         "totals": scan,
+        "archive": {
+            "record_count": len(records),
+            "normalized_row_archive_count": len(normalized_records),
+            "raw_workbook_record_count": sum(1 for record in records if record.workbook_path),
+            "safe_archive_hash_count": len(safe_archive_hashes),
+        },
+        "runs": {
+            "count": len(runs),
+            "status_counts": _status_counts(runs),
+            "top": sorted(runs, key=lambda item: int(item["size"]), reverse=True)[:20],
+        },
+        "deletion_plan": deletion_plan,
+        "deletion_plan_summary": _plan_summary(deletion_plan),
+        "skipped": skipped[:200],
+    }
+
+
+def run_promo_campaign_archive_light_gc(
+    *,
+    runtime_dir: Path,
+    current_run_dirs: list[str | Path] | tuple[str | Path, ...] = (),
+    success_debug_ttl_days: float = LIGHT_GC_SUCCESS_DEBUG_TTL_DAYS,
+    failed_debug_ttl_days: float = LIGHT_GC_FAILED_DEBUG_TTL_DAYS,
+    max_duration_seconds: float = LIGHT_GC_MAX_DURATION_SECONDS,
+    policy_name: str = LIGHT_GC_POLICY_NAME,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    deadline = started + max(0.001, float(max_duration_seconds))
+    runtime_dir = Path(runtime_dir).expanduser().resolve()
+    try:
+        report = build_light_gc_report(
+            runtime_dir=runtime_dir,
+            current_run_dirs=current_run_dirs,
+            success_debug_ttl_days=success_debug_ttl_days,
+            failed_debug_ttl_days=failed_debug_ttl_days,
+            deadline=deadline,
+        )
+        apply_result = apply_gc_plan(runtime_dir=runtime_dir, plan=report["deletion_plan"])
+        status = "success" if not apply_result.get("errors") else "warning"
+        warning = "" if status == "success" else "one_or_more_candidates_failed_to_delete"
+        return _light_gc_summary(
+            policy_name=policy_name,
+            status=status,
+            warning=warning,
+            started=started,
+            report=report,
+            apply_result=apply_result,
+        )
+    except Exception as exc:
+        return _light_gc_summary(
+            policy_name=policy_name,
+            status="warning",
+            warning=f"{type(exc).__name__}: {exc}",
+            started=started,
+            report=None,
+            apply_result={"deleted_count": 0, "deleted_size": 0, "errors": []},
+        )
+
+
+def build_light_gc_report(
+    *,
+    runtime_dir: Path,
+    current_run_dirs: list[str | Path] | tuple[str | Path, ...],
+    success_debug_ttl_days: float,
+    failed_debug_ttl_days: float,
+    deadline: float | None,
+) -> dict[str, Any]:
+    _ensure_before_deadline(deadline)
+    archive_root = promo_campaign_archive_root(runtime_dir)
+    runs_root = runtime_dir / PROMO_RUNS_DIRNAME
+    protected_run_dirs = _normalize_protected_run_dirs(current_run_dirs)
+    records = load_promo_campaign_archive(runtime_dir)
+    normalized_records = [record for record in records if promo_campaign_has_normalized_rows(record)]
+    safe_archive_hashes = {
+        str(record.workbook_fingerprint)
+        for record in normalized_records
+        if str(record.workbook_fingerprint or "").strip()
+    }
+    skipped: list[dict[str, Any]] = []
+    runs = _collect_run_reports(runs_root, deadline=deadline)
+    deletion_plan: list[dict[str, Any]] = []
+    if not normalized_records:
+        skipped.append({"path": str(archive_root), "reason": "normalized_archive_not_ready_skip_light_gc"})
+    else:
+        deletion_plan.extend(
+            _plan_old_debug_files(
+                runtime_dir=runtime_dir,
+                runs=runs,
+                success_debug_ttl_days=success_debug_ttl_days,
+                failed_debug_ttl_days=failed_debug_ttl_days,
+                protected_run_dirs=protected_run_dirs,
+                skipped=skipped,
+                deadline=deadline,
+            )
+        )
+        deletion_plan.extend(
+            _plan_duplicate_workbook_files(
+                runtime_dir=runtime_dir,
+                runs_root=runs_root,
+                archive_root=archive_root,
+                safe_archive_hashes=safe_archive_hashes,
+                protected_run_dirs=protected_run_dirs,
+                skipped=skipped,
+                deadline=deadline,
+            )
+        )
+    _ensure_before_deadline(deadline)
+    return {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "runtime_dir": str(runtime_dir),
+        "archive_root": str(archive_root),
+        "runs_root": str(runs_root),
+        "protected_run_dirs": [str(path) for path in protected_run_dirs],
+        "mode_is_read_only": False,
         "archive": {
             "record_count": len(records),
             "normalized_row_archive_count": len(normalized_records),
@@ -200,17 +321,18 @@ def _scan_runtime(runtime_dir: Path) -> dict[str, Any]:
     }
 
 
-def _collect_run_reports(runs_root: Path) -> list[dict[str, Any]]:
+def _collect_run_reports(runs_root: Path, *, deadline: float | None = None) -> list[dict[str, Any]]:
     if not runs_root.exists():
         return []
     rows: list[dict[str, Any]] = []
     now = time.time()
     for run_dir in sorted(path for path in runs_root.iterdir() if path.is_dir()):
+        _ensure_before_deadline(deadline)
         size = 0
         file_count = 0
         mtime_max = run_dir.stat().st_mtime
         by_category: dict[str, int] = defaultdict(int)
-        for path in _iter_files(run_dir):
+        for path in _iter_files(run_dir, deadline=deadline):
             try:
                 stat = path.stat()
             except OSError:
@@ -240,10 +362,17 @@ def _plan_old_debug_files(
     runs: list[dict[str, Any]],
     success_debug_ttl_days: float,
     failed_debug_ttl_days: float,
+    protected_run_dirs: tuple[Path, ...],
     skipped: list[dict[str, Any]],
+    deadline: float | None = None,
 ) -> list[dict[str, Any]]:
     plan: list[dict[str, Any]] = []
     for run in runs:
+        _ensure_before_deadline(deadline)
+        run_dir = Path(str(run["run_dir"])).resolve()
+        if _is_protected_path(run_dir, protected_run_dirs):
+            skipped.append({"path": str(run_dir), "reason": "current_run_protected_skip", "status": str(run["status"])})
+            continue
         status = str(run["status"])
         age_days = float(run["age_days"])
         if status == "success":
@@ -256,8 +385,11 @@ def _plan_old_debug_files(
         if age_days < ttl:
             skipped.append({"path": run["run_dir"], "reason": "ttl_not_reached", "status": status, "age_days": age_days, "ttl_days": ttl})
             continue
-        for path in _iter_files(Path(run["run_dir"])):
+        for path in _iter_files(run_dir, deadline=deadline):
+            _ensure_before_deadline(deadline)
             if not _is_relative_to(path, runtime_dir):
+                continue
+            if _is_protected_path(path, protected_run_dirs):
                 continue
             if _is_debug_trace_file(path) and _is_allowed_delete_candidate(path):
                 plan.append(
@@ -276,16 +408,22 @@ def _plan_duplicate_workbook_files(
     runs_root: Path,
     archive_root: Path,
     safe_archive_hashes: set[str],
+    protected_run_dirs: tuple[Path, ...],
     skipped: list[dict[str, Any]],
+    deadline: float | None = None,
 ) -> list[dict[str, Any]]:
     plan: list[dict[str, Any]] = []
     if not safe_archive_hashes:
         skipped.append({"path": str(runs_root), "reason": "no_normalized_archive_hashes_for_duplicate_workbook_gc"})
         return plan
-    for path in _iter_files(runs_root):
+    for path in _iter_files(runs_root, deadline=deadline):
+        _ensure_before_deadline(deadline)
         if path.suffix.lower() != ".xlsx":
             continue
         if _is_relative_to(path, archive_root):
+            continue
+        if _is_protected_path(path, protected_run_dirs):
+            skipped.append({"path": str(path), "reason": "current_run_protected_skip"})
             continue
         if not _is_allowed_delete_candidate(path, allow_workbook=True):
             continue
@@ -350,11 +488,13 @@ def _status_counts(runs: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
     return dict(sorted(counts.items()))
 
 
-def _iter_files(root: Path):
+def _iter_files(root: Path, *, deadline: float | None = None):
     if not root.exists():
         return
     for current, _dirs, files in os.walk(root):
+        _ensure_before_deadline(deadline)
         for filename in files:
+            _ensure_before_deadline(deadline)
             yield Path(current) / filename
 
 
@@ -415,6 +555,65 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _normalize_protected_run_dirs(current_run_dirs: list[str | Path] | tuple[str | Path, ...]) -> tuple[Path, ...]:
+    normalized: list[Path] = []
+    for raw_path in current_run_dirs:
+        text = str(raw_path or "").strip()
+        if not text:
+            continue
+        normalized.append(Path(text).expanduser().resolve())
+    return tuple(normalized)
+
+
+def _is_protected_path(path: Path, protected_roots: tuple[Path, ...]) -> bool:
+    resolved = path.resolve()
+    return any(_is_relative_to(resolved, root) or resolved == root.resolve() for root in protected_roots)
+
+
+def _skip_reason_counts(skipped: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for item in skipped:
+        reason = str(item.get("reason") or "unknown")
+        counts[reason] += 1
+    return dict(sorted(counts.items()))
+
+
+def _light_gc_summary(
+    *,
+    policy_name: str,
+    status: str,
+    warning: str,
+    started: float,
+    report: dict[str, Any] | None,
+    apply_result: dict[str, Any],
+) -> dict[str, Any]:
+    skipped = list((report or {}).get("skipped") or [])
+    plan_summary = (report or {}).get("deletion_plan_summary") or {"count": 0, "size": 0, "by_reason": {}}
+    errors = list(apply_result.get("errors") or [])
+    summary = {
+        "policy_name": policy_name,
+        "status": status,
+        "warning": warning,
+        "duration_ms": max(0, int(round((time.perf_counter() - started) * 1000))),
+        "deleted_count": int(apply_result.get("deleted_count") or 0),
+        "freed_bytes": int(apply_result.get("deleted_size") or 0),
+        "skipped_count": len(skipped),
+        "skip_reasons": _skip_reason_counts(skipped),
+        "deletion_plan_summary": plan_summary,
+        "apply_error_count": len(errors),
+        "errors": errors[:20],
+    }
+    if report is not None:
+        summary["archive"] = report.get("archive") or {}
+        summary["protected_run_dirs"] = report.get("protected_run_dirs") or []
+    return summary
+
+
+def _ensure_before_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.perf_counter() > deadline:
+        raise TimeoutError("promo archive light GC deadline exceeded")
 
 
 def _emit_report(report: dict[str, Any], report_path: str) -> None:

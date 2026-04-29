@@ -149,6 +149,7 @@ class PromoLiveSourceBlock:
             / f"{request.snapshot_date}__{self.now_factory().strftime('%Y%m%d_%H%M%S')}"
         )
         run_dir.mkdir(parents=True, exist_ok=True)
+        _set_promo_context(diagnostics, "current_run_dir", str(run_dir))
         archive_root = promo_campaign_archive_root(self.runtime_dir)
         collector_summary = None
         browser_session_phase = _start_promo_phase(diagnostics, "browser_session_check")
@@ -220,6 +221,7 @@ class PromoLiveSourceBlock:
                 f"archive_reuse_enabled=true"
             )
             trace_run_dir = collector_summary.run_dir
+            _set_promo_context(diagnostics, "collector_run_dir", collector_summary.run_dir)
         result = materialize_promo_result_from_archive(
             runtime_dir=self.runtime_dir,
             snapshot_date=request.snapshot_date,
