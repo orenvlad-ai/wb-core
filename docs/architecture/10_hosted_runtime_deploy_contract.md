@@ -58,6 +58,13 @@ Canonical target template:
 Canonical live target for the current selleros host:
 - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__selleros_api.json`
 
+Canonical pre-cutover target for the EU VPS migration preparation:
+- `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json`
+- `ssh_destination = wb-core-eu-root`
+- `public_base_url = http://89.191.226.88`
+
+The EU target is intentionally IP-based until DNS cutover. The old selleros target remains the rollback/live contour and must not be changed as part of EU host preparation.
+
 Canonical repo-owned systemd artifacts for this contour:
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.service`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`

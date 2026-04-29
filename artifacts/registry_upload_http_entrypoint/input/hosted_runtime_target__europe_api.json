@@ -1,0 +1,58 @@
+{
+  "target_id": "selleros_api_hosted_runtime_europe_pre_cutover",
+  "public_base_url": "http://89.191.226.88",
+  "loopback_base_url": "http://127.0.0.1:8765",
+  "ssh_destination": "wb-core-eu-root",
+  "target_dir": "/opt/wb-core-runtime/app",
+  "service_name": "wb-core-registry-http.service",
+  "restart_command": "systemctl restart wb-core-registry-http.service",
+  "status_command": "systemctl status --no-pager --full wb-core-registry-http.service",
+  "environment_file": "/opt/wb-ai/.env",
+  "systemd_unit_directory": "/etc/systemd/system",
+  "systemd_units_source_dir": "artifacts/registry_upload_http_entrypoint/systemd",
+  "nginx_public_routes": {
+    "server_config_path": "/etc/nginx/sites-enabled/wb-ai",
+    "backup_dir": "/etc/nginx/sites-available",
+    "test_command": "nginx -t",
+    "reload_command": "systemctl reload nginx",
+    "manifest_path": "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json",
+    "managed_block_label": "WB-CORE MANAGED PUBLIC ROUTES"
+  },
+  "managed_systemd_units": [
+    {
+      "name": "wb-core-sheet-vitrina-refresh.service",
+      "enable": false,
+      "restart": false
+    },
+    {
+      "name": "wb-core-sheet-vitrina-refresh.timer",
+      "enable": true,
+      "restart": true
+    },
+    {
+      "name": "wb-core-sheet-vitrina-closure-retry.service",
+      "enable": false,
+      "restart": false
+    },
+    {
+      "name": "wb-core-sheet-vitrina-closure-retry.timer",
+      "enable": true,
+      "restart": true
+    }
+  ],
+  "runtime_env": {
+    "REGISTRY_UPLOAD_HTTP_HOST": "127.0.0.1",
+    "REGISTRY_UPLOAD_HTTP_PORT": "8765",
+    "REGISTRY_UPLOAD_RUNTIME_DIR": "/opt/wb-core-runtime/state",
+    "REGISTRY_UPLOAD_HTTP_PATH": "/v1/registry-upload/bundle",
+    "COST_PRICE_UPLOAD_HTTP_PATH": "/v1/cost-price/upload",
+    "SHEET_VITRINA_HTTP_PATH": "/v1/sheet-vitrina-v1/plan",
+    "SHEET_VITRINA_REFRESH_HTTP_PATH": "/v1/sheet-vitrina-v1/refresh",
+    "SHEET_VITRINA_STATUS_HTTP_PATH": "/v1/sheet-vitrina-v1/status",
+    "SHEET_VITRINA_OPERATOR_UI_PATH": "/sheet-vitrina-v1/operator",
+    "PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH": "/opt/wb-web-bot/storage_state.json",
+    "SELLER_PORTAL_CANONICAL_SUPPLIER_ID": "c0ed0bf8-c443-41f2-b9db-1c14f0099815",
+    "SELLER_PORTAL_CANONICAL_SUPPLIER_LABEL": "ИП Сагитов В. Р.",
+    "SELLER_PORTAL_RELOGIN_SSH_DESTINATION": "wb-core-eu-root"
+  }
+}
