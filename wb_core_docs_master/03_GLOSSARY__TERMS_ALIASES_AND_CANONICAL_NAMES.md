@@ -21,7 +21,7 @@ update_triggers:
   - "изменение canonical naming"
   - "появление нового публичного термина"
   - "изменение operator-visible labels"
-built_from_commit: "fea50f1cb627a9723b14e4b9c6281d7453e93224"
+built_from_commit: "863184041a619b3a940f94c38d60e0dfce6bc6d9"
 ---
 
 # Summary
@@ -58,10 +58,13 @@ built_from_commit: "fea50f1cb627a9723b14e4b9c6281d7453e93224"
 | `promo current invariant smoke` | `promo invariant guard` | read-only live/public guard for current promo row visibility and expected ended/no-download artifact handling |
 | `normalized promo archive` | `campaign_rows.jsonl`, `campaign_rows_manifest.json` | normalized campaign-row truth for historical promo replay without permanent raw workbook dependency |
 | `promo_refresh_light_gc_v1` | `promo artifact light GC`, `refresh-integrated GC` | bounded refresh-time cleanup after normalized archive + ready snapshot persistence; protects current/unknown/replay-critical artifacts |
-| `public route allowlist` | `nginx allowlist`, `managed public routes` | repo-owned hosted nginx route publication manifest for the current wb-core hosted contour |
-| `EU hosted runtime target` | `wb-core-eu-root`, `89.191.226.88`, `current live target` | current primary hosted runtime target for deploy/probe/GC/runtime writes |
+| `public route allowlist` | `nginx allowlist`, `managed public routes` | repo-owned hosted nginx route publication manifest for the current HTTPS wb-core hosted contour |
+| `EU hosted runtime target` | `wb-core-eu-root`, `89.191.226.88`, `current live target` | current primary hosted runtime target for deploy/probe/GC/runtime writes; must publish production HTTPS domain route |
 | `selleros rollback target` | `selleros-root`, `178.72.152.177`, `old selleros VPS` | rollback-only/read-only legacy target; routine mutating writes are blocked by hosted runner guard |
-| `api.selleros.pro` | `current live DNS name` | allowed DNS name for current EU hosted contour; not by itself proof that a target is old selleros |
+| `https://api.selleros.pro` | `production URL`, `current public endpoint` | required current live public endpoint; IP-only HTTP is not an acceptable production contour |
+| `api.selleros.pro` | `current live DNS name`, `production domain` | required DNS name for current EU hosted contour and nginx `server_name`; not by itself proof that a target is old selleros |
+| `current-live HTTPS/TLS invariant` | `EU domain/TLS invariant`, `443 ssl guard` | current-live target validation requires `public_base_url=https://api.selleros.pro`, server names `89.191.226.88` + `api.selleros.pro`, TLS enabled and LetsEncrypt paths for the domain |
+| `public-probe system CA fallback` | `secure public probe fallback` | hosted public probe first uses secure system CA fallback before the legacy insecure diagnostic fallback |
 | `ЕБД` | `единая база данных` | user-facing alias for shared server-side accepted truth/runtime layer `wb-core`; not Google Sheets/GAS, browser UI, localStorage or report-private manual state |
 | `stock-report` | `Отчёт по остаткам` | read-only previous-closed stock report with active SKU selector |
 | `prepare -> upload -> refresh -> load` | `MVP flow`, `end-to-end flow` | historical bounded Google Sheets scenario; archived / do not use |

@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "fea50f1cb627a9723b14e4b9c6281d7453e93224"
+built_from_commit: "863184041a619b3a940f94c38d60e0dfce6bc6d9"
 ---
 
 # Summary
@@ -41,7 +41,7 @@ built_from_commit: "fea50f1cb627a9723b14e4b9c6281d7453e93224"
 | `11–12` | `rule-based` | смёржены в `main` |
 | `13–16` | `table-facing` / `projection` / `wide-matrix` | смёржены в `main` |
 | `17–19` | `archived sheet-side scaffold/write/presentation` | Google Sheets contour archived / do not use; retained only as migration evidence |
-| `20–23` | `registry upload line` | смёржены в `main` до live HTTP entrypoint plus hosted public-route allowlist/deploy publication boundary, EU current-live target metadata and rollback-only selleros write guard |
+| `20–23` | `registry upload line` | смёржены в `main` до live HTTP entrypoint plus hosted public-route allowlist/deploy publication boundary, EU current-live target metadata, production HTTPS/domain/TLS invariant and rollback-only selleros write guard |
 | `24–26` | `web/operator + archived sheet-side history` | current web/operator contour active; Google Sheets/GAS side archived |
 | `27` | `browser-capture collector` | смёржен в `main` как bounded local promo XLSX collector contour |
 | `28` | `browser-capture live wiring` | смёржен в `main` как promo live source seam inside refresh/runtime/read-side |
@@ -158,7 +158,7 @@ Current repo-owned unified web/operator surface:
 - job/log surface is detailed and machine-useful: source/module/adapter/endpoint steps, source result kinds/counts, metric batch summaries and write results stay server-driven and can be exported per completed run through `GET /v1/sheet-vitrina-v1/job?job_id=...&format=text&download=1`
 - server-side business timezone = `Asia/Yekaterinburg` for default `as_of_date`, `today_current` and operator-facing freshness dates
 - live daily auto-refresh = repo-owned artifacts `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.{service,timer}` -> installed on host as `wb-core-sheet-vitrina-refresh.timer` -> existing `POST /v1/sheet-vitrina-v1/refresh` at `11:00, 20:00 Asia/Yekaterinburg` (`06:00 UTC` and `15:00 UTC` on current host) with `{"auto_refresh": true}`; daily path builds server-side ready snapshot only and never loads Google Sheets
-- active hosted target = `wb-core-eu-root` / `89.191.226.88` / `/opt/wb-core-runtime/state`; `api.selleros.pro` may be current live DNS, while old `selleros-root` / `178.72.152.177` is rollback-only and routine writes are blocked before SSH/rsync/nginx/systemd
+- active hosted target = `wb-core-eu-root` / `89.191.226.88` / `/opt/wb-core-runtime/state`; production public endpoint is `https://api.selleros.pro`; current-live nginx must keep `server_name 89.191.226.88 api.selleros.pro;` plus `listen 443 ssl`; old `selleros-root` / `178.72.152.177` is rollback-only and routine writes are blocked before SSH/rsync/nginx/systemd
 - source matrix is explicit: group A bot/web-source historical, group B WB API historical/date-period capable, group C WB API current-snapshot-only, group D other/manual/browser-collector overlays
 - `seller_funnel_snapshot` materialization can receive enabled/relevant `nm_ids`; strict validation is applied after relevant-row filtering, so invalid non-relevant rows are logged as `ignored_non_relevant_invalid_rows` instead of poisoning the snapshot
 - bot-backed current-day sync probes `/opt/wb-web-bot/storage_state.json` before seller portal capture; invalidated browser state surfaces as `seller_portal_session_invalid` / human `сессия seller portal больше не действует; требуется повторный вход`

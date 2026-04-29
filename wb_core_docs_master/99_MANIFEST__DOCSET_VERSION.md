@@ -21,10 +21,10 @@ update_triggers:
   - "explicit derived-sync flow"
   - "transitional pack rebuild"
   - "изменение build metadata pack"
-built_from_commit: "fea50f1cb627a9723b14e4b9c6281d7453e93224"
-docset_version: "wb_core_docs_master_v62"
-built_at: "2026-04-29T20:25:01Z"
-build_note: "Recurring derived-sync from current authoritative docs and code-state; compact pack updated for EU hosted target fixation, selleros rollback-only write guard, current DNS classification, normalized promo campaign archive and refresh-integrated promo artifact GC."
+built_from_commit: "863184041a619b3a940f94c38d60e0dfce6bc6d9"
+docset_version: "wb_core_docs_master_v63"
+built_at: "2026-04-29T21:05:30Z"
+build_note: "Recurring derived-sync from current authoritative docs and code-state; compact pack updated for post-incident EU hosted production HTTPS/domain/TLS invariant, secure public-probe system-CA fallback and rollback-only selleros guard continuity."
 included_roots:
   - "README.md"
   - "docs/architecture/"
@@ -36,14 +36,8 @@ included_roots:
   - "wb_core_docs_master/"
 core_docs_changed:
   - "README.md"
-  - "docs/architecture/01_target_architecture.md"
-  - "docs/architecture/09_official_api_secret_boundary.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
-  - "docs/modules/00_INDEX__MODULES.md"
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
-  - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
-  - "docs/modules/27_MODULE__PROMO_XLSX_COLLECTOR_BLOCK.md"
-  - "docs/modules/28_MODULE__PROMO_LIVE_SOURCE_WIRING_BLOCK.md"
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "wb_core_docs_master/00_INDEX__WEBCORE_PROJECT_DOCS.md"
   - "wb_core_docs_master/01_PASSPORT__WEBCORE_PROJECT.md"
@@ -54,6 +48,11 @@ core_docs_changed:
   - "wb_core_docs_master/07_REGISTER__DO_NOT_LOSE_CONSTRAINTS.md"
   - "wb_core_docs_master/09_RUNBOOK__COMMON_SMOKE_AND_DEBUG.md"
   - "wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md"
+code_state_audited:
+  - "apps/registry_upload_http_entrypoint_hosted_runtime.py"
+  - "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"
+  - "apps/registry_upload_http_entrypoint_public_routes_smoke.py"
+  - "artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json"
 ---
 
 # Summary
