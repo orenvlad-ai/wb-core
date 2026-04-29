@@ -98,6 +98,22 @@ def main() -> None:
     if "location / {" not in first_apply:
         raise AssertionError("managed nginx output must preserve unrelated fallback location")
 
+    pre_cutover_nginx = """server {
+    listen 80;
+    server_name 89.191.226.88;
+}
+"""
+    pre_cutover_apply = hosted_runtime.apply_managed_nginx_public_routes_to_text(
+        pre_cutover_nginx,
+        managed_block=rendered,
+        routes=routes,
+        server_names=("89.191.226.88", "api.selleros.pro"),
+    )
+    if "server_name 89.191.226.88 api.selleros.pro;" not in pre_cutover_apply:
+        raise AssertionError("managed nginx output must publish explicit pre-cutover and future production host names")
+    if pre_cutover_apply.count("server_name ") != 1:
+        raise AssertionError("managed nginx output must rewrite the target server_name line without duplicating it")
+
     with TemporaryDirectory(prefix="hosted-public-routes-smoke-") as tmp:
         target_file = Path(tmp) / "target.json"
         target_file.write_text(
@@ -120,6 +136,7 @@ def main() -> None:
                         "test_command": "nginx -t",
                         "reload_command": "systemctl reload nginx",
                         "manifest_path": "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json",
+                        "server_names": ["127.0.0.1", "api.selleros.pro"],
                     },
                     "managed_systemd_units": [],
                     "runtime_env": {
@@ -137,6 +154,9 @@ def main() -> None:
         plan_routes = print_plan["deploy_plan"]["nginx_public_routes"]["routes"]
         if "/v1/sheet-vitrina-v1/feedbacks" not in {route["path"] for route in plan_routes}:
             raise AssertionError("print-plan must expose feedbacks in nginx public routes")
+        plan_server_names = print_plan["deploy_plan"]["nginx_public_routes"]["server_names"]
+        if plan_server_names != ["127.0.0.1", "api.selleros.pro"]:
+            raise AssertionError(f"print-plan must expose configured nginx server_names, got {plan_server_names}")
         dry_run = _run_json(
             [
                 sys.executable,
@@ -155,6 +175,7 @@ def main() -> None:
     print(f"public_route_manifest: ok -> {len(routes)} routes")
     print("public_route_render: ok -> feedbacks and supply prefixes included")
     print("public_route_apply_idempotent: ok")
+    print("public_route_server_names: ok -> explicit IP and future host names rendered")
     print("public_route_deploy_dry_run: ok")
 
 
