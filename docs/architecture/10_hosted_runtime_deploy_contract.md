@@ -61,8 +61,11 @@ Canonical active target for the current EU hosted runtime:
 - `target_role = primary_live`
 - `target_lifecycle = current_live`
 - `mutation_policy = routine_writes_allowed`
+- `host_ip = 89.191.226.88`
+- `public_domain = api.selleros.pro`
 - `ssh_destination = wb-core-eu-root`
 - `public_base_url = http://89.191.226.88`
+- current live DNS name = `api.selleros.pro`
 - `runtime_env.REGISTRY_UPLOAD_RUNTIME_DIR = /opt/wb-core-runtime/state`
 - `service_name = wb-core-registry-http.service`
 - nginx `server_names = 89.191.226.88`
@@ -73,9 +76,12 @@ Archived legacy target:
 - `target_role = rollback_only`
 - `target_lifecycle = deprecated_live_target`
 - `mutation_policy = do_not_deploy_without_emergency_rollback_override`
+- `legacy_host_ip = 178.72.152.177`
+- `public_domain = api.selleros.pro`
 - `ssh_destination = selleros-root`
 - `public_base_url = https://api.selleros.pro`
 - This target is rollback/read-only migration evidence only. Routine deploy, apply-nginx, restart, update, audit, GC or hosted runtime write tasks must use the EU target. The runner fail-fast rejects archived/legacy target hosts for mutating actions unless an explicit emergency rollback override is present.
+- The domain string in this archived JSON is historical metadata, not old-VPS identity. Old VPS identity is `selleros-root` / `178.72.152.177`; `api.selleros.pro` may be a current live DNS name for the EU target.
 - Recommended provider-side label for the old VPS: `ROLLBACK-ONLY_DO-NOT-DEPLOY_wb-core-old-selleros`.
 
 Canonical repo-owned systemd artifacts for this contour:
@@ -107,6 +113,9 @@ Checked-in target template фиксирует field names, которые бол
 - `target_role`
 - `target_lifecycle`
 - `mutation_policy`
+- `host_ip`
+- `legacy_host_ip`
+- `public_domain`
 - `provider_side_label_recommendation`
 - `public_base_url`
 - `loopback_base_url`
@@ -132,7 +141,10 @@ Known active EU target values теперь зафиксированы repo-owned
 - `target_role = primary_live`
 - `target_lifecycle = current_live`
 - `mutation_policy = routine_writes_allowed`
+- `host_ip = 89.191.226.88`
+- `public_domain = api.selleros.pro`
 - `public_base_url = http://89.191.226.88`
+- current live DNS name = `api.selleros.pro`
 - `loopback_base_url = http://127.0.0.1:8765`
 - `ssh_destination = wb-core-eu-root`
 - `target_dir = /opt/wb-core-runtime/app`
@@ -152,7 +164,8 @@ Known active EU target values теперь зафиксированы repo-owned
 - route paths inside `runtime_env` follow current entrypoint defaults
 
 Archived selleros target note:
-- `selleros-root`, `api.selleros.pro` and host `178.72.152.177` are not active runtime targets after the EU VPS cutover.
+- `selleros-root` and host `178.72.152.177` are not active runtime targets after the EU VPS cutover.
+- `api.selleros.pro` is not by itself old-VPS identity; target safety is determined from repo target metadata plus `ssh_destination`, target dir, runtime dir, service name and the old IP guard.
 - Selleros is `rollback_only` / `deprecated_live_target` / `do_not_deploy_without_emergency_rollback_override`; it is not a routine deploy, apply-nginx, restart, update, GC or hosted runtime mutation target.
 - If `WB_CORE_HOSTED_RUNTIME_TARGET_FILE` points to archived selleros JSON or any target with `ssh_destination=selleros-root`, mutating commands must fail fast before SSH/rsync/nginx/systemd writes instead of silently touching the old VPS.
 - Emergency rollback writes require the exact explicit override `WB_CORE_ALLOW_ROLLBACK_TARGET_WRITE=I_UNDERSTAND_SELLEROS_IS_ROLLBACK_ONLY`; the runner prints a warning and still does not print secrets.

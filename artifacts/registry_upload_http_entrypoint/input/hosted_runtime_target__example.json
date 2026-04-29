@@ -3,6 +3,8 @@
   "target_role": "primary_live",
   "target_lifecycle": "current_live",
   "mutation_policy": "routine_writes_allowed",
+  "host_ip": "89.191.226.88",
+  "public_domain": "api.selleros.pro",
   "target_id": "wb_core_eu_hosted_runtime_example",
   "public_base_url": "http://89.191.226.88",
   "loopback_base_url": "http://127.0.0.1:8765",
