@@ -105,10 +105,11 @@ update_note: "Phase 4 live page composition остаётся server-driven; вк
   - default/no-surface path still returns `web_vitrina_contract` v1
   - optional `as_of_date` keeps one-day historical read on the same route
   - optional `date_from/date_to` now materializes a bounded ready-snapshot period window on the same route
-  - optional `surface=page_composition` now returns a server-driven page payload for the live page shell; by default it keeps source-status details unloaded
-  - optional `include_source_status=1` on that page-composition surface returns the detailed grouped loading table without triggering refresh/upstream fetch
+  - optional `surface=page_composition` now returns a bounded server-driven page payload for the live page shell; by default it keeps source-status details unloaded and defers heavy `table_surface.rows`
+  - optional `include_table_data=1` on that page-composition surface returns the full table rows/groupings for the browser lazy table load without changing ready-snapshot truth or triggering refresh/upstream fetch
+  - optional `include_source_status=1` on that page-composition surface returns the detailed grouped loading table without triggering refresh/upstream fetch and does not imply full table rows
   - page-composition `meta` exposes the explicit server-owned time model: `business_timezone`, `snapshot_as_of_date`, `yesterday_closed_date`, `today_current_date`, `visible_date_columns`, `server_now_business_tz` and `generated_at`. Business dates remain backend-owned; browser timezone is used only for readable timestamp display.
-  - page-composition `meta.page_composition_diagnostics` exposes lightweight read-side diagnostics: server build duration, payload bytes, `include_source_status`, row count and cell count. This field is observability-only and does not create a new read contract, source-status endpoint, slim payload mode or browser-owned truth layer.
+  - page-composition `meta.page_composition_diagnostics` exposes lightweight read-side diagnostics: server build duration, compact payload bytes, `include_source_status`, `include_table_data`, total/returned row count and returned cell count. This field is observability-only and does not create a new source-status endpoint or browser-owned truth layer.
   - if a web-vitrina read/model/page-composition change can affect promo metric row visibility, live/public closure must include `python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py` (or local-CA-only fallback `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1 python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py`) to prove current promo rows remain present and expected ended/no-download artifacts are not fatal.
 - `page_composition` is server-owned and assembled only from:
   - `web_vitrina_contract`

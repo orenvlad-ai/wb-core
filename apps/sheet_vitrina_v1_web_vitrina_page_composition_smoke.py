@@ -251,6 +251,34 @@ def main() -> None:
         if grouping_ids != ["group:overview", f"group:{first_group}"]:
             raise AssertionError(f"page composition grouping order mismatch, got {grouping_ids}")
 
+        deferred_composition = build_web_vitrina_page_composition(
+            contract=contract,
+            view_model=view_model,
+            adapter=adapter,
+            page_route="/sheet-vitrina-v1/vitrina",
+            read_route="/v1/sheet-vitrina-v1/web-vitrina",
+            operator_route="/sheet-vitrina-v1/operator",
+            available_snapshot_dates=runtime.list_sheet_vitrina_ready_snapshot_dates(descending=True),
+            selected_as_of_date=None,
+            selected_date_from=None,
+            selected_date_to=None,
+            activity_surface=_build_activity_surface_fixture(),
+            include_table_data=False,
+        )
+        deferred_table = deferred_composition["table_surface"]
+        if deferred_table["table_data_state"] != "deferred":
+            raise AssertionError(f"deferred page composition table state mismatch, got {deferred_table}")
+        if deferred_table["rows"] or deferred_table["groupings"]:
+            raise AssertionError(f"deferred page composition must not inline rows/groupings, got {deferred_table}")
+        if deferred_table["total_row_count"] != len(composition["table_surface"]["rows"]) or deferred_table["returned_row_count"] != 0:
+            raise AssertionError(f"deferred page composition row counters mismatch, got {deferred_table}")
+        full_payload_bytes = len(json.dumps(composition, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        deferred_payload_bytes = len(json.dumps(deferred_composition, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        if deferred_payload_bytes >= full_payload_bytes:
+            raise AssertionError(
+                f"deferred page composition must be smaller than full table payload, got {deferred_payload_bytes} >= {full_payload_bytes}"
+            )
+
         period_contract = SheetVitrinaV1WebVitrinaBlock(
             runtime=runtime,
             now_factory=lambda: NOW,
@@ -325,6 +353,7 @@ def main() -> None:
         print("web_vitrina_page_composition_activity_surface: ok ->", len(upload_items), len(loading_rows))
         print("web_vitrina_page_composition_filters: ok ->", ",".join(sorted(controls)))
         print("web_vitrina_page_composition_table: ok ->", len(composition["table_surface"]["columns"]), len(composition["table_surface"]["rows"]))
+        print("web_vitrina_page_composition_deferred_table: ok ->", deferred_table["table_data_state"], deferred_payload_bytes)
         print("web_vitrina_page_composition_error: ok ->", error_payload["meta"]["current_state"])
 
 

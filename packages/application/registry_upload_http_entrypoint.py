@@ -639,6 +639,7 @@ class RegistryUploadHttpEntrypoint:
         date_from: str | None = None,
         date_to: str | None = None,
         include_source_status: bool = False,
+        include_table_data: bool = False,
     ) -> dict[str, Any]:
         page_composition_started_perf = time.perf_counter()
         effective_as_of_date = as_of_date or default_business_as_of_date(self.now_factory())
@@ -706,6 +707,7 @@ class RegistryUploadHttpEntrypoint:
                 ),
                 started_perf=page_composition_started_perf,
                 include_source_status=include_source_status,
+                include_table_data=include_table_data,
             )
 
         source_status_snapshot_as_of_date = _web_vitrina_source_status_snapshot_as_of_date(contract)
@@ -757,9 +759,11 @@ class RegistryUploadHttpEntrypoint:
                 view_model=view_model,
                 adapter=adapter,
                 activity_surface=activity_surface,
+                include_table_data=include_table_data,
             ),
             started_perf=page_composition_started_perf,
             include_source_status=include_source_status,
+            include_table_data=include_table_data,
         )
 
     def handle_sheet_research_sku_group_comparison_options_request(
@@ -3571,24 +3575,28 @@ def _with_page_composition_diagnostics(
     *,
     started_perf: float,
     include_source_status: bool,
+    include_table_data: bool,
 ) -> dict[str, Any]:
     normalized = dict(payload)
     meta = dict(normalized.get("meta") or {})
     table_surface = dict(normalized.get("table_surface") or {})
     rows = list(table_surface.get("rows") or [])
     columns = list(table_surface.get("columns") or [])
+    total_row_count = int(table_surface.get("total_row_count") or len(rows))
     diagnostics = {
         "page_composition_build_ms": max(0, int(round((time.perf_counter() - started_perf) * 1000))),
         "payload_bytes": 0,
         "include_source_status": bool(include_source_status),
-        "row_count": len(rows),
+        "include_table_data": bool(include_table_data),
+        "row_count": total_row_count,
+        "returned_row_count": len(rows),
         "cell_count": _page_composition_cell_count(rows=rows, columns=columns),
     }
     meta["page_composition_diagnostics"] = diagnostics
     normalized["meta"] = meta
     for _ in range(2):
         diagnostics["payload_bytes"] = len(
-            json.dumps(normalized, ensure_ascii=False, indent=2).encode("utf-8")
+            json.dumps(normalized, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         ) + 1
     return normalized
 

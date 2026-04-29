@@ -844,6 +844,7 @@ def _build_handler(
                         date_from=date_from,
                         date_to=date_to,
                         include_source_status=_resolve_optional_query_bool(parsed.query, "include_source_status"),
+                        include_table_data=_resolve_optional_query_bool(parsed.query, "include_table_data"),
                     )
                     _write_json_response(
                         self,
@@ -1713,7 +1714,7 @@ def _write_json_response(
     status: HTTPStatus,
     payload: Any,
 ) -> None:
-    body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
     handler.send_response(status.value)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))

@@ -220,7 +220,7 @@ update_note: "Обновлён под AI-assisted feedback review MVP: `Отзы
     - default path builds `web_vitrina_contract` v1 only from existing ready snapshot + current registry truth, stays truthful `422` on missing ready snapshot and must not trigger refresh/upstream fetch
     - optional `as_of_date=<YYYY-MM-DD>` keeps bounded one-day historical read on the same route
     - optional `date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>` now materializes a bounded server-side ready-snapshot window on the same route; browser does not aggregate multi-day truth itself
-    - optional `surface=page_composition` on the same route builds server-driven page payload over `contract -> view_model -> gravity_table_adapter` for the live sibling page and still must not trigger refresh/upstream fetch
+    - optional `surface=page_composition` on the same route builds bounded server-driven page payload over `contract -> view_model -> gravity_table_adapter` for the live sibling page, defers heavy table rows unless `include_table_data=1` is explicit, and still must not trigger refresh/upstream fetch
   - `web_vitrina_contract` v1 is library-agnostic and currently materializes only:
     - `meta` = `snapshot_id`, `bundle_version`, `as_of_date`, `business_timezone`, `date_columns`, `temporal_slots`, `generated_at`, `refreshed_at`, `row_count`
     - `status_summary` = compact refresh/source freshness summary without raw `STATUS` dump

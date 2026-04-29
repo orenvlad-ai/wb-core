@@ -154,6 +154,7 @@ def run_browser_check(base_url: str) -> dict[str, object]:
             if not current_tail_button_enabled:
                 raise AssertionError("current visible tail date must stay enabled in the history calendar")
 
+            page.locator("[data-history-toggle]").click()
             page.locator("[data-history-preset='week']").click()
             page.wait_for_function(
                 "() => document.querySelector('[data-history-date-from]').value === '2026-04-18' && document.querySelector('[data-history-date-to]').value === '2026-04-21'",
@@ -169,7 +170,9 @@ def run_browser_check(base_url: str) -> dict[str, object]:
                 timeout=5000,
             )
             page.wait_for_function(
-                "() => document.querySelector('[data-page-meta]').textContent.includes('as_of_date 2026-04-21')",
+                """() => Array.from(
+                  document.querySelectorAll("[data-table-head] [data-col-id^='date:']")
+                ).some(node => node.getAttribute("data-col-id") === "date:2026-04-21")""",
                 timeout=5000,
             )
             period_query = page.evaluate("() => window.location.search")
