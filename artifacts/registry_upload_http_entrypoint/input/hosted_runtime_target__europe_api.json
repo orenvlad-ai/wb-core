@@ -16,7 +16,11 @@
     "test_command": "nginx -t",
     "reload_command": "systemctl reload nginx",
     "manifest_path": "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json",
-    "managed_block_label": "WB-CORE MANAGED PUBLIC ROUTES"
+    "managed_block_label": "WB-CORE MANAGED PUBLIC ROUTES",
+    "server_names": [
+      "89.191.226.88",
+      "api.selleros.pro"
+    ]
   },
   "managed_systemd_units": [
     {

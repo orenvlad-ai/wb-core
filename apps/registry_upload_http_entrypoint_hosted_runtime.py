@@ -138,6 +138,7 @@ class NginxPublicRoutesConfig:
     reload_command: str
     manifest_path: str
     managed_block_label: str = DEFAULT_NGINX_MANAGED_BLOCK_LABEL
+    server_names: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -223,6 +224,7 @@ def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
                 raw_nginx_public_routes.get("managed_block_label", DEFAULT_NGINX_MANAGED_BLOCK_LABEL)
             ).strip()
             or DEFAULT_NGINX_MANAGED_BLOCK_LABEL,
+            server_names=_configured_nginx_server_names(raw_nginx_public_routes.get("server_names")),
         )
 
     return HostedRuntimeTarget(
@@ -677,7 +679,7 @@ def apply_nginx_public_routes(target: HostedRuntimeTarget, *, dry_run: bool) -> 
         current_text,
         managed_block=managed_block,
         routes=routes,
-        server_name=_server_name_from_public_base_url(target.public_base_url),
+        server_names=_nginx_server_names_for_target(target),
         managed_block_label=config.managed_block_label,
     )
     changed = current_text != next_text
@@ -690,6 +692,7 @@ def apply_nginx_public_routes(target: HostedRuntimeTarget, *, dry_run: bool) -> 
         "manifest_path": config.manifest_path,
         "route_count": len(routes),
         "managed_block_label": config.managed_block_label,
+        "server_names": list(_nginx_server_names_for_target(target)),
         "proxy_pass_url": proxy_pass_url,
     }
     if dry_run:
@@ -772,9 +775,11 @@ def apply_managed_nginx_public_routes_to_text(
     *,
     managed_block: str,
     routes: list[dict[str, Any]],
-    server_name: str,
+    server_name: str | None = None,
+    server_names: tuple[str, ...] | list[str] | None = None,
     managed_block_label: str = DEFAULT_NGINX_MANAGED_BLOCK_LABEL,
 ) -> str:
+    desired_server_names = _normalize_nginx_server_names(server_names or ([server_name] if server_name else []))
     route_keys = {_nginx_route_key(route) for route in routes}
     route_keys.update(("", str(route["path"])) for route in routes)
     without_managed = _remove_managed_nginx_block(text, managed_block_label)
@@ -782,7 +787,7 @@ def apply_managed_nginx_public_routes_to_text(
     return _insert_managed_nginx_block(
         without_route_blocks,
         managed_block=managed_block,
-        server_name=server_name,
+        server_names=desired_server_names,
     )
 
 
@@ -823,6 +828,7 @@ def _describe_nginx_public_routes(target: HostedRuntimeTarget) -> dict[str, Any]
         "reload_command": target.nginx_public_routes.reload_command,
         "manifest_path": target.nginx_public_routes.manifest_path,
         "managed_block_label": target.nginx_public_routes.managed_block_label,
+        "server_names": list(_nginx_server_names_for_target(target)),
         "route_count": len(routes),
         "routes": [
             {
@@ -926,14 +932,54 @@ def _remove_nginx_location_blocks(text: str, route_keys: set[tuple[str, str]]) -
     return location_pattern.sub(replace, text)
 
 
-def _insert_managed_nginx_block(text: str, *, managed_block: str, server_name: str) -> str:
-    pattern = re.compile(rf"(?m)^([ \t]*server_name\s+{re.escape(server_name)};[ \t]*)$")
-    match = pattern.search(text)
-    if not match:
-        raise ValueError(f"server_name {server_name!r} not found in nginx server config")
-    insertion_point = match.end()
-    tail = re.sub(r"^\n+", "\n", text[insertion_point:])
-    return text[:insertion_point] + "\n\n" + managed_block + tail
+def _insert_managed_nginx_block(text: str, *, managed_block: str, server_names: tuple[str, ...]) -> str:
+    desired_server_names = _normalize_nginx_server_names(server_names)
+    desired_set = set(desired_server_names)
+    pattern = re.compile(r"(?m)^([ \t]*)server_name\s+([^;]+);[ \t]*$")
+    for match in pattern.finditer(text):
+        current_names = set(match.group(2).split())
+        if not (current_names & desired_set):
+            continue
+        directive = f"{match.group(1)}server_name {' '.join(desired_server_names)};"
+        rewritten = text[:match.start()] + directive + text[match.end():]
+        insertion_point = match.start() + len(directive)
+        tail = re.sub(r"^\n+", "\n", rewritten[insertion_point:])
+        return rewritten[:insertion_point] + "\n\n" + managed_block + tail
+    raise ValueError(f"none of server_names {list(desired_server_names)!r} found in nginx server config")
+
+
+def _configured_nginx_server_names(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("nginx_public_routes.server_names must be a JSON array when provided")
+    return _normalize_nginx_server_names(str(item) for item in value)
+
+
+def _nginx_server_names_for_target(target: HostedRuntimeTarget) -> tuple[str, ...]:
+    if target.nginx_public_routes and target.nginx_public_routes.server_names:
+        return target.nginx_public_routes.server_names
+    return (_safe_nginx_server_name(_server_name_from_public_base_url(target.public_base_url)),)
+
+
+def _normalize_nginx_server_names(values: Any) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for value in values or []:
+        server_name = _safe_nginx_server_name(value)
+        if server_name not in normalized:
+            normalized.append(server_name)
+    if not normalized:
+        raise ValueError("at least one nginx server_name is required")
+    return tuple(normalized)
+
+
+def _safe_nginx_server_name(value: Any) -> str:
+    server_name = str(value or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", server_name):
+        raise ValueError(f"invalid nginx server_name {value!r}")
+    if server_name == "_" or ".." in server_name:
+        raise ValueError(f"invalid nginx server_name {value!r}")
+    return server_name
 
 
 def _normalize_proxy_pass_url(loopback_base_url: str) -> str:
