@@ -63,6 +63,7 @@ update_note: "Phase 4 live page composition остаётся server-driven; вк
 - `status_verification`: targeted composition smoke, browser smoke и hosted/public probe подтверждены
 - `status_checkpoint`: рабочий checkpoint подтверждён
 - `status_main`: модуль смёржен в `main`
+- `status_live_publication`: current production verify target is `https://api.selleros.pro`; IP-only HTTP or missing `443 ssl` for this page is production publication drift, not an acceptable web-vitrina variant
 
 # 2. Upstream/source basis и semantics
 
