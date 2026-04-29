@@ -306,6 +306,7 @@ Public probe validates:
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx` returns either `200` + XLSX after regional calculation or truthful `422 {"error": ...}` before the first successful calculation
 - `POST /v1/sheet-vitrina-v1/refresh` returns JSON with either success shape including `server_context` or truthful `422 {"error": ...}`
   - refresh completion must separate `ready snapshot persisted` from semantic source health via explicit semantic fields
+  - after ready snapshot persistence and promo normalized archive sync, refresh runs bounded `promo_refresh_light_gc_v1`; it scans only promo artifact roots, protects the current collector run and replay-critical archive files, and surfaces `refresh_diagnostics.promo_artifact_gc` plus operator log summary. GC warnings stay warnings and must not convert a successful data refresh into an error.
 - `POST /v1/sheet-vitrina-v1/load` is archived and must return blocked/archived behavior; `GET /v1/sheet-vitrina-v1/job` remains a current operator log route for refresh/supply jobs
 
 If the task changes operator upload/calculate write paths inside this contour, live closure additionally requires one controlled end-to-end HTTP scenario on the hosted runtime:

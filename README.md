@@ -36,6 +36,7 @@ Legacy-репозитории остаются рабочими, но счита
 - full legacy parity по всем историческим registry rows и metric sections;
 - full legacy parity beyond current `102`-row uploaded metric dictionary и beyond current server-driven two-day read-side без поломки текущего contour;
 - repo-owned hosted runtime deploy/probe contract теперь materialized в repo, including managed public-route allowlist publishing for current wb-core routes; active hosted runtime target = `wb-core-eu-root` / `89.191.226.88` / `/opt/wb-core-runtime/state`; legacy `selleros-root` / `api.selleros.pro` target is archived/do-not-use for deploy/probe/GC/runtime tasks; final auth-hardening вокруг already materialized upload/read линии ещё не закрыты;
+- promo artifact retention встроен в hosted refresh: after normalized promo archive + ready snapshot persistence refresh runs bounded `promo_refresh_light_gc_v1`, protects current/unknown/replay-critical artifacts and surfaces GC summary in refresh diagnostics/job log;
 - окончательное решение по судьбе `AI_EXPORT` как compatibility contract или прямой замене server-side contract.
 
 ## Что repo уже содержит

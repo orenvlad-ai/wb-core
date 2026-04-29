@@ -48,6 +48,7 @@ from packages.application.web_vitrina_page_composition import (
 )
 from packages.application.web_vitrina_view_model import build_web_vitrina_view_model
 from packages.application.wb_regional_supply import WbRegionalSupplyBlock
+from apps.promo_campaign_archive_gc import run_promo_campaign_archive_light_gc
 from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE_NAME,
     DAILY_REFRESH_BUSINESS_HOURS,
@@ -77,6 +78,7 @@ from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope, SheetVit
 
 OperatorLogEmitter = Callable[[str], None]
 SheetLoadRunner = Callable[[SheetVitrinaV1Envelope, OperatorLogEmitter], dict[str, Any]]
+PromoArtifactGcRunner = Callable[..., dict[str, Any]]
 SHEET_OPERATOR_JOB_ID: ContextVar[str] = ContextVar("sheet_vitrina_v1_operator_job_id", default="")
 SHEET_VITRINA_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/refresh"
 SHEET_VITRINA_LOAD_ROUTE = "/v1/sheet-vitrina-v1/load"
@@ -490,11 +492,13 @@ class RegistryUploadHttpEntrypoint:
         seller_portal_recovery_controller: SellerPortalRecoveryController | None = None,
         feedbacks_block: SheetVitrinaV1FeedbacksBlock | None = None,
         feedbacks_ai_block: SheetVitrinaV1FeedbacksAiBlock | None = None,
+        promo_artifact_gc_runner: PromoArtifactGcRunner | None = None,
     ) -> None:
         self.runtime = runtime or RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
         self.activated_at_factory = activated_at_factory or _default_activated_at_factory
         self.refreshed_at_factory = refreshed_at_factory or _default_activated_at_factory
         self.now_factory = now_factory or _default_now_factory
+        self.promo_artifact_gc_runner = promo_artifact_gc_runner or run_promo_campaign_archive_light_gc
         self._sheet_cycle_lock = threading.RLock()
         self.sheet_plan_block = SheetVitrinaV1LivePlanBlock(
             runtime=self.runtime,
@@ -1488,6 +1492,31 @@ class RegistryUploadHttpEntrypoint:
                     save_snapshot_phase,
                     finished_at=self.activated_at_factory(),
                     status="success",
+                )
+                promo_gc_phase = _start_operator_phase(
+                    "promo_artifact_light_gc",
+                    started_at=self.activated_at_factory(),
+                )
+                promo_gc_summary = _run_promo_artifact_light_gc_after_refresh(
+                    runtime_dir=self.runtime.runtime_dir,
+                    refresh_diagnostics=refresh_diagnostics,
+                    runner=self.promo_artifact_gc_runner,
+                    emit=emit,
+                )
+                _finish_operator_phase(
+                    refresh_diagnostics,
+                    promo_gc_phase,
+                    finished_at=self.activated_at_factory(),
+                    status=(
+                        "success"
+                        if str(promo_gc_summary.get("status") or "") == "success"
+                        else "warning"
+                    ),
+                    note_kind=(
+                        None
+                        if str(promo_gc_summary.get("status") or "") == "success"
+                        else "promo_artifact_gc_warning"
+                    ),
                 )
                 refresh_outcome = _build_refresh_result_payload(refresh_result)
                 save_operator_phase = _start_operator_phase(
@@ -3057,6 +3086,89 @@ class SheetVitrinaV1OperatorJobStore:
             job.log_lines.append(f"{timestamp} {message}")
             if len(job.log_lines) > 4000:
                 job.log_lines = job.log_lines[-4000:]
+
+
+def _run_promo_artifact_light_gc_after_refresh(
+    *,
+    runtime_dir: Path,
+    refresh_diagnostics: dict[str, Any],
+    runner: PromoArtifactGcRunner,
+    emit: OperatorLogEmitter,
+) -> dict[str, Any]:
+    protected_run_dirs = _promo_artifact_gc_protected_run_dirs(refresh_diagnostics)
+    try:
+        summary = runner(
+            runtime_dir=runtime_dir,
+            current_run_dirs=protected_run_dirs,
+        )
+        if not isinstance(summary, Mapping):
+            summary = {
+                "policy_name": "promo_refresh_light_gc_v1",
+                "status": "warning",
+                "warning": "gc_runner_returned_non_mapping_summary",
+                "deleted_count": 0,
+                "freed_bytes": 0,
+                "skipped_count": 0,
+                "skip_reasons": {},
+                "duration_ms": None,
+            }
+    except Exception as exc:
+        summary = {
+            "policy_name": "promo_refresh_light_gc_v1",
+            "status": "warning",
+            "warning": f"{type(exc).__name__}: {exc}",
+            "deleted_count": 0,
+            "freed_bytes": 0,
+            "skipped_count": 0,
+            "skip_reasons": {},
+            "duration_ms": None,
+        }
+    normalized = dict(summary)
+    normalized.setdefault("policy_name", "promo_refresh_light_gc_v1")
+    normalized.setdefault("status", "warning")
+    normalized.setdefault("warning", "")
+    normalized.setdefault("deleted_count", 0)
+    normalized.setdefault("freed_bytes", 0)
+    normalized.setdefault("skipped_count", 0)
+    normalized.setdefault("skip_reasons", {})
+    normalized["protected_run_dirs"] = protected_run_dirs
+    refresh_diagnostics["promo_artifact_gc"] = normalized
+    emit(
+        _format_log_event(
+            "promo_artifact_gc_finish",
+            cycle="refresh",
+            policy_name=normalized.get("policy_name"),
+            status=normalized.get("status"),
+            warning=normalized.get("warning"),
+            deleted_count=normalized.get("deleted_count"),
+            freed_bytes=normalized.get("freed_bytes"),
+            skipped_count=normalized.get("skipped_count"),
+            skip_reasons=json.dumps(normalized.get("skip_reasons") or {}, ensure_ascii=False, sort_keys=True),
+            duration_ms=normalized.get("duration_ms"),
+        )
+    )
+    return normalized
+
+
+def _promo_artifact_gc_protected_run_dirs(refresh_diagnostics: Mapping[str, Any]) -> list[str]:
+    protected: list[str] = []
+    source_slots = refresh_diagnostics.get("source_slots")
+    if not isinstance(source_slots, list):
+        return protected
+    for slot in source_slots:
+        if not isinstance(slot, Mapping):
+            continue
+        promo_diagnostics = slot.get("promo_diagnostics")
+        if not isinstance(promo_diagnostics, Mapping):
+            continue
+        context = promo_diagnostics.get("context")
+        if not isinstance(context, Mapping):
+            continue
+        for key in ("current_run_dir", "collector_run_dir"):
+            value = str(context.get(key) or "").strip()
+            if value and value not in protected:
+                protected.append(value)
+    return protected
 
 
 def _sheet_row_counts(plan: SheetVitrinaV1Envelope) -> dict[str, int]:

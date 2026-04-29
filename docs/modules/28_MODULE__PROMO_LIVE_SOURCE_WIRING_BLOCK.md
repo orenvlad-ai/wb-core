@@ -174,6 +174,7 @@ Retention / GC guard:
 - `apps/promo_campaign_archive_gc.py dry-run` builds a deletion plan without deleting.
 - `apps/promo_campaign_archive_gc.py apply --confirm` deletes only guarded candidates from the structured plan; it never removes archive records, metadata, normalized rows/manifests, exact-date runtime snapshots or unknown/incomplete parse artifacts.
 - Safe workbook deletion is limited to duplicate workbook copies after hash proof and normalized row archive proof. Old successful HAR/screenshots/request logs may be planned after TTL; failed traces use a longer TTL and keep compact summaries.
+- The hosted `POST /v1/sheet-vitrina-v1/refresh` flow runs automatic `promo_refresh_light_gc_v1` only after the ready snapshot is persisted and promo archive sync has written normalized replay-critical rows/manifests. The light GC is bounded, scans only `promo_xlsx_collector_runs` + the promo archive metadata needed for hash proof, protects the current run, skips unknown/incomplete state, and surfaces `promo_artifact_gc` summary in `refresh_diagnostics` and the operator job log. GC warnings do not turn a successful data refresh into a failed refresh.
 
 # 6. Кодовые части
 
@@ -210,6 +211,7 @@ Retention / GC guard:
   - current promo metric rows are present in public `web-vitrina` and are not all blank, while truthful zero rows for ineligible SKU remain valid.
 - Required checklist rule: run `python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py` after changes touching `promo_by_price` materialization, promo archive/artifact validation, promo collector diagnostics/status handling, `ended_without_download` / expected non-materializable campaign handling, `sheet_vitrina_v1` refresh orchestration, temporal source acceptance/fallback around promo, promo source-status reduction, web-vitrina read/page-composition paths that affect promo row visibility, or hosted deploys where current promo correctness must be verified.
 - Retention changes must additionally pass `python3 apps/promo_campaign_archive_gc_smoke.py` and a GC `dry-run` on the intended runtime before any live `apply`.
+- Refresh-integrated retention changes must also pass `python3 apps/sheet_vitrina_v1_refresh_promo_artifact_gc_smoke.py`; the fixture proves normalized archive preservation, current-run protection, old successful debug deletion, unknown-run skip, and warning surfacing on GC failure.
 - If local CA verification blocks the live read while the route is otherwise reachable, the accepted local-only fallback is `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1 python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py`; timeout, non-200 route status or bad payload remains a real blocker.
 - This smoke is read-only and must not be replaced by `/v1/sheet-vitrina-v1/load`, Google Sheets/GAS, browser `localStorage` truth or a runtime refresh unless a separate task explicitly requires a controlled refresh.
 - Hosted live closure additionally depends on one bounded runtime dependency seam:
