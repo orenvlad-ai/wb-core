@@ -29,7 +29,7 @@
 
 Главный незакрытый gap текущего `main`:
 - registry upload и bounded reverse-load уже присутствуют в текущей линии;
-- этот документ теперь признаёт repo-owned hosted runtime deploy/probe contract для active EU target `wb-core-eu-root` / `89.191.226.88`; archived `selleros-root` / `api.selleros.pro` target не является active runtime/update target, хранится только как rollback/read-only evidence, а mutating deploy/apply-nginx/restart/update/GC paths должны fail-fast без explicit emergency rollback override.
+- этот документ теперь признаёт repo-owned hosted runtime deploy/probe contract для active EU target `wb-core-eu-root` / `89.191.226.88` с `api.selleros.pro` как допустимым current live DNS name; archived `selleros-root` / `178.72.152.177` target не является active runtime/update target, хранится только как rollback/read-only evidence, а mutating deploy/apply-nginx/restart/update/GC paths должны fail-fast без explicit emergency rollback override.
 
 После этого незакрытым хвостом остаются:
 - full legacy parity по всем metric sections;

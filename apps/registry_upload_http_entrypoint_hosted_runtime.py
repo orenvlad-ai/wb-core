@@ -82,12 +82,12 @@ ROLLBACK_TARGET_WRITE_OVERRIDE_ENV = "WB_CORE_ALLOW_ROLLBACK_TARGET_WRITE"
 ROLLBACK_TARGET_WRITE_OVERRIDE_VALUE = "I_UNDERSTAND_SELLEROS_IS_ROLLBACK_ONLY"
 CURRENT_LIVE_TARGET_FILE_HINT = "artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json"
 ACTIVE_HOSTED_RUNTIME_SSH_DESTINATION = "wb-core-eu-root"
-ACTIVE_HOSTED_RUNTIME_PUBLIC_HOSTS = {"89.191.226.88"}
+ACTIVE_HOSTED_RUNTIME_PUBLIC_HOSTS = {"89.191.226.88", "api.selleros.pro"}
 ACTIVE_HOSTED_RUNTIME_TARGET_DIR = "/opt/wb-core-runtime/app"
 ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR = "/opt/wb-core-runtime/state"
 ACTIVE_HOSTED_RUNTIME_SERVICE_NAME = "wb-core-registry-http.service"
 ARCHIVED_HOSTED_RUNTIME_SSH_DESTINATIONS = {"selleros-root"}
-ARCHIVED_HOSTED_RUNTIME_PUBLIC_HOSTS = {"api.selleros.pro", "178.72.152.177"}
+ARCHIVED_HOSTED_RUNTIME_PUBLIC_HOSTS = {"178.72.152.177"}
 ROLLBACK_ONLY_STATUSES = {ARCHIVED_TARGET_STATUS, "rollback_only", "deprecated"}
 ROLLBACK_ONLY_ROLES = {ROLLBACK_ONLY_TARGET_ROLE, "do_not_deploy", "deprecated_live_target"}
 ROLLBACK_ONLY_LIFECYCLES = {ROLLBACK_ONLY_TARGET_LIFECYCLE, "rollback_only", "archived"}
@@ -193,6 +193,9 @@ class HostedRuntimeTarget:
     target_role: str = ""
     target_lifecycle: str = ""
     mutation_policy: str = ""
+    host_ip: str = ""
+    legacy_host_ip: str = ""
+    public_domain: str = ""
     archive_note: str = ""
     provider_side_label_recommendation: str = ""
 
@@ -285,6 +288,9 @@ def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
         target_role=str(payload.get("target_role", "")).strip(),
         target_lifecycle=str(payload.get("target_lifecycle", "")).strip(),
         mutation_policy=str(payload.get("mutation_policy", "")).strip(),
+        host_ip=str(payload.get("host_ip", "")).strip(),
+        legacy_host_ip=str(payload.get("legacy_host_ip", "")).strip(),
+        public_domain=str(payload.get("public_domain", "")).strip(),
         archive_note=str(payload.get("archive_note", "")).strip(),
         provider_side_label_recommendation=str(payload.get("provider_side_label_recommendation", "")).strip(),
     )
@@ -349,6 +355,9 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
         "target_role": target.target_role or None,
         "target_lifecycle": target.target_lifecycle or None,
         "mutation_policy": target.mutation_policy or None,
+        "host_ip": target.host_ip or None,
+        "legacy_host_ip": target.legacy_host_ip or None,
+        "public_domain": target.public_domain or None,
         "archive_note": target.archive_note or None,
         "provider_side_label_recommendation": target.provider_side_label_recommendation or None,
         "public_base_url": target.public_base_url,
