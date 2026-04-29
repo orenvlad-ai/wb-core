@@ -66,6 +66,7 @@ Canonical pre-cutover target for the EU VPS migration preparation:
 The EU target is intentionally IP-based until DNS cutover. The old selleros target remains the rollback/live contour and must not be changed as part of EU host preparation.
 
 Canonical repo-owned systemd artifacts for this contour:
+- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-registry-http.service`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.service`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.service`
@@ -119,6 +120,10 @@ Known selleros target values теперь зафиксированы repo-owned:
 - `nginx_public_routes.test_command = nginx -t`
 - `nginx_public_routes.reload_command = systemctl reload nginx`
 - route paths inside `runtime_env` follow current entrypoint defaults
+
+EU pre-cutover target note:
+- the blank EU host also manages `wb-core-registry-http.service` from the repo-owned systemd artifact, then enables it for boot and restarts it through the existing `restart_command`;
+- the old selleros rollback target may keep using the already installed host service and must not be changed during EU preparation.
 
 Secrets and mutable credentials по-прежнему не хранятся в Git. Repo stores only non-secret target wiring and unit artifacts.
 
