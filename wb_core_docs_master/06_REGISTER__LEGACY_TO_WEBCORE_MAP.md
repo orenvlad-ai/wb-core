@@ -28,7 +28,7 @@ update_triggers:
   - "перенос новой legacy capability"
   - "изменение migration boundary"
   - "закрытие крупного compatibility gap"
-built_from_commit: "5ed568cf0ca49559b5fd21510b5e0da7e3cc927e"
+built_from_commit: "fea50f1cb627a9723b14e4b9c6281d7453e93224"
 ---
 
 # Summary
@@ -47,9 +47,9 @@ built_from_commit: "5ed568cf0ca49559b5fd21510b5e0da7e3cc927e"
 | legacy `DATA`/vitrina readback | `sheet_vitrina_v1_mvp_end_to_end_block` + `promo_live_source_wiring_block` | bounded replacement есть | rows materialize-ятся по uploaded package; `COST_PRICE` overlay и promo-backed `promo_by_price` rows уже server-side integrated в current refresh/runtime/read-side contour |
 | legacy report historical fact gaps | accepted temporal slots + `manual_monthly_plan_report_baseline` + one-off ready-fact reconcile | bounded server-side replacement есть | plan-report may use controlled monthly XLSX baseline only for full-month aggregates; ready snapshots may be one-off reconcile input for missing accepted `fin_report_daily` / `ads_compact` slots; neither path revives Google Sheets/GAS as report truth |
 | legacy `AI_EXPORT` | отдельного полного replacement пока нет | open gap | compatibility boundary ещё не закрыт |
-| `wb-ai-research` ingest/runtime вокруг registry | `registry_upload_file_backed_service_block`, `registry_upload_db_backed_runtime_block`, `registry_upload_http_entrypoint_block` | перенесено bounded chain-ом | repo-owned deploy/probe contract and managed public-route allowlist есть, actual deploy rights/final hardening остаются отдельно |
+| `wb-ai-research` ingest/runtime вокруг registry | `registry_upload_file_backed_service_block`, `registry_upload_db_backed_runtime_block`, `registry_upload_http_entrypoint_block` | перенесено bounded chain-ом | repo-owned deploy/probe contract, EU current-live target metadata, managed public-route allowlist and rollback-only selleros write guard есть; final auth/storage hardening остаётся отдельно |
 | `wb-ai-research` snapshot consumers | source/data blocks `01–10` | largely migrated | current repo owns contracts/artifacts/smokes |
-| `wb-web-bot` browser web-source capture | `web_source_snapshot_block` consumer boundary + `promo_xlsx_collector_block` precursor + `promo_live_source_wiring_block` | bounded thin adapter boundary materialized | wb-core now owns canonical hydration/modal/drawer semantics, sidecar contract, workbook inspection and live promo source wiring, but not the whole browser runtime |
+| `wb-web-bot` browser web-source capture | `web_source_snapshot_block` consumer boundary + `promo_xlsx_collector_block` precursor + `promo_live_source_wiring_block` | bounded thin adapter boundary materialized | wb-core now owns canonical hydration/modal/drawer semantics, sidecar contract, workbook inspection, normalized promo archive, refresh-integrated promo artifact GC and live promo source wiring, but not the whole browser runtime |
 
 ## Boundary rules
 

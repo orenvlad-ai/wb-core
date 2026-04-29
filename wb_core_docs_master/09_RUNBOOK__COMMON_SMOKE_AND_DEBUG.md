@@ -52,7 +52,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "5ed568cf0ca49559b5fd21510b5e0da7e3cc927e"
+built_from_commit: "fea50f1cb627a9723b14e4b9c6281d7453e93224"
 ---
 
 # Summary
@@ -133,6 +133,8 @@ python3 apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py
 python3 apps/promo_xlsx_collector_contract_smoke.py
 python3 apps/promo_xlsx_collector_integration_smoke.py
 python3 apps/promo_campaign_archive_integrity_smoke.py
+python3 apps/promo_campaign_archive_gc_smoke.py
+python3 apps/sheet_vitrina_v1_refresh_promo_artifact_gc_smoke.py
 python3 apps/sheet_vitrina_v1_promo_live_source_smoke.py
 python3 apps/sheet_vitrina_v1_promo_live_source_integration_smoke.py
 python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py
@@ -141,7 +143,9 @@ git diff --check
 
 Current promo smoke intent:
 - `apps/sheet_vitrina_v1_promo_live_source_smoke.py` now additionally proves historical interval replay fills the exact-date promo seam on `yesterday_closed` cache miss.
-- `apps/promo_campaign_archive_integrity_smoke.py` audits promo archive artifact states without deleting, repairing, downloading or changing accepted truth.
+- `apps/promo_campaign_archive_integrity_smoke.py` proves normalized promo replay still works after raw workbook is hidden in fixture.
+- `apps/promo_campaign_archive_gc_smoke.py` covers guarded audit/dry-run/apply fixture behavior, duplicate/debug cleanup candidates and unknown/incomplete artifact skips.
+- `apps/sheet_vitrina_v1_refresh_promo_artifact_gc_smoke.py` proves refresh-integrated light GC runs after normalized archive/ready snapshot persistence and surfaces warnings without turning successful data refresh into data loss.
 - `apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py` is the read-only live/public guard for `promo_by_price[today_current]`, expected ended/no-download diagnostics and non-blank current promo rows.
 
 Current web-vitrina phase-2 smoke intent:
@@ -257,8 +261,18 @@ Required local env for the runner itself:
 
 Canonical target template:
 - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__example.json`
-- current selleros live target:
+- current EU live target:
+  - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json`
+  - `ssh_destination = wb-core-eu-root`
+  - `host_ip = 89.191.226.88`
+  - `public_domain = api.selleros.pro`
+  - `runtime_dir = /opt/wb-core-runtime/state`
+  - `service_name = wb-core-registry-http.service`
+- rollback-only old selleros target:
   - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__selleros_api.json`
+  - `ssh_destination = selleros-root`
+  - `legacy_host_ip = 178.72.152.177`
+  - routine mutating actions fail fast unless `WB_CORE_ALLOW_ROLLBACK_TARGET_WRITE=I_UNDERSTAND_SELLEROS_IS_ROLLBACK_ONLY`
 - repo-owned systemd artifacts:
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.service`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`
@@ -284,6 +298,8 @@ Current promo archive/runtime norm:
 - promo collector is archive-first: unchanged campaigns reuse archived workbook artifacts instead of redownloading every Excel
 - historical `promo_by_price[yesterday_closed]` may be truthfully filled from campaign interval replay into exact-date runtime seam when archive coverage exists
 - uncovered dates must stay blank/incomplete; no fake sheet-side backfill is allowed
+- campaign rows are normalized into `campaign_rows.jsonl` plus manifest/fingerprint/source metadata so replay does not require indefinite raw workbook retention
+- refresh automatically runs bounded `promo_refresh_light_gc_v1` after normalized archive + ready snapshot persistence; unknown/current/replay-critical files are skipped, not deleted
 
 Current hosted runtime dependency note for promo live wiring:
 - hosted `deploy` now also ensures `openpyxl==3.1.5` and `playwright==1.58.0` on the remote system python before restarting `wb-core-registry-http.service`;
