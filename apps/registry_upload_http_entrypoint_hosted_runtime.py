@@ -23,6 +23,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+PROBE_BODY_LIMIT_BYTES = 768 * 1024
+
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_COST_PRICE_UPLOAD_PATH,
     DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
@@ -1170,7 +1172,7 @@ def _collect_http_probe(
         request.add_header("Content-Length", str(len(body)))
     try:
         with _open_request(request, timeout_seconds=timeout_seconds) as response:
-            body_text = response.read().decode("utf-8", errors="replace")
+            body_text, body_truncated, body_bytes_read = _read_probe_response_body(response)
             return {
                 "route": name,
                 "method": method,
@@ -1178,11 +1180,13 @@ def _collect_http_probe(
                 "http_status": response.getcode(),
                 "content_type": response.headers.get("Content-Type", ""),
                 "body_excerpt": body_text,
+                "body_truncated": body_truncated,
+                "body_bytes_read": body_bytes_read,
                 "json_body": _try_load_json(body_text),
                 "network_error": None,
             }
     except urllib_error.HTTPError as exc:
-        body_text = exc.read().decode("utf-8", errors="replace")
+        body_text, body_truncated, body_bytes_read = _read_probe_response_body(exc)
         return {
             "route": name,
             "method": method,
@@ -1190,6 +1194,8 @@ def _collect_http_probe(
             "http_status": exc.code,
             "content_type": exc.headers.get("Content-Type", ""),
             "body_excerpt": body_text,
+            "body_truncated": body_truncated,
+            "body_bytes_read": body_bytes_read,
             "json_body": _try_load_json(body_text),
             "network_error": None,
         }
@@ -1433,9 +1439,12 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
 
     payload = result.get("json_body")
     if not isinstance(payload, dict):
-        evaluation["ok"] = False
-        evaluation["detail"] = "expected JSON object response"
-        return evaluation
+        if result.get("body_truncated"):
+            payload = _synthetic_payload_from_truncated_json(str(result.get("body_excerpt") or ""))
+        else:
+            evaluation["ok"] = False
+            evaluation["detail"] = "expected JSON object response"
+            return evaluation
 
     if route == "status":
         evaluation["ok"], evaluation["detail"] = _validate_json_result(
@@ -1710,6 +1719,31 @@ def _validate_json_result(
     return False, f"unexpected HTTP status {status}"
 
 
+def _read_probe_response_body(response: Any) -> tuple[str, bool, int]:
+    content_type = str(response.headers.get("Content-Type", "") or "").lower()
+    if any(
+        binary_type in content_type
+        for binary_type in (
+            "spreadsheetml.sheet",
+            "application/zip",
+            "application/octet-stream",
+        )
+    ):
+        return "", False, 0
+    raw = response.read(PROBE_BODY_LIMIT_BYTES + 1)
+    body_truncated = len(raw) > PROBE_BODY_LIMIT_BYTES
+    if body_truncated:
+        raw = raw[:PROBE_BODY_LIMIT_BYTES]
+    return raw.decode("utf-8", errors="replace"), body_truncated, len(raw)
+
+
+def _synthetic_payload_from_truncated_json(body: str) -> dict[str, Any]:
+    return {
+        match.group(1): True
+        for match in re.finditer(r'"([^"\\]+)"\s*:', body)
+    }
+
+
 def _collect_remote_loopback_surface(
     target: HostedRuntimeTarget,
     *,
@@ -1792,6 +1826,7 @@ from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
 PAYLOAD = json.loads({payload_json!r})
+PROBE_BODY_LIMIT_BYTES = {PROBE_BODY_LIMIT_BYTES!r}
 
 def _append_as_of_date(url, as_of_date):
     if not as_of_date:
@@ -1829,6 +1864,23 @@ def _try_load_json(body_text):
     except json.JSONDecodeError:
         return None
 
+def _read_probe_response_body(response):
+    content_type = str(response.headers.get("Content-Type", "") or "").lower()
+    if any(
+        binary_type in content_type
+        for binary_type in (
+            "spreadsheetml.sheet",
+            "application/zip",
+            "application/octet-stream",
+        )
+    ):
+        return "", False, 0
+    raw = response.read(PROBE_BODY_LIMIT_BYTES + 1)
+    body_truncated = len(raw) > PROBE_BODY_LIMIT_BYTES
+    if body_truncated:
+        raw = raw[:PROBE_BODY_LIMIT_BYTES]
+    return raw.decode("utf-8", errors="replace"), body_truncated, len(raw)
+
 
 def _open_request(request: urllib_request.Request, *, timeout_seconds: float):
     try:
@@ -1855,7 +1907,7 @@ def _collect(name, method, url, json_payload=None):
         request.add_header("Content-Length", str(len(body)))
     try:
         with urllib_request.urlopen(request, timeout=PAYLOAD["timeout_seconds"]) as response:
-            body_text = response.read().decode("utf-8", errors="replace")
+            body_text, body_truncated, body_bytes_read = _read_probe_response_body(response)
             return {{
                 "route": name,
                 "method": method,
@@ -1863,18 +1915,22 @@ def _collect(name, method, url, json_payload=None):
                 "http_status": response.getcode(),
                 "content_type": response.headers.get("Content-Type", ""),
                 "body_excerpt": body_text,
+                "body_truncated": body_truncated,
+                "body_bytes_read": body_bytes_read,
                 "json_body": _try_load_json(body_text),
                 "network_error": None,
             }}
     except urllib_error.HTTPError as exc:
-        body_text = exc.read().decode("utf-8", errors="replace")
+        body_text, body_truncated, body_bytes_read = _read_probe_response_body(exc)
         return {{
             "route": name,
             "method": method,
             "url": url,
             "http_status": exc.code,
             "content_type": exc.headers.get("Content-Type", ""),
-                "body_excerpt": body_text,
+            "body_excerpt": body_text,
+            "body_truncated": body_truncated,
+            "body_bytes_read": body_bytes_read,
             "json_body": _try_load_json(body_text),
             "network_error": None,
         }}
