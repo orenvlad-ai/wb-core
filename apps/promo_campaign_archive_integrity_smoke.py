@@ -22,6 +22,8 @@ from packages.application.promo_campaign_archive import (  # noqa: E402
     ARTIFACT_STATE_WORKBOOK_WITHOUT_METADATA,
     audit_promo_campaign_archive,
     materialize_promo_result_from_archive,
+    promo_campaign_rows_archive_path,
+    promo_campaign_rows_manifest_path,
     promo_campaign_archive_root,
     sync_promo_campaign_archive,
 )
@@ -117,6 +119,7 @@ def main() -> None:
         _assert_expected_non_materializable_is_not_fatal(Path(tmp) / "case-a")
         _assert_true_artifact_loss_remains_fatal(Path(tmp) / "case-b")
         _assert_only_expected_non_materializable_stays_incomplete(Path(tmp) / "case-c")
+        _assert_normalized_rows_replay_without_workbook(Path(tmp) / "case-d")
         print(
             "promo campaign archive integrity smoke passed: "
             f"states={counts}; validation_failed_count={audit.get('validation_failed_count')}"
@@ -275,6 +278,77 @@ def _assert_only_expected_non_materializable_stays_incomplete(runtime_dir: Path)
         raise AssertionError(f"ended-only case must expose expected non-materializable artifacts, got {diagnostics}")
     if "no_materializable_campaign_artifacts=true" not in (result.detail or ""):
         raise AssertionError(f"ended-only incomplete detail missing explicit reason, got {result.detail}")
+
+
+def _assert_normalized_rows_replay_without_workbook(runtime_dir: Path) -> None:
+    _write_promo_fixture(
+        runtime_dir=runtime_dir,
+        run_name="2026-04-26__complete-normalized",
+        promo_folder="2401__3401__complete-normalized",
+        promo_id=2401,
+        period_id=3401,
+        title="Complete normalized replay artifact",
+        confidence="high",
+        workbook_kind="valid",
+    )
+    _write_price_truth(runtime_dir=runtime_dir, snapshot_date="2026-04-26", nm_id=123456, discounted_price=900)
+    sync_summary = sync_promo_campaign_archive(runtime_dir)
+    archive_dir = promo_campaign_archive_root(runtime_dir) / "2401__3401__complete-normalized-replay-artifact"
+    if not promo_campaign_rows_archive_path(archive_dir).exists():
+        raise AssertionError("sync must persist normalized campaign rows")
+    if not promo_campaign_rows_manifest_path(archive_dir).exists():
+        raise AssertionError("sync must persist normalized campaign row manifest")
+
+    before = materialize_promo_result_from_archive(
+        runtime_dir=runtime_dir,
+        snapshot_date="2026-04-26",
+        requested_nm_ids=[123456],
+        sync_summary=sync_summary,
+        diagnostics={},
+    )
+    if before.kind != "success" or before.covered_count != 1 or not before.items:
+        raise AssertionError(f"workbook-backed replay fixture must succeed before hiding workbook, got {before}")
+
+    hidden_paths: list[Path] = []
+    for workbook_path in sorted(runtime_dir.glob("**/workbook.xlsx")):
+        hidden_path = workbook_path.with_name("workbook.hidden-by-smoke.xlsx")
+        workbook_path.rename(hidden_path)
+        hidden_paths.append(hidden_path)
+    try:
+        audit = audit_promo_campaign_archive(runtime_dir, deep_workbook_check=True)
+        counts = audit.get("artifact_state_counts") or {}
+        if int(counts.get(ARTIFACT_STATE_COMPLETE, 0) or 0) != 1:
+            raise AssertionError(f"normalized row archive must keep artifact complete without workbook, got {audit}")
+        if int(audit.get("normalized_row_archive_count") or 0) != 1:
+            raise AssertionError(f"expected one normalized row archive, got {audit}")
+        after = materialize_promo_result_from_archive(
+            runtime_dir=runtime_dir,
+            snapshot_date="2026-04-26",
+            requested_nm_ids=[123456],
+            sync_summary=sync_summary,
+            diagnostics={},
+        )
+    finally:
+        for hidden_path in hidden_paths:
+            hidden_path.rename(hidden_path.with_name("workbook.xlsx"))
+
+    if after.kind != before.kind or after.covered_count != before.covered_count:
+        raise AssertionError(f"normalized replay changed result envelope: before={before}, after={after}")
+    before_item = before.items[0]
+    after_item = after.items[0]
+    comparable_fields = (
+        "promo_count_by_price",
+        "promo_entry_price_best",
+        "promo_participation",
+    )
+    for field in comparable_fields:
+        if getattr(before_item, field) != getattr(after_item, field):
+            raise AssertionError(f"normalized replay mismatch for {field}: before={before_item}, after={after_item}")
+    for counter in ("candidate_row_count", "eligible_row_count", "accepted_row_count"):
+        before_value = (before.diagnostics.get("counters") or {}).get(counter)
+        after_value = (after.diagnostics.get("counters") or {}).get(counter)
+        if before_value != after_value:
+            raise AssertionError(f"normalized replay counter mismatch for {counter}: before={before.diagnostics}, after={after.diagnostics}")
 
 
 def _write_promo_fixture(

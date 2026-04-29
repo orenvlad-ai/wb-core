@@ -60,7 +60,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
 
 
 DEFAULT_TARGET_FILE = (
-    ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "hosted_runtime_target__example.json"
+    ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "hosted_runtime_target__europe_api.json"
 )
 DEFAULT_PUBLIC_ROUTE_ALLOWLIST_FILE = (
     ROOT / "artifacts" / "registry_upload_http_entrypoint" / "nginx" / "public_route_allowlist.json"
@@ -70,6 +70,17 @@ SSH_IDENTITY_FILE_ENV = "WB_CORE_HOSTED_RUNTIME_SSH_IDENTITY_FILE"
 SSH_OPTIONS_ENV = "WB_CORE_HOSTED_RUNTIME_SSH_OPTIONS"
 DEFAULT_NGINX_MANAGED_BLOCK_LABEL = "WB-CORE MANAGED PUBLIC ROUTES"
 DEFAULT_NGINX_MANAGED_TLS_BLOCK_LABEL = "WB-CORE MANAGED TLS"
+ACTIVE_TARGET_STATUS = "active"
+ARCHIVED_TARGET_STATUS = "archived"
+LOCAL_TEST_TARGET_STATUS = "local_test"
+ACTIVE_HOSTED_RUNTIME_SSH_DESTINATION = "wb-core-eu-root"
+ACTIVE_HOSTED_RUNTIME_PUBLIC_HOSTS = {"89.191.226.88"}
+ACTIVE_HOSTED_RUNTIME_TARGET_DIR = "/opt/wb-core-runtime/app"
+ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR = "/opt/wb-core-runtime/state"
+ACTIVE_HOSTED_RUNTIME_SERVICE_NAME = "wb-core-registry-http.service"
+ARCHIVED_HOSTED_RUNTIME_SSH_DESTINATIONS = {"selleros-root"}
+ARCHIVED_HOSTED_RUNTIME_PUBLIC_HOSTS = {"api.selleros.pro", "178.72.152.177"}
+LOCAL_TEST_PUBLIC_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 RUNTIME_ENV_CONTRACT = [
     "REGISTRY_UPLOAD_HTTP_HOST",
@@ -153,6 +164,7 @@ class NginxPublicRoutesConfig:
 
 @dataclass(frozen=True)
 class HostedRuntimeTarget:
+    target_status: str
     target_id: str
     public_base_url: str
     loopback_base_url: str
@@ -239,6 +251,7 @@ def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
         )
 
     return HostedRuntimeTarget(
+        target_status=str(payload.get("target_status", ACTIVE_TARGET_STATUS)).strip() or ACTIVE_TARGET_STATUS,
         target_id=str(payload.get("target_id", "")).strip(),
         public_base_url=_normalize_base_url(str(payload.get("public_base_url", "")).strip()),
         loopback_base_url=_normalize_base_url(str(payload.get("loopback_base_url", "")).strip()),
@@ -285,6 +298,7 @@ def build_runtime_contract_summary(target: HostedRuntimeTarget) -> dict[str, Any
 
 def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
     missing = _missing_for_deploy(target)
+    target_blockers = _target_action_blockers(target)
     deploy_sequence = [
         "sync current checked-out worktree to target_dir via rsync",
         "install required Python runtime packages on the hosted system python",
@@ -308,6 +322,7 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
         ]
     )
     return {
+        "target_status": target.target_status,
         "target_id": target.target_id,
         "public_base_url": target.public_base_url,
         "loopback_base_url": target.loopback_base_url,
@@ -325,6 +340,7 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
         "optional_runtime_contract": OPTIONAL_RUNTIME_CONTRACT,
         "deploy_sequence": deploy_sequence,
         "missing_for_deploy": missing,
+        "target_action_blockers": target_blockers,
         "applicable_to_current_checkout_without_merge": True,
     }
 
@@ -1138,6 +1154,7 @@ def _run_shell_command(command: str) -> subprocess.CompletedProcess[str]:
 
 def run_public_probe_command(args: argparse.Namespace) -> int:
     target = load_hosted_runtime_target(args.target_file)
+    _ensure_active_hosted_runtime_target(target, action="public-probe")
     raw_results = collect_public_surface(
         base_url=target.public_base_url,
         route_paths=target.route_paths,
@@ -1162,6 +1179,7 @@ def run_public_probe_command(args: argparse.Namespace) -> int:
 
 def run_loopback_probe_command(args: argparse.Namespace) -> int:
     target = load_hosted_runtime_target(args.target_file)
+    _ensure_active_hosted_runtime_target(target, action="loopback-probe")
     payload = {
         "target_id": target.target_id,
         "as_of_date": args.as_of_date,
@@ -1194,6 +1212,7 @@ def run_print_plan_command(args: argparse.Namespace) -> int:
 def run_deploy_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
+    _ensure_active_hosted_runtime_target(target, action="deploy")
     payload = {
         "target_id": target.target_id,
         **deploy_current_checkout(
@@ -1210,6 +1229,7 @@ def run_deploy_command(args: argparse.Namespace) -> int:
 def run_deploy_and_verify_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
+    _ensure_active_hosted_runtime_target(target, action="deploy-and-verify")
     deploy_summary = deploy_current_checkout(
         target,
         target_file=target_file,
@@ -1257,6 +1277,7 @@ def run_deploy_and_verify_command(args: argparse.Namespace) -> int:
 
 def run_apply_nginx_routes_command(args: argparse.Namespace) -> int:
     target = load_hosted_runtime_target(args.target_file)
+    _ensure_active_hosted_runtime_target(target, action="apply-nginx-routes")
     payload = {
         "target_id": target.target_id,
         "nginx_public_routes": apply_nginx_public_routes(target, dry_run=args.dry_run),
@@ -2368,6 +2389,57 @@ def _missing_for_deploy(target: HostedRuntimeTarget) -> list[str]:
             except Exception:
                 missing.append("nginx_public_routes.manifest_path")
     return missing
+
+
+def _ensure_active_hosted_runtime_target(target: HostedRuntimeTarget, *, action: str) -> None:
+    blockers = _target_action_blockers(target)
+    if blockers:
+        raise ValueError(
+            f"{action} refused for non-active hosted runtime target "
+            f"{target.target_id!r}: {'; '.join(blockers)}"
+        )
+
+
+def _target_action_blockers(target: HostedRuntimeTarget) -> list[str]:
+    blockers: list[str] = []
+    status = str(target.target_status or "").strip().lower()
+    ssh_destination = str(target.ssh_destination or "").strip()
+    public_host = _public_base_url_host(target.public_base_url)
+    if status == LOCAL_TEST_TARGET_STATUS and public_host in LOCAL_TEST_PUBLIC_HOSTS and not ssh_destination:
+        return blockers
+    if status != ACTIVE_TARGET_STATUS:
+        blockers.append(f"target_status={status or '<missing>'}")
+    if ssh_destination in ARCHIVED_HOSTED_RUNTIME_SSH_DESTINATIONS:
+        blockers.append(f"archived ssh_destination={ssh_destination}")
+    elif ssh_destination and ssh_destination != ACTIVE_HOSTED_RUNTIME_SSH_DESTINATION:
+        blockers.append(
+            f"ssh_destination must be {ACTIVE_HOSTED_RUNTIME_SSH_DESTINATION}, got {ssh_destination}"
+        )
+    if public_host in ARCHIVED_HOSTED_RUNTIME_PUBLIC_HOSTS:
+        blockers.append(f"archived public_base_url host={public_host}")
+    elif public_host and public_host not in ACTIVE_HOSTED_RUNTIME_PUBLIC_HOSTS:
+        blockers.append(
+            f"public_base_url host must be one of {sorted(ACTIVE_HOSTED_RUNTIME_PUBLIC_HOSTS)}, got {public_host}"
+        )
+    if str(target.target_dir).strip() != ACTIVE_HOSTED_RUNTIME_TARGET_DIR:
+        blockers.append(
+            f"target_dir must be {ACTIVE_HOSTED_RUNTIME_TARGET_DIR}, got {target.target_dir}"
+        )
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        blockers.append(
+            f"REGISTRY_UPLOAD_RUNTIME_DIR must be {ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR}, got {runtime_dir}"
+        )
+    if str(target.service_name).strip() != ACTIVE_HOSTED_RUNTIME_SERVICE_NAME:
+        blockers.append(
+            f"service_name must be {ACTIVE_HOSTED_RUNTIME_SERVICE_NAME}, got {target.service_name}"
+        )
+    return blockers
+
+
+def _public_base_url_host(public_base_url: str) -> str:
+    parsed = urllib_parse.urlparse(str(public_base_url or ""))
+    return str(parsed.hostname or "").strip().lower()
 
 
 def _is_placeholder(value: str) -> bool:

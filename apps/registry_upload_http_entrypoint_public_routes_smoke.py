@@ -150,10 +150,11 @@ def main() -> None:
         target_file.write_text(
             json.dumps(
                 {
+                    "target_status": "active",
                     "target_id": "public_routes_smoke",
-                    "public_base_url": "https://api.selleros.pro",
+                    "public_base_url": "http://89.191.226.88",
                     "loopback_base_url": "http://127.0.0.1:8765",
-                    "ssh_destination": "example-host",
+                    "ssh_destination": "wb-core-eu-root",
                     "target_dir": "/opt/wb-core-runtime/app",
                     "service_name": "wb-core-registry-http.service",
                     "restart_command": "systemctl restart wb-core-registry-http.service",
@@ -167,7 +168,7 @@ def main() -> None:
                         "test_command": "nginx -t",
                         "reload_command": "systemctl reload nginx",
                         "manifest_path": "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json",
-                        "server_names": ["127.0.0.1", "api.selleros.pro"],
+                        "server_names": ["127.0.0.1", "89.191.226.88"],
                         "tls": {
                             "listen": ["443 ssl"],
                             "certificate_path": "/etc/letsencrypt/live/api.selleros.pro/fullchain.pem",
@@ -191,7 +192,7 @@ def main() -> None:
         if "/v1/sheet-vitrina-v1/feedbacks" not in {route["path"] for route in plan_routes}:
             raise AssertionError("print-plan must expose feedbacks in nginx public routes")
         plan_server_names = print_plan["deploy_plan"]["nginx_public_routes"]["server_names"]
-        if plan_server_names != ["127.0.0.1", "api.selleros.pro"]:
+        if plan_server_names != ["127.0.0.1", "89.191.226.88"]:
             raise AssertionError(f"print-plan must expose configured nginx server_names, got {plan_server_names}")
         plan_tls = print_plan["deploy_plan"]["nginx_public_routes"]["tls"]
         if not plan_tls["configured"] or plan_tls["listen"] != ["443 ssl"]:
@@ -214,7 +215,7 @@ def main() -> None:
     print(f"public_route_manifest: ok -> {len(routes)} routes")
     print("public_route_render: ok -> feedbacks and supply prefixes included")
     print("public_route_apply_idempotent: ok")
-    print("public_route_server_names: ok -> explicit IP and future host names rendered")
+    print("public_route_server_names: ok -> explicit active IP host names rendered")
     print("public_route_tls: ok -> explicit managed 443 ssl block rendered")
     print("public_route_deploy_dry_run: ok")
 

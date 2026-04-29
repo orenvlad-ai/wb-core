@@ -64,7 +64,8 @@ update_note: "Обновлён под archive-first / interval-based promo seman
   - `promo_entry_price_best`
 - Historical truth generation теперь тоже server-owned:
   - campaign metadata задаёт authoritative interval `promo_start_at..promo_end_at`
-  - archived workbook задаёт SKU + `Плановая цена для акции`
+  - archived workbook задаёт SKU + `Плановая цена для акции`, and archive sync also persists normalized `campaign_rows.jsonl` + `campaign_rows_manifest.json`
+  - interval replay may read normalized campaign rows when raw `workbook.xlsx` is absent, but only if manifest fingerprint/row-count/column-signature checks pass
   - daily metric truth задаёт `price_seller_discounted` через runtime `prices_snapshot[accepted_current_snapshot]` для exact requested date
   - interval replay materialize-ит exact-date payload в existing runtime seam `temporal_source_snapshots[source_key=promo_by_price]`
 
@@ -148,7 +149,7 @@ Refresh diagnostics для `promo_by_price` дополнительно surface-�
 Materializer-level validation checks the atomic campaign artifact unit before row materialization:
 - `metadata.json` sidecar exists and carries parseable campaign coverage fields;
 - `archive_record.json` workbook path points to the canonical archive workbook path;
-- workbook file physically exists, is non-empty, has mtime/size and fingerprint evidence, and can be opened for plan-price sheet inspection during materialization;
+- workbook file physically exists, is non-empty, has mtime/size and fingerprint evidence, and can be opened for plan-price sheet inspection during materialization; or normalized `campaign_rows.jsonl` + `campaign_rows_manifest.json` exist with matching workbook/metadata fingerprints, row count and schema version;
 - `period_parse_confidence=high` and requested exact date is inside `promo_start_at..promo_end_at`;
 - workbook inspection JSON is parsed when present, but raw workbook/upstream payloads, cookies, tokens, browser state and localStorage-derived data are not persisted in diagnostics.
 
@@ -167,6 +168,12 @@ Artifact states are:
 If collector metadata has high-confidence ended evidence from loaded drawer/card evidence (campaign/title match plus absent/disabled download action), from high-confidence timeline evidence (`timeline_non_materializable_expected`, `drawer_opened=false`, ended label/title/period evidence), or from high-confidence read-only campaign manifest evidence (`manifest_decision=drawer_avoid_manifest_non_materializable`, timeline title+period match, ended lifecycle, not-available downloadability/materializability), the materializer may classify a metadata-only campaign as `ended_without_download` with `workbook_required=false` and reason `metadata_only_ended_without_download`. This remains non-materializable and must not be treated as fresh upstream success. It is excluded from fatal missing-artifact gating, remains visible in diagnostics, and does not materialize rows; usable complete campaigns still materialize rows for the same requested date. If all covering campaigns are expected non-materializable and no complete workbook can materialize rows, the source returns safe `incomplete`/blank rather than fake zero-success. Unknown/low-confidence UI or manifest status keeps the conservative fatal missing-artifact path, with true metadata-only loss surfaced as `metadata_only_true_artifact_loss`.
 
 Invalid or incomplete current artifacts still produce `PromoLiveSourceIncomplete`; temporal policy continues to preserve accepted current/closed truth rather than writing fake zeros/blanks or accepting low-confidence dates. `apps/promo_campaign_archive_integrity_smoke.py` is a dry-run audit fixture: it counts archive artifact states and examples without deleting, repairing, downloading, or changing runtime accepted truth.
+
+Retention / GC guard:
+- `apps/promo_campaign_archive_gc.py audit` is read-only and reports runtime/archive/run sizes.
+- `apps/promo_campaign_archive_gc.py dry-run` builds a deletion plan without deleting.
+- `apps/promo_campaign_archive_gc.py apply --confirm` deletes only guarded candidates from the structured plan; it never removes archive records, metadata, normalized rows/manifests, exact-date runtime snapshots or unknown/incomplete parse artifacts.
+- Safe workbook deletion is limited to duplicate workbook copies after hash proof and normalized row archive proof. Old successful HAR/screenshots/request logs may be planned after TTL; failed traces use a longer TTL and keep compact summaries.
 
 # 6. Кодовые части
 
@@ -202,6 +209,7 @@ Invalid or incomplete current artifacts still produce `PromoLiveSourceIncomplete
   - ended/no-download artifacts, including campaign `2242` when present, остаются `workbook_required=false` diagnostics и не входят в `fatal_missing_artifacts`;
   - current promo metric rows are present in public `web-vitrina` and are not all blank, while truthful zero rows for ineligible SKU remain valid.
 - Required checklist rule: run `python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py` after changes touching `promo_by_price` materialization, promo archive/artifact validation, promo collector diagnostics/status handling, `ended_without_download` / expected non-materializable campaign handling, `sheet_vitrina_v1` refresh orchestration, temporal source acceptance/fallback around promo, promo source-status reduction, web-vitrina read/page-composition paths that affect promo row visibility, or hosted deploys where current promo correctness must be verified.
+- Retention changes must additionally pass `python3 apps/promo_campaign_archive_gc_smoke.py` and a GC `dry-run` on the intended runtime before any live `apply`.
 - If local CA verification blocks the live read while the route is otherwise reachable, the accepted local-only fallback is `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1 python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py`; timeout, non-200 route status or bad payload remains a real blocker.
 - This smoke is read-only and must not be replaced by `/v1/sheet-vitrina-v1/load`, Google Sheets/GAS, browser `localStorage` truth or a runtime refresh unless a separate task explicitly requires a controlled refresh.
 - Hosted live closure additionally depends on one bounded runtime dependency seam:

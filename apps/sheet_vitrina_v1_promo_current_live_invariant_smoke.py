@@ -21,7 +21,7 @@ from urllib import request as urllib_request
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TARGET_FILE = (
-    ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "hosted_runtime_target__selleros_api.json"
+    ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "hosted_runtime_target__europe_api.json"
 )
 ALLOW_INSECURE_ENV = "SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK"
 

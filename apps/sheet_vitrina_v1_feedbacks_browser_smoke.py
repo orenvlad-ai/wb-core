@@ -24,7 +24,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Browser smoke-check feedbacks tab read-only UX.")
-    parser.add_argument("--base-url", default="", help="Existing base URL, for example https://api.selleros.pro")
+    parser.add_argument("--base-url", default="", help="Existing base URL, for example http://89.191.226.88")
     parser.add_argument(
         "--ignore-https-errors",
         action="store_true",

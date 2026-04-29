@@ -29,7 +29,7 @@
 
 Главный незакрытый gap текущего `main`:
 - registry upload и bounded reverse-load уже присутствуют в текущей линии;
-- этот документ теперь признаёт repo-owned hosted runtime deploy/probe contract для `api.selleros.pro`, но не должен трактоваться как подтверждение actual granted deploy access, final auth-hardening или production storage binding.
+- этот документ теперь признаёт repo-owned hosted runtime deploy/probe contract для active EU target `wb-core-eu-root` / `89.191.226.88`; archived `selleros-root` / `api.selleros.pro` target не является active deploy/probe/GC/runtime target.
 
 После этого незакрытым хвостом остаются:
 - full legacy parity по всем metric sections;
@@ -123,7 +123,7 @@ Web-source capture — это adapter, а не domain-логика.
 Факты из reference:
 - `wb-web-bot` захватывает payload `search-report/report` через Playwright;
 - `wb-ai-research/wb-ai/web_sources/client.py` содержит прямой HTTP client для WB search report;
-- `wb-table-audit/apps-script/src/44_raw_search_analytics_snapshot.js` потребляет server endpoint `GET https://api.selleros.pro/v1/search-analytics/snapshot`.
+- `wb-table-audit/apps-script/src/44_raw_search_analytics_snapshot.js` historically consumed server endpoint `GET https://api.selleros.pro/v1/search-analytics/snapshot`; current active hosted runtime target is the EU VPS target contract, not the archived selleros SSH target.
 - current `main` уже materialize-ит bounded repo-owned promo collector block, который переиспользует seller session reuse path и canonical browser seams, но не копирует весь `wb-web-bot` внутрь `wb-core`.
 
 Следствие:

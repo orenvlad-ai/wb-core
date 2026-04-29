@@ -1,5 +1,7 @@
 {
-  "target_id": "selleros_api_hosted_runtime",
+  "target_status": "archived",
+  "archive_note": "Archived legacy target. Do not use for deploy/probe/audit/GC/runtime tasks after EU VPS cutover; active target is hosted_runtime_target__europe_api.json / wb-core-eu-root / 89.191.226.88.",
+  "target_id": "selleros_api_hosted_runtime_archived",
   "public_base_url": "https://api.selleros.pro",
   "loopback_base_url": "http://127.0.0.1:8765",
   "ssh_destination": "selleros-root",

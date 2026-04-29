@@ -18,7 +18,7 @@ from packages.application.web_source_snapshot_block import WebSourceSnapshotBloc
 from packages.contracts.web_source_snapshot_block import WebSourceSnapshotRequest
 
 
-LATEST_SNAPSHOT_URL = "https://api.selleros.pro/v1/search-analytics/snapshot"
+LATEST_SNAPSHOT_URL = "http://89.191.226.88/v1/search-analytics/snapshot"
 
 
 def _resolve_latest_window() -> tuple[str, str]:

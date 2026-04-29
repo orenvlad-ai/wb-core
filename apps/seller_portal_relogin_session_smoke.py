@@ -134,7 +134,7 @@ def main() -> None:
             wb_bot_python=Path(sys.executable),
             timeout_sec=30,
             poll_sec=0.0,
-            ssh_destination="selleros-root",
+            ssh_destination="wb-core-eu-root",
             canonical_supplier_id="canonical-supplier-id",
             canonical_supplier_label="ИП Сагитов В. Р.",
         )
@@ -214,8 +214,8 @@ def main() -> None:
         MODULE._pid_is_running = lambda _pid: True  # type: ignore[assignment]
         archive_bytes, archive_name = MODULE.build_macos_launcher_archive(
             config,
-            public_status_url="https://api.selleros.pro/v1/sheet-vitrina-v1/seller-portal-recovery/status",
-            public_operator_url="https://api.selleros.pro/sheet-vitrina-v1/operator",
+            public_status_url="http://89.191.226.88/v1/sheet-vitrina-v1/seller-portal-recovery/status",
+            public_operator_url="http://89.191.226.88/sheet-vitrina-v1/operator",
         )
         MODULE._pid_is_running = original_pid_is_running  # type: ignore[assignment]
         if archive_name != "seller-portal-relogin-macos.zip":
@@ -226,15 +226,15 @@ def main() -> None:
                 raise AssertionError(f"unexpected launcher archive entries: {names}")
             launcher_text = archive.read("seller-portal-relogin.command").decode("utf-8")
         required_fragments = [
-            "selleros-root",
+            "wb-core-eu-root",
             "RUN_ID=seller-recovery-test-run",
             "${STATUS}",
             "python3 -c",
             'json.loads(raw).get("status", "")',
             'json.loads(raw).get("summary", "")',
-            "https://api.selleros.pro/v1/sheet-vitrina-v1/seller-portal-recovery/status",
+            "http://89.191.226.88/v1/sheet-vitrina-v1/seller-portal-recovery/status",
             "run_id=seller-recovery-test-run",
-            "https://api.selleros.pro/sheet-vitrina-v1/operator",
+            "http://89.191.226.88/sheet-vitrina-v1/operator",
             "/vnc.html?autoconnect=1&resize=remote&path=websockify&reconnect=1",
             "Восстановление завершено: ${STATUS:-unknown}",
         ]
