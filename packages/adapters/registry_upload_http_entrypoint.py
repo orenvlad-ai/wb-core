@@ -16,7 +16,10 @@ from urllib import parse as urllib_parse
 
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.application.sheet_vitrina_v1_feedbacks_ai import SheetVitrinaV1FeedbacksAiError
-from packages.application.sheet_vitrina_v1_feedbacks import SheetVitrinaV1FeedbacksError
+from packages.application.sheet_vitrina_v1_feedbacks import (
+    FEEDBACKS_EXPORT_CONTENT_TYPE,
+    SheetVitrinaV1FeedbacksError,
+)
 from packages.application.sheet_vitrina_v1_load_bridge import LegacyGoogleSheetsContourArchivedError
 from packages.application.sheet_vitrina_v1_load_bridge import legacy_google_sheets_archive_context
 from packages.contracts.factory_order_supply import (
@@ -50,6 +53,7 @@ DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_CALCULATE_PATH = (
     "/v1/sheet-vitrina-v1/research/sku-group-comparison/calculate"
 )
 DEFAULT_SHEET_FEEDBACKS_PATH = "/v1/sheet-vitrina-v1/feedbacks"
+DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH = "/v1/sheet-vitrina-v1/feedbacks/export.xlsx"
 DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH = "/v1/sheet-vitrina-v1/feedbacks/ai-prompt"
 DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH = "/v1/sheet-vitrina-v1/feedbacks/ai-analyze"
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
@@ -520,6 +524,35 @@ def _build_handler(
                     return
 
                 _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if parsed.path == DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    workbook_bytes, filename = entrypoint.handle_sheet_feedbacks_export_request(payload)
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina feedbacks export failed: {exc}"},
+                    )
+                    return
+
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    workbook_bytes,
+                    content_type=FEEDBACKS_EXPORT_CONTENT_TYPE,
+                    filename=filename,
+                    as_attachment=True,
+                )
                 return
 
             if parsed.path == DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH:
@@ -1980,6 +2013,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "research_options_path": DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH,
         "research_calculate_path": DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_CALCULATE_PATH,
         "feedbacks_path": DEFAULT_SHEET_FEEDBACKS_PATH,
+        "feedbacks_export_path": DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH,
         "feedbacks_ai_prompt_path": DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH,
         "feedbacks_ai_analyze_path": DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH,
         "job_path": job_path,

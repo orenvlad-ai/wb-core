@@ -43,10 +43,11 @@ class FakeAiProvider:
         self,
         *,
         prompt: str,
+        model: str,
         rows: list[Mapping[str, Any]],
         schema: Mapping[str, Any],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        self.calls.append({"prompt_length": len(prompt), "row_count": len(rows), "schema_type": schema.get("type")})
+        self.calls.append({"prompt_length": len(prompt), "model": model, "row_count": len(rows), "schema_type": schema.get("type")})
         if self.fail:
             return [{"feedback_id": "unexpected", "complaint_fit": "yes"}], {"model": "fake"}
         results = []
@@ -71,7 +72,7 @@ class FakeAiProvider:
                     "evidence": "фрагмент",
                 }
             )
-        return results, {"model": "fake-feedbacks-ai", "response_id": "fake-response"}
+        return results, {"model": model, "response_id": "fake-response"}
 
 
 def main() -> None:
@@ -87,6 +88,8 @@ def main() -> None:
         initial = block.get_prompt()
         if initial.get("status") != "missing" or not initial.get("starter_prompt"):
             raise AssertionError(f"initial prompt must expose missing status and starter prompt: {initial}")
+        if initial.get("model") != "gpt-5-mini" or initial.get("available_models") != ["gpt-5-mini", "gpt-5"]:
+            raise AssertionError(f"initial prompt must expose default model/allowlist: {initial}")
         if (initial.get("analysis_limits") or {}).get("max_rows_per_run") != 3:
             raise AssertionError(f"initial prompt must expose AI row cap, got: {initial}")
         try:
@@ -95,8 +98,15 @@ def main() -> None:
             pass
         else:
             raise AssertionError("empty prompt must be rejected")
-        saved = block.save_prompt({"prompt": "Разбери отзывы по правилам."})
-        if saved.get("status") != "ready" or saved.get("prompt") != "Разбери отзывы по правилам.":
+        try:
+            block.save_prompt({"prompt": "Разбери отзывы по правилам.", "model": "not-a-model"})
+        except ValueError as exc:
+            if "model must be one of" not in str(exc):
+                raise AssertionError(f"invalid model must fail clearly, got: {exc}") from exc
+        else:
+            raise AssertionError("invalid model must be rejected")
+        saved = block.save_prompt({"prompt": "Разбери отзывы по правилам.", "model": "gpt-5"})
+        if saved.get("status") != "ready" or saved.get("prompt") != "Разбери отзывы по правилам." or saved.get("model") != "gpt-5":
             raise AssertionError(f"saved prompt payload mismatch: {saved}")
         analysis = block.analyze({"rows": _rows()})
         if analysis.get("contract_name") != "sheet_vitrina_v1_feedbacks_ai_analysis":
@@ -105,6 +115,8 @@ def main() -> None:
             raise AssertionError(f"analysis result order/mapping mismatch: {analysis}")
         if analysis["results"][0]["category_label"] != "Мат, оскорбления или угрозы":
             raise AssertionError(f"category label mismatch: {analysis}")
+        if fake_provider.calls[-1]["model"] != "gpt-5" or analysis["meta"]["model"] != "gpt-5":
+            raise AssertionError(f"selected model must be passed to provider and metadata: {fake_provider.calls} {analysis}")
         try:
             block.analyze({"rows": _rows() + [_extra_row()]})
         except ValueError as exc:
@@ -153,9 +165,17 @@ def main() -> None:
             empty_status, empty_payload = _post_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH}", {"prompt": ""})
             if empty_status != 422 or "prompt" not in str(empty_payload.get("error") or ""):
                 raise AssertionError(f"empty prompt route must return 422, got: {empty_status} {empty_payload}")
+            invalid_model_status, invalid_model_payload = _post_json(
+                f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH}",
+                {"prompt": "ok", "model": "bad-model"},
+            )
+            if invalid_model_status != 422 or "model" not in str(invalid_model_payload.get("error") or ""):
+                raise AssertionError(f"invalid model route must return 422, got: {invalid_model_status} {invalid_model_payload}")
             analyze_status, analyze_payload = _post_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH}", {"rows": _rows()})
             if analyze_status != 200 or len(analyze_payload.get("results") or []) != 3:
                 raise AssertionError(f"AI analyze route mismatch: {analyze_status} {analyze_payload}")
+            if analyze_payload.get("meta", {}).get("model") != "gpt-5":
+                raise AssertionError(f"AI analyze route must expose selected model, got: {analyze_payload}")
             capped_status, capped_payload = _post_json(
                 f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH}",
                 {"rows": _rows() + [_extra_row()]},

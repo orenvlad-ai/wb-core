@@ -48,6 +48,7 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/plan-report/baseline-status",
         "/v1/sheet-vitrina-v1/seller-portal-session/check",
         "/v1/sheet-vitrina-v1/feedbacks",
+        "/v1/sheet-vitrina-v1/feedbacks/export.xlsx",
         "/v1/sheet-vitrina-v1/feedbacks/ai-prompt",
         "/v1/sheet-vitrina-v1/feedbacks/ai-analyze",
         "/v1/sheet-vitrina-v1/supply/factory-order/",
@@ -63,6 +64,8 @@ def main() -> None:
     )
     if rendered.count("location = /v1/sheet-vitrina-v1/feedbacks {") != 1:
         raise AssertionError("rendered nginx block must include feedbacks exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/feedbacks/export.xlsx {") != 1:
+        raise AssertionError("rendered nginx block must include feedbacks export exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/feedbacks/ai-prompt {") != 1:
         raise AssertionError("rendered nginx block must include feedbacks AI prompt exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/feedbacks/ai-analyze {") != 1:
@@ -198,6 +201,8 @@ def main() -> None:
         plan_routes = print_plan["deploy_plan"]["nginx_public_routes"]["routes"]
         if "/v1/sheet-vitrina-v1/feedbacks" not in {route["path"] for route in plan_routes}:
             raise AssertionError("print-plan must expose feedbacks in nginx public routes")
+        if "/v1/sheet-vitrina-v1/feedbacks/export.xlsx" not in {route["path"] for route in plan_routes}:
+            raise AssertionError("print-plan must expose feedbacks export in nginx public routes")
         plan_server_names = print_plan["deploy_plan"]["nginx_public_routes"]["server_names"]
         if plan_server_names != ["127.0.0.1", "89.191.226.88"]:
             raise AssertionError(f"print-plan must expose configured nginx server_names, got {plan_server_names}")

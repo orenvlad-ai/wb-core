@@ -47,19 +47,32 @@ class OpenAiFeedbacksAnalysisProvider:
         self,
         *,
         prompt: str,
+        model: str | None = None,
         rows: list[Mapping[str, Any]],
         schema: Mapping[str, Any],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         api_key = self._api_key()
-        model = self._model()
-        payload = self._build_payload(prompt=prompt, rows=rows, schema=schema, model=model, include_temperature=True)
+        resolved_model = str(model or "").strip() or self._model()
+        payload = self._build_payload(
+            prompt=prompt,
+            rows=rows,
+            schema=schema,
+            model=resolved_model,
+            include_temperature=True,
+        )
         try:
             response_payload = self._post_response(payload, api_key=api_key)
         except OpenAiFeedbacksAnalysisError as exc:
             if "temperature" not in str(exc).lower():
                 raise
             response_payload = self._post_response(
-                self._build_payload(prompt=prompt, rows=rows, schema=schema, model=model, include_temperature=False),
+                self._build_payload(
+                    prompt=prompt,
+                    rows=rows,
+                    schema=schema,
+                    model=resolved_model,
+                    include_temperature=False,
+                ),
                 api_key=api_key,
             )
         text = _extract_response_text(response_payload)
@@ -70,7 +83,7 @@ class OpenAiFeedbacksAnalysisProvider:
         if not isinstance(parsed, Mapping) or not isinstance(parsed.get("results"), list):
             raise OpenAiFeedbacksAnalysisError("OpenAI analysis output did not match expected shape")
         return [dict(item) for item in parsed["results"] if isinstance(item, Mapping)], {
-            "model": model,
+            "model": resolved_model,
             "response_id": str(response_payload.get("id") or ""),
             "usage": response_payload.get("usage") if isinstance(response_payload.get("usage"), Mapping) else None,
         }

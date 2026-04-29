@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import time
 from typing import Any, Mapping
@@ -21,6 +22,17 @@ class WbFeedbacksTransportError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class WbFeedbacksFetchResult:
+    rows: list[Mapping[str, Any]]
+    page_count: int
+    raw_count: int
+    truncated: bool
+    truncation_reason: str
+    cap: int
+    take: int
+
+
 class HttpBackedWbFeedbacksSource:
     """Read-only source for WB feedbacks through the canonical official API token."""
 
@@ -31,7 +43,7 @@ class HttpBackedWbFeedbacksSource:
         base_url_env_var: str = "WB_FEEDBACKS_API_BASE_URL",
         timeout_seconds: float = 30.0,
         take: int = 100,
-        max_pages_per_stream: int = 5,
+        max_pages_per_stream: int = 100,
         max_requests_per_window: int = 3,
         rate_limit_window_seconds: float = 1.0,
     ) -> None:
@@ -51,7 +63,7 @@ class HttpBackedWbFeedbacksSource:
         date_to_ts: int,
         is_answered: bool,
         request_timestamps: list[float],
-    ) -> list[Mapping[str, Any]]:
+    ) -> WbFeedbacksFetchResult:
         runtime = load_runtime_config(
             token_env_var=self._token_env_var,
             default_base_url=self._default_base_url,
@@ -61,6 +73,9 @@ class HttpBackedWbFeedbacksSource:
         rows: list[Mapping[str, Any]] = []
         take = max(1, int(self._take))
         max_pages = max(1, int(self._max_pages_per_stream))
+        page_count = 0
+        truncated = False
+        truncation_reason = ""
         for page_index in range(max_pages):
             skip = page_index * take
             payload = self._fetch_once(
@@ -74,6 +89,7 @@ class HttpBackedWbFeedbacksSource:
                 skip=skip,
                 request_timestamps=request_timestamps,
             )
+            page_count += 1
             page_rows = _extract_feedback_rows(payload)
             for row in page_rows:
                 row_copy = dict(row)
@@ -81,7 +97,18 @@ class HttpBackedWbFeedbacksSource:
                 rows.append(row_copy)
             if len(page_rows) < take:
                 break
-        return rows
+        else:
+            truncated = True
+            truncation_reason = "max_pages_per_stream"
+        return WbFeedbacksFetchResult(
+            rows=rows,
+            page_count=page_count,
+            raw_count=len(rows),
+            truncated=truncated,
+            truncation_reason=truncation_reason,
+            cap=take * max_pages,
+            take=take,
+        )
 
     def _fetch_once(
         self,
