@@ -63,6 +63,7 @@ Canonical pre-cutover target for the EU VPS migration preparation:
 - `ssh_destination = wb-core-eu-root`
 - `public_base_url = http://89.191.226.88`
 - nginx `server_names = 89.191.226.88 + api.selleros.pro` so pre-cutover `--resolve api.selleros.pro:80:89.191.226.88` checks exercise the same explicit future production Host without switching DNS.
+- nginx TLS is target-owned for the EU pre-cutover host: the runner can render `listen 443 ssl` for `api.selleros.pro` using already transferred certificate files, without issuing or renewing certificates before DNS cutover.
 
 The EU target is intentionally IP-based until DNS cutover. The old selleros target remains the rollback/live contour and must not be changed as part of EU host preparation.
 
@@ -102,6 +103,10 @@ Checked-in target template фиксирует field names, которые бол
 - `managed_systemd_units`
 - `nginx_public_routes`
   - optional `server_names` array may pin concrete nginx hostnames/IP names for the server block; when omitted, the runner derives the single name from `public_base_url`
+  - optional `tls` object may render a managed TLS block into that same server block:
+    - `listen` = explicit nginx listen directives, current EU value `["443 ssl"]`
+    - `certificate_path` = public certificate chain path
+    - `certificate_key_path` = private key path reference only; deploy output must not print key content
 - `runtime_env`
 
 Known selleros target values теперь зафиксированы repo-owned:
@@ -126,7 +131,8 @@ Known selleros target values теперь зафиксированы repo-owned:
 
 EU pre-cutover target note:
 - the blank EU host also manages `wb-core-registry-http.service` from the repo-owned systemd artifact, then enables it for boot and restarts it through the existing `restart_command`;
-- the EU nginx server block explicitly accepts both the IP pre-cutover name and `api.selleros.pro`; this is not a DNS switch and does not enable HTTPS/cert issuance by itself;
+- the EU nginx server block explicitly accepts both the IP pre-cutover name and `api.selleros.pro`; this is not a DNS switch;
+- the EU target may enable HTTPS with an existing transferred certificate through `nginx_public_routes.tls`; certbot issuance/renewal stays manual/out-of-scope until DNS points at the EU host;
 - the old selleros rollback target may keep using the already installed host service and must not be changed during EU preparation.
 
 Secrets and mutable credentials по-прежнему не хранятся в Git. Repo stores only non-secret target wiring and unit artifacts.
@@ -229,7 +235,7 @@ Current deploy contract note:
   - render the repo-owned nginx public route allowlist into the configured server block, create a timestamped backup before changing the file, validate with `nginx -t`, and reload nginx only after validation succeeds;
   - restart runtime;
   - only after that run loopback/public verification.
-- nginx public route publishing is idempotent: the runner removes prior `WB-CORE MANAGED PUBLIC ROUTES` block and matching legacy/manual locations from the configured server config, rewrites the target `server_name` directive to the target's explicit `nginx_public_routes.server_names` when provided, then inserts one generated block from `artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`. New public routes for this contour must be added to that manifest and verified through the deploy runner; manual live nginx edits are not the completion path.
+- nginx public route publishing is idempotent: the runner removes prior `WB-CORE MANAGED PUBLIC ROUTES` block, prior `WB-CORE MANAGED TLS` block and matching legacy/manual locations from the configured server config, rewrites the target `server_name` directive to the target's explicit `nginx_public_routes.server_names` when provided, then inserts generated TLS and route blocks from target/manifest truth. New public routes for this contour must be added to that manifest and verified through the deploy runner; manual live nginx edits are not the completion path.
 - The allowlist intentionally uses exact locations plus narrow route-family prefixes such as `/v1/sheet-vitrina-v1/supply/factory-order/`, `/v1/sheet-vitrina-v1/supply/wb-regional/` and `/v1/sheet-vitrina-v1/research/`; broad catch-all publication is not part of the current contract.
 
 If deploy / publish / restart / probe / required verify steps are safe and available, Codex обязана выполнить их в том же bounded execution. `clasp` is part of this list only for archived Apps Script guard changes.

@@ -20,7 +20,14 @@
     "server_names": [
       "89.191.226.88",
       "api.selleros.pro"
-    ]
+    ],
+    "tls": {
+      "listen": [
+        "443 ssl"
+      ],
+      "certificate_path": "/etc/letsencrypt/live/api.selleros.pro/fullchain.pem",
+      "certificate_key_path": "/etc/letsencrypt/live/api.selleros.pro/privkey.pem"
+    }
   },
   "managed_systemd_units": [
     {
