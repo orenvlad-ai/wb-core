@@ -459,7 +459,20 @@
     }
 
     .feedbacks-table {
-      min-width: 1580px;
+      min-width: 1640px;
+    }
+
+    .feedbacks-ai-select-cell {
+      width: 52px;
+      min-width: 52px;
+      text-align: center;
+    }
+
+    .feedbacks-ai-select {
+      width: 16px;
+      height: 16px;
+      margin: 0;
+      accent-color: var(--accent);
     }
 
     .feedbacks-text-cell {
@@ -2318,6 +2331,7 @@
     const ALL_VALUE = "__all__";
     const DEFAULT_UNIFIED_TAB = "vitrina";
     const FEEDBACKS_UNIFIED_TAB = "feedbacks";
+    const FEEDBACKS_AI_MAX_ROWS_PER_RUN = 3;
     const RESEARCH_UNIFIED_TAB = "research";
     const EMBEDDED_UNIFIED_TABS = new Set(["factory-order", "reports"]);
     const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", FEEDBACKS_UNIFIED_TAB, RESEARCH_UNIFIED_TAB]);
@@ -2429,6 +2443,7 @@
         selectedStars: new Set(["1", "2", "3", "4", "5"]),
         isAnswered: "all",
         rows: [],
+        selectedAiFeedbackIds: new Set(),
         summary: null,
         meta: null,
         error: ""
@@ -4811,8 +4826,9 @@
           : "read-only · WB API / feedbacks";
       }
       if (feedbacksSourceNoteNode) {
+        const selectedAiCount = feedbacksSelectedAiCount();
         feedbacksSourceNoteNode.textContent = state.feedbacks.loaded
-          ? ("Загружено: " + formatFeedbacksPeriodLabel(state.feedbacks.dateFrom, state.feedbacks.dateTo))
+          ? ("Загружено: " + formatFeedbacksPeriodLabel(state.feedbacks.dateFrom, state.feedbacks.dateTo) + " · AI: " + selectedAiCount + "/" + FEEDBACKS_AI_MAX_ROWS_PER_RUN)
           : "WB API / feedbacks";
       }
       if (feedbacksLoadButton) {
@@ -4820,8 +4836,10 @@
         feedbacksLoadButton.textContent = state.feedbacks.loading ? "Загрузка…" : "Загрузить отзывы";
       }
       if (feedbacksAiAnalyzeButton) {
-        feedbacksAiAnalyzeButton.disabled = state.feedbacks.loading || state.feedbacks.analyzing || !state.feedbacks.loaded || !(state.feedbacks.rows || []).length;
-        feedbacksAiAnalyzeButton.textContent = state.feedbacks.analyzing ? "AI-разбор…" : "AI-разбор отзывов";
+        const selectedAiCount = feedbacksSelectedAiCount();
+        feedbacksAiAnalyzeButton.disabled = state.feedbacks.loading || state.feedbacks.analyzing || !state.feedbacks.loaded || !selectedAiCount;
+        feedbacksAiAnalyzeButton.textContent = state.feedbacks.analyzing ? "AI-разбор…" : ("AI-разбор (" + selectedAiCount + "/" + FEEDBACKS_AI_MAX_ROWS_PER_RUN + ")");
+        feedbacksAiAnalyzeButton.title = "Максимум " + FEEDBACKS_AI_MAX_ROWS_PER_RUN + " отзыва за запуск";
       }
       if (feedbacksErrorNode) {
         feedbacksErrorNode.textContent = state.feedbacks.error || "";
@@ -5086,6 +5104,27 @@
     }
 
     function handleFeedbacksInputChange(event) {
+      const aiSelectNode = event.target.closest("[data-feedbacks-ai-select]");
+      if (aiSelectNode) {
+        const feedbackId = String(aiSelectNode.value || "").trim();
+        if (!feedbackId) {
+          return;
+        }
+        if (aiSelectNode.checked) {
+          if (feedbacksSelectedAiCount() >= FEEDBACKS_AI_MAX_ROWS_PER_RUN && !state.feedbacks.selectedAiFeedbackIds.has(feedbackId)) {
+            aiSelectNode.checked = false;
+            state.feedbacks.error = "AI-разбор: максимум " + FEEDBACKS_AI_MAX_ROWS_PER_RUN + " отзыва за запуск.";
+            renderFeedbacksPanel();
+            return;
+          }
+          state.feedbacks.selectedAiFeedbackIds.add(feedbackId);
+        } else {
+          state.feedbacks.selectedAiFeedbackIds.delete(feedbackId);
+        }
+        state.feedbacks.error = "";
+        renderFeedbacksPanel();
+        return;
+      }
       const starNode = event.target.closest("[data-feedbacks-star]");
       if (starNode) {
         const value = String(starNode.value || "");
@@ -5146,6 +5185,7 @@
           throw new Error("unexpected feedbacks payload");
         }
         state.feedbacks.rows = Array.isArray(payload.rows) ? payload.rows : [];
+        state.feedbacks.selectedAiFeedbackIds = defaultFeedbacksAiSelection(state.feedbacks.rows);
         state.feedbacks.summary = payload.summary || null;
         state.feedbacks.meta = payload.meta || null;
         state.feedbacks.aiResults = {};
@@ -5234,6 +5274,17 @@
       if (!state.feedbacks.loaded || !(state.feedbacks.rows || []).length) {
         return;
       }
+      const rowsForAi = buildFeedbacksAiRows();
+      if (!rowsForAi.length) {
+        state.feedbacks.error = "Выберите отзыв для AI-разбора.";
+        renderFeedbacksPanel();
+        return;
+      }
+      if (rowsForAi.length > FEEDBACKS_AI_MAX_ROWS_PER_RUN) {
+        state.feedbacks.error = "AI-разбор: максимум " + FEEDBACKS_AI_MAX_ROWS_PER_RUN + " отзыва за запуск.";
+        renderFeedbacksPanel();
+        return;
+      }
       if (state.feedbacks.promptStatus !== "ready" || !String(state.feedbacks.savedPrompt || "").trim()) {
         state.feedbacks.error = "Сначала сохраните промпт разбора";
         activateFeedbacksSubsection("prompt");
@@ -5251,7 +5302,7 @@
             "Accept": "application/json",
             "Content-Type": "application/json; charset=utf-8"
           },
-          body: JSON.stringify({rows: buildFeedbacksAiRows()})
+          body: JSON.stringify({rows: rowsForAi})
         });
         const payload = await readJsonResponse(response, "non-json response from feedbacks AI analyze route");
         if (requestId !== state.feedbacks.analysisRequestSequence) {
@@ -5263,7 +5314,7 @@
         if (!payload || payload.contract_name !== "sheet_vitrina_v1_feedbacks_ai_analysis") {
           throw new Error("unexpected feedbacks AI analysis payload");
         }
-        const resultMap = {};
+        const resultMap = Object.assign({}, state.feedbacks.aiResults || {});
         (Array.isArray(payload.results) ? payload.results : []).forEach(function(item) {
           if (item && item.feedback_id) {
             resultMap[String(item.feedback_id)] = item;
@@ -5284,7 +5335,7 @@
     }
 
     function buildFeedbacksAiRows() {
-      return (state.feedbacks.rows || []).map(function(row) {
+      return feedbacksSelectedAiRows().map(function(row) {
         return {
           feedback_id: String(row.feedback_id || ""),
           created_at: String(row.created_at || ""),
@@ -5299,6 +5350,34 @@
           answer_text: String(row.answer_text || "")
         };
       });
+    }
+
+    function defaultFeedbacksAiSelection(rows) {
+      const selected = new Set();
+      (Array.isArray(rows) ? rows : []).some(function(row) {
+        const feedbackId = feedbackRowId(row);
+        if (!feedbackId) {
+          return false;
+        }
+        selected.add(feedbackId);
+        return true;
+      });
+      return selected;
+    }
+
+    function feedbacksSelectedAiRows() {
+      const selected = state.feedbacks.selectedAiFeedbackIds || new Set();
+      return (state.feedbacks.rows || []).filter(function(row) {
+        return selected.has(feedbackRowId(row));
+      });
+    }
+
+    function feedbacksSelectedAiCount() {
+      return feedbacksSelectedAiRows().length;
+    }
+
+    function feedbackRowId(row) {
+      return String((row && row.feedback_id) || "").trim();
     }
 
     function renderFeedbacksSummary() {
@@ -5354,7 +5433,7 @@
         feedbacksResultNode.innerHTML = '<p class="research-result-note">Загружаем отзывы из WB API…</p>';
         return;
       }
-      if (state.feedbacks.error) {
+      if (state.feedbacks.error && !state.feedbacks.loaded) {
         feedbacksResultNode.innerHTML = '<p class="research-result-note">Загрузка не выполнена.</p>';
         return;
       }
@@ -5368,6 +5447,7 @@
         return;
       }
       const columns = [
+        ["ai_select", "AI"],
         ["created_date", "Дата"],
         ["product_valuation", "Звёзды"],
         ["ai_complaint_fit", "Подходит для жалобы"],
@@ -5400,6 +5480,9 @@
       return "<tr>" + columns.map(function(column) {
         const key = column[0];
         const isText = ["text", "pros", "cons", "answer_text", "product_name", "ai_reason"].includes(key);
+        if (key === "ai_select") {
+          return renderFeedbacksAiSelectCell(row);
+        }
         if (key.indexOf("ai_") === 0) {
           return renderFeedbacksAiCell(row, key);
         }
@@ -5407,6 +5490,22 @@
         const value = rawValue === null || typeof rawValue === "undefined" || rawValue === "" ? "—" : String(rawValue);
         return '<td' + (isText ? ' class="feedbacks-text-cell"' : "") + ">" + (isText ? '<span class="feedbacks-text-clip">' : "") + escapeHtml(value) + (isText ? "</span>" : "") + "</td>";
       }).join("") + "</tr>";
+    }
+
+    function renderFeedbacksAiSelectCell(row) {
+      const feedbackId = feedbackRowId(row);
+      const selected = state.feedbacks.selectedAiFeedbackIds && state.feedbacks.selectedAiFeedbackIds.has(feedbackId);
+      const disabled = !feedbackId || (!selected && feedbacksSelectedAiCount() >= FEEDBACKS_AI_MAX_ROWS_PER_RUN);
+      return [
+        '<td class="feedbacks-ai-select-cell">',
+        '<input class="feedbacks-ai-select" type="checkbox" data-feedbacks-ai-select value="',
+        escapeHtml(feedbackId),
+        '" aria-label="Выбрать отзыв для AI-разбора"',
+        selected ? " checked" : "",
+        disabled ? " disabled" : "",
+        ">",
+        "</td>"
+      ].join("");
     }
 
     function renderFeedbacksAiCell(row, key) {

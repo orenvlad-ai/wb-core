@@ -87,6 +87,8 @@ def main() -> None:
         initial = block.get_prompt()
         if initial.get("status") != "missing" or not initial.get("starter_prompt"):
             raise AssertionError(f"initial prompt must expose missing status and starter prompt: {initial}")
+        if (initial.get("analysis_limits") or {}).get("max_rows_per_run") != 3:
+            raise AssertionError(f"initial prompt must expose AI row cap, got: {initial}")
         try:
             block.save_prompt({"prompt": ""})
         except ValueError:
@@ -103,6 +105,13 @@ def main() -> None:
             raise AssertionError(f"analysis result order/mapping mismatch: {analysis}")
         if analysis["results"][0]["category_label"] != "Мат, оскорбления или угрозы":
             raise AssertionError(f"category label mismatch: {analysis}")
+        try:
+            block.analyze({"rows": _rows() + [_extra_row()]})
+        except ValueError as exc:
+            if "at most 3 items" not in str(exc):
+                raise AssertionError(f"AI row cap must surface clearly, got: {exc}") from exc
+        else:
+            raise AssertionError("AI row cap must reject too many rows")
 
         failing = SheetVitrinaV1FeedbacksAiBlock(
             runtime_dir=runtime_dir,
@@ -147,6 +156,12 @@ def main() -> None:
             analyze_status, analyze_payload = _post_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH}", {"rows": _rows()})
             if analyze_status != 200 or len(analyze_payload.get("results") or []) != 3:
                 raise AssertionError(f"AI analyze route mismatch: {analyze_status} {analyze_payload}")
+            capped_status, capped_payload = _post_json(
+                f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH}",
+                {"rows": _rows() + [_extra_row()]},
+            )
+            if capped_status != 422 or "at most 3 items" not in str(capped_payload.get("error") or ""):
+                raise AssertionError(f"AI analyze route must reject too many rows, got: {capped_status} {capped_payload}")
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -196,6 +211,22 @@ def _rows() -> list[dict[str, Any]]:
             "answer_text": "Ответ",
         },
     ]
+
+
+def _extra_row() -> dict[str, Any]:
+    return {
+        "feedback_id": "fb-4",
+        "created_at": "2026-04-26T07:00:00Z",
+        "rating": 4,
+        "text": "Нейтральный отзыв",
+        "pros": "",
+        "cons": "",
+        "nm_id": 126,
+        "product_name": "Товар",
+        "supplier_article": "A-4",
+        "is_answered": False,
+        "answer_text": "",
+    }
 
 
 def _reserve_free_port() -> int:

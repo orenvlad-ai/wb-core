@@ -44,6 +44,7 @@ def main() -> None:
 def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str, object]:
     captured_urls: list[str] = []
     ai_analyze_called = False
+    ai_request_rows: list[dict[str, object]] = []
     page_url = base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -78,10 +79,15 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         def fulfill_ai_analyze(route: object) -> None:
             nonlocal ai_analyze_called
             ai_analyze_called = True
+            payload = json.loads(route.request.post_data or "{}")
+            rows = payload.get("rows") if isinstance(payload, dict) else None
+            if not isinstance(rows, list):
+                raise AssertionError("feedbacks AI analyze request must include rows array")
+            ai_request_rows[:] = [row for row in rows if isinstance(row, dict)]
             route.fulfill(
                 status=200,
                 headers={"Content-Type": "application/json; charset=utf-8"},
-                body=json.dumps(_ai_payload(), ensure_ascii=False),
+                body=json.dumps(_ai_payload(ai_request_rows), ensure_ascii=False),
             )
 
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH, fulfill_prompt)
@@ -139,11 +145,13 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 raise AssertionError(f"feedbacks route query must include selected stars, got {captured_urls[-1]}")
             page.locator("[data-feedbacks-ai-analyze]").click()
             page.wait_for_function(
-                "() => document.querySelector('[data-feedbacks-table] tbody tr td:nth-child(3)')?.textContent.includes('Да')"
+                "() => document.querySelector('[data-feedbacks-table] tbody tr td:nth-child(4)')?.textContent.includes('Да')"
             )
             if not ai_analyze_called:
                 raise AssertionError("feedbacks AI analyze route must be called")
-            first_fit = page.locator("[data-feedbacks-table] tbody tr").nth(0).locator("td").nth(2).inner_text()
+            if len(ai_request_rows) != 1 or ai_request_rows[0].get("feedback_id") != "browser-1":
+                raise AssertionError(f"feedbacks AI analyze must default to one selected row, got {ai_request_rows}")
+            first_fit = page.locator("[data-feedbacks-table] tbody tr").nth(0).locator("td").nth(3).inner_text()
             if "Да" not in first_fit:
                 raise AssertionError(f"AI-positive feedbacks must sort first, got {first_fit!r}")
             page.locator("[data-feedbacks-ai-filter]").select_option("yes")
@@ -160,6 +168,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "star_filter_changes_query": True,
         "table_rows": 24,
         "ai_columns_present": True,
+        "ai_request_rows": len(ai_request_rows),
         "ai_filter_works": True,
     }
 
@@ -216,14 +225,15 @@ def _prompt_payload(*, status: str) -> dict[str, object]:
     }
 
 
-def _ai_payload() -> dict[str, object]:
+def _ai_payload(rows: list[dict[str, object]]) -> dict[str, object]:
+    feedback_ids = [str(row.get("feedback_id") or "") for row in rows if row.get("feedback_id")]
     return {
         "contract_name": "sheet_vitrina_v1_feedbacks_ai_analysis",
         "contract_version": "v1",
-        "meta": {"analyzed_at": "2026-04-29T09:00:00Z", "row_count": 24},
+        "meta": {"analyzed_at": "2026-04-29T09:00:00Z", "row_count": len(feedback_ids)},
         "results": [
             {
-                "feedback_id": "browser-24",
+                "feedback_id": feedback_id,
                 "complaint_fit": "yes",
                 "complaint_fit_label": "Да",
                 "category": "profanity_or_insult",
@@ -233,20 +243,7 @@ def _ai_payload() -> dict[str, object]:
                 "confidence_label": "Высокая",
                 "evidence": "фрагмент",
             }
-        ]
-        + [
-            {
-                "feedback_id": f"browser-{index}",
-                "complaint_fit": "no",
-                "complaint_fit_label": "Нет",
-                "category": "product_quality_claim",
-                "category_label": "Претензия к товару",
-                "reason": "Обычная претензия к товару",
-                "confidence": "medium",
-                "confidence_label": "Средняя",
-                "evidence": "",
-            }
-            for index in range(1, 24)
+            for feedback_id in feedback_ids
         ],
     }
 

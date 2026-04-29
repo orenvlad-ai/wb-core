@@ -20,8 +20,8 @@ PROMPT_CONTRACT_NAME = "sheet_vitrina_v1_feedbacks_ai_prompt"
 ANALYSIS_CONTRACT_NAME = "sheet_vitrina_v1_feedbacks_ai_analysis"
 CONTRACT_VERSION = "v1"
 MAX_PROMPT_LENGTH = 16000
-MAX_ROWS_PER_RUN = 600
-BATCH_SIZE = 25
+MAX_ROWS_PER_RUN = 3
+BATCH_SIZE = 3
 MAX_TEXT_CHARS_PER_REVIEW = 1400
 MIN_ANALYZE_INTERVAL_SECONDS = 3.0
 
@@ -210,6 +210,11 @@ def _prompt_payload(state: FeedbacksAiPromptState) -> dict[str, Any]:
         "updated_at": state.updated_at,
         "status": "ready" if state.prompt.strip() else "missing",
         "max_length": MAX_PROMPT_LENGTH,
+        "analysis_limits": {
+            "max_rows_per_run": MAX_ROWS_PER_RUN,
+            "batch_size": BATCH_SIZE,
+            "max_text_chars_per_review": MAX_TEXT_CHARS_PER_REVIEW,
+        },
     }
 
 
