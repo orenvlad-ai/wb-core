@@ -21,7 +21,7 @@ update_triggers:
   - "изменение canonical naming"
   - "появление нового публичного термина"
   - "изменение operator-visible labels"
-built_from_commit: "c8faa36b1eec440925a8c98b5d87eb188e5e7492"
+built_from_commit: "5ed568cf0ca49559b5fd21510b5e0da7e3cc927e"
 ---
 
 # Summary
@@ -39,7 +39,7 @@ built_from_commit: "c8faa36b1eec440925a8c98b5d87eb188e5e7492"
 | `wb_core_docs_master` | `docs master`, `project pack` | derived secondary compact project-pack |
 | `VB-Core Витрина V1` | `WB Core Vitrina V1`, `sheet_vitrina_v1` | legacy Google Sheets contour; archived / do not use |
 | `sheet_vitrina_v1` | `sheet_vitrina`, `Vitrina V1` | current website/operator/web-vitrina server contour; GAS part is archive-only |
-| `/sheet-vitrina-v1/vitrina` | `Витрина`, `unified UI` | primary current user-facing website entrypoint for vitrina, supply and reports tabs |
+| `/sheet-vitrina-v1/vitrina` | `Витрина`, `unified UI` | primary current user-facing website entrypoint for vitrina, supply, reports, feedbacks and research tabs |
 | `/sheet-vitrina-v1/operator` | `operator compatibility entry` | compatibility route rendering the same unified shell, not a separate current truth owner |
 | `CONFIG / METRICS / FORMULAS` | `operator sheets`, `registry sheets` | former sheet-side input реестры; archive/migration-only |
 | `config_v2 / metrics_v2 / formulas_v2` | `CONFIG_V2 / METRICS_V2 / FORMULAS_V2` | canonical bundle/runtime arrays |
@@ -52,6 +52,11 @@ built_from_commit: "c8faa36b1eec440925a8c98b5d87eb188e5e7492"
 | `group-refresh` | `Обновить группу`, `source group refresh` | date-scoped `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` for one source group and one selected date |
 | `plan-report` | `Выполнение плана` | read-only operator report over persisted closed-day facts, H1/H2 plan values and optional server-side monthly baseline |
 | `manual_monthly_plan_report_baseline` | `Исторические данные для отчёта`, `baseline` | separate runtime SQLite source used only by plan-report for full-month operator XLSX aggregates; not a general historical backfill |
+| `feedbacks` | `Отзывы`, `sheet_vitrina_v1_feedbacks` | read-only official WB feedbacks route/tab; not accepted truth persistence and not complaint submission |
+| `feedbacks AI` | `AI анализ отзывов`, `feedbacks/ai-prompt`, `feedbacks/ai-analyze` | transient operator review aid over loaded feedback rows via server-side prompt + OpenAI call; not `AI_EXPORT`, not ЕБД and not complaint automation |
+| `research_sku_group_comparison` | `Исследования`, `Сравнение групп SKU` | read-only retrospective comparison of two SKU groups over persisted ready snapshots; no causal/statistical claims |
+| `promo current invariant smoke` | `promo invariant guard` | read-only live/public guard for current promo row visibility and expected ended/no-download artifact handling |
+| `public route allowlist` | `nginx allowlist`, `managed public routes` | repo-owned hosted nginx route publication manifest for the current wb-core hosted contour |
 | `ЕБД` | `единая база данных` | user-facing alias for shared server-side accepted truth/runtime layer `wb-core`; not Google Sheets/GAS, browser UI, localStorage or report-private manual state |
 | `stock-report` | `Отчёт по остаткам` | read-only previous-closed stock report with active SKU selector |
 | `prepare -> upload -> refresh -> load` | `MVP flow`, `end-to-end flow` | historical bounded Google Sheets scenario; archived / do not use |
@@ -71,7 +76,7 @@ built_from_commit: "c8faa36b1eec440925a8c98b5d87eb188e5e7492"
 
 - Final production naming для будущих hosted/runtime/deploy слоёв ещё не зафиксирован.
 - Текущий main-confirmed uploaded package уже фиксируется как `102` metrics rows / `95` enabled+show_in_data metric keys в current truth; operator-facing `DATA_VITRINA` при этом materialize-ит тот же server-driven row set как thin two-day `date_matrix` (`1631` source rows -> `1698` rendered rows на `yesterday_closed + today_current`) без локального subset path.
-- User-facing labels for current web-vitrina are now centralized around `Витрина`, `Загрузить и обновить`, `Загрузка данных`, `Обновить группу`, `Отчёты`, `Отчёт по остаткам`, `Выполнение плана`, `Исторические данные для отчёта` and `ЕБД`.
+- User-facing labels for current web-vitrina are now centralized around `Витрина`, `Загрузить и обновить`, `Загрузка данных`, `Обновить группу`, `Отчёты`, `Отчёт по остаткам`, `Выполнение плана`, `Исторические данные для отчёта`, `Отзывы`, `Исследования`, `Товар в акции` and `ЕБД`.
 
 # Not in scope
 
