@@ -70,6 +70,7 @@ Canonical active target for the current EU hosted runtime:
 - `service_name = wb-core-registry-http.service`
 - nginx `server_names = 89.191.226.88 api.selleros.pro`
 - nginx managed TLS = `/etc/letsencrypt/live/api.selleros.pro/fullchain.pem` + `/etc/letsencrypt/live/api.selleros.pro/privkey.pem`
+- This production domain/TLS publication is a hard current-live invariant. For targets marked `primary_live` or `current_live`, `deploy`, `deploy-and-verify` and `apply-nginx-routes` must fail locally before SSH/rsync/nginx/systemd mutation if the target regresses to IP-only HTTP, drops `api.selleros.pro` from `server_names`, or drops managed `443 ssl` TLS.
 
 Archived legacy target:
 - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__selleros_api.json`
@@ -166,6 +167,7 @@ Known active EU target values теперь зафиксированы repo-owned
 - `nginx_public_routes.tls.certificate_path = /etc/letsencrypt/live/api.selleros.pro/fullchain.pem`
 - `nginx_public_routes.tls.certificate_key_path = /etc/letsencrypt/live/api.selleros.pro/privkey.pem`
 - route paths inside `runtime_env` follow current entrypoint defaults
+- losing `api.selleros.pro` or `listen 443 ssl` is production outage drift, not an acceptable deploy variant; repo-owned validation treats it as a blocker before live mutation.
 
 Archived selleros target note:
 - `selleros-root` and host `178.72.152.177` are not active runtime targets after the EU VPS cutover.
@@ -174,7 +176,7 @@ Archived selleros target note:
 - If `WB_CORE_HOSTED_RUNTIME_TARGET_FILE` points to archived selleros JSON or any target with `ssh_destination=selleros-root`, mutating commands must fail fast before SSH/rsync/nginx/systemd writes instead of silently touching the old VPS.
 - Emergency rollback writes require the exact explicit override `WB_CORE_ALLOW_ROLLBACK_TARGET_WRITE=I_UNDERSTAND_SELLEROS_IS_ROLLBACK_ONLY`; the runner prints a warning and still does not print secrets.
 - `print-plan` and dry-run command planning may remain available for rollback evidence because they do not mutate the old VPS.
-- DNS/TLS publication for `api.selleros.pro` is part of the current EU target contract; future DNS/TLS changes still require an explicit target-contract update before deploy.
+- DNS/TLS publication for `api.selleros.pro` is part of the current EU target contract; future DNS/TLS changes still require an explicit target-contract update before deploy. The current invariant is exact: `public_base_url=https://api.selleros.pro`, `nginx_public_routes.server_names=["89.191.226.88","api.selleros.pro"]`, and managed TLS with `listen=["443 ssl"]` plus the LetsEncrypt paths for `api.selleros.pro`.
 
 Secrets and mutable credentials по-прежнему не хранятся в Git. Repo stores only non-secret target wiring and unit artifacts.
 
@@ -360,7 +362,7 @@ If the task introduces or changes temporal closed-day retry behavior for `sheet_
 - verify the repo-owned timer/service artifacts are installed on host as `wb-core-sheet-vitrina-closure-retry.service` / `.timer`;
 - verify at least one affected `as_of_date` where a strict closed-day-capable source either transitions to `success` after retry or stays in a truthful retry/exhausted/blocker state without fake closed values in the visible slot.
 
-The current active public probe target is `https://api.selleros.pro`. `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1` remains a diagnostic-only legacy TLS escape hatch for historical checks and is not part of the active EU target closure.
+The current active public probe target is `https://api.selleros.pro`. Live/public closure for website/operator tasks must verify the HTTPS production domain routes, including `GET /sheet-vitrina-v1/vitrina`, `GET /sheet-vitrina-v1/operator`, `GET /v1/sheet-vitrina-v1/status`, `GET /v1/sheet-vitrina-v1/web-vitrina`, and `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition`. `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1` remains a diagnostic-only legacy TLS escape hatch for historical checks and is not part of the active EU target closure.
 
 ## Human-Only Boundary
 

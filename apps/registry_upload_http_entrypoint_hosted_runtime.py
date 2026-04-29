@@ -91,6 +91,11 @@ ROLLBACK_TARGET_WRITE_OVERRIDE_VALUE = "I_UNDERSTAND_SELLEROS_IS_ROLLBACK_ONLY"
 CURRENT_LIVE_TARGET_FILE_HINT = "artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json"
 ACTIVE_HOSTED_RUNTIME_SSH_DESTINATION = "wb-core-eu-root"
 ACTIVE_HOSTED_RUNTIME_PUBLIC_HOSTS = {"89.191.226.88", "api.selleros.pro"}
+CURRENT_LIVE_PUBLIC_BASE_URL = "https://api.selleros.pro"
+CURRENT_LIVE_REQUIRED_SERVER_NAMES = ("89.191.226.88", "api.selleros.pro")
+CURRENT_LIVE_REQUIRED_TLS_LISTEN = "443 ssl"
+CURRENT_LIVE_REQUIRED_TLS_CERTIFICATE_PATH = "/etc/letsencrypt/live/api.selleros.pro/fullchain.pem"
+CURRENT_LIVE_REQUIRED_TLS_CERTIFICATE_KEY_PATH = "/etc/letsencrypt/live/api.selleros.pro/privkey.pem"
 ACTIVE_HOSTED_RUNTIME_TARGET_DIR = "/opt/wb-core-runtime/app"
 ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR = "/opt/wb-core-runtime/state"
 ACTIVE_HOSTED_RUNTIME_SERVICE_NAME = "wb-core-registry-http.service"
@@ -2604,7 +2609,75 @@ def _target_action_blockers(target: HostedRuntimeTarget) -> list[str]:
         blockers.append(
             f"service_name must be {ACTIVE_HOSTED_RUNTIME_SERVICE_NAME}, got {target.service_name}"
         )
+    current_live_invariant_blockers = _current_live_publication_invariant_blockers(target)
+    if current_live_invariant_blockers:
+        blockers.append(_current_live_publication_invariant_error(current_live_invariant_blockers))
     return blockers
+
+
+def _is_current_live_target(target: HostedRuntimeTarget) -> bool:
+    role = str(target.target_role or "").strip().lower()
+    lifecycle = str(target.target_lifecycle or "").strip().lower()
+    return role == PRIMARY_LIVE_TARGET_ROLE or lifecycle == CURRENT_LIVE_TARGET_LIFECYCLE
+
+
+def _current_live_publication_invariant_blockers(target: HostedRuntimeTarget) -> list[str]:
+    if not _is_current_live_target(target):
+        return []
+
+    blockers: list[str] = []
+    if target.public_base_url != CURRENT_LIVE_PUBLIC_BASE_URL:
+        blockers.append(f"public_base_url={target.public_base_url or '<missing>'}")
+
+    if not target.nginx_public_routes:
+        blockers.append("nginx_public_routes=<missing>")
+        return blockers
+
+    server_names = _nginx_server_names_for_target(target)
+    if server_names != CURRENT_LIVE_REQUIRED_SERVER_NAMES:
+        blockers.append(f"nginx_public_routes.server_names={list(server_names)!r}")
+
+    rendered_server_name = f"server_name {' '.join(server_names)};"
+    required_server_name = f"server_name {' '.join(CURRENT_LIVE_REQUIRED_SERVER_NAMES)};"
+    if rendered_server_name != required_server_name:
+        blockers.append(f"rendered_server_name={rendered_server_name!r}")
+
+    tls = target.nginx_public_routes.tls
+    if tls is None:
+        blockers.append("nginx_public_routes.tls=<missing>")
+        return blockers
+
+    if CURRENT_LIVE_REQUIRED_TLS_LISTEN not in tls.listen:
+        blockers.append(f"nginx_public_routes.tls.listen={list(tls.listen)!r}")
+    if tls.certificate_path != CURRENT_LIVE_REQUIRED_TLS_CERTIFICATE_PATH:
+        blockers.append(f"nginx_public_routes.tls.certificate_path={tls.certificate_path!r}")
+    if tls.certificate_key_path != CURRENT_LIVE_REQUIRED_TLS_CERTIFICATE_KEY_PATH:
+        blockers.append(f"nginx_public_routes.tls.certificate_key_path={tls.certificate_key_path!r}")
+
+    try:
+        rendered_tls = render_nginx_tls_block(tls)
+    except ValueError as exc:
+        blockers.append(f"nginx_public_routes.tls render failed: {exc}")
+    else:
+        if f"listen {CURRENT_LIVE_REQUIRED_TLS_LISTEN};" not in rendered_tls:
+            blockers.append("rendered TLS block missing `listen 443 ssl;`")
+        if f"ssl_certificate {CURRENT_LIVE_REQUIRED_TLS_CERTIFICATE_PATH};" not in rendered_tls:
+            blockers.append("rendered TLS block missing LetsEncrypt fullchain path")
+        if f"ssl_certificate_key {CURRENT_LIVE_REQUIRED_TLS_CERTIFICATE_KEY_PATH};" not in rendered_tls:
+            blockers.append("rendered TLS block missing LetsEncrypt private key path reference")
+
+    return blockers
+
+
+def _current_live_publication_invariant_error(blockers: list[str]) -> str:
+    return (
+        f"current live EU target must publish `{CURRENT_LIVE_PUBLIC_BASE_URL}`; "
+        "required server_names: `89.191.226.88`, `api.selleros.pro`; "
+        "required TLS: `listen 443 ssl` with LetsEncrypt paths "
+        f"`{CURRENT_LIVE_REQUIRED_TLS_CERTIFICATE_PATH}` and "
+        f"`{CURRENT_LIVE_REQUIRED_TLS_CERTIFICATE_KEY_PATH}`; "
+        f"blockers: {', '.join(blockers)}"
+    )
 
 
 def _public_base_url_host(public_base_url: str) -> str:

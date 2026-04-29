@@ -243,11 +243,79 @@ def main() -> None:
             "print-plan",
         ]
     )
+    if eu_print_plan["deploy_plan"]["public_base_url"] != "https://api.selleros.pro":
+        raise AssertionError("EU print-plan must expose current HTTPS production URL")
+    if eu_print_plan["deploy_plan"]["target_role"] != "primary_live":
+        raise AssertionError("EU print-plan must expose primary_live target_role")
+    if eu_print_plan["deploy_plan"]["target_lifecycle"] != "current_live":
+        raise AssertionError("EU print-plan must expose current_live lifecycle")
     eu_plan_routes = eu_print_plan["deploy_plan"]["nginx_public_routes"]
     if eu_plan_routes["server_names"] != ["89.191.226.88", "api.selleros.pro"]:
         raise AssertionError("EU print-plan must expose current domain and IP server_names")
     if eu_plan_routes["tls"]["configured"] is not True:
         raise AssertionError("EU print-plan must expose configured managed TLS")
+    if eu_print_plan["deploy_plan"]["target_action_blockers"]:
+        raise AssertionError(
+            f"EU print-plan must have no target action blockers, got {eu_print_plan['deploy_plan']['target_action_blockers']}"
+        )
+
+    with TemporaryDirectory(prefix="hosted-current-live-invariant-smoke-") as tmp:
+        invariant_dir = Path(tmp)
+        missing_domain = _write_current_live_fixture(
+            invariant_dir / "missing_domain.json",
+            server_names=["89.191.226.88"],
+        )
+        missing_tls = _write_current_live_fixture(
+            invariant_dir / "missing_tls.json",
+            tls=None,
+        )
+        ip_http_only = _write_current_live_fixture(
+            invariant_dir / "ip_http_only.json",
+            public_base_url="http://89.191.226.88",
+        )
+        _assert_current_live_invariant_failure(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--target-file",
+                str(missing_domain),
+                "deploy",
+                "--allow-dirty",
+            ],
+            required_fragments=[
+                "current live EU target must publish `https://api.selleros.pro`",
+                "required server_names: `89.191.226.88`, `api.selleros.pro`",
+                "nginx_public_routes.server_names",
+            ],
+        )
+        _assert_current_live_invariant_failure(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--target-file",
+                str(missing_tls),
+                "apply-nginx-routes",
+            ],
+            required_fragments=[
+                "required TLS: `listen 443 ssl` with LetsEncrypt paths",
+                "nginx_public_routes.tls=<missing>",
+            ],
+        )
+        _assert_current_live_invariant_failure(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--target-file",
+                str(ip_http_only),
+                "deploy-and-verify",
+                "--allow-dirty",
+                "--skip-refresh",
+            ],
+            required_fragments=[
+                "current live EU target must publish `https://api.selleros.pro`",
+                "public_base_url=http://89.191.226.88",
+            ],
+        )
 
     print(f"public_route_manifest: ok -> {len(routes)} routes")
     print("public_route_render: ok -> feedbacks and supply prefixes included")
@@ -256,6 +324,7 @@ def main() -> None:
     print("public_route_tls: ok -> explicit managed 443 ssl block rendered")
     print("public_route_deploy_dry_run: ok")
     print("public_route_eu_target_https_domain: ok -> api.selleros.pro + TLS configured")
+    print("current_live_publication_invariant: ok -> bad current-live targets fail before mutation")
 
 
 def _run_json(command: list[str]) -> dict[str, object]:
@@ -270,6 +339,78 @@ def _run_json(command: list[str]) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise AssertionError("runner must emit a JSON object")
     return payload
+
+
+def _write_current_live_fixture(
+    path: Path,
+    *,
+    public_base_url: str = "https://api.selleros.pro",
+    server_names: list[str] | None = None,
+    tls: dict[str, object] | None | bool = True,
+) -> Path:
+    nginx_public_routes: dict[str, object] = {
+        "server_config_path": "/tmp/wb-core-current-live-invariant-smoke-nginx.conf",
+        "backup_dir": "/tmp",
+        "test_command": "nginx -t",
+        "reload_command": "systemctl reload nginx",
+        "manifest_path": "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json",
+        "server_names": server_names or ["89.191.226.88", "api.selleros.pro"],
+    }
+    if tls is True:
+        nginx_public_routes["tls"] = {
+            "listen": ["443 ssl"],
+            "certificate_path": "/etc/letsencrypt/live/api.selleros.pro/fullchain.pem",
+            "certificate_key_path": "/etc/letsencrypt/live/api.selleros.pro/privkey.pem",
+        }
+    elif isinstance(tls, dict):
+        nginx_public_routes["tls"] = tls
+
+    path.write_text(
+        json.dumps(
+            {
+                "target_status": "active",
+                "target_role": "primary_live",
+                "target_lifecycle": "current_live",
+                "mutation_policy": "routine_writes_allowed",
+                "host_ip": "89.191.226.88",
+                "public_domain": "api.selleros.pro",
+                "target_id": "current_live_invariant_smoke",
+                "public_base_url": public_base_url,
+                "loopback_base_url": "http://127.0.0.1:8765",
+                "ssh_destination": "wb-core-eu-root",
+                "target_dir": "/opt/wb-core-runtime/app",
+                "service_name": "wb-core-registry-http.service",
+                "restart_command": "systemctl restart wb-core-registry-http.service",
+                "status_command": "systemctl status --no-pager --full wb-core-registry-http.service",
+                "environment_file": "/opt/wb-ai/.env",
+                "systemd_unit_directory": "/etc/systemd/system",
+                "systemd_units_source_dir": "artifacts/registry_upload_http_entrypoint/systemd",
+                "nginx_public_routes": nginx_public_routes,
+                "managed_systemd_units": [],
+                "runtime_env": {
+                    "REGISTRY_UPLOAD_HTTP_HOST": "127.0.0.1",
+                    "REGISTRY_UPLOAD_HTTP_PORT": "8765",
+                    "REGISTRY_UPLOAD_RUNTIME_DIR": "/opt/wb-core-runtime/state",
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _assert_current_live_invariant_failure(command: list[str], *, required_fragments: list[str]) -> None:
+    result = subprocess.run(command, cwd=ROOT, check=False, capture_output=True, text=True)
+    if result.returncode == 0:
+        raise AssertionError(f"command unexpectedly succeeded: {' '.join(command)}")
+    output = result.stdout + result.stderr
+    for fragment in required_fragments:
+        if fragment not in output:
+            raise AssertionError(
+                f"current-live invariant failure missing {fragment!r}; output was:\n{output}"
+            )
 
 
 if __name__ == "__main__":
