@@ -1,6 +1,10 @@
 {
   "target_status": "archived",
-  "archive_note": "Archived legacy target. Do not use for deploy/probe/audit/GC/runtime tasks after EU VPS cutover; active target is hosted_runtime_target__europe_api.json / wb-core-eu-root / 89.191.226.88.",
+  "target_role": "rollback_only",
+  "target_lifecycle": "deprecated_live_target",
+  "mutation_policy": "do_not_deploy_without_emergency_rollback_override",
+  "provider_side_label_recommendation": "ROLLBACK-ONLY_DO-NOT-DEPLOY_wb-core-old-selleros",
+  "archive_note": "Archived legacy target. Rollback/read-only only after EU VPS cutover; do not use for routine deploy/apply-nginx/restart/update/audit/GC/runtime tasks. Active target is hosted_runtime_target__europe_api.json / wb-core-eu-root / 89.191.226.88. Mutating rollback requires WB_CORE_ALLOW_ROLLBACK_TARGET_WRITE=I_UNDERSTAND_SELLEROS_IS_ROLLBACK_ONLY.",
   "target_id": "selleros_api_hosted_runtime_archived",
   "public_base_url": "https://api.selleros.pro",
   "loopback_base_url": "http://127.0.0.1:8765",

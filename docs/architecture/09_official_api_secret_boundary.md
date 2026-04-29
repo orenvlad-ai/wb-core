@@ -18,7 +18,7 @@
 - `fin_report_daily_block`
 - `wb_feedbacks` / `sheet_vitrina_v1_feedbacks` read-only route
 
-`web_source_snapshot_block` и `seller_funnel_snapshot_block` не используют direct WB token path: они ходят в repo-owned hosted runtime contour. Active hosted target is `wb-core-eu-root` / `89.191.226.88`; archived `selleros-root` / `api.selleros.pro` must not be used for deploy/probe/GC/runtime tasks.
+`web_source_snapshot_block` и `seller_funnel_snapshot_block` не используют direct WB token path: они ходят в repo-owned hosted runtime contour. Active hosted target is `wb-core-eu-root` / `89.191.226.88`; archived `selleros-root` / `api.selleros.pro` is rollback/read-only evidence only, and mutating deploy/apply-nginx/restart/update/GC paths must fail fast unless the explicit emergency rollback override is set.
 
 ## Что Хранится Только Вне Git
 
