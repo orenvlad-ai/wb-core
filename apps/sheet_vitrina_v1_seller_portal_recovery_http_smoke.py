@@ -10,6 +10,7 @@ import socket
 import sys
 from tempfile import TemporaryDirectory
 import threading
+from types import SimpleNamespace
 from urllib import request as urllib_request
 import zipfile
 
@@ -27,7 +28,10 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     build_registry_upload_http_server,
 )
-from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
+from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
+    RegistryUploadHttpEntrypoint,
+    SellerPortalRecoveryController,
+)
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
 
 
@@ -240,6 +244,21 @@ class _FakeSellerRecoveryController:
 
 
 def main() -> None:
+    probe_error_controller = SellerPortalRecoveryController(
+        config_factory=lambda: SimpleNamespace(
+            canonical_supplier_id="canonical-supplier-id",
+            canonical_supplier_label="ИП Сагитов В. Р.",
+        ),
+        status_reader=lambda *args, **kwargs: (_ for _ in ()).throw(
+            FileNotFoundError("/opt/wb-web-bot/venv/bin/python")
+        ),
+    )
+    probe_error_payload = probe_error_controller.check_session(
+        launcher_download_path=DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+    )
+    if probe_error_payload.get("status") != "session_probe_error":
+        raise AssertionError(f"session-check must degrade probe exceptions into truthful payload, got {probe_error_payload}")
+
     with TemporaryDirectory(prefix="sheet-vitrina-recovery-http-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         port = _reserve_free_port()
@@ -342,6 +361,7 @@ def main() -> None:
                 raise AssertionError(f"unexpected recovery controller lifecycle, got {controller.calls}")
 
             print("seller_portal_session_check_http: ok -> lightweight session-check route is wired")
+            print("seller_portal_session_check_probe_error: ok -> probe exceptions stay 200-shape")
             print("seller_portal_recovery_http_operator: ok -> operator UI exposes recovery block and config")
             print("seller_portal_recovery_http_lifecycle: ok -> run-aware start/status/stop/not_needed lifecycle is wired")
             print("seller_portal_recovery_launcher_download: ok -> downloadable Mac launcher is attached")

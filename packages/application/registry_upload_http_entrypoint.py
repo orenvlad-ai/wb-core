@@ -438,11 +438,22 @@ class SellerPortalRecoveryController:
         launcher_download_path: str,
     ) -> dict[str, Any]:
         config = self._config()
-        raw = (
-            self._status_reader(config, True)
-            if self._status_reader is not None
-            else self._tool().read_session_status(config, with_probe=True)
-        )
+        try:
+            raw = (
+                self._status_reader(config, True)
+                if self._status_reader is not None
+                else self._tool().read_session_status(config, with_probe=True)
+            )
+        except Exception as exc:  # pragma: no cover - defensive live probe boundary
+            raw = {
+                "status": "probe_error",
+                "message": str(exc),
+                "current_storage_probe": {
+                    "ok": False,
+                    "status": "seller_portal_session_probe_error",
+                    "message": str(exc),
+                },
+            }
         return _build_seller_portal_session_check_payload(
             raw,
             config=config,
