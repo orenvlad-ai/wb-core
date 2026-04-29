@@ -29,6 +29,7 @@ related_modules:
   - "docs/modules/29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md"
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
+  - "docs/modules/32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md"
 related_paths:
   - "packages/"
   - "apps/"
@@ -38,7 +39,7 @@ update_triggers:
   - "изменение current main-confirmed contour"
   - "merge нового bounded модуля"
   - "смена главного project gap"
-built_from_commit: "c8faa36b1eec440925a8c98b5d87eb188e5e7492"
+built_from_commit: "5ed568cf0ca49559b5fd21510b5e0da7e3cc927e"
 ---
 
 # Summary
@@ -51,9 +52,10 @@ built_from_commit: "c8faa36b1eec440925a8c98b5d87eb188e5e7492"
 - registry upload line `20–23` уже смёржена;
 - sheet-side operator line `24–26` уже смёржена как legacy/export contour, но Google Sheets/GAS side is now `ARCHIVED / DO NOT USE`;
 - bounded browser-capture collector `27` уже смёржен как repo-owned local promo XLSX runner с truthful sidecar contract;
-- bounded live wiring `28` уже смёржен и переводит `promo_by_price` из blocked gap в current server-owned source seam внутри existing refresh/runtime/read-side contour.
+- bounded live wiring `28` уже смёржен и переводит `promo_by_price` из blocked gap в current server-owned source seam внутри existing refresh/runtime/read-side contour, с diagnostics-only promo artifact/preflight surface и live/public current invariant guard.
 - web-vitrina line `29–31` уже смёржена и является active user-facing surface: `/sheet-vitrina-v1/vitrina` + `/v1/sheet-vitrina-v1/web-vitrina`.
-- current operator UI unified вокруг `/sheet-vitrina-v1/vitrina`: first tab `Витрина`, sibling tabs `Расчет поставок` и `Отчеты`; `/sheet-vitrina-v1/operator` остаётся compatibility entry на тот же shell.
+- research block `32` уже смёржен как read-only MVP вкладки `Исследования` для сравнения двух групп SKU по persisted ready snapshots.
+- current operator UI unified вокруг `/sheet-vitrina-v1/vitrina`: first tab `Витрина`, sibling tabs `Расчет поставок`, `Отчеты`, `Отзывы` и `Исследования`; `/sheet-vitrina-v1/operator` остаётся compatibility entry на тот же shell.
 
 # Current norm
 
@@ -76,7 +78,7 @@ Confirmed contour на текущем `main`:
 - registry upload bundle и validator;
 - file-backed accept/store/activate;
 - DB-backed runtime/current truth;
-- live HTTP entrypoint;
+- live HTTP entrypoint, including repo-owned hosted public-route allowlist publishing and feedbacks/AI routes;
 - archived Apps Script trigger and compact seed bootstrap for `CONFIG / METRICS / FORMULAS`;
 - server-side uploaded compact package/runtime state `33 / 102 / 7`;
 - server-side refresh/read ready snapshot in repo-owned SQLite runtime contour; Google Sheets reverse-load is archived.
@@ -92,14 +94,18 @@ Confirmed contour на текущем `main`:
   - accepted/runtime-cached exact-date promo truth используется только как fallback, если replay не дал exact `success`
   - invalid later attempts do not overwrite accepted current/closed promo truth
   - low-confidence cross-year labels keep `promo_start_at/end_at = null`
+  - high-confidence ended/no-download promo evidence is path/diagnostic metadata only: it can avoid drawer/deep workbook flow and exclude expected non-materializable artifacts from fatal gating, but it does not create metric truth.
 - unified web-vitrina/operator surface:
   - primary manual action `Загрузить и обновить` refreshes server-side ready snapshot without Google Sheets `/load`;
   - compact table toolbar combines period/search/filter/column/sort controls; default no-query history opens the latest four server-readable business dates ending on backend-owned `today_current_date` when available;
   - bottom `Загрузка данных` is lazy: initial state shows only `not_loaded` + `Загрузить`, then explicit read-only `surface=page_composition&include_source_status=1` loads grouped source status table (`WB API`, `Seller Portal / бот`, `Прочие источники`) with date-scoped `Обновить группу`;
+  - `Отзывы` tab is read-only over official WB feedbacks API through canonical `WB_API_TOKEN`, with bounded manual filters/table and transient AI-assisted review through server-side prompt storage + OpenAI route; AI labels are not accepted truth, complaint submission, Seller Portal automation or Google Sheets/GAS state;
+  - `Исследования` tab provides read-only `research_sku_group_comparison`: two mutually exclusive SKU groups, non-financial metrics, compact date ranges, candidate-only `Товар в акции` chip from latest closed-day promo truth and no causal/statistical claims;
   - `GET /v1/sheet-vitrina-v1/plan-report` adds read-only `Выполнение плана` over accepted closed-day `fin_report_daily.fin_buyout_rub` + `ads_compact.ads_sum`, H1/H2 plan params, per-block coverage and optional server-side monthly baseline;
   - plan-report baseline routes (`baseline-template.xlsx`, `baseline-upload`, `baseline-status`) store operator monthly aggregates in separate runtime SQLite state used only by the plan report;
   - one-off `apps/sheet_vitrina_v1_ready_fact_reconcile.py` can dry-run/apply missing accepted slots from already persisted ready snapshots without overwriting existing diffs or fabricating zeros;
   - `GET /v1/sheet-vitrina-v1/stock-report` remains read-only previous-closed stock report with current active SKU selector;
+  - supply tab keeps server-driven factory-order and regional calculations; regional result now uses compact district rows with per-district XLSX action and district files include `nmId / SKU / Количество к поставке / Дефицит`;
   - seller-funnel materialization filters raw rows to enabled/relevant `nm_ids` before strict field validation and logs ignored invalid non-relevant rows.
 - User-facing `ЕБД` / `единая база данных` now means the shared server-side accepted truth/runtime layer behind web-vitrina, plan-report and future reports; it is not Google Sheets/GAS, browser UI/localStorage or a private report-only manual table.
 
@@ -116,7 +122,7 @@ Confirmed contour на текущем `main`:
 # Known gaps
 
 - full legacy parity по всем historical metric sections и registry rows;
-- repo-owned hosted deploy/probe contract around current website/operator runtime is documented, while actual deploy rights/publish hardening remain a separate completion boundary;
+- repo-owned hosted deploy/probe contract around current website/operator runtime is documented and includes managed public-route publishing; production storage binding, final auth-hardening and actual live access remain separate completion boundaries;
 - окончательная судьба `AI_EXPORT` как compatibility contract;
 - materialized `packages/domain`, `infra/`, `tests/`, `api/`, `jobs/`, `db/`.
 
@@ -124,5 +130,5 @@ Confirmed contour на текущем `main`:
 
 - перенос всего legacy 1:1;
 - утверждение, что actual deploy rights или final production hardening уже materialized в repo;
-- broad operator UX redesign beyond the current unified vitrina/supply/reports shell;
+- broad operator UX redesign beyond the current unified vitrina/supply/reports/feedbacks/research shell;
 - полный architectural redesign `wb-core`.

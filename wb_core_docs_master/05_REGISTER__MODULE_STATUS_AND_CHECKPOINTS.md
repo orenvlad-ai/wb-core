@@ -4,7 +4,7 @@ doc_id: "WB-CORE-PROJECT-05-MODULE-STATUS"
 doc_type: "register"
 status: "active"
 purpose: "Дать compact register смёрженных модулей и current checkpoints без чтения всех module docs подряд."
-scope: "Семейства модулей, диапазоны `01–30`, текущий статус `main`, главный current checkpoint и открытые хвосты."
+scope: "Семейства модулей, диапазоны `01–32`, текущий статус `main`, главный current checkpoint и открытые хвосты."
 source_basis:
   - "docs/modules/00_INDEX__MODULES.md"
   - "README.md"
@@ -20,18 +20,18 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "c8faa36b1eec440925a8c98b5d87eb188e5e7492"
+built_from_commit: "5ed568cf0ca49559b5fd21510b5e0da7e3cc927e"
 ---
 
 # Summary
 
-На текущем `main` main-confirmed module set уже доходит до `31`.
+На текущем `main` main-confirmed module set уже доходит до `32`.
 
 Практически это значит:
 - source/data foundation уже materialized;
 - registry upload line уже замкнута до HTTP entrypoint;
 - sheet-side line reached bounded MVP historically, but Google Sheets/GAS load/write contour is now archived/do-not-use.
-- web-vitrina line уже имеет stable route/contract seam, отдельный library-agnostic `view_model`, первый concrete grid adapter layer и real live page composition на sibling route.
+- web-vitrina line уже имеет stable route/contract seam, отдельный library-agnostic `view_model`, первый concrete grid adapter layer и real live page composition на sibling route, plus read-only feedbacks and research tabs in the same unified shell.
 
 # Current norm
 
@@ -41,11 +41,12 @@ built_from_commit: "c8faa36b1eec440925a8c98b5d87eb188e5e7492"
 | `11–12` | `rule-based` | смёржены в `main` |
 | `13–16` | `table-facing` / `projection` / `wide-matrix` | смёржены в `main` |
 | `17–19` | `archived sheet-side scaffold/write/presentation` | Google Sheets contour archived / do not use; retained only as migration evidence |
-| `20–23` | `registry upload line` | смёржены в `main` до live HTTP entrypoint |
+| `20–23` | `registry upload line` | смёржены в `main` до live HTTP entrypoint plus hosted public-route allowlist/deploy publication boundary |
 | `24–26` | `web/operator + archived sheet-side history` | current web/operator contour active; Google Sheets/GAS side archived |
 | `27` | `browser-capture collector` | смёржен в `main` как bounded local promo XLSX collector contour |
 | `28` | `browser-capture live wiring` | смёржен в `main` как promo live source seam inside refresh/runtime/read-side |
-| `29–31` | `web-vitrina seams` | смёржены в `main` как stable read/view-model/adapter ladder plus real sibling page composition |
+| `29–31` | `web-vitrina seams` | смёржены в `main` как stable read/view-model/adapter ladder plus real sibling page composition, включая read-only feedbacks tab and transient AI review flow |
+| `32` | `web/operator/research` | смёржен в `main` как read-only SKU group comparison over accepted truth / ready snapshots |
 
 ## Current checkpoint ladder
 
@@ -69,6 +70,7 @@ built_from_commit: "c8faa36b1eec440925a8c98b5d87eb188e5e7492"
 18. `web_vitrina_view_model_block`
 19. `web_vitrina_gravity_table_adapter_block`
 20. `web_vitrina_page_composition_block`
+21. `research_sku_group_comparison_block`
 
 ## Operator-facing checkpoint
 
@@ -86,6 +88,12 @@ Current main-confirmed operator flow:
 - `GET /v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx`
 - `POST /v1/sheet-vitrina-v1/plan-report/baseline-upload`
 - `GET /v1/sheet-vitrina-v1/plan-report/baseline-status`
+- `GET /v1/sheet-vitrina-v1/feedbacks`
+- `GET /v1/sheet-vitrina-v1/feedbacks/ai-prompt`
+- `POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt`
+- `POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze`
+- `GET /v1/sheet-vitrina-v1/research/sku-group-comparison/options`
+- `POST /v1/sheet-vitrina-v1/research/sku-group-comparison/calculate`
 - `GET /sheet-vitrina-v1/operator`
 - `GET /sheet-vitrina-v1/vitrina`
 - former Google Sheets `prepare/upload/load DATA_VITRINA` flow is archived and blocked by guards
@@ -107,14 +115,16 @@ Current live promo source flow:
 - `STATUS` and ready snapshot now expose truthful promo source facts instead of a permanent blocked gap
 
 Current repo-owned unified web/operator surface:
-- primary route = `GET /sheet-vitrina-v1/vitrina`; first/default tab = `Витрина`, sibling tabs = `Расчет поставок` and `Отчеты`
+- primary route = `GET /sheet-vitrina-v1/vitrina`; first/default tab = `Витрина`, sibling tabs = `Расчет поставок`, `Отчеты`, `Отзывы` and `Исследования`
 - compatibility route = `GET /sheet-vitrina-v1/operator`; it renders the same unified shell and is not a separate source-of-truth owner
-- page uses current read/action routes: `POST /v1/sheet-vitrina-v1/refresh`, `GET /v1/sheet-vitrina-v1/status`, `GET /v1/sheet-vitrina-v1/job`, `GET /v1/sheet-vitrina-v1/daily-report`, `GET /v1/sheet-vitrina-v1/stock-report`, `GET /v1/sheet-vitrina-v1/plan-report` and `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh`
+- page uses current read/action routes: `POST /v1/sheet-vitrina-v1/refresh`, `GET /v1/sheet-vitrina-v1/status`, `GET /v1/sheet-vitrina-v1/job`, `GET /v1/sheet-vitrina-v1/daily-report`, `GET /v1/sheet-vitrina-v1/stock-report`, `GET /v1/sheet-vitrina-v1/plan-report`, `GET /v1/sheet-vitrina-v1/feedbacks`, `feedbacks/ai-prompt`, `feedbacks/ai-analyze`, research SKU-group comparison routes and `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh`
 - former Google Sheets `/load` stays archived/blocked and is not needed for current web-vitrina completion
 - `GET /v1/sheet-vitrina-v1/web-vitrina` stays server-owned and library-agnostic on the default path: current v1 shape is `meta + status_summary + schema + rows + capabilities`, built only from existing ready snapshot/current truth and optional `as_of_date`
 - phase-2 web-vitrina materializes repo-owned `web_vitrina_view_model` over that stable contract: current schema = `columns + rows + groups + sections + formatters + filters + sorts + state_model`
 - phase-3 web-vitrina materializes repo-owned `web_vitrina_gravity_table_adapter` over that `view_model`: current Gravity-specific surface = `columns + rows + renderers + groupings + filters + sorts + use_table_options + table_props + state_surface`
 - phase-4 web-vitrina materializes repo-owned `web_vitrina_page_composition` via optional `surface=page_composition`; the page shell renders summary, compact toolbar/history controls, main table and then bottom `Действия и состояния`
+- the same unified shell exposes `Отзывы` as a manual read-only WB feedbacks table with optional transient AI review columns; prompt storage is operational runtime config, not ЕБД/accepted truth
+- the same unified shell exposes `Исследования` as read-only SKU group comparison; options/calculate use active SKU truth, selectable non-financial metrics and persisted ready snapshots only
 - current live vitrina action/status semantics:
   - `Загрузить и обновить` = canonical `POST /v1/sheet-vitrina-v1/refresh` + page reread, without Google Sheets write dependency
   - the old cheap top-panel `Обновить`, `JSON Connect` and permanent top status badge are not rendered
@@ -184,7 +194,7 @@ Current additional operator supply flow on the same page:
 - future exact-date sales history continues to materialize through existing refresh/runtime flow, so the historical bootstrap is bounded and not a recurring operator step
 - XLSX generation is hardened so operator templates and recommendation files open as standard XLSX workbooks without a repair path
 - calculation, result XLSX and `Общее количество / Расчётный вес / Расчётный объём` summary stay fully server-driven
-- regional block adds server-side district allocation with truthful `deficit = full_recommendation - allocated_qty`, a compact per-district summary table and one separate XLSX file per canonical district key
+- regional block adds server-side district allocation with truthful `deficit = full_recommendation - allocated_qty`, a compact per-district summary table with row-level XLSX actions and one separate XLSX file per canonical district key; each district XLSX includes `nmId / SKU / Количество к поставке / Дефицит`
 - current bounded regional methodology uses total SKU `orderCount` plus current district stocks and then applies legacy box allocation against shared `stock_ff`; inbound `ФФ -> WB` is intentionally not materialized for this block in the current checkpoint
 
 Current main-confirmed counts для этого flow:
@@ -206,9 +216,9 @@ This is the first bounded MVP checkpoint, not final production parity.
 - full legacy parity beyond current main-confirmed sheet/upload dictionary;
 - promo source seam itself больше не является gap; remaining tail = broader live numeric parity beyond the currently wired promo-backed metric subset and beyond current `COST_PRICE` overlay;
 - отдельный bounded fix по любому remaining non-district / foreign stocks residual, если одной truthful `STATUS` note окажется недостаточно для operator flow;
-- production hardening around runtime/deploy/auth;
+- production hardening around runtime/deploy/auth and storage binding;
 - generic orchestration platform beyond current bounded auto + retry timers;
-- actual deploy rights/publish wiring for hosted contour;
+- actual live deploy rights for hosted contour;
 - unresolved long-tail compatibility around `AI_EXPORT`.
 
 # Not in scope

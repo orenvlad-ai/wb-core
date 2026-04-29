@@ -13,6 +13,7 @@ source_basis:
   - "apps/registry_upload_db_backed_runtime_smoke.py"
   - "apps/registry_upload_http_entrypoint_smoke.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"
+  - "apps/registry_upload_http_entrypoint_public_routes_smoke.py"
   - "apps/sheet_vitrina_v1_business_time_smoke.py"
   - "apps/sheet_vitrina_v1_registry_upload_trigger_smoke.py"
   - "apps/sheet_vitrina_v1_registry_seed_v3_bootstrap_smoke.py"
@@ -23,9 +24,14 @@ source_basis:
   - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_group_refresh_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_source_status_smoke.py"
+  - "apps/sheet_vitrina_v1_popup_outside_click_browser_smoke.py"
   - "apps/sheet_vitrina_v1_plan_report_smoke.py"
   - "apps/sheet_vitrina_v1_plan_report_http_smoke.py"
   - "apps/sheet_vitrina_v1_ready_fact_reconcile_smoke.py"
+  - "apps/sheet_vitrina_v1_feedbacks_http_smoke.py"
+  - "apps/sheet_vitrina_v1_feedbacks_ai_smoke.py"
+  - "apps/sheet_vitrina_v1_feedbacks_browser_smoke.py"
+  - "apps/sheet_vitrina_v1_research_sku_group_comparison_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_integration_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_view_model_smoke.py"
@@ -33,8 +39,10 @@ source_basis:
   - "apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py"
   - "apps/promo_xlsx_collector_contract_smoke.py"
   - "apps/promo_xlsx_collector_integration_smoke.py"
+  - "apps/promo_campaign_archive_integrity_smoke.py"
   - "apps/sheet_vitrina_v1_promo_live_source_smoke.py"
   - "apps/sheet_vitrina_v1_promo_live_source_integration_smoke.py"
+  - "apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py"
 source_of_truth_level: "derived_secondary_project_pack"
 related_paths:
   - "apps/"
@@ -44,7 +52,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "c8faa36b1eec440925a8c98b5d87eb188e5e7492"
+built_from_commit: "5ed568cf0ca49559b5fd21510b5e0da7e3cc927e"
 ---
 
 # Summary
@@ -65,6 +73,7 @@ python3 apps/registry_upload_file_backed_service_smoke.py
 python3 apps/registry_upload_db_backed_runtime_smoke.py
 python3 apps/registry_upload_http_entrypoint_smoke.py
 python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py
+python3 apps/registry_upload_http_entrypoint_public_routes_smoke.py
 python3 apps/cost_price_upload_http_entrypoint_smoke.py
 python3 apps/official_api_token_path_smoke.py
 python3 apps/sales_funnel_history_block_batching_smoke.py
@@ -98,6 +107,10 @@ python3 apps/sheet_vitrina_v1_plan_report_smoke.py
 python3 apps/sheet_vitrina_v1_plan_report_http_smoke.py
 python3 apps/sheet_vitrina_v1_reports_ui_smoke.py
 python3 apps/sheet_vitrina_v1_ready_fact_reconcile_smoke.py
+python3 apps/sheet_vitrina_v1_feedbacks_http_smoke.py
+python3 apps/sheet_vitrina_v1_feedbacks_ai_smoke.py
+python3 apps/sheet_vitrina_v1_feedbacks_browser_smoke.py
+python3 apps/sheet_vitrina_v1_research_sku_group_comparison_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_http_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_view_model_smoke.py
@@ -106,6 +119,7 @@ python3 apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_integration_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py
+python3 apps/sheet_vitrina_v1_popup_outside_click_browser_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_current_tail_browser_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_source_status_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_group_coverage_smoke.py
@@ -118,13 +132,17 @@ python3 apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py
 python3 apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py
 python3 apps/promo_xlsx_collector_contract_smoke.py
 python3 apps/promo_xlsx_collector_integration_smoke.py
+python3 apps/promo_campaign_archive_integrity_smoke.py
 python3 apps/sheet_vitrina_v1_promo_live_source_smoke.py
 python3 apps/sheet_vitrina_v1_promo_live_source_integration_smoke.py
+python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py
 git diff --check
 ```
 
 Current promo smoke intent:
 - `apps/sheet_vitrina_v1_promo_live_source_smoke.py` now additionally proves historical interval replay fills the exact-date promo seam on `yesterday_closed` cache miss.
+- `apps/promo_campaign_archive_integrity_smoke.py` audits promo archive artifact states without deleting, repairing, downloading or changing accepted truth.
+- `apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py` is the read-only live/public guard for `promo_by_price[today_current]`, expected ended/no-download diagnostics and non-blank current promo rows.
 
 Current web-vitrina phase-2 smoke intent:
 - `apps/sheet_vitrina_v1_web_vitrina_view_model_smoke.py` keeps the mapper library-agnostic and checks canonical `columns / rows / groups / sections / formatters / filters / sorts / state_model`.
@@ -140,6 +158,9 @@ Current web-vitrina phase-4 smoke intent:
 - `apps/sheet_vitrina_v1_web_vitrina_source_status_smoke.py` proves source-aware loading-table reduction for accepted-current rollover, runtime-cache/latest-confirmed fallback, non-required slots and promo fallback.
 - `apps/sheet_vitrina_v1_web_vitrina_group_coverage_smoke.py`, `apps/sheet_vitrina_v1_web_vitrina_group_refresh_smoke.py` and `apps/sheet_vitrina_v1_web_vitrina_group_action_ui_smoke.py` prove grouped loading-table coverage, lazy details empty/error behavior, date-scoped `group-refresh` payload semantics and visible launch failure handling.
 - `apps/sheet_vitrina_v1_web_vitrina_highlight_ui_smoke.py` keeps `updated_cells` highlighting browser-session-only across full refresh and group refresh.
+- `apps/sheet_vitrina_v1_popup_outside_click_browser_smoke.py` keeps custom floating controls closeable by outside-click/`Escape` without breaking checkbox/date-range first-click behavior.
+- `apps/sheet_vitrina_v1_feedbacks_http_smoke.py`, `apps/sheet_vitrina_v1_feedbacks_ai_smoke.py` and `apps/sheet_vitrina_v1_feedbacks_browser_smoke.py` cover the read-only `Отзывы` route/table plus transient server-side prompt/analyze flow.
+- `apps/sheet_vitrina_v1_research_sku_group_comparison_smoke.py` covers read-only research options/calculate semantics, non-financial metric filtering, promo candidate chip metadata and no zero-fill coverage behavior.
 
 Current reports smoke intent:
 - `apps/sheet_vitrina_v1_stock_report_smoke.py` checks previous-closed stock report semantics and active SKU filtering.
@@ -215,6 +236,7 @@ Current promo live-source wiring norm:
 - invalid later attempt must not overwrite accepted current/closed promo truth
 - promo candidate/eligible metric split is canonical: `promo_participation` and `promo_count_by_price` are computed from eligible rows where runtime `price_seller_discounted < Плановая цена для акции`; `promo_entry_price_best` is computed as max plan price across active candidate rows, so ineligible SKUs can truthfully have participation/count `0` and entry price `>0`
 - missing runtime seller price must not fake-positive participation/count, but must not hide candidate-derived `promo_entry_price_best` when active candidate plan prices exist
+- collector timeline/manifest/drawer preflight and artifact validation diagnostics are observability-only; high-confidence ended/no-download campaigns may be non-materializable without becoming fatal missing artifacts.
 
 ## Hosted runtime contract
 
@@ -242,10 +264,17 @@ Canonical target template:
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.service`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
+- repo-owned nginx public route allowlist:
+  - `artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`
 
 Current canonical WB secret path for official adapters:
 - `WB_API_TOKEN`
 - keep live service/env aligned to one canonical WB token path before calling a live task complete
+
+Current feedbacks AI secret/env path:
+- `OPENAI_API_KEY`
+- optional `OPENAI_MODEL`, `OPENAI_API_BASE_URL`, `OPENAI_TIMEOUT_SECONDS`
+- AI feedback labels are transient operator output, not accepted truth or ЕБД persistence
 
 Current promo runtime env override when hosted runtime needs explicit seller session path:
 - `PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH`
@@ -277,6 +306,10 @@ Expected routes:
 - `GET /v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx`
 - `POST /v1/sheet-vitrina-v1/plan-report/baseline-upload`
 - `GET /v1/sheet-vitrina-v1/plan-report/baseline-status`
+- `GET /v1/sheet-vitrina-v1/feedbacks`
+- `GET /v1/sheet-vitrina-v1/feedbacks/ai-prompt`
+- `POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt`
+- `POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze`
 - `GET /v1/sheet-vitrina-v1/plan`
 - `GET /v1/sheet-vitrina-v1/status`
 - `GET /v1/sheet-vitrina-v1/job`
@@ -286,6 +319,12 @@ Expected routes:
 - `GET /sheet-vitrina-v1/vitrina`
 - `GET /v1/sheet-vitrina-v1/web-vitrina`
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition&include_source_status=1`
+- `GET /v1/sheet-vitrina-v1/research/sku-group-comparison/options`
+- `POST /v1/sheet-vitrina-v1/research/sku-group-comparison/calculate`
+- `GET /v1/sheet-vitrina-v1/seller-portal-recovery/status`
+- `POST /v1/sheet-vitrina-v1/seller-portal-recovery/start`
+- `POST /v1/sheet-vitrina-v1/seller-portal-recovery/stop`
+- `GET /v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/status`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/inbound-factory.xlsx`
@@ -295,6 +334,9 @@ Expected routes:
 - `POST /v1/sheet-vitrina-v1/supply/factory-order/upload/inbound-ff-to-wb`
 - `POST /v1/sheet-vitrina-v1/supply/factory-order/calculate`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx`
+- `GET /v1/sheet-vitrina-v1/supply/wb-regional/status`
+- `POST /v1/sheet-vitrina-v1/supply/wb-regional/calculate`
+- `GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district}.xlsx`
 
 Temporal closure retry runner:
 
@@ -448,7 +490,7 @@ Use this section for current website/operator/public verification. Legacy Google
 - current COST_PRICE checkpoint проверяется по accepted/rejected server upload result, separate runtime current state и server-side refresh/read integration;
 - applicable себестоимость резолвится server-side по `group + latest effective_from <= slot_date`;
 - operator-facing derived rows используют canonical keys `total_proxy_profit_rub` и `proxy_margin_pct_total`;
-- `GET /sheet-vitrina-v1/vitrina` поднимает primary unified web/operator page без SPA/build pipeline: first/default tab `Витрина`, sibling tabs `Расчет поставок` and `Отчеты`;
+- `GET /sheet-vitrina-v1/vitrina` поднимает primary unified web/operator page без SPA/build pipeline: first/default tab `Витрина`, sibling tabs `Расчет поставок`, `Отчеты`, `Отзывы` and `Исследования`;
 - `GET /sheet-vitrina-v1/operator` остаётся compatibility entry и рендерит тот же unified shell, а не отдельный truth owner;
 - `GET /v1/sheet-vitrina-v1/web-vitrina` остаётся cheap read-only JSON path: default v1 shape = `contract_name / contract_version / page_route / read_route / meta / status_summary / schema / rows / capabilities`, optional `as_of_date` stays on том же route и не имеет права trigger-ить refresh/upstream fetch;
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition` now adds the page-only payload for `/sheet-vitrina-v1/vitrina`: `composition_name / composition_version / meta / summary_cards / filter_surface / table_surface / status_summary / capabilities`; default page-composition keeps source-status details unloaded, route still stays read-only and must not trigger refresh/upstream fetch;
@@ -465,6 +507,9 @@ Use this section for current website/operator/public verification. Legacy Google
 - `GET /v1/sheet-vitrina-v1/plan-report` остаётся cheap read-only JSON path: primary valid query includes `period`, `h1_buyout_plan_rub`, `h2_buyout_plan_rub`, planned DRR percent and optional `as_of_date` / contract-start params; complete Q1-Q4 params are transitional fallback only;
 - plan-report response contains independent selected/MTD/QTD/YTD blocks with `available / partial / unavailable`, source mix and per-source missing dates; an unavailable YTD block must not hide an available selected period;
 - plan-report may use `manual_monthly_plan_report_baseline` only for full-month aggregates inside the route; baseline is uploaded/read via `baseline-template.xlsx`, `baseline-upload`, `baseline-status` and does not replace accepted daily snapshots or any other report source;
+- `GET /v1/sheet-vitrina-v1/feedbacks` is read-only over official WB feedbacks and supports bounded `date_from/date_to`, `stars` and `is_answered`; hosted 401/403 from WB token permission is a real blocker for the `Отзывы` feature, not a silent fallback to another token name;
+- feedbacks AI prompt/analyze routes manage operational prompt config and transient structured output only; they must not write accepted truth, submit complaints, call Seller Portal or use Google Sheets/GAS;
+- `GET /v1/sheet-vitrina-v1/research/sku-group-comparison/options` and `POST .../calculate` are read-only over active SKU/config, non-financial metric options and persisted ready snapshots; missing dates/values surface partial/unavailable coverage and are not zero-filled;
 - one-off `apps/sheet_vitrina_v1_ready_fact_reconcile.py dry-run|apply` can repair missing accepted report facts from persisted ready snapshots, but must not overwrite existing accepted diffs or fabricate blank ready values as zero;
 - operator page state is browser-owned only: current top-level tab, active subsection under `Отчёты` / `Расчёт поставок` and stock-report SKU selection persist in namespaced `localStorage`; reload must restore the last valid state, while empty/broken storage or obsolete `nmId` values must fall back safely to current defaults/current active SKU truth;
 - daily-report factor lists are now full valid sets sorted by `matched_sku_count desc` and aggregate strength; factor rows surface label + arrow + `N SKU` + truthful aggregate summary instead of plain `вверх/вниз` text;
@@ -510,6 +555,10 @@ Use this section for current website/operator/public verification. Legacy Google
 | `today_current` values оказались под yesterday date column | live runtime stale; current contour всё ещё использует single-date surrogate вместо two-slot ready snapshot. GAS publish относится только к legacy sheet/export scope |
 | default refresh without `as_of_date` materialize-ит `UTC yesterday` / `UTC today` вместо EKT dates | stale deploy or stale business-time helper; current runtime still uses UTC-bound default-date semantics instead of `Asia/Yekaterinburg` |
 | `required env WB_API_TOKEN is not set` | live/runtime secret boundary is not aligned with the canonical WB token path |
+| `GET /v1/sheet-vitrina-v1/feedbacks` returns 401/403 from upstream | hosted `WB_API_TOKEN` lacks feedbacks permission or is invalid for that WB category; this blocks the `Отзывы` feature until the canonical token is fixed |
+| `required env OPENAI_API_KEY is not set` or OpenAI 401/403 on feedbacks AI | feedbacks AI prompt/table may still render, but AI analyze is blocked by the canonical OpenAI runtime secret/model access |
+| promo current invariant smoke reports fatal expected ended/no-download artifacts | regression in promo artifact classification; high-confidence non-materializable campaigns must stay diagnostic-only and not enter fatal missing-artifact gating |
+| research options route has `promo_filter_available=false` | latest closed ready snapshot or promo truth is unavailable; chip must be disabled/unavailable and calculation must not fabricate a promo-filtered candidate list |
 | `historical stocks report .* did not finish within bounded polling window` or `... was not listed` | Seller Analytics CSV historical report did not become downloadable in bounded time; inspect `STOCK_HISTORY_DAILY_CSV` report queue / token scope / upstream availability |
 | `STATUS.stocks[yesterday_closed] = error` with note from historical CSV fetch | closed-day stocks path failed before exact-date runtime cache was materialized; inspect Seller Analytics CSV create/poll/download chain and runtime backfill state |
 | `STATUS.stocks[yesterday_closed] = not_available` | stale deploy or stale ready snapshot: after the historical stocks checkpoint switch, this source should no longer stay current-only in `sheet_vitrina_v1` |

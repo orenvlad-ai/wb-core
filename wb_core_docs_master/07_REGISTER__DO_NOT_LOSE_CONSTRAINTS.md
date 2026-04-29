@@ -8,9 +8,12 @@ scope: "Source-of-truth rules, migration boundaries, sheet/runtime invariants, d
 source_basis:
   - "docs/architecture/03_source_of_truth_policy.md"
   - "docs/architecture/07_codex_execution_protocol.md"
+  - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
+  - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
+  - "docs/modules/32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md"
 source_of_truth_level: "derived_secondary_project_pack"
 related_docs:
   - "docs/architecture/03_source_of_truth_policy.md"
@@ -22,7 +25,7 @@ update_triggers:
   - "изменение migration boundary"
   - "изменение operator/runtime invariant"
   - "изменение docs governance"
-built_from_commit: "c8faa36b1eec440925a8c98b5d87eb188e5e7492"
+built_from_commit: "5ed568cf0ca49559b5fd21510b5e0da7e3cc927e"
 ---
 
 # Summary
@@ -61,6 +64,10 @@ built_from_commit: "c8faa36b1eec440925a8c98b5d87eb188e5e7492"
 | `C-21` | Перед sync `~/Projects/wb-core` к current `origin/main` несвязанный dirty state нужно сохранять только bounded safe method (`stash`, backup, отдельная branch/worktree или эквивалент), без destructive reset поверх пользовательских изменений. |
 | `C-22` | Готовность pack к upload определяется по `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`, а не по Finder timestamps, имени архива или памяти исполнителя. |
 | `C-23` | После explicit derived-sync или transitional pack rebuild, когда upload-ready source подготовлен, в handoff должен оставаться ровно один human-only remainder: внешний upload актуального `wb_core_docs_master`; manifest при этом не превращается в upload state machine. |
+| `C-24` | Hosted public-route publication for the current contour goes through the repo-owned nginx allowlist and deploy runner; manual broad catch-all live nginx edits are not a completion path. |
+| `C-25` | `Отзывы` and feedbacks AI stay read-only/transient: they must not submit complaints, write Google Sheets/GAS, persist AI labels as accepted truth/ЕБД, or call Seller Portal automation. |
+| `C-26` | `Исследования` / SKU group comparison is read-only over accepted truth / persisted ready snapshots, excludes financial metrics in the MVP, makes no causal/statistical claims, and must not trigger refresh/upstream fetch/backfill/reconcile. |
+| `C-27` | Promo preflight/manifest/artifact diagnostics and promo current invariant smoke are observability/guard surfaces only; expected ended/no-download non-materializable campaigns must not become fatal missing-artifact blockers, and diagnostics must not become metric truth. |
 
 # Known gaps
 
