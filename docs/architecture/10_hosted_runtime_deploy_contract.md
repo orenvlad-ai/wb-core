@@ -58,6 +58,9 @@ Canonical target template:
 Canonical active target for the current EU hosted runtime:
 - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json`
 - `target_status = active`
+- `target_role = primary_live`
+- `target_lifecycle = current_live`
+- `mutation_policy = routine_writes_allowed`
 - `ssh_destination = wb-core-eu-root`
 - `public_base_url = http://89.191.226.88`
 - `runtime_env.REGISTRY_UPLOAD_RUNTIME_DIR = /opt/wb-core-runtime/state`
@@ -67,9 +70,13 @@ Canonical active target for the current EU hosted runtime:
 Archived legacy target:
 - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__selleros_api.json`
 - `target_status = archived`
+- `target_role = rollback_only`
+- `target_lifecycle = deprecated_live_target`
+- `mutation_policy = do_not_deploy_without_emergency_rollback_override`
 - `ssh_destination = selleros-root`
 - `public_base_url = https://api.selleros.pro`
-- This target is migration evidence only and must not be used for deploy, probe, audit, GC or hosted runtime tasks. The runner fail-fast rejects archived/legacy target hosts.
+- This target is rollback/read-only migration evidence only. Routine deploy, apply-nginx, restart, update, audit, GC or hosted runtime write tasks must use the EU target. The runner fail-fast rejects archived/legacy target hosts for mutating actions unless an explicit emergency rollback override is present.
+- Recommended provider-side label for the old VPS: `ROLLBACK-ONLY_DO-NOT-DEPLOY_wb-core-old-selleros`.
 
 Canonical repo-owned systemd artifacts for this contour:
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-registry-http.service`
@@ -90,10 +97,17 @@ Supported commands:
 - `public-probe`
 - `deploy-and-verify`
 
+Read-only commands may inspect rollback-only target metadata (`print-plan`, `deploy --dry-run`, `apply-nginx-routes --dry-run`, bounded probes when explicitly needed), but routine writes must not target selleros.
+
 ## Canonical Target Definition
 
 Checked-in target template фиксирует field names, которые больше не нужно угадывать руками:
 - `target_id`
+- `target_status`
+- `target_role`
+- `target_lifecycle`
+- `mutation_policy`
+- `provider_side_label_recommendation`
 - `public_base_url`
 - `loopback_base_url`
 - `ssh_destination`
@@ -115,6 +129,9 @@ Checked-in target template фиксирует field names, которые бол
 
 Known active EU target values теперь зафиксированы repo-owned:
 - `target_status = active`
+- `target_role = primary_live`
+- `target_lifecycle = current_live`
+- `mutation_policy = routine_writes_allowed`
 - `public_base_url = http://89.191.226.88`
 - `loopback_base_url = http://127.0.0.1:8765`
 - `ssh_destination = wb-core-eu-root`
@@ -136,7 +153,10 @@ Known active EU target values теперь зафиксированы repo-owned
 
 Archived selleros target note:
 - `selleros-root`, `api.selleros.pro` and host `178.72.152.177` are not active runtime targets after the EU VPS cutover.
-- If `WB_CORE_HOSTED_RUNTIME_TARGET_FILE` points to archived selleros JSON or any target with `ssh_destination=selleros-root`, deploy/probe commands must fail fast instead of silently touching the old VPS.
+- Selleros is `rollback_only` / `deprecated_live_target` / `do_not_deploy_without_emergency_rollback_override`; it is not a routine deploy, apply-nginx, restart, update, GC or hosted runtime mutation target.
+- If `WB_CORE_HOSTED_RUNTIME_TARGET_FILE` points to archived selleros JSON or any target with `ssh_destination=selleros-root`, mutating commands must fail fast before SSH/rsync/nginx/systemd writes instead of silently touching the old VPS.
+- Emergency rollback writes require the exact explicit override `WB_CORE_ALLOW_ROLLBACK_TARGET_WRITE=I_UNDERSTAND_SELLEROS_IS_ROLLBACK_ONLY`; the runner prints a warning and still does not print secrets.
+- `print-plan` and dry-run command planning may remain available for rollback evidence because they do not mutate the old VPS.
 - Future DNS/TLS changes require an explicit target-contract update before `api.selleros.pro` can be considered active again.
 
 Secrets and mutable credentials по-прежнему не хранятся в Git. Repo stores only non-secret target wiring and unit artifacts.

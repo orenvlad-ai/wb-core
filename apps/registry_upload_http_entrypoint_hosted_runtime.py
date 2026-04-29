@@ -73,6 +73,14 @@ DEFAULT_NGINX_MANAGED_TLS_BLOCK_LABEL = "WB-CORE MANAGED TLS"
 ACTIVE_TARGET_STATUS = "active"
 ARCHIVED_TARGET_STATUS = "archived"
 LOCAL_TEST_TARGET_STATUS = "local_test"
+PRIMARY_LIVE_TARGET_ROLE = "primary_live"
+CURRENT_LIVE_TARGET_LIFECYCLE = "current_live"
+ROLLBACK_ONLY_TARGET_ROLE = "rollback_only"
+ROLLBACK_ONLY_TARGET_LIFECYCLE = "deprecated_live_target"
+ROLLBACK_ONLY_MUTATION_POLICY = "do_not_deploy_without_emergency_rollback_override"
+ROLLBACK_TARGET_WRITE_OVERRIDE_ENV = "WB_CORE_ALLOW_ROLLBACK_TARGET_WRITE"
+ROLLBACK_TARGET_WRITE_OVERRIDE_VALUE = "I_UNDERSTAND_SELLEROS_IS_ROLLBACK_ONLY"
+CURRENT_LIVE_TARGET_FILE_HINT = "artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json"
 ACTIVE_HOSTED_RUNTIME_SSH_DESTINATION = "wb-core-eu-root"
 ACTIVE_HOSTED_RUNTIME_PUBLIC_HOSTS = {"89.191.226.88"}
 ACTIVE_HOSTED_RUNTIME_TARGET_DIR = "/opt/wb-core-runtime/app"
@@ -80,6 +88,9 @@ ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR = "/opt/wb-core-runtime/state"
 ACTIVE_HOSTED_RUNTIME_SERVICE_NAME = "wb-core-registry-http.service"
 ARCHIVED_HOSTED_RUNTIME_SSH_DESTINATIONS = {"selleros-root"}
 ARCHIVED_HOSTED_RUNTIME_PUBLIC_HOSTS = {"api.selleros.pro", "178.72.152.177"}
+ROLLBACK_ONLY_STATUSES = {ARCHIVED_TARGET_STATUS, "rollback_only", "deprecated"}
+ROLLBACK_ONLY_ROLES = {ROLLBACK_ONLY_TARGET_ROLE, "do_not_deploy", "deprecated_live_target"}
+ROLLBACK_ONLY_LIFECYCLES = {ROLLBACK_ONLY_TARGET_LIFECYCLE, "rollback_only", "archived"}
 LOCAL_TEST_PUBLIC_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 RUNTIME_ENV_CONTRACT = [
@@ -179,6 +190,11 @@ class HostedRuntimeTarget:
     systemd_units_source_dir: str = ""
     managed_systemd_units: tuple[ManagedSystemdUnit, ...] = field(default_factory=tuple)
     nginx_public_routes: NginxPublicRoutesConfig | None = None
+    target_role: str = ""
+    target_lifecycle: str = ""
+    mutation_policy: str = ""
+    archive_note: str = ""
+    provider_side_label_recommendation: str = ""
 
     @property
     def route_paths(self) -> dict[str, str]:
@@ -266,6 +282,11 @@ def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
         systemd_units_source_dir=str(payload.get("systemd_units_source_dir", "")).strip(),
         managed_systemd_units=tuple(managed_systemd_units),
         nginx_public_routes=nginx_public_routes,
+        target_role=str(payload.get("target_role", "")).strip(),
+        target_lifecycle=str(payload.get("target_lifecycle", "")).strip(),
+        mutation_policy=str(payload.get("mutation_policy", "")).strip(),
+        archive_note=str(payload.get("archive_note", "")).strip(),
+        provider_side_label_recommendation=str(payload.get("provider_side_label_recommendation", "")).strip(),
     )
 
 
@@ -299,6 +320,7 @@ def build_runtime_contract_summary(target: HostedRuntimeTarget) -> dict[str, Any
 def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
     missing = _missing_for_deploy(target)
     target_blockers = _target_action_blockers(target)
+    mutation_guard = _describe_target_mutation_guard(target)
     deploy_sequence = [
         "sync current checked-out worktree to target_dir via rsync",
         "install required Python runtime packages on the hosted system python",
@@ -324,6 +346,11 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
     return {
         "target_status": target.target_status,
         "target_id": target.target_id,
+        "target_role": target.target_role or None,
+        "target_lifecycle": target.target_lifecycle or None,
+        "mutation_policy": target.mutation_policy or None,
+        "archive_note": target.archive_note or None,
+        "provider_side_label_recommendation": target.provider_side_label_recommendation or None,
         "public_base_url": target.public_base_url,
         "loopback_base_url": target.loopback_base_url,
         "ssh_destination": target.ssh_destination or "<local-only>",
@@ -341,6 +368,7 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
         "deploy_sequence": deploy_sequence,
         "missing_for_deploy": missing,
         "target_action_blockers": target_blockers,
+        "target_mutation_guard": mutation_guard,
         "applicable_to_current_checkout_without_merge": True,
     }
 
@@ -596,7 +624,9 @@ def deploy_current_checkout(
     target_file: Path | None,
     dry_run: bool,
     allow_dirty: bool,
+    action: str = "deploy",
 ) -> dict[str, Any]:
+    _ensure_target_allows_mutation(target, action=action, dry_run=dry_run)
     missing = _missing_for_deploy(target)
     if missing:
         raise ValueError(f"deploy target is incomplete for deploy: {', '.join(missing)}")
@@ -681,6 +711,7 @@ def _build_runtime_pip_install_command(target: HostedRuntimeTarget) -> list[str]
 
 
 def apply_nginx_public_routes(target: HostedRuntimeTarget, *, dry_run: bool) -> dict[str, Any]:
+    _ensure_target_allows_mutation(target, action="apply-nginx-routes", dry_run=dry_run)
     if not target.nginx_public_routes:
         return {
             "ok": True,
@@ -1154,7 +1185,7 @@ def _run_shell_command(command: str) -> subprocess.CompletedProcess[str]:
 
 def run_public_probe_command(args: argparse.Namespace) -> int:
     target = load_hosted_runtime_target(args.target_file)
-    _ensure_active_hosted_runtime_target(target, action="public-probe")
+    _warn_if_rollback_read_only_target(target, action="public-probe")
     raw_results = collect_public_surface(
         base_url=target.public_base_url,
         route_paths=target.route_paths,
@@ -1179,7 +1210,7 @@ def run_public_probe_command(args: argparse.Namespace) -> int:
 
 def run_loopback_probe_command(args: argparse.Namespace) -> int:
     target = load_hosted_runtime_target(args.target_file)
-    _ensure_active_hosted_runtime_target(target, action="loopback-probe")
+    _warn_if_rollback_read_only_target(target, action="loopback-probe")
     payload = {
         "target_id": target.target_id,
         "as_of_date": args.as_of_date,
@@ -1212,7 +1243,6 @@ def run_print_plan_command(args: argparse.Namespace) -> int:
 def run_deploy_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
-    _ensure_active_hosted_runtime_target(target, action="deploy")
     payload = {
         "target_id": target.target_id,
         **deploy_current_checkout(
@@ -1220,6 +1250,7 @@ def run_deploy_command(args: argparse.Namespace) -> int:
             target_file=target_file,
             dry_run=args.dry_run,
             allow_dirty=args.allow_dirty,
+            action="deploy",
         ),
     }
     _print_json(payload)
@@ -1229,12 +1260,12 @@ def run_deploy_command(args: argparse.Namespace) -> int:
 def run_deploy_and_verify_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
-    _ensure_active_hosted_runtime_target(target, action="deploy-and-verify")
     deploy_summary = deploy_current_checkout(
         target,
         target_file=target_file,
         dry_run=args.dry_run,
         allow_dirty=args.allow_dirty,
+        action="deploy-and-verify",
     )
     loopback_summary = collect_loopback_surface(
         target,
@@ -1277,7 +1308,6 @@ def run_deploy_and_verify_command(args: argparse.Namespace) -> int:
 
 def run_apply_nginx_routes_command(args: argparse.Namespace) -> int:
     target = load_hosted_runtime_target(args.target_file)
-    _ensure_active_hosted_runtime_target(target, action="apply-nginx-routes")
     payload = {
         "target_id": target.target_id,
         "nginx_public_routes": apply_nginx_public_routes(target, dry_run=args.dry_run),
@@ -2400,6 +2430,100 @@ def _ensure_active_hosted_runtime_target(target: HostedRuntimeTarget, *, action:
         )
 
 
+def _ensure_target_allows_mutation(target: HostedRuntimeTarget, *, action: str, dry_run: bool) -> None:
+    if dry_run:
+        return
+    if _is_rollback_only_target(target):
+        if _rollback_target_write_override_enabled():
+            _warn_rollback_target_write_override(target, action=action)
+            return
+        raise ValueError(_rollback_only_target_mutation_error(target, action=action))
+    _ensure_active_hosted_runtime_target(target, action=action)
+
+
+def _describe_target_mutation_guard(target: HostedRuntimeTarget) -> dict[str, Any]:
+    rollback_only = _is_rollback_only_target(target)
+    blockers = _target_action_blockers(target)
+    return {
+        "current_live_target_file": CURRENT_LIVE_TARGET_FILE_HINT,
+        "current_live_ssh_destination": ACTIVE_HOSTED_RUNTIME_SSH_DESTINATION,
+        "current_live_public_hosts": sorted(ACTIVE_HOSTED_RUNTIME_PUBLIC_HOSTS),
+        "rollback_only": rollback_only,
+        "mutating_actions_blocked_by_default": rollback_only or bool(blockers),
+        "mutating_actions_require_override": rollback_only,
+        "override_env": ROLLBACK_TARGET_WRITE_OVERRIDE_ENV if rollback_only else None,
+        "override_value": ROLLBACK_TARGET_WRITE_OVERRIDE_VALUE if rollback_only else None,
+        "target_action_blockers": blockers,
+        "read_only_actions_allowed": [
+            "print-plan",
+            "deploy --dry-run",
+            "apply-nginx-routes --dry-run",
+            "public-probe",
+            "loopback-probe",
+        ],
+    }
+
+
+def _is_rollback_only_target(target: HostedRuntimeTarget) -> bool:
+    status = str(target.target_status or "").strip().lower()
+    role = str(target.target_role or "").strip().lower()
+    lifecycle = str(target.target_lifecycle or "").strip().lower()
+    mutation_policy = str(target.mutation_policy or "").strip().lower()
+    ssh_destination = str(target.ssh_destination or "").strip()
+    public_host = _public_base_url_host(target.public_base_url)
+    return (
+        status in ROLLBACK_ONLY_STATUSES
+        or role in ROLLBACK_ONLY_ROLES
+        or lifecycle in ROLLBACK_ONLY_LIFECYCLES
+        or "do_not_deploy" in mutation_policy
+        or "rollback_only" in mutation_policy
+        or ssh_destination in ARCHIVED_HOSTED_RUNTIME_SSH_DESTINATIONS
+        or public_host in ARCHIVED_HOSTED_RUNTIME_PUBLIC_HOSTS
+    )
+
+
+def _rollback_target_write_override_enabled() -> bool:
+    return os.environ.get(ROLLBACK_TARGET_WRITE_OVERRIDE_ENV, "") == ROLLBACK_TARGET_WRITE_OVERRIDE_VALUE
+
+
+def _rollback_only_target_mutation_error(target: HostedRuntimeTarget, *, action: str) -> str:
+    return (
+        f"{action} refused for rollback-only selleros hosted runtime target {target.target_id!r}: "
+        "old selleros target is rollback-only after EU migration; "
+        f"use {CURRENT_LIVE_TARGET_FILE_HINT} "
+        f"({ACTIVE_HOSTED_RUNTIME_SSH_DESTINATION} / {sorted(ACTIVE_HOSTED_RUNTIME_PUBLIC_HOSTS)[0]}) "
+        "for current live deploy/apply-nginx/restart/update actions; "
+        "mutation requires explicit emergency rollback override "
+        f"{ROLLBACK_TARGET_WRITE_OVERRIDE_ENV}={ROLLBACK_TARGET_WRITE_OVERRIDE_VALUE}; "
+        f"target ssh_destination={target.ssh_destination or '<missing>'}, "
+        f"public_base_url={target.public_base_url or '<missing>'}, "
+        f"target_status={target.target_status or '<missing>'}, "
+        f"target_role={target.target_role or '<missing>'}, "
+        f"target_lifecycle={target.target_lifecycle or '<missing>'}"
+    )
+
+
+def _warn_rollback_target_write_override(target: HostedRuntimeTarget, *, action: str) -> None:
+    print(
+        "WARNING: emergency rollback override enabled for rollback-only selleros hosted runtime target "
+        f"{target.target_id!r}; action={action}; current live target remains "
+        f"{CURRENT_LIVE_TARGET_FILE_HINT} / {ACTIVE_HOSTED_RUNTIME_SSH_DESTINATION} / "
+        f"{sorted(ACTIVE_HOSTED_RUNTIME_PUBLIC_HOSTS)[0]}.",
+        file=sys.stderr,
+    )
+
+
+def _warn_if_rollback_read_only_target(target: HostedRuntimeTarget, *, action: str) -> None:
+    if not _is_rollback_only_target(target):
+        return
+    print(
+        "WARNING: read-only action against rollback-only selleros hosted runtime target "
+        f"{target.target_id!r}; action={action}; do not use this target for routine deploy/apply/restart/update. "
+        f"Current live target is {CURRENT_LIVE_TARGET_FILE_HINT} / {ACTIVE_HOSTED_RUNTIME_SSH_DESTINATION}.",
+        file=sys.stderr,
+    )
+
+
 def _target_action_blockers(target: HostedRuntimeTarget) -> list[str]:
     blockers: list[str] = []
     status = str(target.target_status or "").strip().lower()
@@ -2510,7 +2634,11 @@ def main() -> int:
     args = parser.parse_args()
     if getattr(args, "as_of_date", None) == "AUTO_YESTERDAY":
         args.as_of_date = _default_as_of_date()
-    return int(args.handler(args))
+    try:
+        return int(args.handler(args))
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ INPUT_BUNDLE = ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import apps.registry_upload_http_entrypoint_hosted_runtime as hosted_runtime  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.contracts.sheet_vitrina_v1 import (  # noqa: E402
     SheetVitrinaV1Envelope,
@@ -123,6 +124,10 @@ def main() -> None:
         archived_target_payload.update(
             {
                 "target_status": "archived",
+                "target_role": "rollback_only",
+                "target_lifecycle": "deprecated_live_target",
+                "mutation_policy": "do_not_deploy_without_emergency_rollback_override",
+                "provider_side_label_recommendation": "ROLLBACK-ONLY_DO-NOT-DEPLOY_wb-core-old-selleros",
                 "target_id": "archived_selleros_target",
                 "public_base_url": "https://api.selleros.pro",
                 "ssh_destination": "selleros-root",
@@ -216,7 +221,30 @@ def main() -> None:
             if "apply-nginx-routes" not in " ".join(deploy_dry_run["commands"]["nginx_public_routes_update"]):
                 raise AssertionError("deploy --dry-run must expose nginx public route update command")
 
-            archived_deploy = subprocess.run(
+            archived_print_plan = _run_json(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--target-file",
+                    str(archived_target_file),
+                    "print-plan",
+                ]
+            )
+            archived_plan = archived_print_plan["deploy_plan"]
+            if archived_plan["target_role"] != "rollback_only":
+                raise AssertionError("archived selleros print-plan must expose rollback_only target_role")
+            if archived_plan["target_lifecycle"] != "deprecated_live_target":
+                raise AssertionError("archived selleros print-plan must expose deprecated lifecycle")
+            mutation_guard = archived_plan["target_mutation_guard"]
+            if mutation_guard["mutating_actions_require_override"] is not True:
+                raise AssertionError("archived selleros target must require explicit mutation override")
+            if (
+                mutation_guard["override_env"]
+                != hosted_runtime.ROLLBACK_TARGET_WRITE_OVERRIDE_ENV
+            ):
+                raise AssertionError("archived selleros target must expose rollback override env")
+
+            archived_deploy_dry_run = _run_json(
                 [
                     sys.executable,
                     str(SCRIPT),
@@ -225,6 +253,21 @@ def main() -> None:
                     "deploy",
                     "--dry-run",
                     "--allow-dirty",
+                ]
+            )
+            if archived_deploy_dry_run["dry_run"] is not True:
+                raise AssertionError("archived selleros deploy --dry-run must stay allowed and dry")
+            if "selleros-root" not in " ".join(archived_deploy_dry_run["commands"]["rsync"]):
+                raise AssertionError("archived selleros deploy --dry-run must expose, not execute, selleros command plan")
+
+            archived_deploy = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--target-file",
+                    str(archived_target_file),
+                    "deploy",
+                    "--allow-dirty",
                 ],
                 cwd=ROOT,
                 check=False,
@@ -232,10 +275,73 @@ def main() -> None:
                 text=True,
             )
             if archived_deploy.returncode == 0:
-                raise AssertionError("archived selleros deploy target must fail fast")
+                raise AssertionError("archived selleros real deploy target must fail fast")
             archived_output = archived_deploy.stdout + archived_deploy.stderr
-            if "refused for non-active hosted runtime target" not in archived_output:
-                raise AssertionError("archived target failure must name the active-target guard")
+            if "rollback-only after EU migration" not in archived_output:
+                raise AssertionError("archived deploy failure must name EU migration rollback-only guard")
+            if "hosted_runtime_target__europe_api.json" not in archived_output:
+                raise AssertionError("archived deploy failure must point operators to the EU target file")
+            if hosted_runtime.ROLLBACK_TARGET_WRITE_OVERRIDE_ENV not in archived_output:
+                raise AssertionError("archived deploy failure must name explicit emergency rollback override")
+
+            archived_nginx_apply = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--target-file",
+                    str(archived_target_file),
+                    "apply-nginx-routes",
+                ],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if archived_nginx_apply.returncode == 0:
+                raise AssertionError("archived selleros apply-nginx-routes must fail fast")
+            archived_nginx_output = archived_nginx_apply.stdout + archived_nginx_apply.stderr
+            if "rollback-only after EU migration" not in archived_nginx_output:
+                raise AssertionError("archived nginx apply failure must name rollback-only guard")
+
+            archived_deploy_and_verify = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--target-file",
+                    str(archived_target_file),
+                    "deploy-and-verify",
+                    "--allow-dirty",
+                    "--skip-refresh",
+                ],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if archived_deploy_and_verify.returncode == 0:
+                raise AssertionError("archived selleros deploy-and-verify must fail fast")
+            archived_deploy_and_verify_output = (
+                archived_deploy_and_verify.stdout + archived_deploy_and_verify.stderr
+            )
+            if "rollback-only after EU migration" not in archived_deploy_and_verify_output:
+                raise AssertionError("archived deploy-and-verify failure must name rollback-only guard")
+
+            archived_target = hosted_runtime.load_hosted_runtime_target(archived_target_file)
+            previous_override = os.environ.get(hosted_runtime.ROLLBACK_TARGET_WRITE_OVERRIDE_ENV)
+            try:
+                os.environ[hosted_runtime.ROLLBACK_TARGET_WRITE_OVERRIDE_ENV] = (
+                    hosted_runtime.ROLLBACK_TARGET_WRITE_OVERRIDE_VALUE
+                )
+                hosted_runtime._ensure_target_allows_mutation(
+                    archived_target,
+                    action="deploy",
+                    dry_run=False,
+                )
+            finally:
+                if previous_override is None:
+                    os.environ.pop(hosted_runtime.ROLLBACK_TARGET_WRITE_OVERRIDE_ENV, None)
+                else:
+                    os.environ[hosted_runtime.ROLLBACK_TARGET_WRITE_OVERRIDE_ENV] = previous_override
 
             public_probe = _run_json(
                 [
@@ -339,7 +445,10 @@ def main() -> None:
                 "deploy_dry_run_nginx_routes: ok -> "
                 f"{deploy_dry_run['commands']['nginx_public_routes_update'][-1]}"
             )
-            print("archived_target_guard: ok -> deploy refused")
+            print("archived_target_print_plan: ok -> rollback_only metadata exposed")
+            print("archived_target_deploy_dry_run: ok -> command plan only")
+            print("archived_target_guard: ok -> real deploy/apply-nginx refused")
+            print("archived_target_override_guard: ok -> explicit env override recognized without remote mutation")
             print(f"public_probe_web_vitrina_page: ok -> {route_map['web_vitrina_page']['http_status']}")
             print(f"public_probe_operator_reports: ok -> {route_map['operator_reports']['http_status']}")
             print(f"public_probe_web_vitrina_read: ok -> {route_map['web_vitrina_read']['http_status']}")
