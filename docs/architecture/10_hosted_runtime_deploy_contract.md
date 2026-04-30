@@ -219,11 +219,17 @@ Current promo live-wiring note:
   - `SELLER_PORTAL_CANONICAL_SUPPLIER_ID` = authoritative supplier that the saved seller session must target before recovery is considered successful;
   - `SELLER_PORTAL_CANONICAL_SUPPLIER_LABEL` = operator-facing org label for the same supplier;
   - `SELLER_PORTAL_RELOGIN_SSH_DESTINATION` = SSH host alias baked into the downloadable macOS launcher for localhost-only noVNC tunneling.
-- hosted deploy contract must also materialize the bounded workbook parser dependency on the remote system python:
+- hosted deploy contract must materialize the bounded workbook/parser/browser dependency on the remote system python:
   - current canonical packages = `openpyxl==3.1.5`, `playwright==1.58.0`
   - deploy runner installs them on host before restart if they are still missing;
-  - browser binaries themselves stay outside `wb-core` deploy contract and are expected to come from the existing seller-site contour already present on the selleros host.
-- current seller-portal relogin recovery on selleros also expects host OS packages outside the Python contract:
+  - deploy runner also verifies or installs Playwright Chromium with host browser dependencies before restart.
+- current seller-portal relogin recovery on the EU hosted runtime is repo-owned dependency setup, not a manual one-off host state:
+  - `/opt/wb-web-bot/venv/bin/python` must exist and carry `playwright==1.58.0` for seller-session probes;
+  - `/opt/wb-web-bot/storage_state.json` remains runtime data and is never created, printed or deleted by deploy;
+  - the deploy runner creates/repairs `/opt/wb-web-bot/venv` with `python3 -m venv`, installs the pinned Playwright package there and ensures Chromium can launch from both the hosted runtime system python and the wb-web-bot venv.
+- current seller-portal relogin recovery also expects host OS packages that deploy now verifies/installs:
+  - `python3-pip`
+  - `python3-venv`
   - `xvfb`
   - `x11vnc`
   - `novnc`
@@ -276,7 +282,9 @@ Google Sheets, GAS, `clasp`, `/v1/sheet-vitrina-v1/load` and `invalid_grant` are
 Current deploy contract note:
 - `deploy` does more than `rsync + restart`:
   - sync current checkout;
+  - ensure host OS dependencies for SellerPortalBot recovery are present (`python3-pip`, `python3-venv`, `xvfb`, `x11vnc`, `novnc`, `websockify`, `openbox`);
   - ensure required hosted runtime python packages are present (`openpyxl==3.1.5`, `playwright==1.58.0`);
+  - create/repair `/opt/wb-web-bot/venv`, install `playwright==1.58.0` into it and ensure Playwright Chromium can launch from both Python contexts;
   - install/update repo-owned systemd units when configured;
   - render the repo-owned nginx public route allowlist into the configured server block, create a timestamped backup before changing the file, validate with `nginx -t`, and reload nginx only after validation succeeds;
   - restart runtime;
