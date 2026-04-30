@@ -209,6 +209,9 @@ def main() -> None:
                 raise AssertionError("deploy --dry-run must expose seller recovery OS dependency install")
             if "websockify" not in seller_os_command or "/usr/share/novnc" not in seller_os_command:
                 raise AssertionError("deploy --dry-run must expose noVNC/websockify dependency checks")
+            owner_os_command = " ".join(deploy_dry_run["commands"]["seller_portal_owner_runtime_os_dependencies"])
+            if "postgresql" not in owner_os_command or "systemctl enable --now postgresql" not in owner_os_command:
+                raise AssertionError("deploy --dry-run must expose owner runtime PostgreSQL dependency install")
             if "openpyxl==3.1.5" not in " ".join(deploy_dry_run["commands"]["runtime_pip_install"]):
                 raise AssertionError("deploy --dry-run must expose runtime pip install command for openpyxl")
             if "playwright==1.58.0" not in " ".join(deploy_dry_run["commands"]["runtime_pip_install"]):
@@ -220,6 +223,18 @@ def main() -> None:
                 raise AssertionError("deploy --dry-run must create or repair /opt/wb-web-bot/venv")
             if "playwright==1.58.0" not in seller_venv_command:
                 raise AssertionError("deploy --dry-run must install Playwright into wb-web-bot venv")
+            if "psycopg2-binary==2.9.11" not in seller_venv_command:
+                raise AssertionError("deploy --dry-run must install psycopg2 into wb-web-bot venv")
+            owner_venv_command = " ".join(deploy_dry_run["commands"]["seller_portal_owner_runtime_venv"])
+            if "python3 -m venv --clear /opt/wb-ai/venv" not in owner_venv_command:
+                raise AssertionError("deploy --dry-run must repair /opt/wb-ai/venv when owner imports fail")
+            if "fastapi==0.129.1" not in owner_venv_command or "uvicorn==0.41.0" not in owner_venv_command:
+                raise AssertionError("deploy --dry-run must install wb-ai API packages")
+            owner_contract_command = " ".join(deploy_dry_run["commands"]["seller_portal_owner_runtime_contract"])
+            if "/opt/wb-web-bot/bot/runner_day.py" not in owner_contract_command:
+                raise AssertionError("deploy --dry-run must verify wb-web-bot owner code")
+            if "/opt/wb-ai/run_web_source_handoff.py" not in owner_contract_command:
+                raise AssertionError("deploy --dry-run must verify wb-ai handoff code")
             seller_browser_command = " ".join(deploy_dry_run["commands"]["seller_portal_recovery_playwright_browser"])
             if "playwright install --with-deps chromium" not in seller_browser_command:
                 raise AssertionError("deploy --dry-run must expose Playwright Chromium dependency install")

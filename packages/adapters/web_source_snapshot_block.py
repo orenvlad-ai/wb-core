@@ -35,11 +35,16 @@ class ArtifactBackedWebSourceSnapshotSource:
         raise ValueError(f"unsupported scenario: {scenario}")
 
 
+DEFAULT_WEB_SOURCE_OWNER_RUNTIME_BASE_URL = "http://127.0.0.1:8000"
+WEB_SOURCE_OWNER_RUNTIME_BASE_URL_ENV = "SHEET_VITRINA_WEBSOURCE_CURRENT_SYNC_API_BASE_URL"
+WEB_SOURCE_SNAPSHOT_BASE_URL_ENV = "SHEET_VITRINA_WEB_SOURCE_SNAPSHOT_BASE_URL"
+
+
 class HttpBackedWebSourceSnapshotSource:
     """Минимальный HTTP adapter к hosted snapshot endpoint."""
 
-    def __init__(self, base_url: str = "http://89.191.226.88") -> None:
-        self._base_url = base_url.rstrip("/")
+    def __init__(self, base_url: str | None = None) -> None:
+        self._base_url = (base_url or _resolve_default_base_url()).rstrip("/")
 
     def fetch(self, request: WebSourceSnapshotRequest) -> Mapping[str, Any]:
         try:
@@ -119,3 +124,11 @@ def _open_url(url: str):
         ):
             return urllib_request.urlopen(url, context=ssl._create_unverified_context())
         raise
+
+
+def _resolve_default_base_url() -> str:
+    return (
+        os.environ.get(WEB_SOURCE_SNAPSHOT_BASE_URL_ENV, "").strip()
+        or os.environ.get(WEB_SOURCE_OWNER_RUNTIME_BASE_URL_ENV, "").strip()
+        or DEFAULT_WEB_SOURCE_OWNER_RUNTIME_BASE_URL
+    )

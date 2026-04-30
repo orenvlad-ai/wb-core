@@ -134,6 +134,9 @@ OPTIONAL_RUNTIME_CONTRACT = [
     "SELLER_PORTAL_CANONICAL_SUPPLIER_ID",
     "SELLER_PORTAL_CANONICAL_SUPPLIER_LABEL",
     "SELLER_PORTAL_RELOGIN_SSH_DESTINATION",
+    "SHEET_VITRINA_WEBSOURCE_CURRENT_SYNC_API_BASE_URL",
+    "SHEET_VITRINA_WEB_SOURCE_SNAPSHOT_BASE_URL",
+    "SHEET_VITRINA_SELLER_FUNNEL_SNAPSHOT_BASE_URL",
 ]
 RUNTIME_PIP_PACKAGES = [
     "openpyxl==3.1.5",
@@ -162,6 +165,20 @@ SELLER_PORTAL_RECOVERY_VENV_DIR = "/opt/wb-web-bot/venv"
 SELLER_PORTAL_RECOVERY_VENV_PYTHON = "/opt/wb-web-bot/venv/bin/python"
 SELLER_PORTAL_RECOVERY_VENV_PIP_PACKAGES = [
     "playwright==1.58.0",
+    "psycopg2-binary==2.9.11",
+]
+SELLER_PORTAL_OWNER_RUNTIME_OS_PACKAGES = [
+    "postgresql",
+    "postgresql-client",
+]
+SELLER_PORTAL_OWNER_WB_AI_DIR = "/opt/wb-ai"
+SELLER_PORTAL_OWNER_WB_AI_VENV_DIR = "/opt/wb-ai/venv"
+SELLER_PORTAL_OWNER_WB_AI_VENV_PYTHON = "/opt/wb-ai/venv/bin/python"
+SELLER_PORTAL_OWNER_WB_AI_VENV_PIP_PACKAGES = [
+    "fastapi==0.129.1",
+    "uvicorn==0.41.0",
+    "psycopg2-binary==2.9.11",
+    "requests==2.32.5",
 ]
 ROUTE_ENV_DEFAULTS = {
     "REGISTRY_UPLOAD_HTTP_PATH": DEFAULT_UPLOAD_PATH,
@@ -367,8 +384,11 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
     deploy_sequence = [
         "sync current checked-out worktree to target_dir via rsync",
         "install required host OS packages for seller-portal recovery and browser launch",
+        "install required host OS packages for seller-portal owner capture runtime",
         "install required Python runtime packages on the hosted system python",
         "create or repair /opt/wb-web-bot/venv for seller-session probes",
+        "create or repair /opt/wb-ai/venv for seller-portal owner handoff API",
+        "verify owner runtime code/import contract for /opt/wb-web-bot and /opt/wb-ai",
         "ensure Playwright Chromium can launch from both hosted runtime python contexts",
     ]
     if target.has_managed_systemd_units:
@@ -701,8 +721,11 @@ def deploy_current_checkout(
         f"cd {shlex.quote(target.target_dir)} && {target.restart_command}",
     )
     seller_recovery_os_dependencies_command = _build_seller_portal_recovery_os_dependencies_command(target)
+    seller_owner_os_dependencies_command = _build_seller_portal_owner_runtime_os_dependencies_command(target)
     runtime_pip_install_command = _build_runtime_pip_install_command(target)
     seller_recovery_venv_command = _build_seller_portal_recovery_venv_command(target)
+    seller_owner_venv_command = _build_seller_portal_owner_runtime_venv_command(target)
+    seller_owner_contract_command = _build_seller_portal_owner_runtime_contract_command(target)
     seller_recovery_playwright_browser_command = _build_seller_portal_recovery_playwright_browser_command(target)
     systemd_commands = _build_managed_systemd_commands(target)
     nginx_public_routes_command = _build_nginx_public_routes_command(target, target_file=target_file, dry_run=dry_run)
@@ -723,8 +746,11 @@ def deploy_current_checkout(
             "rsync": rsync_plan,
             "chown_target_dir": chown_target_dir_command,
             "seller_portal_recovery_os_dependencies": seller_recovery_os_dependencies_command,
+            "seller_portal_owner_runtime_os_dependencies": seller_owner_os_dependencies_command,
             "runtime_pip_install": runtime_pip_install_command,
             "seller_portal_recovery_venv": seller_recovery_venv_command,
+            "seller_portal_owner_runtime_venv": seller_owner_venv_command,
+            "seller_portal_owner_runtime_contract": seller_owner_contract_command,
             "seller_portal_recovery_playwright_browser": seller_recovery_playwright_browser_command,
             "systemd_install": systemd_commands["install"],
             "systemd_daemon_reload": systemd_commands["daemon_reload"],
@@ -742,8 +768,11 @@ def deploy_current_checkout(
     _run_command(rsync_plan)
     _run_command(chown_target_dir_command)
     _run_command(seller_recovery_os_dependencies_command)
+    _run_command(seller_owner_os_dependencies_command)
     _run_command(runtime_pip_install_command)
     _run_command(seller_recovery_venv_command)
+    _run_command(seller_owner_venv_command)
+    _run_command(seller_owner_contract_command)
     _run_command(seller_recovery_playwright_browser_command)
     if systemd_commands["install"]:
         _run_command(systemd_commands["install"])
@@ -781,11 +810,23 @@ def _build_seller_portal_recovery_os_dependencies_command(target: HostedRuntimeT
     return _remote_shell_command(target, command)
 
 
+def _build_seller_portal_owner_runtime_os_dependencies_command(target: HostedRuntimeTarget) -> list[str]:
+    package_names = " ".join(shlex.quote(item) for item in SELLER_PORTAL_OWNER_RUNTIME_OS_PACKAGES)
+    checks = "command -v psql >/dev/null 2>&1 && systemctl is-active --quiet postgresql"
+    install = (
+        f"apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y {package_names} "
+        "&& systemctl enable --now postgresql"
+    )
+    command = f"({checks}) || ({install})"
+    return _remote_shell_command(target, command)
+
+
 def _build_seller_portal_recovery_venv_command(target: HostedRuntimeTarget) -> list[str]:
     package_names = " ".join(shlex.quote(item) for item in SELLER_PORTAL_RECOVERY_VENV_PIP_PACKAGES)
     version_check_script = (
         "import importlib.metadata as m; "
-        "raise SystemExit(0 if m.version('playwright') == '1.58.0' else 1)"
+        "checks = {'playwright': '1.58.0', 'psycopg2-binary': '2.9.11'}; "
+        "raise SystemExit(0 if all(m.version(name) == version for name, version in checks.items()) else 1)"
     )
     python = shlex.quote(SELLER_PORTAL_RECOVERY_VENV_PYTHON)
     bot_dir = shlex.quote(SELLER_PORTAL_RECOVERY_WB_WEB_BOT_DIR)
@@ -794,6 +835,60 @@ def _build_seller_portal_recovery_venv_command(target: HostedRuntimeTarget) -> l
     pip_install = f"{python} -m pip install --upgrade {package_names}"
     command = f"install -d {bot_dir} && python3 -m venv {venv_dir} && ({version_check} || {pip_install})"
     return _remote_shell_command(target, command)
+
+
+def _build_seller_portal_owner_runtime_venv_command(target: HostedRuntimeTarget) -> list[str]:
+    package_names = " ".join(shlex.quote(item) for item in SELLER_PORTAL_OWNER_WB_AI_VENV_PIP_PACKAGES)
+    version_check_script = (
+        "import importlib.metadata as m; "
+        "import fastapi, psycopg2, requests, uvicorn; "
+        "checks = {"
+        "'fastapi': '0.129.1', "
+        "'uvicorn': '0.41.0', "
+        "'psycopg2-binary': '2.9.11', "
+        "'requests': '2.32.5'"
+        "}; "
+        "raise SystemExit(0 if all(m.version(name) == version for name, version in checks.items()) else 1)"
+    )
+    python = shlex.quote(SELLER_PORTAL_OWNER_WB_AI_VENV_PYTHON)
+    ai_dir = shlex.quote(SELLER_PORTAL_OWNER_WB_AI_DIR)
+    venv_dir = shlex.quote(SELLER_PORTAL_OWNER_WB_AI_VENV_DIR)
+    version_check = f"{python} -c {shlex.quote(version_check_script)} >/dev/null 2>&1"
+    pip_bootstrap = f"{python} -m pip install --upgrade pip setuptools wheel"
+    pip_install = f"{python} -m pip install --upgrade {package_names}"
+    repair = f"python3 -m venv --clear {venv_dir} && {pip_bootstrap} && {pip_install}"
+    command = f"install -d {ai_dir} && ({version_check} || ({repair}))"
+    return _remote_shell_command(target, command)
+
+
+def _build_seller_portal_owner_runtime_contract_command(target: HostedRuntimeTarget) -> list[str]:
+    bot_dir = shlex.quote(SELLER_PORTAL_RECOVERY_WB_WEB_BOT_DIR)
+    ai_dir = shlex.quote(SELLER_PORTAL_OWNER_WB_AI_DIR)
+    bot_python = shlex.quote(SELLER_PORTAL_RECOVERY_VENV_PYTHON)
+    ai_python = shlex.quote(SELLER_PORTAL_OWNER_WB_AI_VENV_PYTHON)
+    checks = [
+        f"test -f {bot_dir}/bot/runner_day.py",
+        f"test -f {bot_dir}/bot/runner_sales_funnel_day.py",
+        f"test -f {ai_dir}/run_web_source_handoff.py",
+        f"test -f {ai_dir}/api.py",
+        (
+            f"cd {bot_dir} && {bot_python} -c "
+            + shlex.quote(
+                "import bot.runner_day, bot.runner_sales_funnel_day, bot.db, bot.db_sales_funnel; "
+                "import psycopg2, playwright"
+            )
+            + " >/dev/null 2>&1"
+        ),
+        (
+            f"cd {ai_dir} && {ai_python} -c "
+            + shlex.quote(
+                "import api, run_web_source_handoff, sync_web_source_handoff, web_source_handoff; "
+                "import fastapi, psycopg2, requests, uvicorn"
+            )
+            + " >/dev/null 2>&1"
+        ),
+    ]
+    return _remote_shell_command(target, " && ".join(checks))
 
 
 def _build_seller_portal_recovery_playwright_browser_command(target: HostedRuntimeTarget) -> list[str]:

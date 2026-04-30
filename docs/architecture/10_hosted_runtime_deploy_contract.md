@@ -158,7 +158,7 @@ Known active EU target values теперь зафиксированы repo-owned
 - `runtime_env.REGISTRY_UPLOAD_RUNTIME_DIR = /opt/wb-core-runtime/state`
 - `systemd_unit_directory = /etc/systemd/system`
 - `systemd_units_source_dir = artifacts/registry_upload_http_entrypoint/systemd`
-- `managed_systemd_units = refresh.service + refresh.timer + closure-retry.service + closure-retry.timer`
+- `managed_systemd_units = wb-ai-api.service + refresh.service + refresh.timer + closure-retry.service + closure-retry.timer`
 - `nginx_public_routes.server_config_path = /etc/nginx/sites-enabled/wb-ai`
 - `nginx_public_routes.manifest_path = artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`
 - `nginx_public_routes.test_command = nginx -t`
@@ -211,6 +211,9 @@ Optional runtime overrides remain the same as in current official-api boundary:
 - `SELLER_PORTAL_CANONICAL_SUPPLIER_ID`
 - `SELLER_PORTAL_CANONICAL_SUPPLIER_LABEL`
 - `SELLER_PORTAL_RELOGIN_SSH_DESTINATION`
+- `SHEET_VITRINA_WEBSOURCE_CURRENT_SYNC_API_BASE_URL`
+- `SHEET_VITRINA_WEB_SOURCE_SNAPSHOT_BASE_URL`
+- `SHEET_VITRINA_SELLER_FUNNEL_SNAPSHOT_BASE_URL`
 
 Current promo live-wiring note:
 - if hosted runtime uses the repo-owned `promo_by_price` live seam, service env must expose a valid seller session state path for the bounded browser collector;
@@ -224,9 +227,15 @@ Current promo live-wiring note:
   - deploy runner installs them on host before restart if they are still missing;
   - deploy runner also verifies or installs Playwright Chromium with host browser dependencies before restart.
 - current seller-portal relogin recovery on the EU hosted runtime is repo-owned dependency setup, not a manual one-off host state:
-  - `/opt/wb-web-bot/venv/bin/python` must exist and carry `playwright==1.58.0` for seller-session probes;
+  - `/opt/wb-web-bot/venv/bin/python` must exist and carry `playwright==1.58.0` plus `psycopg2-binary==2.9.11` for seller-session probes and owner capture DB writes;
   - `/opt/wb-web-bot/storage_state.json` remains runtime data and is never created, printed or deleted by deploy;
-  - the deploy runner creates/repairs `/opt/wb-web-bot/venv` with `python3 -m venv`, installs the pinned Playwright package there and ensures Chromium can launch from both the hosted runtime system python and the wb-web-bot venv.
+  - the deploy runner creates/repairs `/opt/wb-web-bot/venv` with `python3 -m venv`, installs pinned packages there and ensures Chromium can launch from both the hosted runtime system python and the wb-web-bot venv.
+- steady-state Seller Portal bot-backed capture on EU is a separate owner runtime contour, not a public nginx route:
+  - non-secret owner code lives under `/opt/wb-web-bot/bot` and `/opt/wb-ai`;
+  - `/opt/wb-ai/venv/bin/python` must carry `fastapi==0.129.1`, `uvicorn==0.41.0`, `psycopg2-binary==2.9.11` and `requests==2.32.5`;
+  - `wb-ai-api.service` is repo-owned systemd wiring and binds `/opt/wb-ai/api.py` to `127.0.0.1:8000`;
+  - web-vitrina materialization adapters default to that local owner API for `GET /v1/search-analytics/snapshot` and `GET /v1/sales-funnel/daily`, with env overrides only for an explicit alternate owner runtime;
+  - local PostgreSQL is the EU handoff store for source raw tables and local read-side tables; credentials remain in host env files and must not be printed. DB/schema initialization is operational runtime setup, while deploy verifies packages, venvs, code/import contract and the localhost API systemd unit.
 - current seller-portal relogin recovery also expects host OS packages that deploy now verifies/installs:
   - `python3-pip`
   - `python3-venv`
@@ -283,8 +292,10 @@ Current deploy contract note:
 - `deploy` does more than `rsync + restart`:
   - sync current checkout;
   - ensure host OS dependencies for SellerPortalBot recovery are present (`python3-pip`, `python3-venv`, `xvfb`, `x11vnc`, `novnc`, `websockify`, `openbox`);
+  - ensure host OS dependencies for SellerPortalBot owner runtime are present (`postgresql`, `postgresql-client`);
   - ensure required hosted runtime python packages are present (`openpyxl==3.1.5`, `playwright==1.58.0`);
-  - create/repair `/opt/wb-web-bot/venv`, install `playwright==1.58.0` into it and ensure Playwright Chromium can launch from both Python contexts;
+  - create/repair `/opt/wb-web-bot/venv`, install `playwright==1.58.0` and `psycopg2-binary==2.9.11` into it and ensure Playwright Chromium can launch from both Python contexts;
+  - create/repair `/opt/wb-ai/venv`, install the pinned local API/handoff packages and verify `/opt/wb-web-bot/bot` plus `/opt/wb-ai/run_web_source_handoff.py` imports;
   - install/update repo-owned systemd units when configured;
   - render the repo-owned nginx public route allowlist into the configured server block, create a timestamped backup before changing the file, validate with `nginx -t`, and reload nginx only after validation succeeds;
   - restart runtime;
