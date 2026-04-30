@@ -46,6 +46,8 @@ related_runners:
   - "apps/sheet_vitrina_v1_feedbacks_http_smoke.py"
   - "apps/sheet_vitrina_v1_feedbacks_ai_smoke.py"
   - "apps/sheet_vitrina_v1_feedbacks_browser_smoke.py"
+  - "apps/seller_portal_feedbacks_complaints_scout.py"
+  - "apps/seller_portal_feedbacks_complaints_scout_smoke.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime.py"
 related_docs:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
@@ -102,6 +104,7 @@ update_note: "Phase 4 live page composition остаётся server-driven; вк
   - The feedback table is internally scrollable around the operator-visible row window, keeps long feedback/pros/cons/answer text bounded, supports manual column resizing with namespaced localStorage (`wb_core_feedbacks_column_widths_v1`) and a reset action, includes `Скачать Excel по текущему фильтру` for the current visible rows, and includes AI columns (`Подходит для жалобы`, `Категория`, `Причина`, `Уверенность`) that show `Не разобрано` before analysis.
   - The same tab has a nested `AI-промпт разбора` subsection backed by `GET/POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt`. The UI shows a full-width editable starter prompt when no saved prompt exists, exposes the current/available AI model selector from server-side OpenAI model discovery, and saves prompt+model server-side; unavailable preferred models are not selectable, and discovery fallback is explicit. Only a saved server-side prompt enables real analysis. The `AI-разбор отзывов` action processes the current visible/filtered table as a bounded sequential queue, sends one row per `POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze`, updates matching rows progressively, supports stop/retry for unresolved rows and refuses oversized visible queues with a clear filter-narrowing message. The response fills the existing feedback table, adds AI filter (`Все / Подходит для жалобы / На проверку / Не подходит / Не разобрано`) and sorts analyzed rows as `Да`, `Проверить`, `Нет`, `Не разобрано` while preserving review date desc inside each group.
   - Feedbacks AI output is transient browser/session display over a server-side OpenAI call; it does not persist AI labels, does not write accepted truth/ready snapshots/ЕБД, does not submit complaints, does not call Seller Portal and does not use Google Sheets/GAS.
+  - `apps/seller_portal_feedbacks_complaints_scout.py` is a bounded read-only Seller Portal scout for future complaint workflow feasibility. It reuses the existing `/opt/wb-web-bot/storage_state.json` session contour and Playwright conventions, can inspect `Отзывы и вопросы`, visible feedback rows, the complaint category modal and `Мои жалобы`, and writes sanitized JSON/Markdown diagnostics outside committed source. It must not click final complaint submit/save buttons, edit feedback answers, persist AI/operator labels, write accepted truth, call Google Sheets/GAS or expose a public HTTP route.
   - `Исследования` is a same-shell read-only tab, not an iframe and not a new truth contour; MVP block `Сравнение групп SKU` reads active SKU from current `config_v2`, selectable non-financial SKU metrics from current registry/view truth, and calculates retrospective group dynamics over persisted ready snapshots only
   - research SKU selectors include independent compact `Товар в акции` chips; the options route derives the candidate-only promo filter from latest closed-day ready snapshot promo metrics and returns unavailable metadata instead of fabricating a filtered list when promo truth is absent
   - research period controls are compact date-range pickers in the browser, while the calculate contract remains explicit `date_from/date_to`; result rendering uses the same `table-shell / table-scroll / vitrina-table` page pattern with horizontal scroll rather than a card layout
@@ -185,6 +188,9 @@ update_note: "Phase 4 live page composition остаётся server-driven; вк
 - feedbacks route/UI smokes:
   - `apps/sheet_vitrina_v1_feedbacks_http_smoke.py`
   - `apps/sheet_vitrina_v1_feedbacks_browser_smoke.py`
+- read-only Seller Portal complaint scout:
+  - `apps/seller_portal_feedbacks_complaints_scout.py`
+  - `apps/seller_portal_feedbacks_complaints_scout_smoke.py`
 - hosted deploy/probe contract:
   - `apps/registry_upload_http_entrypoint_hosted_runtime.py`
 
@@ -204,6 +210,8 @@ update_note: "Phase 4 live page composition остаётся server-driven; вк
   - confirms server-side prompt+model get/save validation, OpenAI model discovery metadata, safe fallback when model discovery fails, invalid/unavailable model rejection, fake-provider selected-model propagation, AI analyze shape, invalid provider output surfacing, Russian category/fit/confidence labels and HTTP prompt/analyze routes without live OpenAI calls
 - `apps/sheet_vitrina_v1_feedbacks_browser_smoke.py`
   - confirms the `Отзывы` tab opens in the unified shell, nested feedbacks/prompt subsections render, the compact feedbacks range picker closes on outside click, non-future feedback dates after a stale ready-snapshot date remain selectable, valid >31-day ranges save without hover-triggered loading/disable, star filter changes the route query and clears stale rows/export state, the feedback table is internally scrollable even for 650 fake rows, Excel export sends current visible rows, discovered model selector/full-width prompt render, column resize handles persist widths through localStorage, saved prompt enables the filtered-set AI queue, every AI request contains one row, row-level AI failures are visible and retryable, AI filter works, oversized visible queues fail before OpenAI requests and positive complaint-fit rows sort first without using `/load`
+- `apps/seller_portal_feedbacks_complaints_scout_smoke.py`
+  - confirms the read-only scout parsers extract visible feedback rows, complaint modal categories, `Мои жалобы` rows, match-score statuses and the missing-session blocker, and that submit-like labels such as `Отправить` / `Подать жалобу` are refused while the safe `Пожаловаться на отзыв` modal-open label remains allowed for scout mode
 - `apps/sheet_vitrina_v1_web_vitrina_highlight_ui_smoke.py`
   - confirms full refresh session highlighting covers both touched temporal dates, keeps green for changed cells, yellow for latest-confirmed cells and clears on browser reload
 - `apps/sheet_vitrina_v1_web_vitrina_source_status_smoke.py`
