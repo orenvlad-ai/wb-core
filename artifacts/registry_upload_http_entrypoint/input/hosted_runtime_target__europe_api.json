@@ -42,6 +42,11 @@
       "restart": false
     },
     {
+      "name": "wb-ai-api.service",
+      "enable": true,
+      "restart": true
+    },
+    {
       "name": "wb-core-sheet-vitrina-refresh.service",
       "enable": false,
       "restart": false

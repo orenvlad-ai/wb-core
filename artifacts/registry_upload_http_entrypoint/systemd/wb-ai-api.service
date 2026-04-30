@@ -1,0 +1,16 @@
+[Unit]
+Description=WB AI Local Handoff API
+After=network.target postgresql.service
+Wants=network.target postgresql.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/wb-ai
+EnvironmentFile=/opt/wb-ai/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/wb-ai/venv/bin/uvicorn api:APP --host 127.0.0.1 --port 8000 --app-dir /opt/wb-ai
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
