@@ -960,23 +960,27 @@ def _click_safe_row_menu(page: Page, dom_id: str) -> dict[str, Any]:
     const rect = el.getBoundingClientRect();
     return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
   };
-  const buttons = Array.from(row.querySelectorAll('button, [role="button"]')).filter(visible);
+  const buttons = Array.from(row.querySelectorAll('button, [role="button"]')).filter(visible).map((button) => {
+    const rect = button.getBoundingClientRect();
+    return {
+      button,
+      rect,
+      label: (button.innerText || button.getAttribute('aria-label') || button.getAttribute('title') || '').trim()
+    };
+  });
   const danger = /(ответить|редакт|удал|сохран|отправ|подать)/i;
-  const preferred = buttons.find((button) => {
-    const label = (button.innerText || button.getAttribute('aria-label') || button.getAttribute('title') || '').trim();
-    return !danger.test(label) && /(ещ|ещё|еще|действ|меню|more|⋮|\.\.\.)/i.test(label);
+  const preferred = buttons.find((item) => {
+    return !danger.test(item.label) && /(ещ|ещё|еще|действ|меню|more|⋮|\.\.\.)/i.test(item.label);
   });
-  const iconOnly = buttons.find((button) => {
-    const label = (button.innerText || button.getAttribute('aria-label') || button.getAttribute('title') || '').trim();
-    return !label && !danger.test(label);
-  });
+  const iconOnly = buttons
+    .filter((item) => !item.label && item.rect.width <= 64 && item.rect.height <= 64)
+    .sort((a, b) => b.rect.x - a.rect.x)[0];
   const target = preferred || iconOnly;
   if (!target) {
     return {ok: false, reason: 'no safe menu button', button_count: buttons.length};
   }
-  const label = (target.innerText || target.getAttribute('aria-label') || target.getAttribute('title') || '').trim();
-  target.click();
-  return {ok: true, label, button_count: buttons.length};
+  target.button.click();
+  return {ok: true, label: target.label, button_count: buttons.length};
 }
         """,
         dom_id,
@@ -1491,13 +1495,24 @@ _DOM_CANDIDATE_SCRIPT = r"""
     })
     .map((button) => (button.innerText || button.getAttribute('aria-label') || button.getAttribute('title') || '').trim().slice(0, 120));
   const links = (el) => Array.from(el.querySelectorAll('a[href]')).map((a) => a.href).slice(0, 5);
-  const all = Array.from(document.querySelectorAll('article, tr, li, [data-testid], [data-test-id], [data-qa], [role="row"], div'));
+  const preferredSelector = kind === 'feedback'
+    ? '[data-testid="Base-table-row"], tr, [role="row"], article, li'
+    : '[data-testid="Base-table-row"], tr, [role="row"], article, li';
+  const preferred = Array.from(document.querySelectorAll(preferredSelector));
+  const fallback = Array.from(document.querySelectorAll('[data-testid], [data-test-id], [data-qa], div'));
+  const all = [];
+  const seenElements = new Set();
+  for (const el of preferred.concat(fallback)) {
+    if (seenElements.has(el)) continue;
+    seenElements.add(el);
+    all.push(el);
+  }
   const seen = new Set();
   const rows = [];
   for (const el of all) {
     if (!visible(el)) continue;
     const rect = el.getBoundingClientRect();
-    if (rect.height > 900) continue;
+    if (rect.height > 420) continue;
     const text = (el.innerText || '').trim();
     const norm = text.replace(/\s+/g, ' ').trim();
     if (norm.length < 35 || norm.length > 2600) continue;
