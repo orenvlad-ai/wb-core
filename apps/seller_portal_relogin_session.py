@@ -668,18 +668,23 @@ def probe_storage_state(storage_state_path: Path, *, wb_bot_python: Path) -> dic
             "status": "seller_portal_session_missing",
             "message": "storage_state.json is missing",
         }
-    probe = subprocess.run(
-        [
-            str(wb_bot_python),
-            "-c",
-            _SELLER_PORTAL_SESSION_PROBE_SCRIPT,
-            str(storage_state_path),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=60,
-    )
+    if not wb_bot_python.exists():
+        return _build_storage_probe_unavailable_payload(wb_bot_python)
+    try:
+        probe = subprocess.run(
+            [
+                str(wb_bot_python),
+                "-c",
+                _SELLER_PORTAL_SESSION_PROBE_SCRIPT,
+                str(storage_state_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60,
+        )
+    except (FileNotFoundError, PermissionError) as exc:
+        return _build_storage_probe_unavailable_payload(wb_bot_python, detail=str(exc))
     stdout = str(probe.stdout or "").strip()
     stderr = str(probe.stderr or "").strip()
     payload: dict[str, Any]
@@ -696,6 +701,17 @@ def probe_storage_state(storage_state_path: Path, *, wb_bot_python: Path) -> dic
         payload["stderr_tail"] = stderr[-1000:]
     payload.setdefault("supplier_context", read_storage_state_supplier_context(storage_state_path))
     return payload
+
+
+def _build_storage_probe_unavailable_payload(wb_bot_python: Path, *, detail: str = "") -> dict[str, Any]:
+    message = f"wb-web-bot python is unavailable: {wb_bot_python}"
+    if detail:
+        message = f"{message}; {detail}"
+    return {
+        "ok": False,
+        "status": "seller_portal_session_probe_unavailable",
+        "message": message,
+    }
 
 
 def load_relogin_session_config_from_env() -> ReloginSessionConfig:

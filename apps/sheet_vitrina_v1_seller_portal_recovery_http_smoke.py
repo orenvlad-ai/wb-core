@@ -33,6 +33,7 @@ from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
     SellerPortalRecoveryController,
 )
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
+from apps.seller_portal_relogin_session import probe_storage_state  # noqa: E402
 
 
 class _FakeSellerRecoveryController:
@@ -244,6 +245,22 @@ class _FakeSellerRecoveryController:
 
 
 def main() -> None:
+    with TemporaryDirectory(prefix="sheet-vitrina-recovery-probe-") as probe_tmp:
+        storage_state = Path(probe_tmp) / "storage_state.json"
+        storage_state.write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
+        missing_python_payload = probe_storage_state(
+            storage_state,
+            wb_bot_python=Path(probe_tmp) / "missing-venv" / "bin" / "python",
+        )
+        if (
+            missing_python_payload.get("ok") is not False
+            or missing_python_payload.get("status") != "seller_portal_session_probe_unavailable"
+        ):
+            raise AssertionError(
+                "missing wb-web-bot python must degrade into a truthful probe payload, "
+                f"got {missing_python_payload}"
+            )
+
     probe_error_controller = SellerPortalRecoveryController(
         config_factory=lambda: SimpleNamespace(
             canonical_supplier_id="canonical-supplier-id",

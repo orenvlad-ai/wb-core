@@ -28,6 +28,7 @@ related_endpoints:
   - "GET /sheet-vitrina-v1/vitrina"
   - "GET /v1/sheet-vitrina-v1/web-vitrina"
   - "GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition&include_source_status=1"
+  - "POST /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start"
   - "GET /v1/sheet-vitrina-v1/feedbacks"
   - "POST /v1/sheet-vitrina-v1/feedbacks/export.xlsx"
   - "GET /v1/sheet-vitrina-v1/feedbacks/ai-prompt"

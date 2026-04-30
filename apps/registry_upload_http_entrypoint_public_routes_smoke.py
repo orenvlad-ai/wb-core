@@ -39,6 +39,7 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/job",
         "/v1/sheet-vitrina-v1/web-vitrina",
         "/v1/sheet-vitrina-v1/web-vitrina/group-refresh",
+        "/v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start",
         "/v1/sheet-vitrina-v1/refresh",
         "/v1/sheet-vitrina-v1/daily-report",
         "/v1/sheet-vitrina-v1/stock-report",
@@ -72,6 +73,8 @@ def main() -> None:
         raise AssertionError("rendered nginx block must include feedbacks AI analyze exactly once")
     if rendered.count("location ^~ /v1/sheet-vitrina-v1/supply/factory-order/ {") != 1:
         raise AssertionError("rendered nginx block must include factory-order prefix exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start {") != 1:
+        raise AssertionError("rendered nginx block must include web-vitrina seller recovery start exactly once")
 
     sample_nginx = """server {
     server_name api.selleros.pro;

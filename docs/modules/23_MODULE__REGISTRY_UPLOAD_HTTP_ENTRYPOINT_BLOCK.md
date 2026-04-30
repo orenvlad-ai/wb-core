@@ -47,6 +47,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/refresh"
   - "POST /v1/sheet-vitrina-v1/load"
   - "POST /v1/sheet-vitrina-v1/seller-portal-recovery/start"
+  - "POST /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start"
   - "POST /v1/sheet-vitrina-v1/seller-portal-recovery/stop"
   - "GET /v1/sheet-vitrina-v1/seller-portal-session/check"
   - "GET /v1/sheet-vitrina-v1/daily-report"
@@ -213,7 +214,9 @@ update_note: "Обновлён под строгую feedbacks загрузку 
   - block `Проверка и восстановление Seller-сессии` внутри `Обновление данных` остаётся таким же bounded operator seam, а не отдельной инженерной консолью:
     - `GET /v1/sheet-vitrina-v1/seller-portal-session/check` читает current seller storage state, запускает current session probe, проверяет canonical supplier/org и возвращает truthful short result (`session_valid_canonical / session_valid_wrong_org / session_invalid / session_missing / session_probe_error`) без запуска Xvfb/noVNC
     - `POST /v1/sheet-vitrina-v1/seller-portal-recovery/start` стартует repo-owned recovery lifecycle поверх existing `apps/seller_portal_relogin_session.py`
+    - `POST /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start` остаётся same recovery start seam для unified web-vitrina shell and async job-backed action
     - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/status` отдаёт cheap truthful per-run status surface; root `status` теперь = state конкретного recovery run (`idle / starting / awaiting_login / saving_session / validating_session / checking_canonical_supplier / triggering_refresh / completed / not_needed / stopped / timeout / error`), а session health остаётся отдельным `session_status`
+    - if the EU host lacks `/opt/wb-web-bot/venv/bin/python`, session probe is surfaced as `session_probe_error` in this 200-shape status payload instead of public 500
     - `POST /v1/sheet-vitrina-v1/seller-portal-recovery/stop` cleanup-ит только temporary noVNC/Xvfb contour и возвращает page в нейтральный idle summary; сохранённый `storage_state.json` и steady seller session не удаляются
     - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip` отдаёт reusable macOS `.command` launcher, который привязывается к текущему `run_id`, поднимает SSH tunnel к localhost-only noVNC, ждёт local HTTP-ready, открывает browser по explicit `path=websockify&reconnect=1` URL, poll-ит `status?run_id=...` и в конце всегда печатает явный completion marker before exit
     - operator block дополнительно показывает `Текущий запуск / Статус запуска / Финал запуска / Статус сессии / Старт / Завершение`, чтобы final конкретного recovery run не путался с общим session-check outcome
