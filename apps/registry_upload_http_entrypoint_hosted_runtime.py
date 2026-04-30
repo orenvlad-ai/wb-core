@@ -139,6 +139,30 @@ RUNTIME_PIP_PACKAGES = [
     "openpyxl==3.1.5",
     "playwright==1.58.0",
 ]
+SELLER_PORTAL_RECOVERY_OS_PACKAGES = [
+    "python3-pip",
+    "python3-venv",
+    "xvfb",
+    "x11vnc",
+    "novnc",
+    "websockify",
+    "openbox",
+]
+SELLER_PORTAL_RECOVERY_REQUIRED_COMMANDS = [
+    "python3",
+    "xvfb-run",
+    "Xvfb",
+    "x11vnc",
+    "websockify",
+    "openbox",
+]
+SELLER_PORTAL_RECOVERY_NOVNC_WEB_DIR = "/usr/share/novnc"
+SELLER_PORTAL_RECOVERY_WB_WEB_BOT_DIR = "/opt/wb-web-bot"
+SELLER_PORTAL_RECOVERY_VENV_DIR = "/opt/wb-web-bot/venv"
+SELLER_PORTAL_RECOVERY_VENV_PYTHON = "/opt/wb-web-bot/venv/bin/python"
+SELLER_PORTAL_RECOVERY_VENV_PIP_PACKAGES = [
+    "playwright==1.58.0",
+]
 ROUTE_ENV_DEFAULTS = {
     "REGISTRY_UPLOAD_HTTP_PATH": DEFAULT_UPLOAD_PATH,
     "COST_PRICE_UPLOAD_HTTP_PATH": DEFAULT_COST_PRICE_UPLOAD_PATH,
@@ -342,7 +366,10 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
     mutation_guard = _describe_target_mutation_guard(target)
     deploy_sequence = [
         "sync current checked-out worktree to target_dir via rsync",
+        "install required host OS packages for seller-portal recovery and browser launch",
         "install required Python runtime packages on the hosted system python",
+        "create or repair /opt/wb-web-bot/venv for seller-session probes",
+        "ensure Playwright Chromium can launch from both hosted runtime python contexts",
     ]
     if target.has_managed_systemd_units:
         deploy_sequence.extend(
@@ -673,7 +700,10 @@ def deploy_current_checkout(
         target,
         f"cd {shlex.quote(target.target_dir)} && {target.restart_command}",
     )
+    seller_recovery_os_dependencies_command = _build_seller_portal_recovery_os_dependencies_command(target)
     runtime_pip_install_command = _build_runtime_pip_install_command(target)
+    seller_recovery_venv_command = _build_seller_portal_recovery_venv_command(target)
+    seller_recovery_playwright_browser_command = _build_seller_portal_recovery_playwright_browser_command(target)
     systemd_commands = _build_managed_systemd_commands(target)
     nginx_public_routes_command = _build_nginx_public_routes_command(target, target_file=target_file, dry_run=dry_run)
     status_command = (
@@ -692,7 +722,10 @@ def deploy_current_checkout(
             "mkdir": mkdir_command,
             "rsync": rsync_plan,
             "chown_target_dir": chown_target_dir_command,
+            "seller_portal_recovery_os_dependencies": seller_recovery_os_dependencies_command,
             "runtime_pip_install": runtime_pip_install_command,
+            "seller_portal_recovery_venv": seller_recovery_venv_command,
+            "seller_portal_recovery_playwright_browser": seller_recovery_playwright_browser_command,
             "systemd_install": systemd_commands["install"],
             "systemd_daemon_reload": systemd_commands["daemon_reload"],
             "restart": restart_command,
@@ -708,7 +741,10 @@ def deploy_current_checkout(
     _run_command(mkdir_command)
     _run_command(rsync_plan)
     _run_command(chown_target_dir_command)
+    _run_command(seller_recovery_os_dependencies_command)
     _run_command(runtime_pip_install_command)
+    _run_command(seller_recovery_venv_command)
+    _run_command(seller_recovery_playwright_browser_command)
     if systemd_commands["install"]:
         _run_command(systemd_commands["install"])
         _run_command(systemd_commands["daemon_reload"])
@@ -729,6 +765,50 @@ def _build_runtime_pip_install_command(target: HostedRuntimeTarget) -> list[str]
     python_check = "python3 -c 'import openpyxl, playwright' >/dev/null 2>&1"
     pip_install = f"python3 -m pip install --break-system-packages {package_names}"
     command = f"{python_check} || {pip_install}"
+    return _remote_shell_command(target, command)
+
+
+def _build_seller_portal_recovery_os_dependencies_command(target: HostedRuntimeTarget) -> list[str]:
+    command_checks = " && ".join(
+        f"command -v {shlex.quote(command)} >/dev/null 2>&1"
+        for command in SELLER_PORTAL_RECOVERY_REQUIRED_COMMANDS
+    )
+    venv_check = "python3 -m venv --help >/dev/null 2>&1"
+    novnc_check = f"test -d {shlex.quote(SELLER_PORTAL_RECOVERY_NOVNC_WEB_DIR)}"
+    package_names = " ".join(shlex.quote(item) for item in SELLER_PORTAL_RECOVERY_OS_PACKAGES)
+    install = f"apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y {package_names}"
+    command = f"({command_checks} && {venv_check} && {novnc_check}) || ({install})"
+    return _remote_shell_command(target, command)
+
+
+def _build_seller_portal_recovery_venv_command(target: HostedRuntimeTarget) -> list[str]:
+    package_names = " ".join(shlex.quote(item) for item in SELLER_PORTAL_RECOVERY_VENV_PIP_PACKAGES)
+    version_check_script = (
+        "import importlib.metadata as m; "
+        "raise SystemExit(0 if m.version('playwright') == '1.58.0' else 1)"
+    )
+    python = shlex.quote(SELLER_PORTAL_RECOVERY_VENV_PYTHON)
+    bot_dir = shlex.quote(SELLER_PORTAL_RECOVERY_WB_WEB_BOT_DIR)
+    venv_dir = shlex.quote(SELLER_PORTAL_RECOVERY_VENV_DIR)
+    version_check = f"{python} -c {shlex.quote(version_check_script)} >/dev/null 2>&1"
+    pip_install = f"{python} -m pip install --upgrade {package_names}"
+    command = f"install -d {bot_dir} && python3 -m venv {venv_dir} && ({version_check} || {pip_install})"
+    return _remote_shell_command(target, command)
+
+
+def _build_seller_portal_recovery_playwright_browser_command(target: HostedRuntimeTarget) -> list[str]:
+    launch_check_script = (
+        "from playwright.sync_api import sync_playwright; "
+        "p=sync_playwright().start(); "
+        "b=p.chromium.launch(headless=True); "
+        "b.close(); "
+        "p.stop()"
+    )
+    system_check = f"python3 -c {shlex.quote(launch_check_script)} >/dev/null 2>&1"
+    venv_python = shlex.quote(SELLER_PORTAL_RECOVERY_VENV_PYTHON)
+    venv_check = f"{venv_python} -c {shlex.quote(launch_check_script)} >/dev/null 2>&1"
+    install = f"python3 -m playwright install --with-deps chromium && {venv_python} -m playwright install chromium"
+    command = f"({system_check} && {venv_check}) || ({install})"
     return _remote_shell_command(target, command)
 
 

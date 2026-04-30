@@ -204,12 +204,27 @@ def main() -> None:
                 deploy_dry_run["commands"]["chown_target_dir"]
             ):
                 raise AssertionError("deploy --dry-run must expose target_dir ownership normalization")
+            seller_os_command = " ".join(deploy_dry_run["commands"]["seller_portal_recovery_os_dependencies"])
+            if "python3-venv" not in seller_os_command or "xvfb" not in seller_os_command:
+                raise AssertionError("deploy --dry-run must expose seller recovery OS dependency install")
+            if "websockify" not in seller_os_command or "/usr/share/novnc" not in seller_os_command:
+                raise AssertionError("deploy --dry-run must expose noVNC/websockify dependency checks")
             if "openpyxl==3.1.5" not in " ".join(deploy_dry_run["commands"]["runtime_pip_install"]):
                 raise AssertionError("deploy --dry-run must expose runtime pip install command for openpyxl")
             if "playwright==1.58.0" not in " ".join(deploy_dry_run["commands"]["runtime_pip_install"]):
                 raise AssertionError("deploy --dry-run must expose runtime pip install command for playwright")
             if "import openpyxl, playwright" not in " ".join(deploy_dry_run["commands"]["runtime_pip_install"]):
                 raise AssertionError("deploy --dry-run must guard on both openpyxl and playwright imports")
+            seller_venv_command = " ".join(deploy_dry_run["commands"]["seller_portal_recovery_venv"])
+            if "python3 -m venv /opt/wb-web-bot/venv" not in seller_venv_command:
+                raise AssertionError("deploy --dry-run must create or repair /opt/wb-web-bot/venv")
+            if "playwright==1.58.0" not in seller_venv_command:
+                raise AssertionError("deploy --dry-run must install Playwright into wb-web-bot venv")
+            seller_browser_command = " ".join(deploy_dry_run["commands"]["seller_portal_recovery_playwright_browser"])
+            if "playwright install --with-deps chromium" not in seller_browser_command:
+                raise AssertionError("deploy --dry-run must expose Playwright Chromium dependency install")
+            if "/opt/wb-web-bot/venv/bin/python -m playwright install chromium" not in seller_browser_command:
+                raise AssertionError("deploy --dry-run must expose wb-web-bot venv browser install")
             if "install" not in " ".join(deploy_dry_run["commands"]["systemd_install"]):
                 raise AssertionError("deploy --dry-run must expose systemd install command")
             if "daemon-reload" not in " ".join(deploy_dry_run["commands"]["systemd_daemon_reload"]):
@@ -437,6 +452,7 @@ def main() -> None:
             print(f"print_plan: ok -> {print_plan['deploy_plan']['target_id']}")
             print(f"deploy_dry_run: ok -> {deploy_dry_run['commands']['restart'][-1]}")
             print(f"deploy_dry_run_runtime_pip: ok -> {deploy_dry_run['commands']['runtime_pip_install'][-1]}")
+            print("deploy_dry_run_seller_recovery_dependencies: ok -> OS, venv and browser commands exposed")
             print(
                 "deploy_dry_run_systemd: ok -> "
                 f"{deploy_dry_run['commands']['systemd_restart'][-1]}"
