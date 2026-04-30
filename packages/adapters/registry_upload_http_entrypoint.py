@@ -837,6 +837,13 @@ def _build_handler(
                         public_status_url=f"{request_origin}{DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH}",
                         public_operator_url=f"{request_origin}{sheet_operator_ui_path}",
                     )
+                except RuntimeError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.CONFLICT,
+                        {"error": f"seller portal recovery launcher unavailable: {exc}"},
+                    )
+                    return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,

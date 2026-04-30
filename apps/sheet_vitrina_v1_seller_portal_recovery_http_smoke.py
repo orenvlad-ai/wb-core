@@ -11,6 +11,7 @@ import sys
 from tempfile import TemporaryDirectory
 import threading
 from types import SimpleNamespace
+from urllib import error as urllib_error
 from urllib import request as urllib_request
 import zipfile
 
@@ -220,6 +221,10 @@ class _FakeSellerRecoveryController:
 
     def build_launcher_archive(self, *, public_status_url: str, public_operator_url: str) -> tuple[bytes, str]:
         self.calls.append("launcher")
+        if not (self.running and self.visual_ready):
+            raise RuntimeError(
+                "seller recovery launcher is only available while the current recovery run is awaiting login"
+            )
         archive_buffer = io.BytesIO()
         with zipfile.ZipFile(archive_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
             info = zipfile.ZipInfo("seller-portal-relogin.command")
@@ -323,6 +328,15 @@ def main() -> None:
             if status_code != 200 or status_payload.get("status") != "idle" or status_payload.get("session_status") != "session_invalid":
                 raise AssertionError(f"initial recovery status must separate idle run-state from invalid session-state, got {status_code} / {status_payload}")
 
+            unavailable_code, unavailable_payload = _get_json_allow_error(
+                base_url + DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH
+            )
+            if unavailable_code != 409 or "launcher unavailable" not in str(unavailable_payload.get("error") or ""):
+                raise AssertionError(
+                    "launcher route must return truthful unavailable JSON before awaiting_login, "
+                    f"got {unavailable_code} / {unavailable_payload}"
+                )
+
             start_code, start_payload = _post_json(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH, {"replace": True})
             if start_code != 200 or start_payload.get("status") != "starting" or not start_payload.get("run_id"):
                 raise AssertionError(f"start must surface current run startup with run_id, got {start_code} / {start_payload}")
@@ -374,13 +388,14 @@ def main() -> None:
             second_start_code, second_start_payload = _post_json(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH, {"replace": True})
             if second_start_code != 200 or second_start_payload.get("status") != "not_needed" or second_start_payload.get("run_final_status") != "not_needed":
                 raise AssertionError(f"not_needed start must finish immediately with final outcome, got {second_start_code} / {second_start_payload}")
-            if controller.calls != ["check", "status:", "start:True", "status:", "status:", f"status:{run_id}", "launcher", "stop", "start:True"]:
+            if controller.calls != ["check", "status:", "launcher", "start:True", "status:", "status:", f"status:{run_id}", "launcher", "stop", "start:True"]:
                 raise AssertionError(f"unexpected recovery controller lifecycle, got {controller.calls}")
 
             print("seller_portal_session_check_http: ok -> lightweight session-check route is wired")
             print("seller_portal_session_check_probe_error: ok -> probe exceptions stay 200-shape")
             print("seller_portal_recovery_http_operator: ok -> operator UI exposes recovery block and config")
             print("seller_portal_recovery_http_lifecycle: ok -> run-aware start/status/stop/not_needed lifecycle is wired")
+            print("seller_portal_recovery_launcher_unavailable: ok -> unavailable launcher is 409 JSON, not 500")
             print("seller_portal_recovery_launcher_download: ok -> downloadable Mac launcher is attached")
             print("smoke-check passed")
         finally:
@@ -410,6 +425,15 @@ def _get_json(url: str) -> tuple[int, dict[str, object]]:
     request = urllib_request.Request(url, method="GET", headers={"Accept": "application/json"})
     with urllib_request.urlopen(request, timeout=15) as response:
         return response.status, json.loads(response.read().decode("utf-8"))
+
+
+def _get_json_allow_error(url: str) -> tuple[int, dict[str, object]]:
+    request = urllib_request.Request(url, method="GET", headers={"Accept": "application/json"})
+    try:
+        with urllib_request.urlopen(request, timeout=15) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib_error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
 def _post_json(url: str, payload: dict[str, object]) -> tuple[int, dict[str, object]]:
