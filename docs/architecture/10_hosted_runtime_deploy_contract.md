@@ -244,7 +244,7 @@ Current promo live-wiring note:
   - `POST /v1/sheet-vitrina-v1/seller-portal-recovery/stop`
   - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip`
 - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/status` must remain a 200-shape status surface even when the EU host is missing `/opt/wb-web-bot/venv/bin/python`; that state is surfaced as a seller-session probe error, not as a public 500.
-- the downloadable launcher stays Mac-only and does not expose noVNC publicly: it binds to the current recovery `run_id`, opens a SSH tunnel to the localhost-only host port, waits for local HTTP-ready, launches `http://127.0.0.1:<port>/vnc.html?...path=websockify&reconnect=1` locally, polls `GET /seller-portal-recovery/status?run_id=...` and always prints a final completion marker (`completed / not_needed / stopped / timeout / error`) before exiting.
+- the downloadable launcher stays Mac-only and does not expose noVNC publicly: `launcher.zip` is a zip only while the current recovery run is `awaiting_login`; outside that state it returns truthful `409` JSON, not public `500`. The launcher binds to the current recovery `run_id`, opens a SSH tunnel to the localhost-only host port, waits for local HTTP-ready, launches `http://127.0.0.1:<port>/vnc.html?...path=websockify&reconnect=1` locally, polls `GET /seller-portal-recovery/status?run_id=...` and always prints a final completion marker (`completed / not_needed / stopped / timeout / error`) before exiting.
 
 Secrets stay outside Git. Repo stores only env names and target shape.
 
