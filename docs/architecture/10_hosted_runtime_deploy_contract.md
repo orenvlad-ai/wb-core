@@ -32,6 +32,7 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `GET /sheet-vitrina-v1/operator`
 - `GET /sheet-vitrina-v1/vitrina`
 - `GET /v1/sheet-vitrina-v1/web-vitrina`
+- `POST /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/status`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/inbound-factory.xlsx`
@@ -232,9 +233,11 @@ Current promo live-wiring note:
 - current steady operator path over that tool is bounded and HTTP-owned:
   - `GET /v1/sheet-vitrina-v1/seller-portal-session/check`
   - `POST /v1/sheet-vitrina-v1/seller-portal-recovery/start`
+  - `POST /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start`
   - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/status`
   - `POST /v1/sheet-vitrina-v1/seller-portal-recovery/stop`
   - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip`
+- `GET /v1/sheet-vitrina-v1/seller-portal-recovery/status` must remain a 200-shape status surface even when the EU host is missing `/opt/wb-web-bot/venv/bin/python`; that state is surfaced as a seller-session probe error, not as a public 500.
 - the downloadable launcher stays Mac-only and does not expose noVNC publicly: it binds to the current recovery `run_id`, opens a SSH tunnel to the localhost-only host port, waits for local HTTP-ready, launches `http://127.0.0.1:<port>/vnc.html?...path=websockify&reconnect=1` locally, polls `GET /seller-portal-recovery/status?run_id=...` and always prints a final completion marker (`completed / not_needed / stopped / timeout / error`) before exiting.
 
 Secrets stay outside Git. Repo stores only env names and target shape.
