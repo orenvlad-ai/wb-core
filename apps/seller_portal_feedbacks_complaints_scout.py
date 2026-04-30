@@ -270,7 +270,8 @@ def navigate_to_feedbacks_questions(page: Page, config: ScoutConfig) -> dict[str
         "blocker": "",
     }
     page.goto(config.start_url, wait_until="domcontentloaded")
-    _wait_settle(page)
+    _wait_settle(page, 4000)
+    _wait_for_text_visible(page, "Товары и цены", timeout_ms=8000)
     if _looks_like_login(page):
         result["blocker"] = "seller portal redirected to login/auth page"
         result["final_url"] = page.url
@@ -317,6 +318,9 @@ def navigate_to_feedbacks_questions(page: Page, config: ScoutConfig) -> dict[str
             continue
 
     direct_candidates = [
+        f"{config.start_url}/feedbacks/feedbacks-tab",
+        f"{config.start_url}/feedbacks/questions-tab",
+        f"{config.start_url}/feedbacks/complaints-tab",
         f"{config.start_url}/feedbacks-questions/feedbacks",
         f"{config.start_url}/feedbacks-questions",
         f"{config.start_url}/reviews-questions/feedbacks",
@@ -1088,7 +1092,9 @@ def _is_feedbacks_questions_page(page: Page) -> bool:
     except PlaywrightError:
         return False
     text = _norm_text(body)
-    return "Отзывы" in text and ("Вопросы" in text or "Мои жалобы" in text or "Пожаловаться" in text)
+    url = page.url.lower()
+    has_feedback_tabs = "Отзывы" in text and "Вопросы" in text and ("Мои жалобы" in text or "/feedbacks/" in url)
+    return bool(has_feedback_tabs and "/feedbacks/" in url)
 
 
 def _looks_like_login(page: Page) -> bool:
@@ -1132,6 +1138,15 @@ def _wait_settle(page: Page, timeout_ms: int = 2000) -> None:
     except PlaywrightError:
         pass
     page.wait_for_timeout(timeout_ms)
+
+
+def _wait_for_text_visible(page: Page, text: str, *, timeout_ms: int) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout_ms / 1000.0)
+    while time.monotonic() < deadline:
+        if _first_visible_text_locator(page, text) is not None:
+            return True
+        page.wait_for_timeout(500)
+    return False
 
 
 def _decision_detectability(rows: list[dict[str, Any]]) -> str:
