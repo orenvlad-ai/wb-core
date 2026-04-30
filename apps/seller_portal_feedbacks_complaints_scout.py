@@ -370,7 +370,13 @@ def scout_complaint_categories(page: Page, config: ScoutConfig, feedbacks_report
         report["blocker"] = "open_complaint_modal is false; category modal not opened by default"
         return report
     rows = feedbacks_report.get("rows") if isinstance(feedbacks_report.get("rows"), list) else []
-    row_ids = [str(row.get("dom_scout_id") or "") for row in rows if row.get("dom_scout_id")]
+    actionable_rows = [row for row in rows if row.get("three_dot_menu_found")]
+    fallback_rows = [row for row in rows if row not in actionable_rows]
+    row_ids = [
+        str(row.get("dom_scout_id") or "")
+        for row in [*actionable_rows, *fallback_rows]
+        if row.get("dom_scout_id")
+    ]
     if not row_ids:
         report["blocker"] = "No feedback row DOM ids available for complaint modal scout"
         return report
@@ -419,6 +425,7 @@ def scout_one_complaint_modal(page: Page, dom_id: str) -> dict[str, Any]:
         "complaint_action_found": False,
         "opened": False,
         "categories": [],
+        "menu_labels": [],
         "description_fields": [],
         "validation_hints": [],
         "submit_button_seen": False,
@@ -432,6 +439,7 @@ def scout_one_complaint_modal(page: Page, dom_id: str) -> dict[str, Any]:
         sample["blocker"] = str(clicked_menu.get("reason") or "safe row menu not found")
         return sample
     _wait_settle(page, 800)
+    sample["menu_labels"] = extract_open_menu_labels(page)
     action = _find_text_locator(page, "Пожаловаться на отзыв")
     if action is None:
         sample["blocker"] = "Пожаловаться на отзыв action not found in row menu"
@@ -665,6 +673,40 @@ def extract_complaint_modal_state(page: Page) -> dict[str, Any]:
         "submit_button_seen": submit_seen,
         "modal_text_fingerprint": _fingerprint(str(payload.get("text") or "")),
     }
+
+
+def extract_open_menu_labels(page: Page) -> list[str]:
+    try:
+        labels = page.evaluate(
+            r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+  };
+  const roots = Array.from(document.querySelectorAll('[role="menu"], [role="listbox"], [class*="Dropdown"], [class*="dropdown"], [class*="Popover"], [class*="popover"], [data-popper-placement]')).filter(visible);
+  const labels = [];
+  for (const root of roots) {
+    const text = (root.innerText || '').replace(/\s+/g, ' ').trim();
+    if (text && text.length <= 160) labels.push(text);
+    for (const el of Array.from(root.querySelectorAll('button, [role="button"], [role="menuitem"], li, div')).filter(visible)) {
+      const label = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+      if (label && label.length <= 160) labels.push(label);
+    }
+  }
+  return labels.slice(0, 80);
+}
+            """
+        )
+    except PlaywrightError:
+        return []
+    blocked_tokens = ("Оценка/дата",)
+    return _unique_preserve(
+        label
+        for label in (str(item) for item in labels)
+        if label and not any(token in label for token in blocked_tokens)
+    )[:20]
 
 
 def close_modal_without_submit(page: Page) -> str:
@@ -1509,13 +1551,14 @@ _DOM_CANDIDATE_SCRIPT = r"""
   }
   const seen = new Set();
   const rows = [];
-  for (const el of all) {
+    for (const el of all) {
     if (!visible(el)) continue;
     const rect = el.getBoundingClientRect();
     if (rect.height > 420) continue;
     const text = (el.innerText || '').trim();
     const norm = text.replace(/\s+/g, ' ').trim();
     if (norm.length < 35 || norm.length > 2600) continue;
+    if (kind === 'feedback' && /Оценка\/дата\s+Отзыв/i.test(norm)) continue;
     const feedbackLike = /(Отзыв|Достоин|Недостат|Артикул|Оценка|звезд|★|Пожаловаться)/i.test(norm);
     const complaintLike = /(Причина|Описание|Мои жалобы|Ждут ответа|Есть ответ|Одобрен|Отклон|Отзыв)/i.test(norm);
     if (kind === 'feedback' && !feedbackLike) continue;
