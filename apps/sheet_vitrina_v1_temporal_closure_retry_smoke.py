@@ -56,19 +56,19 @@ def main() -> None:
         second_plan = plan_block.build_plan(as_of_date=SECOND_AS_OF_DATE)
         second_status_rows = _status_rows(second_plan)
         for key in ("web_source_snapshot[yesterday_closed]", "seller_funnel_snapshot[yesterday_closed]"):
-            if second_status_rows[key][1] != "closure_retrying":
-                raise AssertionError(f"{key} must not inherit provisional current data into closed slot")
-            if "closure_state=closure_retrying" not in str(second_status_rows[key][10]):
-                raise AssertionError(f"{key} must expose retry state in note")
+            if second_status_rows[key][1] != "success":
+                raise AssertionError(f"{key} must use accepted current as latest-confirmed closed-day fallback")
+            if "accepted_current_from_prior_closed_day_latest_confirmed" not in str(second_status_rows[key][10]):
+                raise AssertionError(f"{key} must explain accepted-current latest-confirmed fallback")
         if second_status_rows["stocks[yesterday_closed]"][1] != "closure_retrying":
             raise AssertionError("stocks yesterday_closed must stay strict when exact-date history/cache is still missing")
         if "closure_state=closure_retrying" not in str(second_status_rows["stocks[yesterday_closed]"][10]):
             raise AssertionError("stocks yesterday_closed must disclose strict closed-day retry state")
         second_data_rows = _data_rows(second_plan)
-        if second_data_rows[f"SKU:{probe_nm_id}|views_current"][2:] != ["", 200.0]:
-            raise AssertionError("search metric must stay blank for closed slot while closure is retrying")
-        if second_data_rows[f"SKU:{probe_nm_id}|view_count"][2:] != ["", 400.0]:
-            raise AssertionError("seller metric must stay blank for closed slot while closure is retrying")
+        if second_data_rows[f"SKU:{probe_nm_id}|views_current"][2:] != [100.0, 200.0]:
+            raise AssertionError("search metric must expose accepted-current latest-confirmed fallback for closed slot")
+        if second_data_rows[f"SKU:{probe_nm_id}|view_count"][2:] != [300.0, 400.0]:
+            raise AssertionError("seller metric must expose accepted-current latest-confirmed fallback for closed slot")
         if second_data_rows[f"SKU:{probe_nm_id}|stock_total"][2:] != ["", ""]:
             raise AssertionError("stocks must keep both slots blank until exact-date closed history is available")
 
@@ -106,7 +106,7 @@ def main() -> None:
             raise AssertionError("later invalid closed-day stocks attempt must not overwrite the accepted yesterday snapshot")
 
         print(f"first_refresh: ok -> {first_plan.snapshot_id}")
-        print(f"closure_retrying: ok -> {second_status_rows['web_source_snapshot[yesterday_closed]'][10]}")
+        print(f"accepted_current_latest_confirmed: ok -> {second_status_rows['web_source_snapshot[yesterday_closed]'][10]}")
         print(f"closure_accepted: ok -> {third_status_rows['web_source_snapshot[yesterday_closed]'][10]}")
         print(f"closure_preserved: ok -> {preserved_status_rows['web_source_snapshot[yesterday_closed]'][10]}")
         print("smoke-check passed")
