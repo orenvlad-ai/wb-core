@@ -132,6 +132,59 @@ def main() -> None:
         if row_timestamps.get(seller_row_id) != OLD_REFRESHED_AT:
             raise AssertionError(f"web contract must preserve unrelated row timestamp, got {row_timestamps}")
 
+        def build_seller_error_plan(**kwargs: object) -> SheetVitrinaV1Envelope:
+            captured["source_keys"] = list(kwargs.get("source_keys") or [])
+            captured["metric_keys"] = list(kwargs.get("metric_keys") or [])
+            return _build_partial_seller_error_plan(nm_id=nm_id)
+
+        entrypoint.sheet_plan_block.build_plan = build_seller_error_plan  # type: ignore[method-assign]
+        error_job = entrypoint.start_sheet_source_group_refresh_job(
+            source_group_id="seller_portal_bot",
+            as_of_date="2026-04-21",
+        )
+        error_snapshot = _wait_job(entrypoint, str(error_job["job_id"]))
+        if error_snapshot["status"] != "success":
+            raise AssertionError(f"source-error group refresh must still finish materialization, got {error_snapshot}")
+        error_summary = error_snapshot["result"]["merge_summary"]
+        if error_summary["rows_updated"] != 0 or error_summary["updated_cell_count"] != 0:
+            raise AssertionError(f"failed source rows must not be counted as updated, got {error_summary}")
+        merged_after_error = runtime.load_sheet_vitrina_ready_snapshot(as_of_date="2026-04-20")
+        error_data_rows = {row[1]: row for row in _sheet(merged_after_error, "DATA_VITRINA").rows}
+        if error_data_rows[seller_row_id][2] != 20 or error_data_rows[seller_row_id][3] != 21:
+            raise AssertionError(f"failed seller source must preserve prior cells, got {error_data_rows[seller_row_id]}")
+        error_status_rows = {row[0]: row for row in _sheet(merged_after_error, "STATUS").rows}
+        if error_status_rows["seller_funnel_snapshot[today_current]"][1] != "error":
+            raise AssertionError(f"failed seller source must still update STATUS truth, got {error_status_rows}")
+        error_metadata = dict(getattr(merged_after_error, "metadata", {}) or {})
+        error_row_updated_at = error_metadata.get("row_last_updated_at_by_row_id") or {}
+        error_group_updated_at = error_metadata.get("source_group_last_updated_at") or {}
+        if error_row_updated_at.get(seller_row_id) != OLD_REFRESHED_AT:
+            raise AssertionError(f"failed seller row timestamp must not advance, got {error_row_updated_at}")
+        if error_group_updated_at.get("seller_portal_bot") != OLD_REFRESHED_AT:
+            raise AssertionError(f"failed seller group timestamp must not advance, got {error_group_updated_at}")
+
+        def build_full_seller_error_plan(**_: object) -> SheetVitrinaV1Envelope:
+            return _build_full_seller_error_plan(nm_id=nm_id)
+
+        entrypoint.sheet_plan_block.build_plan = build_full_seller_error_plan  # type: ignore[method-assign]
+        full_error_job = entrypoint.start_sheet_refresh_job(as_of_date="2026-04-20")
+        full_error_snapshot = _wait_job(entrypoint, str(full_error_job["job_id"]))
+        if full_error_snapshot["status"] != "success":
+            raise AssertionError(f"full refresh with failed source must finish with semantic status, got {full_error_snapshot}")
+        full_result = full_error_snapshot["result"]
+        if any(item.get("row_id") == seller_row_id for item in (full_result.get("updated_cells") or [])):
+            raise AssertionError(f"failed seller source must not be highlighted as updated, got {full_result}")
+        merged_after_full_error = runtime.load_sheet_vitrina_ready_snapshot(as_of_date="2026-04-20")
+        full_error_data_rows = {row[1]: row for row in _sheet(merged_after_full_error, "DATA_VITRINA").rows}
+        if full_error_data_rows[seller_row_id][2] != 20 or full_error_data_rows[seller_row_id][3] != 21:
+            raise AssertionError(
+                f"full refresh failed seller source must preserve prior cells, got {full_error_data_rows[seller_row_id]}"
+            )
+        full_error_metadata = dict(getattr(merged_after_full_error, "metadata", {}) or {})
+        preservation = full_error_metadata.get("last_full_refresh_preservation") or {}
+        if int(preservation.get("preserved_cell_count") or 0) < 2:
+            raise AssertionError(f"full refresh must record preserved failed cells, got {preservation}")
+
         try:
             entrypoint.start_sheet_source_group_refresh_job(
                 source_group_id="wb_api",
@@ -165,6 +218,8 @@ def main() -> None:
                 raise AssertionError(f"group refresh log missing {expected!r}: {log_text}")
 
         print("web_vitrina_group_refresh_partial_update: ok ->", merge_summary)
+        print("web_vitrina_group_refresh_failed_source_preserve: ok ->", error_summary)
+        print("web_vitrina_full_refresh_failed_source_preserve: ok ->", preservation)
         print("web_vitrina_group_refresh_unsupported_date: ok -> 2026-04-19")
         print("web_vitrina_group_refresh_timestamps: ok ->", row_updated_at[price_row_id], row_updated_at[seller_row_id])
         print("web_vitrina_group_refresh_stage_failure: ok ->", failed_snapshot["error"])
@@ -256,6 +311,110 @@ def _build_partial_wb_api_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
                     _status_row("prices_snapshot[today_current]", "success", "new price today"),
                 ],
                 row_count=2,
+                column_count=len(STATUS_HEADER),
+            ),
+        ],
+    )
+
+
+def _build_partial_seller_error_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
+    return SheetVitrinaV1Envelope(
+        plan_version="delivery_contract_v1__sheet_scaffold_v1",
+        snapshot_id="partial-seller-error-snapshot",
+        as_of_date="2026-04-20",
+        date_columns=["2026-04-20", "2026-04-21"],
+        temporal_slots=[
+            SheetVitrinaV1TemporalSlot(slot_key="yesterday_closed", slot_label="Вчера", column_date="2026-04-20"),
+            SheetVitrinaV1TemporalSlot(slot_key="today_current", slot_label="Сегодня", column_date="2026-04-21"),
+        ],
+        source_temporal_policies={},
+        sheets=[
+            SheetVitrinaWriteTarget(
+                sheet_name="DATA_VITRINA",
+                write_start_cell="A1",
+                write_rect="A1:D2",
+                clear_range="A:Z",
+                write_mode="overwrite",
+                partial_update_allowed=False,
+                header=["label", "key", "2026-04-20", "2026-04-21"],
+                rows=[["SKU: показы", f"SKU:{nm_id}|view_count", "", ""]],
+                row_count=1,
+                column_count=4,
+            ),
+            SheetVitrinaWriteTarget(
+                sheet_name="STATUS",
+                write_start_cell="A1",
+                write_rect="A1:K2",
+                clear_range="A:Z",
+                write_mode="overwrite",
+                partial_update_allowed=False,
+                header=STATUS_HEADER,
+                rows=[
+                    _status_row(
+                        "seller_funnel_snapshot[today_current]",
+                        "error",
+                        "current_day_web_source_sync_failed=module missing",
+                    ),
+                ],
+                row_count=1,
+                column_count=len(STATUS_HEADER),
+            ),
+        ],
+    )
+
+
+def _build_full_seller_error_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
+    return SheetVitrinaV1Envelope(
+        plan_version="delivery_contract_v1__sheet_scaffold_v1",
+        snapshot_id="full-seller-error-snapshot",
+        as_of_date="2026-04-20",
+        date_columns=["2026-04-20", "2026-04-21"],
+        temporal_slots=[
+            SheetVitrinaV1TemporalSlot(slot_key="yesterday_closed", slot_label="Вчера", column_date="2026-04-20"),
+            SheetVitrinaV1TemporalSlot(slot_key="today_current", slot_label="Сегодня", column_date="2026-04-21"),
+        ],
+        source_temporal_policies={},
+        sheets=[
+            SheetVitrinaWriteTarget(
+                sheet_name="DATA_VITRINA",
+                write_start_cell="A1",
+                write_rect="A1:D4",
+                clear_range="A:Z",
+                write_mode="overwrite",
+                partial_update_allowed=False,
+                header=["label", "key", "2026-04-20", "2026-04-21"],
+                rows=[
+                    ["SKU: цена со скидкой", f"SKU:{nm_id}|price_seller_discounted", 200, 201],
+                    ["SKU: показы", f"SKU:{nm_id}|view_count", "", ""],
+                    ["SKU: себестоимость", f"SKU:{nm_id}|cost_price_rub", 80, 81],
+                ],
+                row_count=3,
+                column_count=4,
+            ),
+            SheetVitrinaWriteTarget(
+                sheet_name="STATUS",
+                write_start_cell="A1",
+                write_rect="A1:K5",
+                clear_range="A:Z",
+                write_mode="overwrite",
+                partial_update_allowed=False,
+                header=STATUS_HEADER,
+                rows=[
+                    _status_row("prices_snapshot[yesterday_closed]", "success", "full price yesterday"),
+                    _status_row("prices_snapshot[today_current]", "success", "full price today"),
+                    _status_row(
+                        "seller_funnel_snapshot[yesterday_closed]",
+                        "error",
+                        "closed_day_sync_error=module missing",
+                    ),
+                    _status_row(
+                        "seller_funnel_snapshot[today_current]",
+                        "error",
+                        "current_day_web_source_sync_failed=module missing",
+                    ),
+                    _status_row("cost_price[today_current]", "success", "full cost today"),
+                ],
+                row_count=5,
                 column_count=len(STATUS_HEADER),
             ),
         ],

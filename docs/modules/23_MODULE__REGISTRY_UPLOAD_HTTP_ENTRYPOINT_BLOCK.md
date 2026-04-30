@@ -287,6 +287,7 @@ update_note: "Обновлён под строгую feedbacks загрузку 
   - `provisional_current_snapshot` для открытого `today_current`;
   - `closed_day_candidate_snapshot` для явной попытки закрытия уже завершённого дня;
   - `accepted_closed_day_snapshot` как единственный допустимый truth для `yesterday_closed`.
+  - если valid closed-day truth ещё не принят, но для той же даты уже есть `accepted_current_snapshot`, visible `yesterday_closed` может использовать его только как `latest_confirmed`/yellow fallback with `resolution_rule=accepted_current_from_prior_closed_day_latest_confirmed`; это не создаёт `accepted_closed_day_snapshot` и не закрывает persisted retry/owner-runner blocker.
 - Final source matrix теперь materialized server-side как четыре группы:
   - A. bot/web-source historical / closed-day-capable = `seller_funnel_snapshot`, `web_source_snapshot`
   - B. WB API historical/date-period capable = `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`
@@ -302,6 +303,7 @@ update_note: "Обновлён под строгую feedbacks загрузку 
   - если valid exact-date truth ещё не принят, auto/retry contour создаёт или продолжает persisted retry state `closure_pending / closure_retrying / closure_rate_limited / closure_exhausted`;
   - invalid / missing / incomplete candidate не принимается как final closed truth;
   - already accepted closed snapshot не может быть затёрт later invalid attempt.
+  - full refresh и group refresh must not overwrite previously confirmed visible metric cells with blanks when a selected source/date status is `error/missing/not_found/blocked/not_available`; they keep prior cells and still update STATUS/job truth with the exact upstream or runtime blocker.
 - Source-aware slot reduction now follows the policy tag rather than a coarse worst-slot rule:
   - `seller_funnel_snapshot` и `web_source_snapshot` остаются полноценными two-slot sources; problematic `today_current` keeps source/card/aggregate yellow or red.
   - `stocks` still reads authoritative exact-date historical CSV/runtime truth for `yesterday_closed`, but `today_current` is now a truthful non-required `not_available` slot and must not degrade source status or aggregate semantic status.

@@ -1828,6 +1828,48 @@ class SheetVitrinaV1LivePlanBlock:
                 payload,
             )
 
+        if accepted_snapshot is None and source_key in STRICT_CLOSED_DAY_SOURCE_KEYS and temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED:
+            prior_current_snapshot = self._load_slot_snapshot_status(
+                source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
+                requested_nm_ids=requested_nm_ids,
+                snapshot_role=TEMPORAL_ROLE_ACCEPTED_CURRENT,
+            )
+            if prior_current_snapshot is not None:
+                prior_status, prior_payload, prior_accepted_at = prior_current_snapshot
+                note_parts = ["resolution_rule=accepted_current_from_prior_closed_day_latest_confirmed"]
+                if prior_accepted_at:
+                    note_parts.append(f"accepted_at={prior_accepted_at}")
+                note_parts.append(f"latest_attempt_kind={status.kind}")
+                if status.note:
+                    note_parts.append(f"latest_attempt_note={status.note}")
+                if allow_persisted_retry and _source_slot_supports_persisted_retry(
+                    source_key=source_key,
+                    temporal_slot=temporal_slot,
+                ):
+                    reason = status.note or sync_error or _invalid_temporal_candidate_note(source_key, temporal_slot)
+                    next_retry_at, retry_state = _next_closure_retry(
+                        now,
+                        (closure_state.attempt_count if closure_state is not None else 0) + 1,
+                        reason,
+                    )
+                    self.runtime.save_temporal_source_closure_state(
+                        source_key=source_key,
+                        target_date=column_date,
+                        slot_kind=temporal_slot,
+                        state=retry_state,
+                        attempt_count=(closure_state.attempt_count if closure_state is not None else 0) + 1,
+                        next_retry_at=next_retry_at,
+                        last_reason=reason,
+                        last_attempt_at=now_iso,
+                        last_success_at=prior_accepted_at,
+                        accepted_at=None,
+                    )
+                    note_parts.append(f"closure_state={retry_state}")
+                return _append_status_note(prior_status, "; ".join(note_parts)), prior_payload
+
         cached_snapshot = self._load_cached_temporal_source(
             source_key=source_key,
             temporal_slot=temporal_slot,

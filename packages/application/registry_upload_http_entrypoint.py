@@ -1480,7 +1480,16 @@ class RegistryUploadHttpEntrypoint:
                     )
                 )
                 refreshed_at = self.refreshed_at_factory()
-                plan = _with_full_refresh_metadata(plan, refreshed_at=refreshed_at)
+                previous_plan, previous_refreshed_at = _load_existing_ready_snapshot_for_preservation(
+                    self.runtime,
+                    as_of_date=plan.as_of_date,
+                )
+                plan = _with_full_refresh_metadata(
+                    plan,
+                    refreshed_at=refreshed_at,
+                    previous_plan=previous_plan,
+                    previous_refreshed_at=previous_refreshed_at,
+                )
                 save_snapshot_phase = _start_operator_phase(
                     "save_ready_snapshot",
                     started_at=self.activated_at_factory(),
@@ -3368,12 +3377,24 @@ def _merge_source_group_ready_snapshot(
         for row_id in partial_rows_by_id
         if _metric_key_from_row_id(row_id) in metric_key_set
     }
+    partial_cell_statuses = _updated_cell_statuses_by_source_and_date(partial_plan)
+    merged_row_ids: set[str] = set()
     merged_data_rows: list[list[Any]] = []
     rows_updated = 0
     rows_preserved = 0
     for row in previous_data.rows:
         row_id = _row_id(row)
         if row_id in updated_row_ids:
+            metric_key = _metric_key_from_row_id(row_id)
+            source_key = _source_key_for_metric_key(metric_key)
+            if selected_date and not _source_date_allows_cell_merge(
+                partial_cell_statuses,
+                source_key=source_key,
+                as_of_date=selected_date,
+            ):
+                merged_data_rows.append(list(row))
+                rows_preserved += 1
+                continue
             if selected_date:
                 merged_data_rows.append(
                     _merge_row_selected_date(
@@ -3385,20 +3406,31 @@ def _merge_source_group_ready_snapshot(
                 )
             else:
                 merged_data_rows.append(partial_rows_by_id[row_id])
+            merged_row_ids.add(row_id)
             rows_updated += 1
         else:
             merged_data_rows.append(list(row))
             rows_preserved += 1
     existing_row_ids = {_row_id(row) for row in previous_data.rows if _row_id(row)}
     for row_id in sorted(updated_row_ids - existing_row_ids):
+        metric_key = _metric_key_from_row_id(row_id)
+        source_key = _source_key_for_metric_key(metric_key)
+        if selected_date and not _source_date_allows_cell_merge(
+            partial_cell_statuses,
+            source_key=source_key,
+            as_of_date=selected_date,
+        ):
+            rows_preserved += 1
+            continue
         merged_data_rows.append(partial_rows_by_id[row_id])
+        merged_row_ids.add(row_id)
         rows_updated += 1
     if source_group_id == "other_sources" and selected_date:
         _recompute_other_sources_derived_rows(
             rows=merged_data_rows,
             header=previous_data.header,
             selected_dates=[selected_date],
-            updated_row_ids=updated_row_ids,
+            updated_row_ids=merged_row_ids,
         )
 
     selected_status_rows = [
@@ -3454,20 +3486,25 @@ def _merge_source_group_ready_snapshot(
         metadata=previous_metadata,
         fallback_updated_at=previous_refreshed_at,
     )
-    for row_id in updated_row_ids:
+    for row_id in merged_row_ids:
         row_updated_at[row_id] = refreshed_at
     group_updated_at = _source_group_updated_at_metadata(
         metadata=previous_metadata,
         fallback_updated_at=previous_refreshed_at,
     )
-    group_updated_at[source_group_id] = refreshed_at
-    updated_cells = _updated_cells_for_plan(
-        replace(
-            previous_plan,
-            sheets=merged_sheets,
-        ),
-        row_ids=updated_row_ids,
-        date_columns=[selected_date] if selected_date else list(previous_plan.date_columns),
+    if merged_row_ids:
+        group_updated_at[source_group_id] = refreshed_at
+    updated_cells = (
+        _updated_cells_for_plan(
+            replace(
+                previous_plan,
+                sheets=merged_sheets,
+            ),
+            row_ids=merged_row_ids,
+            date_columns=[selected_date] if selected_date else list(previous_plan.date_columns),
+        )
+        if merged_row_ids
+        else []
     )
     metadata = {
         **previous_metadata,
@@ -3502,29 +3539,196 @@ def _merge_source_group_ready_snapshot(
         "metric_keys": sorted(metric_key_set),
         "selected_as_of_date": selected_date,
         "updated_dates": [selected_date] if selected_date else list(previous_plan.date_columns),
-        "updated_row_ids": sorted(updated_row_ids),
+        "updated_row_ids": sorted(merged_row_ids),
         "updated_cells": updated_cells,
         "updated_cell_count": _count_updated_cells_by_status(updated_cells, "updated"),
         "latest_confirmed_cell_count": _count_updated_cells_by_status(updated_cells, "latest_confirmed"),
     }
 
 
-def _with_full_refresh_metadata(plan: SheetVitrinaV1Envelope, *, refreshed_at: str) -> SheetVitrinaV1Envelope:
+def _with_full_refresh_metadata(
+    plan: SheetVitrinaV1Envelope,
+    *,
+    refreshed_at: str,
+    previous_plan: SheetVitrinaV1Envelope | None = None,
+    previous_refreshed_at: str = "",
+) -> SheetVitrinaV1Envelope:
+    preservation_summary: dict[str, Any] | None = None
+    if previous_plan is not None:
+        plan, preservation_summary = _preserve_unconfirmed_source_cells_from_previous_plan(
+            plan=plan,
+            previous_plan=previous_plan,
+        )
     data_sheet = _find_sheet(plan, "DATA_VITRINA")
-    row_updated_at = {
-        _row_id(row): refreshed_at
-        for row in (data_sheet.rows if data_sheet is not None else [])
-        if _row_id(row)
-    }
+    previous_metadata = dict(getattr(previous_plan, "metadata", {}) or {}) if previous_plan is not None else {}
+    if previous_plan is None:
+        row_updated_at = {
+            _row_id(row): refreshed_at
+            for row in (data_sheet.rows if data_sheet is not None else [])
+            if _row_id(row)
+        }
+        group_updated_at = {
+            group_id: refreshed_at
+            for group_id in WEB_VITRINA_SOURCE_GROUP_ORDER
+        }
+    else:
+        previous_timestamp = previous_refreshed_at or refreshed_at
+        row_updated_at = _row_updated_at_metadata(
+            previous_plan,
+            metadata=previous_metadata,
+            fallback_updated_at=previous_timestamp,
+        )
+        updated_cells = _updated_cells_for_plan(plan)
+        updated_row_ids = {
+            str(item.get("row_id") or "")
+            for item in updated_cells
+            if str(item.get("row_id") or "")
+        }
+        for row in (data_sheet.rows if data_sheet is not None else []):
+            row_id = _row_id(row)
+            if not row_id:
+                continue
+            row_updated_at.setdefault(row_id, previous_timestamp)
+            if row_id in updated_row_ids:
+                row_updated_at[row_id] = refreshed_at
+        group_updated_at = _source_group_updated_at_metadata(
+            metadata=previous_metadata,
+            fallback_updated_at=previous_timestamp,
+        )
+        updated_group_ids = {
+            str(item.get("source_group_id") or "")
+            for item in updated_cells
+            if str(item.get("source_group_id") or "")
+        }
+        for group_id in updated_group_ids:
+            group_updated_at[group_id] = refreshed_at
     metadata = {
         **dict(getattr(plan, "metadata", {}) or {}),
         "row_last_updated_at_by_row_id": row_updated_at,
-        "source_group_last_updated_at": {
-            group_id: refreshed_at
-            for group_id in WEB_VITRINA_SOURCE_GROUP_ORDER
-        },
+        "source_group_last_updated_at": group_updated_at,
     }
+    if preservation_summary and preservation_summary.get("preserved_cell_count"):
+        metadata["last_full_refresh_preservation"] = preservation_summary
     return replace(plan, metadata=metadata)
+
+
+def _load_existing_ready_snapshot_for_preservation(
+    runtime: Any,
+    *,
+    as_of_date: str,
+) -> tuple[SheetVitrinaV1Envelope | None, str]:
+    try:
+        previous_plan = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=as_of_date)
+        previous_status = runtime.load_sheet_vitrina_refresh_status(as_of_date=as_of_date)
+    except ValueError:
+        return None, ""
+    return previous_plan, str(getattr(previous_status, "refreshed_at", "") or "")
+
+
+def _preserve_unconfirmed_source_cells_from_previous_plan(
+    *,
+    plan: SheetVitrinaV1Envelope,
+    previous_plan: SheetVitrinaV1Envelope,
+) -> tuple[SheetVitrinaV1Envelope, dict[str, Any]]:
+    data_sheet = _find_sheet(plan, "DATA_VITRINA")
+    previous_data = _find_sheet(previous_plan, "DATA_VITRINA")
+    if data_sheet is None or previous_data is None:
+        return plan, {"preserved_cell_count": 0, "preserved_row_count": 0}
+
+    previous_rows_by_id = {
+        _row_id(row): list(row)
+        for row in previous_data.rows
+        if _row_id(row)
+    }
+    if not previous_rows_by_id:
+        return plan, {"preserved_cell_count": 0, "preserved_row_count": 0}
+
+    status_by_source_date = _updated_cell_statuses_by_source_and_date(plan)
+    plan_indexes_by_date = {
+        as_of_date: _sheet_header_indexes(data_sheet.header, as_of_date)
+        for as_of_date in plan.date_columns
+    }
+    previous_indexes_by_date = {
+        as_of_date: _sheet_header_indexes(previous_data.header, as_of_date)
+        for as_of_date in plan.date_columns
+    }
+
+    preserved_cell_count = 0
+    preserved_row_ids: set[str] = set()
+    merged_rows: list[list[Any]] = []
+    for row in data_sheet.rows:
+        row_id = _row_id(row)
+        previous_row = previous_rows_by_id.get(row_id)
+        source_key = _source_key_for_metric_key(_metric_key_from_row_id(row_id))
+        if not row_id or previous_row is None or not source_key:
+            merged_rows.append(list(row))
+            continue
+
+        merged_row = list(row)
+        for as_of_date, current_indexes in plan_indexes_by_date.items():
+            if _source_date_allows_cell_merge(
+                status_by_source_date,
+                source_key=source_key,
+                as_of_date=as_of_date,
+            ):
+                continue
+            previous_indexes = previous_indexes_by_date.get(as_of_date) or []
+            if not current_indexes or not previous_indexes:
+                continue
+            fallback_previous_index = previous_indexes[0]
+            for current_index in current_indexes:
+                previous_index = (
+                    current_index
+                    if current_index in previous_indexes
+                    else fallback_previous_index
+                )
+                if previous_index >= len(previous_row) or _is_blank_sheet_value(previous_row[previous_index]):
+                    continue
+                while current_index >= len(merged_row):
+                    merged_row.append("")
+                if merged_row[current_index] != previous_row[previous_index]:
+                    merged_row[current_index] = previous_row[previous_index]
+                preserved_cell_count += 1
+                preserved_row_ids.add(row_id)
+        merged_rows.append(merged_row)
+
+    if not preserved_cell_count:
+        return plan, {"preserved_cell_count": 0, "preserved_row_count": 0}
+
+    merged_sheets = [
+        replace(
+            sheet,
+            rows=merged_rows,
+            row_count=len(merged_rows),
+            column_count=len(sheet.header),
+        )
+        if sheet.sheet_name == "DATA_VITRINA"
+        else sheet
+        for sheet in plan.sheets
+    ]
+    return replace(plan, sheets=merged_sheets), {
+        "preserved_cell_count": preserved_cell_count,
+        "preserved_row_count": len(preserved_row_ids),
+        "preserved_row_ids": sorted(preserved_row_ids),
+    }
+
+
+def _source_date_allows_cell_merge(
+    status_by_source_date: Mapping[tuple[str, str], str],
+    *,
+    source_key: str,
+    as_of_date: str,
+) -> bool:
+    if not source_key:
+        return True
+    key = (source_key, as_of_date)
+    if key not in status_by_source_date:
+        return True
+    return status_by_source_date.get(key) in {"updated", "latest_confirmed"}
+
+
+def _is_blank_sheet_value(value: Any) -> bool:
+    return value is None or str(value).strip() == ""
 
 
 def _new_operator_refresh_diagnostics(
@@ -3829,9 +4033,8 @@ def _updated_cell_statuses_by_source_and_date(plan: SheetVitrinaV1Envelope) -> d
             continue
         grouped_rows.setdefault((source_key, as_of_date), []).append(list(row))
     return {
-        key: status
+        key: _updated_cell_status_for_status_rows(rows)
         for key, rows in grouped_rows.items()
-        if (status := _updated_cell_status_for_status_rows(rows))
     }
 
 
