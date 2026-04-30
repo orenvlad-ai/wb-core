@@ -998,8 +998,10 @@ def _hover_or_click_text(page: Page, text: str) -> bool:
 def _click_tab_like(page: Page, text: str) -> bool:
     for role in ("tab", "button", "link"):
         try:
-            locator = page.get_by_role(role, name=re.compile(re.escape(text), re.IGNORECASE)).first
-            if locator.count() and locator.is_visible(timeout=1000):
+            locator = _first_visible_locator(
+                page.get_by_role(role, name=re.compile(re.escape(text), re.IGNORECASE))
+            )
+            if locator is not None:
                 assert_safe_click_label(text, purpose="tab_navigation")
                 locator.click(timeout=3000)
                 return True
@@ -1019,8 +1021,8 @@ def _click_tab_like(page: Page, text: str) -> bool:
 def _first_visible_text_locator(page: Page, text: str):
     for exact in (True, False):
         try:
-            locator = page.get_by_text(text, exact=exact).first
-            if locator.count() and locator.is_visible(timeout=1000):
+            locator = _first_visible_locator(page.get_by_text(text, exact=exact))
+            if locator is not None:
                 return locator
         except PlaywrightError:
             pass
@@ -1029,17 +1031,32 @@ def _first_visible_text_locator(page: Page, text: str):
 
 def _find_text_locator(page: Page, text: str):
     try:
-        locator = page.get_by_text(text, exact=True).first
-        if locator.count() and locator.is_visible(timeout=1200):
+        locator = _first_visible_locator(page.get_by_text(text, exact=True))
+        if locator is not None:
             return locator
     except PlaywrightError:
         pass
     try:
-        locator = page.get_by_text(text, exact=False).first
-        if locator.count() and locator.is_visible(timeout=1200):
+        locator = _first_visible_locator(page.get_by_text(text, exact=False))
+        if locator is not None:
             return locator
     except PlaywrightError:
         pass
+    return None
+
+
+def _first_visible_locator(locator: Any, *, limit: int = 20):
+    try:
+        count = min(locator.count(), limit)
+    except PlaywrightError:
+        return None
+    for index in range(count):
+        candidate = locator.nth(index)
+        try:
+            if candidate.is_visible(timeout=600):
+                return candidate
+        except PlaywrightError:
+            continue
     return None
 
 
