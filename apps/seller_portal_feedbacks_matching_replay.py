@@ -61,6 +61,11 @@ UI_DATE_RE = re.compile(r"\b(\d{1,2})[./](\d{1,2})[./](\d{2,4})\b")
 ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
 ARTICLE_DIGITS_RE = re.compile(r"\d{5,}")
 MAX_SCROLL_ATTEMPTS = 30
+MAX_NETWORK_PAGES = 30
+SELLER_PORTAL_NETWORK_PAGE_LIMIT = 20
+SELLER_PORTAL_FEEDBACKS_ENDPOINT = (
+    "https://seller-reviews.wildberries.ru/ns/fa-seller-api/reviews-ext-seller-portal/api/v2/feedbacks"
+)
 
 
 @dataclass(frozen=True)
@@ -79,6 +84,9 @@ class ReplayConfig:
     headless: bool
     timeout_ms: int
     write_artifacts: bool
+    apply_ui_filters: str
+    targeted_search: str
+    max_targeted_searches: int
 
 
 def main() -> None:
@@ -90,6 +98,9 @@ def main() -> None:
     parser.add_argument("--max-api-rows", type=int, default=25)
     parser.add_argument("--max-ui-rows", type=int, default=100)
     parser.add_argument("--mode", choices=(NO_SUBMIT_MODE,), default=NO_SUBMIT_MODE)
+    parser.add_argument("--apply-ui-filters", choices=("auto", "yes", "no"), default="auto")
+    parser.add_argument("--targeted-search", choices=("auto", "yes", "no"), default="auto")
+    parser.add_argument("--max-targeted-searches", type=int, default=10)
     parser.add_argument("--storage-state-path", default=str(DEFAULT_STORAGE_STATE_PATH))
     parser.add_argument("--wb-bot-python", default=str(DEFAULT_WB_BOT_PYTHON))
     parser.add_argument("--output-dir", default="")
@@ -119,6 +130,9 @@ def main() -> None:
         headless=not args.headed,
         timeout_ms=max(5000, int(args.timeout_ms)),
         write_artifacts=not bool(args.no_artifacts),
+        apply_ui_filters=args.apply_ui_filters,
+        targeted_search=args.targeted_search,
+        max_targeted_searches=max(0, int(args.max_targeted_searches)),
     )
     report = run_replay(config)
     if config.write_artifacts:
@@ -144,6 +158,9 @@ def run_replay(config: ReplayConfig) -> dict[str, Any]:
             "is_answered": config.is_answered,
             "max_api_rows": config.max_api_rows,
             "max_ui_rows": config.max_ui_rows,
+            "apply_ui_filters": config.apply_ui_filters,
+            "targeted_search": config.targeted_search,
+            "max_targeted_searches": config.max_targeted_searches,
         },
         "read_only_guards": no_submit_guards(),
         "api": {},
@@ -244,6 +261,9 @@ def collect_seller_portal_ui_rows(config: ReplayConfig) -> dict[str, Any]:
         "ui": {
             "success": False,
             "rows_collected": 0,
+            "dom_rows_collected": 0,
+            "seller_portal_network_rows_collected": 0,
+            "collection_strategy": "none",
             "rows": [],
             "filters": {
                 "requested_is_answered": config.is_answered,
@@ -251,8 +271,11 @@ def collect_seller_portal_ui_rows(config: ReplayConfig) -> dict[str, Any]:
                 "limitation": "",
             },
             "scroll_stats": {},
+            "seller_portal_network_stats": {},
+            "targeted_search_stats": {},
             "field_availability": {},
             "hidden_feedback_id_available": False,
+            "seller_portal_network_feedback_id_available": False,
             "selectors": [],
             "blocker": "",
         },
@@ -281,6 +304,11 @@ def collect_seller_portal_ui_rows(config: ReplayConfig) -> dict[str, Any]:
             )
             page = context.new_page()
             page.set_default_timeout(config.timeout_ms)
+            seller_portal_feedback_headers: dict[str, str] = {}
+            page.on(
+                "request",
+                lambda request: capture_seller_portal_feedback_headers(request, seller_portal_feedback_headers),
+            )
             try:
                 navigation = navigate_to_feedbacks_questions(page, scout_config)
                 report["navigation"] = navigation
@@ -293,20 +321,36 @@ def collect_seller_portal_ui_rows(config: ReplayConfig) -> dict[str, Any]:
                 _wait_settle(page, 2500)
                 _wait_for_feedback_rows(page, timeout_ms=10000)
                 filters = describe_ui_filter_alignment(page, config)
-                rows, scroll_stats = collect_feedback_rows_with_scroll(
+                dom_rows, scroll_stats = collect_feedback_rows_with_scroll(
                     page,
                     max_rows=config.max_ui_rows,
                     date_from=config.date_from,
                 )
+                network_rows, network_stats = collect_feedback_rows_from_seller_portal_network(
+                    page,
+                    config,
+                    request_headers=seller_portal_feedback_headers,
+                )
+                targeted_stats = build_targeted_search_stats(config, network_rows, dom_rows)
+                rows = network_rows if network_rows else dom_rows
+                collection_strategy = "seller_portal_network_cursor" if network_rows else "dom_scroll"
                 report["ui"].update(
                     {
                         "success": bool(rows),
                         "rows_collected": len(rows),
+                        "dom_rows_collected": len(dom_rows),
+                        "seller_portal_network_rows_collected": len(network_rows),
+                        "collection_strategy": collection_strategy if rows else "none",
                         "rows": rows,
                         "filters": filters,
                         "scroll_stats": scroll_stats,
+                        "seller_portal_network_stats": network_stats,
+                        "targeted_search_stats": targeted_stats,
                         "field_availability": field_availability(rows),
                         "hidden_feedback_id_available": any(bool(row.get("hidden_feedback_id")) for row in rows),
+                        "seller_portal_network_feedback_id_available": any(
+                            bool(row.get("seller_portal_feedback_id") or row.get("feedback_id")) for row in rows
+                        ),
                         "selectors": sorted({selector for row in rows for selector in row.get("selector_hints", [])})[:30],
                         "blocker": "" if rows else "No Seller Portal UI feedback rows were collected",
                     }
@@ -347,21 +391,44 @@ def build_scout_config(config: ReplayConfig) -> ScoutConfig:
 def describe_ui_filter_alignment(page: Page, config: ReplayConfig) -> dict[str, Any]:
     url = page.url
     route_unanswered = "not-answered" in url
+    route_answered = "answered" in url and "not-answered" not in url
+    status_aligned = (
+        (config.is_answered == "false" and route_unanswered)
+        or (config.is_answered == "true" and route_answered)
+        or config.is_answered == "all"
+    )
+    limitation = (
+        "Seller Portal DOM renders only the first cursor page. Browser UI date/star controls are not changed; "
+        "the replay uses read-only Seller Portal cursor pagination and applies requested date/star filters client-side."
+    )
+    if config.apply_ui_filters == "no":
+        limitation = (
+            "UI filter changes were disabled by --apply-ui-filters=no. The status route is observed, and requested "
+            "date/star filters are applied only to collected read-only rows."
+        )
     if config.is_answered == "false" and route_unanswered:
         return {
             "requested_is_answered": config.is_answered,
+            "requested_apply_ui_filters": config.apply_ui_filters,
             "applied": "route_not_answered",
+            "status_tab_selected": True,
             "date_filter_applied": False,
             "stars_filter_applied": False,
-            "limitation": "UI date/star filters were not changed; bounded visible/infinite-scroll rows were read only.",
+            "safe_filter_alignment": "partial",
+            "limitation": limitation,
             "url": url,
         }
     return {
         "requested_is_answered": config.is_answered,
-        "applied": "none",
+        "requested_apply_ui_filters": config.apply_ui_filters,
+        "applied": "route_aligned" if status_aligned else "none",
+        "status_tab_selected": bool(status_aligned),
         "date_filter_applied": False,
         "stars_filter_applied": False,
-        "limitation": (
+        "safe_filter_alignment": "partial" if status_aligned else "none",
+        "limitation": limitation
+        if status_aligned
+        else (
             "UI filters were not changed in no-submit replay. The Seller Portal route may not align exactly with "
             f"is_answered={config.is_answered}."
         ),
@@ -418,6 +485,344 @@ def collect_feedback_rows_with_scroll(page: Page, *, max_rows: int, date_from: s
     }
 
 
+def collect_feedback_rows_from_seller_portal_network(
+    page: Page,
+    config: ReplayConfig,
+    *,
+    request_headers: Mapping[str, str],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Collect read-only Seller Portal rows via the same cursor endpoint used by the page."""
+
+    stats: dict[str, Any] = {
+        "enabled": True,
+        "endpoint": SELLER_PORTAL_FEEDBACKS_ENDPOINT,
+        "page_limit": SELLER_PORTAL_NETWORK_PAGE_LIMIT,
+        "max_pages": MAX_NETWORK_PAGES,
+        "pages_attempted": 0,
+        "raw_rows_seen": 0,
+        "rows_after_requested_filters": 0,
+        "request_statuses": [],
+        "captured_header_keys": sorted(request_headers.keys()),
+        "cursor_pagination_available": False,
+        "next_cursor_observed": False,
+        "newest_seen_date": "",
+        "oldest_seen_date": "",
+        "oldest_collected_date": "",
+        "newest_collected_date": "",
+        "stop_reason": "",
+        "feedback_id_available": False,
+        "errors": [],
+    }
+    rows_by_id: dict[str, dict[str, Any]] = {}
+    is_answered_values = seller_portal_is_answered_values(config.is_answered)
+    stop_reason = ""
+
+    for is_answered in is_answered_values:
+        cursor = ""
+        seen_cursors: set[str] = set()
+        for page_index in range(1, MAX_NETWORK_PAGES + 1):
+            if len(rows_by_id) >= config.max_ui_rows:
+                stop_reason = "max_ui_rows_reached"
+                break
+            if cursor in seen_cursors and cursor:
+                stop_reason = "repeated_cursor"
+                break
+            seen_cursors.add(cursor)
+            stats["pages_attempted"] += 1
+            response = fetch_seller_portal_feedbacks_page(
+                page,
+                cursor=cursor,
+                is_answered=is_answered,
+                limit=SELLER_PORTAL_NETWORK_PAGE_LIMIT,
+                request_headers=request_headers,
+            )
+            stats["request_statuses"].append(
+                {
+                    "is_answered": is_answered,
+                    "page_index": page_index,
+                    "status": response.get("status"),
+                    "ok": response.get("ok"),
+                    "cursor_present": bool(cursor),
+                }
+            )
+            if not response.get("ok"):
+                stats["errors"].append(
+                    {
+                        "stage": "seller_portal_network_fetch",
+                        "status": response.get("status"),
+                        "message": safe_text(str(response.get("error") or response.get("text") or ""), 500),
+                    }
+                )
+                stop_reason = "network_fetch_failed"
+                break
+
+            feedbacks, next_cursor = parse_seller_portal_feedbacks_payload(response.get("json"))
+            stats["cursor_pagination_available"] = stats["cursor_pagination_available"] or bool(next_cursor)
+            stats["next_cursor_observed"] = stats["next_cursor_observed"] or bool(next_cursor)
+            stats["raw_rows_seen"] += len(feedbacks)
+            if not feedbacks:
+                stop_reason = "network_page_empty"
+                break
+
+            oldest_seen_this_page = ""
+            for feedback in feedbacks:
+                row = seller_portal_network_feedback_to_ui_row(feedback, is_answered=is_answered)
+                row_date = normalize_date_key(row.get("review_datetime") or row.get("created_at"))
+                if row_date:
+                    oldest_seen_this_page = min([oldest_seen_this_page, row_date]) if oldest_seen_this_page else row_date
+                    stats["newest_seen_date"] = max([stats["newest_seen_date"], row_date]) if stats["newest_seen_date"] else row_date
+                    stats["oldest_seen_date"] = min([stats["oldest_seen_date"], row_date]) if stats["oldest_seen_date"] else row_date
+                if not ui_row_matches_requested_filters(row, config):
+                    continue
+                key = ui_row_identity(row)
+                if not key or key in rows_by_id:
+                    continue
+                row["ui_collection_index"] = len(rows_by_id)
+                rows_by_id[key] = row
+                stats["rows_after_requested_filters"] = len(rows_by_id)
+                stats["feedback_id_available"] = stats["feedback_id_available"] or bool(row.get("feedback_id"))
+                stats["newest_collected_date"] = (
+                    max([stats["newest_collected_date"], row_date]) if stats["newest_collected_date"] and row_date else row_date
+                ) or stats["newest_collected_date"]
+                stats["oldest_collected_date"] = (
+                    min([stats["oldest_collected_date"], row_date]) if stats["oldest_collected_date"] and row_date else row_date
+                ) or stats["oldest_collected_date"]
+                if len(rows_by_id) >= config.max_ui_rows:
+                    stop_reason = "max_ui_rows_reached"
+                    break
+
+            if stop_reason == "max_ui_rows_reached":
+                break
+            if oldest_seen_this_page and oldest_seen_this_page < config.date_from:
+                stop_reason = "oldest_network_date_before_date_from"
+                break
+            if not next_cursor:
+                stop_reason = "no_next_cursor"
+                break
+            cursor = next_cursor
+        if stop_reason in {"max_ui_rows_reached", "network_fetch_failed"}:
+            break
+
+    rows = list(rows_by_id.values())[: config.max_ui_rows]
+    for index, row in enumerate(rows):
+        row["row_index"] = index
+    stats["rows_after_requested_filters"] = len(rows)
+    stats["stop_reason"] = stop_reason or "network_collection_completed"
+    return rows, stats
+
+
+def fetch_seller_portal_feedbacks_page(
+    page: Page,
+    *,
+    cursor: str,
+    is_answered: bool,
+    limit: int,
+    request_headers: Mapping[str, str],
+) -> dict[str, Any]:
+    try:
+        return page.evaluate(
+            r"""
+async ({endpoint, cursor, isAnswered, limit, requestHeaders}) => {
+  const url = new URL(endpoint);
+  url.searchParams.set('cursor', cursor || '');
+  url.searchParams.set('isAnswered', String(Boolean(isAnswered)));
+  url.searchParams.set('limit', String(limit));
+  url.searchParams.set('searchText', '');
+  url.searchParams.set('sortOrder', 'dateDesc');
+  const result = {ok: false, status: 0, url: url.toString(), json: null, text: '', error: ''};
+  try {
+    const response = await fetch(url.toString(), {
+      method: 'GET',
+      credentials: 'include',
+      headers: {
+        'accept': 'application/json, text/plain, */*',
+        ...requestHeaders
+      }
+    });
+    result.ok = response.ok;
+    result.status = response.status;
+    const text = await response.text();
+    result.text = text.slice(0, 500);
+    try {
+      result.json = JSON.parse(text);
+    } catch (error) {
+      result.error = String(error && error.message || error);
+    }
+  } catch (error) {
+    result.error = String(error && error.message || error);
+  }
+  return result;
+}
+            """,
+            {
+                "endpoint": SELLER_PORTAL_FEEDBACKS_ENDPOINT,
+                "cursor": cursor,
+                "isAnswered": is_answered,
+                "limit": max(1, min(int(limit), 100)),
+                "requestHeaders": dict(request_headers),
+            },
+        )
+    except PlaywrightError as exc:
+        return {"ok": False, "status": 0, "json": None, "text": "", "error": safe_text(str(exc), 500)}
+
+
+def capture_seller_portal_feedback_headers(request: Any, headers: dict[str, str]) -> None:
+    try:
+        url = str(request.url)
+    except Exception:
+        return
+    if "reviews-ext-seller-portal/api/v2/feedbacks" not in url:
+        return
+    try:
+        raw_headers = request.headers
+    except Exception:
+        return
+    for key in ("authorizev3", "wb-seller-lk", "root-version", "content-type"):
+        value = raw_headers.get(key)
+        if value:
+            headers[key] = str(value)
+
+
+def parse_seller_portal_feedbacks_payload(payload: Any) -> tuple[list[dict[str, Any]], str]:
+    if not isinstance(payload, dict):
+        return [], ""
+    data = payload.get("data")
+    if isinstance(data, dict) and isinstance(data.get("data"), dict):
+        data = data.get("data")
+    if not isinstance(data, dict):
+        return [], ""
+    feedbacks = [item for item in data.get("feedbacks") or [] if isinstance(item, dict)]
+    pages = data.get("pages") if isinstance(data.get("pages"), dict) else {}
+    next_cursor = str(pages.get("next") or "") if pages else ""
+    return feedbacks, next_cursor
+
+
+def seller_portal_network_feedback_to_ui_row(feedback: Mapping[str, Any], *, is_answered: bool) -> dict[str, Any]:
+    product = feedback.get("productInfo") if isinstance(feedback.get("productInfo"), dict) else {}
+    info = feedback.get("feedbackInfo") if isinstance(feedback.get("feedbackInfo"), dict) else {}
+    complaints = feedback.get("supplierComplaints") if isinstance(feedback.get("supplierComplaints"), dict) else {}
+    feedback_complaint = complaints.get("feedbackComplaint") if isinstance(complaints.get("feedbackComplaint"), dict) else {}
+    created_at = iso_from_epoch_ms(feedback.get("createdDate"))
+    review_datetime = ui_datetime_from_epoch_ms(feedback.get("createdDate"))
+    review_date = review_datetime[:10] if review_datetime else normalize_date_key(created_at)
+    feedback_id = str(feedback.get("id") or "").strip()
+    text = str(info.get("feedbackText") or "").strip()
+    pros = combine_reason_text(info.get("feedbackTextPros"), info.get("goodReasons"))
+    cons = combine_reason_text(info.get("feedbackTextCons"), info.get("badReasons"))
+    media_indicators = seller_portal_media_indicators(info)
+    row_text = " ".join(part for part in (text, pros, cons) if part)
+    normalized_review = normalize_text(row_text)
+    return {
+        "source": "seller_portal_network_cursor",
+        "feedback_id": feedback_id,
+        "seller_portal_feedback_id": feedback_id,
+        "hidden_feedback_id": "",
+        "created_at": created_at,
+        "review_datetime": review_datetime,
+        "review_date": review_date,
+        "rating": normalize_rating(feedback.get("valuation")),
+        "product_title": safe_text(str(product.get("name") or ""), 240),
+        "supplier_article": safe_text(str(product.get("supplierArticle") or ""), 180),
+        "vendor_article": safe_text(str(product.get("supplierArticle") or ""), 180),
+        "wb_article": str(product.get("wbArticle") or ""),
+        "nm_id": str(product.get("wbArticle") or ""),
+        "text_snippet": safe_text(text, 700),
+        "pros_snippet": safe_text(pros, 700),
+        "cons_snippet": safe_text(cons, 700),
+        "comment_snippet": "",
+        "media_indicators": media_indicators,
+        "photo_count": int(bool("photo" in media_indicators)),
+        "video_count": int(bool("video" in media_indicators)),
+        "is_answered": bool(is_answered or feedback.get("answer") or feedback.get("brandAnswer")),
+        "answer_text": safe_text(str(feedback.get("answer") or feedback.get("brandAnswer") or ""), 500),
+        "complaint_action_found": bool(feedback_complaint.get("isAvailable")),
+        "complaint_status": str(feedback_complaint.get("status") or ""),
+        "return_request_available": bool((feedback.get("returnProductOption") or {}).get("isAvailable"))
+        if isinstance(feedback.get("returnProductOption"), dict)
+        else False,
+        "row_text_fingerprint": sha256(row_text.encode("utf-8")).hexdigest()[:20],
+        "dom_fingerprint": sha256(f"{feedback_id}|{row_text}".encode("utf-8")).hexdigest()[:20],
+        "normalized_review_text_fingerprint": sha256(normalized_review.encode("utf-8")).hexdigest()[:20],
+        "selector_hints": ["seller_portal_network_cursor"],
+        "three_dot_menu_found": bool(feedback_complaint.get("isAvailable")),
+    }
+
+
+def seller_portal_media_indicators(info: Mapping[str, Any]) -> list[str]:
+    indicators: list[str] = []
+    photos = info.get("photos")
+    video = info.get("video")
+    if photos:
+        indicators.append("photo")
+    if video:
+        indicators.append("video")
+    return indicators
+
+
+def combine_reason_text(text_value: Any, reasons_value: Any) -> str:
+    parts: list[str] = []
+    if str(text_value or "").strip():
+        parts.append(str(text_value).strip())
+    if isinstance(reasons_value, list):
+        parts.extend(str(item).strip() for item in reasons_value if str(item or "").strip())
+    return " ".join(unique_preserve(parts))
+
+
+def ui_row_matches_requested_filters(row: Mapping[str, Any], config: ReplayConfig) -> bool:
+    row_date = normalize_date_key(row.get("review_datetime") or row.get("review_date") or row.get("created_at"))
+    if row_date and (row_date < config.date_from or row_date > config.date_to):
+        return False
+    rating = normalize_rating(row.get("rating"))
+    if rating and int(rating) not in set(config.stars):
+        return False
+    if config.is_answered in {"true", "false"}:
+        expected = config.is_answered == "true"
+        if bool(row.get("is_answered")) != expected:
+            return False
+    return True
+
+
+def seller_portal_is_answered_values(value: str) -> list[bool]:
+    if value == "true":
+        return [True]
+    if value == "false":
+        return [False]
+    return [False, True]
+
+
+def build_targeted_search_stats(
+    config: ReplayConfig,
+    network_rows: list[dict[str, Any]],
+    dom_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if config.targeted_search == "no":
+        return {
+            "requested": config.targeted_search,
+            "used": False,
+            "searches_attempted": 0,
+            "limitation": "Targeted search was disabled by --targeted-search=no.",
+        }
+    if network_rows:
+        return {
+            "requested": config.targeted_search,
+            "used": False,
+            "searches_attempted": 0,
+            "limitation": (
+                "Targeted search was not needed because read-only Seller Portal cursor pagination collected "
+                f"{len(network_rows)} requested rows."
+            ),
+        }
+    return {
+        "requested": config.targeted_search,
+        "used": False,
+        "searches_attempted": 0,
+        "limitation": (
+            "No stable read-only Seller Portal search input was exercised in this block; DOM fallback collected "
+            f"{len(dom_rows)} rows."
+        ),
+    }
+
+
 def scroll_feedback_list(page: Page) -> dict[str, Any]:
     try:
         return page.evaluate(
@@ -460,7 +865,7 @@ def scroll_feedback_list(page: Page) -> dict[str, Any]:
 
 
 def ui_row_identity(row: Mapping[str, Any]) -> str:
-    hidden = str(row.get("hidden_feedback_id") or "").strip()
+    hidden = str(row.get("hidden_feedback_id") or row.get("feedback_id") or row.get("seller_portal_feedback_id") or "").strip()
     if hidden:
         return f"id:{hidden}"
     parts = [
@@ -496,6 +901,7 @@ def match_one_api_row(api_row: Mapping[str, Any], ui_rows: list[dict[str, Any]])
             "reasons": [*best.get("reasons", []), "duplicate candidate penalty"],
         }
     status = classify_match(best, ambiguity_count=ambiguity_count)
+    not_found_reason = classify_not_found_reason(status, api_row, ui_rows, best)
     return {
         "api_feedback_id": str(api_row.get("feedback_id") or ""),
         "api_summary": summarize_api_row(api_row),
@@ -510,9 +916,39 @@ def match_one_api_row(api_row: Mapping[str, Any], ui_rows: list[dict[str, Any]])
         "close_candidate_summaries": [summarize_ui_row(item.get("ui_row") or {}) for item in close_candidates[:5]],
         "text_similarity": best.get("text_similarity", 0.0),
         "text_containment": best.get("text_containment", 0.0),
+        "not_found_reason": not_found_reason,
         "reason": "; ".join(best.get("reasons") or ["no UI candidates above minimum threshold"]),
         "safe_for_future_submit": status == "exact",
     }
+
+
+def classify_not_found_reason(
+    status: str,
+    api_row: Mapping[str, Any],
+    ui_rows: list[dict[str, Any]],
+    best: Mapping[str, Any],
+) -> str:
+    if status != "not_found":
+        return ""
+    if not ui_rows:
+        return "not_found_due_to_no_ui_coverage"
+    reason = " ".join(str(item) for item in best.get("reasons") or [])
+    if "short text penalty" in reason or "duplicate candidate penalty" in reason:
+        return "not_found_due_to_short_text_or_duplicate"
+    api_date = normalize_date_key(api_row.get("created_date") or api_row.get("created_at"))
+    ui_dates = {
+        normalize_date_key(row.get("review_date") or row.get("review_datetime") or row.get("created_at"))
+        for row in ui_rows
+    }
+    if api_date and api_date not in ui_dates:
+        return "not_found_due_to_no_ui_coverage"
+    api_nm = normalize_nm_id(api_row.get("nm_id"))
+    api_supplier = normalize_article(api_row.get("supplier_article"))
+    ui_nm_ids = {normalize_nm_id(row.get("nm_id") or row.get("wb_article")) for row in ui_rows}
+    ui_articles = {normalize_article(row.get("supplier_article") or row.get("vendor_article")) for row in ui_rows}
+    if (api_nm and api_nm not in ui_nm_ids) and (api_supplier and api_supplier not in ui_articles):
+        return "not_found_due_to_no_ui_coverage"
+    return "not_found_due_to_mismatch"
 
 
 def score_candidate(api_row: Mapping[str, Any], ui_row: Mapping[str, Any]) -> dict[str, Any]:
@@ -688,6 +1124,11 @@ def empty_candidate_score() -> dict[str, Any]:
 
 def build_aggregate(matches: list[dict[str, Any]], api_rows: list[dict[str, Any]], ui_rows: list[dict[str, Any]]) -> dict[str, Any]:
     counts = Counter(str(match.get("match_status") or "not_found") for match in matches)
+    not_found_reasons = Counter(
+        str(match.get("not_found_reason") or "not_found_due_to_mismatch")
+        for match in matches
+        if match.get("match_status") == "not_found"
+    )
     tested = len(api_rows)
     risk_count = sum(
         1
@@ -708,6 +1149,7 @@ def build_aggregate(matches: list[dict[str, Any]], api_rows: list[dict[str, Any]
     return {
         "api_rows_tested": tested,
         "ui_rows_collected": len(ui_rows),
+        "ui_coverage_ratio": rate(min(len(ui_rows), tested), tested),
         "exact_count": counts.get("exact", 0),
         "high_count": counts.get("high", 0),
         "ambiguous_count": counts.get("ambiguous", 0),
@@ -716,6 +1158,13 @@ def build_aggregate(matches: list[dict[str, Any]], api_rows: list[dict[str, Any]
         "high_rate": rate(counts.get("high", 0), tested),
         "ambiguous_rate": rate(counts.get("ambiguous", 0), tested),
         "not_found_rate": rate(counts.get("not_found", 0), tested),
+        "not_found_reason_split": {
+            "not_found_due_to_no_ui_coverage": not_found_reasons.get("not_found_due_to_no_ui_coverage", 0),
+            "not_found_due_to_mismatch": not_found_reasons.get("not_found_due_to_mismatch", 0),
+            "not_found_due_to_short_text_or_duplicate": not_found_reasons.get(
+                "not_found_due_to_short_text_or_duplicate", 0
+            ),
+        },
         "duplicate_or_short_text_risk_count": risk_count,
         "top_mismatch_reasons": [
             {"reason": reason, "count": count}
@@ -734,8 +1183,15 @@ def build_recommendation(aggregate: Mapping[str, Any], report: Mapping[str, Any]
     ready = bool(tested and exact == tested and risk_count == 0)
     exact_only_feasibility = "feasible_for_exact_matches" if exact > 0 else "not_proven"
     required: list[str] = []
-    if not report.get("ui", {}).get("hidden_feedback_id_available"):
+    ui = report.get("ui", {}) if isinstance(report.get("ui"), dict) else {}
+    if ui.get("seller_portal_network_feedback_id_available"):
+        required.append(
+            "Seller Portal cursor endpoint exposes feedback_id for read-only matching; DOM hidden feedback_id is still not observed."
+        )
+    elif not ui.get("hidden_feedback_id_available"):
         required.append("No hidden UI feedback_id observed; keep exact-only matching on text+datetime+rating+article/nmId.")
+    if float(aggregate.get("ui_coverage_ratio") or 0.0) < 1.0:
+        required.append("UI coverage is lower than API rows tested; keep improving date/star alignment or cursor pagination.")
     if high:
         required.append("High matches need operator confirmation because one strong field is missing.")
     if ambiguous:
@@ -771,6 +1227,7 @@ def empty_aggregate() -> dict[str, Any]:
     return {
         "api_rows_tested": 0,
         "ui_rows_collected": 0,
+        "ui_coverage_ratio": 0.0,
         "exact_count": 0,
         "high_count": 0,
         "ambiguous_count": 0,
@@ -779,6 +1236,11 @@ def empty_aggregate() -> dict[str, Any]:
         "high_rate": 0.0,
         "ambiguous_rate": 0.0,
         "not_found_rate": 0.0,
+        "not_found_reason_split": {
+            "not_found_due_to_no_ui_coverage": 0,
+            "not_found_due_to_mismatch": 0,
+            "not_found_due_to_short_text_or_duplicate": 0,
+        },
         "duplicate_or_short_text_risk_count": 0,
         "top_mismatch_reasons": [],
     }
@@ -801,10 +1263,15 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
         f"- is_answered: `{params.get('is_answered')}`",
         f"- API rows loaded: `{api.get('row_count', 0)}` / total `{api.get('total_available_rows', 0)}`",
         f"- UI rows collected: `{ui.get('rows_collected', 0)}`",
+        f"- UI collection strategy: `{ui.get('collection_strategy')}`",
+        f"- UI coverage ratio: `{agg.get('ui_coverage_ratio', 0.0)}`",
+        f"- DOM rows / Seller Portal cursor rows: `{ui.get('dom_rows_collected', 0)}` / `{ui.get('seller_portal_network_rows_collected', 0)}`",
         f"- UI filters applied: `{(ui.get('filters') or {}).get('applied')}`",
         f"- Hidden UI feedback_id available: `{ui.get('hidden_feedback_id_available')}`",
+        f"- Seller Portal network feedback_id available: `{ui.get('seller_portal_network_feedback_id_available')}`",
         f"- Exact/high/ambiguous/not_found: `{agg.get('exact_count', 0)}` / `{agg.get('high_count', 0)}` / `{agg.get('ambiguous_count', 0)}` / `{agg.get('not_found_count', 0)}`",
         f"- Exact rate: `{agg.get('exact_rate', 0.0)}`",
+        f"- Not-found reason split: `{agg.get('not_found_reason_split')}`",
         f"- Duplicate/short-text risk count: `{agg.get('duplicate_or_short_text_risk_count', 0)}`",
         f"- Controlled submit readiness: `{rec.get('readiness_for_controlled_submit')}`",
         f"- Future policy: `{rec.get('future_auto_submit_policy')}`",
@@ -820,6 +1287,7 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
                 f"- `{match.get('match_status')}` score `{match.get('match_score')}` safe `{match.get('safe_for_future_submit')}` feedback `{match.get('api_feedback_id')}`",
                 f"  API: `{api_summary.get('created_at')}` rating `{api_summary.get('rating')}` nm `{api_summary.get('nm_id')}` article `{api_summary.get('supplier_article')}` text `{api_summary.get('review_text')}`",
                 f"  UI: `{ui_summary.get('review_datetime')}` rating `{ui_summary.get('rating')}` nm `{ui_summary.get('nm_id')}` article `{ui_summary.get('supplier_article')}` text `{ui_summary.get('review_text')}`",
+                f"  Not-found reason: `{match.get('not_found_reason')}`",
                 f"  Reason: {match.get('reason')}",
             ]
         )
@@ -862,10 +1330,16 @@ def compact_stdout_report(report: Mapping[str, Any]) -> dict[str, Any]:
             for key in (
                 "success",
                 "rows_collected",
+                "dom_rows_collected",
+                "seller_portal_network_rows_collected",
+                "collection_strategy",
                 "filters",
                 "scroll_stats",
+                "seller_portal_network_stats",
+                "targeted_search_stats",
                 "field_availability",
                 "hidden_feedback_id_available",
+                "seller_portal_network_feedback_id_available",
                 "blocker",
             )
         },
@@ -897,6 +1371,8 @@ def summarize_ui_row(row: Mapping[str, Any]) -> dict[str, Any]:
         return {}
     return {
         "row_index": row.get("row_index", row.get("ui_collection_index")),
+        "source": str(row.get("source") or ""),
+        "feedback_id": str(row.get("feedback_id") or row.get("seller_portal_feedback_id") or ""),
         "review_datetime": str(row.get("review_datetime") or ""),
         "review_date": str(row.get("review_date") or ""),
         "rating": normalize_rating(row.get("rating")),
@@ -1000,6 +1476,23 @@ def parse_iso_datetime(value: str) -> datetime | None:
     if parsed.tzinfo is None and "T" in value:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def iso_from_epoch_ms(value: Any) -> str:
+    try:
+        millis = int(value)
+    except (TypeError, ValueError):
+        return ""
+    return datetime.fromtimestamp(millis / 1000, timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def ui_datetime_from_epoch_ms(value: Any) -> str:
+    iso_value = iso_from_epoch_ms(value)
+    parsed = parse_iso_datetime(iso_value) if iso_value else None
+    if parsed is None:
+        return ""
+    business_dt = parsed.astimezone(ZoneInfo(BUSINESS_TZ))
+    return business_dt.strftime("%d.%m.%Y в %H:%M")
 
 
 def token_overlap(left: str, right: str) -> float:
