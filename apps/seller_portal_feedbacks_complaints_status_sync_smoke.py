@@ -19,7 +19,7 @@ def main() -> None:
     with TemporaryDirectory(prefix="complaints-status-sync-smoke-") as tmp:
         journal = JsonFileFeedbacksComplaintJournal(Path(tmp))
         journal.create_or_update(_record("pending-feedback", "Текст pending", "Другое"))
-        journal.create_or_update(_record("approved-feedback", "Текст approved", "Другое"))
+        journal.create_or_update(_record("approved-feedback", "Текст approved", "Другое", last_error="submit success not confirmed"))
         journal.create_or_update(_record("rejected-feedback", "Текст rejected", "Другое"))
         journal.create_or_update(
             _record(
@@ -66,6 +66,9 @@ def main() -> None:
             raise AssertionError(f"pending tab must stay waiting_response: {statuses}")
         if statuses["approved-feedback"] != "satisfied":
             raise AssertionError(f"approved answered row must become satisfied: {statuses}")
+        approved = journal.find_by_feedback_id("approved-feedback") or {}
+        if approved.get("last_error"):
+            raise AssertionError(f"resolved status sync must clear stale last_error: {approved}")
         if statuses["rejected-feedback"] != "rejected":
             raise AssertionError(f"rejected answered row must become rejected: {statuses}")
         if statuses["pros-only-feedback"] != "satisfied":
@@ -86,6 +89,7 @@ def _record(
     *,
     pros: str = "",
     complaint_text: str = "Просим проверить отзыв: тест.",
+    last_error: str = "",
 ) -> dict[str, object]:
     return {
         "feedback_id": feedback_id,
@@ -95,6 +99,7 @@ def _record(
         "review_text": text,
         "pros": pros,
         "product_name": "Товар",
+        "last_error": last_error,
     }
 
 
