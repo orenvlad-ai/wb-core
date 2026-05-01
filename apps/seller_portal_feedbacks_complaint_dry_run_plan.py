@@ -629,7 +629,11 @@ def draft_one_candidate_modal(
         result["blocker"] = "complaint modal did not open"
         return result
 
-    category = choose_complaint_category(result["categories_found"], force_other=config.force_category_other)
+    category = choose_complaint_category(
+        result["categories_found"],
+        force_other=config.force_category_other,
+        preferred_category=(candidate.get("ai") or {}).get("category_label"),
+    )
     result["selected_category"] = category
     if not category:
         result["blocker"] = "Другое category unavailable and no obvious safe fallback category was selected"
@@ -820,10 +824,13 @@ def apply_article_search_for_candidate(
         return {"ok": False, "search_value": search_value, "reason": safe_text(str(exc), 400)}
 
 
-def choose_complaint_category(categories: Iterable[str], *, force_other: bool) -> str:
+def choose_complaint_category(categories: Iterable[str], *, force_other: bool, preferred_category: Any = "") -> str:
     normalized = {normalize_text(category): str(category) for category in categories if str(category or "").strip()}
     if force_other and normalize_text("Другое") in normalized:
         return normalized[normalize_text("Другое")]
+    preferred = normalize_text(preferred_category)
+    if preferred and preferred in normalized:
+        return normalized[preferred]
     if normalize_text("Другое") in normalized:
         return normalized[normalize_text("Другое")]
     return ""
@@ -1004,14 +1011,14 @@ def apply_modal_results(candidates: list[dict[str, Any]], modal_results: list[Ma
 
 
 def build_draft_text(ai_result: Mapping[str, Any]) -> str:
-    reason = normalize_sentence(ai_result.get("reason") or "")
+    reason = TEXT_WS_RE.sub(" ", str(ai_result.get("reason") or "").strip())
     evidence = normalize_sentence(ai_result.get("evidence") or "")
-    if reason and evidence:
-        draft = f"Просим проверить отзыв. Основание: {reason}. Фрагмент: {evidence}."
-    elif reason:
-        draft = f"Просим проверить отзыв. Основание: {reason}."
+    if reason:
+        draft = reason
+    elif evidence:
+        draft = f"Просим проверить отзыв: фрагмент отзыва требует проверки. Фрагмент: {evidence}."
     else:
-        draft = "Просим проверить отзыв. Основание: требуется ручная проверка корректности отзыва."
+        draft = "Просим проверить отзыв: требуется ручная проверка корректности отзыва."
     return safe_text(draft, DRAFT_LIMIT)
 
 

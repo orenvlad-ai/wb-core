@@ -51,31 +51,100 @@ CONFIDENCE_LABELS = {
     "low": "Низкая",
 }
 CATEGORY_LABELS = {
-    "profanity_or_insult": "Мат, оскорбления или угрозы",
-    "links_contacts_ads": "Ссылки, контакты или реклама",
-    "not_about_product": "Отзыв не про товар",
-    "wrong_product_or_media": "Другой товар или медиа",
-    "wb_delivery_or_pickup_point": "Доставка, ПВЗ или логистика WB",
-    "competitor_suspicion": "Возможный конкурент",
-    "product_quality_claim": "Претензия к товару",
-    "too_little_information": "Недостаточно данных",
+    "competitor_review": "Отзыв оставили конкуренты",
     "other": "Другое",
+    "not_about_product": "Отзыв не относится к товару",
+    "spam_ad_text": "Спам-реклама в тексте",
+    "profanity": "Нецензурная лексика",
+    "political_context": "Отзыв с политическим контекстом",
+    "threats_insults": "Угрозы, оскорбления",
+    "unrelated_media": "Фото или видео не имеет отношения к товару",
+    "obscene_media": "Нецензурное содержимое в фото или видео",
+    "spam_ad_media": "Спам-реклама на фото или видео",
 }
 
-STARTER_PROMPT = """Ты помогаешь оператору Wildberries предварительно разобрать отзывы покупателей и понять, есть ли формальное основание для жалобы на отзыв.
+BAD_REASON_PHRASES = (
+    "оснований для жалобы неясно",
+    "основание неясно",
+    "недостаточно данных",
+    "оценить основание вручную",
+    "оценить вручную",
+    "отзыв без текста и деталей",
+)
+
+STARTER_PROMPT = """Ты помогаешь оператору Wildberries предварительно разобрать отзывы покупателей и подготовить безопасный черновик жалобы на отзыв.
 
 Классифицируй каждый отзыв строго по переданной JSON schema.
 
-Правила:
+Разрешённые category id и их точные категории WB:
+- competitor_review = Отзыв оставили конкуренты
+- other = Другое
+- not_about_product = Отзыв не относится к товару
+- spam_ad_text = Спам-реклама в тексте
+- profanity = Нецензурная лексика
+- political_context = Отзыв с политическим контекстом
+- threats_insults = Угрозы, оскорбления
+- unrelated_media = Фото или видео не имеет отношения к товару
+- obscene_media = Нецензурное содержимое в фото или видео
+- spam_ad_media = Спам-реклама на фото или видео
+
+Запрещено возвращать любые внутренние/старые категории: Недостаточно данных, Претензия к товару, Доставка/ПВЗ/логистика WB, Другой товар или медиа, Не применимо.
+Если данных мало, основание слабое или отзыв не подходит для жалобы, выбирай category=other, но complaint_fit должен отражать решение.
+
+Смысл полей:
+- complaint_fit=yes, если есть явное формальное основание для жалобы.
+- complaint_fit=review, если шанс есть, но основание спорное и нужен операторский контроль.
+- complaint_fit=no, если жалобу подавать не следует.
+- reason = готовый короткий текст для поля WB "Опишите ситуацию" для yes/review. Для no reason = короткое пояснение, начинающееся с "Жалобу не подавать: ...".
+- evidence = короткий фрагмент отзыва или наблюдение из входных данных, на котором основан вывод.
+- confidence = high, medium или low.
+
+Когда выбирать yes:
+- отзыв явно не относится к товару;
+- отзыв про доставку, WB, ПВЗ, баллы, чат, сервис, получение заказа, а не свойства товара;
+- товар не доставили, товара нет, пустая коробка;
+- пришёл другой товар, модель, артикул, вариант, чужой заказ, пересорт или неверная комплектация;
+- есть явная нецензурная лексика;
+- есть угрозы или оскорбления;
+- есть реклама, ссылки, контакты, призыв купить другой бренд;
+- есть политический или иной нерелевантный контекст;
+- есть сильные признаки конкурента.
+
+Когда выбирать review:
+- шанс есть, но основание спорное;
+- короткое "пришло сломанным/разбитым";
+- "не то стекло" без деталей;
+- смешанный отзыв: товарная претензия плюс WB/доставка/поддержка;
+- замаскированный мат;
+- слабое подозрение на конкурента;
+- есть фото/видео, но содержимое медиа не передано;
+- пустой или очень короткий отзыв с низкой оценкой и без ясной причины.
+
+Когда выбирать no:
 - Негативная оценка сама по себе не основание для жалобы.
-- Честные претензии к товару, качеству, размеру, цвету, комплектации или ожиданиям покупателя обычно классифицируй как no.
-- Жалобы на доставку, ПВЗ, логистику, упаковку или сервис Wildberries обычно классифицируй как review, не auto-yes.
-- Категорию competitor_suspicion выбирай только при явных признаках конкурента, не выдумывай мотивы.
-- Если данных мало, выбирай review или no, не yes.
-- yes ставь только когда есть явное формальное основание: мат/оскорбления/угрозы, контакты/ссылки/реклама, отзыв явно не про товар, явно другой товар/медиа или похожее нарушение правил площадки.
-- reason и evidence пиши коротко на русском, без пересказа всего отзыва.
-- confidence отражает уверенность: high, medium или low.
-- Верни только JSON по schema, без markdown и дополнительных пояснений."""
+- обычная товарная претензия к качеству, хрупкости, пузырям, установке, размеру, Face ID, антишпион-эффекту, мутности, царапинам, отпечаткам;
+- нет признаков WB/доставки/пересорта/спама/мата/оскорблений/нерелевантности.
+
+Category mapping:
+- доставка/WB/ПВЗ/баллы/чат/сервис -> not_about_product или other; предпочитай not_about_product, если отзыв описывает не товар, а получение/сервис.
+- пришёл другой товар/пересорт/не та модель -> not_about_product, если отзыв про неверный заказ/вариант, иначе other.
+- пустая коробка/нет товара/использованный товар/неполная комплектация -> other.
+- мат -> profanity.
+- угрозы/оскорбления -> threats_insults.
+- реклама/ссылки/контакты/другой бренд -> spam_ad_text.
+- конкурент -> competitor_review.
+- политика -> political_context.
+- media categories выбирай только если текст явно говорит, что фото/видео нерелевантное, нецензурное или рекламное; не делай вывод только из photo_count/video_count.
+- слабые, пустые и неподходящие cases -> other, не "Недостаточно данных".
+
+Требования к reason:
+- Для yes пиши уверенный, короткий complaint description без markdown.
+- Для review пиши осторожный complaint description через "Просим проверить отзыв: ...".
+- Для no пиши "Жалобу не подавать: ..." и кратко объясняй почему.
+- Не пиши "основание неясно", "недостаточно данных", "оценить вручную" как финальный reason.
+- Не выдумывай факты и не обещай, что WB одобрит жалобу.
+
+Верни только JSON по schema, без markdown и дополнительных пояснений."""
 
 
 class FeedbacksAiProvider(Protocol):
@@ -447,13 +516,14 @@ def _validated_results(raw_results: list[dict[str, Any]], *, expected_rows: list
         complaint_fit = _enum_value(raw.get("complaint_fit"), COMPLAINT_FIT_LABELS, "complaint_fit")
         category = _enum_value(raw.get("category"), CATEGORY_LABELS, "category")
         confidence = _enum_value(raw.get("confidence"), CONFIDENCE_LABELS, "confidence")
+        reason = _validated_reason(raw.get("reason"), complaint_fit=complaint_fit)
         by_id[feedback_id] = {
             "feedback_id": feedback_id,
             "complaint_fit": complaint_fit,
             "complaint_fit_label": COMPLAINT_FIT_LABELS[complaint_fit],
             "category": category,
             "category_label": CATEGORY_LABELS[category],
-            "reason": _short_string(raw.get("reason"), 360) or "—",
+            "reason": reason,
             "confidence": confidence,
             "confidence_label": CONFIDENCE_LABELS[confidence],
             "evidence": _short_string(raw.get("evidence"), 240),
@@ -508,6 +578,22 @@ def _enum_value(value: Any, labels: Mapping[str, str], field_name: str) -> str:
     if normalized not in labels:
         raise OpenAiFeedbacksAnalysisError(f"OpenAI returned invalid {field_name}")
     return normalized
+
+
+def _validated_reason(value: Any, *, complaint_fit: str) -> str:
+    reason = _short_string(value, 360)
+    lower_reason = reason.lower().replace("ё", "е")
+    if complaint_fit in {"yes", "review"}:
+        if not reason:
+            raise OpenAiFeedbacksAnalysisError("OpenAI returned empty reason for complaint candidate")
+        if any(phrase in lower_reason for phrase in BAD_REASON_PHRASES):
+            raise OpenAiFeedbacksAnalysisError("OpenAI returned non-actionable complaint description")
+        return reason
+    if not reason or any(phrase in lower_reason for phrase in BAD_REASON_PHRASES):
+        return "Жалобу не подавать: отзыв не содержит формального основания для жалобы."
+    if not lower_reason.startswith("жалобу не подавать"):
+        return _short_string("Жалобу не подавать: " + reason, 360)
+    return reason
 
 
 def _safe_provider_meta(meta: Mapping[str, Any], *, batch_size: int) -> dict[str, Any]:

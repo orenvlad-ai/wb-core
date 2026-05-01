@@ -286,6 +286,14 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             first_fit = page.locator("[data-feedbacks-table] tbody tr").nth(0).locator("td").nth(2).inner_text()
             if "Да" not in first_fit:
                 raise AssertionError(f"AI-positive feedbacks must sort first, got {first_fit!r}")
+            table_text_after_ai = page.locator("[data-feedbacks-table] tbody").inner_text()
+            if "Нецензурная лексика" not in table_text_after_ai:
+                raise AssertionError("feedbacks AI table must render exact WB category labels")
+            for old_label in ("Недостаточно данных", "Претензия к товару", "Доставка, ПВЗ или логистика WB", "Мат, оскорбления или угрозы"):
+                if old_label in table_text_after_ai:
+                    raise AssertionError(f"feedbacks AI table must not render old/internal category label {old_label!r}")
+            if "В отзыве присутствует нецензурная лексика" not in table_text_after_ai:
+                raise AssertionError("feedbacks AI reason column must render complaint description text")
             if "Ошибка" not in page.locator("[data-feedbacks-table] tbody").inner_text():
                 raise AssertionError("row-level AI failure must be visible in the feedbacks table")
             page.locator("[data-feedbacks-ai-analyze]").click()
@@ -389,7 +397,7 @@ def _prompt_payload(*, status: str, model: str = "gpt-5-mini") -> dict[str, obje
         "model_source": "saved" if status == "ready" else "default",
         "model_discovery_status": "available",
         "model_discovery_error": "",
-        "starter_prompt": "Стартовый промпт разбора отзывов",
+        "starter_prompt": "Стартовый промпт разбора отзывов: reason = текст для поля «Опишите ситуацию», category только WB.",
         "updated_at": "2026-04-29T09:00:00Z" if status == "ready" else None,
         "status": status,
     }
@@ -406,9 +414,9 @@ def _ai_payload(rows: list[dict[str, object]]) -> dict[str, object]:
                 "feedback_id": feedback_id,
                 "complaint_fit": "yes",
                 "complaint_fit_label": "Да",
-                "category": "profanity_or_insult",
-                "category_label": "Мат, оскорбления или угрозы",
-                "reason": "Есть оскорбление",
+                "category": "product_quality_claim" if feedback_id == "browser-3" else "profanity",
+                "category_label": "Претензия к товару" if feedback_id == "browser-3" else "Нецензурная лексика",
+                "reason": "В отзыве присутствует нецензурная лексика, что нарушает правила публикации отзывов.",
                 "confidence": "high",
                 "confidence_label": "Высокая",
                 "evidence": "фрагмент",
