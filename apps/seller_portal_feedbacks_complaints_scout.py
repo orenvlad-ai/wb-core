@@ -71,12 +71,19 @@ DATE_RE = re.compile(
     r"(?:\s+\d{4})?)\b",
     re.IGNORECASE,
 )
+DATE_TIME_RE = re.compile(
+    r"\b(\d{1,2}[./]\d{1,2}[./]\d{2,4}\s+(?:в\s+)?\d{1,2}:\d{2})\b",
+    re.IGNORECASE,
+)
 ARTICLE_RE = re.compile(
     r"(?:артикул\s*(?:wb|вб|продавца)?|nm\s*id|nmid)\D{0,12}(\d{5,})",
     re.IGNORECASE,
 )
 RATING_RE = re.compile(r"\b([1-5])\s*(?:звезд|звезды|звезда|★|/ ?5)\b", re.IGNORECASE)
 FEEDBACK_ID_RE = re.compile(r"(?:feedback|review|comment)[_-]?(?:id)?[=:_/ -]*([a-z0-9-]{8,})", re.IGNORECASE)
+ROW_MENU_COMPLAINT_LABEL = "Пожаловаться на отзыв"
+ROW_MENU_RETURN_LABEL = "Запросить возврат"
+ROW_MENU_EXPECTED_LABELS = (ROW_MENU_RETURN_LABEL, ROW_MENU_COMPLAINT_LABEL)
 
 
 @dataclass(frozen=True)
@@ -350,11 +357,34 @@ def scout_feedbacks_tab(page: Page, config: ScoutConfig) -> dict[str, Any]:
         report["blocker"] = "Отзывы tab was not found"
         return report
     _wait_settle(page, 2500)
+    _wait_for_feedback_rows(page, timeout_ms=10000)
     rows = extract_visible_feedback_rows(page, max_rows=config.max_feedback_rows)
+    menu_diagnostics = scout_feedback_row_menus(
+        page,
+        rows,
+        max_rows=min(len(rows), max(1, min(config.max_feedback_rows, max(config.max_modal_reviews, 3)))),
+    )
+    diagnostics_by_id = {
+        str(item.get("dom_scout_id") or ""): item
+        for item in menu_diagnostics
+        if item.get("dom_scout_id")
+    }
+    for index, row in enumerate(rows):
+        row["row_index"] = index
+        diagnostic = diagnostics_by_id.get(str(row.get("dom_scout_id") or ""))
+        if not diagnostic:
+            continue
+        row["row_menu_opened"] = bool(diagnostic.get("menu_opened"))
+        row["row_menu_items"] = diagnostic.get("menu_items_found") or []
+        row["complaint_action_found"] = bool(diagnostic.get("complaint_action_found"))
+        row["three_dot_menu_found"] = bool(row.get("three_dot_menu_found") or diagnostic.get("menu_opened"))
     report["visible_rows_parsed_count"] = len(rows)
     report["rows"] = rows
     report["hidden_feedback_id_available"] = any(bool(row.get("hidden_feedback_id")) for row in rows)
     report["three_dot_menu_found"] = any(bool(row.get("three_dot_menu_found")) for row in rows)
+    report["row_level_menu_found"] = any(bool(item.get("menu_opened")) for item in menu_diagnostics)
+    report["complaint_action_found"] = any(bool(item.get("complaint_action_found")) for item in menu_diagnostics)
+    report["row_menu_diagnostics"] = menu_diagnostics
     report["field_availability"] = field_availability(rows)
     report["selectors"] = sorted({selector for row in rows for selector in row.get("selector_hints", [])})[:30]
     report["success"] = bool(rows)
@@ -370,20 +400,20 @@ def scout_complaint_categories(page: Page, config: ScoutConfig, feedbacks_report
         report["blocker"] = "open_complaint_modal is false; category modal not opened by default"
         return report
     rows = feedbacks_report.get("rows") if isinstance(feedbacks_report.get("rows"), list) else []
-    actionable_rows = [row for row in rows if row.get("three_dot_menu_found")]
-    fallback_rows = [row for row in rows if row not in actionable_rows]
-    row_ids = [
-        str(row.get("dom_scout_id") or "")
-        for row in [*actionable_rows, *fallback_rows]
-        if row.get("dom_scout_id")
+    actionable_rows = [
+        row
+        for row in rows
+        if row.get("complaint_action_found") or row.get("row_menu_opened") or row.get("three_dot_menu_found")
     ]
-    if not row_ids:
+    fallback_rows = [row for row in rows if row not in actionable_rows]
+    sample_rows = [row for row in [*actionable_rows, *fallback_rows] if row.get("dom_scout_id")]
+    if not sample_rows:
         report["blocker"] = "No feedback row DOM ids available for complaint modal scout"
         return report
 
     samples: list[dict[str, Any]] = []
-    for dom_id in row_ids[: config.max_modal_reviews]:
-        sample = scout_one_complaint_modal(page, dom_id)
+    for row in sample_rows[: config.max_modal_reviews]:
+        sample = scout_one_complaint_modal(page, row)
         samples.append(sample)
         if sample.get("opened"):
             report["modal_opened_safely"] = True
@@ -418,9 +448,66 @@ def scout_complaint_categories(page: Page, config: ScoutConfig, feedbacks_report
     return report
 
 
-def scout_one_complaint_modal(page: Page, dom_id: str) -> dict[str, Any]:
+def scout_feedback_row_menus(page: Page, rows: list[dict[str, Any]], *, max_rows: int) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    for index, row in enumerate(rows[:max_rows]):
+        dom_id = str(row.get("dom_scout_id") or "")
+        diagnostic: dict[str, Any] = {
+            "row_index": index,
+            "dom_scout_id": dom_id,
+            "product_title": _safe_text(str(row.get("product_title") or ""), 160),
+            "supplier_article": _safe_text(str(row.get("supplier_article") or ""), 120),
+            "wb_article": _safe_text(str(row.get("wb_article") or row.get("nm_id") or ""), 80),
+            "rating": str(row.get("rating") or ""),
+            "review_date": str(row.get("review_date") or ""),
+            "review_datetime": str(row.get("review_datetime") or ""),
+            "review_snippet": _safe_text(str(row.get("text_snippet") or ""), 220),
+            "menu_opened": False,
+            "menu_items_found": [],
+            "complaint_action_found": False,
+            "row_menu_click": {},
+            "blocker": "",
+        }
+        if not dom_id:
+            diagnostic["blocker"] = "row DOM id unavailable"
+            diagnostics.append(diagnostic)
+            continue
+        clicked_menu = _click_safe_row_menu(page, dom_id)
+        diagnostic["row_menu_click"] = clicked_menu
+        diagnostic["menu_opened"] = bool(clicked_menu.get("ok"))
+        if not clicked_menu.get("ok"):
+            diagnostic["blocker"] = str(clicked_menu.get("reason") or "safe row menu not found")
+            diagnostics.append(diagnostic)
+            continue
+        _wait_settle(page, 500)
+        menu_state = extract_open_row_menu_state(page)
+        diagnostic["menu_items_found"] = menu_state.get("items") or []
+        diagnostic["complaint_action_found"] = bool(menu_state.get("complaint_action_found"))
+        if not diagnostic["menu_items_found"]:
+            diagnostic["blocker"] = "row menu opened but no readable menu items were found"
+        _safe_escape(page)
+        _wait_settle(page, 250)
+        diagnostics.append(diagnostic)
+    return diagnostics
+
+
+def scout_one_complaint_modal(page: Page, row: dict[str, Any] | str) -> dict[str, Any]:
+    if isinstance(row, str):
+        dom_id = row
+        row_context: dict[str, Any] = {}
+    else:
+        row_context = row
+        dom_id = str(row.get("dom_scout_id") or "")
     sample: dict[str, Any] = {
         "dom_scout_id": dom_id,
+        "row_index": row_context.get("row_index"),
+        "product_title": _safe_text(str(row_context.get("product_title") or ""), 160),
+        "supplier_article": _safe_text(str(row_context.get("supplier_article") or ""), 120),
+        "wb_article": _safe_text(str(row_context.get("wb_article") or row_context.get("nm_id") or ""), 80),
+        "rating": str(row_context.get("rating") or ""),
+        "review_date": str(row_context.get("review_date") or ""),
+        "review_datetime": str(row_context.get("review_datetime") or ""),
+        "review_snippet": _safe_text(str(row_context.get("text_snippet") or ""), 220),
         "menu_opened": False,
         "complaint_action_found": False,
         "opened": False,
@@ -431,31 +518,48 @@ def scout_one_complaint_modal(page: Page, dom_id: str) -> dict[str, Any]:
         "submit_button_seen": False,
         "submit_clicked": False,
         "close_method": "",
+        "durable_success_state_seen": False,
+        "durable_success_state_after_close": False,
         "blocker": "",
     }
     clicked_menu = _click_safe_row_menu(page, dom_id)
+    sample["row_menu_click"] = clicked_menu
     sample["menu_opened"] = bool(clicked_menu.get("ok"))
     if not clicked_menu.get("ok"):
         sample["blocker"] = str(clicked_menu.get("reason") or "safe row menu not found")
         return sample
     _wait_settle(page, 800)
-    sample["menu_labels"] = extract_open_menu_labels(page)
-    action = _find_text_locator(page, "Пожаловаться на отзыв")
-    if action is None:
+    menu_state = extract_open_row_menu_state(page)
+    sample["menu_labels"] = menu_state.get("items") or []
+    sample["complaint_action_found"] = bool(menu_state.get("complaint_action_found"))
+    if not sample["complaint_action_found"]:
         sample["blocker"] = "Пожаловаться на отзыв action not found in row menu"
         _safe_escape(page)
         return sample
-    sample["complaint_action_found"] = True
-    assert_safe_click_label("Пожаловаться на отзыв", purpose="open_complaint_modal")
-    action.click(timeout=5000)
+    assert_safe_click_label(ROW_MENU_COMPLAINT_LABEL, purpose="open_complaint_modal")
+    action_click = click_open_row_menu_complaint_action(page)
+    sample["complaint_action_click"] = action_click
+    if not action_click.get("ok"):
+        sample["blocker"] = str(action_click.get("reason") or "Пожаловаться на отзыв action could not be clicked")
+        _safe_escape(page)
+        return sample
     _wait_settle(page, 1500)
     modal = extract_complaint_modal_state(page)
     sample.update(modal)
     sample["opened"] = bool(modal.get("opened"))
+    success_state = detect_complaint_success_state(page)
+    sample["durable_success_state_seen"] = bool(success_state.get("seen"))
     sample["submit_clicked"] = False
+    if sample["durable_success_state_seen"] and not sample["opened"]:
+        sample["blocker"] = (
+            "complaint action appears to create durable success/submitted state without a readable modal: "
+            + str(success_state.get("text") or "")
+        )
+        return sample
     close_method = close_modal_without_submit(page)
     sample["close_method"] = close_method
     _wait_settle(page, 600)
+    sample["durable_success_state_after_close"] = bool(detect_complaint_success_state(page).get("seen"))
     return sample
 
 
@@ -498,26 +602,63 @@ def parse_feedback_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     text = str(candidate.get("text") or "")
     attrs = _safe_mapping(candidate.get("attrs") if isinstance(candidate.get("attrs"), dict) else {})
     links = [str(item) for item in candidate.get("links") or []][:5]
+    link_texts = [str(item) for item in candidate.get("link_texts") or []][:5]
     buttons = [str(item) for item in candidate.get("buttons") or []][:10]
+    structured = candidate.get("structured") if isinstance(candidate.get("structured"), dict) else {}
     hidden_feedback_id = _extract_feedback_id(attrs, links, text)
+    supplier_article = _safe_text(
+        str(structured.get("supplier_article") or _guess_supplier_article(text, buttons)),
+        120,
+    )
+    wb_article = str(
+        structured.get("wb_article")
+        or _guess_wb_article(text, buttons=buttons, links=links)
+        or ""
+    )
+    nm_id = str(structured.get("nm_id") or wb_article or _guess_article(text, label_re=r"(?:nm\s*id|nmid)") or "")
+    review_datetime = str(structured.get("review_datetime") or _guess_datetime(text) or "")
+    review_date = str(structured.get("review_date") or _guess_date(review_datetime or text) or "")
+    review_text = str(structured.get("review_text") or _guess_review_text(text) or "")
+    pros = str(structured.get("pros") or _field_after_label(text, ("Достоинства", "Плюсы")) or "")
+    cons = str(structured.get("cons") or _field_after_label(text, ("Недостатки", "Минусы")) or "")
+    comment = str(structured.get("comment") or _field_after_label(text, ("Комментарий",)) or "")
+    media_indicators = _unique_preserve(
+        [
+            *(_guess_media_indicators(text) or []),
+            *[str(item) for item in structured.get("media_indicators") or []],
+        ]
+    )
     return {
         "dom_scout_id": str(candidate.get("dom_scout_id") or ""),
-        "product_title": _guess_product_title(text),
-        "supplier_article": _guess_article(text, label_re=r"артикул\s*продавца"),
-        "wb_article": _guess_article(text, label_re=r"артикул\s*(?:wb|вб)?"),
-        "nm_id": _guess_article(text, label_re=r"(?:nm\s*id|nmid|артикул\s*(?:wb|вб)?)"),
-        "rating": _guess_rating(text),
-        "review_date": _guess_date(text),
-        "text_snippet": _guess_review_text(text),
-        "pros_snippet": _field_after_label(text, ("Достоинства", "Плюсы")),
-        "cons_snippet": _field_after_label(text, ("Недостатки", "Минусы")),
+        "product_title": _guess_product_title(
+            text,
+            supplier_article=supplier_article,
+            wb_article=wb_article,
+            link_texts=link_texts,
+        ),
+        "supplier_article": supplier_article,
+        "vendor_article": supplier_article,
+        "wb_article": wb_article,
+        "nm_id": nm_id,
+        "rating": str(structured.get("rating") or _guess_rating(text) or ""),
+        "review_date": review_date,
+        "review_datetime": review_datetime,
+        "text_snippet": _safe_text(review_text, SAFE_TEXT_LIMIT),
+        "pros_snippet": _safe_text(pros, SAFE_TEXT_LIMIT),
+        "cons_snippet": _safe_text(cons, SAFE_TEXT_LIMIT),
+        "comment_snippet": _safe_text(comment, SAFE_TEXT_LIMIT),
         "answer_status": _guess_answer_status(text),
-        "media_indicators": _guess_media_indicators(text),
-        "three_dot_menu_found": _has_three_dot_button(buttons),
+        "purchase_status": str(structured.get("purchase_status") or _guess_purchase_status(text) or ""),
+        "media_indicators": media_indicators,
+        "three_dot_menu_found": bool(structured.get("row_menu_button_found") or _has_three_dot_button(buttons)),
         "hidden_feedback_id": hidden_feedback_id,
         "links": [_safe_url(link) for link in links],
+        "link_texts": [_safe_text(link_text, 160) for link_text in link_texts],
         "data_attributes": attrs,
+        "menu_button_candidates": structured.get("menu_button_candidates") or [],
         "dom_fingerprint": _fingerprint(text),
+        "row_text_fingerprint": _fingerprint(text),
+        "normalized_review_text_fingerprint": _fingerprint(review_text),
         "safe_text_fingerprint": _safe_text(_norm_text(text), 420),
         "selector_hints": [str(candidate.get("selector") or "")] if candidate.get("selector") else [],
         "raw_text_lines": _safe_lines(text, 10),
@@ -528,6 +669,7 @@ def parse_complaint_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     text = str(candidate.get("text") or "")
     attrs = _safe_mapping(candidate.get("attrs") if isinstance(candidate.get("attrs"), dict) else {})
     decision = _guess_decision(text)
+    review_text = _field_after_label(text, ("Отзыв",)) or _guess_review_text(text)
     return {
         "dom_scout_id": str(candidate.get("dom_scout_id") or ""),
         "product_title": _guess_product_title(text),
@@ -536,9 +678,10 @@ def parse_complaint_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         "nm_id": _guess_article(text, label_re=r"(?:nm\s*id|nmid|артикул\s*(?:wb|вб)?)"),
         "complaint_reason": _field_after_label(text, ("Причина",)),
         "complaint_description": _field_after_label(text, ("Описание",)),
-        "review_text_snippet": _field_after_label(text, ("Отзыв",)) or _guess_review_text(text),
+        "review_text_snippet": review_text,
         "review_rating": _guess_rating(text),
         "review_date": _guess_date(text),
+        "review_datetime": _guess_datetime(text),
         "displayed_status": _guess_status(text),
         "decision_label": decision,
         "wb_response_snippet": _field_after_label(text, ("Ответ WB", "Решение", "Комментарий")),
@@ -546,6 +689,8 @@ def parse_complaint_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         "hidden_ids": _extract_hidden_ids(attrs, [str(item) for item in candidate.get("links") or []], text),
         "data_attributes": attrs,
         "dom_fingerprint": _fingerprint(text),
+        "row_text_fingerprint": _fingerprint(text),
+        "normalized_review_text_fingerprint": _fingerprint(review_text),
         "safe_text_fingerprint": _safe_text(_norm_text(text), 420),
         "selector_hints": [str(candidate.get("selector") or "")] if candidate.get("selector") else [],
         "raw_text_lines": _safe_lines(text, 10),
@@ -579,6 +724,36 @@ def parse_feedback_rows_from_html(html: str, max_rows: int = 20) -> list[dict[st
         if len(rows) >= max_rows:
             break
     return rows
+
+
+def parse_row_menu_diagnostics_from_html(html: str, row_index: int = 0) -> dict[str, Any]:
+    parser = _ScoutHTMLParser()
+    parser.feed(html)
+    menu_items: list[str] = []
+    for element in parser.elements:
+        attrs = element["attrs"]
+        role = str(attrs.get("role") or "").lower()
+        class_name = str(attrs.get("class") or "")
+        is_row_menu = (
+            attrs.get("data-scout-row-menu") is not None
+            or role == "menu"
+            or bool(re.search(r"(Dropdown|dropdown|Menu|menu|Popover|popover)", class_name))
+        )
+        if not is_row_menu:
+            continue
+        menu_items.extend(
+            _extract_row_menu_items_from_texts([element["text"], *[str(item) for item in element.get("buttons", [])]])
+        )
+    menu_items = _unique_preserve(menu_items)
+    return {
+        "row_index": row_index,
+        "menu_opened": bool(menu_items),
+        "menu_items_found": menu_items,
+        "complaint_action_found": any(
+            _norm_text(item).lower() == _norm_text(ROW_MENU_COMPLAINT_LABEL).lower()
+            for item in menu_items
+        ),
+    }
 
 
 def parse_complaint_categories_from_html(html: str) -> dict[str, Any]:
@@ -642,13 +817,17 @@ def extract_complaint_modal_state(page: Page) -> dict[str, Any]:
   const candidates = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="modal"], [class*="Modal"], [class*="popup"], [class*="Popup"]')).filter(visible);
   const root = candidates[candidates.length - 1] || document.body;
   const text = (root.innerText || '').trim();
-  const labels = Array.from(root.querySelectorAll('label, [role="radio"], [role="option"], li, button, textarea, input')).filter(visible).map((el) => ({
+  const labelFor = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('value') || '').trim();
+  const labels = Array.from(root.querySelectorAll('label, [role="radio"], [role="option"], li, button, textarea, input, [class*="Complaint-form-section__item"]')).filter(visible).map((el) => ({
     tag: el.tagName.toLowerCase(),
     role: el.getAttribute('role') || '',
     type: el.getAttribute('type') || '',
-    text: (el.innerText || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('value') || '').trim()
+    placeholder: el.getAttribute('placeholder') || '',
+    text: labelFor(el)
   })).filter((item) => item.text);
-  return { opened: candidates.length > 0 || /жалоб/i.test(text), text, labels };
+  const buttons = Array.from(root.querySelectorAll('button')).filter(visible).map((button) => labelFor(button)).filter(Boolean);
+  const titleCandidates = Array.from(root.querySelectorAll('h1, h2, h3, [class*="title"], [class*="Title"]')).filter(visible).map((el) => labelFor(el)).filter(Boolean);
+  return { opened: candidates.length > 0 || /жалоб/i.test(text), text, labels, buttons, titleCandidates };
 }
         """
     )
@@ -664,49 +843,152 @@ def extract_complaint_modal_state(page: Page) -> dict[str, Any]:
         for text in _safe_lines(str(payload.get("text") or ""), 60)
         if any(token in text.lower() for token in ("символ", "обяз", "выберите", "лимит", "причин"))
     ][:8]
-    submit_seen = any(SUBMIT_LIKE_RE.search(text) for text in texts)
+    button_labels = _unique_preserve(str(item) for item in payload.get("buttons") or [])
+    submit_labels = [label for label in button_labels if SUBMIT_LIKE_RE.search(label)]
+    submit_seen = bool(submit_labels or any(SUBMIT_LIKE_RE.search(text) for text in texts))
     return {
         "opened": bool(payload.get("opened")),
+        "modal_title": _safe_text(str((payload.get("titleCandidates") or [""])[0] or ""), 180),
+        "modal_text_preview": _safe_text(str(payload.get("text") or ""), 500),
         "categories": categories,
         "description_fields": description_fields,
+        "description_field_found": bool(description_fields),
         "validation_hints": validation_hints,
         "submit_button_seen": submit_seen,
+        "submit_button_label": submit_labels[0] if submit_labels else "",
+        "button_labels": button_labels[:10],
         "modal_text_fingerprint": _fingerprint(str(payload.get("text") or "")),
     }
 
 
-def extract_open_menu_labels(page: Page) -> list[str]:
+def extract_open_row_menu_state(page: Page) -> dict[str, Any]:
     try:
-        labels = page.evaluate(
+        payload = page.evaluate(
             r"""
 () => {
   const visible = (el) => {
     const style = window.getComputedStyle(el);
     const rect = el.getBoundingClientRect();
-    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight;
   };
-  const roots = Array.from(document.querySelectorAll('[role="menu"], [role="listbox"], [class*="Dropdown"], [class*="dropdown"], [class*="Popover"], [class*="popover"], [data-popper-placement]')).filter(visible);
-  const labels = [];
-  for (const root of roots) {
-    const text = (root.innerText || '').replace(/\s+/g, ' ').trim();
-    if (text && text.length <= 160) labels.push(text);
-    for (const el of Array.from(root.querySelectorAll('button, [role="button"], [role="menuitem"], li, div')).filter(visible)) {
-      const label = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
-      if (label && label.length <= 160) labels.push(label);
-    }
-  }
-  return labels.slice(0, 80);
+  const labelFor = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+  const selector = '[role="menu"], [role="listbox"], [data-popper-placement], [class*="Dropdown"], [class*="dropdown"], [class*="Popover"], [class*="popover"], [class*="Menu"], [class*="menu"], ul';
+  const roots = Array.from(document.querySelectorAll(selector))
+    .filter(visible)
+    .filter((root) => /Пожаловаться\s+на\s+отзыв|Запросить\s+возврат/i.test(labelFor(root)));
+  return roots.slice(0, 10).map((root) => {
+    const rect = root.getBoundingClientRect();
+    const items = Array.from(root.querySelectorAll('button, [role="button"], [role="menuitem"], li, div, span'))
+      .filter(visible)
+      .map((el) => labelFor(el))
+      .filter(Boolean);
+    const rootText = labelFor(root);
+    if (rootText) items.unshift(rootText);
+    return {
+      tag: root.tagName.toLowerCase(),
+      role: root.getAttribute('role') || '',
+      className: String(root.className || '').slice(0, 160),
+      rect: {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)},
+      text: rootText,
+      items
+    };
+  });
 }
             """
         )
     except PlaywrightError:
-        return []
-    blocked_tokens = ("Оценка/дата",)
-    return _unique_preserve(
-        label
-        for label in (str(item) for item in labels)
-        if label and not any(token in label for token in blocked_tokens)
-    )[:20]
+        payload = []
+    items: list[str] = []
+    root_texts: list[str] = []
+    for root in payload if isinstance(payload, list) else []:
+        root_texts.append(_safe_text(str(root.get("text") or ""), 240))
+        items.extend(_extract_row_menu_items_from_texts([str(item) for item in root.get("items") or []]))
+    items = _unique_preserve(items)
+    return {
+        "root_count": len(payload) if isinstance(payload, list) else 0,
+        "root_texts": [text for text in root_texts if text],
+        "items": items,
+        "complaint_action_found": any(
+            _norm_text(item).lower() == _norm_text(ROW_MENU_COMPLAINT_LABEL).lower()
+            for item in items
+        ),
+        "return_action_found": any(
+            _norm_text(item).lower() == _norm_text(ROW_MENU_RETURN_LABEL).lower()
+            for item in items
+        ),
+    }
+
+
+def extract_open_menu_labels(page: Page) -> list[str]:
+    return [str(item) for item in extract_open_row_menu_state(page).get("items") or []][:20]
+
+
+def click_open_row_menu_complaint_action(page: Page) -> dict[str, Any]:
+    try:
+        return page.evaluate(
+            r"""
+(targetText) => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight;
+  };
+  const labelFor = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+  const selector = '[role="menu"], [role="listbox"], [data-popper-placement], [class*="Dropdown"], [class*="dropdown"], [class*="Popover"], [class*="popover"], [class*="Menu"], [class*="menu"], ul';
+  const roots = Array.from(document.querySelectorAll(selector))
+    .filter(visible)
+    .filter((root) => /Пожаловаться\s+на\s+отзыв|Запросить\s+возврат/i.test(labelFor(root)));
+  for (const root of roots) {
+    const candidates = Array.from(root.querySelectorAll('button, [role="button"], [role="menuitem"], li'))
+      .filter(visible)
+      .filter((el) => labelFor(el) === targetText)
+      .sort((a, b) => {
+        const aButton = a.tagName === 'BUTTON' ? 0 : 1;
+        const bButton = b.tagName === 'BUTTON' ? 0 : 1;
+        return aButton - bButton;
+      });
+    const target = candidates.find((el) => !el.disabled) || candidates[0];
+    if (target) {
+      const rect = target.getBoundingClientRect();
+      target.click();
+      return {
+        ok: true,
+        label: labelFor(target),
+        tag: target.tagName.toLowerCase(),
+        rect: {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)}
+      };
+    }
+  }
+  return {ok: false, reason: 'complaint action not found inside visible row menu'};
+}
+            """,
+            ROW_MENU_COMPLAINT_LABEL,
+        )
+    except PlaywrightError as exc:
+        return {"ok": False, "reason": _safe_text(str(exc), 300)}
+
+
+def detect_complaint_success_state(page: Page) -> dict[str, Any]:
+    try:
+        texts = page.evaluate(
+            r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight;
+  };
+  const roots = Array.from(document.querySelectorAll('[role="status"], [aria-live], [class*="Toast"], [class*="toast"], [class*="Notification"], [class*="notification"], [class*="Snackbar"], [class*="snackbar"]')).filter(visible);
+  return roots.map((root) => (root.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 20);
+}
+            """
+        )
+    except PlaywrightError:
+        texts = []
+    for text in [str(item) for item in texts]:
+        if re.search(r"(жалоб[ауы].{0,40}(отправ|создан|принят)|успешно.{0,40}жалоб)", text, re.IGNORECASE):
+            return {"seen": True, "text": _safe_text(text, 300)}
+    return {"seen": False, "text": ""}
 
 
 def close_modal_without_submit(page: Page) -> str:
@@ -726,7 +1008,59 @@ def close_modal_without_submit(page: Page) -> str:
                 return f"text={label}"
         except PlaywrightError:
             continue
+    close_icon = click_modal_close_icon(page)
+    if close_icon.get("ok"):
+        time.sleep(0.3)
+        if not _modal_visible(page):
+            return "icon_close"
     return "not_closed"
+
+
+def click_modal_close_icon(page: Page) -> dict[str, Any]:
+    try:
+        return page.evaluate(
+            r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight;
+  };
+  const labelFor = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+  const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="modal"], [class*="Modal"], [class*="popup"], [class*="Popup"]')).filter(visible);
+  const root = dialogs[dialogs.length - 1];
+  if (!root) return {ok: false, reason: 'modal not visible'};
+  const rr = root.getBoundingClientRect();
+  const candidates = Array.from(document.querySelectorAll('button, [role="button"]'))
+    .filter(visible)
+    .map((button) => {
+      const rect = button.getBoundingClientRect();
+      const label = labelFor(button);
+      return {button, label, rect};
+    })
+    .filter((item) => {
+      if (/отправ|подать|сохран|пожаловаться/i.test(item.label)) return false;
+      const small = item.rect.width >= 24 && item.rect.width <= 56 && item.rect.height >= 24 && item.rect.height <= 56;
+      const explicit = /закрыть|close|отмена|отменить/i.test(item.label);
+      const nearTopRight = item.rect.x >= rr.right - 90 && item.rect.x <= rr.right + 70 && item.rect.y >= rr.y - 90 && item.rect.y <= rr.y + 30;
+      return explicit || (small && nearTopRight);
+    })
+    .sort((a, b) => {
+      const aExplicit = /закрыть|close|отмена|отменить/i.test(a.label) ? 0 : 1;
+      const bExplicit = /закрыть|close|отмена|отменить/i.test(b.label) ? 0 : 1;
+      if (aExplicit !== bExplicit) return aExplicit - bExplicit;
+      return b.rect.x - a.rect.x;
+    });
+  const target = candidates[0];
+  if (!target) return {ok: false, reason: 'safe close icon not found'};
+  const rect = target.rect;
+  target.button.click();
+  return {ok: true, label: target.label, rect: {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)}};
+}
+            """
+        )
+    except PlaywrightError as exc:
+        return {"ok": False, "reason": _safe_text(str(exc), 300)}
 
 
 def assert_safe_click_label(label: str, *, purpose: str) -> None:
@@ -767,8 +1101,13 @@ def score_feedback_match(source_feedback: dict[str, Any], ui_row: dict[str, Any]
     if _same_nonempty(source_feedback.get("rating"), ui_row.get("rating")):
         score += 0.15
         reasons.append("same rating")
-    if _same_dateish(source_feedback.get("created_date") or source_feedback.get("review_date"), ui_row.get("review_date")):
-        score += 0.18
+    source_datetime = source_feedback.get("created_at") or source_feedback.get("created_datetime") or source_feedback.get("review_datetime")
+    ui_datetime = ui_row.get("review_datetime") or ui_row.get("created_at")
+    if _same_datetimeish(source_datetime, ui_datetime):
+        score += 0.22
+        reasons.append("same exact datetime")
+    elif _same_dateish(source_feedback.get("created_date") or source_feedback.get("review_date") or source_datetime, ui_row.get("review_date") or ui_datetime):
+        score += 0.14
         reasons.append("same date/day")
     if _same_nonempty(source_feedback.get("nm_id") or source_feedback.get("wb_article"), ui_row.get("nm_id") or ui_row.get("wb_article")):
         score += 0.2
@@ -780,9 +1119,7 @@ def score_feedback_match(source_feedback: dict[str, Any], ui_row: dict[str, Any]
         score -= 0.08
         reasons.append("short text penalty")
     score = max(0.0, min(0.99, round(score, 3)))
-    if score >= 0.98:
-        status = "exact"
-    elif score >= 0.82:
+    if score >= 0.82:
         status = "high"
     elif score >= 0.55:
         status = "ambiguous"
@@ -798,7 +1135,16 @@ def build_matching_feasibility(report: dict[str, Any]) -> dict[str, Any]:
     hidden_id = any(bool(row.get("hidden_feedback_id")) for row in feedback_rows)
     reliable_fields = [
         field
-        for field in ("text_snippet", "rating", "review_date", "nm_id", "wb_article", "supplier_article", "product_title")
+        for field in (
+            "text_snippet",
+            "rating",
+            "review_datetime",
+            "review_date",
+            "nm_id",
+            "wb_article",
+            "supplier_article",
+            "product_title",
+        )
         if any(row.get(field) for row in feedback_rows)
     ]
     return {
@@ -813,6 +1159,7 @@ def build_matching_feasibility(report: dict[str, Any]) -> dict[str, Any]:
                 "complaint_description",
                 "review_text_snippet",
                 "review_rating",
+                "review_datetime",
                 "review_date",
                 "nm_id",
                 "decision_label",
@@ -823,7 +1170,8 @@ def build_matching_feasibility(report: dict[str, Any]) -> dict[str, Any]:
             "feedback_id_exact": 1.0,
             "text_high_similarity": 0.42,
             "same_rating": 0.15,
-            "same_date_or_day": 0.18,
+            "same_exact_datetime": 0.22,
+            "same_date_or_day": 0.14,
             "same_nm_id_or_wb_article": 0.20,
             "same_supplier_article": 0.14,
             "short_text_penalty": -0.08,
@@ -846,12 +1194,17 @@ def field_availability(rows: list[dict[str, Any]]) -> dict[str, bool]:
         "nm_id",
         "rating",
         "review_date",
+        "review_datetime",
         "text_snippet",
         "pros_snippet",
         "cons_snippet",
+        "comment_snippet",
         "answer_status",
+        "purchase_status",
         "media_indicators",
         "hidden_feedback_id",
+        "row_menu_opened",
+        "complaint_action_found",
         "complaint_reason",
         "complaint_description",
         "review_text_snippet",
@@ -890,6 +1243,8 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         f"- Feedback rows parsed: `{feedbacks.get('visible_rows_parsed_count', 0)}`",
         f"- Hidden feedback id available: `{feedbacks.get('hidden_feedback_id_available')}`",
         f"- Three-dot menu found: `{feedbacks.get('three_dot_menu_found')}`",
+        f"- Row-level menu opened: `{feedbacks.get('row_level_menu_found')}`",
+        f"- Complaint action found: `{feedbacks.get('complaint_action_found')}`",
         f"- Complaint modal opened safely: `{modal.get('modal_opened_safely')}`",
         f"- Submit button not clicked: `{modal.get('submit_button_not_clicked')}`",
         f"- Categories: `{', '.join(modal.get('categories') or [])}`",
@@ -919,7 +1274,16 @@ def _compact_stdout_report(report: dict[str, Any]) -> dict[str, Any]:
         "navigation": report.get("navigation"),
         "feedbacks": {
             key: report.get("feedbacks", {}).get(key)
-            for key in ("success", "visible_rows_parsed_count", "hidden_feedback_id_available", "three_dot_menu_found", "field_availability", "blocker")
+            for key in (
+                "success",
+                "visible_rows_parsed_count",
+                "hidden_feedback_id_available",
+                "three_dot_menu_found",
+                "row_level_menu_found",
+                "complaint_action_found",
+                "field_availability",
+                "blocker",
+            )
         },
         "complaint_modal": {
             key: report.get("complaint_modal", {}).get(key)
@@ -958,6 +1322,9 @@ def _empty_feedbacks_report() -> dict[str, Any]:
         "selectors": [],
         "hidden_feedback_id_available": False,
         "three_dot_menu_found": False,
+        "row_level_menu_found": False,
+        "complaint_action_found": False,
+        "row_menu_diagnostics": [],
         "blocker": "",
     }
 
@@ -1000,14 +1367,21 @@ def _click_safe_row_menu(page: Page, dom_id: str) -> dict[str, Any]:
   const visible = (el) => {
     const style = window.getComputedStyle(el);
     const rect = el.getBoundingClientRect();
-    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight;
   };
-  const buttons = Array.from(row.querySelectorAll('button, [role="button"]')).filter(visible).map((button) => {
+  const labelFor = (button) => (button.innerText || button.getAttribute('aria-label') || button.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+  const rowRect = row.getBoundingClientRect();
+  const actualButtons = Array.from(row.querySelectorAll('button')).filter(visible);
+  const roleButtons = Array.from(row.querySelectorAll('[role="button"]')).filter(visible).filter((button) => !button.querySelector('button'));
+  const buttons = actualButtons.concat(roleButtons).map((button) => {
     const rect = button.getBoundingClientRect();
     return {
       button,
-      rect,
-      label: (button.innerText || button.getAttribute('aria-label') || button.getAttribute('title') || '').trim()
+      tag: button.tagName.toLowerCase(),
+      disabled: Boolean(button.disabled || button.getAttribute('aria-disabled') === 'true'),
+      rect: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
+      label: labelFor(button),
+      html: String(button.innerHTML || '').slice(0, 260)
     };
   });
   const danger = /(ответить|редакт|удал|сохран|отправ|подать)/i;
@@ -1015,14 +1389,35 @@ def _click_safe_row_menu(page: Page, dom_id: str) -> dict[str, Any]:
     return !danger.test(item.label) && /(ещ|ещё|еще|действ|меню|more|⋮|\.\.\.)/i.test(item.label);
   });
   const iconOnly = buttons
-    .filter((item) => !item.label && item.rect.width <= 64 && item.rect.height <= 64)
+    .filter((item) => {
+      const small = item.rect.width >= 24 && item.rect.width <= 56 && item.rect.height >= 24 && item.rect.height <= 56;
+      const rightEdge = item.rect.x >= rowRect.right - 150;
+      const dotSvg = /viewBox="-10 -3 24 24"|C0 3\.10457|0 2C0 3/i.test(item.html);
+      return !item.disabled && !item.label && small && rightEdge && (dotSvg || item.rect.x >= rowRect.right - 80);
+    })
     .sort((a, b) => b.rect.x - a.rect.x)[0];
   const target = preferred || iconOnly;
   if (!target) {
-    return {ok: false, reason: 'no safe menu button', button_count: buttons.length};
+    return {
+      ok: false,
+      reason: 'no safe row-level menu button',
+      button_count: buttons.length,
+      right_button_count: buttons.filter((item) => item.rect.x >= rowRect.right - 150).length
+    };
   }
   target.button.click();
-  return {ok: true, label: target.label, button_count: buttons.length};
+  return {
+    ok: true,
+    label: target.label,
+    tag: target.tag,
+    button_count: buttons.length,
+    rect: {
+      x: Math.round(target.rect.x),
+      y: Math.round(target.rect.y),
+      width: Math.round(target.rect.width),
+      height: Math.round(target.rect.height)
+    }
+  };
 }
         """,
         dom_id,
@@ -1195,6 +1590,35 @@ def _wait_for_text_visible(page: Page, text: str, *, timeout_ms: int) -> bool:
     return False
 
 
+def _wait_for_feedback_rows(page: Page, *, timeout_ms: int) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout_ms / 1000.0)
+    while time.monotonic() < deadline:
+        try:
+            found = bool(
+                page.evaluate(
+                    r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 240 && rect.height > 32 && rect.bottom > 0 && rect.top < window.innerHeight;
+  };
+  const text = (el) => (el.innerText || '').replace(/\s+/g, ' ').trim();
+  return Array.from(document.querySelectorAll('tr[data-testid="Base-table-row"][role="button"], [data-testid="Base-table-row"][role="button"], [data-testid="feedback-item"]'))
+    .filter(visible)
+    .some((el) => /Плюсы|Минусы|Комментарий|Выкуп|\d{1,2}\.\d{1,2}\.\d{4}\s+в\s+\d{1,2}:\d{2}/i.test(text(el)));
+}
+                    """
+                )
+            )
+        except PlaywrightError:
+            found = False
+        if found:
+            return True
+        page.wait_for_timeout(500)
+    return False
+
+
 def _decision_detectability(rows: list[dict[str, Any]]) -> str:
     decisions = [str(row.get("decision_label") or "").strip() for row in rows]
     if any(decision in {"approved", "rejected"} for decision in decisions):
@@ -1216,6 +1640,8 @@ def _matching_risks(
         risks.append("review date unavailable in visible feedback rows")
     if not any(row.get("rating") for row in feedback_rows):
         risks.append("rating unavailable in visible feedback rows")
+    if not any(row.get("nm_id") or row.get("wb_article") for row in feedback_rows):
+        risks.append("nmId/WB article unavailable in visible feedback rows")
     if not (complaints_pending or complaints_answered):
         risks.append("complaint status rows not observed; status sync may need empty-state handling")
     if any(len(str(row.get("text_snippet") or "")) < 30 for row in feedback_rows):
@@ -1223,7 +1649,17 @@ def _matching_risks(
     return risks or ["no major matching risks observed in bounded sample"]
 
 
-def _guess_product_title(text: str) -> str:
+def _guess_product_title(
+    text: str,
+    *,
+    supplier_article: str = "",
+    wb_article: str = "",
+    link_texts: Iterable[str] = (),
+) -> str:
+    for link_text in link_texts:
+        normalized = _norm_text(str(link_text or ""))
+        if normalized and not re.fullmatch(r"\d{5,}", normalized):
+            return _safe_text(normalized, 160)
     lines = [
         line
         for line in _safe_lines(text, 20)
@@ -1237,12 +1673,52 @@ def _guess_product_title(text: str) -> str:
                 "Пожаловаться",
                 "Достоинства",
                 "Недостатки",
+                "Плюсы",
+                "Минусы",
+                "Комментарий",
                 "Причина",
                 "Описание",
+                "Выкуп",
             )
         )
     ]
-    return _safe_text(lines[0], 160) if lines else ""
+    if lines:
+        candidate = lines[0]
+    else:
+        candidate = _norm_text(text)
+    for marker in (supplier_article, wb_article):
+        marker_text = _norm_text(str(marker or ""))
+        if marker_text and marker_text in candidate:
+            candidate = candidate.split(marker_text, 1)[0]
+    candidate = re.split(r"\b(?:Выкуп|Плюсы|Минусы|Комментарий|Отзыв|Достоинства|Недостатки)\b", candidate, maxsplit=1)[0]
+    candidate = DATE_TIME_RE.sub("", candidate)
+    candidate = DATE_RE.sub("", candidate)
+    return _safe_text(candidate, 160)
+
+
+def _guess_supplier_article(text: str, buttons: Iterable[str]) -> str:
+    for button in buttons:
+        label = _norm_text(str(button or ""))
+        if not label or re.fullmatch(r"\d{5,}", label):
+            continue
+        if re.search(r"(выкуп|оценка|дата|отправ|пожаловаться|запросить|фильтр)", label, re.IGNORECASE):
+            continue
+        if len(label) <= 120:
+            return label
+    labeled = _field_after_label(text, ("Артикул продавца", "Артикул поставщика", "Артикул"))
+    return labeled
+
+
+def _guess_wb_article(text: str, *, buttons: Iterable[str], links: Iterable[str]) -> str:
+    for button in buttons:
+        label = _norm_text(str(button or ""))
+        if re.fullmatch(r"\d{5,}", label):
+            return label
+    for link in links:
+        match = re.search(r"/catalog/(\d{5,})", str(link or ""))
+        if match:
+            return match.group(1)
+    return _guess_article(text, label_re=r"артикул\s*(?:wb|вб)?")
 
 
 def _guess_article(text: str, *, label_re: str) -> str:
@@ -1264,6 +1740,11 @@ def _guess_rating(text: str) -> str:
     return ""
 
 
+def _guess_datetime(text: str) -> str:
+    match = DATE_TIME_RE.search(text)
+    return _norm_text(match.group(1)) if match else ""
+
+
 def _guess_date(text: str) -> str:
     match = DATE_RE.search(text)
     return match.group(1) if match else ""
@@ -1278,6 +1759,15 @@ def _guess_review_text(text: str) -> str:
         return ""
     lines.sort(key=len, reverse=True)
     return _safe_text(lines[0], SAFE_TEXT_LIMIT)
+
+
+def _guess_purchase_status(text: str) -> str:
+    lower = text.lower()
+    if "не выкуп" in lower or "возврат" in lower:
+        return "return_or_not_bought"
+    if "выкуп" in lower:
+        return "buyout"
+    return ""
 
 
 def _field_after_label(text: str, labels: Iterable[str]) -> str:
@@ -1301,6 +1791,10 @@ def _field_after_label(text: str, labels: Iterable[str]) -> str:
         "Отзыв",
         "Оценка",
         "Дата",
+        "Плюсы",
+        "Минусы",
+        "Достоинства",
+        "Недостатки",
         "Ответ WB",
         "Решение",
         "Комментарий",
@@ -1407,16 +1901,70 @@ def _extract_complaint_categories(texts: Iterable[str]) -> list[str]:
     return categories
 
 
+def _extract_row_menu_items_from_texts(texts: Iterable[str]) -> list[str]:
+    items: list[str] = []
+    for raw_text in texts:
+        text = _norm_text(str(raw_text or ""))
+        if not text:
+            continue
+        lower = text.lower()
+        matched_expected = False
+        for expected in ROW_MENU_EXPECTED_LABELS:
+            if expected.lower() in lower and expected not in items:
+                items.append(expected)
+                matched_expected = True
+            elif expected.lower() in lower:
+                matched_expected = True
+        if (
+            not matched_expected
+            and 3 <= len(text) <= 80
+            and any(token in lower for token in ("возврат", "пожаловаться", "отзыв"))
+        ):
+            if text not in items:
+                items.append(text)
+    return items
+
+
 def _same_nonempty(a: Any, b: Any) -> bool:
     return bool(str(a or "").strip() and str(a or "").strip() == str(b or "").strip())
 
 
+def _normalize_date_key(value: Any) -> str:
+    text = _norm_text(str(value or ""))
+    if not text:
+        return ""
+    match = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", text)
+    if match:
+        return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
+    match = re.search(r"\b(\d{1,2})[./](\d{1,2})[./](\d{2,4})\b", text)
+    if match:
+        year = int(match.group(3))
+        if year < 100:
+            year += 2000
+        return f"{year:04d}-{int(match.group(2)):02d}-{int(match.group(1)):02d}"
+    return text[:10]
+
+
+def _normalize_datetime_key(value: Any) -> str:
+    date_key = _normalize_date_key(value)
+    if not date_key:
+        return ""
+    match = re.search(r"\b(\d{1,2}):(\d{2})\b", str(value or ""))
+    if not match:
+        return ""
+    return f"{date_key} {int(match.group(1)):02d}:{match.group(2)}"
+
+
+def _same_datetimeish(a: Any, b: Any) -> bool:
+    a_key = _normalize_datetime_key(a)
+    b_key = _normalize_datetime_key(b)
+    return bool(a_key and b_key and a_key == b_key)
+
+
 def _same_dateish(a: Any, b: Any) -> bool:
-    a_text = str(a or "").strip()
-    b_text = str(b or "").strip()
-    if not a_text or not b_text:
-        return False
-    return a_text == b_text or a_text[:10] == b_text[:10]
+    a_key = _normalize_date_key(a)
+    b_key = _normalize_date_key(b)
+    return bool(a_key and b_key and a_key == b_key)
 
 
 def _safe_mapping(value: Any) -> dict[str, Any]:
@@ -1497,7 +2045,7 @@ class _ScoutHTMLParser(HTMLParser):
             return
         node = self.stack.pop()
         text = _norm_text(" ".join(node["text"]))
-        if node["tag"] in {"button", "a"} and self.stack:
+        if node["tag"] == "button" and self.stack:
             self.stack[-1].setdefault("buttons", []).append(text)
         if text and (
             node["tag"] in {"article", "tr", "li", "section", "div", "label", "button"}
@@ -1514,8 +2062,9 @@ _DOM_CANDIDATE_SCRIPT = r"""
   const visible = (el) => {
     const style = window.getComputedStyle(el);
     const rect = el.getBoundingClientRect();
-    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 240 && rect.height > 24;
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight;
   };
+  const textFor = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
   const attrsFor = (el) => {
     const attrs = {};
     for (const attr of Array.from(el.attributes || [])) {
@@ -1535,13 +2084,90 @@ _DOM_CANDIDATE_SCRIPT = r"""
       const rect = button.getBoundingClientRect();
       return style && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
     })
-    .map((button) => (button.innerText || button.getAttribute('aria-label') || button.getAttribute('title') || '').trim().slice(0, 120));
+    .map((button) => textFor(button).slice(0, 120));
   const links = (el) => Array.from(el.querySelectorAll('a[href]')).map((a) => a.href).slice(0, 5);
-  const preferredSelector = kind === 'feedback'
-    ? '[data-testid="Base-table-row"], tr, [role="row"], article, li'
-    : '[data-testid="Base-table-row"], tr, [role="row"], article, li';
-  const preferred = Array.from(document.querySelectorAll(preferredSelector));
-  const fallback = Array.from(document.querySelectorAll('[data-testid], [data-test-id], [data-qa], div'));
+  const linkTexts = (el) => Array.from(el.querySelectorAll('a[href]')).map((a) => textFor(a)).filter(Boolean).slice(0, 5);
+  const uniqueTexts = (values) => {
+    const result = [];
+    for (const value of values) {
+      const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+      if (normalized && !result.includes(normalized)) result.push(normalized);
+    }
+    return result;
+  };
+  const textBlocks = (el) => {
+    let primaryNodes = Array.from(el.querySelectorAll('[class*="Feedback-text-block__text-wrapper"]')).filter(visible);
+    if (!primaryNodes.length) {
+      primaryNodes = Array.from(el.querySelectorAll('[data-testid="text-ellipse"]')).filter(visible);
+    }
+    const primary = primaryNodes
+      .filter(visible)
+      .map((node) => textFor(node));
+    if (primary.length) return uniqueTexts(primary);
+    return uniqueTexts(Array.from(el.querySelectorAll('[class*="Feedback-text-block"]')).filter(visible).map((node) => textFor(node)));
+  };
+  const fieldAfter = (parts, labels) => {
+    for (const part of parts) {
+      const text = String(part || '').replace(/\s+/g, ' ').trim();
+      for (const label of labels) {
+        const re = new RegExp('^' + label + '\\s*:?\\s*(.+)$', 'i');
+        const match = text.match(re);
+        if (match) return match[1].trim().slice(0, 240);
+      }
+    }
+    return '';
+  };
+  const structuredFor = (el, norm) => {
+    const labels = buttonLabels(el);
+    const hrefs = links(el);
+    const linkLabels = linkTexts(el);
+    const numericButton = labels.find((label) => /^\d{5,}$/.test(label)) || '';
+    const supplierButton = labels.find((label) => label && !/^\d{5,}$/.test(label) && !/(выкуп|оценка|дата|фильтр|отправ|пожаловаться|запросить)/i.test(label)) || '';
+    const hrefNm = (hrefs.map((href) => String(href || '').match(/\/catalog\/(\d{5,})/)).find(Boolean) || [])[1] || '';
+    const dateTimeMatch = norm.match(/\b(\d{1,2}[./]\d{1,2}[./]\d{2,4}\s+(?:в\s+)?\d{1,2}:\d{2})\b/i);
+    const dateMatch = norm.match(/\b(\d{1,2}[./]\d{1,2}[./]\d{2,4})\b/i);
+    const activeRating = el.querySelector('[class*="Rating--active"], [class*="rating--active"]');
+    const activeStars = activeRating ? Array.from(activeRating.querySelectorAll('svg')).filter(visible).length : 0;
+    const blocks = textBlocks(el);
+    const reviewText = blocks.join(' ').replace(/\s+/g, ' ').trim().slice(0, 240);
+    const rowRect = el.getBoundingClientRect();
+    const menuButtonCandidates = Array.from(el.querySelectorAll('button')).filter(visible).map((button) => {
+      const rect = button.getBoundingClientRect();
+      return {
+        label: textFor(button).slice(0, 80),
+        disabled: Boolean(button.disabled || button.getAttribute('aria-disabled') === 'true'),
+        rect: {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)},
+        right_edge_candidate: rect.x >= rowRect.right - 150 && rect.width >= 24 && rect.width <= 56 && rect.height >= 24 && rect.height <= 56
+      };
+    }).filter((item) => item.right_edge_candidate).slice(0, 8);
+    return {
+      product_title: linkLabels.find((label) => label && !/^\d{5,}$/.test(label)) || '',
+      supplier_article: supplierButton,
+      wb_article: numericButton || hrefNm,
+      nm_id: numericButton || hrefNm,
+      review_datetime: dateTimeMatch ? dateTimeMatch[1].replace(/\s+/g, ' ').trim() : '',
+      review_date: dateMatch ? dateMatch[1] : '',
+      rating: activeStars >= 1 && activeStars <= 5 ? String(activeStars) : '',
+      review_text: reviewText,
+      pros: fieldAfter(blocks, ['Плюсы', 'Достоинства']),
+      cons: fieldAfter(blocks, ['Минусы', 'Недостатки']),
+      comment: fieldAfter(blocks, ['Комментарий']),
+      purchase_status: /выкуп/i.test(norm) ? 'buyout' : '',
+      media_indicators: [
+        el.querySelector('[class*="Photo-item"], button[class*="Photo"], [class*="photo"]') ? 'photo' : '',
+        el.querySelector('[class*="Video"], [class*="video"]') ? 'video' : ''
+      ].filter(Boolean),
+      row_menu_button_found: menuButtonCandidates.some((item) => !item.disabled && !item.label),
+      menu_button_candidates: menuButtonCandidates
+    };
+  };
+  const feedbackBaseRows = Array.from(document.querySelectorAll('tr[data-testid="Base-table-row"][role="button"], [data-testid="Base-table-row"][role="button"]'));
+  const preferred = kind === 'feedback'
+    ? (feedbackBaseRows.length ? feedbackBaseRows : Array.from(document.querySelectorAll('[data-testid="feedback-item"], article, li')))
+    : Array.from(document.querySelectorAll('[data-testid="Base-table-row"], tr, [role="row"], article, li'));
+  const fallback = kind === 'feedback' && feedbackBaseRows.length
+    ? []
+    : Array.from(document.querySelectorAll('[data-testid], [data-test-id], [data-qa], div'));
   const all = [];
   const seenElements = new Set();
   for (const el of preferred.concat(fallback)) {
@@ -1551,15 +2177,25 @@ _DOM_CANDIDATE_SCRIPT = r"""
   }
   const seen = new Set();
   const rows = [];
-    for (const el of all) {
+  for (const el of all) {
     if (!visible(el)) continue;
     const rect = el.getBoundingClientRect();
+    if (rect.width < 240 || rect.height < 24) continue;
     if (rect.height > 420) continue;
     const text = (el.innerText || '').trim();
     const norm = text.replace(/\s+/g, ' ').trim();
     if (norm.length < 35 || norm.length > 2600) continue;
+    const attrs = attrsFor(el);
+    const className = String(attrs.class || '');
     if (kind === 'feedback' && /Оценка\/дата\s+Отзыв/i.test(norm)) continue;
-    const feedbackLike = /(Отзыв|Достоин|Недостат|Артикул|Оценка|звезд|★|Пожаловаться)/i.test(norm);
+    if (kind === 'feedback' && /(narrow-banner|carousel|onboarding|New-main-tabs|banner-page)/i.test(className + ' ' + norm)) continue;
+    const structured = structuredFor(el, norm);
+    const feedbackLike = (
+      el.matches('tr[data-testid="Base-table-row"][role="button"], [data-testid="Base-table-row"][role="button"]')
+      && (/Плюсы|Минусы|Комментарий|Достоинства|Недостатки|Выкуп|\d{1,2}[./]\d{1,2}[./]\d{2,4}\s+(?:в\s+)?\d{1,2}:\d{2}/i.test(norm) || structured.row_menu_button_found)
+    ) || (
+      el.matches('[data-testid="feedback-item"]') && /Плюсы|Минусы|Комментарий|Достоинства|Недостатки/i.test(norm)
+    );
     const complaintLike = /(Причина|Описание|Мои жалобы|Ждут ответа|Есть ответ|Одобрен|Отклон|Отзыв)/i.test(norm);
     if (kind === 'feedback' && !feedbackLike) continue;
     if (kind === 'complaint' && !complaintLike) continue;
@@ -1572,9 +2208,11 @@ _DOM_CANDIDATE_SCRIPT = r"""
       dom_scout_id: scoutId,
       selector: `[data-wb-core-scout-id="${scoutId}"]`,
       text: text,
-      attrs: attrsFor(el),
+      attrs,
       buttons: buttonLabels(el),
       links: links(el),
+      link_texts: linkTexts(el),
+      structured,
       rect: {width: Math.round(rect.width), height: Math.round(rect.height)}
     });
     if (rows.length >= limit) break;

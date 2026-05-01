@@ -18,6 +18,7 @@ from apps.seller_portal_feedbacks_complaints_scout import (
     parse_complaint_categories_from_html,
     parse_feedback_rows_from_html,
     parse_my_complaints_rows_from_html,
+    parse_row_menu_diagnostics_from_html,
     run_scout,
     score_feedback_match,
 )
@@ -25,6 +26,7 @@ from apps.seller_portal_feedbacks_complaints_scout import (
 
 def main() -> None:
     _assert_feedback_parser()
+    _assert_row_menu_parser()
     _assert_category_parser()
     _assert_my_complaints_parser()
     _assert_matching_scores()
@@ -57,6 +59,53 @@ def _assert_feedback_parser() -> None:
         raise AssertionError(f"rating/date not extracted: {row}")
     if not row["three_dot_menu_found"]:
         raise AssertionError(f"three-dot menu not detected: {row}")
+
+    live_like_rows = parse_feedback_rows_from_html(
+        """
+        <tr data-scout-feedback-row>
+          <td><a href="https://www.wildberries.ru/catalog/428855306/detail.aspx">
+            Защитное стекло матовое на iPhone 15 / 16
+          </a></td>
+          <td><button>(Matte) iPhone 15 / 16</button><button>428855306</button></td>
+          <td>01.05.2026 в 16:38</td>
+          <td><div>Плюсы: Упаковала</div><div>Минусы: Все отлично</div><div>Комментарий: Спасибо</div></td>
+          <td><button>...</button></td>
+        </tr>
+        """,
+        max_rows=3,
+    )
+    live_row = live_like_rows[0]
+    if live_row["supplier_article"] != "(Matte) iPhone 15 / 16" or live_row["wb_article"] != "428855306":
+        raise AssertionError(f"live-like articles not extracted: {live_row}")
+    if live_row["review_datetime"] != "01.05.2026 в 16:38":
+        raise AssertionError(f"review datetime not extracted: {live_row}")
+    if live_row["pros_snippet"] != "Упаковала" or live_row["cons_snippet"] != "Все отлично":
+        raise AssertionError(f"pros/cons not extracted: {live_row}")
+
+
+def _assert_row_menu_parser() -> None:
+    global_only = parse_row_menu_diagnostics_from_html(
+        """
+        <main>
+          <button>Пожаловаться на отзыв</button>
+        </main>
+        """
+    )
+    if global_only["complaint_action_found"]:
+        raise AssertionError(f"global complaint action must not count as row menu: {global_only}")
+
+    menu = parse_row_menu_diagnostics_from_html(
+        """
+        <div data-scout-row-menu class="Dropdown-list">
+          <button>Запросить возврат</button>
+          <button>Пожаловаться на отзыв</button>
+        </div>
+        """
+    )
+    if menu["menu_items_found"] != ["Запросить возврат", "Пожаловаться на отзыв"]:
+        raise AssertionError(f"row menu items not parsed: {menu}")
+    if not menu["complaint_action_found"]:
+        raise AssertionError(f"complaint action not found in row menu: {menu}")
 
 
 def _assert_category_parser() -> None:
@@ -120,18 +169,21 @@ def _assert_matching_scores() -> None:
         {
             "text": "Упаковка пришла мятая, запах не соответствует описанию товара",
             "rating": "2",
-            "created_date": "2026-04-28",
+            "created_at": "2026-04-28 10:25",
             "nm_id": "123456789",
         },
         {
             "text_snippet": "Упаковка пришла мятая, запах не соответствует описанию товара",
             "rating": "2",
-            "review_date": "2026-04-28",
+            "review_datetime": "28.04.2026 в 10:25",
+            "review_date": "28.04.2026",
             "nm_id": "123456789",
         },
     )
     if high["status"] != "high" or high["score"] < 0.82:
         raise AssertionError(f"high match failed: {high}")
+    if "same exact datetime" not in high["reasons"]:
+        raise AssertionError(f"datetime match reason missing: {high}")
 
     ambiguous = score_feedback_match(
         {"text": "Короткий похожий отзыв", "rating": "3", "created_date": "2026-04-28"},
@@ -148,6 +200,7 @@ def _assert_matching_scores() -> None:
 def _assert_no_submit_guard() -> None:
     assert_safe_click_label("Пожаловаться на отзыв", purpose="open_complaint_modal")
     assert_safe_click_label("Закрыть", purpose="close_modal")
+    assert_safe_click_label("Отмена", purpose="close_modal")
     for label in ("Отправить", "Подать жалобу", "Сохранить", "Пожаловаться"):
         try:
             assert_safe_click_label(label, purpose="tab_navigation")
