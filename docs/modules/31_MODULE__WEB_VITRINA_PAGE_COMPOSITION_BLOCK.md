@@ -48,6 +48,8 @@ related_runners:
   - "apps/sheet_vitrina_v1_feedbacks_browser_smoke.py"
   - "apps/seller_portal_feedbacks_complaints_scout.py"
   - "apps/seller_portal_feedbacks_complaints_scout_smoke.py"
+  - "apps/seller_portal_feedbacks_matching_replay.py"
+  - "apps/seller_portal_feedbacks_matching_replay_smoke.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime.py"
 related_docs:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
@@ -105,6 +107,7 @@ update_note: "Phase 4 live page composition остаётся server-driven; вк
   - The same tab has a nested `AI-промпт разбора` subsection backed by `GET/POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt`. The UI shows a full-width editable starter prompt when no saved prompt exists, exposes the current/available AI model selector from server-side OpenAI model discovery, and saves prompt+model server-side; unavailable preferred models are not selectable, and discovery fallback is explicit. Only a saved server-side prompt enables real analysis. The `AI-разбор отзывов` action processes the current visible/filtered table as a bounded sequential queue, sends one row per `POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze`, updates matching rows progressively, supports stop/retry for unresolved rows and refuses oversized visible queues with a clear filter-narrowing message. The response fills the existing feedback table, adds AI filter (`Все / Подходит для жалобы / На проверку / Не подходит / Не разобрано`) and sorts analyzed rows as `Да`, `Проверить`, `Нет`, `Не разобрано` while preserving review date desc inside each group.
   - Feedbacks AI output is transient browser/session display over a server-side OpenAI call; it does not persist AI labels, does not write accepted truth/ready snapshots/ЕБД, does not submit complaints, does not call Seller Portal and does not use Google Sheets/GAS.
   - `apps/seller_portal_feedbacks_complaints_scout.py` is a bounded read-only Seller Portal scout for future complaint workflow feasibility. It reuses the existing `/opt/wb-web-bot/storage_state.json` session contour and Playwright conventions, can inspect `Отзывы и вопросы`, visible feedback rows, row-level `...` menus, the `Пожаловаться на отзыв` complaint category modal and `Мои жалобы`, and writes sanitized JSON/Markdown diagnostics outside committed source. It must not click final complaint submit/save buttons, edit feedback answers, persist AI/operator labels, write accepted truth, call Google Sheets/GAS or expose a public HTTP route.
+  - `apps/seller_portal_feedbacks_matching_replay.py` is a bounded no-submit replay for future complaint matching feasibility. It loads canonical feedback rows through `SheetVitrinaV1FeedbacksBlock`, reads Seller Portal `Отзывы` rows with the same storage_state contour, compares text + exact minute/date + rating + nmId/WB article/supplier article + product/media signals, and emits `exact` / `high` / `ambiguous` / `not_found` with per-row reasons and `safe_for_future_submit=true` only for `exact`. It must not open complaint submit paths, click final complaint buttons, change Seller Portal state, persist status truth or expose a public route.
   - `Исследования` is a same-shell read-only tab, not an iframe and not a new truth contour; MVP block `Сравнение групп SKU` reads active SKU from current `config_v2`, selectable non-financial SKU metrics from current registry/view truth, and calculates retrospective group dynamics over persisted ready snapshots only
   - research SKU selectors include independent compact `Товар в акции` chips; the options route derives the candidate-only promo filter from latest closed-day ready snapshot promo metrics and returns unavailable metadata instead of fabricating a filtered list when promo truth is absent
   - research period controls are compact date-range pickers in the browser, while the calculate contract remains explicit `date_from/date_to`; result rendering uses the same `table-shell / table-scroll / vitrina-table` page pattern with horizontal scroll rather than a card layout
@@ -191,6 +194,9 @@ update_note: "Phase 4 live page composition остаётся server-driven; вк
 - read-only Seller Portal complaint scout:
   - `apps/seller_portal_feedbacks_complaints_scout.py`
   - `apps/seller_portal_feedbacks_complaints_scout_smoke.py`
+- no-submit Seller Portal matching replay:
+  - `apps/seller_portal_feedbacks_matching_replay.py`
+  - `apps/seller_portal_feedbacks_matching_replay_smoke.py`
 - hosted deploy/probe contract:
   - `apps/registry_upload_http_entrypoint_hosted_runtime.py`
 
@@ -213,6 +219,9 @@ update_note: "Phase 4 live page composition остаётся server-driven; вк
 - `apps/seller_portal_feedbacks_complaints_scout_smoke.py`
   - confirms the read-only scout parsers extract visible feedback rows, scoped row-menu items (`Запросить возврат`, `Пожаловаться на отзыв`), complaint modal categories, `Мои жалобы` rows, match-score statuses and the missing-session blocker, and that submit-like labels such as `Отправить` / `Подать жалобу` are refused while the safe `Пожаловаться на отзыв` modal-open label remains allowed for scout mode
   - live EU scout evidence (`/opt/wb-core-runtime/state/feedbacks_complaints_scout/20260501T124236Z/`) confirms the Seller Portal route `Товары и цены -> Коммуникации -> Отзывы и вопросы -> Отзывы`, row-level `...` menu opening, scoped detection of `Пожаловаться на отзыв`, safe complaint modal open/close without submit, visible category samples, stronger feedback row fields (`product_title`, supplier article, WB/nmId, rating, exact date/time, pros/cons/comment/media), and `Мои жалобы` pending/answered status extraction
+- `apps/seller_portal_feedbacks_matching_replay_smoke.py`
+  - confirms API fixture rows can be matched to UI fixture rows as `exact`, `high`, `ambiguous` short-text duplicate and `not_found`, validates WB UI datetime parsing (`01.05.2026 в 17:03`), text/article/nmId normalization, duplicate penalty, report JSON/Markdown shape and no-submit guards (`complaint_submit_clicked=false`, no complaint modal path called)
+  - live EU no-submit replay evidence (`/opt/wb-core-runtime/state/feedbacks_matching_replay/20260501T130828Z/`) confirms canonical API feedback rows load for `2026-05-01`, Seller Portal session/navigation stay valid on `/feedbacks/feedbacks-tab/not-answered`, UI row extraction exposes product/title/article/nmId/rating/date/text fields without hidden `feedback_id`, matching produces `exact/high/ambiguous/not_found` with per-row reasons, and no complaint modal or submit path is called. Bounded sample result: 30 API rows tested from 49 available, 5 UI rows collected, 4 exact, 0 high, 1 ambiguous, 25 not_found; readiness remains `not_ready` until UI date/star filter alignment or deeper list collection covers more API rows.
 - `apps/sheet_vitrina_v1_web_vitrina_highlight_ui_smoke.py`
   - confirms full refresh session highlighting covers both touched temporal dates, keeps green for changed cells, yellow for latest-confirmed cells and clears on browser reload
 - `apps/sheet_vitrina_v1_web_vitrina_source_status_smoke.py`

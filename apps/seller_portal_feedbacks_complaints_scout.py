@@ -2126,8 +2126,34 @@ _DOM_CANDIDATE_SCRIPT = r"""
     const hrefNm = (hrefs.map((href) => String(href || '').match(/\/catalog\/(\d{5,})/)).find(Boolean) || [])[1] || '';
     const dateTimeMatch = norm.match(/\b(\d{1,2}[./]\d{1,2}[./]\d{2,4}\s+(?:в\s+)?\d{1,2}:\d{2})\b/i);
     const dateMatch = norm.match(/\b(\d{1,2}[./]\d{1,2}[./]\d{2,4})\b/i);
-    const activeRating = el.querySelector('[class*="Rating--active"], [class*="rating--active"]');
-    const activeStars = activeRating ? Array.from(activeRating.querySelectorAll('svg')).filter(visible).length : 0;
+    const ratingFromDom = () => {
+      const labelTexts = labels.concat(
+        Array.from(el.querySelectorAll('[aria-label], [title]'))
+          .filter(visible)
+          .map((node) => textFor(node))
+      );
+      for (const label of labelTexts) {
+        const match = String(label || '').match(/\b([1-5])\s*(?:из|\/)\s*5\b|\b([1-5])\s*(?:звезд|звезды|звезда)\b/i);
+        if (match) return match[1] || match[2] || '';
+      }
+      const activeNodes = Array.from(el.querySelectorAll('[class*="Rating"][class*="active"], [class*="rating"][class*="active"], [class*="Star"][class*="active"], [class*="star"][class*="active"]'))
+        .filter(visible)
+        .filter((node) => {
+          const classText = String(node.className || '') + ' ' + String(node.parentElement && node.parentElement.className || '');
+          return /rating|star/i.test(classText) && !/(not[-_ ]?active|inactive|disabled)/i.test(classText);
+        });
+      if (activeNodes.length >= 1 && activeNodes.length <= 5) return String(activeNodes.length);
+      const activeUseNodes = Array.from(el.querySelectorAll('svg, path, use'))
+        .filter(visible)
+        .filter((node) => {
+          const classText = String(node.className && node.className.baseVal ? node.className.baseVal : node.className || '');
+          const parentText = String(node.parentElement && node.parentElement.className || '');
+          const fill = String(node.getAttribute('fill') || window.getComputedStyle(node).fill || '');
+          return /rating|star/i.test(classText + ' ' + parentText) && fill && !/none|transparent|rgba\(0,\s*0,\s*0,\s*0\)/i.test(fill);
+        });
+      if (activeUseNodes.length >= 1 && activeUseNodes.length <= 5) return String(activeUseNodes.length);
+      return '';
+    };
     const blocks = textBlocks(el);
     const reviewText = blocks.join(' ').replace(/\s+/g, ' ').trim().slice(0, 240);
     const rowRect = el.getBoundingClientRect();
@@ -2147,7 +2173,7 @@ _DOM_CANDIDATE_SCRIPT = r"""
       nm_id: numericButton || hrefNm,
       review_datetime: dateTimeMatch ? dateTimeMatch[1].replace(/\s+/g, ' ').trim() : '',
       review_date: dateMatch ? dateMatch[1] : '',
-      rating: activeStars >= 1 && activeStars <= 5 ? String(activeStars) : '',
+      rating: ratingFromDom(),
       review_text: reviewText,
       pros: fieldAfter(blocks, ['Плюсы', 'Достоинства']),
       cons: fieldAfter(blocks, ['Минусы', 'Недостатки']),
