@@ -30,6 +30,7 @@ related_modules:
   - "packages/application/sheet_vitrina_v1_plan_report.py"
   - "packages/application/sheet_vitrina_v1_feedbacks.py"
   - "packages/application/sheet_vitrina_v1_feedbacks_ai.py"
+  - "packages/application/sheet_vitrina_v1_feedbacks_complaints.py"
   - "packages/application/sheet_vitrina_v1_web_vitrina.py"
   - "packages/application/web_vitrina_gravity_table_adapter.py"
   - "packages/application/web_vitrina_page_composition.py"
@@ -61,6 +62,8 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/feedbacks/ai-prompt"
   - "POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt"
   - "POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze"
+  - "GET /v1/sheet-vitrina-v1/feedbacks/complaints"
+  - "POST /v1/sheet-vitrina-v1/feedbacks/complaints/sync-status"
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
   - "GET /v1/sheet-vitrina-v1/job"
@@ -120,7 +123,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под строгую feedbacks загрузку и operator UI: `Отзывы` получает chunked WB feedbacks read route with final server-side date/star/answered filtering and diagnostic meta, XLSX export route for the current table, server-side AI prompt+model discovery config, public `feedbacks/ai-prompt` + `feedbacks/ai-analyze` routes and OpenAI Responses API structured-output adapter via `OPENAI_API_KEY`; AI labels stay transient UI/session output and are not complaint submission, Seller Portal automation, ЕБД/accepted truth or Google Sheets/GAS."
+update_note: "Обновлён под строгую feedbacks загрузку и operator UI: `Отзывы` получает chunked WB feedbacks read route with final server-side date/star/answered filtering and diagnostic meta, XLSX export route for the current table, server-side AI prompt+model discovery config, public `feedbacks/ai-prompt` + `feedbacks/ai-analyze` routes, operational complaint journal read route and read-only complaints status sync route; AI labels stay transient UI/session output, while real complaint submit is CLI-only through a guarded Seller Portal runner and is not exposed as a public submit route."
 ---
 
 # 1. Идентификатор и статус
@@ -200,6 +203,8 @@ update_note: "Обновлён под строгую feedbacks загрузку 
   - `POST /v1/sheet-vitrina-v1/feedbacks/export.xlsx` = XLSX export for rows already loaded/filtered in the `Отзывы` browser table. The request body carries the current visible rows, including transient AI columns if already present; the route returns a standard workbook named `wb_feedbacks_YYYY-MM-DD_YYYY-MM-DD.xlsx` with Russian headers and does not re-fetch WB API, persist AI truth, write runtime DB or call Google Sheets/GAS.
   - `GET /v1/sheet-vitrina-v1/feedbacks/ai-prompt` / `POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt` = server-side operational prompt config for the same `Отзывы` tab. Prompt storage is an atomic JSON file inside runtime dir, validates non-empty prompt with bounded length plus a model that is selectable for the current OpenAI key. The response returns `available_models`, `preferred_models`, `unavailable_models`, `model_source` and discovery diagnostics from OpenAI `GET /v1/models`; if model discovery is unavailable, the route falls back to the safe `gpt-5-mini` / `gpt-5` allowlist with an explicit diagnostic. It is not accepted truth, ЕБД persistence, ready snapshot truth or browser-local source of truth.
   - `POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze` = bounded AI analysis over rows already loaded by the operator. The browser turns the current visible/filtered table into a bounded queue, sends exactly one trimmed feedback row per request, updates the matching row after each response and keeps per-row failures retryable. The server route uses the saved prompt/model config, enforces a hard cap of 3 rows per request plus batch/text/rate limits, returns structured per-`feedback_id` transient labels (`Да / Проверить / Нет`, category, reason, confidence) and model metadata, and does not submit complaints, call Seller Portal, train on manual confirmation, write runtime DB or Google Sheets/GAS.
+  - `GET /v1/sheet-vitrina-v1/feedbacks/complaints` = read-only JSON contract for the operational complaint journal inside runtime state. It returns complaint rows/statuses for the `Отзывы -> Жалобы` table and is not accepted truth/ЕБД/Google Sheets/GAS.
+  - `POST /v1/sheet-vitrina-v1/feedbacks/complaints/sync-status` = read-only Seller Portal `Мои жалобы` status sync. It may run the bounded browser scanner to update only the runtime complaint journal statuses (`Ждёт ответа`, `Удовлетворена`, `Отклонена`, `Ошибка`) and must not submit complaints. Real complaint submission remains CLI-only via `apps/seller_portal_feedbacks_complaint_submit.py` with explicit submit flag and hard max-submit cap.
   - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
   - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result, where root `status` is semantic snapshot outcome rather than mere ready-snapshot existence
   - `GET /v1/sheet-vitrina-v1/job` = cheap poll/read surface для live operator log и async action state

@@ -2046,6 +2046,7 @@
 	        <div class="feedbacks-subtabs" role="tablist" aria-label="Отзывы">
 	          <button class="feedbacks-subtab-button is-active" type="button" data-feedbacks-subtab="reviews" role="tab" aria-selected="true">Отзывы</button>
 	          <button class="feedbacks-subtab-button" type="button" data-feedbacks-subtab="prompt" role="tab" aria-selected="false">AI-промпт разбора</button>
+	          <button class="feedbacks-subtab-button" type="button" data-feedbacks-subtab="complaints" role="tab" aria-selected="false">Жалобы</button>
 	        </div>
 
 	        <section class="feedbacks-subpanel" data-feedbacks-subpanel="reviews">
@@ -2151,6 +2152,30 @@
 	              <button class="button secondary" type="button" data-feedbacks-back-to-reviews>Вернуться к отзывам</button>
 	              <span class="research-result-note" data-feedbacks-prompt-status>Промпт не загружен</span>
 	            </div>
+	          </div>
+	        </section>
+	        <section class="feedbacks-subpanel" data-feedbacks-subpanel="complaints" hidden>
+	          <div class="research-form-grid feedbacks-toolbar">
+	            <div class="research-field research-actions">
+	              <button class="button secondary" type="button" data-feedbacks-complaints-reload>Обновить журнал</button>
+	              <button class="button primary" type="button" data-feedbacks-complaints-sync>Обновить статусы</button>
+	              <span class="research-result-note" data-feedbacks-complaints-status>Журнал жалоб не загружен</span>
+	            </div>
+	            <details class="column-manager" data-feedbacks-complaints-column-manager>
+	              <summary class="column-manager-toggle">Столбцы</summary>
+	              <div class="column-manager-panel">
+	                <p class="column-manager-note">Видимость колонок хранится только в localStorage браузера.</p>
+	                <div class="column-checkbox-list" data-feedbacks-complaints-column-controls></div>
+	                <div class="column-manager-actions">
+	                  <button class="button secondary" type="button" data-feedbacks-complaints-columns-reset>Сбросить столбцы</button>
+	                </div>
+	              </div>
+	            </details>
+	          </div>
+	          <p class="research-error" data-feedbacks-complaints-error></p>
+	          <div class="summary-grid" data-feedbacks-complaints-summary></div>
+	          <div data-feedbacks-complaints-result>
+	            <p class="research-result-note">Откройте журнал жалоб или обновите статусы.</p>
 	          </div>
 	        </section>
 	      </section>
@@ -2360,6 +2385,14 @@
     const feedbacksPromptSaveButton = document.querySelector("[data-feedbacks-prompt-save]");
     const feedbacksPromptStatusNode = document.querySelector("[data-feedbacks-prompt-status]");
     const feedbacksBackToReviewsButton = document.querySelector("[data-feedbacks-back-to-reviews]");
+    const feedbacksComplaintsReloadButton = document.querySelector("[data-feedbacks-complaints-reload]");
+    const feedbacksComplaintsSyncButton = document.querySelector("[data-feedbacks-complaints-sync]");
+    const feedbacksComplaintsStatusNode = document.querySelector("[data-feedbacks-complaints-status]");
+    const feedbacksComplaintsErrorNode = document.querySelector("[data-feedbacks-complaints-error]");
+    const feedbacksComplaintsSummaryNode = document.querySelector("[data-feedbacks-complaints-summary]");
+    const feedbacksComplaintsResultNode = document.querySelector("[data-feedbacks-complaints-result]");
+    const feedbacksComplaintsColumnControlsNode = document.querySelector("[data-feedbacks-complaints-column-controls]");
+    const feedbacksComplaintsColumnsResetButton = document.querySelector("[data-feedbacks-complaints-columns-reset]");
 
     const ALL_VALUE = "__all__";
     const DEFAULT_UNIFIED_TAB = "vitrina";
@@ -2380,6 +2413,7 @@
     };
     const FEEDBACKS_WB_CATEGORY_LABEL_SET = new Set(Object.values(FEEDBACKS_WB_CATEGORY_LABELS));
     const FEEDBACKS_COLUMN_WIDTHS_STORAGE_KEY = "wb_core_feedbacks_column_widths_v1";
+    const FEEDBACKS_COMPLAINTS_VISIBLE_COLUMNS_STORAGE_KEY = "wb_core_feedbacks_complaints_visible_columns_v1";
     const FEEDBACKS_MIN_COLUMN_WIDTH = 72;
     const FEEDBACKS_DEFAULT_COLUMN_WIDTHS = {
       created_date: 112,
@@ -2398,10 +2432,59 @@
       cons: 240,
       answer_text: 280
     };
+    const FEEDBACKS_COMPLAINTS_DEFAULT_VISIBLE_COLUMNS = [
+      "complaint_status_label",
+      "wb_category_label",
+      "complaint_text",
+      "submitted_at",
+      "last_status_checked_at",
+      "wb_decision_text",
+      "review_created_at",
+      "rating",
+      "nm_id",
+      "supplier_article",
+      "product_name",
+      "review_text",
+      "ai_complaint_fit_label",
+      "ai_category_label",
+      "ai_reason",
+      "feedback_id",
+      "match_status",
+      "match_score"
+    ];
+    const FEEDBACKS_COMPLAINTS_MANDATORY_COLUMNS = ["complaint_status_label", "feedback_id"];
+    const FEEDBACKS_COMPLAINTS_TABLE_COLUMNS = [
+      ["complaint_status_label", "Статус жалобы"],
+      ["wb_category_label", "Категория WB"],
+      ["complaint_text", "Текст жалобы"],
+      ["submitted_at", "Дата подачи"],
+      ["last_status_checked_at", "Дата обновления статуса"],
+      ["wb_decision_text", "Результат WB"],
+      ["review_created_at", "Дата отзыва"],
+      ["rating", "Оценка"],
+      ["nm_id", "nmId"],
+      ["supplier_article", "Артикул"],
+      ["product_name", "Товар"],
+      ["review_text", "Текст отзыва"],
+      ["pros", "Плюсы"],
+      ["cons", "Минусы"],
+      ["is_answered_label", "Есть ответ"],
+      ["answer_text", "Ответ продавца"],
+      ["photo_count", "Фото"],
+      ["video_count", "Видео"],
+      ["ai_complaint_fit_label", "Подходит для жалобы"],
+      ["ai_category_label", "Категория AI"],
+      ["ai_reason", "Причина AI / текст ситуации"],
+      ["ai_confidence_label", "Уверенность AI"],
+      ["feedback_id", "ID отзыва"],
+      ["match_status", "Match status"],
+      ["match_score", "Match score"],
+      ["last_error", "Ошибка"]
+    ];
     const RESEARCH_UNIFIED_TAB = "research";
     const EMBEDDED_UNIFIED_TABS = new Set(["factory-order", "reports"]);
     const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", FEEDBACKS_UNIFIED_TAB, RESEARCH_UNIFIED_TAB]);
-    const FLOATING_DETAILS_SELECTOR = "details[data-column-manager], details[data-research-picker]";
+    const FLOATING_DETAILS_SELECTOR = "details[data-column-manager], details[data-research-picker], details[data-feedbacks-complaints-column-manager]";
     const formattersById = new Map();
     const renderersById = new Map();
     const sortOptionsByValue = new Map();
@@ -2522,6 +2605,18 @@
         meta: null,
         exporting: false,
         columnWidths: loadFeedbacksColumnWidths(),
+        complaints: {
+          loading: false,
+          loaded: false,
+          syncing: false,
+          rows: [],
+          summary: null,
+          meta: null,
+          schemaColumns: [],
+          visibleColumnIds: loadFeedbacksComplaintsVisibleColumns(),
+          lastSyncReport: null,
+          error: ""
+        },
         error: ""
       },
       sessionHighlights: {}
@@ -2596,6 +2691,23 @@
     if (feedbacksBackToReviewsButton) {
       feedbacksBackToReviewsButton.addEventListener("click", function() {
         activateFeedbacksSubsection("reviews");
+      });
+    }
+    if (feedbacksComplaintsReloadButton) {
+      feedbacksComplaintsReloadButton.addEventListener("click", function() {
+        loadFeedbacksComplaints();
+      });
+    }
+    if (feedbacksComplaintsSyncButton) {
+      feedbacksComplaintsSyncButton.addEventListener("click", function() {
+        syncFeedbacksComplaintsStatuses();
+      });
+    }
+    if (feedbacksComplaintsColumnsResetButton) {
+      feedbacksComplaintsColumnsResetButton.addEventListener("click", function() {
+        state.feedbacks.complaints.visibleColumnIds = FEEDBACKS_COMPLAINTS_DEFAULT_VISIBLE_COLUMNS.slice();
+        persistFeedbacksComplaintsVisibleColumns();
+        renderFeedbacksComplaintsPanel();
       });
     }
     if (feedbacksPromptTextareaNode) {
@@ -4857,17 +4969,20 @@
     }
 
     function activateFeedbacksSubsection(value) {
-      const normalized = value === "prompt" ? "prompt" : "reviews";
+      const normalized = value === "prompt" ? "prompt" : (value === "complaints" ? "complaints" : "reviews");
       state.feedbacks.activeSubsection = normalized;
       syncFeedbacksSubsections();
       if (normalized === "prompt" && !state.feedbacks.promptLoaded && !state.feedbacks.promptLoading) {
         loadFeedbacksPrompt();
       }
+      if (normalized === "complaints" && !state.feedbacks.complaints.loaded && !state.feedbacks.complaints.loading) {
+        loadFeedbacksComplaints();
+      }
       renderFeedbacksPanel();
     }
 
     function syncFeedbacksSubsections() {
-      const normalized = state.feedbacks.activeSubsection === "prompt" ? "prompt" : "reviews";
+      const normalized = state.feedbacks.activeSubsection === "prompt" ? "prompt" : (state.feedbacks.activeSubsection === "complaints" ? "complaints" : "reviews");
       feedbacksSubtabButtons.forEach(function(button) {
         const selected = button.getAttribute("data-feedbacks-subtab") === normalized;
         button.classList.toggle("is-active", selected);
@@ -4948,6 +5063,7 @@
       renderFeedbacksSummary();
       renderFeedbacksResult();
       renderFeedbacksPromptPanel();
+      renderFeedbacksComplaintsPanel();
     }
 
     function renderFeedbacksRangePicker() {
@@ -5294,6 +5410,42 @@
         return normalized;
       } catch (error) {
         return {};
+      }
+    }
+
+    function loadFeedbacksComplaintsVisibleColumns() {
+      try {
+        const raw = window.localStorage.getItem(FEEDBACKS_COMPLAINTS_VISIBLE_COLUMNS_STORAGE_KEY);
+        if (!raw) {
+          return FEEDBACKS_COMPLAINTS_DEFAULT_VISIBLE_COLUMNS.slice();
+        }
+        const payload = JSON.parse(raw);
+        if (!Array.isArray(payload)) {
+          return FEEDBACKS_COMPLAINTS_DEFAULT_VISIBLE_COLUMNS.slice();
+        }
+        const allowed = new Set(FEEDBACKS_COMPLAINTS_TABLE_COLUMNS.map(function(column) { return column[0]; }));
+        const selected = payload.map(function(item) { return String(item || ""); }).filter(function(item) {
+          return allowed.has(item);
+        });
+        FEEDBACKS_COMPLAINTS_MANDATORY_COLUMNS.forEach(function(columnId) {
+          if (selected.indexOf(columnId) === -1) {
+            selected.unshift(columnId);
+          }
+        });
+        return selected.length ? selected : FEEDBACKS_COMPLAINTS_DEFAULT_VISIBLE_COLUMNS.slice();
+      } catch (error) {
+        return FEEDBACKS_COMPLAINTS_DEFAULT_VISIBLE_COLUMNS.slice();
+      }
+    }
+
+    function persistFeedbacksComplaintsVisibleColumns() {
+      try {
+        window.localStorage.setItem(
+          FEEDBACKS_COMPLAINTS_VISIBLE_COLUMNS_STORAGE_KEY,
+          JSON.stringify(state.feedbacks.complaints.visibleColumnIds || [])
+        );
+      } catch (error) {
+        // Broken localStorage must not break the complaints table.
       }
     }
 
@@ -5825,6 +5977,248 @@
           feedbacksPromptStatusNode.textContent = "Сохранённого промпта нет, показан стартовый текст · модель: " + (state.feedbacks.model || "gpt-5-mini") + discoverySuffix;
         }
       }
+    }
+
+    async function loadFeedbacksComplaints() {
+      const complaints = state.feedbacks.complaints;
+      if (!WEB_VITRINA_CONFIG.feedbacks_complaints_path || complaints.loading) {
+        return;
+      }
+      complaints.loading = true;
+      complaints.error = "";
+      renderFeedbacksComplaintsPanel();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.feedbacks_complaints_path, {
+          method: "GET",
+          headers: {"Accept": "application/json"}
+        });
+        const payload = await readJsonResponse(response, "non-json response from feedbacks complaints route");
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "feedbacks complaints route returned " + response.status);
+        }
+        if (!payload || payload.contract_name !== "sheet_vitrina_v1_feedbacks_complaints") {
+          throw new Error("unexpected feedbacks complaints payload");
+        }
+        complaints.rows = Array.isArray(payload.rows) ? payload.rows : [];
+        complaints.summary = payload.summary || null;
+        complaints.meta = payload.meta || null;
+        complaints.schemaColumns = Array.isArray((payload.schema || {}).columns)
+          ? payload.schema.columns.map(function(column) {
+            return [String(column.key || ""), String(column.label || column.key || "")];
+          }).filter(function(column) { return column[0]; })
+          : FEEDBACKS_COMPLAINTS_TABLE_COLUMNS.slice();
+        complaints.loaded = true;
+      } catch (error) {
+        complaints.error = String(error && error.message ? error.message : error);
+        complaints.loaded = false;
+      } finally {
+        complaints.loading = false;
+        renderFeedbacksComplaintsPanel();
+      }
+    }
+
+    async function syncFeedbacksComplaintsStatuses() {
+      const complaints = state.feedbacks.complaints;
+      if (!WEB_VITRINA_CONFIG.feedbacks_complaints_sync_status_path || complaints.syncing) {
+        return;
+      }
+      complaints.syncing = true;
+      complaints.error = "";
+      renderFeedbacksComplaintsPanel();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.feedbacks_complaints_sync_status_path, {
+          method: "POST",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json; charset=utf-8"
+          },
+          body: JSON.stringify({max_complaint_rows: 80})
+        });
+        const payload = await readJsonResponse(response, "non-json response from complaints status sync route");
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "complaints status sync returned " + response.status);
+        }
+        complaints.lastSyncReport = payload;
+        await loadFeedbacksComplaints();
+      } catch (error) {
+        complaints.error = String(error && error.message ? error.message : error);
+      } finally {
+        complaints.syncing = false;
+        renderFeedbacksComplaintsPanel();
+      }
+    }
+
+    function renderFeedbacksComplaintsPanel() {
+      const complaints = state.feedbacks.complaints || {};
+      if (feedbacksComplaintsReloadButton) {
+        feedbacksComplaintsReloadButton.disabled = Boolean(complaints.loading || complaints.syncing);
+        feedbacksComplaintsReloadButton.textContent = complaints.loading ? "Загрузка…" : "Обновить журнал";
+      }
+      if (feedbacksComplaintsSyncButton) {
+        feedbacksComplaintsSyncButton.disabled = Boolean(complaints.loading || complaints.syncing);
+        feedbacksComplaintsSyncButton.textContent = complaints.syncing ? "Обновляем…" : "Обновить статусы";
+        feedbacksComplaintsSyncButton.title = "Read-only синхронизация из Seller Portal / Мои жалобы";
+      }
+      if (feedbacksComplaintsStatusNode) {
+        const meta = complaints.meta || {};
+        const syncReport = complaints.lastSyncReport || {};
+        if (complaints.syncing) {
+          feedbacksComplaintsStatusNode.textContent = "Читаем Мои жалобы…";
+        } else if (syncReport.finished_at) {
+          feedbacksComplaintsStatusNode.textContent = "Последний sync: " + formatTimestampDisplay(syncReport.finished_at);
+        } else if (complaints.loaded) {
+          feedbacksComplaintsStatusNode.textContent = "Записей: " + formatNumber(Number(meta.record_count || (complaints.rows || []).length || 0), 0, true);
+        } else {
+          feedbacksComplaintsStatusNode.textContent = "Журнал жалоб не загружен";
+        }
+      }
+      if (feedbacksComplaintsErrorNode) {
+        feedbacksComplaintsErrorNode.textContent = complaints.error || "";
+        feedbacksComplaintsErrorNode.classList.toggle("is-error", !!complaints.error);
+      }
+      renderFeedbacksComplaintsSummary();
+      renderFeedbacksComplaintsColumnControls();
+      renderFeedbacksComplaintsResult();
+    }
+
+    function renderFeedbacksComplaintsSummary() {
+      if (!feedbacksComplaintsSummaryNode) {
+        return;
+      }
+      const complaints = state.feedbacks.complaints || {};
+      if (!complaints.loaded || !complaints.summary) {
+        feedbacksComplaintsSummaryNode.innerHTML = "";
+        return;
+      }
+      const summary = complaints.summary || {};
+      const cards = [
+        {label: "Всего", value: Number(summary.total || 0), detail: "runtime-журнал"},
+        {label: "Ждёт ответа", value: Number(summary.waiting_response || 0), detail: "отправлено, решение WB не получено"},
+        {label: "Удовлетворена", value: Number(summary.satisfied || 0), detail: "WB принял жалобу"},
+        {label: "Отклонена", value: Number(summary.rejected || 0), detail: "WB отказал"},
+        {label: "Ошибка", value: Number(summary.error || 0), detail: "техническая ошибка"}
+      ];
+      feedbacksComplaintsSummaryNode.innerHTML = cards.map(function(item) {
+        return [
+          '<article class="summary-card">',
+          '<p class="summary-card-label">' + escapeHtml(item.label) + "</p>",
+          '<p class="summary-card-value">' + escapeHtml(formatNumber(item.value, 0, true)) + "</p>",
+          '<p class="summary-card-detail">' + escapeHtml(item.detail) + "</p>",
+          "</article>"
+        ].join("");
+      }).join("");
+    }
+
+    function feedbacksComplaintsAllColumns() {
+      const columns = (state.feedbacks.complaints.schemaColumns || []).length
+        ? state.feedbacks.complaints.schemaColumns
+        : FEEDBACKS_COMPLAINTS_TABLE_COLUMNS;
+      return columns.filter(function(column) { return column[0]; });
+    }
+
+    function feedbacksComplaintsVisibleColumns() {
+      const visible = new Set(state.feedbacks.complaints.visibleColumnIds || []);
+      FEEDBACKS_COMPLAINTS_MANDATORY_COLUMNS.forEach(function(columnId) { visible.add(columnId); });
+      return feedbacksComplaintsAllColumns().filter(function(column) {
+        return visible.has(column[0]);
+      });
+    }
+
+    function renderFeedbacksComplaintsColumnControls() {
+      if (!feedbacksComplaintsColumnControlsNode) {
+        return;
+      }
+      const allColumns = feedbacksComplaintsAllColumns();
+      const visible = new Set(state.feedbacks.complaints.visibleColumnIds || []);
+      FEEDBACKS_COMPLAINTS_MANDATORY_COLUMNS.forEach(function(columnId) { visible.add(columnId); });
+      feedbacksComplaintsColumnControlsNode.innerHTML = allColumns.map(function(column) {
+        const columnId = column[0];
+        const mandatory = FEEDBACKS_COMPLAINTS_MANDATORY_COLUMNS.indexOf(columnId) !== -1;
+        return [
+          '<label class="column-checkbox">',
+          '<input type="checkbox" data-feedbacks-complaints-column-id="' + escapeHtml(columnId) + '"' + (visible.has(columnId) ? " checked" : "") + (mandatory ? " disabled" : "") + ">",
+          '<span class="column-checkbox-text">' + escapeHtml(column[1] || columnId) + "</span>",
+          '<span class="column-checkbox-meta">' + escapeHtml(columnId) + "</span>",
+          "</label>"
+        ].join("");
+      }).join("");
+      feedbacksComplaintsColumnControlsNode.querySelectorAll("[data-feedbacks-complaints-column-id]").forEach(function(node) {
+        node.addEventListener("change", function() {
+          const columnId = String(node.getAttribute("data-feedbacks-complaints-column-id") || "");
+          if (!columnId || FEEDBACKS_COMPLAINTS_MANDATORY_COLUMNS.indexOf(columnId) !== -1) {
+            return;
+          }
+          const next = new Set(state.feedbacks.complaints.visibleColumnIds || []);
+          if (node.checked) {
+            next.add(columnId);
+          } else {
+            next.delete(columnId);
+          }
+          FEEDBACKS_COMPLAINTS_MANDATORY_COLUMNS.forEach(function(mandatoryId) { next.add(mandatoryId); });
+          state.feedbacks.complaints.visibleColumnIds = Array.from(next).filter(function(id) {
+            return feedbacksComplaintsAllColumns().some(function(column) { return column[0] === id; });
+          });
+          persistFeedbacksComplaintsVisibleColumns();
+          renderFeedbacksComplaintsResult();
+        });
+      });
+    }
+
+    function renderFeedbacksComplaintsResult() {
+      if (!feedbacksComplaintsResultNode) {
+        return;
+      }
+      const complaints = state.feedbacks.complaints || {};
+      if (complaints.loading) {
+        feedbacksComplaintsResultNode.innerHTML = '<p class="research-result-note">Загружаем runtime-журнал жалоб…</p>';
+        return;
+      }
+      if (complaints.error && !complaints.loaded) {
+        feedbacksComplaintsResultNode.innerHTML = '<p class="research-result-note">Журнал жалоб не загружен.</p>';
+        return;
+      }
+      if (!complaints.loaded) {
+        feedbacksComplaintsResultNode.innerHTML = '<p class="research-result-note">Откройте журнал жалоб или обновите статусы.</p>';
+        return;
+      }
+      const rows = Array.isArray(complaints.rows) ? complaints.rows : [];
+      if (!rows.length) {
+        feedbacksComplaintsResultNode.innerHTML = '<p class="research-result-note">Жалобы ещё не записаны в runtime-журнал.</p>';
+        return;
+      }
+      const columns = feedbacksComplaintsVisibleColumns();
+      feedbacksComplaintsResultNode.innerHTML = [
+        '<div class="table-shell feedbacks-table-shell" data-feedbacks-complaints-table-shell data-grid-library="@gravity-ui/table">',
+        '<div class="table-scroll feedbacks-table-scroll" data-feedbacks-complaints-table-scroll>',
+        '<table class="vitrina-table feedbacks-table" data-feedbacks-complaints-table>',
+        '<thead><tr>',
+        columns.map(function(column) { return '<th>' + escapeHtml(column[1] || column[0]) + "</th>"; }).join(""),
+        "</tr></thead><tbody>",
+        rows.map(function(row) {
+          return "<tr>" + columns.map(function(column) {
+            const key = column[0];
+            const value = complaintCellValue(row, key);
+            const isText = ["complaint_text", "review_text", "pros", "cons", "answer_text", "ai_reason", "product_name", "last_error", "wb_decision_text"].includes(key);
+            return '<td' + (isText ? ' class="feedbacks-text-cell"' : "") + ">" + (isText ? '<span class="feedbacks-text-clip">' : "") + escapeHtml(value) + (isText ? "</span>" : "") + "</td>";
+          }).join("") + "</tr>";
+        }).join(""),
+        "</tbody></table></div></div>"
+      ].join("");
+    }
+
+    function complaintCellValue(row, key) {
+      if (!row || typeof row !== "object") {
+        return "—";
+      }
+      const value = row[key];
+      if (value === null || typeof value === "undefined" || value === "") {
+        return "—";
+      }
+      if (key === "match_score") {
+        const score = Number(value);
+        return Number.isFinite(score) ? score.toFixed(3) : String(value);
+      }
+      return String(value);
     }
 
     function renderFeedbacksResult() {

@@ -18,6 +18,8 @@ from apps.sheet_vitrina_v1_web_vitrina_browser_smoke import LocalWebVitrinaFixtu
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH,
     DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH,
+    DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
+    DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH,
     DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH,
     DEFAULT_SHEET_FEEDBACKS_PATH,
     DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
@@ -48,6 +50,8 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
     captured_urls: list[str] = []
     ai_request_batches: list[list[str]] = []
     export_requests: list[dict[str, object]] = []
+    complaints_requests: list[str] = []
+    complaints_sync_requests: list[dict[str, object]] = []
     failed_once: set[str] = set()
     large_feedbacks_mode = False
     prompt_saved = False
@@ -147,11 +151,38 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 body=json.dumps(_ai_payload([row]), ensure_ascii=False),
             )
 
-        context.route("**" + DEFAULT_SHEET_WEB_VITRINA_READ_PATH + "?**", fulfill_web_vitrina_read)
-        context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH, fulfill_prompt)
-        context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH, fulfill_ai_analyze)
-        context.route("**" + DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH, fulfill_export)
+        def fulfill_complaints(route: object) -> None:
+            complaints_requests.append(route.request.url)
+            route.fulfill(
+                status=200,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                body=json.dumps(_complaints_payload(), ensure_ascii=False),
+            )
+
+        def fulfill_complaints_sync(route: object) -> None:
+            payload = json.loads(route.request.post_data or "{}")
+            complaints_sync_requests.append(payload)
+            route.fulfill(
+                status=200,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                body=json.dumps(
+                    {
+                        "contract_name": "seller_portal_feedbacks_complaints_status_sync",
+                        "contract_version": "read_only_v1",
+                        "finished_at": "2026-05-02T05:00:00Z",
+                        "aggregate": {"statuses_updated": 1, "pending_rows_read": 1, "answered_rows_read": 0},
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_PATH + "?**", fulfill_feedbacks)
+        context.route("**" + DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH, fulfill_export)
+        context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH, fulfill_complaints)
+        context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH, fulfill_complaints_sync)
+        context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH, fulfill_ai_analyze)
+        context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH, fulfill_prompt)
+        context.route("**" + DEFAULT_SHEET_WEB_VITRINA_READ_PATH + "?**", fulfill_web_vitrina_read)
         try:
             page.goto(page_url, wait_until="domcontentloaded")
             page.wait_for_selector("[data-unified-tab-button='feedbacks']")
@@ -159,11 +190,38 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             page.wait_for_selector("[data-feedbacks-panel]")
             page.wait_for_selector("[data-feedbacks-subtab='reviews']")
             page.wait_for_selector("[data-feedbacks-subtab='prompt']")
+            page.wait_for_selector("[data-feedbacks-subtab='complaints']")
+            if complaints_sync_requests:
+                raise AssertionError("complaints status sync must not auto-run on page load")
+            page.locator("[data-feedbacks-subtab='complaints']").click()
+            page.wait_for_selector("[data-feedbacks-complaints-table] tbody tr")
+            if not complaints_requests:
+                raise AssertionError("complaints subtab must load runtime journal")
+            complaints_table_text = page.locator("[data-feedbacks-complaints-table]").inner_text()
+            complaints_header_text = page.locator("[data-feedbacks-complaints-table] thead").inner_text()
+            if "Ждёт ответа" not in complaints_table_text:
+                raise AssertionError("complaints table must render waiting response status")
+            for expected in ("Категория WB", "Текст жалобы", "Match status"):
+                if expected not in complaints_header_text:
+                    raise AssertionError(f"complaints table must render {expected!r}; header={complaints_header_text!r}")
+            if page.locator("[data-feedbacks-complaints-column-id='match_score']").count() != 1:
+                raise AssertionError("complaints table must expose column visibility controls")
+            page.locator("[data-feedbacks-complaints-column-manager] summary").click()
+            page.locator("[data-feedbacks-complaints-column-id='match_score']").click()
+            if "Match score" in page.locator("[data-feedbacks-complaints-table] thead").inner_text():
+                raise AssertionError("complaints column visibility must hide optional columns")
+            page.locator("[data-feedbacks-complaints-sync]").click()
+            page.wait_for_function("() => document.querySelector('[data-feedbacks-complaints-status]')?.textContent.includes('Последний sync')")
+            if not complaints_sync_requests:
+                raise AssertionError("complaints status sync button must call the sync route")
+            page.locator("[data-feedbacks-subtab='reviews']").click()
 
             range_toggle = page.locator("[data-feedbacks-range-toggle]")
             range_popover = page.locator("[data-feedbacks-range-popover]")
             range_toggle.click()
             _assert_node_hidden(range_popover, False, "feedbacks range picker must open")
+            if page.locator('[data-feedbacks-range-day="2026-04-25"]').count() != 1:
+                page.locator("[data-feedbacks-range-prev]").click()
             for day in ("2026-04-25", "2026-04-26", "2026-04-27", "2026-04-28", "2026-04-29"):
                 day_button = page.locator(f'[data-feedbacks-range-day="{day}"]')
                 if day_button.count() != 1 or not day_button.is_enabled():
@@ -341,6 +399,8 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "ai_retry_requests": 1,
         "large_queue_blocked": True,
         "ai_filter_works": True,
+        "complaints_tab_visible": True,
+        "complaints_sync_requests": len(complaints_sync_requests),
     }
 
 
@@ -422,6 +482,67 @@ def _ai_payload(rows: list[dict[str, object]]) -> dict[str, object]:
                 "evidence": "фрагмент",
             }
             for feedback_id in feedback_ids
+        ],
+    }
+
+
+def _complaints_payload() -> dict[str, object]:
+    return {
+        "contract_name": "sheet_vitrina_v1_feedbacks_complaints",
+        "contract_version": "v1",
+        "meta": {
+            "record_count": 1,
+            "auto_sync_on_page_load": False,
+            "generated_at": "2026-05-02T04:00:00Z",
+        },
+        "summary": {
+            "total": 1,
+            "waiting_response": 1,
+            "satisfied": 0,
+            "rejected": 0,
+            "error": 0,
+        },
+        "schema": {
+            "columns": [
+                {"key": "complaint_status_label", "label": "Статус жалобы"},
+                {"key": "wb_category_label", "label": "Категория WB"},
+                {"key": "complaint_text", "label": "Текст жалобы"},
+                {"key": "submitted_at", "label": "Дата подачи"},
+                {"key": "review_created_at", "label": "Дата отзыва"},
+                {"key": "rating", "label": "Оценка"},
+                {"key": "nm_id", "label": "nmId"},
+                {"key": "supplier_article", "label": "Артикул"},
+                {"key": "product_name", "label": "Товар"},
+                {"key": "review_text", "label": "Текст отзыва"},
+                {"key": "ai_complaint_fit_label", "label": "Подходит для жалобы"},
+                {"key": "ai_category_label", "label": "Категория AI"},
+                {"key": "ai_reason", "label": "Причина AI / текст ситуации"},
+                {"key": "feedback_id", "label": "ID отзыва"},
+                {"key": "match_status", "label": "Match status"},
+                {"key": "match_score", "label": "Match score"},
+                {"key": "last_error", "label": "Ошибка"},
+            ]
+        },
+        "rows": [
+            {
+                "complaint_status_label": "Ждёт ответа",
+                "wb_category_label": "Другое",
+                "complaint_text": "Просим проверить отзыв: тестовое описание.",
+                "submitted_at": "2026-05-02T04:00:00Z",
+                "review_created_at": "2026-05-01T12:00:00Z",
+                "rating": "1",
+                "nm_id": "123456",
+                "supplier_article": "ART-1",
+                "product_name": "Товар",
+                "review_text": "Текст отзыва",
+                "ai_complaint_fit_label": "Да",
+                "ai_category_label": "Другое",
+                "ai_reason": "Просим проверить отзыв: тестовое описание.",
+                "feedback_id": "complaint-feedback-1",
+                "match_status": "exact",
+                "match_score": "1.0",
+                "last_error": "",
+            }
         ],
     }
 
