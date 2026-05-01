@@ -670,14 +670,17 @@ def parse_complaint_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     attrs = _safe_mapping(candidate.get("attrs") if isinstance(candidate.get("attrs"), dict) else {})
     decision = _guess_decision(text)
     review_text = _field_after_label(text, ("Отзыв",)) or _guess_review_text(text)
+    complaint_reason = _field_after_label(text, ("Причина",)) or _guess_complaint_category(text)
+    complaint_description = _field_after_label(text, ("Описание",)) or _guess_complaint_description(text, complaint_reason)
+    supplier_article = _guess_supplier_article(text, []) or _guess_art_line(text)
     return {
         "dom_scout_id": str(candidate.get("dom_scout_id") or ""),
         "product_title": _guess_product_title(text),
-        "supplier_article": _guess_article(text, label_re=r"артикул\s*продавца"),
+        "supplier_article": supplier_article,
         "wb_article": _guess_article(text, label_re=r"артикул\s*(?:wb|вб)?"),
         "nm_id": _guess_article(text, label_re=r"(?:nm\s*id|nmid|артикул\s*(?:wb|вб)?)"),
-        "complaint_reason": _field_after_label(text, ("Причина",)),
-        "complaint_description": _field_after_label(text, ("Описание",)),
+        "complaint_reason": complaint_reason,
+        "complaint_description": complaint_description,
         "review_text_snippet": review_text,
         "review_rating": _guess_rating(text),
         "review_date": _guess_date(text),
@@ -1707,6 +1710,70 @@ def _guess_supplier_article(text: str, buttons: Iterable[str]) -> str:
             return label
     labeled = _field_after_label(text, ("Артикул продавца", "Артикул поставщика", "Артикул"))
     return labeled
+
+
+def _guess_art_line(text: str) -> str:
+    for line in _safe_lines(text, 80):
+        match = re.match(r"^\s*Арт\.?\s*:\s*(.+?)\s*$", line, re.IGNORECASE)
+        if match:
+            return _safe_text(match.group(1), 120)
+    match = re.search(r"\bАрт\.?\s*:\s*(.+?)(?=\s+(?:" + "|".join(re.escape(label) for label in EXPECTED_COMPLAINT_CATEGORIES) + r")\b|$)", text, re.IGNORECASE)
+    if match:
+        return _safe_text(match.group(1), 120)
+    return ""
+
+
+def _guess_complaint_category(text: str) -> str:
+    normalized_expected = {_norm_text(label).lower(): label for label in EXPECTED_COMPLAINT_CATEGORIES}
+    for line in _safe_lines(text, 80):
+        normalized = _norm_text(line).lower()
+        if normalized in normalized_expected:
+            return normalized_expected[normalized]
+    normalized_text = _norm_text(text).lower()
+    for normalized, label in normalized_expected.items():
+        if normalized in normalized_text:
+            return label
+    return ""
+
+
+def _guess_complaint_description(text: str, category: str = "") -> str:
+    lines = _safe_lines(text, 80)
+    category_norm = _norm_text(category).lower()
+    for index, line in enumerate(lines):
+        if category_norm and _norm_text(line).lower() != category_norm:
+            continue
+        for candidate in lines[index + 1 : index + 4]:
+            if _line_is_complaint_metadata(candidate):
+                continue
+            return _safe_text(candidate, SAFE_TEXT_LIMIT)
+    if category_norm:
+        normalized = _norm_text(text)
+        lower = normalized.lower()
+        pos = lower.find(category_norm)
+        if pos >= 0:
+            candidate = normalized[pos + len(category_norm) :].strip()
+            candidate = DATE_TIME_RE.sub("", candidate)
+            candidate = DATE_RE.sub("", candidate)
+            candidate = _norm_text(candidate)
+            if candidate and not _line_is_complaint_metadata(candidate):
+                return _safe_text(candidate, SAFE_TEXT_LIMIT)
+    return ""
+
+
+def _line_is_complaint_metadata(line: str) -> bool:
+    normalized = _norm_text(line)
+    lower = normalized.lower()
+    if not normalized:
+        return True
+    if DATE_TIME_RE.search(normalized) or DATE_RE.fullmatch(normalized):
+        return True
+    if lower in {"одобрена", "удовлетворена", "отклонена", "ждет ответа", "ждёт ответа"}:
+        return True
+    if lower.startswith("арт:") or lower.startswith("арт.:") or lower.startswith("артикул"):
+        return True
+    if any(_norm_text(label).lower() == lower for label in EXPECTED_COMPLAINT_CATEGORIES):
+        return True
+    return False
 
 
 def _guess_wb_article(text: str, *, buttons: Iterable[str], links: Iterable[str]) -> str:
