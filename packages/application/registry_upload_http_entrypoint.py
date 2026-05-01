@@ -22,6 +22,7 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.sheet_vitrina_v1_daily_report import SheetVitrinaV1DailyReportBlock
 from packages.application.sheet_vitrina_v1_feedbacks import SheetVitrinaV1FeedbacksBlock
 from packages.application.sheet_vitrina_v1_feedbacks_ai import SheetVitrinaV1FeedbacksAiBlock
+from packages.application.sheet_vitrina_v1_feedbacks_complaints import SheetVitrinaV1FeedbacksComplaintsBlock
 from packages.application.sheet_vitrina_v1_load_bridge import (
     LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE,
     LegacyGoogleSheetsContourArchivedError,
@@ -492,6 +493,7 @@ class RegistryUploadHttpEntrypoint:
         seller_portal_recovery_controller: SellerPortalRecoveryController | None = None,
         feedbacks_block: SheetVitrinaV1FeedbacksBlock | None = None,
         feedbacks_ai_block: SheetVitrinaV1FeedbacksAiBlock | None = None,
+        feedbacks_complaints_block: SheetVitrinaV1FeedbacksComplaintsBlock | None = None,
         promo_artifact_gc_runner: PromoArtifactGcRunner | None = None,
     ) -> None:
         self.runtime = runtime or RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
@@ -527,6 +529,10 @@ class RegistryUploadHttpEntrypoint:
         )
         self.feedbacks_block = feedbacks_block or SheetVitrinaV1FeedbacksBlock(now_factory=self.now_factory)
         self.feedbacks_ai_block = feedbacks_ai_block or SheetVitrinaV1FeedbacksAiBlock(
+            runtime_dir=self.runtime.runtime_dir,
+            now_factory=self.now_factory,
+        )
+        self.feedbacks_complaints_block = feedbacks_complaints_block or SheetVitrinaV1FeedbacksComplaintsBlock(
             runtime_dir=self.runtime.runtime_dir,
             now_factory=self.now_factory,
         )
@@ -831,6 +837,12 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_sheet_feedbacks_ai_analyze_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self.feedbacks_ai_block.analyze(payload)
+
+    def handle_sheet_feedbacks_complaints_request(self) -> dict[str, Any]:
+        return self.feedbacks_complaints_block.build_table()
+
+    def handle_sheet_feedbacks_complaints_sync_status_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.feedbacks_complaints_block.sync_status(payload)
 
     def handle_sheet_refresh_request(
         self,
