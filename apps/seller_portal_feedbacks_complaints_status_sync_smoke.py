@@ -21,6 +21,7 @@ def main() -> None:
         journal.create_or_update(_record("pending-feedback", "Текст pending", "Другое"))
         journal.create_or_update(_record("approved-feedback", "Текст approved", "Другое", last_error="submit success not confirmed"))
         journal.create_or_update(_record("rejected-feedback", "Текст rejected", "Другое"))
+        journal.create_or_update(_record("direct-feedback", "Direct text", "Другое"))
         journal.create_or_update(
             _record(
                 "pros-only-feedback",
@@ -48,6 +49,7 @@ def main() -> None:
                 "rows": [
                     _row("Текст approved", "Другое", decision="approved", status="answered"),
                     _row("Текст rejected", "Другое", decision="rejected", status="answered"),
+                    _row("unrelated visible text", "Другое", decision="approved", status="answered", hidden_feedback_id="direct-feedback"),
                     _row("unmatched", "Другое", decision="approved", status="answered"),
                     _row("чужой отзыв", "Другое", decision="rejected", status="answered", description="другое описание"),
                     _row(
@@ -71,13 +73,17 @@ def main() -> None:
             raise AssertionError(f"resolved status sync must clear stale last_error: {approved}")
         if statuses["rejected-feedback"] != "rejected":
             raise AssertionError(f"rejected answered row must become rejected: {statuses}")
+        if statuses["direct-feedback"] != "satisfied":
+            raise AssertionError(f"direct feedback_id row must override text mismatch: {statuses}")
         if statuses["pros-only-feedback"] != "satisfied":
             raise AssertionError(f"pros/cons fallback must match the right answered row once: {statuses}")
         if report["aggregate"]["unmatched_rows"] != 2:
             raise AssertionError(f"unmatched row must be reported: {report}")
         if report["aggregate"]["duplicate_row_matches_skipped"] != 1:
             raise AssertionError(f"duplicate pending/answered match must be skipped: {report}")
-        if report["aggregate"]["statuses_updated"] != 4:
+        if report["aggregate"]["weak_matches_rejected"] < 1:
+            raise AssertionError(f"weak status-sync matches must be diagnosed but rejected: {report}")
+        if report["aggregate"]["statuses_updated"] != 5:
             raise AssertionError(f"each local complaint may update at most once: {report}")
     print("seller_portal_feedbacks_complaints_status_sync_smoke: OK")
 
@@ -110,6 +116,7 @@ def _row(
     decision: str,
     status: str,
     description: str = "Просим проверить отзыв: тест.",
+    hidden_feedback_id: str = "",
 ) -> dict[str, object]:
     return {
         "review_text_snippet": text,
@@ -119,7 +126,7 @@ def _row(
         "decision_label": decision,
         "displayed_status": status,
         "wb_response_snippet": decision,
-        "hidden_ids": {},
+        "hidden_ids": {"feedback_id": hidden_feedback_id} if hidden_feedback_id else {},
     }
 
 

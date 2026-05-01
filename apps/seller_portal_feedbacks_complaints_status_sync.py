@@ -179,12 +179,15 @@ def _apply_status_updates(
     updates: list[dict[str, Any]] = []
     best_matches: dict[str, dict[str, Any]] = {}
     matched_candidate_count = 0
+    weak_matches_rejected = 0
     unmatched = 0
     for row, status in [(row, "waiting_response") for row in pending_rows] + [
         (row, _status_from_answered_row(row)) for row in answered_rows
     ]:
         candidate = _match_complaint_row_to_record(row, records)
         if not candidate:
+            if _weak_complaint_row_to_record(row, records):
+                weak_matches_rejected += 1
             unmatched += 1
             continue
         match = candidate["record"]
@@ -228,7 +231,9 @@ def _apply_status_updates(
     report["aggregate"]["statuses_updated"] = len(updates)
     report["aggregate"]["unmatched_rows"] = unmatched
     report["aggregate"]["duplicate_row_matches_skipped"] = duplicate_matches_skipped
+    report["aggregate"]["weak_matches_rejected"] = weak_matches_rejected
     report["aggregate"]["updated_status_counts"] = dict(Counter(str(item.get("status") or "unknown") for item in updates))
+    report["aggregate"]["match_reason_counts"] = dict(Counter(str(item.get("match_reason") or "unknown") for item in updates))
 
 
 def _match_complaint_row_to_record(row: Mapping[str, Any], records: list[Mapping[str, Any]]) -> dict[str, Any] | None:
@@ -272,6 +277,27 @@ def _match_complaint_row_to_record(row: Mapping[str, Any], records: list[Mapping
         if best is None or int(candidate["score"]) > int(best["score"]):
             best = candidate
     return best
+
+
+def _weak_complaint_row_to_record(row: Mapping[str, Any], records: list[Mapping[str, Any]]) -> bool:
+    row_text = _norm(row.get("review_text_snippet"))
+    row_product = _norm(row.get("product_title"))
+    row_category = _norm(row.get("complaint_reason"))
+    row_description = _norm(row.get("complaint_description"))
+    for record in records:
+        record_text = _record_review_text(record)
+        record_product = _norm(record.get("product_name"))
+        record_category = _norm(record.get("wb_category_label"))
+        record_description = _norm(record.get("complaint_text"))
+        weak_text = row_text and record_text and (row_text in record_text or record_text in row_text)
+        weak_product = row_product and record_product and (row_product[:16] in record_product or record_product[:16] in row_product)
+        weak_category = row_category and record_category and row_category == record_category
+        weak_description = row_description and record_description and (
+            row_description[:24] in record_description or record_description[:24] in row_description
+        )
+        if weak_text or weak_description or (weak_product and weak_category):
+            return True
+    return False
 
 
 def _sync_match_rank(item: Mapping[str, Any]) -> tuple[int, int]:

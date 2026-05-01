@@ -129,6 +129,7 @@ class JsonFileFeedbacksComplaintJournal:
         raw_status_text: str = "",
         wb_decision_text: str = "",
         status_sync_run_id: str = "",
+        last_error: str | None = None,
         checked_at: str | None = None,
     ) -> dict[str, Any] | None:
         normalized_id = str(feedback_id or "").strip()
@@ -153,6 +154,8 @@ class JsonFileFeedbacksComplaintJournal:
                 )
                 if normalized_status != "error":
                     updated["last_error"] = ""
+                elif last_error is not None:
+                    updated["last_error"] = _safe_text(last_error, 800)
                 if status_sync_run_id:
                     updated["status_sync_run_id"] = status_sync_run_id
                 records[index] = _normalize_record(updated)
