@@ -6,7 +6,7 @@
 
 Новый контур проектируется как параллельный experimental/night-run contour. Он не заменяет текущий ChatGPT Project workflow, не становится source of truth и не получает права выполнять unfrozen discussion как задачу.
 
-MVP-0 этого контура - только docs/ADR. В этом шаге нет runtime code, API endpoints, UI implementation, Codex runner, deploy или live/public mutation.
+Current MVP-0 checkpoint materializes only a repo-only contract skeleton: data contracts, deterministic validation, bounded Codex prompt generation and local smoke. В этом checkpoint нет runtime service, API endpoints, UI implementation, Codex runner, deploy или live/public mutation.
 
 ## Current Norm
 
@@ -212,7 +212,7 @@ Verifier независимо проверяет результат. Handoff Cod
 
 ### task_spec
 
-Минимальные поля: `id`, `version`, `hash`, `status`, `goal`, `scope`, `not_in_scope`, `class`, `risks`, `acceptance_criteria`, `required_smokes`, `allowed_paths`, `forbidden_paths`, `allowed_actions`, `forbidden_actions`, `human_gates`, `context_snapshot_id`.
+Минимальные fields for the repo-only MVP-0 skeleton: `id`, `version`, `status`, `title`, `goal`, `scope`, `not_in_scope`, `task_class`, `class_reason`, `risks`, `acceptance_criteria`, `required_smokes`, `allowed_paths`, `forbidden_paths`, `allowed_actions`, `forbidden_actions`, `human_gates`, `frozen_at`, `spec_hash`, `explicit_policy_note`.
 
 ### sprint_plan
 
@@ -220,7 +220,7 @@ Verifier независимо проверяет результат. Handoff Cod
 
 ### sprint_step
 
-Минимальные поля: `id`, `sprint_plan_id`, `sequence`, `class`, `goal`, `scope`, `acceptance`, `smokes`, `stop_conditions`, `codex_prompt`, `policy_profile`.
+Минимальные fields for the repo-only MVP-0 skeleton: `id`, `sequence`, `title`, `goal`, `task_class`, `scope`, `acceptance_criteria`, `required_smokes`, `stop_conditions`.
 
 ### run
 
@@ -311,14 +311,18 @@ The cockpit must report exact state:
 - `human_gate_required`: workflow stopped on one manual decision/action.
 - `live_complete`: future/gated only; never default in MVP-0/MVP-1.
 
-For MVP-0 target completion is `repo-prepared / docs-only`.
+For the ADR-only step MVP-0 target completion was `repo-prepared / docs-only`. Current MVP-0 skeleton completion is `repo-prepared / repo-only`: contract code and local smoke may exist, but execution runner, runtime service, UI, API endpoints and live/deploy lanes remain out of scope.
 
 ## MVP Boundaries
 
 ### MVP-0
 
-- docs/ADR only;
-- no code;
+- repo-only contract skeleton only;
+- data contracts for frozen task spec, sprint plan and sprint step;
+- deterministic policy validation;
+- bounded Codex prompt builder;
+- targeted local smoke;
+- no runtime/production code;
 - no execution;
 - no Codex runner;
 - no UI implementation;
