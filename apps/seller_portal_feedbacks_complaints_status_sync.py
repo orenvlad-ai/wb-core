@@ -202,6 +202,7 @@ def _apply_status_updates(
             "row": row,
             "match_reason": candidate["reason"],
             "match_score": candidate["score"],
+            "match_kind": candidate.get("kind") or "unknown",
         }
         previous = best_matches.get(feedback_id)
         if previous is None or _sync_match_rank(current) > _sync_match_rank(previous):
@@ -234,27 +235,40 @@ def _apply_status_updates(
     report["aggregate"]["weak_matches_rejected"] = weak_matches_rejected
     report["aggregate"]["updated_status_counts"] = dict(Counter(str(item.get("status") or "unknown") for item in updates))
     report["aggregate"]["match_reason_counts"] = dict(Counter(str(item.get("match_reason") or "unknown") for item in updates))
+    report["aggregate"]["direct_matches"] = sum(1 for item in best_matches.values() if item.get("match_kind") == "direct_id")
+    report["aggregate"]["strong_composite_matches"] = sum(
+        1 for item in best_matches.values() if item.get("match_kind") == "strong_composite"
+    )
 
 
 def _match_complaint_row_to_record(row: Mapping[str, Any], records: list[Mapping[str, Any]]) -> dict[str, Any] | None:
     hidden_ids = row.get("hidden_ids") if isinstance(row.get("hidden_ids"), Mapping) else {}
-    feedback_id = str(hidden_ids.get("feedback_id") or "").strip()
+    feedback_id = str(
+        hidden_ids.get("feedback_id")
+        or row.get("feedback_id")
+        or row.get("seller_portal_feedback_id")
+        or row.get("review_id")
+        or ""
+    ).strip()
     if feedback_id:
         for record in records:
             if str(record.get("feedback_id") or "").strip() == feedback_id:
-                return {"record": record, "reason": "feedback_id", "score": 100}
+                return {"record": record, "reason": "feedback_id", "score": 100, "kind": "direct_id"}
     row_text = _norm(row.get("review_text_snippet"))
     row_product = _norm(row.get("product_title"))
+    row_article = _norm(row.get("supplier_article") or row.get("nm_id") or row.get("wb_article"))
     row_category = _norm(row.get("complaint_reason"))
     row_description = _norm(row.get("complaint_description"))
     best: dict[str, Any] | None = None
     for record in records:
         record_text = _record_review_text(record)
         record_product = _norm(record.get("product_name"))
+        record_article = _norm(record.get("supplier_article") or record.get("nm_id"))
         record_category = _norm(record.get("wb_category_label"))
         record_description = _norm(record.get("complaint_text"))
         text_ok = _strong_text_match(row_text, record_text)
         product_ok = _strong_text_match(row_product, record_product, min_chars=12)
+        article_ok = bool(row_article and record_article and (row_article == record_article or row_article in record_article or record_article in row_article))
         category_ok = bool(row_category and record_category and row_category == record_category)
         description_ok = _strong_text_match(row_description, record_description, min_chars=18)
         score = 0
@@ -268,12 +282,19 @@ def _match_complaint_row_to_record(row: Mapping[str, Any], records: list[Mapping
         if product_ok:
             score += 15
             reasons.append("product")
+        if article_ok:
+            score += 20
+            reasons.append("article")
         if category_ok:
             score += 10
             reasons.append("category")
-        if score < 55 or not text_ok and not description_ok:
+        strong = bool(
+            (description_ok and (product_ok or article_ok) and category_ok and (text_ok or article_ok))
+            or (text_ok and (product_ok or article_ok) and (category_ok or description_ok))
+        )
+        if score < 65 or not strong:
             continue
-        candidate = {"record": record, "reason": "+".join(reasons), "score": score}
+        candidate = {"record": record, "reason": "+".join(reasons), "score": score, "kind": "strong_composite"}
         if best is None or int(candidate["score"]) > int(best["score"]):
             best = candidate
     return best

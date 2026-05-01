@@ -85,6 +85,10 @@ def main() -> None:
             raise AssertionError(f"weak status-sync matches must be diagnosed but rejected: {report}")
         if report["aggregate"]["statuses_updated"] != 5:
             raise AssertionError(f"each local complaint may update at most once: {report}")
+        if report["aggregate"]["direct_matches"] != 1:
+            raise AssertionError(f"direct feedback_id sync matches must be counted: {report}")
+        if report["aggregate"]["strong_composite_matches"] != 4:
+            raise AssertionError(f"strong composite sync matches must be counted: {report}")
     print("seller_portal_feedbacks_complaints_status_sync_smoke: OK")
 
 
@@ -104,7 +108,7 @@ def _record(
         "complaint_text": complaint_text,
         "review_text": text,
         "pros": pros,
-        "product_name": "Товар",
+        "product_name": "Защитное стекло антишпион на iPhone 17 Pro Max",
         "last_error": last_error,
     }
 
@@ -120,7 +124,7 @@ def _row(
 ) -> dict[str, object]:
     return {
         "review_text_snippet": text,
-        "product_title": "Товар",
+        "product_title": "Защитное стекло антишпион на iPhone 17 Pro Max",
         "complaint_reason": category,
         "complaint_description": description,
         "decision_label": decision,
