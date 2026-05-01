@@ -21,14 +21,42 @@ def main() -> None:
         journal.create_or_update(_record("pending-feedback", "Текст pending", "Другое"))
         journal.create_or_update(_record("approved-feedback", "Текст approved", "Другое"))
         journal.create_or_update(_record("rejected-feedback", "Текст rejected", "Другое"))
+        journal.create_or_update(
+            _record(
+                "pros-only-feedback",
+                "",
+                "Другое",
+                pros="Коробка была вскрыта",
+                complaint_text="Отзыв касается вскрытой коробки.",
+            )
+        )
         report = {"aggregate": {}, "updates": []}
         rows = {
-            "pending": {"rows": [_row("Текст pending", "Другое", decision="", status="pending")]},
+            "pending": {
+                "rows": [
+                    _row("Текст pending", "Другое", decision="", status="pending"),
+                    _row(
+                        "Коробка была вскрыта",
+                        "Другое",
+                        decision="",
+                        status="pending",
+                        description="Отзыв касается вскрытой коробки.",
+                    ),
+                ]
+            },
             "answered": {
                 "rows": [
                     _row("Текст approved", "Другое", decision="approved", status="answered"),
                     _row("Текст rejected", "Другое", decision="rejected", status="answered"),
                     _row("unmatched", "Другое", decision="approved", status="answered"),
+                    _row("чужой отзыв", "Другое", decision="rejected", status="answered", description="другое описание"),
+                    _row(
+                        "Коробка была вскрыта",
+                        "Другое",
+                        decision="approved",
+                        status="answered",
+                        description="Отзыв касается вскрытой коробки.",
+                    ),
                 ]
             },
         }
@@ -40,28 +68,49 @@ def main() -> None:
             raise AssertionError(f"approved answered row must become satisfied: {statuses}")
         if statuses["rejected-feedback"] != "rejected":
             raise AssertionError(f"rejected answered row must become rejected: {statuses}")
-        if report["aggregate"]["unmatched_rows"] != 1:
+        if statuses["pros-only-feedback"] != "satisfied":
+            raise AssertionError(f"pros/cons fallback must match the right answered row once: {statuses}")
+        if report["aggregate"]["unmatched_rows"] != 2:
             raise AssertionError(f"unmatched row must be reported: {report}")
+        if report["aggregate"]["duplicate_row_matches_skipped"] != 1:
+            raise AssertionError(f"duplicate pending/answered match must be skipped: {report}")
+        if report["aggregate"]["statuses_updated"] != 4:
+            raise AssertionError(f"each local complaint may update at most once: {report}")
     print("seller_portal_feedbacks_complaints_status_sync_smoke: OK")
 
 
-def _record(feedback_id: str, text: str, category: str) -> dict[str, object]:
+def _record(
+    feedback_id: str,
+    text: str,
+    category: str,
+    *,
+    pros: str = "",
+    complaint_text: str = "Просим проверить отзыв: тест.",
+) -> dict[str, object]:
     return {
         "feedback_id": feedback_id,
         "complaint_status": "waiting_response",
         "wb_category_label": category,
-        "complaint_text": "Просим проверить отзыв: тест.",
+        "complaint_text": complaint_text,
         "review_text": text,
+        "pros": pros,
         "product_name": "Товар",
     }
 
 
-def _row(text: str, category: str, *, decision: str, status: str) -> dict[str, object]:
+def _row(
+    text: str,
+    category: str,
+    *,
+    decision: str,
+    status: str,
+    description: str = "Просим проверить отзыв: тест.",
+) -> dict[str, object]:
     return {
         "review_text_snippet": text,
         "product_title": "Товар",
         "complaint_reason": category,
-        "complaint_description": "Просим проверить отзыв: тест.",
+        "complaint_description": description,
         "decision_label": decision,
         "displayed_status": status,
         "wb_response_snippet": decision,
