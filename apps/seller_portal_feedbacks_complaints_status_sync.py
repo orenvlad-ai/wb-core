@@ -177,21 +177,38 @@ def _apply_status_updates(
     report["aggregate"]["pending_rows_read"] = len(pending_rows)
     report["aggregate"]["answered_rows_read"] = len(answered_rows)
     updates: list[dict[str, Any]] = []
+    best_matches: dict[str, dict[str, Any]] = {}
+    matched_candidate_count = 0
     unmatched = 0
     for row, status in [(row, "waiting_response") for row in pending_rows] + [
         (row, _status_from_answered_row(row)) for row in answered_rows
     ]:
-        match = _match_complaint_row_to_record(row, records)
-        if not match:
+        candidate = _match_complaint_row_to_record(row, records)
+        if not candidate:
             unmatched += 1
             continue
+        match = candidate["record"]
         feedback_id = str(match.get("feedback_id") or "")
         if feedback_id not in local_by_id:
             unmatched += 1
             continue
+        matched_candidate_count += 1
+        current = {
+            "feedback_id": feedback_id,
+            "status": status,
+            "row": row,
+            "match_reason": candidate["reason"],
+            "match_score": candidate["score"],
+        }
+        previous = best_matches.get(feedback_id)
+        if previous is None or _sync_match_rank(current) > _sync_match_rank(previous):
+            best_matches[feedback_id] = current
+    duplicate_matches_skipped = max(0, matched_candidate_count - len(best_matches))
+    for feedback_id, item in best_matches.items():
+        row = item["row"]
         updated = journal.update_status(
             feedback_id,
-            status=status,
+            status=str(item.get("status") or "waiting_response"),
             raw_status_text=str(row.get("displayed_status") or row.get("decision_label") or ""),
             wb_decision_text=str(row.get("wb_response_snippet") or row.get("decision_label") or ""),
             status_sync_run_id=run_id,
@@ -202,42 +219,82 @@ def _apply_status_updates(
                     "feedback_id": feedback_id,
                     "status": updated.get("complaint_status"),
                     "status_label": updated.get("complaint_status_label"),
-                    "match_reason": _match_reason(row, match),
+                    "match_reason": item.get("match_reason"),
+                    "match_score": item.get("match_score"),
                 }
             )
     report["updates"] = updates
     report["aggregate"]["matched_local_complaints"] = len(updates)
     report["aggregate"]["statuses_updated"] = len(updates)
     report["aggregate"]["unmatched_rows"] = unmatched
+    report["aggregate"]["duplicate_row_matches_skipped"] = duplicate_matches_skipped
     report["aggregate"]["updated_status_counts"] = dict(Counter(str(item.get("status") or "unknown") for item in updates))
 
 
-def _match_complaint_row_to_record(row: Mapping[str, Any], records: list[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+def _match_complaint_row_to_record(row: Mapping[str, Any], records: list[Mapping[str, Any]]) -> dict[str, Any] | None:
     hidden_ids = row.get("hidden_ids") if isinstance(row.get("hidden_ids"), Mapping) else {}
     feedback_id = str(hidden_ids.get("feedback_id") or "").strip()
     if feedback_id:
         for record in records:
             if str(record.get("feedback_id") or "").strip() == feedback_id:
-                return record
+                return {"record": record, "reason": "feedback_id", "score": 100}
     row_text = _norm(row.get("review_text_snippet"))
     row_product = _norm(row.get("product_title"))
     row_category = _norm(row.get("complaint_reason"))
     row_description = _norm(row.get("complaint_description"))
+    best: dict[str, Any] | None = None
     for record in records:
-        text_ok = row_text and (row_text in _norm(record.get("review_text")) or _norm(record.get("review_text")) in row_text)
-        product_ok = row_product and (row_product[:40] in _norm(record.get("product_name")) or _norm(record.get("product_name"))[:40] in row_product)
-        category_ok = row_category and row_category == _norm(record.get("wb_category_label"))
-        description_ok = row_description and (row_description[:80] in _norm(record.get("complaint_text")) or _norm(record.get("complaint_text"))[:80] in row_description)
-        if text_ok and (category_ok or description_ok or product_ok):
-            return record
-    return None
+        record_text = _record_review_text(record)
+        record_product = _norm(record.get("product_name"))
+        record_category = _norm(record.get("wb_category_label"))
+        record_description = _norm(record.get("complaint_text"))
+        text_ok = _strong_text_match(row_text, record_text)
+        product_ok = _strong_text_match(row_product, record_product, min_chars=12)
+        category_ok = bool(row_category and record_category and row_category == record_category)
+        description_ok = _strong_text_match(row_description, record_description, min_chars=18)
+        score = 0
+        reasons: list[str] = []
+        if text_ok:
+            score += 45
+            reasons.append("review_text")
+        if description_ok:
+            score += 35
+            reasons.append("complaint_text")
+        if product_ok:
+            score += 15
+            reasons.append("product")
+        if category_ok:
+            score += 10
+            reasons.append("category")
+        if score < 55 or not text_ok and not description_ok:
+            continue
+        candidate = {"record": record, "reason": "+".join(reasons), "score": score}
+        if best is None or int(candidate["score"]) > int(best["score"]):
+            best = candidate
+    return best
 
 
-def _match_reason(row: Mapping[str, Any], record: Mapping[str, Any]) -> str:
-    hidden_ids = row.get("hidden_ids") if isinstance(row.get("hidden_ids"), Mapping) else {}
-    if hidden_ids.get("feedback_id") and hidden_ids.get("feedback_id") == record.get("feedback_id"):
-        return "feedback_id"
-    return "review_text_plus_category_or_product"
+def _sync_match_rank(item: Mapping[str, Any]) -> tuple[int, int]:
+    status = str(item.get("status") or "")
+    final_status_rank = 2 if status in {"satisfied", "rejected"} else 1
+    return (final_status_rank, int(item.get("match_score") or 0))
+
+
+def _record_review_text(record: Mapping[str, Any]) -> str:
+    chunks = [
+        _norm(record.get("review_text")),
+        _norm(record.get("pros")),
+        _norm(record.get("cons")),
+    ]
+    return " ".join(chunk for chunk in chunks if chunk)
+
+
+def _strong_text_match(left: str, right: str, *, min_chars: int = 8) -> bool:
+    left = _norm(left)
+    right = _norm(right)
+    if len(left) < min_chars or len(right) < min_chars:
+        return False
+    return left in right or right in left
 
 
 def _status_from_answered_row(row: Mapping[str, Any]) -> str:
