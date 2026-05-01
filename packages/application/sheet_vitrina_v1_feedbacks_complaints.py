@@ -151,6 +151,8 @@ class JsonFileFeedbacksComplaintJournal:
                         "wb_decision_text": _safe_text(wb_decision_text, 600),
                     }
                 )
+                if normalized_status != "error":
+                    updated["last_error"] = ""
                 if status_sync_run_id:
                     updated["status_sync_run_id"] = status_sync_run_id
                 records[index] = _normalize_record(updated)
