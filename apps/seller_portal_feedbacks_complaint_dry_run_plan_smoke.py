@@ -123,6 +123,10 @@ def _assert_category_other_fallback() -> None:
     categories = ["Спам-реклама в тексте", "Другое", "Нецензурная лексика"]
     if choose_complaint_category(categories, force_other=True) != "Другое":
         raise AssertionError("force_category_other must select Другое when available")
+    if choose_complaint_category(categories, force_other=False, preferred_category="Нецензурная лексика") != "Нецензурная лексика":
+        raise AssertionError("AI category_label must be selected when force_category_other is disabled and label exists")
+    if choose_complaint_category(categories, force_other=False, preferred_category="Фото или видео не имеет отношения к товару") != "Другое":
+        raise AssertionError("unavailable AI category_label must fall back to Другое")
     if choose_complaint_category(["Спам-реклама в тексте"], force_other=True):
         raise AssertionError("missing Другое must not choose a weak fallback")
 
@@ -130,14 +134,12 @@ def _assert_category_other_fallback() -> None:
 def _assert_draft_text_builder() -> None:
     draft = build_draft_text(
         {
-            "reason": "есть формальное основание",
+            "reason": "Просим проверить отзыв: покупатель описывает получение заказа, а не свойства товара.",
             "evidence": "фрагмент доказательства",
         }
     )
-    if not draft.startswith("Просим проверить отзыв. Основание:"):
-        raise AssertionError(f"draft must be formal: {draft}")
-    if "фрагмент доказательства" not in draft or len(draft) > 500:
-        raise AssertionError(f"draft must include short evidence and stay bounded: {draft}")
+    if draft != "Просим проверить отзыв: покупатель описывает получение заказа, а не свойства товара.":
+        raise AssertionError(f"draft must use AI reason as ready WB description without prefix duplication: {draft}")
     long = build_draft_text({"reason": "а" * 1000, "evidence": "б" * 1000})
     if len(long) > 500:
         raise AssertionError("draft text must be bounded")
@@ -229,9 +231,9 @@ def _ai(feedback_id: str, fit: str) -> dict[str, str]:
         "feedback_id": feedback_id,
         "complaint_fit": fit,
         "complaint_fit_label": {"yes": "Да", "review": "Проверить", "no": "Нет"}.get(fit, ""),
-        "category": "other",
-        "category_label": "Другое",
-        "reason": "короткая причина",
+        "category": "not_about_product",
+        "category_label": "Отзыв не относится к товару",
+        "reason": "Просим проверить отзыв: покупатель описывает получение заказа, а не свойства товара.",
         "confidence": "medium",
         "confidence_label": "Средняя",
         "evidence": "короткий фрагмент",

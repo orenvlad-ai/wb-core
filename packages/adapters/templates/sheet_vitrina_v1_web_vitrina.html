@@ -2366,6 +2366,19 @@
     const FEEDBACKS_UNIFIED_TAB = "feedbacks";
     const FEEDBACKS_AI_MAX_QUEUE_ROWS = 25;
     const FEEDBACKS_MAX_RANGE_DAYS = 62;
+    const FEEDBACKS_WB_CATEGORY_LABELS = {
+      competitor_review: "Отзыв оставили конкуренты",
+      other: "Другое",
+      not_about_product: "Отзыв не относится к товару",
+      spam_ad_text: "Спам-реклама в тексте",
+      profanity: "Нецензурная лексика",
+      political_context: "Отзыв с политическим контекстом",
+      threats_insults: "Угрозы, оскорбления",
+      unrelated_media: "Фото или видео не имеет отношения к товару",
+      obscene_media: "Нецензурное содержимое в фото или видео",
+      spam_ad_media: "Спам-реклама на фото или видео"
+    };
+    const FEEDBACKS_WB_CATEGORY_LABEL_SET = new Set(Object.values(FEEDBACKS_WB_CATEGORY_LABELS));
     const FEEDBACKS_COLUMN_WIDTHS_STORAGE_KEY = "wb_core_feedbacks_column_widths_v1";
     const FEEDBACKS_MIN_COLUMN_WIDTH = 72;
     const FEEDBACKS_DEFAULT_COLUMN_WIDTHS = {
@@ -5458,8 +5471,8 @@
           photo_count: Number(row.photo_count || 0),
           video_count: Number(row.video_count || 0),
           ai_complaint_fit_label: String(result.complaint_fit_label || ""),
-          ai_category_label: String(result.category_label || ""),
-          ai_reason: String(result.reason || ""),
+          ai_category_label: feedbacksAiCategoryLabel(result),
+          ai_reason: feedbacksAiReasonText(result),
           ai_confidence_label: String(result.confidence_label || "")
         };
       });
@@ -5847,7 +5860,8 @@
         '</colgroup>',
         '<thead><tr>',
         columns.map(function(column) {
-          return '<th class="feedbacks-resizable-th" data-feedbacks-column-key="' + escapeHtml(column[0]) + '" style="width:' + feedbacksColumnWidth(column[0]) + 'px">' +
+          const headerTitle = column[0] === "ai_reason" ? ' title="Причина = текст для поля WB «Опишите ситуацию»"' : "";
+          return '<th class="feedbacks-resizable-th" data-feedbacks-column-key="' + escapeHtml(column[0]) + '" style="width:' + feedbacksColumnWidth(column[0]) + 'px"' + headerTitle + '>' +
             escapeHtml(column[1]) +
             '<span class="feedbacks-column-resize-handle" data-feedbacks-column-resize="' + escapeHtml(column[0]) + '" aria-hidden="true"></span>' +
             "</th>";
@@ -5920,10 +5934,10 @@
         return '<td class="feedbacks-ai-cell"><span class="feedbacks-ai-fit fit-' + escapeHtml(fit) + '">' + escapeHtml(result.complaint_fit_label || "—") + "</span></td>";
       }
       if (key === "ai_category") {
-        return '<td class="feedbacks-ai-cell">' + escapeHtml(result.category_label || "—") + "</td>";
+        return '<td class="feedbacks-ai-cell">' + escapeHtml(feedbacksAiCategoryLabel(result) || "—") + "</td>";
       }
       if (key === "ai_reason") {
-        return '<td class="feedbacks-ai-cell feedbacks-text-cell"><span class="feedbacks-text-clip">' + escapeHtml(result.reason || "—") + "</span></td>";
+        return '<td class="feedbacks-ai-cell feedbacks-text-cell"><span class="feedbacks-text-clip">' + escapeHtml(feedbacksAiReasonText(result) || "—") + "</span></td>";
       }
       if (key === "ai_confidence") {
         return '<td class="feedbacks-ai-cell">' + escapeHtml(result.confidence_label || "—") + "</td>";
@@ -5934,6 +5948,25 @@
     function feedbacksAiResult(row) {
       const feedbackId = String((row && row.feedback_id) || "");
       return (state.feedbacks.aiResults || {})[feedbackId] || null;
+    }
+
+    function feedbacksAiCategoryLabel(result) {
+      if (!result) {
+        return "";
+      }
+      const byId = FEEDBACKS_WB_CATEGORY_LABELS[String(result.category || "")] || "";
+      if (byId) {
+        return byId;
+      }
+      const label = String(result.category_label || "");
+      if (FEEDBACKS_WB_CATEGORY_LABEL_SET.has(label)) {
+        return label;
+      }
+      return "Другое";
+    }
+
+    function feedbacksAiReasonText(result) {
+      return String((result && result.reason) || "");
     }
 
     function feedbacksAiError(row) {

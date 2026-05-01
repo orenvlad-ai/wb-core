@@ -27,7 +27,10 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
 )
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
 from packages.application.sheet_vitrina_v1_feedbacks_ai import (  # noqa: E402
+    CATEGORY_LABELS,
+    STARTER_PROMPT,
     SheetVitrinaV1FeedbacksAiBlock,
+    analysis_json_schema,
 )
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
 
@@ -59,7 +62,7 @@ class FakeAiProvider:
         results = []
         for index, row in enumerate(rows):
             fit = "yes" if index == 0 else ("review" if index == 1 else "no")
-            category = "profanity_or_insult" if fit == "yes" else ("wb_delivery_or_pickup_point" if fit == "review" else "product_quality_claim")
+            category = "profanity" if fit == "yes" else ("not_about_product" if fit == "review" else "other")
             confidence = "high" if fit == "yes" else ("medium" if fit == "review" else "low")
             results.append(
                 {
@@ -68,11 +71,15 @@ class FakeAiProvider:
                     "complaint_fit_label": {"yes": "Да", "review": "Проверить", "no": "Нет"}[fit],
                     "category": category,
                     "category_label": {
-                        "profanity_or_insult": "Мат, оскорбления или угрозы",
-                        "wb_delivery_or_pickup_point": "Доставка, ПВЗ или логистика WB",
-                        "product_quality_claim": "Претензия к товару",
+                        "profanity": "Нецензурная лексика",
+                        "not_about_product": "Отзыв не относится к товару",
+                        "other": "Другое",
                     }[category],
-                    "reason": "Короткая причина",
+                    "reason": {
+                        "yes": "В отзыве присутствует нецензурная лексика, что нарушает правила публикации отзывов.",
+                        "review": "Просим проверить отзыв: покупатель описывает доставку/получение заказа, а не свойства товара.",
+                        "no": "Жалобу не подавать: отзыв содержит обычную претензию к товару.",
+                    }[fit],
                     "confidence": confidence,
                     "confidence_label": {"high": "Высокая", "medium": "Средняя", "low": "Низкая"}[confidence],
                     "evidence": "фрагмент",
@@ -82,6 +89,7 @@ class FakeAiProvider:
 
 
 def main() -> None:
+    _assert_wb_category_schema_and_prompt()
     with TemporaryDirectory(prefix="sheet-vitrina-feedbacks-ai-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         fake_provider = FakeAiProvider()
@@ -121,8 +129,12 @@ def main() -> None:
             raise AssertionError(f"analysis contract mismatch: {analysis}")
         if [item["complaint_fit"] for item in analysis["results"]] != ["yes", "review", "no"]:
             raise AssertionError(f"analysis result order/mapping mismatch: {analysis}")
-        if analysis["results"][0]["category_label"] != "Мат, оскорбления или угрозы":
+        if analysis["results"][0]["category_label"] != "Нецензурная лексика":
             raise AssertionError(f"category label mismatch: {analysis}")
+        if analysis["results"][1]["category_label"] != "Отзыв не относится к товару" or "Опишите ситуацию" not in initial["starter_prompt"]:
+            raise AssertionError(f"WB category/prompt semantics mismatch: {analysis} {initial}")
+        if not analysis["results"][0]["reason"].startswith("В отзыве присутствует"):
+            raise AssertionError(f"yes/review reason must be ready complaint text: {analysis}")
         if fake_provider.calls[-1]["model"] != "gpt-5.5" or analysis["meta"]["model"] != "gpt-5.5":
             raise AssertionError(f"selected model must be passed to provider and metadata: {fake_provider.calls} {analysis}")
         try:
@@ -156,6 +168,36 @@ def main() -> None:
                 raise AssertionError(f"invalid provider output must be surfaced clearly, got: {exc}") from exc
         else:
             raise AssertionError("invalid provider output must fail")
+
+        bad_reason = SheetVitrinaV1FeedbacksAiBlock(
+            runtime_dir=runtime_dir / "bad-reason",
+            provider=BadReasonProvider(),
+            now_factory=lambda: NOW,
+            min_analyze_interval_seconds=0,
+        )
+        bad_reason.save_prompt({"prompt": STARTER_PROMPT, "model": "gpt-5.5"})
+        try:
+            bad_reason.analyze({"rows": _rows()[:1]})
+        except Exception as exc:
+            if "non-actionable complaint description" not in str(exc):
+                raise AssertionError(f"bad reason text must fail clearly, got: {exc}") from exc
+        else:
+            raise AssertionError("bad reason text must be rejected")
+
+        old_category = SheetVitrinaV1FeedbacksAiBlock(
+            runtime_dir=runtime_dir / "old-category",
+            provider=OldCategoryProvider(),
+            now_factory=lambda: NOW,
+            min_analyze_interval_seconds=0,
+        )
+        old_category.save_prompt({"prompt": STARTER_PROMPT, "model": "gpt-5.5"})
+        try:
+            old_category.analyze({"rows": _rows()[:1]})
+        except Exception as exc:
+            if "invalid category" not in str(exc):
+                raise AssertionError(f"old category ids must fail clearly, got: {exc}") from exc
+        else:
+            raise AssertionError("old internal category id must be rejected")
 
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=runtime_dir,
@@ -205,6 +247,103 @@ def main() -> None:
             thread.join(timeout=5)
 
     print("sheet-vitrina-v1-feedbacks-ai-smoke passed")
+
+
+def _assert_wb_category_schema_and_prompt() -> None:
+    old_categories = {
+        "too_little_information",
+        "product_quality_claim",
+        "wb_delivery_or_pickup_point",
+        "wrong_product_or_media",
+        "competitor_suspicion",
+        "profanity_or_insult",
+        "links_contacts_ads",
+    }
+    expected_categories = {
+        "competitor_review",
+        "other",
+        "not_about_product",
+        "spam_ad_text",
+        "profanity",
+        "political_context",
+        "threats_insults",
+        "unrelated_media",
+        "obscene_media",
+        "spam_ad_media",
+    }
+    if set(CATEGORY_LABELS) != expected_categories:
+        raise AssertionError(f"category enum must match WB categories exactly: {CATEGORY_LABELS}")
+    if old_categories & set(CATEGORY_LABELS):
+        raise AssertionError(f"old internal categories must not remain: {CATEGORY_LABELS}")
+    schema = analysis_json_schema()
+    result_schema = schema["properties"]["results"]["items"]["properties"]
+    if set(result_schema["category"]["enum"]) != expected_categories:
+        raise AssertionError(f"schema category enum mismatch: {result_schema['category']['enum']}")
+    if set(result_schema["category_label"]["enum"]) != set(CATEGORY_LABELS.values()):
+        raise AssertionError(f"schema category labels must be exact WB labels: {result_schema['category_label']['enum']}")
+    forbidden_text = [
+        "too_little_information",
+        "product_quality_claim",
+        "wb_delivery_or_pickup_point",
+        "wrong_product_or_media",
+        "Недостаточно данных =",
+        "Претензия к товару =",
+        "Доставка, ПВЗ или логистика WB =",
+    ]
+    if any(fragment in STARTER_PROMPT for fragment in forbidden_text):
+        raise AssertionError("starter prompt must not present old categories as selectable categories")
+    if "Опишите ситуацию" not in STARTER_PROMPT or "reason = готовый короткий текст" not in STARTER_PROMPT:
+        raise AssertionError("starter prompt must define reason as WB complaint description text")
+    if "category=other" not in STARTER_PROMPT or "Недостаточно данных" not in STARTER_PROMPT:
+        raise AssertionError("starter prompt must force weak/empty cases into WB category other")
+
+
+class BadReasonProvider(FakeAiProvider):
+    def analyze_batch(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        rows: list[Mapping[str, Any]],
+        schema: Mapping[str, Any],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        return [
+            {
+                "feedback_id": str(rows[0]["feedback_id"]),
+                "complaint_fit": "yes",
+                "complaint_fit_label": "Да",
+                "category": "other",
+                "category_label": "Другое",
+                "reason": "Недостаточно данных.",
+                "confidence": "low",
+                "confidence_label": "Низкая",
+                "evidence": "",
+            }
+        ], {"model": model, "response_id": "bad-reason"}
+
+
+class OldCategoryProvider(FakeAiProvider):
+    def analyze_batch(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        rows: list[Mapping[str, Any]],
+        schema: Mapping[str, Any],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        return [
+            {
+                "feedback_id": str(rows[0]["feedback_id"]),
+                "complaint_fit": "yes",
+                "complaint_fit_label": "Да",
+                "category": "product_quality_claim",
+                "category_label": "Претензия к товару",
+                "reason": "Просим проверить отзыв: покупатель описывает получение заказа, а не свойства товара.",
+                "confidence": "medium",
+                "confidence_label": "Средняя",
+                "evidence": "фрагмент",
+            }
+        ], {"model": model, "response_id": "old-category"}
 
 
 def _rows() -> list[dict[str, Any]]:
