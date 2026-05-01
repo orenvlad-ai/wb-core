@@ -22,7 +22,9 @@ from apps.seller_portal_feedbacks_matching_replay import (  # noqa: E402
     normalize_datetime_minute,
     normalize_nm_id,
     normalize_text,
+    parse_seller_portal_feedbacks_payload,
     render_markdown_report,
+    seller_portal_network_feedback_to_ui_row,
     write_report_artifacts,
 )
 
@@ -33,6 +35,8 @@ def main() -> None:
     _assert_ambiguous_short_text_collision()
     _assert_not_found()
     _assert_normalizers()
+    _assert_seller_portal_network_cursor_parser()
+    _assert_coverage_metrics_and_not_found_split()
     _assert_report_shape()
     _assert_no_submit_guard()
     print("seller_portal_feedbacks_matching_replay_smoke: OK")
@@ -106,6 +110,8 @@ def _assert_not_found() -> None:
     match = match_one_api_row(api, [_ui_row("ui-other")])
     if match["match_status"] != "not_found" or match["safe_for_future_submit"]:
         raise AssertionError(f"expected not_found, got {match}")
+    if not str(match.get("not_found_reason") or "").startswith("not_found_due_to_"):
+        raise AssertionError(f"not_found reason must be classified: {match}")
 
 
 def _assert_normalizers() -> None:
@@ -119,6 +125,64 @@ def _assert_normalizers() -> None:
         raise AssertionError("nmId normalization failed")
     if normalize_article(" Артикул WB (Anti-Spy) iPhone 15 / 16 ") != "anti-spy iphone 15 16":
         raise AssertionError("supplier article normalization failed")
+
+
+def _assert_seller_portal_network_cursor_parser() -> None:
+    payload = {
+        "data": {
+            "data": {
+                "feedbacks": [
+                    {
+                        "id": "api-exact",
+                        "createdDate": 1777637010000,
+                        "valuation": 1,
+                        "answer": None,
+                        "brandAnswer": None,
+                        "productInfo": {
+                            "name": "Защитное стекло антишпион на iPhone 15 / 16",
+                            "supplierArticle": "(Anti-Spy) iPhone 15 / 16",
+                            "wbArticle": 391662965,
+                        },
+                        "feedbackInfo": {
+                            "feedbackText": "Плохое качество, стекло не подошло",
+                            "feedbackTextPros": "",
+                            "feedbackTextCons": "Не как на фото",
+                            "goodReasons": [],
+                            "badReasons": [],
+                            "photos": [{"id": "p1"}],
+                            "video": None,
+                        },
+                        "supplierComplaints": {"feedbackComplaint": {"isAvailable": True, "status": "unknown"}},
+                    }
+                ],
+                "pages": {"next": "cursor-2"},
+            }
+        }
+    }
+    feedbacks, cursor = parse_seller_portal_feedbacks_payload(payload)
+    if cursor != "cursor-2" or len(feedbacks) != 1:
+        raise AssertionError(f"network payload parser failed: {feedbacks}, {cursor}")
+    ui_row = seller_portal_network_feedback_to_ui_row(feedbacks[0], is_answered=False)
+    if ui_row["feedback_id"] != "api-exact" or ui_row["hidden_feedback_id"]:
+        raise AssertionError(f"network row id mapping failed: {ui_row}")
+    if ui_row["review_datetime"] != "01.05.2026 в 17:03":
+        raise AssertionError(f"network row datetime mapping failed: {ui_row}")
+    if "photo" not in ui_row["media_indicators"] or not ui_row["complaint_action_found"]:
+        raise AssertionError(f"network row indicators failed: {ui_row}")
+    match = match_one_api_row(_api_row("api-exact"), [ui_row])
+    if match["match_status"] != "exact" or "feedback_id" not in match["matched_fields"]:
+        raise AssertionError(f"network feedback_id must produce exact match: {match}")
+
+
+def _assert_coverage_metrics_and_not_found_split() -> None:
+    api_rows = [_api_row("api-no-ui")]
+    matches = match_api_rows_to_ui(api_rows, [])
+    aggregate = build_aggregate(matches, api_rows, [])
+    if aggregate["ui_coverage_ratio"] != 0.0:
+        raise AssertionError(f"expected zero UI coverage: {aggregate}")
+    split = aggregate["not_found_reason_split"]
+    if split["not_found_due_to_no_ui_coverage"] != 1:
+        raise AssertionError(f"expected no-ui-coverage split: {aggregate}")
 
 
 def _assert_report_shape() -> None:
