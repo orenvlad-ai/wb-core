@@ -6,7 +6,7 @@
 
 Новый контур проектируется как параллельный experimental/night-run contour. Он не заменяет текущий ChatGPT Project workflow, не становится source of truth и не получает права выполнять unfrozen discussion как задачу.
 
-Current MVP-0 checkpoint materializes only a repo-only contract skeleton: data contracts, deterministic validation, bounded Codex prompt generation and local smoke. MVP-0.1 adds local contract tooling on top of that skeleton: JSON example task spec, validate, freeze and generate-prompt CLI flow, plus CLI smoke. MVP-0.2 adds a local-only internal cockpit prototype: stdlib server, simple HTML page, JSON state dir, discussion/task-spec/freeze/prompt flow and server smoke. В этом checkpoint нет production runtime service, production API endpoints, OpenAI API integration, Codex runner, deploy или live/public mutation.
+Current MVP-0 checkpoint materializes only a repo-only contract skeleton: data contracts, deterministic validation, bounded Codex prompt generation and local smoke. MVP-0.1 adds local contract tooling on top of that skeleton: JSON example task spec, validate, freeze and generate-prompt CLI flow, plus CLI smoke. MVP-0.2 adds a local-only internal cockpit prototype: stdlib server, simple HTML page, JSON state dir, discussion/task-spec/freeze/prompt flow and server smoke. MVP-0.3 adds a repo-only execution loop prototype: runner CLI, fake executor, isolated worktree/run artifacts, deterministic verifier and runner smoke. В этом checkpoint нет production runtime service, production API endpoints, OpenAI API integration, real Codex execution in smoke, deploy или live/public mutation.
 
 ## Current Norm
 
@@ -39,6 +39,17 @@ Current MVP-0 checkpoint materializes only a repo-only contract skeleton: data c
 `operator -> cockpit/intake chat -> curator service -> frozen task spec -> sprint plan -> Codex worker -> verifier -> nightly report / blocker / human gate`
 
 Новый сервис не является свободным AI-агентом. Это deterministic orchestration service со встроенным LLM-curator. LLM помогает формулировать и объяснять, но process ownership принадлежит state machine, policy engine, verifier, task ledger и immutable audit/state snapshots.
+
+## Control-Plane Isolation
+
+Curator cockpit is a development/control-plane surface, not product UI.
+
+Isolation rules:
+- MVP remains local-only/internal-only;
+- cockpit must not be published under `api.selleros.pro`, `selleros.pro`, `/sheet-vitrina-v1/vitrina` or `/sheet-vitrina-v1/operator`;
+- future hosted cockpit requires separate host/domain/access layer, auth, state and secrets;
+- SellerOS/product-plane outage must not make the development control center unavailable;
+- no production SellerOS/operator tab is introduced before an explicit control-plane hosting decision.
 
 ## Role-Based Architecture
 
@@ -226,6 +237,8 @@ Verifier независимо проверяет результат. Handoff Cod
 
 Минимальные поля: `id`, `sprint_step_id`, `worktree`, `branch`, `sandbox_profile`, `status`, `started_at`, `finished_at`, `logs_ref`, `artifacts_ref`, `handoff_id`.
 
+MVP-0.3 repo-only runner materializes local `RunRequest` and `RunResult` contracts with `executor_mode`, `repo_root`, `state_dir`, `base_ref`, `branch_name`, `prompt_path`, `handoff_path`, `log_path`, `changed_files`, `check_results`, `blocker_reason` and `next_manual_step`.
+
 ### check_result
 
 Минимальные поля: `id`, `run_id`, `checker`, `status`, `summary`, `evidence_refs`, `failed_rules`, `created_at`.
@@ -311,7 +324,7 @@ The cockpit must report exact state:
 - `human_gate_required`: workflow stopped on one manual decision/action.
 - `live_complete`: future/gated only; never default in MVP-0/MVP-1.
 
-For the ADR-only step MVP-0 target completion was `repo-prepared / docs-only`. Current MVP-0 skeleton completion is `repo-prepared / repo-only`: contract code and local smoke may exist, but execution runner, runtime service, UI, API endpoints and live/deploy lanes remain out of scope.
+For the ADR-only step MVP-0 target completion was `repo-prepared / docs-only`. The original MVP-0 skeleton completion was `repo-prepared / repo-only`: contract code and local smoke existed without execution runner, runtime service, UI, API endpoints or live/deploy lanes. MVP-0.3 remains repo-only: local runner artifacts and fake execution are allowed, while production runtime, OpenAI-backed execution, auto-merge and live/public/deploy lanes remain out of scope.
 
 ## MVP Boundaries
 
@@ -353,6 +366,19 @@ For the ADR-only step MVP-0 target completion was `repo-prepared / docs-only`. C
 - no live/public/deploy contour or production route wiring;
 - current ChatGPT Project workflow remains active and canonical until explicit cutover.
 
+### MVP-0.3 Repo-Only Execution Loop
+
+- local runner CLI only: `prepare-run`, `run-step`, `verify-run`, `cleanup-run`;
+- fake executor writes deterministic handoff with mandatory curator and compact-check blocks;
+- run artifacts live under local `state_dir`, with prompt, handoff, log, metadata and verifier output;
+- `run-step` creates an isolated git worktree/branch under local state before executor activity;
+- command executor exists only behind explicit `--allow-real-executor`, `--executor-command` and `repo_only_executor` policy;
+- deterministic verifier checks frozen spec, prompt, handoff blocks, forbidden path hits and `git diff --check`;
+- runner smoke uses fake executor only and does not require Codex CLI/auth;
+- no OpenAI API integration, no real Codex execution in smoke, no auto-merge, no live/public/deploy contour;
+- no local cockpit fake-run endpoint is introduced in this checkpoint;
+- current ChatGPT Project workflow remains active and canonical until explicit cutover.
+
 ### MVP-1
 
 - repo-only task spec/prompt schema;
@@ -391,10 +417,10 @@ For the ADR-only step MVP-0 target completion was `repo-prepared / docs-only`. C
 ## Not In Scope
 
 This document does not implement:
-- runtime service;
-- cockpit UI;
-- API endpoints;
-- Codex runner;
+- production runtime service;
+- production cockpit UI;
+- production API endpoints;
+- OpenAI-backed Codex execution runner;
 - vector DB;
 - multi-agent execution;
 - live deploy lane;
