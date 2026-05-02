@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
 import json
-from typing import Literal, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 TaskSpecStatus = Literal["draft", "frozen"]
 TaskClass = Literal["L1", "L2", "L3"]
@@ -23,8 +23,12 @@ DEFAULT_FORBIDDEN_PATHS = (
 DEFAULT_FORBIDDEN_ACTIONS = (
     "live",
     "deploy",
+    "live_deploy",
     "SSH",
+    "ssh",
     "root",
+    "root_shell",
+    "public_route_change",
     "production_runtime_mutation",
     "execution_from_discussion",
     "codex_worker_run",
@@ -117,6 +121,92 @@ def freeze_task_spec(task_spec: TaskSpec, frozen_at: str | None = None) -> TaskS
     frozen_timestamp = frozen_at or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     frozen = replace(task_spec, status="frozen", frozen_at=frozen_timestamp, spec_hash=None)
     return replace(frozen, spec_hash=_compute_task_spec_hash(frozen))
+
+
+def task_spec_from_mapping(payload: Mapping[str, Any]) -> TaskSpec:
+    return TaskSpec(
+        id=_mapping_str(payload, "id"),
+        version=_mapping_str(payload, "version"),
+        status=_mapping_str(payload, "status"),
+        title=_mapping_str(payload, "title"),
+        goal=_mapping_str(payload, "goal"),
+        scope=_mapping_sequence(payload, "scope"),
+        not_in_scope=_mapping_sequence(payload, "not_in_scope", default=()),
+        task_class=_mapping_str(payload, "task_class"),
+        class_reason=_mapping_str(payload, "class_reason"),
+        risks=_mapping_sequence(payload, "risks", default=()),
+        acceptance_criteria=_mapping_sequence(payload, "acceptance_criteria"),
+        required_smokes=_mapping_sequence(payload, "required_smokes", default=()),
+        allowed_paths=_mapping_sequence(payload, "allowed_paths"),
+        forbidden_paths=_mapping_sequence(payload, "forbidden_paths", default=()),
+        allowed_actions=_mapping_sequence(payload, "allowed_actions", default=()),
+        forbidden_actions=_mapping_sequence(payload, "forbidden_actions", default=()),
+        human_gates=_mapping_sequence(payload, "human_gates", default=()),
+        frozen_at=_mapping_optional_str(payload, "frozen_at"),
+        spec_hash=_mapping_optional_str(payload, "spec_hash"),
+        explicit_policy_note=_mapping_optional_str(payload, "explicit_policy_note"),
+    )
+
+
+def sprint_step_from_mapping(payload: Mapping[str, Any]) -> SprintStep:
+    return SprintStep(
+        id=_mapping_str(payload, "id"),
+        sequence=_mapping_int(payload, "sequence"),
+        title=_mapping_str(payload, "title"),
+        goal=_mapping_str(payload, "goal"),
+        task_class=_mapping_str(payload, "task_class"),
+        scope=_mapping_sequence(payload, "scope"),
+        acceptance_criteria=_mapping_sequence(payload, "acceptance_criteria"),
+        required_smokes=_mapping_sequence(payload, "required_smokes"),
+        stop_conditions=_mapping_sequence(payload, "stop_conditions"),
+    )
+
+
+def sprint_steps_from_task_spec_mapping(payload: Mapping[str, Any], task_spec: TaskSpec) -> tuple[SprintStep, ...]:
+    raw_steps = payload.get("sprint_steps", payload.get("steps"))
+    if raw_steps is None:
+        return (default_sprint_step_from_task_spec(task_spec),)
+    if not isinstance(raw_steps, Sequence) or isinstance(raw_steps, (str, bytes)):
+        raise CuratorCockpitValidationError("sprint_steps must be a list")
+    steps: list[SprintStep] = []
+    for raw_step in raw_steps:
+        if not isinstance(raw_step, Mapping):
+            raise CuratorCockpitValidationError("sprint_steps items must be objects")
+        steps.append(sprint_step_from_mapping(raw_step))
+    if not steps:
+        raise CuratorCockpitValidationError("sprint_steps must not be empty")
+    return tuple(steps)
+
+
+def default_sprint_step_from_task_spec(task_spec: TaskSpec, step_id: str = "step-001") -> SprintStep:
+    return SprintStep(
+        id=step_id,
+        sequence=1,
+        title=task_spec.title,
+        goal=task_spec.goal,
+        task_class=task_spec.task_class,
+        scope=task_spec.scope,
+        acceptance_criteria=task_spec.acceptance_criteria,
+        required_smokes=task_spec.required_smokes,
+        stop_conditions=("stop if requested work leaves frozen task scope",),
+    )
+
+
+def task_spec_to_dict(task_spec: TaskSpec) -> dict[str, Any]:
+    return _json_ready(asdict(task_spec))
+
+
+def sprint_step_to_dict(step: SprintStep) -> dict[str, Any]:
+    return _json_ready(asdict(step))
+
+
+def frozen_task_spec_payload_from_mapping(payload: Mapping[str, Any], frozen_at: str | None = None) -> dict[str, Any]:
+    task_spec = task_spec_from_mapping(payload)
+    frozen = freeze_task_spec(task_spec, frozen_at=frozen_at)
+    frozen_payload = task_spec_to_dict(frozen)
+    steps = sprint_steps_from_task_spec_mapping(payload, task_spec)
+    frozen_payload["sprint_steps"] = [sprint_step_to_dict(step) for step in steps]
+    return frozen_payload
 
 
 def validate_task_spec(task_spec: TaskSpec, require_frozen: bool = False) -> None:
@@ -271,8 +361,19 @@ def _merge_defaults(values: Sequence[str], defaults: Sequence[str]) -> tuple[str
 def _compute_task_spec_hash(task_spec: TaskSpec) -> str:
     payload = asdict(task_spec)
     payload["spec_hash"] = None
+    payload["frozen_at"] = None
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, list):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    return value
 
 
 def _require_non_empty(label: str, value: str | None) -> None:
@@ -319,3 +420,33 @@ def _is_present(value: str | None) -> bool:
 
 def _format_items(values: Sequence[str]) -> list[str]:
     return [f"- {value}" for value in values]
+
+
+def _mapping_str(payload: Mapping[str, Any], key: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str):
+        raise CuratorCockpitValidationError(f"{key} is required")
+    return value
+
+
+def _mapping_optional_str(payload: Mapping[str, Any], key: str) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise CuratorCockpitValidationError(f"{key} must be a string when provided")
+    return value
+
+
+def _mapping_int(payload: Mapping[str, Any], key: str) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise CuratorCockpitValidationError(f"{key} must be an integer")
+    return value
+
+
+def _mapping_sequence(payload: Mapping[str, Any], key: str, default: Sequence[str] | None = None) -> tuple[str, ...]:
+    value = payload.get(key, default)
+    if value is None:
+        raise CuratorCockpitValidationError(f"{key} is required")
+    return _to_tuple(value)

@@ -6,7 +6,7 @@
 
 Новый контур проектируется как параллельный experimental/night-run contour. Он не заменяет текущий ChatGPT Project workflow, не становится source of truth и не получает права выполнять unfrozen discussion как задачу.
 
-Current MVP-0 checkpoint materializes only a repo-only contract skeleton: data contracts, deterministic validation, bounded Codex prompt generation and local smoke. В этом checkpoint нет runtime service, API endpoints, UI implementation, Codex runner, deploy или live/public mutation.
+Current MVP-0 checkpoint materializes only a repo-only contract skeleton: data contracts, deterministic validation, bounded Codex prompt generation and local smoke. MVP-0.1 adds local contract tooling on top of that skeleton: JSON example task spec, validate, freeze and generate-prompt CLI flow, plus CLI smoke. В этом checkpoint нет runtime service, API endpoints, UI implementation, Codex runner, deploy или live/public mutation.
 
 ## Current Norm
 
@@ -330,6 +330,15 @@ For the ADR-only step MVP-0 target completion was `repo-prepared / docs-only`. C
 - no live deploy;
 - no Telegram as UI;
 - no vector DB requirement.
+
+### MVP-0.1 Contract Tooling
+
+- local CLI only: `validate-task-spec`, `freeze-task-spec`, `generate-codex-prompt`;
+- checked-in example draft task spec under `artifacts/curator_cockpit_mvp/input/`;
+- deterministic freeze writes `frozen_at` and stable `spec_hash`;
+- prompt generation remains forbidden for draft specs;
+- CLI smoke covers validate/freeze/prompt flow;
+- still no backend service, UI, OpenAI integration, Codex execution runner, live deploy or public route mutation.
 
 ### MVP-1
 
