@@ -355,6 +355,16 @@ def cleanup_run_worktree(run_dir: Path) -> dict[str, Any]:
     return {"status": "cleaned", "worktree_path": str(worktree_path), "branch_name": branch_name}
 
 
+def load_run_record(run_dir: Path) -> dict[str, Any]:
+    metadata = _read_run_metadata(run_dir)
+    verifier_path = run_dir / "verifier.json"
+    if verifier_path.exists():
+        verifier = json.loads(verifier_path.read_text(encoding="utf-8"))
+        if isinstance(verifier, Mapping):
+            metadata["verifier"] = _json_ready(dict(verifier))
+    return _json_ready(metadata)
+
+
 def run_result_to_dict(result: RunResult) -> dict[str, Any]:
     return _json_ready(asdict(result))
 

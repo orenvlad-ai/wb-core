@@ -32,6 +32,16 @@ from packages.application.curator_cockpit_mvp import (  # noqa: E402
     validate_sprint_step,
     validate_task_spec,
 )
+from packages.application.curator_cockpit_mvp_execution import (  # noqa: E402
+    CuratorCockpitExecutionError,
+    cleanup_run_worktree,
+    load_run_record,
+    prepare_run,
+    run_result_to_dict,
+    run_step,
+    verifier_result_to_dict,
+    verify_run,
+)
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -45,11 +55,16 @@ EXPOSED_ROUTES = (
     "GET /api/example-task-spec",
     "GET /api/task-specs/{id}",
     "GET /api/prompts/{prompt_id}",
+    "GET /api/runs/{id}",
     "POST /api/discussions",
     "POST /api/discussions/{id}/messages",
     "POST /api/task-specs",
     "POST /api/task-specs/{id}/freeze",
     "POST /api/task-specs/{id}/generate-prompt",
+    "POST /api/task-specs/{id}/prepare-run",
+    "POST /api/task-specs/{id}/run-fake",
+    "POST /api/runs/{id}/verify",
+    "POST /api/runs/{id}/cleanup",
 )
 
 
@@ -71,6 +86,7 @@ class CockpitStateStore:
         discussions = self._read_collection("discussions")
         task_specs = self._read_collection("task_specs")
         prompts = self._read_collection("prompts")
+        runs = self._read_collection("runs")
         return {
             "status": "ok",
             "local_only": True,
@@ -82,14 +98,18 @@ class CockpitStateStore:
                 "messages": sum(len(item.get("messages", [])) for item in discussions.values()),
                 "task_specs": len(task_specs),
                 "prompts": len(prompts),
+                "runs": len(runs),
             },
             "discussions": sorted(discussions),
             "task_specs": sorted(task_specs),
             "prompts": sorted(prompts),
+            "runs": sorted(runs),
             "exposed_routes": list(EXPOSED_ROUTES),
             "live_deploy_enabled": False,
             "public_routes_enabled": False,
             "codex_runner_enabled": False,
+            "fake_executor_enabled": True,
+            "real_executor_enabled": False,
             "openai_api_enabled": False,
             "notice": LOCAL_ONLY_NOTICE,
         }
@@ -227,6 +247,63 @@ class CockpitStateStore:
             raise NotFoundError(f"prompt not found: {prompt_id}")
         return Path(str(prompt["path"])).read_text(encoding="utf-8")
 
+    def prepare_run(self, task_spec_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        task_spec_payload = self.get_task_spec(task_spec_id)
+        step_id = self._step_id_from_payload(task_spec_payload, payload)
+        result = prepare_run(
+            task_spec_payload,
+            step_id=step_id,
+            repo_root=ROOT,
+            state_dir=self.state_dir,
+            executor_mode="fake",
+        )
+        summary = _run_summary_from_result(result, verifier=None)
+        self._remember_run(summary)
+        return summary
+
+    def run_fake(self, task_spec_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        task_spec_payload = self.get_task_spec(task_spec_id)
+        step_id = self._step_id_from_payload(task_spec_payload, payload)
+        result = run_step(
+            task_spec_payload,
+            step_id=step_id,
+            repo_root=ROOT,
+            state_dir=self.state_dir,
+            executor_mode="fake",
+        )
+        record = load_run_record(Path(result.run_dir))
+        summary = _run_summary_from_record(record)
+        self._remember_run(summary)
+        return summary
+
+    def get_run(self, run_id: str) -> dict[str, Any]:
+        run_dir = self._run_dir_for_id(run_id)
+        record = load_run_record(run_dir)
+        summary = _run_summary_from_record(record)
+        result = record.get("result", {})
+        summary["metadata"] = record
+        summary["prompt_text"] = _read_run_artifact_preview(run_dir, result.get("prompt_path"))
+        summary["handoff_text"] = _read_run_artifact_preview(run_dir, result.get("handoff_path"))
+        return summary
+
+    def verify_run(self, run_id: str) -> dict[str, Any]:
+        run_dir = self._run_dir_for_id(run_id)
+        verifier = verify_run(run_dir)
+        record = load_run_record(run_dir)
+        summary = _run_summary_from_record(record)
+        summary["verifier"] = verifier_result_to_dict(verifier)
+        self._remember_run(summary)
+        return summary
+
+    def cleanup_run(self, run_id: str) -> dict[str, Any]:
+        run_dir = self._run_dir_for_id(run_id)
+        cleanup = cleanup_run_worktree(run_dir)
+        record = load_run_record(run_dir)
+        summary = _run_summary_from_record(record)
+        summary["cleanup"] = cleanup
+        self._remember_run(summary)
+        return summary
+
     def _read_collection(self, name: str) -> dict[str, Any]:
         path = self.state_dir / f"{name}.json"
         if not path.exists():
@@ -239,6 +316,36 @@ class CockpitStateStore:
     def _write_collection(self, name: str, payload: Mapping[str, Any]) -> None:
         path = self.state_dir / f"{name}.json"
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def _remember_run(self, summary: Mapping[str, Any]) -> None:
+        run_id = str(summary.get("run_id") or "")
+        if not run_id:
+            raise BadRequestError("run summary is missing run_id")
+        runs = self._read_collection("runs")
+        runs[run_id] = _json_ready(dict(summary))
+        self._write_collection("runs", runs)
+
+    def _run_dir_for_id(self, run_id: str) -> Path:
+        if "/" in run_id or "\\" in run_id or ".." in run_id:
+            raise BadRequestError(f"invalid run id: {run_id}")
+        runs = self._read_collection("runs")
+        run = runs.get(run_id)
+        if isinstance(run, Mapping) and run.get("run_dir"):
+            run_dir = Path(str(run["run_dir"])).resolve()
+        else:
+            run_dir = (self.state_dir / "runs" / run_id).resolve()
+        if not _is_relative_to(run_dir, self.state_dir.resolve()):
+            raise BadRequestError(f"run dir is outside local state dir: {run_dir}")
+        if not run_dir.exists():
+            raise NotFoundError(f"run not found: {run_id}")
+        return run_dir
+
+    def _step_id_from_payload(self, task_spec_payload: Mapping[str, Any], payload: Mapping[str, Any]) -> str:
+        if payload.get("step_id"):
+            return str(payload["step_id"])
+        task_spec = task_spec_from_mapping(task_spec_payload)
+        steps = sprint_steps_from_task_spec_mapping(task_spec_payload, task_spec)
+        return steps[0].id
 
 
 class CockpitRequestHandler(BaseHTTPRequestHandler):
@@ -262,6 +369,9 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                 return
             if len(parts) == 3 and parts[:2] == ["api", "prompts"]:
                 self._send_text(self.server.store.get_prompt_text(parts[2]))
+                return
+            if len(parts) == 3 and parts[:2] == ["api", "runs"]:
+                self._send_json(self.server.store.get_run(parts[2]))
                 return
             self._send_error(HTTPStatus.NOT_FOUND, "route not found")
         except RequestError as exc:
@@ -297,10 +407,24 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[:2] == ["api", "task-specs"] and parts[3] == "generate-prompt":
                 self._send_json(self.server.store.generate_prompt(parts[2], payload), HTTPStatus.CREATED)
                 return
+            if len(parts) == 4 and parts[:2] == ["api", "task-specs"] and parts[3] == "prepare-run":
+                self._send_json(self.server.store.prepare_run(parts[2], payload), HTTPStatus.CREATED)
+                return
+            if len(parts) == 4 and parts[:2] == ["api", "task-specs"] and parts[3] == "run-fake":
+                self._send_json(self.server.store.run_fake(parts[2], payload), HTTPStatus.CREATED)
+                return
+            if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "verify":
+                self._send_json(self.server.store.verify_run(parts[2]))
+                return
+            if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "cleanup":
+                self._send_json(self.server.store.cleanup_run(parts[2]))
+                return
             self._send_error(HTTPStatus.NOT_FOUND, "route not found")
         except RequestError as exc:
             self._send_error(exc.status, str(exc))
         except CuratorCockpitValidationError as exc:
+            self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+        except CuratorCockpitExecutionError as exc:
             self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
         except Exception as exc:
             self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
@@ -368,6 +492,57 @@ class NotFoundError(RequestError):
 
 def build_server(config: CockpitServerConfig) -> CockpitHTTPServer:
     return CockpitHTTPServer(config)
+
+
+def _run_summary_from_result(result, verifier: Mapping[str, Any] | None) -> dict[str, Any]:
+    payload = run_result_to_dict(result)
+    return {
+        "status": payload["status"],
+        "run_id": payload["id"],
+        "task_spec_id": payload["task_spec_id"],
+        "step_id": payload["step_id"],
+        "branch_name": payload["branch_name"],
+        "run_dir": payload["run_dir"],
+        "worktree_path": payload["worktree_path"],
+        "prompt_path": payload["prompt_path"],
+        "handoff_path": payload["handoff_path"],
+        "log_path": payload["log_path"],
+        "changed_files": payload["changed_files"],
+        "check_results": payload["check_results"],
+        "blocker_reason": payload["blocker_reason"],
+        "next_manual_step": payload["next_manual_step"],
+        "verifier_status": None if verifier is None else verifier.get("status"),
+        "mandatory_handoff_blocks_present": False if verifier is None else bool(verifier.get("mandatory_handoff_blocks_present")),
+        "errors": [],
+    }
+
+
+def _run_summary_from_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    result = record.get("result")
+    if not isinstance(result, Mapping):
+        raise BadRequestError("run record missing result object")
+    verifier = record.get("verifier")
+    if verifier is not None and not isinstance(verifier, Mapping):
+        verifier = None
+    return {
+        "status": result.get("status"),
+        "run_id": result.get("id"),
+        "task_spec_id": result.get("task_spec_id"),
+        "step_id": result.get("step_id"),
+        "branch_name": result.get("branch_name"),
+        "run_dir": result.get("run_dir"),
+        "worktree_path": result.get("worktree_path"),
+        "prompt_path": result.get("prompt_path"),
+        "handoff_path": result.get("handoff_path"),
+        "log_path": result.get("log_path"),
+        "changed_files": result.get("changed_files", []),
+        "check_results": result.get("check_results", []),
+        "blocker_reason": result.get("blocker_reason"),
+        "next_manual_step": result.get("next_manual_step"),
+        "verifier_status": None if verifier is None else verifier.get("status"),
+        "mandatory_handoff_blocks_present": False if verifier is None else bool(verifier.get("mandatory_handoff_blocks_present")),
+        "errors": [],
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -458,10 +633,24 @@ def _render_html() -> str:
       <button onclick="generatePrompt()">Generate Codex Prompt</button>
       <pre id="promptOutput">No prompt generated.</pre>
     </section>
+    <section class="full">
+      <h2>Run</h2>
+      <div class="muted">Fake executor only in MVP. No OpenAI API, no real Codex CLI, no live/deploy/public route.</div>
+      <button onclick="prepareRun()">Prepare Run</button>
+      <button onclick="runFake()">Run Fake Executor</button>
+      <button onclick="verifyRun()">Verify Run</button>
+      <button class="secondary" onclick="cleanupRun()">Cleanup Run</button>
+      <pre id="runStatus">No run yet.</pre>
+      <h2>Run Prompt</h2>
+      <pre id="runPrompt">No run prompt.</pre>
+      <h2>Run Handoff</h2>
+      <pre id="runHandoff">No handoff.</pre>
+    </section>
   </main>
   <script>
     let discussionId = null;
     let taskSpecId = null;
+    let currentRunId = null;
 
     async function request(path, options = {{}}) {{
       const response = await fetch(path, options);
@@ -528,10 +717,71 @@ def _render_html() -> str:
       document.getElementById('promptOutput').textContent = await response.text();
     }}
 
+    async function prepareRun() {{
+      const stepId = document.getElementById('stepIdInput').value || 'step-001';
+      const summary = await request(`/api/task-specs/${{taskSpecId}}/prepare-run`, {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{step_id: stepId}})
+      }});
+      currentRunId = summary.run_id;
+      renderRun(summary);
+      await loadRun(currentRunId);
+    }}
+
+    async function runFake() {{
+      const stepId = document.getElementById('stepIdInput').value || 'step-001';
+      const summary = await request(`/api/task-specs/${{taskSpecId}}/run-fake`, {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{step_id: stepId}})
+      }});
+      currentRunId = summary.run_id;
+      renderRun(summary);
+      await loadRun(currentRunId);
+    }}
+
+    async function verifyRun() {{
+      if (!currentRunId) return;
+      const summary = await request(`/api/runs/${{currentRunId}}/verify`, {{method: 'POST', body: '{{}}'}});
+      renderRun(summary);
+      await loadRun(currentRunId);
+    }}
+
+    async function cleanupRun() {{
+      if (!currentRunId) return;
+      const summary = await request(`/api/runs/${{currentRunId}}/cleanup`, {{method: 'POST', body: '{{}}'}});
+      renderRun(summary);
+    }}
+
+    async function loadRun(runId) {{
+      const run = await request(`/api/runs/${{runId}}`);
+      renderRun(run);
+      document.getElementById('runPrompt').textContent = run.prompt_text || 'No run prompt.';
+      document.getElementById('runHandoff').textContent = run.handoff_text || 'No handoff.';
+    }}
+
     function renderSpec(spec) {{
       document.getElementById('taskSpecStatus').textContent = JSON.stringify({{id: spec.id, status: spec.status, spec_hash: spec.spec_hash}}, null, 2);
       document.getElementById('sprintPlan').textContent = JSON.stringify(spec.sprint_steps || [], null, 2);
       document.getElementById('humanGates').textContent = JSON.stringify(spec.human_gates || [], null, 2);
+    }}
+
+    function renderRun(run) {{
+      const view = {{
+        task_spec_id: run.task_spec_id,
+        run_id: run.run_id,
+        status: run.status,
+        verifier_status: run.verifier_status,
+        run_dir: run.run_dir,
+        worktree_path: run.worktree_path,
+        prompt_path: run.prompt_path,
+        handoff_path: run.handoff_path,
+        blocker_reason: run.blocker_reason,
+        mandatory_handoff_blocks_present: run.mandatory_handoff_blocks_present,
+        cleanup: run.cleanup || null
+      }};
+      document.getElementById('runStatus').textContent = JSON.stringify(view, null, 2);
     }}
   </script>
 </body>
@@ -551,6 +801,18 @@ def _read_json(path: Path) -> Mapping[str, Any]:
     if not isinstance(payload, Mapping):
         raise BadRequestError("JSON root must be an object")
     return payload
+
+
+def _read_run_artifact_preview(run_dir: Path, path: Any, limit: int = 20000) -> str | None:
+    if not path:
+        return None
+    text_path = Path(str(path)).resolve()
+    if not _is_relative_to(text_path, run_dir.resolve()):
+        raise BadRequestError(f"run artifact path is outside run dir: {text_path}")
+    if not text_path.exists():
+        return None
+    text = text_path.read_text(encoding="utf-8")
+    return text[:limit]
 
 
 def _select_step(steps, step_id: str):
@@ -585,6 +847,14 @@ def _json_ready(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _json_ready(item) for key, item in value.items()}
     return value
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
 
 if __name__ == "__main__":
