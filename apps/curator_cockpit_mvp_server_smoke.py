@@ -39,6 +39,7 @@ def main() -> None:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        created_run_id = None
         try:
             base_url = f"http://127.0.0.1:{port}"
             _wait_ready(base_url)
@@ -46,6 +47,8 @@ def main() -> None:
             html = _get_text(base_url + "/")
             if "Curator Cockpit MVP" not in html or "Local-only MVP prototype" not in html:
                 raise AssertionError("root route must return cockpit HTML with local-only notice")
+            if "Run Fake Executor" not in html or "Fake executor only in MVP" not in html:
+                raise AssertionError("root route must expose local fake-run UI wording")
 
             state = _get_json(base_url + "/api/state")
             if state.get("host") != "127.0.0.1" or state.get("local_only") is not True:
@@ -55,6 +58,8 @@ def main() -> None:
                     raise AssertionError(f"server must not expose live/deploy route: {route}")
             if state.get("live_deploy_enabled") is not False or state.get("public_routes_enabled") is not False:
                 raise AssertionError(f"live/public flags must stay false: {state}")
+            if state.get("fake_executor_enabled") is not True or state.get("real_executor_enabled") is not False:
+                raise AssertionError(f"server must expose fake-only executor state: {state}")
 
             discussion = _post_json(base_url + "/api/discussions", {"title": "Smoke discussion"})
             discussion_id = discussion["id"]
@@ -71,6 +76,14 @@ def main() -> None:
             task_spec_id = draft["id"]
             _expect_http_error(
                 lambda: _post_json(base_url + f"/api/task-specs/{task_spec_id}/generate-prompt", {"step_id": "step-001"}),
+                expected_status=400,
+            )
+            _expect_http_error(
+                lambda: _post_json(base_url + f"/api/task-specs/{task_spec_id}/prepare-run", {"step_id": "step-001"}),
+                expected_status=400,
+            )
+            _expect_http_error(
+                lambda: _post_json(base_url + f"/api/task-specs/{task_spec_id}/run-fake", {"step_id": "step-001"}),
                 expected_status=400,
             )
 
@@ -105,9 +118,59 @@ def main() -> None:
                 if token not in prompt:
                     raise AssertionError(f"generated prompt missing token: {token}")
 
+            prepared = _post_json(
+                base_url + f"/api/task-specs/{task_spec_id}/prepare-run",
+                {"step_id": "step-001"},
+            )
+            if prepared.get("status") != "prepared" or prepared.get("verifier_status") is not None:
+                raise AssertionError(f"prepare-run must only prepare local artifacts: {prepared}")
+            prepared_run = _get_json(base_url + f"/api/runs/{prepared['run_id']}")
+            if "Класс задачи:" not in prepared_run.get("prompt_text", ""):
+                raise AssertionError(f"prepared run must expose prompt preview: {prepared_run}")
+            if prepared_run.get("handoff_text") is not None:
+                raise AssertionError(f"prepared run must not have handoff yet: {prepared_run}")
+
+            fake_run = _post_json(
+                base_url + f"/api/task-specs/{task_spec_id}/run-fake",
+                {"step_id": "step-001"},
+            )
+            created_run_id = fake_run["run_id"]
+            if fake_run.get("status") != "verifier_passed" or fake_run.get("verifier_status") != "passed":
+                raise AssertionError(f"run-fake must pass verifier: {fake_run}")
+            if fake_run.get("mandatory_handoff_blocks_present") is not True:
+                raise AssertionError(f"run-fake must report mandatory handoff blocks: {fake_run}")
+            worktree_path = Path(fake_run["worktree_path"]).resolve()
+            if worktree_path == ROOT.resolve() or not _is_relative_to(worktree_path, state_dir.resolve()):
+                raise AssertionError(f"run-fake must use isolated smoke worktree: {worktree_path}")
+
+            run = _get_json(base_url + f"/api/runs/{created_run_id}")
+            for token in ("=== ДЛЯ КУРАТОРА ===", "=== СЖАТАЯ ПРОВЕРКА ==="):
+                if token not in run.get("handoff_text", ""):
+                    raise AssertionError(f"run handoff missing token: {token}")
+            if "Класс задачи:" not in run.get("prompt_text", ""):
+                raise AssertionError("run prompt preview must include classification header")
+
+            verified = _post_json(base_url + f"/api/runs/{created_run_id}/verify", {})
+            if verified.get("verifier_status") != "passed":
+                raise AssertionError(f"verify-run endpoint must pass: {verified}")
+
+            cleanup = _post_json(base_url + f"/api/runs/{created_run_id}/cleanup", {})
+            if cleanup.get("cleanup", {}).get("status") != "cleaned":
+                raise AssertionError(f"cleanup endpoint must clean owned worktree: {cleanup}")
+            if worktree_path.exists():
+                raise AssertionError(f"cleanup must remove owned worktree: {worktree_path}")
+            if _branch_exists(str(fake_run["branch_name"])):
+                raise AssertionError(f"cleanup must remove owned test branch: {fake_run['branch_name']}")
+            created_run_id = None
+
             _expect_http_error(lambda: _get_json(base_url + "/api/live-deploy"), expected_status=404)
             _expect_http_error(lambda: _get_json(base_url + "/deploy"), expected_status=404)
         finally:
+            if created_run_id:
+                try:
+                    _post_json(base_url + f"/api/runs/{created_run_id}/cleanup", {})
+                except Exception:
+                    pass
             process.terminate()
             try:
                 process.wait(timeout=5)
@@ -166,6 +229,25 @@ def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _branch_exists(branch_name: str) -> bool:
+    completed = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", branch_name],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
 
 if __name__ == "__main__":
