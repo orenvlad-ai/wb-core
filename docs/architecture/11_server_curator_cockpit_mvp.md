@@ -6,7 +6,7 @@
 
 Новый контур проектируется как параллельный experimental/night-run contour. Он не заменяет текущий ChatGPT Project workflow, не становится source of truth и не получает права выполнять unfrozen discussion как задачу.
 
-Current MVP-0 checkpoint materializes only a repo-only contract skeleton: data contracts, deterministic validation, bounded Codex prompt generation and local smoke. MVP-0.1 adds local contract tooling on top of that skeleton: JSON example task spec, validate, freeze and generate-prompt CLI flow, plus CLI smoke. В этом checkpoint нет runtime service, API endpoints, UI implementation, Codex runner, deploy или live/public mutation.
+Current MVP-0 checkpoint materializes only a repo-only contract skeleton: data contracts, deterministic validation, bounded Codex prompt generation and local smoke. MVP-0.1 adds local contract tooling on top of that skeleton: JSON example task spec, validate, freeze and generate-prompt CLI flow, plus CLI smoke. MVP-0.2 adds a local-only internal cockpit prototype: stdlib server, simple HTML page, JSON state dir, discussion/task-spec/freeze/prompt flow and server smoke. В этом checkpoint нет production runtime service, production API endpoints, OpenAI API integration, Codex runner, deploy или live/public mutation.
 
 ## Current Norm
 
@@ -339,6 +339,19 @@ For the ADR-only step MVP-0 target completion was `repo-prepared / docs-only`. C
 - prompt generation remains forbidden for draft specs;
 - CLI smoke covers validate/freeze/prompt flow;
 - still no backend service, UI, OpenAI integration, Codex execution runner, live deploy or public route mutation.
+
+### MVP-0.2 Local Cockpit Prototype
+
+- local-only stdlib server entrypoint under `apps/`;
+- default bind is `127.0.0.1`;
+- simple HTML cockpit covers Discuss, Task Spec, Sprint Plan, Prompt and Human Gates surfaces;
+- local JSON state dir stores discussions, messages, task specs and prompt artifacts;
+- server uses existing contract helpers for validation, freeze and prompt generation;
+- server smoke covers root HTML, state API, discussion/message flow, draft rejection, freeze and prompt generation;
+- no OpenAI API integration yet;
+- no Codex runner yet;
+- no live/public/deploy contour or production route wiring;
+- current ChatGPT Project workflow remains active and canonical until explicit cutover.
 
 ### MVP-1
 
