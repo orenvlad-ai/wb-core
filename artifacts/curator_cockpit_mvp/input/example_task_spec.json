@@ -1,0 +1,93 @@
+{
+  "acceptance_criteria": [
+    "CLI validates the example draft task spec",
+    "CLI freezes the task spec with a stable spec_hash",
+    "CLI generates a bounded Codex prompt from the frozen spec"
+  ],
+  "allowed_actions": [
+    "repo_edit",
+    "local_smoke",
+    "git_diff_check"
+  ],
+  "allowed_paths": [
+    "packages/application/curator_cockpit_mvp.py",
+    "apps/curator_cockpit_mvp_cli.py",
+    "apps/curator_cockpit_mvp_cli_smoke.py",
+    "artifacts/curator_cockpit_mvp/input/example_task_spec.json",
+    "docs/architecture/11_server_curator_cockpit_mvp.md"
+  ],
+  "class_reason": "Bounded repo-only contract tooling over the existing curator cockpit MVP skeleton; no runtime, live, API, UI or Codex execution lane is changed.",
+  "explicit_policy_note": null,
+  "forbidden_actions": [
+    "live_deploy",
+    "ssh",
+    "root_shell",
+    "public_route_change",
+    "execution_from_discussion"
+  ],
+  "forbidden_paths": [
+    "wb_core_docs_master/**",
+    "99_MANIFEST__DOCSET_VERSION.md",
+    "artifacts/registry_upload_http_entrypoint/**",
+    "gas/**"
+  ],
+  "frozen_at": null,
+  "goal": "Materialize local contract tooling for validating, freezing and generating Codex prompts from curator cockpit task specs.",
+  "human_gates": [],
+  "id": "task-curator-cockpit-mvp-tooling-example",
+  "not_in_scope": [
+    "Codex worker execution",
+    "backend HTTP endpoints",
+    "cockpit UI",
+    "OpenAI API integration",
+    "live deploy",
+    "public route changes"
+  ],
+  "required_smokes": [
+    "python3 apps/curator_cockpit_mvp_smoke.py",
+    "git diff --check"
+  ],
+  "risks": [
+    "Prompt generation could drift from mandatory governance footer",
+    "Policy defaults could accidentally permit live/deploy actions"
+  ],
+  "scope": [
+    "packages/application/curator_cockpit_mvp.py",
+    "apps/curator_cockpit_mvp_cli.py",
+    "apps/curator_cockpit_mvp_cli_smoke.py",
+    "artifacts/curator_cockpit_mvp/input/example_task_spec.json",
+    "docs/architecture/11_server_curator_cockpit_mvp.md"
+  ],
+  "spec_hash": null,
+  "sprint_steps": [
+    {
+      "acceptance_criteria": [
+        "validate-task-spec returns validation_ok=true for this example",
+        "freeze-task-spec writes a frozen spec with stable spec_hash",
+        "generate-codex-prompt writes a prompt with mandatory classification and handoff blocks"
+      ],
+      "goal": "Add local validate/freeze/prompt tooling without launching execution.",
+      "id": "step-001",
+      "required_smokes": [
+        "python3 apps/curator_cockpit_mvp_cli_smoke.py"
+      ],
+      "scope": [
+        "packages/application/curator_cockpit_mvp.py",
+        "apps/curator_cockpit_mvp_cli.py",
+        "apps/curator_cockpit_mvp_cli_smoke.py",
+        "artifacts/curator_cockpit_mvp/input/example_task_spec.json"
+      ],
+      "sequence": 1,
+      "stop_conditions": [
+        "The task requires live/deploy/public route operations",
+        "The task requires backend endpoints, UI or Codex worker execution"
+      ],
+      "task_class": "L2",
+      "title": "Add curator cockpit MVP local contract tooling"
+    }
+  ],
+  "status": "draft",
+  "task_class": "L2",
+  "title": "Curator cockpit MVP local contract tooling",
+  "version": "v1"
+}
