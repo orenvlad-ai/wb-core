@@ -31,6 +31,12 @@ source_basis:
   - "apps/sheet_vitrina_v1_feedbacks_http_smoke.py"
   - "apps/sheet_vitrina_v1_feedbacks_ai_smoke.py"
   - "apps/sheet_vitrina_v1_feedbacks_browser_smoke.py"
+  - "apps/sheet_vitrina_v1_feedbacks_complaints_smoke.py"
+  - "apps/seller_portal_feedbacks_complaints_status_sync_smoke.py"
+  - "apps/seller_portal_feedbacks_complaint_submit_smoke.py"
+  - "apps/seller_portal_feedbacks_complaint_confirmation_smoke.py"
+  - "apps/seller_portal_feedbacks_complaints_detail_probe_smoke.py"
+  - "apps/web_source_owner_runtime_base_url_smoke.py"
   - "apps/sheet_vitrina_v1_research_sku_group_comparison_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_integration_smoke.py"
@@ -52,7 +58,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "863184041a619b3a940f94c38d60e0dfce6bc6d9"
+built_from_commit: "e65dc30240e49651c2c660b179acbbd6b2accbd1"
 ---
 
 # Summary
@@ -110,7 +116,16 @@ python3 apps/sheet_vitrina_v1_ready_fact_reconcile_smoke.py
 python3 apps/sheet_vitrina_v1_feedbacks_http_smoke.py
 python3 apps/sheet_vitrina_v1_feedbacks_ai_smoke.py
 python3 apps/sheet_vitrina_v1_feedbacks_browser_smoke.py
+python3 apps/sheet_vitrina_v1_feedbacks_complaints_smoke.py
+python3 apps/seller_portal_feedbacks_complaints_scout_smoke.py
+python3 apps/seller_portal_feedbacks_matching_replay_smoke.py
+python3 apps/seller_portal_feedbacks_complaint_dry_run_plan_smoke.py
+python3 apps/seller_portal_feedbacks_complaint_submit_smoke.py
+python3 apps/seller_portal_feedbacks_complaints_status_sync_smoke.py
+python3 apps/seller_portal_feedbacks_complaint_confirmation_smoke.py
+python3 apps/seller_portal_feedbacks_complaints_detail_probe_smoke.py
 python3 apps/sheet_vitrina_v1_research_sku_group_comparison_smoke.py
+python3 apps/web_source_owner_runtime_base_url_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_http_smoke.py
 python3 apps/sheet_vitrina_v1_web_vitrina_view_model_smoke.py
@@ -163,8 +178,11 @@ Current web-vitrina phase-4 smoke intent:
 - `apps/sheet_vitrina_v1_web_vitrina_group_coverage_smoke.py`, `apps/sheet_vitrina_v1_web_vitrina_group_refresh_smoke.py` and `apps/sheet_vitrina_v1_web_vitrina_group_action_ui_smoke.py` prove grouped loading-table coverage, lazy details empty/error behavior, date-scoped `group-refresh` payload semantics and visible launch failure handling.
 - `apps/sheet_vitrina_v1_web_vitrina_highlight_ui_smoke.py` keeps `updated_cells` highlighting browser-session-only across full refresh and group refresh.
 - `apps/sheet_vitrina_v1_popup_outside_click_browser_smoke.py` keeps custom floating controls closeable by outside-click/`Escape` without breaking checkbox/date-range first-click behavior.
-- `apps/sheet_vitrina_v1_feedbacks_http_smoke.py`, `apps/sheet_vitrina_v1_feedbacks_ai_smoke.py` and `apps/sheet_vitrina_v1_feedbacks_browser_smoke.py` cover the read-only `Отзывы` route/table plus transient server-side prompt/analyze flow.
+- `apps/sheet_vitrina_v1_feedbacks_http_smoke.py`, `apps/sheet_vitrina_v1_feedbacks_ai_smoke.py` and `apps/sheet_vitrina_v1_feedbacks_browser_smoke.py` cover the read-only `Отзывы` route/table, strict server-side feedback filters, Excel export and transient server-side prompt/analyze flow.
+- `apps/sheet_vitrina_v1_feedbacks_complaints_smoke.py` covers nested `Жалобы` runtime journal/status-sync API shape and keeps complaint state separate from feedback AI labels.
+- `apps/seller_portal_feedbacks_complaints_scout_smoke.py`, `apps/seller_portal_feedbacks_matching_replay_smoke.py`, `apps/seller_portal_feedbacks_complaint_dry_run_plan_smoke.py`, `apps/seller_portal_feedbacks_complaint_submit_smoke.py`, `apps/seller_portal_feedbacks_complaints_status_sync_smoke.py`, `apps/seller_portal_feedbacks_complaint_confirmation_smoke.py` and `apps/seller_portal_feedbacks_complaints_detail_probe_smoke.py` cover the guarded Seller Portal complaint lane: scout/matching/dry-run/submit/status sync/confirmation/detail probes without turning web UI into a submit route.
 - `apps/sheet_vitrina_v1_research_sku_group_comparison_smoke.py` covers read-only research options/calculate semantics, non-financial metric filtering, promo candidate chip metadata and no zero-fill coverage behavior.
+- `apps/web_source_owner_runtime_base_url_smoke.py` covers localhost owner runtime API defaults and env override behavior for bot-backed web-source/seller-funnel adapters.
 
 Current reports smoke intent:
 - `apps/sheet_vitrina_v1_stock_report_smoke.py` checks previous-closed stock report semantics and active SKU filtering.
@@ -320,6 +338,12 @@ Current hosted runtime dependency note for promo live wiring:
 - browser binaries remain an existing external host contour expectation and are not installed by `wb-core` deploy;
 - if deploy still fails before HTTP probes, first inspect `journalctl -u wb-core-registry-http.service` for import-time dependency drift instead of treating it as an unspecified runtime outage.
 
+Current hosted runtime dependency note for owner runtime:
+- EU deploy also owns SellerPortalBot/owner-runtime dependencies: host OS `python3-pip`, `python3-venv`, `xvfb`, `x11vnc`, `novnc`, `websockify`, `openbox`, `postgresql`, `postgresql-client`;
+- `/opt/wb-web-bot/venv` is repaired with pinned `playwright==1.58.0` and `psycopg2-binary==2.9.11`;
+- `/opt/wb-ai/venv` is repaired with pinned `fastapi==0.129.1`, `uvicorn==0.41.0`, `psycopg2-binary==2.9.11` and `requests==2.32.5`;
+- `wb-ai-api.service` is managed by repo-owned systemd wiring and binds the owner API to `127.0.0.1:8000`; this is the default adapter base URL for hosted bot-backed web-source/seller-funnel handoff and is not a public nginx route.
+
 Current canonical business timezone for server-side `sheet_vitrina_v1` date math:
 - `Asia/Yekaterinburg`
 - default `as_of_date` = previous business day in `Asia/Yekaterinburg`
@@ -337,9 +361,12 @@ Expected routes:
 - `POST /v1/sheet-vitrina-v1/plan-report/baseline-upload`
 - `GET /v1/sheet-vitrina-v1/plan-report/baseline-status`
 - `GET /v1/sheet-vitrina-v1/feedbacks`
+- `POST /v1/sheet-vitrina-v1/feedbacks/export.xlsx`
 - `GET /v1/sheet-vitrina-v1/feedbacks/ai-prompt`
 - `POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt`
 - `POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze`
+- `GET /v1/sheet-vitrina-v1/feedbacks/complaints`
+- `POST /v1/sheet-vitrina-v1/feedbacks/complaints/sync-status`
 - `GET /v1/sheet-vitrina-v1/plan`
 - `GET /v1/sheet-vitrina-v1/status`
 - `GET /v1/sheet-vitrina-v1/job`
@@ -353,6 +380,7 @@ Expected routes:
 - `POST /v1/sheet-vitrina-v1/research/sku-group-comparison/calculate`
 - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/status`
 - `POST /v1/sheet-vitrina-v1/seller-portal-recovery/start`
+- `POST /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start`
 - `POST /v1/sheet-vitrina-v1/seller-portal-recovery/stop`
 - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/status`
@@ -543,6 +571,9 @@ Use this section for current website/operator/public verification. Legacy Google
 - plan-report may use `manual_monthly_plan_report_baseline` only for full-month aggregates inside the route; baseline is uploaded/read via `baseline-template.xlsx`, `baseline-upload`, `baseline-status` and does not replace accepted daily snapshots or any other report source;
 - `GET /v1/sheet-vitrina-v1/feedbacks` is read-only over official WB feedbacks and supports bounded `date_from/date_to`, `stars` and `is_answered`; hosted 401/403 from WB token permission is a real blocker for the `Отзывы` feature, not a silent fallback to another token name;
 - feedbacks AI prompt/analyze routes manage operational prompt config and transient structured output only; they must not write accepted truth, submit complaints, call Seller Portal or use Google Sheets/GAS;
+- `POST /v1/sheet-vitrina-v1/feedbacks/export.xlsx` exports the currently filtered/loaded feedback table as operator XLSX, not accepted truth or a new source layer;
+- `GET /v1/sheet-vitrina-v1/feedbacks/complaints` and `POST /v1/sheet-vitrina-v1/feedbacks/complaints/sync-status` are runtime complaint journal/status surfaces; they may read status evidence from WB `Мои жалобы`, but must not submit complaints from the public UI;
+- real Seller Portal complaint submit remains a CLI-only guarded lane; completion for such tasks must prove exact matching, hard caps and confirmation/detail read-only probe behavior instead of relying on web UI buttons;
 - `GET /v1/sheet-vitrina-v1/research/sku-group-comparison/options` and `POST .../calculate` are read-only over active SKU/config, non-financial metric options and persisted ready snapshots; missing dates/values surface partial/unavailable coverage and are not zero-filled;
 - one-off `apps/sheet_vitrina_v1_ready_fact_reconcile.py dry-run|apply` can repair missing accepted report facts from persisted ready snapshots, but must not overwrite existing accepted diffs or fabricate blank ready values as zero;
 - operator page state is browser-owned only: current top-level tab, active subsection under `Отчёты` / `Расчёт поставок` and stock-report SKU selection persist in namespaced `localStorage`; reload must restore the last valid state, while empty/broken storage or obsolete `nmId` values must fall back safely to current defaults/current active SKU truth;

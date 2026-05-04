@@ -25,7 +25,7 @@ update_triggers:
   - "изменение migration boundary"
   - "изменение operator/runtime invariant"
   - "изменение docs governance"
-built_from_commit: "863184041a619b3a940f94c38d60e0dfce6bc6d9"
+built_from_commit: "e65dc30240e49651c2c660b179acbbd6b2accbd1"
 ---
 
 # Summary
@@ -65,12 +65,15 @@ built_from_commit: "863184041a619b3a940f94c38d60e0dfce6bc6d9"
 | `C-22` | Готовность pack к upload определяется по `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`, а не по Finder timestamps, имени архива или памяти исполнителя. |
 | `C-23` | После explicit derived-sync или transitional pack rebuild, когда upload-ready source подготовлен, в handoff должен оставаться ровно один human-only remainder: внешний upload актуального `wb_core_docs_master`; manifest при этом не превращается в upload state machine. |
 | `C-24` | Hosted public-route publication for the current contour goes through the repo-owned nginx allowlist and deploy runner; manual broad catch-all live nginx edits are not a completion path. |
-| `C-25` | `Отзывы` and feedbacks AI stay read-only/transient: they must not submit complaints, write Google Sheets/GAS, persist AI labels as accepted truth/ЕБД, or call Seller Portal automation. |
+| `C-25` | `Отзывы` and feedbacks AI stay read-only/transient for table/AI semantics: they must not persist AI labels as accepted truth/ЕБД, write Google Sheets/GAS or silently bypass `WB_API_TOKEN` feedbacks permission errors. Nested `Жалобы` may read complaint journal/status, but public UI must not become a real complaint submit path. |
 | `C-26` | `Исследования` / SKU group comparison is read-only over accepted truth / persisted ready snapshots, excludes financial metrics in the MVP, makes no causal/statistical claims, and must not trigger refresh/upstream fetch/backfill/reconcile. |
 | `C-27` | Promo preflight/manifest/artifact diagnostics and promo current invariant smoke are observability/guard surfaces only; expected ended/no-download non-materializable campaigns must not become fatal missing-artifact blockers, and diagnostics must not become metric truth. |
 | `C-28` | Promo historical truth must survive raw artifact retention: normalized campaign rows and manifest/fingerprint metadata are replay-critical, raw XLSX/HAR/screenshots/traces are short-lived debug artifacts, and GC may delete only guarded candidates after replay-critical persistence is proven. |
 | `C-29` | Current hosted writes target only the EU runtime (`wb-core-eu-root` / `89.191.226.88` / `/opt/wb-core-runtime/state`). Old selleros (`selleros-root` / `178.72.152.177`) is rollback-only/read-only evidence; routine deploy/apply-nginx/restart/update/GC mutations must fail fast before remote side effects unless the explicit emergency rollback override is set. |
 | `C-30` | Current-live EU publication must be production HTTPS, not IP-only/HTTP-only: `public_base_url=https://api.selleros.pro`, nginx `server_name 89.191.226.88 api.selleros.pro;`, `listen 443 ssl` and LetsEncrypt cert/key paths for `api.selleros.pro` are hard invariants. Losing domain/443 is production outage drift, and mutating deploy/apply-nginx must fail locally before remote changes if the invariant is broken. |
+| `C-31` | Seller Portal complaint submit is a guarded CLI-only lane: exact feedback/AI-row match, hard caps and explicit runtime evidence are required; uncertain submit attempts must be resolved through read-only confirmation/detail probes instead of broad resubmission or UI automation. |
+| `C-32` | EU bot-backed web-source/seller-funnel owner runtime is host-local: `wb-ai-api.service` binds `/opt/wb-ai/api.py` to `127.0.0.1:8000`; adapters may default to that localhost API and env overrides may relocate the owner runtime, but this must not become a public nginx route or a product-plane source-of-truth shortcut. |
+| `C-33` | Seller-session recovery/status/launcher routes must degrade truthfully: missing `/opt/wb-web-bot/venv/bin/python` or unavailable launcher state is surfaced as status/error JSON (`200` status surface or truthful `409` for launcher), not as public 500 or hidden deploy success. |
 
 # Known gaps
 
