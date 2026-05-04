@@ -32,6 +32,11 @@ from packages.application.curator_cockpit_mvp import (  # noqa: E402
     validate_sprint_step,
     validate_task_spec,
 )
+from packages.application.curator_cockpit_mvp_ai import (  # noqa: E402
+    CuratorDraftRequest,
+    curator_draft_result_to_dict,
+    draft_task_spec,
+)
 from packages.application.curator_cockpit_mvp_execution import (  # noqa: E402
     CuratorCockpitExecutionError,
     cleanup_run_worktree,
@@ -58,11 +63,13 @@ EXPOSED_ROUTES = (
     "GET /api/runs/{id}",
     "POST /api/discussions",
     "POST /api/discussions/{id}/messages",
+    "POST /api/discussions/{id}/draft-task-spec",
     "POST /api/task-specs",
     "POST /api/task-specs/{id}/freeze",
     "POST /api/task-specs/{id}/generate-prompt",
     "POST /api/task-specs/{id}/prepare-run",
     "POST /api/task-specs/{id}/run-fake",
+    "POST /api/guided-safe-fake-run",
     "POST /api/runs/{id}/verify",
     "POST /api/runs/{id}/cleanup",
 )
@@ -110,6 +117,8 @@ class CockpitStateStore:
             "codex_runner_enabled": False,
             "fake_executor_enabled": True,
             "real_executor_enabled": False,
+            "ai_curator_enabled": True,
+            "openai_curator_optional": True,
             "openai_api_enabled": False,
             "notice": LOCAL_ONLY_NOTICE,
         }
@@ -163,6 +172,43 @@ class CockpitStateStore:
         discussions[discussion_id] = discussion
         self._write_collection("discussions", discussions)
         return discussion
+
+    def draft_task_spec_from_discussion(self, discussion_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        discussion = self._get_discussion(discussion_id)
+        result = draft_task_spec(
+            CuratorDraftRequest(
+                discussion_id=discussion_id,
+                messages=tuple(_safe_messages(discussion.get("messages", []))),
+                existing_task_spec=_optional_mapping(payload.get("existing_task_spec")),
+                repo_context_summary=_optional_str(payload.get("repo_context_summary")),
+                mode=str(payload.get("mode") or "fake"),
+            )
+        )
+        result_payload = curator_draft_result_to_dict(result)
+        if result.status != "success" or not result.task_spec:
+            return {
+                "status": result.status,
+                "task_spec_id": None,
+                "validation_ok": False,
+                "errors": result_payload["errors"],
+                "warnings": result_payload["warnings"],
+                "provider": result.provider,
+                "model": result.model,
+                "blocked_reason": result.blocked_reason,
+            }
+
+        saved = self.create_task_spec(result.task_spec)
+        return {
+            "status": "drafted",
+            "task_spec_id": saved["id"],
+            "task_spec": saved,
+            "validation_ok": True,
+            "errors": [],
+            "warnings": result_payload["warnings"],
+            "provider": result.provider,
+            "model": result.model,
+            "blocked_reason": None,
+        }
 
     def create_task_spec(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         task_specs = self._read_collection("task_specs")
@@ -304,6 +350,32 @@ class CockpitStateStore:
         self._remember_run(summary)
         return summary
 
+    def guided_safe_fake_run(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        task_spec_id = str(payload.get("task_spec_id") or "")
+        if not task_spec_id:
+            raise BadRequestError("task_spec_id is required")
+        task_spec_payload = self.get_task_spec(task_spec_id)
+        step_id = self._step_id_from_payload(task_spec_payload, payload)
+        prompt_summary = self.generate_prompt(task_spec_id, {"step_id": step_id})
+        prepared = self.prepare_run(task_spec_id, {"step_id": step_id})
+        fake_run = self.run_fake(task_spec_id, {"step_id": step_id})
+        verified = self.verify_run(str(fake_run["run_id"]))
+        return {
+            "status": "verifier_passed" if verified.get("verifier_status") == "passed" else "failed",
+            "task_spec_id": task_spec_id,
+            "step_id": step_id,
+            "prompt_id": prompt_summary["id"],
+            "prepared_run_id": prepared["run_id"],
+            "run_id": fake_run["run_id"],
+            "prompt_path": fake_run["prompt_path"],
+            "handoff_path": fake_run["handoff_path"],
+            "worktree_path": fake_run["worktree_path"],
+            "verifier_status": verified.get("verifier_status"),
+            "blocker_reason": verified.get("blocker_reason"),
+            "mandatory_handoff_blocks_present": verified.get("mandatory_handoff_blocks_present"),
+            "errors": [],
+        }
+
     def _read_collection(self, name: str) -> dict[str, Any]:
         path = self.state_dir / f"{name}.json"
         if not path.exists():
@@ -347,6 +419,13 @@ class CockpitStateStore:
         steps = sprint_steps_from_task_spec_mapping(task_spec_payload, task_spec)
         return steps[0].id
 
+    def _get_discussion(self, discussion_id: str) -> Mapping[str, Any]:
+        discussions = self._read_collection("discussions")
+        discussion = discussions.get(discussion_id)
+        if not isinstance(discussion, Mapping):
+            raise NotFoundError(f"discussion not found: {discussion_id}")
+        return discussion
+
 
 class CockpitRequestHandler(BaseHTTPRequestHandler):
     server: "CockpitHTTPServer"
@@ -389,9 +468,15 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/task-specs":
                 self._send_json(self.server.store.create_task_spec(payload), HTTPStatus.CREATED)
                 return
+            if path == "/api/guided-safe-fake-run":
+                self._send_json(self.server.store.guided_safe_fake_run(payload), HTTPStatus.CREATED)
+                return
             parts = _split_path(path)
             if len(parts) == 4 and parts[:2] == ["api", "discussions"] and parts[3] == "messages":
                 self._send_json(self.server.store.add_message(parts[2], payload))
+                return
+            if len(parts) == 4 and parts[:2] == ["api", "discussions"] and parts[3] == "draft-task-spec":
+                self._send_json(self.server.store.draft_task_spec_from_discussion(parts[2], payload), HTTPStatus.CREATED)
                 return
             if len(parts) == 4 and parts[:2] == ["api", "task-specs"] and parts[3] == "freeze":
                 frozen = self.server.store.freeze_task_spec(parts[2], payload)
@@ -590,7 +675,7 @@ def _render_html() -> str:
     section {{ background: white; border: 1px solid #d9d9d4; border-radius: 6px; padding: 14px; }}
     h1 {{ margin: 0; font-size: 22px; }}
     h2 {{ margin: 0 0 10px; font-size: 16px; }}
-    textarea, input {{ width: 100%; box-sizing: border-box; border: 1px solid #c8c8c2; border-radius: 4px; padding: 8px; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }}
+    textarea, input, select {{ width: 100%; box-sizing: border-box; border: 1px solid #c8c8c2; border-radius: 4px; padding: 8px; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }}
     textarea {{ min-height: 150px; resize: vertical; }}
     button {{ margin: 8px 8px 0 0; border: 1px solid #2f5f8f; background: #2f6fab; color: white; border-radius: 4px; padding: 7px 10px; cursor: pointer; }}
     button.secondary {{ background: #f4f4f0; color: #202124; border-color: #b7b7b0; }}
@@ -609,16 +694,26 @@ def _render_html() -> str:
       <h2>Discuss</h2>
       <textarea id="messageInput" placeholder="Operator message"></textarea>
       <button onclick="addMessage()">Add message</button>
+      <select id="curatorModeInput">
+        <option value="fake">Fake curator</option>
+        <option value="openai">OpenAI curator</option>
+      </select>
+      <button onclick="draftTaskSpec()">Draft Task Spec from Discussion</button>
       <pre id="messages">No discussion yet.</pre>
+      <pre id="draftStatus">No draft requested.</pre>
     </section>
     <section>
       <h2>Human Gates</h2>
-      <pre id="humanGates">Save a task spec to inspect gates.</pre>
+      <pre id="humanGates">No human gates for this spec.</pre>
     </section>
     <section class="full">
       <h2>Task Spec</h2>
-      <textarea id="taskSpecInput">{example}</textarea>
-      <button onclick="loadExample()">Load example task spec</button>
+      <pre id="taskSpecSummary">No task spec yet.</pre>
+      <details>
+        <summary>Advanced / Raw JSON</summary>
+        <textarea id="taskSpecInput">{example}</textarea>
+        <button class="secondary" onclick="loadExample()">Load example task spec</button>
+      </details>
       <button onclick="saveDraft()">Validate / Save Draft</button>
       <button onclick="freezeTask()">Freeze Task</button>
       <pre id="taskSpecStatus">Ready.</pre>
@@ -636,15 +731,23 @@ def _render_html() -> str:
     <section class="full">
       <h2>Run</h2>
       <div class="muted">Fake executor only in MVP. No OpenAI API, no real Codex CLI, no live/deploy/public route.</div>
-      <button onclick="prepareRun()">Prepare Run</button>
-      <button onclick="runFake()">Run Fake Executor</button>
-      <button onclick="verifyRun()">Verify Run</button>
+      <button onclick="runSafeFakeFlow()">Run Safe Fake Flow</button>
       <button class="secondary" onclick="cleanupRun()">Cleanup Run</button>
+      <details>
+        <summary>Advanced run controls</summary>
+        <button onclick="prepareRun()">Prepare Run</button>
+        <button onclick="runFake()">Run Fake Executor</button>
+        <button onclick="verifyRun()">Verify Run</button>
+      </details>
       <pre id="runStatus">No run yet.</pre>
-      <h2>Run Prompt</h2>
-      <pre id="runPrompt">No run prompt.</pre>
-      <h2>Run Handoff</h2>
-      <pre id="runHandoff">No handoff.</pre>
+      <details>
+        <summary>Prompt preview</summary>
+        <pre id="runPrompt">No run prompt.</pre>
+      </details>
+      <details>
+        <summary>Handoff preview</summary>
+        <pre id="runHandoff">No handoff.</pre>
+      </details>
     </section>
   </main>
   <script>
@@ -677,6 +780,29 @@ def _render_html() -> str:
         body: JSON.stringify({{role: 'operator', content}})
       }});
       document.getElementById('messages').textContent = JSON.stringify(discussion.messages, null, 2);
+    }}
+
+    async function draftTaskSpec() {{
+      try {{
+        if (!discussionId) {{
+          const discussion = await request('/api/discussions', {{method: 'POST', body: '{{}}'}});
+          discussionId = discussion.id;
+        }}
+        const mode = document.getElementById('curatorModeInput').value || 'fake';
+        const result = await request(`/api/discussions/${{discussionId}}/draft-task-spec`, {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify({{mode}})
+        }});
+        document.getElementById('draftStatus').textContent = JSON.stringify(result, null, 2);
+        if (result.task_spec) {{
+          taskSpecId = result.task_spec_id;
+          document.getElementById('taskSpecInput').value = JSON.stringify(result.task_spec, null, 2);
+          renderSpec(result.task_spec);
+        }}
+      }} catch (error) {{
+        document.getElementById('draftStatus').textContent = String(error);
+      }}
     }}
 
     async function saveDraft() {{
@@ -715,6 +841,22 @@ def _render_html() -> str:
       }});
       const response = await fetch(`/api/prompts/${{summary.id}}`);
       document.getElementById('promptOutput').textContent = await response.text();
+    }}
+
+    async function runSafeFakeFlow() {{
+      try {{
+        const stepId = document.getElementById('stepIdInput').value || 'step-001';
+        const summary = await request('/api/guided-safe-fake-run', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify({{task_spec_id: taskSpecId, step_id: stepId}})
+        }});
+        currentRunId = summary.run_id;
+        renderRun(summary);
+        await loadRun(currentRunId);
+      }} catch (error) {{
+        document.getElementById('runStatus').textContent = String(error);
+      }}
     }}
 
     async function prepareRun() {{
@@ -763,8 +905,17 @@ def _render_html() -> str:
 
     function renderSpec(spec) {{
       document.getElementById('taskSpecStatus').textContent = JSON.stringify({{id: spec.id, status: spec.status, spec_hash: spec.spec_hash}}, null, 2);
+      document.getElementById('taskSpecSummary').textContent = JSON.stringify({{
+        title: spec.title,
+        class: spec.task_class,
+        goal: spec.goal,
+        acceptance_criteria: spec.acceptance_criteria || [],
+        forbidden_actions: spec.forbidden_actions || [],
+        human_gates: spec.human_gates || []
+      }}, null, 2);
       document.getElementById('sprintPlan').textContent = JSON.stringify(spec.sprint_steps || [], null, 2);
-      document.getElementById('humanGates').textContent = JSON.stringify(spec.human_gates || [], null, 2);
+      const gates = spec.human_gates || [];
+      document.getElementById('humanGates').textContent = gates.length ? gates.map((gate) => `- ${{gate}}`).join('\\n') : 'No human gates for this spec.';
     }}
 
     function renderRun(run) {{
@@ -837,6 +988,30 @@ def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _optional_mapping(value: Any) -> Mapping[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise BadRequestError("existing_task_spec must be an object when provided")
+    return value
+
+
+def _safe_messages(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    messages: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        messages.append(
+            {
+                "role": str(item.get("role") or "operator"),
+                "content": str(item.get("content") or ""),
+            }
+        )
+    return messages
 
 
 def _json_ready(value: Any) -> Any:

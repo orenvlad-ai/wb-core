@@ -16,7 +16,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 SERVER = ROOT / "apps" / "curator_cockpit_mvp_server.py"
-EXAMPLE_SPEC = ROOT / "artifacts" / "curator_cockpit_mvp" / "input" / "example_task_spec.json"
 
 
 def main() -> None:
@@ -47,8 +46,14 @@ def main() -> None:
             html = _get_text(base_url + "/")
             if "Curator Cockpit MVP" not in html or "Local-only MVP prototype" not in html:
                 raise AssertionError("root route must return cockpit HTML with local-only notice")
-            if "Run Fake Executor" not in html or "Fake executor only in MVP" not in html:
-                raise AssertionError("root route must expose local fake-run UI wording")
+            for token in (
+                "Draft Task Spec from Discussion",
+                "Run Safe Fake Flow",
+                "Advanced / Raw JSON",
+                "Fake executor only in MVP",
+            ):
+                if token not in html:
+                    raise AssertionError(f"root route must expose simplified guided UI token: {token}")
 
             state = _get_json(base_url + "/api/state")
             if state.get("host") != "127.0.0.1" or state.get("local_only") is not True:
@@ -60,6 +65,8 @@ def main() -> None:
                 raise AssertionError(f"live/public flags must stay false: {state}")
             if state.get("fake_executor_enabled") is not True or state.get("real_executor_enabled") is not False:
                 raise AssertionError(f"server must expose fake-only executor state: {state}")
+            if state.get("ai_curator_enabled") is not True or state.get("openai_curator_optional") is not True:
+                raise AssertionError(f"server must expose optional AI curator state: {state}")
 
             discussion = _post_json(base_url + "/api/discussions", {"title": "Smoke discussion"})
             discussion_id = discussion["id"]
@@ -71,9 +78,21 @@ def main() -> None:
             if len(messages) != 2 or messages[1].get("role") != "curator":
                 raise AssertionError(f"operator message must append static curator placeholder: {messages}")
 
-            example_spec = json.loads(EXAMPLE_SPEC.read_text(encoding="utf-8"))
-            draft = _post_json(base_url + "/api/task-specs", example_spec)
-            task_spec_id = draft["id"]
+            draft_summary = _post_json(
+                base_url + f"/api/discussions/{discussion_id}/draft-task-spec",
+                {"mode": "fake"},
+            )
+            if draft_summary.get("status") != "drafted" or draft_summary.get("provider") != "fake":
+                raise AssertionError(f"fake curator must draft valid task spec: {draft_summary}")
+            task_spec_id = draft_summary["task_spec_id"]
+            draft = _get_json(base_url + f"/api/task-specs/{task_spec_id}")
+            for path in ("wb_core_docs_master/**", "99_MANIFEST__DOCSET_VERSION.md"):
+                if path not in draft.get("forbidden_paths", []):
+                    raise AssertionError(f"draft must preserve forbidden path: {path}")
+            for action in ("live_deploy", "ssh", "root_shell", "public_route_change"):
+                if action not in draft.get("forbidden_actions", []):
+                    raise AssertionError(f"draft must preserve forbidden action: {action}")
+
             _expect_http_error(
                 lambda: _post_json(base_url + f"/api/task-specs/{task_spec_id}/generate-prompt", {"step_id": "step-001"}),
                 expected_status=400,
@@ -84,6 +103,10 @@ def main() -> None:
             )
             _expect_http_error(
                 lambda: _post_json(base_url + f"/api/task-specs/{task_spec_id}/run-fake", {"step_id": "step-001"}),
+                expected_status=400,
+            )
+            _expect_http_error(
+                lambda: _post_json(base_url + "/api/guided-safe-fake-run", {"task_spec_id": task_spec_id, "step_id": "step-001"}),
                 expected_status=400,
             )
 
@@ -161,6 +184,21 @@ def main() -> None:
                 raise AssertionError(f"cleanup must remove owned worktree: {worktree_path}")
             if _branch_exists(str(fake_run["branch_name"])):
                 raise AssertionError(f"cleanup must remove owned test branch: {fake_run['branch_name']}")
+            created_run_id = None
+
+            guided = _post_json(
+                base_url + "/api/guided-safe-fake-run",
+                {"task_spec_id": task_spec_id, "step_id": "step-001"},
+            )
+            created_run_id = guided["run_id"]
+            if guided.get("status") != "verifier_passed" or guided.get("verifier_status") != "passed":
+                raise AssertionError(f"guided safe fake flow must pass verifier: {guided}")
+            guided_run = _get_json(base_url + f"/api/runs/{created_run_id}")
+            if not guided_run.get("prompt_text") or not guided_run.get("handoff_text"):
+                raise AssertionError(f"guided run must expose prompt and handoff: {guided_run}")
+            _post_json(base_url + f"/api/runs/{created_run_id}/cleanup", {})
+            if _branch_exists(str(guided_run["branch_name"])):
+                raise AssertionError(f"guided cleanup must remove owned test branch: {guided_run['branch_name']}")
             created_run_id = None
 
             _expect_http_error(lambda: _get_json(base_url + "/api/live-deploy"), expected_status=404)
