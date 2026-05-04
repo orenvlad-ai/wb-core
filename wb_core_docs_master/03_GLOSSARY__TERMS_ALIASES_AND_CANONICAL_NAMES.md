@@ -21,7 +21,7 @@ update_triggers:
   - "изменение canonical naming"
   - "появление нового публичного термина"
   - "изменение operator-visible labels"
-built_from_commit: "863184041a619b3a940f94c38d60e0dfce6bc6d9"
+built_from_commit: "e65dc30240e49651c2c660b179acbbd6b2accbd1"
 ---
 
 # Summary
@@ -54,6 +54,9 @@ built_from_commit: "863184041a619b3a940f94c38d60e0dfce6bc6d9"
 | `manual_monthly_plan_report_baseline` | `Исторические данные для отчёта`, `baseline` | separate runtime SQLite source used only by plan-report for full-month operator XLSX aggregates; not a general historical backfill |
 | `feedbacks` | `Отзывы`, `sheet_vitrina_v1_feedbacks` | read-only official WB feedbacks route/tab; not accepted truth persistence and not complaint submission |
 | `feedbacks AI` | `AI анализ отзывов`, `feedbacks/ai-prompt`, `feedbacks/ai-analyze` | transient operator review aid over loaded feedback rows via server-side prompt + OpenAI call; not `AI_EXPORT`, not ЕБД and not complaint automation |
+| `feedbacks complaints` | `Жалобы`, `feedbacks/complaints`, `complaint journal` | nested `Отзывы` runtime journal/status-sync contour for complaint evidence/status; read/status routes only, not public complaint submit UI |
+| `Seller Portal complaint submit` | `guarded complaint submit`, `complaint CLI runner` | CLI-only guarded real submit lane with exact match, hard caps and confirmation/detail probes; not web UI, not auto-submit and not accepted truth persistence |
+| `owner runtime API` | `wb-ai-api.service`, `localhost owner API`, `127.0.0.1:8000` | EU host-local owner runtime for bot-backed web-source/seller-funnel handoff; not public nginx route and not `api.selleros.pro` surface |
 | `research_sku_group_comparison` | `Исследования`, `Сравнение групп SKU` | read-only retrospective comparison of two SKU groups over persisted ready snapshots; no causal/statistical claims |
 | `promo current invariant smoke` | `promo invariant guard` | read-only live/public guard for current promo row visibility and expected ended/no-download artifact handling |
 | `normalized promo archive` | `campaign_rows.jsonl`, `campaign_rows_manifest.json` | normalized campaign-row truth for historical promo replay without permanent raw workbook dependency |
@@ -84,7 +87,7 @@ built_from_commit: "863184041a619b3a940f94c38d60e0dfce6bc6d9"
 
 - Final production naming для будущих hosted/runtime/deploy слоёв ещё не зафиксирован.
 - Текущий main-confirmed uploaded package уже фиксируется как `102` metrics rows / `95` enabled+show_in_data metric keys в current truth; operator-facing `DATA_VITRINA` при этом materialize-ит тот же server-driven row set как thin two-day `date_matrix` (`1631` source rows -> `1698` rendered rows на `yesterday_closed + today_current`) без локального subset path.
-- User-facing labels for current web-vitrina are now centralized around `Витрина`, `Загрузить и обновить`, `Загрузка данных`, `Обновить группу`, `Отчёты`, `Отчёт по остаткам`, `Выполнение плана`, `Исторические данные для отчёта`, `Отзывы`, `Исследования`, `Товар в акции` and `ЕБД`.
+- User-facing labels for current web-vitrina are now centralized around `Витрина`, `Загрузить и обновить`, `Загрузка данных`, `Обновить группу`, `Отчёты`, `Отчёт по остаткам`, `Выполнение плана`, `Исторические данные для отчёта`, `Отзывы`, `Жалобы`, `Исследования`, `Товар в акции` and `ЕБД`.
 
 # Not in scope
 

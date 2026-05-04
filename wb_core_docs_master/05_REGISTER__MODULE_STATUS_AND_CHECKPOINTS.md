@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "863184041a619b3a940f94c38d60e0dfce6bc6d9"
+built_from_commit: "e65dc30240e49651c2c660b179acbbd6b2accbd1"
 ---
 
 # Summary
@@ -89,11 +89,15 @@ Current main-confirmed operator flow:
 - `POST /v1/sheet-vitrina-v1/plan-report/baseline-upload`
 - `GET /v1/sheet-vitrina-v1/plan-report/baseline-status`
 - `GET /v1/sheet-vitrina-v1/feedbacks`
+- `POST /v1/sheet-vitrina-v1/feedbacks/export.xlsx`
 - `GET /v1/sheet-vitrina-v1/feedbacks/ai-prompt`
 - `POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt`
 - `POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze`
+- `GET /v1/sheet-vitrina-v1/feedbacks/complaints`
+- `POST /v1/sheet-vitrina-v1/feedbacks/complaints/sync-status`
 - `GET /v1/sheet-vitrina-v1/research/sku-group-comparison/options`
 - `POST /v1/sheet-vitrina-v1/research/sku-group-comparison/calculate`
+- `POST /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start`
 - `GET /sheet-vitrina-v1/operator`
 - `GET /sheet-vitrina-v1/vitrina`
 - former Google Sheets `prepare/upload/load DATA_VITRINA` flow is archived and blocked by guards
@@ -119,13 +123,13 @@ Current live promo source flow:
 Current repo-owned unified web/operator surface:
 - primary route = `GET /sheet-vitrina-v1/vitrina`; first/default tab = `Витрина`, sibling tabs = `Расчет поставок`, `Отчеты`, `Отзывы` and `Исследования`
 - compatibility route = `GET /sheet-vitrina-v1/operator`; it renders the same unified shell and is not a separate source-of-truth owner
-- page uses current read/action routes: `POST /v1/sheet-vitrina-v1/refresh`, `GET /v1/sheet-vitrina-v1/status`, `GET /v1/sheet-vitrina-v1/job`, `GET /v1/sheet-vitrina-v1/daily-report`, `GET /v1/sheet-vitrina-v1/stock-report`, `GET /v1/sheet-vitrina-v1/plan-report`, `GET /v1/sheet-vitrina-v1/feedbacks`, `feedbacks/ai-prompt`, `feedbacks/ai-analyze`, research SKU-group comparison routes and `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh`
+- page uses current read/action routes: `POST /v1/sheet-vitrina-v1/refresh`, `GET /v1/sheet-vitrina-v1/status`, `GET /v1/sheet-vitrina-v1/job`, `GET /v1/sheet-vitrina-v1/daily-report`, `GET /v1/sheet-vitrina-v1/stock-report`, `GET /v1/sheet-vitrina-v1/plan-report`, `GET /v1/sheet-vitrina-v1/feedbacks`, `feedbacks/export.xlsx`, `feedbacks/ai-prompt`, `feedbacks/ai-analyze`, `feedbacks/complaints`, `feedbacks/complaints/sync-status`, research SKU-group comparison routes, seller-session/recovery routes and `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh`
 - former Google Sheets `/load` stays archived/blocked and is not needed for current web-vitrina completion
 - `GET /v1/sheet-vitrina-v1/web-vitrina` stays server-owned and library-agnostic on the default path: current v1 shape is `meta + status_summary + schema + rows + capabilities`, built only from existing ready snapshot/current truth and optional `as_of_date`
 - phase-2 web-vitrina materializes repo-owned `web_vitrina_view_model` over that stable contract: current schema = `columns + rows + groups + sections + formatters + filters + sorts + state_model`
 - phase-3 web-vitrina materializes repo-owned `web_vitrina_gravity_table_adapter` over that `view_model`: current Gravity-specific surface = `columns + rows + renderers + groupings + filters + sorts + use_table_options + table_props + state_surface`
 - phase-4 web-vitrina materializes repo-owned `web_vitrina_page_composition` via optional `surface=page_composition`; the page shell renders summary, compact toolbar/history controls, main table and then bottom `Действия и состояния`
-- the same unified shell exposes `Отзывы` as a manual read-only WB feedbacks table with optional transient AI review columns; prompt storage is operational runtime config, not ЕБД/accepted truth
+- the same unified shell exposes `Отзывы` as a manual read-only WB feedbacks table with strict server-side date/star/answered filters, 62-day feedback date picker, chunked WB pagination, diagnostic meta, Excel export for the current table, resizable columns, optional transient AI review columns and nested `Жалобы` over runtime complaint journal/status sync; prompt storage and AI output are operational/transient, not ЕБД/accepted truth
 - the same unified shell exposes `Исследования` as read-only SKU group comparison; options/calculate use active SKU truth, selectable non-financial metrics and persisted ready snapshots only
 - current live vitrina action/status semantics:
   - `Загрузить и обновить` = canonical `POST /v1/sheet-vitrina-v1/refresh` + page reread, without Google Sheets write dependency
@@ -163,6 +167,8 @@ Current repo-owned unified web/operator surface:
 - `seller_funnel_snapshot` materialization can receive enabled/relevant `nm_ids`; strict validation is applied after relevant-row filtering, so invalid non-relevant rows are logged as `ignored_non_relevant_invalid_rows` instead of poisoning the snapshot
 - bot-backed current-day sync probes `/opt/wb-web-bot/storage_state.json` before seller portal capture; invalidated browser state surfaces as `seller_portal_session_invalid` / human `сессия seller portal больше не действует; требуется повторный вход`
 - seller-portal auth recovery on selleros uses repo-owned localhost-only noVNC/Xvfb path via `apps/seller_portal_relogin_session.py`; unified UI exposes session-check/start/status/stop/launcher controls with per-run `run_id`, safe stop and canonical supplier confirmation
+- steady-state bot-backed source materialization on EU uses localhost owner runtime API `http://127.0.0.1:8000` owned by `wb-ai-api.service` after `/opt/wb-web-bot/bot` capture and `/opt/wb-ai/run_web_source_handoff.py`; env overrides for web-source/seller-funnel base URLs are exceptional owner-runtime relocation knobs, not public nginx routes
+- real complaint submit for `Отзывы/Жалобы` is intentionally outside the web UI: only guarded CLI runners may submit after exact feedback/AI-row match and hard caps, while confirmation/detail probes are read-only evidence for uncertain attempts
 - historical/date-period families (`seller_funnel_snapshot`, `web_source_snapshot`, `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`) now use persisted accepted closed-day semantics for `yesterday_closed`
 - current-snapshot-only families (`prices_snapshot`, `ads_bids`) capture upstream truth only as current snapshot, but an already accepted snapshot for business day D must materialize as `yesterday_closed=D` on D+1; later invalid auto/manual attempts must not blank prior-day accepted truth or already accepted same-day truth
 - semantic reduction is now source-aware instead of naive two-slot worst-case:

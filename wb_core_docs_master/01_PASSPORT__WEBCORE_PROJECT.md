@@ -39,7 +39,7 @@ update_triggers:
   - "изменение current main-confirmed contour"
   - "merge нового bounded модуля"
   - "смена главного project gap"
-built_from_commit: "863184041a619b3a940f94c38d60e0dfce6bc6d9"
+built_from_commit: "e65dc30240e49651c2c660b179acbbd6b2accbd1"
 ---
 
 # Summary
@@ -56,6 +56,8 @@ built_from_commit: "863184041a619b3a940f94c38d60e0dfce6bc6d9"
 - web-vitrina line `29–31` уже смёржена и является active user-facing surface: `/sheet-vitrina-v1/vitrina` + `/v1/sheet-vitrina-v1/web-vitrina`.
 - research block `32` уже смёржен как read-only MVP вкладки `Исследования` для сравнения двух групп SKU по persisted ready snapshots.
 - current operator UI unified вокруг `/sheet-vitrina-v1/vitrina`: first tab `Витрина`, sibling tabs `Расчет поставок`, `Отчеты`, `Отзывы` и `Исследования`; `/sheet-vitrina-v1/operator` остаётся compatibility entry на тот же shell.
+- current `Отзывы` checkpoint now includes strict server-side feedback filtering/export and nested `Жалобы`: complaint journal/status sync are read-only runtime routes, while real Seller Portal complaint submit remains a guarded CLI-only lane with exact-match/hard-cap checks and confirmation/detail probes for uncertain attempts.
+- current hosted EU checkpoint now includes repo-owned localhost owner runtime wiring (`wb-ai-api.service` on `127.0.0.1:8000`) for bot-backed web-source/seller-funnel handoff; public nginx remains product route publication, not the owner API path.
 
 # Current norm
 
@@ -101,7 +103,8 @@ Confirmed contour на текущем `main`:
   - primary manual action `Загрузить и обновить` refreshes server-side ready snapshot without Google Sheets `/load`;
   - compact table toolbar combines period/search/filter/column/sort controls; default no-query history opens the latest four server-readable business dates ending on backend-owned `today_current_date` when available;
   - bottom `Загрузка данных` is lazy: initial state shows only `not_loaded` + `Загрузить`, then explicit read-only `surface=page_composition&include_source_status=1` loads grouped source status table (`WB API`, `Seller Portal / бот`, `Прочие источники`) with date-scoped `Обновить группу`;
-  - `Отзывы` tab is read-only over official WB feedbacks API through canonical `WB_API_TOKEN`, with bounded manual filters/table and transient AI-assisted review through server-side prompt storage + OpenAI route; AI labels are not accepted truth, complaint submission, Seller Portal automation or Google Sheets/GAS state;
+  - `Отзывы` tab is read-only over official WB feedbacks API through canonical `WB_API_TOKEN`, with bounded 62-day date picker independent from ready-snapshot dates, chunked `take/skip` loading, final server-side filters (`date_from/date_to/stars/is_answered`), diagnostic meta, Excel export, resizable columns and transient AI-assisted review through server-side prompt+model config/OpenAI route; AI labels are not accepted truth, Seller Portal automation or Google Sheets/GAS state;
+  - nested `Жалобы` under `Отзывы` exposes runtime complaint journal and read-only status sync from WB `Мои жалобы`; real complaint submit is not a public UI route and remains only a guarded CLI runner with exact feedback/AI-row match, hard caps and read-only confirmation/detail-network probes for uncertain submit outcomes;
   - `Исследования` tab provides read-only `research_sku_group_comparison`: two mutually exclusive SKU groups, non-financial metrics, compact date ranges, candidate-only `Товар в акции` chip from latest closed-day promo truth and no causal/statistical claims;
   - `GET /v1/sheet-vitrina-v1/plan-report` adds read-only `Выполнение плана` over accepted closed-day `fin_report_daily.fin_buyout_rub` + `ads_compact.ads_sum`, H1/H2 plan params, per-block coverage and optional server-side monthly baseline;
   - plan-report baseline routes (`baseline-template.xlsx`, `baseline-upload`, `baseline-status`) store operator monthly aggregates in separate runtime SQLite state used only by the plan report;
@@ -115,6 +118,7 @@ Confirmed contour на текущем `main`:
   - current production endpoint = `https://api.selleros.pro`; current-live EU nginx must publish both `server_name 89.191.226.88 api.selleros.pro;` and `listen 443 ssl` with LetsEncrypt cert/key paths for `api.selleros.pro`;
   - IP-only or HTTP-only EU publication is production outage drift; `deploy`, `deploy-and-verify` and `apply-nginx-routes` fail locally before mutation when current-live hostname/TLS invariants are broken;
   - old selleros identity = `selleros-root` / `178.72.152.177`; its target JSON is rollback-only/deprecated and mutating deploy/apply-nginx/restart/update paths fail fast unless the explicit emergency rollback override is set.
+  - current EU target deploy owns the localhost owner runtime dependencies for SellerPortalBot/web-source handoff: host OS deps, `/opt/wb-web-bot/venv`, `/opt/wb-ai/venv`, `wb-ai-api.service`, pinned Playwright/psycopg2/FastAPI/Uvicorn/requests versions and status/launcher behavior that degrades as truthful JSON instead of public 500.
 
 ## Authoritative source of truth
 
