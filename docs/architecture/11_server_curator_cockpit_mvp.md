@@ -6,7 +6,7 @@
 
 Новый контур проектируется как параллельный experimental/night-run contour. Он не заменяет текущий ChatGPT Project workflow, не становится source of truth и не получает права выполнять unfrozen discussion как задачу.
 
-Current MVP-0 checkpoint materializes only a repo-only contract skeleton: data contracts, deterministic validation, bounded Codex prompt generation and local smoke. MVP-0.1 adds local contract tooling on top of that skeleton: JSON example task spec, validate, freeze and generate-prompt CLI flow, plus CLI smoke. MVP-0.2 adds a local-only internal cockpit prototype: stdlib server, simple HTML page, JSON state dir, discussion/task-spec/freeze/prompt flow and server smoke. MVP-0.3 adds a repo-only execution loop prototype: runner CLI, fake executor, isolated worktree/run artifacts, deterministic verifier and runner smoke. MVP-0.4 wires the local cockpit to that fake-run loop: prepare fake run, run fake executor, view prompt/handoff/verifier result and cleanup owned run worktree. В этом checkpoint нет production runtime service, production API endpoints, OpenAI API integration, real Codex execution through UI or smoke, deploy или live/public mutation.
+Current MVP-0 checkpoint materializes only a repo-only contract skeleton: data contracts, deterministic validation, bounded Codex prompt generation and local smoke. MVP-0.1 adds local contract tooling on top of that skeleton: JSON example task spec, validate, freeze and generate-prompt CLI flow, plus CLI smoke. MVP-0.2 adds a local-only internal cockpit prototype: stdlib server, simple HTML page, JSON state dir, discussion/task-spec/freeze/prompt flow and server smoke. MVP-0.3 adds a repo-only execution loop prototype: runner CLI, fake executor, isolated worktree/run artifacts, deterministic verifier and runner smoke. MVP-0.4 wires the local cockpit to that fake-run loop: prepare fake run, run fake executor, view prompt/handoff/verifier result and cleanup owned run worktree. MVP-1.0 adds optional local AI curator intake and guided fake-flow UX: fake/OpenAI draft provider, Draft Task Spec from Discussion and Run Safe Fake Flow. В этом checkpoint нет production runtime service, production API endpoints, required OpenAI API, real Codex execution through UI or smoke, deploy или live/public mutation.
 
 ## Current Norm
 
@@ -388,6 +388,21 @@ For the ADR-only step MVP-0 target completion was `repo-prepared / docs-only`. T
 - still no real Codex execution through UI;
 - still no command executor through UI;
 - still no OpenAI API integration;
+- still no live/public/deploy contour;
+- still no SellerOS product-plane route or operator tab;
+- current ChatGPT Project workflow remains active and canonical until explicit cutover.
+
+### MVP-1.0 AI Curator Intake And Guided Fake Flow
+
+- local cockpit can draft a task spec from discussion through an AI curator layer;
+- fake provider is deterministic and used by smoke;
+- OpenAI provider is optional/local-only and fails closed when `OPENAI_API_KEY` or `CURATOR_COCKPIT_OPENAI_MODEL` is missing;
+- OpenAI request is constrained to draft task spec JSON and cannot start execution;
+- raw JSON remains available only as advanced/dev view;
+- guided `Run Safe Fake Flow` combines prompt generation, prepare-run, fake executor, verifier and run result display;
+- smoke does not call the real OpenAI API;
+- real Codex CLI is still not exposed through UI;
+- still no OpenAI key in repo, state, logs, prompts or handoffs;
 - still no live/public/deploy contour;
 - still no SellerOS product-plane route or operator tab;
 - current ChatGPT Project workflow remains active and canonical until explicit cutover.
