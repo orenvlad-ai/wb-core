@@ -23,6 +23,11 @@ if str(ROOT) not in sys.path:
 
 from playwright.sync_api import Error as PlaywrightError, Page, sync_playwright  # noqa: E402
 
+from apps.seller_portal_feedbacks_actionable_resolver import (  # noqa: E402
+    config_from_target_probe,
+    match_one_api_row_to_dom as shared_match_one_api_row_to_dom,
+    resolve_feedback_actionability,
+)
 from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     apply_seller_portal_date_filter,
     apply_seller_portal_star_filter,
@@ -523,45 +528,7 @@ def match_api_rows_to_dom(api_rows: list[dict[str, Any]], dom_rows: list[dict[st
 
 
 def match_one_api_row_to_dom(api_row: Mapping[str, Any], dom_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    scored = [score_candidate(api_row, row) for row in dom_rows]
-    scored.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
-    best = scored[0] if scored else {
-        "score": 0.0,
-        "ui_row": {},
-        "matched_fields": [],
-        "missing_fields": [],
-        "mismatched_fields": [],
-        "reasons": ["no DOM rows collected"],
-        "text_similarity": 0.0,
-        "text_containment": 0.0,
-    }
-    close_candidates = [
-        item
-        for item in scored
-        if float(item.get("score") or 0.0) >= 0.5 and float(best.get("score") or 0.0) - float(item.get("score") or 0.0) <= 0.08
-    ]
-    status = classify_match(best, ambiguity_count=len(close_candidates))
-    ui_row = best.get("ui_row") if isinstance(best.get("ui_row"), dict) else {}
-    return {
-        "api_feedback_id": str(api_row.get("feedback_id") or ""),
-        "found_in_seller_portal_dom": status in {"exact", "high"},
-        "match_status": status,
-        "match_score": float(best.get("score") or 0.0),
-        "matched_fields": best.get("matched_fields") or [],
-        "missing_fields": best.get("missing_fields") or [],
-        "mismatched_fields": best.get("mismatched_fields") or [],
-        "match_reason": "; ".join(str(item) for item in best.get("reasons") or []),
-        "text_similarity": best.get("text_similarity", 0.0),
-        "text_containment": best.get("text_containment", 0.0),
-        "tab_used": str(ui_row.get("tab_used") or ui_row.get("status_tab") or ""),
-        "row_index": ui_row.get("row_index", ui_row.get("ui_collection_index")),
-        "ui_row_text_snippet": safe_text(str(ui_row.get("text_snippet") or ""), 260),
-        "ui_review_tags": normalize_review_tags(ui_row.get("review_tags") or []),
-        "api_summary": summarize_api_row(api_row),
-        "best_ui_candidate": summarize_ui_row(ui_row),
-        "dom_scout_id": str(ui_row.get("dom_scout_id") or ""),
-        "safe_for_actionability_probe": status == "exact" and bool(ui_row.get("dom_scout_id")),
-    }
+    return shared_match_one_api_row_to_dom(api_row, dom_rows)
 
 
 def first_exact_match(api_rows: list[dict[str, Any]], dom_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -572,78 +539,42 @@ def first_exact_match(api_rows: list[dict[str, Any]], dom_rows: list[dict[str, A
 
 
 def materialize_and_check_actionability(page: Page, config: TargetRowProbeConfig, match: Mapping[str, Any]) -> dict[str, Any]:
+    api_summary = match.get("api_summary") if isinstance(match.get("api_summary"), Mapping) else {}
+    api_row = api_summary_to_match_row(api_summary, str(match.get("api_feedback_id") or ""))
+    shared = resolve_feedback_actionability(
+        page,
+        config_from_target_probe(config),
+        api_row,
+        expected_ui=match.get("best_ui_candidate") if isinstance(match.get("best_ui_candidate"), Mapping) else {},
+    )
     result = empty_actionability()
     result.update(
         {
             "requested": True,
             "feedback_id": str(match.get("api_feedback_id") or ""),
-            "tab_used": str(match.get("tab_used") or ""),
+            "tab_used": str(shared.get("tab_used") or match.get("tab_used") or ""),
             "match": dict(match),
+            "row_visible": bool(shared.get("row_visible")),
+            "row_menu_found": bool(shared.get("row_menu_found") or shared.get("menu_found")),
+            "menu_items": shared.get("menu_labels") or [],
+            "complaint_action_found": bool(shared.get("complaint_action_found")),
+            "modal_opened": bool(shared.get("modal_opened")),
+            "categories_found": shared.get("categories_found") or [],
+            "description_field_found": bool(shared.get("description_field_found")),
+            "submit_button_seen": bool(shared.get("submit_button_label")),
+            "submit_button_label": str(shared.get("submit_button_label") or ""),
+            "modal_closed": bool(shared.get("modal_closed")),
+            "submit_clicked": bool(shared.get("submit_clicked")),
+            "durable_success_state_seen": bool((shared.get("attempts") or [{}])[-1].get("durable_success_state_seen")) if shared.get("attempts") else False,
+            "durable_success_state_after_close": bool((shared.get("attempts") or [{}])[-1].get("durable_success_state_after_close")) if shared.get("attempts") else False,
+            "filter_controller": shared.get("filter_controller") or {},
+            "visible_row_match": shared.get("visible_row_match") or {},
+            "row_menu_click": shared.get("row_menu_click") or {},
+            "complaint_action_click": shared.get("complaint_action_click") or {},
+            "close_method": str(shared.get("close_method") or ""),
+            "blocker": str(shared.get("block_reason") or ""),
         }
     )
-    tab_label = str(match.get("tab_used") or "") or status_tabs_for_request(config.is_answered)[0]
-    if not _click_tab_like(page, tab_label):
-        result["blocker"] = f"status tab {tab_label!r} was not found for actionability"
-        return result
-    _wait_settle(page, 1200)
-    filters = apply_probe_filters(page, config)
-    result["filter_controller"] = filters
-    visible_match = find_exact_visible_dom_row(page, match)
-    if not visible_match.get("row"):
-        scroll_result = scroll_until_exact_visible(page, config, match)
-        visible_match = scroll_result
-        result["scroll_used"] = bool(scroll_result.get("scroll_attempts"))
-        result["scroll_attempts"] = scroll_result.get("scroll_attempts") or []
-    row = visible_match.get("row") if isinstance(visible_match.get("row"), dict) else {}
-    result["row_visible"] = bool(row)
-    result["visible_row_match"] = visible_match.get("match") or {}
-    if not row:
-        result["blocker"] = "exact DOM row was collected earlier, but could not be materialized for menu check"
-        return result
-    result["row_index"] = row.get("row_index", row.get("ui_collection_index"))
-    dom_id = str(row.get("dom_scout_id") or "")
-    if not dom_id:
-        result["blocker"] = "materialized row has no DOM id for menu click"
-        return result
-    clicked_menu = _click_safe_row_menu(page, dom_id)
-    result["row_menu_click"] = clicked_menu
-    result["row_menu_found"] = bool(clicked_menu.get("ok"))
-    if not clicked_menu.get("ok"):
-        result["blocker"] = str(clicked_menu.get("reason") or "row menu not found")
-        return result
-    _wait_settle(page, 800)
-    menu_state = extract_open_row_menu_state(page)
-    result["menu_items"] = menu_state.get("items") or []
-    result["complaint_action_found"] = bool(menu_state.get("complaint_action_found"))
-    if not result["complaint_action_found"] or not config.open_complaint_modal:
-        _safe_escape(page)
-        result["modal_opened"] = False
-        result["modal_closed"] = True
-        result["blocker"] = "" if result["complaint_action_found"] else "Пожаловаться на отзыв action not found in row menu"
-        return result
-    assert_safe_click_label(ROW_MENU_COMPLAINT_LABEL, purpose="open_complaint_modal")
-    action_click = click_open_row_menu_complaint_action(page)
-    result["complaint_action_click"] = action_click
-    if not action_click.get("ok"):
-        result["blocker"] = str(action_click.get("reason") or "complaint action could not be clicked")
-        _safe_escape(page)
-        return result
-    _wait_settle(page, 1500)
-    modal_state = extract_complaint_modal_state(page)
-    result["modal_opened"] = bool(modal_state.get("opened"))
-    result["categories_found"] = modal_state.get("categories") or []
-    result["description_field_found"] = bool(modal_state.get("description_field_found"))
-    result["submit_button_seen"] = bool(modal_state.get("submit_button_seen"))
-    result["submit_button_label"] = str(modal_state.get("submit_button_label") or "")
-    result["submit_clicked"] = False
-    result["durable_success_state_seen"] = bool(detect_complaint_success_state(page).get("seen"))
-    close_result = close_draft_modal_without_submit(page)
-    result["close_method"] = str(close_result.get("close_method") or "")
-    result["modal_closed"] = bool(close_result.get("modal_closed"))
-    _wait_settle(page, 600)
-    if not result["modal_closed"]:
-        result["modal_closed"] = not bool(extract_complaint_modal_state(page).get("opened"))
-    result["durable_success_state_after_close"] = bool(detect_complaint_success_state(page).get("seen"))
     return result
 
 

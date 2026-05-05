@@ -27,6 +27,10 @@ if str(ROOT) not in sys.path:
 
 from playwright.sync_api import Error as PlaywrightError, Page, Request, Response, sync_playwright  # noqa: E402
 
+from apps.seller_portal_feedbacks_actionable_resolver import (  # noqa: E402
+    config_from_dry_run,
+    resolve_feedback_actionability,
+)
 from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     DryRunConfig,
     analyze_feedback_rows,
@@ -47,7 +51,6 @@ from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     load_api_feedback_rows,
     normalize_requested_date,
     normalize_text,
-    resolve_actionable_feedback_row,
     should_open_modal_for_match,
     should_try_actionability_resolver,
     wait_for_description_field_ready,
@@ -135,6 +138,7 @@ class SubmitConfig:
     timeout_ms: int
     write_artifacts: bool
     deny_feedback_ids: tuple[str, ...] = DEFAULT_DENY_FEEDBACK_IDS
+    target_feedback_id: str = ""
 
 
 def main() -> None:
@@ -149,6 +153,11 @@ def main() -> None:
     parser.add_argument("--dry-run", choices=("0", "1"), default="1")
     parser.add_argument("--require-exact", choices=("0", "1"), default="1")
     parser.add_argument("--retry-errors", choices=("0", "1"), default="0")
+    parser.add_argument(
+        "--target-feedback-id",
+        default="",
+        help="Run a no-submit diagnostic for one explicit feedback_id after normal API/AI safety checks.",
+    )
     parser.add_argument(
         "--deny-feedback-id",
         action="append",
@@ -188,6 +197,7 @@ def main() -> None:
         timeout_ms=max(5000, int(args.timeout_ms)),
         write_artifacts=not bool(args.no_artifacts),
         deny_feedback_ids=normalize_deny_feedback_ids(args.deny_feedback_id),
+        target_feedback_id=str(args.target_feedback_id or "").strip(),
     )
     report = run_submit(config)
     if config.write_artifacts:
@@ -223,6 +233,7 @@ def run_submit(config: SubmitConfig) -> dict[str, Any]:
             "retry_errors": config.retry_errors,
             "explicit_submit_flag": config.submit_confirmation,
             "deny_feedback_ids": list(config.deny_feedback_ids),
+            "target_feedback_id": config.target_feedback_id,
         },
         "safety": {
             "hard_max_submit": MAX_SUBMIT_HARD_CAP,
@@ -269,14 +280,32 @@ def run_submit(config: SubmitConfig) -> dict[str, Any]:
         journal,
         retry_errors=config.retry_errors,
     )
-    selected_ids = select_submit_candidate_ids(
-        list(analysis_by_id.values()),
-        max_submit=config.max_submit,
-        include_review=config.include_review,
-        deny_feedback_ids=config.deny_feedback_ids,
-        existing_feedback_ids=existing_feedback_ids,
-    )
+    api_feedback_ids = {str(row.get("feedback_id") or "") for row in api_rows}
+    if config.target_feedback_id:
+        selected_ids = [config.target_feedback_id] if config.target_feedback_id in api_feedback_ids else []
+        if not selected_ids:
+            report["errors"].append(
+                {
+                    "stage": "target_feedback_id",
+                    "code": "target_not_in_api_rows",
+                    "message": f"target feedback_id {config.target_feedback_id} was not loaded by requested API filters",
+                }
+            )
+    else:
+        selected_ids = select_submit_candidate_ids(
+            list(analysis_by_id.values()),
+            max_submit=config.max_submit,
+            include_review=config.include_review,
+            deny_feedback_ids=config.deny_feedback_ids,
+            existing_feedback_ids=existing_feedback_ids,
+        )
     candidates = build_candidate_records(api_rows, analysis_by_id, selected_ids)
+    if config.target_feedback_id:
+        for candidate in candidates:
+            is_target = str(candidate.get("feedback_id") or "") == config.target_feedback_id
+            candidate["target_feedback_id_requested"] = is_target
+            if is_target:
+                candidate["ai_eligible_for_submit"] = (candidate.get("ai") or {}).get("complaint_fit") in {"yes", "review"}
     mark_denied_candidates(candidates, config.deny_feedback_ids)
     mark_existing_duplicates(candidates, journal, retry_errors=config.retry_errors)
     selected_api_rows = [
@@ -541,16 +570,27 @@ def submit_one_candidate(
         result["blocker"] = "API row unavailable for submit"
         return result
     expected_ui = expected_ui_for_filter_aware_resolver(candidate)
-    resolver = resolve_actionable_feedback_row(page, to_dry_run_config(config), api_row, expected_ui=expected_ui)
+    draft_text = build_draft_text((candidate.get("ai") or {}))
+    resolver = resolve_feedback_actionability(
+        page,
+        config_from_dry_run(to_dry_run_config(config), open_complaint_modal=False),
+        api_row,
+        expected_ui=expected_ui,
+        preferred_category=str((candidate.get("ai") or {}).get("category_label") or ""),
+        description_text=draft_text,
+    )
     result["actionability_resolver"] = resolver
     result["visible_rows_checked"] = int(resolver.get("visible_rows_checked") or 0)
     result["visible_rows_checked_after_search"] = int(resolver.get("visible_rows_checked_after_search") or 0)
-    result["visible_rows_checked_after_scroll"] = int(resolver.get("visible_rows_checked_after_scroll") or 0)
+    result["visible_rows_checked_after_scroll"] = int(resolver.get("dom_rows_collected") or 0)
     result["visible_row_match"] = resolver.get("visible_row_match") or {}
     result["targeted_search"] = resolver.get("targeted_search") or {}
     result["filter_controller"] = resolver.get("filter_controller") or {}
     result["date_filter_applied"] = bool(resolver.get("date_filter_applied"))
     result["star_filter_applied"] = bool(resolver.get("star_filter_applied"))
+    result["selected_star_values_after"] = resolver.get("selected_star_values_after") or []
+    result["list_update_observed"] = bool(resolver.get("list_update_observed"))
+    result["dom_rows_collected"] = int(resolver.get("dom_rows_collected") or 0)
     result["search_used"] = bool(resolver.get("search_used"))
     result["scroll_used"] = bool(resolver.get("scroll_used"))
     result["row_menu_click"] = resolver.get("row_menu_click") or {}
@@ -558,8 +598,8 @@ def submit_one_candidate(
     result["tab_used"] = str(resolver.get("tab_used") or "")
     result["locator_strategy"] = str(resolver.get("locator_strategy") or "")
     result["complaint_action_found"] = bool(resolver.get("complaint_action_found"))
-    visible_row = (resolver.get("attempts") or [{}])[-1].get("resolved_row") if resolver.get("attempts") else {}
-    if resolver.get("actionable_row_found"):
+    visible_row = resolver.get("resolved_row") if isinstance(resolver.get("resolved_row"), Mapping) else {}
+    if not visible_row and resolver.get("actionable_row_found"):
         for attempt in resolver.get("attempts") or []:
             if attempt.get("actionable_row_found"):
                 visible_row = attempt.get("resolved_row") or {}
@@ -611,7 +651,6 @@ def submit_one_candidate(
         return result
     _wait_settle(page, 700)
     result["description_field_ready_after_category"] = wait_for_description_field_ready(page, timeout_ms=min(config.timeout_ms, 6000))
-    draft_text = build_draft_text((candidate.get("ai") or {}))
     if not is_reason_submit_ready(draft_text):
         result["blocker"] = "complaint text is empty or diagnostic placeholder"
         result["close_method"] = close_modal_without_submit(page)
