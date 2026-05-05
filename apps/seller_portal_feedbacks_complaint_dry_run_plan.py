@@ -92,6 +92,7 @@ FEEDBACKS_UNANSWERED_TAB_LABEL = "Ждут ответа"
 FEEDBACKS_ANSWERED_TAB_LABEL = "Есть ответ"
 ACTIONABILITY_SCROLL_ATTEMPTS = 12
 SELLER_PORTAL_DATE_FILTER_MARKER_ATTR = "data-wb-core-filter-date-input"
+SELLER_PORTAL_STAR_FILTER_MARKER_ATTR = "data-wb-core-filter-star-row"
 
 
 @dataclass(frozen=True)
@@ -1211,8 +1212,12 @@ def apply_seller_portal_star_filter(page: Page, *, stars: Iterable[int]) -> dict
     result: dict[str, Any] = {
         "requested_stars": requested,
         "opened": False,
+        "rating_section_opened": False,
         "applied": False,
         "selected_stars": [],
+        "selected_star_values_before": [],
+        "selected_star_values_after": [],
+        "state_readable": False,
         "apply_clicked": False,
         "selectors_used": [],
         "reason": "",
@@ -1221,27 +1226,7 @@ def apply_seller_portal_star_filter(page: Page, *, stars: Iterable[int]) -> dict
         result["reason"] = "rating/star filter is unavailable"
         return result
     try:
-        opened = page.evaluate(
-            r"""
-() => {
-  const visible = (el) => {
-    const style = window.getComputedStyle(el);
-    const rect = el.getBoundingClientRect();
-    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
-  };
-  const labelFor = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
-  const candidates = Array.from(document.querySelectorAll('button, [role="button"]'))
-    .filter(visible)
-    .map((el, index) => ({el, index, text: labelFor(el), tag: el.tagName.toLowerCase()}))
-    .filter((item) => /^Фильтры$/i.test(item.text) || /фильтр/i.test(item.text))
-    .sort((a, b) => (a.text === 'Фильтры' ? -1 : 1) - (b.text === 'Фильтры' ? -1 : 1) || a.index - b.index);
-  const target = candidates[0];
-  if (!target) return {ok: false, reason: 'filters button not found'};
-  target.el.click();
-  return {ok: true, selector: target.tag, text: target.text};
-}
-            """
-        )
+        opened = open_seller_portal_filters_popup(page)
         result["open_filters"] = opened
         result["opened"] = bool(opened.get("ok"))
         if opened.get("selector"):
@@ -1251,75 +1236,34 @@ def apply_seller_portal_star_filter(page: Page, *, stars: Iterable[int]) -> dict
         return result
     _wait_settle(page, 800)
     try:
-        selected = page.evaluate(
-            r"""
-({stars}) => {
-  const requested = new Set((stars || []).map((value) => Number(value)));
-  const visible = (el) => {
-    const style = window.getComputedStyle(el);
-    const rect = el.getBoundingClientRect();
-    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
-  };
-  const text = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-  const labelFor = (el) => text(el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '');
-  const roots = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="popup"], [class*="Popup"], [class*="popover"], [class*="Popover"], [class*="dropdown"], [class*="Dropdown"], aside, body')).filter(visible);
-  const root = roots.find((node) => /Оценка отзыва|Применить|Сбросить/i.test(text(node.innerText || node.textContent || ''))) || null;
-  if (!root) return {ok: false, reason: 'filters popup with review rating section was not found'};
-  const rootText = text(root.innerText || root.textContent || '');
-  if (!/Оценка отзыва/i.test(rootText)) return {ok: false, reason: 'review rating section was not found in filters popup', root_text: rootText.slice(0, 300)};
-  const starFromText = (value) => {
-    const normalized = text(value).replace(/★/g, ' ★ ');
-    for (let star = 1; star <= 5; star += 1) {
-      const re = new RegExp('(^|[^0-9])' + star + '([^0-9]|$)');
-      if (re.test(normalized) && (/★|зв[её]зд|оценк/i.test(normalized) || normalized.length <= 12)) return star;
-    }
-    return 0;
-  };
-  const checkboxRows = Array.from(root.querySelectorAll('input[type="checkbox"]')).filter(visible).map((input, index) => {
-    let row = input.closest('label, li, [role="checkbox"], [class*="checkbox"], [class*="Checkbox"], div') || input.parentElement || input;
-    for (let depth = 0; row && depth < 4; depth += 1) {
-      const rowText = labelFor(row);
-      const star = starFromText(rowText);
-      if (star) return {input, row, index, star, text: rowText};
-      row = row.parentElement;
-    }
-    return {input, row: input, index, star: 0, text: labelFor(input.parentElement || input)};
-  });
-  let rows = checkboxRows.filter((item) => item.star >= 1 && item.star <= 5);
-  if (rows.length < 5 && checkboxRows.length >= 5) {
-    const ordered = checkboxRows.slice(0, 5);
-    rows = ordered.map((item, index) => ({...item, star: 5 - index}));
-  }
-  if (!rows.length) return {ok: false, reason: 'star checkbox rows were not found', checkbox_rows_seen: checkboxRows.map((item) => item.text).slice(0, 10)};
-  const clicked = [];
-  const selected = [];
-  const unique = new Map();
-  rows.forEach((item) => {
-    if (!unique.has(item.star)) unique.set(item.star, item);
-  });
-  Array.from(unique.values()).forEach((item) => {
-    const checked = Boolean(item.input.checked || item.input.getAttribute('aria-checked') === 'true');
-    const shouldCheck = requested.has(item.star);
-    if (checked !== shouldCheck) {
-      (item.row || item.input).click();
-      clicked.push({star: item.star, target_state: shouldCheck, text: item.text.slice(0, 80)});
-    }
-  });
-  Array.from(unique.values()).forEach((item) => {
-    const checked = Boolean(item.input.checked || item.input.getAttribute('aria-checked') === 'true');
-    if (checked) selected.push(item.star);
-  });
-  return {ok: true, rows_seen: Array.from(unique.values()).map((item) => ({star: item.star, text: item.text.slice(0, 80)})), clicked, selected_stars: selected.sort()};
-}
-            """,
-            {"stars": requested},
-        )
+        section = activate_seller_portal_rating_filter_section(page)
+        result["rating_section"] = section
+        result["rating_section_opened"] = bool(section.get("ok"))
+        if section.get("selector"):
+            result["selectors_used"].append(f"rating_section:{section.get('selector')}")
+    except Exception as exc:  # pragma: no cover - live fallback
+        result["rating_section"] = {"ok": False, "reason": safe_text(str(exc), 300)}
+    _wait_settle(page, 500)
+    before_state = inspect_seller_portal_rating_filter_popup(page)
+    result["popup_before"] = before_state
+    result["selected_star_values_before"] = before_state.get("selected_star_values") or []
+    try:
+        selected = select_seller_portal_rating_filter_stars(page, stars=requested)
         result["select_stars"] = selected
-        result["selected_stars"] = selected.get("selected_stars") or []
+        result["selected_stars"] = selected.get("selected_star_values_after") or selected.get("selected_stars") or []
+        result["selected_star_values_after"] = selected.get("selected_star_values_after") or []
+        result["state_readable"] = bool(selected.get("state_readable"))
         if selected.get("ok"):
-            result["selectors_used"].append("review_rating_checkboxes")
+            result["selectors_used"].append(str(selected.get("selector_strategy") or "review_rating_checkboxes"))
     except PlaywrightError as exc:
         result["select_stars"] = {"ok": False, "reason": safe_text(str(exc), 300)}
+    _wait_settle(page, 350)
+    after_state = inspect_seller_portal_rating_filter_popup(page)
+    result["popup_after"] = after_state
+    if after_state.get("selected_star_values"):
+        result["selected_star_values_after"] = after_state.get("selected_star_values") or []
+        result["selected_stars"] = result["selected_star_values_after"]
+        result["state_readable"] = True
     try:
         applied = click_filter_apply_button(page, context_hint="filters")
         result["filters_apply_click"] = applied
@@ -1328,10 +1272,316 @@ def apply_seller_portal_star_filter(page: Page, *, stars: Iterable[int]) -> dict
             result["selectors_used"].append("filters_apply")
     except Exception as exc:  # pragma: no cover - live fallback
         result["filters_apply_click"] = {"ok": False, "reason": safe_text(str(exc), 300)}
-    result["applied"] = bool((result.get("select_stars") or {}).get("ok") and result["apply_clicked"])
+    selected_after = {int(star) for star in result.get("selected_star_values_after") or [] if str(star).isdigit()}
+    requested_set = set(requested)
+    result["applied"] = bool((result.get("select_stars") or {}).get("ok") and result["apply_clicked"] and selected_after == requested_set)
     if not result["applied"] and not result["reason"]:
         result["reason"] = str((result.get("select_stars") or {}).get("reason") or (result.get("open_filters") or {}).get("reason") or "star filter was not applied")
     return result
+
+
+def open_seller_portal_filters_popup(page: Page) -> dict[str, Any]:
+    try:
+        return page.evaluate(
+            r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+  };
+  const labelFor = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+  const candidates = Array.from(document.querySelectorAll('button, [role="button"], a, div, span'))
+    .filter(visible)
+    .map((el, index) => {
+      const rect = el.getBoundingClientRect();
+      const text = labelFor(el);
+      const clickable = el.closest('button, [role="button"], a') || el;
+      let score = 0;
+      if (/^Фильтры$/i.test(text)) score += 160;
+      else if (/фильтр/i.test(text)) score += 80;
+      if (rect.top < 420) score += 20;
+      if (/Применить|Сбросить|Оценка отзыва/i.test(text)) score -= 60;
+      return {el, clickable, index, text, tag: el.tagName.toLowerCase(), score};
+    })
+    .filter((item) => item.score > 70)
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+  const target = candidates[0];
+  if (!target) return {ok: false, reason: 'filters button not found', visible_candidates: candidates.map((item) => item.text).slice(0, 8)};
+  target.clickable.click();
+  return {ok: true, selector: target.tag, text: target.text, selector_strategy: /^Фильтры$/i.test(target.text) ? 'exact_visible_text' : 'filter_text_fallback'};
+}
+            """
+        )
+    except PlaywrightError as exc:
+        return {"ok": False, "reason": safe_text(str(exc), 300)}
+
+
+def activate_seller_portal_rating_filter_section(page: Page) -> dict[str, Any]:
+    try:
+        return page.evaluate(
+            r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+  };
+  const text = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const labelFor = (el) => text(el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '');
+  const roots = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="popup"], [class*="Popup"], [class*="popover"], [class*="Popover"], [class*="dropdown"], [class*="Dropdown"], [class*="drawer"], [class*="Drawer"], aside, body')).filter(visible);
+  const root = roots.find((node) => /Тип отзыва|Оценка отзыва|Применить|Сбросить/i.test(text(node.innerText || node.textContent || ''))) || null;
+  if (!root) return {ok: false, reason: 'filters popup root not found'};
+  const items = Array.from(root.querySelectorAll('button, [role="button"], [role="tab"], a, div, span'))
+    .filter(visible)
+    .map((el, index) => {
+      const rect = el.getBoundingClientRect();
+      const label = labelFor(el);
+      const clickable = el.closest('button, [role="button"], [role="tab"], a') || el;
+      const exact = /^Оценка отзыва$/i.test(label);
+      const score = exact ? 100 : (/Оценка отзыва/i.test(label) ? 40 : 0);
+      return {el, clickable, index, label, score, rect: {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)}};
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || a.rect.y - b.rect.y || a.index - b.index);
+  const target = items[0];
+  if (!target) {
+    const rootText = text(root.innerText || root.textContent || '');
+    return {ok: /Оценка отзыва/i.test(rootText), selector: 'root_text_already_visible', reason: /Оценка отзыва/i.test(rootText) ? '' : 'rating section label not found'};
+  }
+  target.clickable.click();
+  return {ok: true, selector: 'visible_text:Оценка отзыва', label: target.label, rect: target.rect};
+}
+            """
+        )
+    except PlaywrightError as exc:
+        return {"ok": False, "reason": safe_text(str(exc), 300)}
+
+
+def inspect_seller_portal_rating_filter_popup(page: Page) -> dict[str, Any]:
+    try:
+        return page.evaluate(
+            r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+  };
+  const text = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const safeClass = (el) => String(el.getAttribute('class') || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+  const rectFor = (el) => {
+    const rect = el.getBoundingClientRect();
+    return {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)};
+  };
+  const labelFor = (el) => text(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '');
+  const isChecked = (el, row) => {
+    const nodes = [el, row].filter(Boolean);
+    for (const node of nodes) {
+      const aria = node.getAttribute && node.getAttribute('aria-checked');
+      const dataState = node.getAttribute && (node.getAttribute('data-state') || node.getAttribute('data-checked') || node.getAttribute('checked'));
+      const cls = node.getAttribute && String(node.getAttribute('class') || '');
+      if (node.checked === true || aria === 'true' || /^(true|checked)$/i.test(String(dataState || '')) || /(checked|selected|active|is-checked|is_checked)/i.test(cls)) return true;
+    }
+    return false;
+  };
+  const starFromText = (value) => {
+    const normalized = text(value).replace(/★/g, ' ★ ');
+    for (let star = 1; star <= 5; star += 1) {
+      const re = new RegExp('(^|[^0-9])' + star + '([^0-9]|$)');
+      if (re.test(normalized) && (/★|зв[её]зд|оценк/i.test(normalized) || normalized.length <= 18)) return star;
+    }
+    return 0;
+  };
+  const rootCandidates = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="popup"], [class*="Popup"], [class*="popover"], [class*="Popover"], [class*="dropdown"], [class*="Dropdown"], [class*="drawer"], [class*="Drawer"], aside, body'))
+    .filter(visible)
+    .map((el, index) => ({el, index, text: text(el.innerText || el.textContent || ''), rect: rectFor(el), class_name: safeClass(el), role: el.getAttribute('role') || ''}))
+    .filter((item) => /Оценка отзыва|Тип отзыва|Применить|Сбросить/i.test(item.text))
+    .sort((a, b) => (a.el === document.body ? 1 : 0) - (b.el === document.body ? 1 : 0) || (b.rect.width * b.rect.height) - (a.rect.width * a.rect.height));
+  const rootItem = rootCandidates[0] || null;
+  if (!rootItem) return {popup_opened: false, rating_section_opened: false, selected_star_values: [], rows: [], candidate_selectors: {}, reason: 'filters popup root not found'};
+  const root = rootItem.el;
+  const controls = Array.from(root.querySelectorAll('input[type="checkbox"], [role="checkbox"], [aria-checked], [class*="checkbox"], [class*="Checkbox"], [class*="check"], [class*="Check"]'))
+    .filter(visible);
+  const rawRows = controls.map((control, index) => {
+    let row = control.closest('label, li, [role="option"], [role="menuitem"], [class*="row"], [class*="Row"], [class*="item"], [class*="Item"], div') || control.parentElement || control;
+    let star = 0;
+    let rowText = '';
+    let current = row;
+    for (let depth = 0; current && depth < 6; depth += 1, current = current.parentElement) {
+      rowText = labelFor(current);
+      star = starFromText(rowText);
+      if (star) {
+        row = current;
+        break;
+      }
+    }
+    return {control, row, index, star, text: labelFor(row), checked: isChecked(control, row), control_rect: rectFor(control), row_rect: rectFor(row), control_class: safeClass(control), row_class: safeClass(row), role: control.getAttribute('role') || '', aria_checked: control.getAttribute('aria-checked') || ''};
+  });
+  let rows = rawRows.filter((item) => item.star >= 1 && item.star <= 5);
+  if (rows.length < 5 && rawRows.length >= 5) {
+    rows = rawRows.slice(0, 5).map((item, index) => ({...item, star: 5 - index, inferred_by_order: true}));
+  }
+  const unique = new Map();
+  rows.forEach((item) => {
+    if (!unique.has(item.star)) unique.set(item.star, item);
+  });
+  const finalRows = Array.from(unique.values()).sort((a, b) => b.star - a.star);
+  const selected = finalRows.filter((item) => item.checked).map((item) => item.star).sort((a, b) => a - b);
+  const buttons = Array.from(root.querySelectorAll('button, [role="button"], a, div, span'))
+    .filter(visible)
+    .map((el, index) => ({index, text: labelFor(el), tag: el.tagName.toLowerCase(), role: el.getAttribute('role') || '', class_name: safeClass(el), rect: rectFor(el)}))
+    .filter((item) => /^(Применить|Сбросить)$/i.test(item.text) || /Применить|Сбросить/i.test(item.text))
+    .slice(0, 12);
+  return {
+    popup_opened: true,
+    popup_root: {tag: root.tagName.toLowerCase(), role: rootItem.role, class_name: rootItem.class_name, rect: rootItem.rect, text_snippet: rootItem.text.slice(0, 500)},
+    rating_section_opened: /Оценка отзыва/i.test(rootItem.text),
+    rows: finalRows.map((item) => ({
+      star: item.star,
+      text: text(item.text).slice(0, 120),
+      checked: item.checked,
+      inferred_by_order: Boolean(item.inferred_by_order),
+      role: item.role,
+      aria_checked: item.aria_checked,
+      control_class: item.control_class,
+      row_class: item.row_class,
+      control_rect: item.control_rect,
+      row_rect: item.row_rect
+    })),
+    selected_star_values: selected,
+    checkbox_nodes_seen: rawRows.length,
+    buttons,
+    candidate_selectors: {
+      popup_root: '[role=\"dialog\"], [aria-modal=\"true\"], [class*=\"popup\"], [class*=\"Popover\"], [class*=\"Dropdown\"], [class*=\"Drawer\"]',
+      star_row: 'rating section visible custom checkbox rows, fallback top-to-bottom 5..1',
+      one_star_checkbox: finalRows.find((item) => item.star === 1) ? 'row mapped to star=1 under Оценка отзыва' : '',
+      apply_button: 'visible button/role/text Применить'
+    },
+    stable_selector_found: Boolean(finalRows.find((item) => item.star === 1) && buttons.find((item) => /^Применить$/i.test(item.text)))
+  };
+}
+            """
+        )
+    except PlaywrightError as exc:
+        return {"popup_opened": False, "rating_section_opened": False, "selected_star_values": [], "rows": [], "reason": safe_text(str(exc), 300)}
+
+
+def select_seller_portal_rating_filter_stars(page: Page, *, stars: Iterable[int]) -> dict[str, Any]:
+    requested = sorted({int(star) for star in stars if 1 <= int(star) <= 5})
+    try:
+        return page.evaluate(
+            r"""
+({stars, marker}) => {
+  const requested = new Set((stars || []).map((value) => Number(value)));
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+  };
+  const text = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const safeText = (value, limit = 120) => text(value).slice(0, limit);
+  const labelFor = (el) => text(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '');
+  const cls = (el) => String((el && el.getAttribute && el.getAttribute('class')) || '');
+  const isChecked = (control, row) => {
+    for (const node of [control, row].filter(Boolean)) {
+      const aria = node.getAttribute && node.getAttribute('aria-checked');
+      const dataState = node.getAttribute && (node.getAttribute('data-state') || node.getAttribute('data-checked') || node.getAttribute('checked'));
+      if (node.checked === true || aria === 'true' || /^(true|checked)$/i.test(String(dataState || '')) || /(checked|selected|active|is-checked|is_checked)/i.test(cls(node))) return true;
+    }
+    return false;
+  };
+  const stateKnown = (control, row) => {
+    for (const node of [control, row].filter(Boolean)) {
+      if (node.checked === true || node.checked === false) return true;
+      if (node.getAttribute && (node.hasAttribute('aria-checked') || node.hasAttribute('data-state') || node.hasAttribute('data-checked') || node.hasAttribute('checked'))) return true;
+      if (/(checked|selected|active|is-checked|is_checked)/i.test(cls(node))) return true;
+    }
+    return false;
+  };
+  const rectFor = (el) => {
+    const rect = el.getBoundingClientRect();
+    return {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)};
+  };
+  const starFromText = (value) => {
+    const normalized = text(value).replace(/★/g, ' ★ ');
+    for (let star = 1; star <= 5; star += 1) {
+      const re = new RegExp('(^|[^0-9])' + star + '([^0-9]|$)');
+      if (re.test(normalized) && (/★|зв[её]зд|оценк/i.test(normalized) || normalized.length <= 18)) return star;
+    }
+    return 0;
+  };
+  const roots = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="popup"], [class*="Popup"], [class*="popover"], [class*="Popover"], [class*="dropdown"], [class*="Dropdown"], [class*="drawer"], [class*="Drawer"], aside, body'))
+    .filter(visible)
+    .map((el, index) => ({el, index, body: text(el.innerText || el.textContent || ''), rect: rectFor(el)}))
+    .filter((item) => /Оценка отзыва|Тип отзыва|Применить|Сбросить/i.test(item.body))
+    .sort((a, b) => (a.el === document.body ? 1 : 0) - (b.el === document.body ? 1 : 0) || (b.rect.width * b.rect.height) - (a.rect.width * a.rect.height));
+  const rootItem = roots[0];
+  if (!rootItem) return {ok: false, reason: 'filters popup with review rating section was not found', selected_star_values_after: []};
+  const root = rootItem.el;
+  root.querySelectorAll('[' + marker + ']').forEach((el) => el.removeAttribute(marker));
+  const controls = Array.from(root.querySelectorAll('input[type="checkbox"], [role="checkbox"], [aria-checked], [class*="checkbox"], [class*="Checkbox"], [class*="check"], [class*="Check"]')).filter(visible);
+  const rawRows = controls.map((control, index) => {
+    let row = control.closest('label, li, [role="option"], [role="menuitem"], [class*="row"], [class*="Row"], [class*="item"], [class*="Item"], div') || control.parentElement || control;
+    let star = 0;
+    let rowText = '';
+    let current = row;
+    for (let depth = 0; current && depth < 6; depth += 1, current = current.parentElement) {
+      rowText = labelFor(current);
+      star = starFromText(rowText);
+      if (star) {
+        row = current;
+        break;
+      }
+    }
+    return {control, row, index, star, text: rowText || labelFor(row), checked: isChecked(control, row), state_known: stateKnown(control, row), rect: rectFor(row)};
+  });
+  let rows = rawRows.filter((item) => item.star >= 1 && item.star <= 5);
+  let selectorStrategy = 'text_or_aria_checkbox_rows';
+  if (rows.length < 5 && rawRows.length >= 5) {
+    rows = rawRows.slice(0, 5).map((item, index) => ({...item, star: 5 - index, inferred_by_order: true}));
+    selectorStrategy = 'custom_checkbox_order_fallback_5_to_1';
+  }
+  const unique = new Map();
+  rows.forEach((item) => {
+    if (!unique.has(item.star)) unique.set(item.star, item);
+  });
+  rows = Array.from(unique.values()).sort((a, b) => b.star - a.star);
+  if (!rows.length) return {ok: false, reason: 'star checkbox rows were not found', checkbox_rows_seen: rawRows.map((item) => safeText(item.text)).slice(0, 10), selected_star_values_after: []};
+  const before = rows.filter((item) => item.checked).map((item) => item.star).sort((a, b) => a - b);
+  const clicked = [];
+  rows.forEach((item) => {
+    const shouldCheck = requested.has(item.star);
+    const known = item.state_known;
+    const checked = isChecked(item.control, item.row);
+    if (known && checked === shouldCheck) return;
+    if (!known && !shouldCheck) return;
+    const target = item.control || item.row;
+    const clickTarget = target.closest && target.closest('label, button, [role="checkbox"], [role="button"]') || target;
+    clickTarget.click();
+    item.row.setAttribute(marker, String(item.star));
+    clicked.push({star: item.star, target_state: shouldCheck, state_known_before: known, text: safeText(item.text), selector_strategy: selectorStrategy});
+  });
+  const after = rows.map((item) => ({...item, checked_after: isChecked(item.control, item.row), state_known_after: stateKnown(item.control, item.row)}));
+  const selectedAfter = after.filter((item) => item.checked_after).map((item) => item.star).sort((a, b) => a - b);
+  const allReadable = after.every((item) => item.state_known_after || item.inferred_by_order);
+  const requestedClicked = clicked.some((item) => requested.has(item.star));
+  return {
+    ok: requestedClicked || selectedAfter.some((star) => requested.has(star)),
+    selector_strategy: selectorStrategy,
+    state_readable: allReadable,
+    rows_seen: rows.map((item) => ({star: item.star, text: safeText(item.text), checked_before: item.checked, state_known_before: item.state_known, inferred_by_order: Boolean(item.inferred_by_order), rect: item.rect})),
+    clicked,
+    selected_star_values_before: before,
+    selected_star_values_after: selectedAfter,
+    selected_stars: selectedAfter
+  };
+}
+            """,
+            {"stars": requested, "marker": SELLER_PORTAL_STAR_FILTER_MARKER_ATTR},
+        )
+    except PlaywrightError as exc:
+        return {"ok": False, "reason": safe_text(str(exc), 300), "selected_star_values_after": []}
 
 
 def click_filter_apply_button(page: Page, *, context_hint: str) -> dict[str, Any]:
