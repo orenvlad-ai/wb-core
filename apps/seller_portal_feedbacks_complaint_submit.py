@@ -93,7 +93,7 @@ CONTRACT_VERSION = "controlled_submit_v1"
 DEFAULT_RUNTIME_DIR = Path(os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR", "/opt/wb-core-runtime/state"))
 DEFAULT_OUTPUT_ROOT = Path("/opt/wb-core-runtime/state/feedbacks_complaint_submit")
 LOCAL_OUTPUT_ROOT = Path("artifacts/seller_portal_feedbacks_complaint_submit")
-MAX_SUBMIT_HARD_CAP = 1
+MAX_SUBMIT_HARD_CAP = 5
 DEFAULT_DENY_FEEDBACK_IDS = ("GPe9vrq0kctlSfobrgq2", "fdQpHhNXTosEkArTHAZF")
 SUBMIT_RESULT_CONFIRMED_SUCCESS = "confirmed_success"
 SUBMIT_RESULT_CONFIRMED_VALIDATION_ERROR = "confirmed_validation_error"
@@ -534,6 +534,7 @@ def submit_modals_for_candidates(
                 _wait_settle(page, 2500)
                 _wait_for_feedback_rows(page, timeout_ms=10000)
                 submit_clicks = 0
+                prepared_dry_run_count = 0
                 for candidate in submit_candidates:
                     if not config.dry_run and submit_clicks >= config.max_submit:
                         report["ui"]["blocker"] = f"max_submit hard cap reached after {submit_clicks} final click(s)"
@@ -553,9 +554,19 @@ def submit_modals_for_candidates(
                         submit_clicks += int(result.get("submit_clicked_count") or 1)
                     if result.get("submit_clicked") and not config.dry_run:
                         _wait_settle(page, 1800)
-                        break
+                        if not result.get("submit_success"):
+                            report["ui"]["blocker"] = str(result.get("blocker") or "submitted candidate did not reach confirmed success; batch stopped")
+                            break
+                        if submit_clicks >= config.max_submit:
+                            report["ui"]["blocker"] = f"max_submit hard cap reached after {submit_clicks} final click(s)"
+                            break
+                        continue
                     if config.dry_run and result.get("blocker") == "dry_run=1; final submit not clicked":
-                        break
+                        prepared_dry_run_count += 1
+                        if prepared_dry_run_count >= config.max_submit:
+                            report["ui"]["blocker"] = f"dry-run preparation cap reached after {prepared_dry_run_count} candidate(s)"
+                            break
+                        continue
                     if not candidate_state_allows_next_attempt(result):
                         report["ui"]["blocker"] = str(result.get("blocker") or "candidate left modal/page state uncertain")
                         break
@@ -1535,7 +1546,7 @@ def build_submit_aggregate(candidates: list[Mapping[str, Any]]) -> dict[str, Any
         "candidates_selected": len(selected),
         "exact_matched": sum(1 for item in selected if (item.get("match") or {}).get("match_status") == "exact"),
         "submitted_count": len(submitted),
-        "submit_clicked_count": len(submit_clicked),
+        "submit_clicked_count": sum(int(item.get("submit_clicked_count") or 1) for item in submit_clicked),
         "error_count": sum(1 for item in modal if item.get("submit_clicked") and not item.get("submit_success")),
         "submit_result_counts": dict(submit_results),
         "skipped_existing_duplicates": sum(count for reason, count in skipped.items() if "already exists" in reason),
@@ -1547,14 +1558,14 @@ def build_submit_aggregate(candidates: list[Mapping[str, Any]]) -> dict[str, Any
 def determine_final_conclusion(candidates: list[Mapping[str, Any]], errors: list[Mapping[str, Any]]) -> str:
     modal_results = [item.get("modal") or {} for item in candidates]
     submit_results = [str(item.get("submit_result") or "") for item in modal_results if item.get("submit_clicked")]
-    if SUBMIT_RESULT_CONFIRMED_SUCCESS in submit_results:
-        return "submitted_confirmed_waiting_response"
     if SUBMIT_RESULT_CONFIRMED_VALIDATION_ERROR in submit_results:
         return "submit_failed_validation"
     if SUBMIT_RESULT_CONFIRMED_NETWORK_ERROR in submit_results:
         return "submit_failed_network"
     if SUBMIT_RESULT_UNCONFIRMED_AFTER_CLICK in submit_results:
         return "submit_unconfirmed_error"
+    if SUBMIT_RESULT_CONFIRMED_SUCCESS in submit_results:
+        return "submitted_confirmed_waiting_response"
     if errors:
         return "no_safe_candidate"
     if not any(item.get("selected_for_dry_run") and not item.get("skip_reason") for item in candidates):

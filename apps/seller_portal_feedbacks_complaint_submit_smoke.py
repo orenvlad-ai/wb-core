@@ -60,8 +60,10 @@ def _assert_selection_rules() -> None:
     ]
     if select_submit_candidate_ids(results, max_submit=1, include_review=True) != ["yes-1"]:
         raise AssertionError("submit selection must prefer yes before review")
-    if select_submit_candidate_ids(results, max_submit=1, max_candidates=3, include_review=True) != ["yes-1", "yes-2", "review-1"]:
-        raise AssertionError("actionability iteration must check all bounded yes candidates before review while final submit cap stays 1")
+    if select_submit_candidate_ids(results, max_submit=5, max_candidates=3, include_review=True) != ["yes-1", "yes-2", "review-1"]:
+        raise AssertionError("actionability iteration must check bounded yes candidates before review")
+    if select_submit_candidate_ids(results, max_submit=5, include_review=True) != ["yes-1", "yes-2", "review-1"]:
+        raise AssertionError("small batch selection must allow several yes/review candidates within the hard cap")
     if select_submit_candidate_ids(results, max_submit=1, max_candidates=3, include_review=False) != ["yes-1", "yes-2"]:
         raise AssertionError("include_review=0 iteration must still skip review candidates")
     if select_submit_candidate_ids(results, max_submit=1, include_review=False) != ["yes-1"]:
@@ -74,8 +76,8 @@ def _assert_selection_rules() -> None:
     ordered = order_candidates_for_actionability(api_order_candidates, selected_ids=["yes-1", "yes-2", "review-1"])
     if [item["feedback_id"] for item in ordered] != ["yes-1", "yes-2", "review-1"]:
         raise AssertionError("resolver attempts must follow selected yes-before-review order, not API row order")
-    if MAX_SUBMIT_HARD_CAP != 1:
-        raise AssertionError("controlled submit hard cap must remain 1")
+    if MAX_SUBMIT_HARD_CAP != 5:
+        raise AssertionError("controlled batch submit hard cap must remain 5")
 
 
 def _assert_exact_and_reason_guards() -> None:
@@ -164,6 +166,35 @@ def _assert_explicit_submit_flag_required() -> None:
                 raise
             return
         raise AssertionError("real submit must require explicit confirmation flag before any API/browser work")
+    with TemporaryDirectory(prefix="submit-hard-cap-smoke-") as tmp:
+        config = SubmitConfig(
+            date_from="2026-05-01",
+            date_to="2026-05-01",
+            stars=(1,),
+            is_answered="false",
+            max_api_rows=1,
+            max_submit=MAX_SUBMIT_HARD_CAP + 1,
+            include_review=True,
+            dry_run=True,
+            require_exact=True,
+            retry_errors=False,
+            submit_confirmation=False,
+            runtime_dir=Path(tmp),
+            storage_state_path=Path(tmp) / "storage_state.json",
+            wb_bot_python=Path("/usr/bin/python3"),
+            output_dir=Path(tmp),
+            start_url="https://seller.wildberries.ru",
+            headless=True,
+            timeout_ms=5000,
+            write_artifacts=False,
+        )
+        try:
+            run_submit(config)
+        except RuntimeError as exc:
+            if "max_submit hard cap" not in str(exc):
+                raise
+        else:
+            raise AssertionError("direct config above hard cap must be rejected")
 
 
 def _assert_target_feedback_id_config() -> None:
@@ -328,6 +359,24 @@ def _assert_journal_record_shape() -> None:
     )
     if aggregate["submit_clicked_count"] != 1 or aggregate["submitted_count"] != 1:
         raise AssertionError(f"aggregate must count controlled submit: {aggregate}")
+    batch_aggregate = build_submit_aggregate(
+        [
+            {
+                "selected_for_dry_run": True,
+                "ai": _ai("feedback-1", "yes"),
+                "match": {"match_status": "exact"},
+                "modal": {"submit_clicked": True, "submit_clicked_count": 1, "submit_success": True},
+            },
+            {
+                "selected_for_dry_run": True,
+                "ai": _ai("feedback-2", "yes"),
+                "match": {"match_status": "exact"},
+                "modal": {"submit_clicked": True, "submit_clicked_count": 1, "submit_success": True},
+            },
+        ]
+    )
+    if batch_aggregate["submit_clicked_count"] != 2 or batch_aggregate["submitted_count"] != 2:
+        raise AssertionError(f"aggregate must count bounded batch submits: {batch_aggregate}")
 
 
 def _candidate(feedback_id: str, fit: str, match_status: str, reason: str) -> dict[str, object]:
