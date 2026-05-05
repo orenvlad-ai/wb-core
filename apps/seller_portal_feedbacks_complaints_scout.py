@@ -40,6 +40,7 @@ from apps.seller_portal_relogin_session import (  # noqa: E402
     DEFAULT_WB_BOT_PYTHON,
     probe_storage_state,
 )
+from packages.application.feedback_review_tags import known_review_tags_from_text, normalize_review_tags  # noqa: E402
 
 
 DEFAULT_START_URL = "https://seller.wildberries.ru"
@@ -621,6 +622,12 @@ def parse_feedback_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     review_text = str(structured.get("review_text") or _guess_review_text(text) or "")
     pros = str(structured.get("pros") or _field_after_label(text, ("Достоинства", "Плюсы")) or "")
     cons = str(structured.get("cons") or _field_after_label(text, ("Недостатки", "Минусы")) or "")
+    pros_tags = normalize_review_tags(structured.get("pros_tags") or known_review_tags_from_text(pros))
+    cons_tags = normalize_review_tags(structured.get("cons_tags") or known_review_tags_from_text(cons))
+    review_tags = normalize_review_tags(
+        structured.get("review_tags")
+        or [*pros_tags, *cons_tags, *known_review_tags_from_text(review_text)]
+    )
     comment = str(structured.get("comment") or _field_after_label(text, ("Комментарий",)) or "")
     media_indicators = _unique_preserve(
         [
@@ -644,6 +651,10 @@ def parse_feedback_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         "review_date": review_date,
         "review_datetime": review_datetime,
         "text_snippet": _safe_text(review_text, SAFE_TEXT_LIMIT),
+        "review_tags": review_tags,
+        "pros_tags": pros_tags,
+        "cons_tags": cons_tags,
+        "tag_source": "seller_portal_dom" if review_tags else "none",
         "pros_snippet": _safe_text(pros, SAFE_TEXT_LIMIT),
         "cons_snippet": _safe_text(cons, SAFE_TEXT_LIMIT),
         "comment_snippet": _safe_text(comment, SAFE_TEXT_LIMIT),

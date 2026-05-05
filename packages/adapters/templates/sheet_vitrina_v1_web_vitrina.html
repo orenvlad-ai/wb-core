@@ -474,6 +474,28 @@
       overflow: hidden;
     }
 
+    .feedbacks-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      align-items: flex-start;
+    }
+
+    .feedbacks-tag-chip {
+      display: inline-flex;
+      max-width: 100%;
+      border: 1px solid #c8d7ee;
+      border-radius: 6px;
+      background: #eef4ff;
+      color: #26415f;
+      padding: 2px 6px;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.25;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
     .feedbacks-ai-cell {
       white-space: normal;
     }
@@ -2428,6 +2450,7 @@
       product_name: 220,
       brand_name: 140,
       text: 340,
+      review_tags: 180,
       pros: 240,
       cons: 240,
       answer_text: 280
@@ -5618,6 +5641,8 @@
           supplier_article: String(row.supplier_article || ""),
           product_name: String(row.product_name || ""),
           text: String(row.text || ""),
+          review_tags: normalizeFeedbackReviewTags(row.review_tags),
+          tag_source: String(row.tag_source || ""),
           pros: String(row.pros || ""),
           cons: String(row.cons || ""),
           is_answered: Boolean(row.is_answered),
@@ -5833,6 +5858,10 @@
         created_at: String(row.created_at || ""),
         rating: Number(row.product_valuation || row.rating || 0),
         text: String(row.text || ""),
+        review_tags: normalizeFeedbackReviewTags(row.review_tags),
+        tag_source: String(row.tag_source || ""),
+        pros_tags: normalizeFeedbackReviewTags(row.pros_tags),
+        cons_tags: normalizeFeedbackReviewTags(row.cons_tags),
         pros: String(row.pros || ""),
         cons: String(row.cons || ""),
         nm_id: row.nm_id || null,
@@ -6383,6 +6412,7 @@
         ["product_name", "Товар"],
         ["brand_name", "Бренд"],
         ["text", "Отзыв"],
+        ["review_tags", "Теги"],
         ["pros", "Плюсы"],
         ["cons", "Минусы"],
         ["answer_text", "Ответ"]
@@ -6402,10 +6432,39 @@
         if (key.indexOf("ai_") === 0) {
           return renderFeedbacksAiCell(row, key);
         }
+        if (key === "review_tags") {
+          return '<td class="feedbacks-tags-cell">' + renderFeedbackReviewTags(row.review_tags) + "</td>";
+        }
         const rawValue = row[key];
         const value = rawValue === null || typeof rawValue === "undefined" || rawValue === "" ? "—" : String(rawValue);
         return '<td' + (isText ? ' class="feedbacks-text-cell"' : "") + ">" + (isText ? '<span class="feedbacks-text-clip">' : "") + escapeHtml(value) + (isText ? "</span>" : "") + "</td>";
       }).join("") + "</tr>";
+    }
+
+    function normalizeFeedbackReviewTags(value) {
+      const input = Array.isArray(value) ? value : (value ? [value] : []);
+      const seen = new Set();
+      const tags = [];
+      input.forEach(function(item) {
+        const tag = String(item || "").replace(/\s+/g, " ").trim();
+        const key = tag.toLocaleLowerCase("ru-RU");
+        if (!tag || seen.has(key)) {
+          return;
+        }
+        seen.add(key);
+        tags.push(tag);
+      });
+      return tags.slice(0, 16);
+    }
+
+    function renderFeedbackReviewTags(value) {
+      const tags = normalizeFeedbackReviewTags(value);
+      if (!tags.length) {
+        return "—";
+      }
+      return '<div class="feedbacks-tags">' + tags.map(function(tag) {
+        return '<span class="feedbacks-tag-chip">' + escapeHtml(tag) + "</span>";
+      }).join("") + "</div>";
     }
 
     function renderFeedbacksAiCell(row, key) {

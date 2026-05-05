@@ -77,6 +77,7 @@ from apps.seller_portal_feedbacks_matching_replay import (  # noqa: E402
     summarize_api_row,
 )
 from apps.seller_portal_relogin_session import DEFAULT_STORAGE_STATE_PATH, DEFAULT_WB_BOT_PYTHON  # noqa: E402
+from packages.application.feedback_review_tags import normalize_review_tags, reason_contradicts_review_tags  # noqa: E402
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import (  # noqa: E402
     JsonFileFeedbacksComplaintJournal,
 )
@@ -409,9 +410,29 @@ def enforce_submit_guards(candidates: list[dict[str, Any]]) -> None:
         if not is_reason_submit_ready(reason):
             candidate["skip_reason"] = "AI reason is empty or diagnostic placeholder; submit blocked"
             continue
+        review_tags = candidate_review_tags(candidate)
+        candidate["tag_diagnostics"] = {
+            "api_review_tags": normalize_review_tags((candidate.get("api_summary") or {}).get("review_tags") or []),
+            "ui_review_tags": normalize_review_tags(((candidate.get("match") or {}).get("best_ui_candidate") or {}).get("review_tags") or []),
+            "combined_review_tags": review_tags,
+        }
+        if reason_contradicts_review_tags(reason, review_tags):
+            candidate["skip_reason"] = "reason_contradicts_review_tags"
+            continue
         match = candidate.get("match") or {}
         if not should_open_modal_for_match(match):
             candidate["skip_reason"] = f"match_status={match.get('match_status')} is not exact; submit blocked"
+
+
+def candidate_review_tags(candidate: Mapping[str, Any]) -> list[str]:
+    match = candidate.get("match") or {}
+    best_ui = match.get("best_ui_candidate") if isinstance(match.get("best_ui_candidate"), Mapping) else {}
+    return normalize_review_tags(
+        [
+            *((candidate.get("api_summary") or {}).get("review_tags") or []),
+            *((best_ui or {}).get("review_tags") or []),
+        ]
+    )
 
 
 def submit_modals_for_candidates(
@@ -525,6 +546,11 @@ def submit_one_candidate(
             visible_match = find_visible_actionable_row(api_row, visible_rows, expected_ui=expected_ui)
     result["visible_row_match"] = visible_match.get("match") or {}
     visible_row = visible_match.get("row") if isinstance(visible_match.get("row"), dict) else {}
+    result["tag_diagnostics"] = {
+        "api_review_tags": normalize_review_tags(api_row.get("review_tags") or []),
+        "ui_review_tags": normalize_review_tags(visible_row.get("review_tags") or []),
+        "combined_review_tags": normalize_review_tags([*(api_row.get("review_tags") or []), *(visible_row.get("review_tags") or [])]),
+    }
     if not visible_row:
         result["blocker"] = "Exact cursor match exists, but actionable DOM row was not found"
         return result
@@ -1359,6 +1385,10 @@ def journal_record_for_submit(
         "supplier_article": str(api_row.get("supplier_article") or ""),
         "product_name": str(api_row.get("product_name") or ""),
         "review_text": str(api_row.get("text") or ""),
+        "review_tags": normalize_review_tags(api_row.get("review_tags") or []),
+        "tag_source": str(api_row.get("tag_source") or ""),
+        "ui_review_tags": normalize_review_tags(((match.get("best_ui_candidate") or {}).get("review_tags") or [])),
+        "submit_tag_diagnostics": modal.get("tag_diagnostics") or candidate.get("tag_diagnostics") or {},
         "pros": str(api_row.get("pros") or ""),
         "cons": str(api_row.get("cons") or ""),
         "is_answered": bool(api_row.get("is_answered")),

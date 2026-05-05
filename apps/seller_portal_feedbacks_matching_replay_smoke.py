@@ -169,6 +169,8 @@ def _assert_seller_portal_network_cursor_parser() -> None:
         raise AssertionError(f"network row datetime mapping failed: {ui_row}")
     if "photo" not in ui_row["media_indicators"] or not ui_row["complaint_action_found"]:
         raise AssertionError(f"network row indicators failed: {ui_row}")
+    if ui_row["review_tags"] != ["Плохое качество"] or ui_row["tag_source"] != "seller_portal_cursor":
+        raise AssertionError(f"network row must expose Seller Portal review tags: {ui_row}")
     match = match_one_api_row(_api_row("api-exact"), [ui_row])
     if match["match_status"] != "exact" or "feedback_id" not in match["matched_fields"]:
         raise AssertionError(f"network feedback_id must produce exact match: {match}")
@@ -235,6 +237,8 @@ def _api_row(feedback_id: str) -> dict[str, object]:
         "created_date": "2026-05-01",
         "product_valuation": 1,
         "text": "Плохое качество, стекло не подошло",
+        "review_tags": ["Плохое качество"],
+        "tag_source": "official_wb_api",
         "pros": "",
         "cons": "Не как на фото",
         "nm_id": 391662965,

@@ -68,7 +68,7 @@ def _assert_feedback_parser() -> None:
           </a></td>
           <td><button>(Matte) iPhone 15 / 16</button><button>428855306</button></td>
           <td>01.05.2026 в 16:38</td>
-          <td><div>Плюсы: Упаковала</div><div>Минусы: Все отлично</div><div>Комментарий: Спасибо</div></td>
+          <td><div>Плюсы: Упаковала</div><div>Минусы: Плохое качество</div><div>Комментарий: Спасибо</div></td>
           <td><button>...</button></td>
         </tr>
         """,
@@ -79,8 +79,10 @@ def _assert_feedback_parser() -> None:
         raise AssertionError(f"live-like articles not extracted: {live_row}")
     if live_row["review_datetime"] != "01.05.2026 в 16:38":
         raise AssertionError(f"review datetime not extracted: {live_row}")
-    if live_row["pros_snippet"] != "Упаковала" or live_row["cons_snippet"] != "Все отлично":
+    if live_row["pros_snippet"] != "Упаковала" or live_row["cons_snippet"] != "Плохое качество":
         raise AssertionError(f"pros/cons not extracted: {live_row}")
+    if live_row["review_tags"] != ["Плохое качество"] or live_row["cons_tags"] != ["Плохое качество"]:
+        raise AssertionError(f"visible WB chips/tags not extracted: {live_row}")
 
 
 def _assert_row_menu_parser() -> None:

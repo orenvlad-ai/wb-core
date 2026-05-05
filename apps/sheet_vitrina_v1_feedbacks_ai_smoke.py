@@ -56,7 +56,15 @@ class FakeAiProvider:
         rows: list[Mapping[str, Any]],
         schema: Mapping[str, Any],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        self.calls.append({"prompt_length": len(prompt), "model": model, "row_count": len(rows), "schema_type": schema.get("type")})
+        self.calls.append(
+            {
+                "prompt_length": len(prompt),
+                "model": model,
+                "row_count": len(rows),
+                "schema_type": schema.get("type"),
+                "rows": [dict(row) for row in rows],
+            }
+        )
         if self.fail:
             return [{"feedback_id": "unexpected", "complaint_fit": "yes"}], {"model": "fake"}
         results = []
@@ -137,6 +145,9 @@ def main() -> None:
             raise AssertionError(f"yes/review reason must be ready complaint text: {analysis}")
         if fake_provider.calls[-1]["model"] != "gpt-5.5" or analysis["meta"]["model"] != "gpt-5.5":
             raise AssertionError(f"selected model must be passed to provider and metadata: {fake_provider.calls} {analysis}")
+        provider_rows = fake_provider.calls[-1]["rows"]
+        if provider_rows[1].get("review_tags") != ["Плохое качество"] or provider_rows[1].get("tag_source") != "official_wb_api":
+            raise AssertionError(f"review_tags must be normalized and passed to provider, got: {provider_rows}")
         try:
             block.analyze({"rows": _rows() + [_extra_row()]})
         except ValueError as exc:
@@ -198,6 +209,21 @@ def main() -> None:
                 raise AssertionError(f"old category ids must fail clearly, got: {exc}") from exc
         else:
             raise AssertionError("old internal category id must be rejected")
+
+        tag_contradiction = SheetVitrinaV1FeedbacksAiBlock(
+            runtime_dir=runtime_dir / "tag-contradiction",
+            provider=TagContradictionProvider(),
+            now_factory=lambda: NOW,
+            min_analyze_interval_seconds=0,
+        )
+        tag_contradiction.save_prompt({"prompt": STARTER_PROMPT, "model": "gpt-5.5"})
+        try:
+            tag_contradiction.analyze({"rows": [_rows()[1]]})
+        except Exception as exc:
+            if "contradicts review_tags" not in str(exc):
+                raise AssertionError(f"tag contradiction must fail clearly, got: {exc}") from exc
+        else:
+            raise AssertionError("reason that says text is absent while tags exist must be rejected")
 
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=runtime_dir,
@@ -296,6 +322,9 @@ def _assert_wb_category_schema_and_prompt() -> None:
         raise AssertionError("starter prompt must define reason as WB complaint description text")
     if "category=other" not in STARTER_PROMPT or "Недостаточно данных" not in STARTER_PROMPT:
         raise AssertionError("starter prompt must force weak/empty cases into WB category other")
+    for fragment in ("review_tags", "отзыв НЕ пустой", "тег: Плохое качество", "товарный тег"):
+        if fragment not in STARTER_PROMPT:
+            raise AssertionError(f"starter prompt must explain WB review tags, missing {fragment!r}")
 
 
 class BadReasonProvider(FakeAiProvider):
@@ -346,6 +375,30 @@ class OldCategoryProvider(FakeAiProvider):
         ], {"model": model, "response_id": "old-category"}
 
 
+class TagContradictionProvider(FakeAiProvider):
+    def analyze_batch(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        rows: list[Mapping[str, Any]],
+        schema: Mapping[str, Any],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        return [
+            {
+                "feedback_id": str(rows[0]["feedback_id"]),
+                "complaint_fit": "no",
+                "complaint_fit_label": "Нет",
+                "category": "other",
+                "category_label": "Другое",
+                "reason": "Жалобу не подавать: отзыв без текста и описания.",
+                "confidence": "low",
+                "confidence_label": "Низкая",
+                "evidence": "",
+            }
+        ], {"model": model, "response_id": "tag-contradiction"}
+
+
 def _rows() -> list[dict[str, Any]]:
     return [
         {
@@ -365,9 +418,11 @@ def _rows() -> list[dict[str, Any]]:
             "feedback_id": "fb-2",
             "created_at": "2026-04-28T07:00:00Z",
             "rating": 2,
-            "text": "Доставили в мятый коробке",
+            "text": "",
+            "review_tags": ["плохое качество", "Плохое качество"],
+            "tag_source": "official_wb_api",
             "pros": "",
-            "cons": "Доставка",
+            "cons": "",
             "nm_id": 124,
             "product_name": "Товар",
             "supplier_article": "A-2",
