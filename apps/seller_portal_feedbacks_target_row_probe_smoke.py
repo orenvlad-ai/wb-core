@@ -16,7 +16,7 @@ from apps.seller_portal_feedbacks_complaints_scout import (  # noqa: E402
     parse_feedback_rows_from_html,
     parse_row_menu_diagnostics_from_html,
 )
-from apps.seller_portal_feedbacks_actionable_resolver import config_from_target_probe  # noqa: E402
+from apps.seller_portal_feedbacks_actionable_resolver import config_from_target_probe, status_tabs_for_row  # noqa: E402
 from apps.seller_portal_feedbacks_target_row_probe import (  # noqa: E402
     CONTRACT_NAME,
     TargetRowProbeConfig,
@@ -201,6 +201,8 @@ def _assert_shared_resolver_config() -> None:
         raise AssertionError(f"shared resolver must inherit target probe date/star filters: {shared}")
     if shared.is_answered != "all" or shared.max_ui_rows != 50 or not shared.open_complaint_modal:
         raise AssertionError(f"shared resolver must preserve no-submit actionability settings: {shared}")
+    if status_tabs_for_row(shared, {"is_answered": True}, {}) != ["Ждут ответа", "Есть ответ"]:
+        raise AssertionError("shared resolver all-mode must follow target-row probe status tab order")
 
 
 def _api_row(feedback_id: str) -> dict[str, object]:
