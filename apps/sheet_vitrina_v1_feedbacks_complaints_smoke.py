@@ -58,6 +58,17 @@ def _assert_journal_create_dedupe_status_update() -> None:
         updated = journal.update_status("feedback-1", status="satisfied", raw_status_text="Одобрена", wb_decision_text="Принята")
         if not updated or updated["complaint_status_label"] != COMPLAINT_STATUS_LABELS["satisfied"]:
             raise AssertionError(f"status update must set satisfied label: {updated}")
+        metadata = journal.update_metadata(
+            "feedback-1",
+            {
+                "status_sync_run_id": "sync-1",
+                "status_sync_report_path": "/tmp/status-sync.json",
+                "confirmation_probe_path": "/tmp/confirmation.json",
+                "submit_network_evidence_summary": {"methods": ["POST"], "statuses": [200]},
+            },
+        )
+        if not metadata or metadata["status_sync_report_path"] != "/tmp/status-sync.json":
+            raise AssertionError(f"metadata update must preserve post-submit evidence paths: {metadata}")
         payload = SheetVitrinaV1FeedbacksComplaintsBlock(runtime_dir=Path(tmp), journal=journal).build_table()
         if payload["contract_name"] != "sheet_vitrina_v1_feedbacks_complaints" or payload["summary"]["satisfied"] != 1:
             raise AssertionError(f"table contract mismatch: {payload}")
