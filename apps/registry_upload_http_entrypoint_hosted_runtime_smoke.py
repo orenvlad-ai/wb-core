@@ -382,12 +382,15 @@ def main() -> None:
                     "public-probe",
                     "--as-of-date",
                     "2026-04-12",
-                    "--skip-refresh",
                 ]
             )
             if public_probe["ok"] is not True:
                 raise AssertionError("public probe must succeed against local live runner")
+            if public_probe["include_refresh"] is not False:
+                raise AssertionError("canonical public probe must skip heavy refresh by default")
             route_map = {item["route"]: item for item in public_probe["routes"]}
+            if "refresh" in route_map:
+                raise AssertionError("canonical public probe must not call refresh unless explicitly requested")
             if route_map["operator_reports"]["http_status"] != 200:
                 raise AssertionError("operator reports embedded panel must be publicly readable")
             if route_map["load_route"]["http_status"] != 404:
@@ -437,12 +440,15 @@ def main() -> None:
                     "loopback-probe",
                     "--as-of-date",
                     "2026-04-12",
-                    "--skip-refresh",
                 ]
             )
             if loopback_probe["ok"] is not True:
                 raise AssertionError("loopback probe must succeed against local loopback target")
+            if loopback_probe["include_refresh"] is not False:
+                raise AssertionError("canonical loopback probe must skip heavy refresh by default")
             loopback_routes = {item["route"]: item for item in loopback_probe["routes"]}
+            if "refresh" in loopback_routes:
+                raise AssertionError("canonical loopback probe must not call refresh unless explicitly requested")
             if loopback_routes["status"]["http_status"] != 200:
                 raise AssertionError("status with seeded snapshot must stay 200")
             if loopback_routes["web_vitrina_read"]["http_status"] != 200:
@@ -463,6 +469,19 @@ def main() -> None:
                 raise AssertionError("plan-report baseline template route must stay 200")
             if loopback_routes["plan"]["http_status"] != 200:
                 raise AssertionError("plan with seeded snapshot must stay 200")
+            if hosted_runtime._probe_include_refresh(
+                type("Args", (), {"include_refresh": True, "skip_refresh": False})()
+            ) is not True:
+                raise AssertionError("--include-refresh must opt into the deep refresh probe")
+            if hosted_runtime._probe_include_refresh(
+                type("Args", (), {"include_refresh": True, "skip_refresh": True})()
+            ) is not False:
+                raise AssertionError("--skip-refresh must force-disable the deep refresh probe")
+            if hosted_runtime._probe_auth_summary("wb_core_web_session=masked") != {
+                "mode": "app_session_cookie",
+                "cookie_configured": True,
+            }:
+                raise AssertionError("probe auth summary must stay sanitized")
 
             print(f"print_plan: ok -> {print_plan['deploy_plan']['target_id']}")
             print(f"deploy_dry_run: ok -> {deploy_dry_run['commands']['restart'][-1]}")
@@ -493,6 +512,8 @@ def main() -> None:
             print(f"factory_order_status: ok -> {route_map['factory_order_status']['http_status']}")
             print(f"wb_regional_status: ok -> {route_map['wb_regional_status']['http_status']}")
             print(f"loopback_probe_status: ok -> {loopback_routes['status']['http_status']}")
+            print("canonical_probe_refresh_policy: ok -> refresh skipped by default")
+            print("probe_auth_summary: ok -> sanitized")
         finally:
             process.terminate()
             try:

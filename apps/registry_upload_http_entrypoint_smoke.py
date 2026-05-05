@@ -206,7 +206,7 @@ def main() -> None:
             if "Скачать лог" not in operator_ui_html or "max-height: 420px" not in operator_ui_html:
                 raise AssertionError("operator UI must expose log download control and fixed-height log viewport")
             if (
-                "Расчёт поставок" not in operator_ui_html
+                "Поставки" not in operator_ui_html
                 or "Заказ на фабрике" not in operator_ui_html
                 or "Поставка на Wildberries" not in operator_ui_html
             ):

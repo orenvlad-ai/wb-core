@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+import hashlib
+import hmac
 import json
 import math
 import os
@@ -14,6 +17,7 @@ import shlex
 import ssl
 import subprocess
 import sys
+import time
 from typing import Any
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
@@ -453,6 +457,7 @@ def collect_public_surface(
     feedbacks_date_from: str | None = None,
     feedbacks_date_to: str | None = None,
     timeout_seconds: float,
+    auth_cookie: str | None = None,
 ) -> list[dict[str, Any]]:
     results = [
         _collect_http_probe(
@@ -460,30 +465,35 @@ def collect_public_surface(
             method="GET",
             url=f"{base_url}{route_paths['SHEET_VITRINA_OPERATOR_UI_PATH']}",
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="operator_reports",
             method="GET",
             url=f"{base_url}{route_paths['SHEET_VITRINA_OPERATOR_UI_PATH']}?embedded_tab=reports",
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="web_vitrina_page",
             method="GET",
             url=f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}",
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="load_route",
             method="GET",
             url=f"{base_url}{DEFAULT_SHEET_LOAD_PATH}",
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="job",
             method="GET",
             url=f"{base_url}{DEFAULT_SHEET_JOB_PATH}?job_id=hosted_runtime_probe",
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="status",
@@ -493,12 +503,14 @@ def collect_public_surface(
                 as_of_date,
             ),
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="seller_session_check",
             method="GET",
             url=f"{base_url}{DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH}",
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="web_vitrina_read",
@@ -508,6 +520,7 @@ def collect_public_surface(
                 as_of_date,
             ),
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="web_vitrina_page_composition",
@@ -520,18 +533,21 @@ def collect_public_surface(
                 },
             ),
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="daily_report",
             method="GET",
             url=f"{base_url}{DEFAULT_SHEET_DAILY_REPORT_PATH}",
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="stock_report",
             method="GET",
             url=f"{base_url}{DEFAULT_SHEET_STOCK_REPORT_PATH}",
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="plan_report",
@@ -541,18 +557,21 @@ def collect_public_surface(
                 _build_plan_report_probe_params(as_of_date),
             ),
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="plan_report_baseline_status",
             method="GET",
             url=f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH}",
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="plan_report_baseline_template",
             method="GET",
             url=f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH}",
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="plan",
@@ -562,48 +581,56 @@ def collect_public_surface(
                 as_of_date,
             ),
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="factory_order_status",
             method="GET",
             url=f"{base_url}{DEFAULT_FACTORY_ORDER_STATUS_PATH}",
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="factory_order_template_stock_ff",
             method="GET",
             url=f"{base_url}{DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH}",
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="factory_order_template_inbound_factory",
             method="GET",
             url=f"{base_url}{DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH}",
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="factory_order_template_inbound_ff_to_wb",
             method="GET",
             url=f"{base_url}{DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH}",
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="factory_order_recommendation",
             method="GET",
             url=f"{base_url}{DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH}",
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="wb_regional_status",
             method="GET",
             url=f"{base_url}{DEFAULT_WB_REGIONAL_STATUS_PATH}",
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
             name="wb_regional_district_central",
             method="GET",
             url=f"{base_url}{DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX}/central.xlsx",
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
     ]
     if include_feedbacks:
@@ -625,6 +652,7 @@ def collect_public_surface(
                     },
                 ),
                 timeout_seconds=timeout_seconds,
+                auth_cookie=auth_cookie,
             )
         )
     if include_refresh:
@@ -636,6 +664,7 @@ def collect_public_surface(
                 url=f"{base_url}{route_paths['SHEET_VITRINA_REFRESH_HTTP_PATH']}",
                 json_payload=refresh_payload,
                 timeout_seconds=timeout_seconds,
+                auth_cookie=auth_cookie,
             )
         )
     return results
@@ -658,6 +687,7 @@ def collect_loopback_surface(
     feedbacks_date_from: str | None = None,
     feedbacks_date_to: str | None = None,
     timeout_seconds: float,
+    auth_cookie: str | None = None,
 ) -> dict[str, Any]:
     if target.ssh_destination:
         raw_results = _collect_remote_loopback_surface(
@@ -668,6 +698,7 @@ def collect_loopback_surface(
             feedbacks_date_from=feedbacks_date_from,
             feedbacks_date_to=feedbacks_date_to,
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         )
         transport = "ssh"
     else:
@@ -680,6 +711,7 @@ def collect_loopback_surface(
             feedbacks_date_from=feedbacks_date_from,
             feedbacks_date_to=feedbacks_date_to,
             timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
         )
         transport = "local"
     evaluation = evaluate_surface_results(raw_results, route_paths=target.route_paths)
@@ -1384,22 +1416,26 @@ def _run_shell_command(command: str) -> subprocess.CompletedProcess[str]:
 def run_public_probe_command(args: argparse.Namespace) -> int:
     target = load_hosted_runtime_target(args.target_file)
     _warn_if_rollback_read_only_target(target, action="public-probe")
+    include_refresh = _probe_include_refresh(args)
+    auth_cookie = _build_probe_auth_cookie(target, timeout_seconds=args.timeout_seconds)
     raw_results = collect_public_surface(
         base_url=target.public_base_url,
         route_paths=target.route_paths,
         as_of_date=args.as_of_date,
-        include_refresh=not args.skip_refresh,
+        include_refresh=include_refresh,
         include_feedbacks=args.include_feedbacks,
         feedbacks_date_from=args.feedbacks_date_from,
         feedbacks_date_to=args.feedbacks_date_to,
         timeout_seconds=args.timeout_seconds,
+        auth_cookie=auth_cookie,
     )
     payload = {
         "target_id": target.target_id,
         "base_url": target.public_base_url,
         "as_of_date": args.as_of_date,
-        "include_refresh": not args.skip_refresh,
+        "include_refresh": include_refresh,
         "include_feedbacks": args.include_feedbacks,
+        "auth": _probe_auth_summary(auth_cookie),
         **evaluate_surface_results(raw_results, route_paths=target.route_paths),
     }
     _print_json(payload)
@@ -1409,19 +1445,23 @@ def run_public_probe_command(args: argparse.Namespace) -> int:
 def run_loopback_probe_command(args: argparse.Namespace) -> int:
     target = load_hosted_runtime_target(args.target_file)
     _warn_if_rollback_read_only_target(target, action="loopback-probe")
+    include_refresh = _probe_include_refresh(args)
+    auth_cookie = _build_probe_auth_cookie(target, timeout_seconds=args.timeout_seconds)
     payload = {
         "target_id": target.target_id,
         "as_of_date": args.as_of_date,
-        "include_refresh": not args.skip_refresh,
+        "include_refresh": include_refresh,
         "include_feedbacks": args.include_feedbacks,
+        "auth": _probe_auth_summary(auth_cookie),
         **collect_loopback_surface(
             target,
             as_of_date=args.as_of_date,
-            include_refresh=not args.skip_refresh,
+            include_refresh=include_refresh,
             include_feedbacks=args.include_feedbacks,
             feedbacks_date_from=args.feedbacks_date_from,
             feedbacks_date_to=args.feedbacks_date_to,
             timeout_seconds=args.timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
     }
     _print_json(payload)
@@ -1465,25 +1505,29 @@ def run_deploy_and_verify_command(args: argparse.Namespace) -> int:
         allow_dirty=args.allow_dirty,
         action="deploy-and-verify",
     )
+    include_refresh = _probe_include_refresh(args)
+    auth_cookie = _build_probe_auth_cookie(target, timeout_seconds=args.timeout_seconds)
     loopback_summary = collect_loopback_surface(
         target,
         as_of_date=args.as_of_date,
-        include_refresh=not args.skip_refresh,
+        include_refresh=include_refresh,
         include_feedbacks=args.include_feedbacks,
         feedbacks_date_from=args.feedbacks_date_from,
         feedbacks_date_to=args.feedbacks_date_to,
         timeout_seconds=args.timeout_seconds,
+        auth_cookie=auth_cookie,
     )
     public_summary = evaluate_surface_results(
         collect_public_surface(
             base_url=target.public_base_url,
             route_paths=target.route_paths,
             as_of_date=args.as_of_date,
-            include_refresh=not args.skip_refresh,
+            include_refresh=include_refresh,
             include_feedbacks=args.include_feedbacks,
             feedbacks_date_from=args.feedbacks_date_from,
             feedbacks_date_to=args.feedbacks_date_to,
             timeout_seconds=args.timeout_seconds,
+            auth_cookie=auth_cookie,
         ),
         route_paths=target.route_paths,
     )
@@ -1494,8 +1538,9 @@ def run_deploy_and_verify_command(args: argparse.Namespace) -> int:
         "public_probe": {
             "base_url": target.public_base_url,
             "as_of_date": args.as_of_date,
-            "include_refresh": not args.skip_refresh,
+            "include_refresh": include_refresh,
             "include_feedbacks": args.include_feedbacks,
+            "auth": _probe_auth_summary(auth_cookie),
             **public_summary,
         },
         "ok": deploy_summary["ok"] and loopback_summary["ok"] and public_summary["ok"],
@@ -1563,8 +1608,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _add_probe_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--as-of-date", default=None, help="Optional as_of_date for plan/status/refresh probes.")
-    parser.add_argument("--skip-refresh", action="store_true", help="Skip POST /v1/sheet-vitrina-v1/refresh.")
+    parser.add_argument("--as-of-date", default=None, help="Optional as_of_date for plan/status/deep refresh probes.")
+    parser.add_argument(
+        "--include-refresh",
+        action="store_true",
+        help="Run explicit deep POST /v1/sheet-vitrina-v1/refresh probe. Canonical probes skip this heavy mutating route by default.",
+    )
+    parser.add_argument(
+        "--skip-refresh",
+        action="store_true",
+        help="Compatibility flag: force skipping POST /v1/sheet-vitrina-v1/refresh even if --include-refresh is present.",
+    )
     parser.add_argument(
         "--include-feedbacks",
         action="store_true",
@@ -1580,6 +1634,137 @@ def _add_probe_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _probe_include_refresh(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "include_refresh", False)) and not bool(getattr(args, "skip_refresh", False))
+
+
+def _probe_auth_summary(auth_cookie: str | None) -> dict[str, Any]:
+    return {
+        "mode": "app_session_cookie" if auth_cookie else "none",
+        "cookie_configured": bool(auth_cookie),
+    }
+
+
+def _build_probe_auth_cookie(target: HostedRuntimeTarget, *, timeout_seconds: float) -> str | None:
+    """Build an app-session cookie for auth-protected health probes without logging secrets."""
+
+    timeout_seconds = _validate_probe_timeout_seconds(timeout_seconds)
+    if not target.environment_file:
+        return None
+    if target.ssh_destination:
+        result = subprocess.run(
+            _ssh_command() + [target.ssh_destination, "python3", "-"],
+            input=_build_remote_auth_cookie_script(target.environment_file),
+            text=True,
+            capture_output=True,
+            cwd=ROOT,
+            timeout=min(timeout_seconds, 30.0),
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        cookie = result.stdout.strip()
+        return cookie if cookie.startswith("wb_core_web_session=") else None
+    env_values = _read_env_file_values(Path(target.environment_file))
+    return _build_web_auth_cookie_from_env(env_values)
+
+
+def _build_remote_auth_cookie_script(environment_file: str) -> str:
+    return f"""import base64
+import hashlib
+import hmac
+import json
+import shlex
+import time
+from pathlib import Path
+
+ENV_FILE = {environment_file!r}
+COOKIE_NAME = "wb_core_web_session"
+
+
+def _read_env_file(path):
+    values = {{}}
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        try:
+            parsed = shlex.split(value, posix=True)
+        except ValueError:
+            parsed = []
+        values[key] = parsed[0] if parsed else value.strip('"').strip("'")
+    return values
+
+
+def _b64(value):
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+env = _read_env_file(ENV_FILE)
+username = str(env.get("WB_CORE_WEB_AUTH_USERNAME") or "").strip()
+session_secret = str(env.get("WB_CORE_WEB_AUTH_SESSION_SECRET") or "").strip()
+if not username or not session_secret:
+    raise SystemExit(0)
+try:
+    max_age = int(env.get("WB_CORE_WEB_AUTH_SESSION_MAX_AGE_SECONDS") or 600)
+except ValueError:
+    max_age = 600
+max_age = max(60, min(max_age, 600))
+payload = _b64(json.dumps({{"u": username, "exp": int(time.time()) + max_age}}, separators=(",", ":")).encode("utf-8"))
+signature = _b64(hmac.new(session_secret.encode("utf-8"), payload.encode("ascii"), hashlib.sha256).digest())
+print(f"{{COOKIE_NAME}}={{payload}}.{{signature}}")
+"""
+
+
+def _read_env_file_values(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        try:
+            parsed = shlex.split(value, posix=True)
+        except ValueError:
+            parsed = []
+        values[key] = parsed[0] if parsed else value.strip('"').strip("'")
+    return values
+
+
+def _build_web_auth_cookie_from_env(env_values: dict[str, str]) -> str | None:
+    username = str(env_values.get("WB_CORE_WEB_AUTH_USERNAME") or "").strip()
+    session_secret = str(env_values.get("WB_CORE_WEB_AUTH_SESSION_SECRET") or "").strip()
+    if not username or not session_secret:
+        return None
+    try:
+        max_age = int(env_values.get("WB_CORE_WEB_AUTH_SESSION_MAX_AGE_SECONDS") or 600)
+    except ValueError:
+        max_age = 600
+    max_age = max(60, min(max_age, 600))
+    payload = _base64url_encode(json.dumps({"u": username, "exp": int(time.time()) + max_age}, separators=(",", ":")).encode("utf-8"))
+    signature = _base64url_encode(
+        hmac.new(session_secret.encode("utf-8"), payload.encode("ascii"), hashlib.sha256).digest()
+    )
+    return f"wb_core_web_session={payload}.{signature}"
+
+
+def _base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
 def _collect_http_probe(
     *,
     name: str,
@@ -1587,6 +1772,7 @@ def _collect_http_probe(
     url: str,
     timeout_seconds: float,
     json_payload: dict[str, Any] | None = None,
+    auth_cookie: str | None = None,
 ) -> dict[str, Any]:
     timeout_seconds = _validate_probe_timeout_seconds(timeout_seconds)
     request = urllib_request.Request(
@@ -1599,6 +1785,8 @@ def _collect_http_probe(
         request.data = body
         request.add_header("Content-Type", "application/json; charset=utf-8")
         request.add_header("Content-Length", str(len(body)))
+    if auth_cookie:
+        request.add_header("Cookie", auth_cookie)
     try:
         with _open_request(request, timeout_seconds=timeout_seconds) as response:
             body_text, body_truncated, body_bytes_read = _read_probe_response_body(response)
@@ -2184,6 +2372,7 @@ def _collect_remote_loopback_surface(
     feedbacks_date_from: str | None,
     feedbacks_date_to: str | None,
     timeout_seconds: float,
+    auth_cookie: str | None = None,
 ) -> list[dict[str, Any]]:
     timeout_seconds = _validate_probe_timeout_seconds(timeout_seconds)
     script = _build_remote_probe_script(
@@ -2195,6 +2384,7 @@ def _collect_remote_loopback_surface(
         feedbacks_date_from=feedbacks_date_from,
         feedbacks_date_to=feedbacks_date_to,
         timeout_seconds=timeout_seconds,
+        auth_cookie=auth_cookie,
     )
     command = _ssh_command() + [target.ssh_destination, "python3", "-"]
     try:
@@ -2320,6 +2510,7 @@ def _build_remote_probe_script(
     feedbacks_date_from: str | None,
     feedbacks_date_to: str | None,
     timeout_seconds: float,
+    auth_cookie: str | None = None,
 ) -> str:
     normalized_feedbacks_date_from = None
     normalized_feedbacks_date_to = None
@@ -2337,6 +2528,7 @@ def _build_remote_probe_script(
         "feedbacks_date_from": normalized_feedbacks_date_from,
         "feedbacks_date_to": normalized_feedbacks_date_to,
         "timeout_seconds": timeout_seconds,
+        "auth_cookie": auth_cookie or "",
     }
     payload_json = json.dumps(payload, ensure_ascii=True)
     return f"""import json
@@ -2421,6 +2613,8 @@ def _open_request(request: urllib_request.Request, *, timeout_seconds: float):
 
 def _collect(name, method, url, json_payload=None):
     request = urllib_request.Request(url=url, method=method, headers={{"Accept": "application/json, text/html;q=0.9"}})
+    if PAYLOAD.get("auth_cookie"):
+        request.add_header("Cookie", PAYLOAD["auth_cookie"])
     if json_payload is not None:
         body = json.dumps(json_payload).encode("utf-8")
         request.data = body
