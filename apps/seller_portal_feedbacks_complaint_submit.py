@@ -539,8 +539,14 @@ def submit_one_candidate(
     result["actionability_resolver"] = resolver
     result["visible_rows_checked"] = int(resolver.get("visible_rows_checked") or 0)
     result["visible_rows_checked_after_search"] = int(resolver.get("visible_rows_checked_after_search") or 0)
+    result["visible_rows_checked_after_scroll"] = int(resolver.get("visible_rows_checked_after_scroll") or 0)
     result["visible_row_match"] = resolver.get("visible_row_match") or {}
     result["targeted_search"] = resolver.get("targeted_search") or {}
+    result["filter_controller"] = resolver.get("filter_controller") or {}
+    result["date_filter_applied"] = bool(resolver.get("date_filter_applied"))
+    result["star_filter_applied"] = bool(resolver.get("star_filter_applied"))
+    result["search_used"] = bool(resolver.get("search_used"))
+    result["scroll_used"] = bool(resolver.get("scroll_used"))
     result["row_menu_click"] = resolver.get("row_menu_click") or {}
     result["menu_labels"] = resolver.get("menu_labels") or []
     result["tab_used"] = str(resolver.get("tab_used") or "")

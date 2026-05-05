@@ -55,6 +55,7 @@ from apps.seller_portal_feedbacks_matching_replay import (  # noqa: E402
     collect_feedback_rows_with_scroll,
     match_one_api_row,
     normalize_article,
+    normalize_date_key,
     normalize_datetime_minute,
     normalize_nm_id,
     normalize_rating,
@@ -90,6 +91,7 @@ FEEDBACKS_TAB_LABEL = "Отзывы"
 FEEDBACKS_UNANSWERED_TAB_LABEL = "Ждут ответа"
 FEEDBACKS_ANSWERED_TAB_LABEL = "Есть ответ"
 ACTIONABILITY_SCROLL_ATTEMPTS = 12
+SELLER_PORTAL_DATE_FILTER_MARKER_ATTR = "data-wb-core-filter-date-input"
 
 
 @dataclass(frozen=True)
@@ -626,8 +628,14 @@ def draft_one_candidate_modal(
     result["actionability_resolver"] = resolver
     result["visible_rows_checked"] = int(resolver.get("visible_rows_checked") or 0)
     result["visible_rows_checked_after_search"] = int(resolver.get("visible_rows_checked_after_search") or 0)
+    result["visible_rows_checked_after_scroll"] = int(resolver.get("visible_rows_checked_after_scroll") or 0)
     result["visible_row_match"] = resolver.get("visible_row_match") or {}
     result["targeted_search"] = resolver.get("targeted_search") or {}
+    result["filter_controller"] = resolver.get("filter_controller") or {}
+    result["date_filter_applied"] = bool(resolver.get("date_filter_applied"))
+    result["star_filter_applied"] = bool(resolver.get("star_filter_applied"))
+    result["search_used"] = bool(resolver.get("search_used"))
+    result["scroll_used"] = bool(resolver.get("scroll_used"))
     result["row_menu_click"] = resolver.get("row_menu_click") or {}
     result["menu_labels"] = resolver.get("menu_labels") or []
     result["tab_used"] = str(resolver.get("tab_used") or "")
@@ -754,6 +762,17 @@ def resolve_actionable_feedback_row(
         result["visible_rows_checked_after_search"] = int(result["visible_rows_checked_after_search"] or 0) + int(
             attempt.get("visible_rows_checked_after_search") or 0
         )
+        result["visible_rows_checked_after_scroll"] = int(result["visible_rows_checked_after_scroll"] or 0) + int(
+            attempt.get("visible_rows_checked_after_scroll") or 0
+        )
+        result["tab_used"] = tab_label
+        result["locator_strategy"] = str(attempt.get("locator_strategy") or result.get("locator_strategy") or "")
+        result["targeted_search"] = attempt.get("targeted_search") or result.get("targeted_search") or {}
+        result["filter_controller"] = attempt.get("filter_controller") or result.get("filter_controller") or {}
+        result["date_filter_applied"] = bool(attempt.get("date_filter_applied")) or bool(result.get("date_filter_applied"))
+        result["star_filter_applied"] = bool(attempt.get("star_filter_applied")) or bool(result.get("star_filter_applied"))
+        result["search_used"] = bool(attempt.get("search_used")) or bool(result.get("search_used"))
+        result["scroll_used"] = bool(attempt.get("scroll_used")) or bool(result.get("scroll_used"))
         last_blocker = str(attempt.get("block_reason") or last_blocker)
         if attempt.get("actionable_row_found"):
             result.update(
@@ -768,6 +787,11 @@ def resolve_actionable_feedback_row(
                     "complaint_action_available": bool(attempt.get("complaint_action_available")),
                     "visible_row_match": attempt.get("visible_row_match") or {},
                     "targeted_search": attempt.get("targeted_search") or {},
+                    "filter_controller": attempt.get("filter_controller") or {},
+                    "date_filter_applied": bool(attempt.get("date_filter_applied")),
+                    "star_filter_applied": bool(attempt.get("star_filter_applied")),
+                    "search_used": bool(attempt.get("search_used")),
+                    "scroll_used": bool(attempt.get("scroll_used")),
                     "row_menu_click": attempt.get("row_menu_click") or {},
                     "menu_labels": attempt.get("menu_labels") or [],
                     "resolved_row_summary": summarize_ui_row(attempt.get("resolved_row") or {}),
@@ -794,8 +818,15 @@ def resolve_actionable_feedback_row_in_tab(
         "tab_clicked": False,
         "visible_rows_checked": 0,
         "visible_rows_checked_after_search": 0,
+        "visible_rows_checked_after_scroll": 0,
         "scroll_attempts": [],
         "targeted_search": {},
+        "filter_controller": {},
+        "date_filter_applied": False,
+        "star_filter_applied": False,
+        "list_update_observed": False,
+        "search_used": False,
+        "scroll_used": False,
         "visible_row_match": {},
         "resolved_row": {},
         "locator_strategy": "",
@@ -814,42 +845,77 @@ def resolve_actionable_feedback_row_in_tab(
     _wait_settle(page, 1800)
     _wait_for_feedback_rows(page, timeout_ms=7000)
 
-    visible = find_actionable_visible_row_with_scroll(
+    filters = apply_seller_portal_feedback_filters(page, config, api_row, expected_ui=expected_ui)
+    attempt["filter_controller"] = filters
+    attempt["date_filter_applied"] = bool(filters.get("date_filter_applied"))
+    attempt["star_filter_applied"] = bool(filters.get("star_filter_applied"))
+    attempt["list_update_observed"] = bool(filters.get("list_update_observed"))
+    _wait_for_feedback_rows(page, timeout_ms=7000)
+
+    visible = find_actionable_visible_row_once(
         page,
-        config,
         api_row,
         expected_ui=expected_ui,
-        locator_strategy="direct_visible_or_scroll",
+        locator_strategy="filtered_direct_visible",
     )
     attempt["visible_rows_checked"] = int(visible.get("visible_rows_checked") or 0)
-    attempt["scroll_attempts"].extend(visible.get("scroll_attempts") or [])
     if visible.get("row"):
-        return confirm_resolved_row_menu(page, attempt, visible, locator_strategy=str(visible.get("locator_strategy") or "direct_visible_or_scroll"))
+        return confirm_resolved_row_menu(page, attempt, visible, locator_strategy=str(visible.get("locator_strategy") or "filtered_direct_visible"))
 
     search_result = apply_article_search_for_candidate(page, api_row, expected_ui=expected_ui)
     attempt["targeted_search"] = search_result
+    attempt["search_used"] = bool(search_result.get("ok"))
     if search_result.get("ok"):
         _wait_settle(page, 2500)
-        after_search = find_actionable_visible_row_with_scroll(
+        after_search = find_actionable_visible_row_once(
             page,
-            config,
             api_row,
             expected_ui=expected_ui,
-            locator_strategy="article_search_visible_or_scroll",
+            locator_strategy="filtered_article_search_visible",
         )
         attempt["visible_rows_checked_after_search"] = int(after_search.get("visible_rows_checked") or 0)
-        attempt["scroll_attempts"].extend(after_search.get("scroll_attempts") or [])
         if after_search.get("row"):
             return confirm_resolved_row_menu(
                 page,
                 attempt,
                 after_search,
-                locator_strategy=str(after_search.get("locator_strategy") or "article_search_visible_or_scroll"),
+                locator_strategy=str(after_search.get("locator_strategy") or "filtered_article_search_visible"),
             )
 
-    attempt["visible_row_match"] = visible.get("match") or {}
+    scroll = find_actionable_visible_row_with_scroll(
+        page,
+        config,
+        api_row,
+        expected_ui=expected_ui,
+        locator_strategy="filtered_scroll_fallback",
+    )
+    attempt["visible_rows_checked_after_scroll"] = int(scroll.get("visible_rows_checked") or 0)
+    attempt["scroll_attempts"].extend(scroll.get("scroll_attempts") or [])
+    attempt["scroll_used"] = bool(scroll.get("scroll_attempts"))
+    if scroll.get("row"):
+        return confirm_resolved_row_menu(page, attempt, scroll, locator_strategy=str(scroll.get("locator_strategy") or "filtered_scroll_fallback"))
+
+    attempt["visible_row_match"] = scroll.get("match") or visible.get("match") or {}
     attempt["block_reason"] = actionability_block_reason(expected_ui, attempt)
     return attempt
+
+
+def find_actionable_visible_row_once(
+    page: Page,
+    api_row: Mapping[str, Any],
+    *,
+    expected_ui: Mapping[str, Any],
+    locator_strategy: str,
+) -> dict[str, Any]:
+    visible_rows = extract_visible_feedback_rows(page, max_rows=80)
+    visible_match = find_visible_actionable_row(api_row, visible_rows, expected_ui=expected_ui)
+    visible_row = visible_match.get("row") if isinstance(visible_match.get("row"), dict) else {}
+    return {
+        "row": visible_row,
+        "match": visible_match.get("match") or {},
+        "visible_rows_checked": len(visible_rows),
+        "locator_strategy": locator_strategy,
+    }
 
 
 def find_actionable_visible_row_with_scroll(
@@ -928,6 +994,427 @@ def confirm_resolved_row_menu(
     return attempt
 
 
+def apply_seller_portal_feedback_filters(
+    page: Page,
+    config: DryRunConfig,
+    api_row: Mapping[str, Any],
+    *,
+    expected_ui: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    expected_ui = expected_ui or {}
+    date_from, date_to = feedback_filter_date_range(config, api_row, expected_ui=expected_ui)
+    stars = feedback_filter_stars(config, api_row, expected_ui=expected_ui)
+    before_signature = feedback_list_signature(page)
+    date_result = apply_seller_portal_date_filter(page, date_from=date_from, date_to=date_to)
+    _wait_settle(page, 900)
+    star_result = apply_seller_portal_star_filter(page, stars=stars)
+    _wait_settle(page, 1200)
+    after_signature = feedback_list_signature(page)
+    list_update = bool(after_signature.get("fingerprint") and after_signature.get("fingerprint") != before_signature.get("fingerprint"))
+    state = inspect_seller_portal_filter_state(page)
+    return {
+        "requested_date_from": date_from,
+        "requested_date_to": date_to,
+        "requested_stars": list(stars),
+        "date_filter": date_result,
+        "star_filter": star_result,
+        "date_filter_applied": bool(date_result.get("applied")),
+        "star_filter_applied": bool(star_result.get("applied")),
+        "status_tab_selected": True,
+        "reset_clear_used": False,
+        "list_signature_before": before_signature,
+        "list_signature_after": after_signature,
+        "list_update_observed": list_update,
+        "current_visible_date_range": state.get("visible_date_range") or "",
+        "current_selected_stars": state.get("selected_stars") or star_result.get("selected_stars") or [],
+        "selectors_used": [*(date_result.get("selectors_used") or []), *(star_result.get("selectors_used") or [])],
+        "blocker": str(date_result.get("reason") or star_result.get("reason") or ""),
+    }
+
+
+def feedback_filter_date_range(
+    config: DryRunConfig,
+    api_row: Mapping[str, Any],
+    *,
+    expected_ui: Mapping[str, Any] | None = None,
+) -> tuple[str, str]:
+    expected_ui = expected_ui or {}
+    candidate_date = (
+        normalize_date_key(expected_ui.get("review_datetime") or expected_ui.get("review_date") or expected_ui.get("created_at"))
+        or normalize_date_key(api_row.get("created_at") or api_row.get("created_date") or api_row.get("review_datetime"))
+    )
+    if candidate_date:
+        return candidate_date, candidate_date
+    return config.date_from, config.date_to
+
+
+def feedback_filter_stars(
+    config: DryRunConfig,
+    api_row: Mapping[str, Any],
+    *,
+    expected_ui: Mapping[str, Any] | None = None,
+) -> tuple[int, ...]:
+    expected_ui = expected_ui or {}
+    rating = normalize_rating(expected_ui.get("rating") or api_row.get("product_valuation") or api_row.get("rating"))
+    if rating:
+        return (int(rating),)
+    return tuple(config.stars)
+
+
+def apply_seller_portal_date_filter(page: Page, *, date_from: str, date_to: str) -> dict[str, Any]:
+    date_from_ru = format_ru_date(date_from)
+    date_to_ru = format_ru_date(date_to)
+    result: dict[str, Any] = {
+        "requested_date_from": date_from,
+        "requested_date_to": date_to,
+        "requested_date_from_ru": date_from_ru,
+        "requested_date_to_ru": date_to_ru,
+        "opened": False,
+        "applied": False,
+        "inputs_filled": False,
+        "apply_clicked": False,
+        "selectors_used": [],
+        "reason": "",
+    }
+    if not date_from_ru or not date_to_ru:
+        result["reason"] = "date range is unavailable"
+        return result
+    try:
+        opened = page.evaluate(
+            r"""
+({dateFrom, dateTo}) => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+  };
+  const labelFor = (el) => (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+  const dateRe = /\b\d{1,2}[.\/]\d{1,2}[.\/]\d{2,4}\s*[-–]\s*\d{1,2}[.\/]\d{1,2}[.\/]\d{2,4}\b/;
+  const clickables = Array.from(document.querySelectorAll('button, [role="button"], input, [class*="date"], [class*="Date"], div, span'))
+    .filter(visible)
+    .map((el, index) => {
+      const rect = el.getBoundingClientRect();
+      const text = labelFor(el);
+      let score = 0;
+      if (dateRe.test(text)) score += 120;
+      if (/дата|период|date/i.test(text + ' ' + (el.getAttribute('class') || '') + ' ' + (el.getAttribute('data-testid') || ''))) score += 70;
+      if (rect.top < 360) score += 20;
+      if (/отзыв|оценка|фильтр/i.test(text)) score -= 30;
+      return {el, index, text, tag: el.tagName.toLowerCase(), rect: {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)}, score};
+    })
+    .filter((item) => item.score > 60)
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+  const target = clickables[0];
+  if (!target) {
+    const bodyText = (document.body.innerText || '').replace(/\s+/g, ' ');
+    return {ok: false, reason: 'date range control not found', visible_date_range_seen: bodyText.includes(dateFrom) && bodyText.includes(dateTo)};
+  }
+  target.el.click();
+  return {ok: true, selector: target.tag, text: target.text.slice(0, 120), rect: target.rect};
+}
+            """,
+            {"dateFrom": date_from_ru, "dateTo": date_to_ru},
+        )
+        result["open_control"] = opened
+        result["opened"] = bool(opened.get("ok"))
+        if opened.get("selector"):
+            result["selectors_used"].append(f"date_control:{opened.get('selector')}")
+    except PlaywrightError as exc:
+        result["reason"] = safe_text(str(exc), 300)
+        return result
+    _wait_settle(page, 800)
+    try:
+        filled = page.evaluate(
+            r"""
+({dateFrom, dateTo, marker}) => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+  };
+  const text = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const labelFor = (el) => {
+    const parts = [el.getAttribute('aria-label'), el.getAttribute('placeholder'), el.getAttribute('title'), el.getAttribute('name'), el.getAttribute('data-testid')];
+    const id = el.getAttribute('id');
+    if (id) {
+      const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+      if (label) parts.push(label.innerText || label.textContent || '');
+    }
+    let parent = el.parentElement;
+    for (let depth = 0; parent && depth < 3; depth += 1, parent = parent.parentElement) {
+      parts.push(parent.innerText || parent.textContent || '');
+    }
+    return text(parts.filter(Boolean).join(' | '));
+  };
+  const roots = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="popup"], [class*="Popup"], [class*="popover"], [class*="Popover"], [class*="dropdown"], [class*="Dropdown"], body')).filter(visible);
+  const root = roots.find((node) => /дата|период|date|календар|применить/i.test(text(node.innerText || node.textContent || ''))) || document.body;
+  const inputs = Array.from(root.querySelectorAll('input')).filter(visible)
+    .filter((el) => !['checkbox', 'radio', 'button', 'submit', 'hidden', 'search'].includes(String(el.getAttribute('type') || '').toLowerCase()))
+    .map((el, index) => ({el, index, label: labelFor(el), value: String(el.value || ''), type: String(el.getAttribute('type') || '').toLowerCase()}));
+  const dateInputs = inputs.filter((item) => /дата|период|date|дд|мм|yyyy|гггг|\d{1,2}[.\/]\d{1,2}/i.test(item.label + ' ' + item.value + ' ' + item.type));
+  const selected = (dateInputs.length >= 2 ? dateInputs : (inputs.length >= 2 && /дата|период|date|календар/i.test(text(root.innerText || root.textContent || '')) ? inputs : [])).slice(0, 2);
+  root.querySelectorAll('[' + marker + ']').forEach((el) => el.removeAttribute(marker));
+  if (selected.length < 2) return {ok: false, reason: 'two visible date inputs were not found', inputs_considered: inputs.map((item) => item.label).slice(0, 8)};
+  const setValue = (node, value) => {
+    const proto = node.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (descriptor && descriptor.set) descriptor.set.call(node, value);
+    else node.value = value;
+    node.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: value}));
+    node.dispatchEvent(new Event('change', {bubbles: true}));
+    node.blur();
+  };
+  setValue(selected[0].el, dateFrom);
+  setValue(selected[1].el, dateTo);
+  selected[0].el.setAttribute(marker, 'from');
+  selected[1].el.setAttribute(marker, 'to');
+  return {ok: true, fields: selected.map((item) => ({label: item.label.slice(0, 160), value: item.el.value || ''}))};
+}
+            """,
+            {"dateFrom": date_from_ru, "dateTo": date_to_ru, "marker": SELLER_PORTAL_DATE_FILTER_MARKER_ATTR},
+        )
+        result["fill_inputs"] = filled
+        result["inputs_filled"] = bool(filled.get("ok"))
+        if filled.get("ok"):
+            result["selectors_used"].append("date_inputs")
+    except PlaywrightError as exc:
+        result["fill_inputs"] = {"ok": False, "reason": safe_text(str(exc), 300)}
+    try:
+        applied = click_filter_apply_button(page, context_hint="date")
+        result["date_apply_click"] = applied
+        result["apply_clicked"] = bool(applied.get("ok"))
+        if applied.get("ok"):
+            result["selectors_used"].append("date_apply")
+    except Exception as exc:  # pragma: no cover - live fallback
+        result["date_apply_click"] = {"ok": False, "reason": safe_text(str(exc), 300)}
+    state = inspect_seller_portal_filter_state(page)
+    visible_range = str(state.get("visible_date_range") or "")
+    result["visible_date_range_after"] = visible_range
+    result["applied"] = bool(result["inputs_filled"] or (date_from_ru in visible_range and date_to_ru in visible_range))
+    if not result["applied"] and not result["reason"]:
+        result["reason"] = str((result.get("fill_inputs") or {}).get("reason") or (result.get("open_control") or {}).get("reason") or "date filter was not applied")
+    return result
+
+
+def apply_seller_portal_star_filter(page: Page, *, stars: Iterable[int]) -> dict[str, Any]:
+    requested = sorted({int(star) for star in stars if 1 <= int(star) <= 5})
+    result: dict[str, Any] = {
+        "requested_stars": requested,
+        "opened": False,
+        "applied": False,
+        "selected_stars": [],
+        "apply_clicked": False,
+        "selectors_used": [],
+        "reason": "",
+    }
+    if not requested:
+        result["reason"] = "rating/star filter is unavailable"
+        return result
+    try:
+        opened = page.evaluate(
+            r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+  };
+  const labelFor = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+  const candidates = Array.from(document.querySelectorAll('button, [role="button"]'))
+    .filter(visible)
+    .map((el, index) => ({el, index, text: labelFor(el), tag: el.tagName.toLowerCase()}))
+    .filter((item) => /^Фильтры$/i.test(item.text) || /фильтр/i.test(item.text))
+    .sort((a, b) => (a.text === 'Фильтры' ? -1 : 1) - (b.text === 'Фильтры' ? -1 : 1) || a.index - b.index);
+  const target = candidates[0];
+  if (!target) return {ok: false, reason: 'filters button not found'};
+  target.el.click();
+  return {ok: true, selector: target.tag, text: target.text};
+}
+            """
+        )
+        result["open_filters"] = opened
+        result["opened"] = bool(opened.get("ok"))
+        if opened.get("selector"):
+            result["selectors_used"].append(f"filters_button:{opened.get('selector')}")
+    except PlaywrightError as exc:
+        result["reason"] = safe_text(str(exc), 300)
+        return result
+    _wait_settle(page, 800)
+    try:
+        selected = page.evaluate(
+            r"""
+({stars}) => {
+  const requested = new Set((stars || []).map((value) => Number(value)));
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+  };
+  const text = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const labelFor = (el) => text(el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '');
+  const roots = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="popup"], [class*="Popup"], [class*="popover"], [class*="Popover"], [class*="dropdown"], [class*="Dropdown"], aside, body')).filter(visible);
+  const root = roots.find((node) => /Оценка отзыва|Применить|Сбросить/i.test(text(node.innerText || node.textContent || ''))) || null;
+  if (!root) return {ok: false, reason: 'filters popup with review rating section was not found'};
+  const rootText = text(root.innerText || root.textContent || '');
+  if (!/Оценка отзыва/i.test(rootText)) return {ok: false, reason: 'review rating section was not found in filters popup', root_text: rootText.slice(0, 300)};
+  const starFromText = (value) => {
+    const normalized = text(value).replace(/★/g, ' ★ ');
+    for (let star = 1; star <= 5; star += 1) {
+      const re = new RegExp('(^|[^0-9])' + star + '([^0-9]|$)');
+      if (re.test(normalized) && (/★|зв[её]зд|оценк/i.test(normalized) || normalized.length <= 12)) return star;
+    }
+    return 0;
+  };
+  const checkboxRows = Array.from(root.querySelectorAll('input[type="checkbox"]')).filter(visible).map((input, index) => {
+    let row = input.closest('label, li, [role="checkbox"], [class*="checkbox"], [class*="Checkbox"], div') || input.parentElement || input;
+    for (let depth = 0; row && depth < 4; depth += 1) {
+      const rowText = labelFor(row);
+      const star = starFromText(rowText);
+      if (star) return {input, row, index, star, text: rowText};
+      row = row.parentElement;
+    }
+    return {input, row: input, index, star: 0, text: labelFor(input.parentElement || input)};
+  });
+  let rows = checkboxRows.filter((item) => item.star >= 1 && item.star <= 5);
+  if (rows.length < 5 && checkboxRows.length >= 5) {
+    const ordered = checkboxRows.slice(0, 5);
+    rows = ordered.map((item, index) => ({...item, star: 5 - index}));
+  }
+  if (!rows.length) return {ok: false, reason: 'star checkbox rows were not found', checkbox_rows_seen: checkboxRows.map((item) => item.text).slice(0, 10)};
+  const clicked = [];
+  const selected = [];
+  const unique = new Map();
+  rows.forEach((item) => {
+    if (!unique.has(item.star)) unique.set(item.star, item);
+  });
+  Array.from(unique.values()).forEach((item) => {
+    const checked = Boolean(item.input.checked || item.input.getAttribute('aria-checked') === 'true');
+    const shouldCheck = requested.has(item.star);
+    if (checked !== shouldCheck) {
+      (item.row || item.input).click();
+      clicked.push({star: item.star, target_state: shouldCheck, text: item.text.slice(0, 80)});
+    }
+  });
+  Array.from(unique.values()).forEach((item) => {
+    const checked = Boolean(item.input.checked || item.input.getAttribute('aria-checked') === 'true');
+    if (checked) selected.push(item.star);
+  });
+  return {ok: true, rows_seen: Array.from(unique.values()).map((item) => ({star: item.star, text: item.text.slice(0, 80)})), clicked, selected_stars: selected.sort()};
+}
+            """,
+            {"stars": requested},
+        )
+        result["select_stars"] = selected
+        result["selected_stars"] = selected.get("selected_stars") or []
+        if selected.get("ok"):
+            result["selectors_used"].append("review_rating_checkboxes")
+    except PlaywrightError as exc:
+        result["select_stars"] = {"ok": False, "reason": safe_text(str(exc), 300)}
+    try:
+        applied = click_filter_apply_button(page, context_hint="filters")
+        result["filters_apply_click"] = applied
+        result["apply_clicked"] = bool(applied.get("ok"))
+        if applied.get("ok"):
+            result["selectors_used"].append("filters_apply")
+    except Exception as exc:  # pragma: no cover - live fallback
+        result["filters_apply_click"] = {"ok": False, "reason": safe_text(str(exc), 300)}
+    result["applied"] = bool((result.get("select_stars") or {}).get("ok") and result["apply_clicked"])
+    if not result["applied"] and not result["reason"]:
+        result["reason"] = str((result.get("select_stars") or {}).get("reason") or (result.get("open_filters") or {}).get("reason") or "star filter was not applied")
+    return result
+
+
+def click_filter_apply_button(page: Page, *, context_hint: str) -> dict[str, Any]:
+    try:
+        return page.evaluate(
+            r"""
+({contextHint}) => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+  };
+  const labelFor = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+  const roots = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="popup"], [class*="Popup"], [class*="popover"], [class*="Popover"], [class*="dropdown"], [class*="Dropdown"], aside, body')).filter(visible);
+  const root = roots.find((node) => /Применить/i.test(node.innerText || node.textContent || '')) || document.body;
+  const buttons = Array.from(root.querySelectorAll('button, [role="button"]')).filter(visible).map((el, index) => ({el, index, text: labelFor(el), disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true')}));
+  const target = buttons.find((item) => /^Применить$/i.test(item.text) && !item.disabled) || buttons.find((item) => /Применить/i.test(item.text) && !item.disabled);
+  if (!target) return {ok: false, reason: 'apply button not found', context_hint: contextHint, visible_buttons: buttons.map((item) => item.text).filter(Boolean).slice(0, 12)};
+  target.el.click();
+  return {ok: true, label: target.text, context_hint: contextHint};
+}
+            """,
+            {"contextHint": context_hint},
+        )
+    except PlaywrightError as exc:
+        return {"ok": False, "reason": safe_text(str(exc), 300), "context_hint": context_hint}
+
+
+def inspect_seller_portal_filter_state(page: Page) -> dict[str, Any]:
+    try:
+        return page.evaluate(
+            r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+  };
+  const text = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const bodyText = text(document.body.innerText || '');
+  const rangeMatch = bodyText.match(/\b\d{1,2}[.\/]\d{1,2}[.\/]\d{2,4}\s*[-–]\s*\d{1,2}[.\/]\d{1,2}[.\/]\d{2,4}\b/);
+  const selectedStars = [];
+  Array.from(document.querySelectorAll('input[type="checkbox"]')).filter(visible).forEach((input) => {
+    if (!input.checked && input.getAttribute('aria-checked') !== 'true') return;
+    const root = input.closest('label, li, [role="checkbox"], [class*="checkbox"], [class*="Checkbox"], div') || input.parentElement || input;
+    const rowText = text(root.innerText || root.textContent || '');
+    for (let star = 1; star <= 5; star += 1) {
+      const re = new RegExp('(^|[^0-9])' + star + '([^0-9]|$)');
+      if (re.test(rowText) && (/★|зв[её]зд|оценк/i.test(rowText) || rowText.length <= 12) && !selectedStars.includes(star)) selectedStars.push(star);
+    }
+  });
+  return {visible_date_range: rangeMatch ? rangeMatch[0] : '', selected_stars: selectedStars.sort(), text_fingerprint: bodyText.slice(0, 500)};
+}
+            """
+        )
+    except PlaywrightError as exc:
+        return {"reason": safe_text(str(exc), 300), "visible_date_range": "", "selected_stars": []}
+
+
+def feedback_list_signature(page: Page) -> dict[str, Any]:
+    try:
+        return page.evaluate(
+            r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 120 && rect.height > 20;
+  };
+  const rows = Array.from(document.querySelectorAll('[data-testid*="feedback"], [class*="Feedback"], [class*="feedback"], [class*="Table-row"], [class*="table-row"], article, li'))
+    .filter(visible)
+    .map((el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .slice(0, 20);
+  const text = rows.join(' || ') || (document.body.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 2000);
+  let hash = 0;
+  for (let i = 0; i < text.length; i += 1) hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+  return {row_count: rows.length, fingerprint: String(hash), sample: rows.slice(0, 3)};
+}
+            """
+        )
+    except PlaywrightError as exc:
+        return {"row_count": 0, "fingerprint": "", "reason": safe_text(str(exc), 300), "sample": []}
+
+
+def format_ru_date(value: Any) -> str:
+    date_key = normalize_date_key(value)
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date_key):
+        return ""
+    year, month, day = date_key.split("-")
+    return f"{day}.{month}.{year}"
+
+
 def feedback_tab_candidates(
     api_row: Mapping[str, Any],
     expected_ui: Mapping[str, Any] | None = None,
@@ -988,9 +1475,12 @@ def clear_article_search(page: Page) -> dict[str, Any]:
 def actionability_block_reason(expected_ui: Mapping[str, Any], attempt: Mapping[str, Any]) -> str:
     if expected_ui and expected_ui.get("complaint_action_found") is False:
         return "Seller Portal cursor row says complaint action is unavailable"
+    filters = attempt.get("filter_controller") if isinstance(attempt.get("filter_controller"), Mapping) else {}
+    if filters and not (filters.get("date_filter_applied") and filters.get("star_filter_applied")):
+        return "exact cursor match exists, but Seller Portal date/star UI filters could not be fully applied"
     if (attempt.get("targeted_search") or {}).get("ok"):
-        return "exact cursor match exists, but actionable DOM row was not found after tab-aware scroll and WB-article search"
-    return "exact cursor match exists, but actionable DOM row was not found after tab-aware visible/scroll collection"
+        return "exact cursor match exists, but actionable DOM row was not found after status/date/star filters, WB-article search and bounded scroll"
+    return "exact cursor match exists, but actionable DOM row was not found after status/date/star filters and bounded scroll"
 
 
 def empty_actionability_resolver_state() -> dict[str, Any]:
@@ -1009,8 +1499,14 @@ def empty_actionability_resolver_state() -> dict[str, Any]:
         "locator_strategy": "",
         "visible_rows_checked": 0,
         "visible_rows_checked_after_search": 0,
+        "visible_rows_checked_after_scroll": 0,
         "visible_row_match": {},
         "targeted_search": {},
+        "filter_controller": {},
+        "date_filter_applied": False,
+        "star_filter_applied": False,
+        "search_used": False,
+        "scroll_used": False,
         "row_menu_click": {},
         "menu_labels": [],
         "resolved_row_summary": {},
@@ -1587,12 +2083,18 @@ def empty_modal_candidate_state() -> dict[str, Any]:
         "feedback_id": "",
         "visible_rows_checked": 0,
         "visible_rows_checked_after_search": 0,
+        "visible_rows_checked_after_scroll": 0,
         "actionability_resolver": empty_actionability_resolver_state(),
         "tab_used": "",
         "locator_strategy": "",
         "complaint_action_found": False,
         "visible_row_match": {},
         "targeted_search": {},
+        "filter_controller": {},
+        "date_filter_applied": False,
+        "star_filter_applied": False,
+        "search_used": False,
+        "scroll_used": False,
         "row_menu_click": {},
         "menu_labels": [],
         "complaint_action_click": {},
@@ -1626,6 +2128,12 @@ def build_aggregate(candidates: list[Mapping[str, Any]]) -> dict[str, Any]:
     modal_opened = [item for item in candidates if (item.get("modal") or {}).get("modal_opened")]
     draft_prepared = [item for item in candidates if (item.get("modal") or {}).get("draft_prepared")]
     submit_clicked_count = sum(1 for item in candidates if (item.get("modal") or {}).get("submit_clicked"))
+    actionable_found = [
+        item
+        for item in candidates
+        if bool(((item.get("modal") or {}).get("actionability_resolver") or {}).get("actionable_row_found"))
+    ]
+    complaint_action_found = [item for item in candidates if (item.get("modal") or {}).get("complaint_action_found")]
     skipped_reasons = Counter(str(item.get("skip_reason") or "") for item in candidates if item.get("skip_reason"))
     ai_counts = Counter(str((item.get("ai") or {}).get("complaint_fit") or "unknown") for item in candidates)
     return {
@@ -1636,6 +2144,8 @@ def build_aggregate(candidates: list[Mapping[str, Any]]) -> dict[str, Any]:
         "ai_no_count": ai_counts.get("no", 0),
         "candidates_selected": len(selected),
         "exact_matched": len(exact),
+        "actionable_row_found_count": len(actionable_found),
+        "complaint_action_found_count": len(complaint_action_found),
         "modal_opened_count": len(modal_opened),
         "modal_draft_prepared_count": len(draft_prepared),
         "submit_clicked_count": submit_clicked_count,
@@ -1659,6 +2169,8 @@ def empty_aggregate() -> dict[str, Any]:
         "ai_no_count": 0,
         "candidates_selected": 0,
         "exact_matched": 0,
+        "actionable_row_found_count": 0,
+        "complaint_action_found_count": 0,
         "modal_opened_count": 0,
         "modal_draft_prepared_count": 0,
         "submit_clicked_count": 0,
@@ -1773,6 +2285,8 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
         f"- AI yes/review/no: `{agg.get('ai_yes_count', 0)}` / `{agg.get('ai_review_count', 0)}` / `{agg.get('ai_no_count', 0)}`",
         f"- Candidates selected: `{agg.get('candidates_selected', 0)}`",
         f"- Exact matched: `{agg.get('exact_matched', 0)}`",
+        f"- Actionable rows found: `{agg.get('actionable_row_found_count', 0)}`",
+        f"- Complaint actions found: `{agg.get('complaint_action_found_count', 0)}`",
         f"- Modal opened: `{agg.get('modal_opened_count', 0)}`",
         f"- Draft prepared: `{agg.get('modal_draft_prepared_count', 0)}`",
         f"- Submit clicked count: `{agg.get('submit_clicked_count', 0)}`",
@@ -1786,11 +2300,13 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
         ai = candidate.get("ai") or {}
         match = candidate.get("match") or {}
         modal = candidate.get("modal") or {}
+        filters = modal.get("filter_controller") or {}
         lines.extend(
             [
                 f"- `{candidate.get('feedback_id')}` selected `{candidate.get('selected_for_dry_run')}` fit `{ai.get('complaint_fit')}` match `{match.get('match_status')}` modal `{modal.get('draft_prepared')}`",
                 f"  API: `{api.get('created_at')}` rating `{api.get('rating')}` nm `{api.get('nm_id')}` article `{api.get('supplier_article')}` text `{api.get('review_text')}` tags `{', '.join(api.get('review_tags') or [])}`",
                 f"  AI: `{ai.get('category_label')}` / `{ai.get('confidence_label')}` reason `{ai.get('reason')}` evidence `{ai.get('evidence')}`",
+                f"  Resolver: tab `{modal.get('tab_used')}` strategy `{modal.get('locator_strategy')}` date_filter `{modal.get('date_filter_applied')}` star_filter `{modal.get('star_filter_applied')}` search `{modal.get('search_used')}` scroll `{modal.get('scroll_used')}` rows `{modal.get('visible_rows_checked')}`/`{modal.get('visible_rows_checked_after_search')}`/`{modal.get('visible_rows_checked_after_scroll')}` requested `{filters.get('requested_date_from')}`..`{filters.get('requested_date_to')}` stars `{filters.get('requested_stars')}`",
                 f"  Draft: category `{modal.get('selected_category')}` submit `{modal.get('submit_button_label')}` clicked `{modal.get('submit_clicked')}` text `{modal.get('draft_text')}`",
                 f"  Description: match `{modal.get('description_value_match')}` after-fill length `{len(str(modal.get('modal_description_value_after_fill') or ''))}` after-blur length `{len(str(modal.get('modal_description_value_after_blur') or ''))}`",
                 f"  Skip/blocker: `{candidate.get('skip_reason') or modal.get('blocker') or ''}`",
