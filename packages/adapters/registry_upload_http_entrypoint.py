@@ -61,6 +61,9 @@ DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH = "/v1/sheet-vitrina-v1/feedbacks/ai-prom
 DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH = "/v1/sheet-vitrina-v1/feedbacks/ai-analyze"
 DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH = "/v1/sheet-vitrina-v1/feedbacks/complaints"
 DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH = "/v1/sheet-vitrina-v1/feedbacks/complaints/sync-status"
+DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH = (
+    "/v1/sheet-vitrina-v1/feedbacks/complaints/sync-status/job"
+)
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_SHEET_LOAD_PATH = "/v1/sheet-vitrina-v1/load"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
@@ -586,7 +589,7 @@ def _build_handler(
                     )
                     return
 
-                _write_json_response(self, HTTPStatus.OK, result)
+                _write_json_response(self, HTTPStatus.OK, _with_complaints_sync_job_urls(result))
                 return
 
             if parsed.path == DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH:
@@ -999,6 +1002,37 @@ def _build_handler(
                     return
 
                 _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH:
+                try:
+                    run_id = _resolve_single_query_param(parsed.query, "run_id")
+                    if not run_id:
+                        raise ValueError("run_id query parameter is required")
+                    payload = entrypoint.handle_sheet_feedbacks_complaints_sync_status_job_request(run_id)
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                except SheetVitrinaV1FeedbacksComplaintsError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus(exc.http_status),
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina feedbacks complaints status sync job failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(self, HTTPStatus.OK, _with_complaints_sync_job_urls(payload))
                 return
 
             if parsed.path == DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH:
@@ -1914,6 +1948,19 @@ def _with_sheet_job_urls(payload: Mapping[str, Any], job_path: str) -> dict[str,
     return normalized
 
 
+def _with_complaints_sync_job_urls(payload: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    run_id = str(normalized.get("run_id", "") or "").strip()
+    if not run_id:
+        return normalized
+    normalized["poll_url"] = (
+        f"{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH}?"
+        f"{urllib_parse.urlencode({'run_id': run_id})}"
+    )
+    normalized["complaints_url"] = DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH
+    return normalized
+
+
 def _with_factory_order_dataset_urls(payload: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
     normalized["datasets"] = _map_dataset_urls(normalized.get("datasets"))
@@ -2080,6 +2127,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "feedbacks_ai_analyze_path": DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH,
         "feedbacks_complaints_path": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
         "feedbacks_complaints_sync_status_path": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH,
+        "feedbacks_complaints_sync_status_job_path": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH,
         "job_path": job_path,
         "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
         "seller_recovery_status_path": DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,

@@ -19,6 +19,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH,
     DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
+    DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH,
     DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH,
     DEFAULT_SHEET_FEEDBACKS_PATH,
@@ -314,6 +315,7 @@ def main() -> None:
                 f'"feedbacks_export_path": "{DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH}"',
                 f'"feedbacks_complaints_path": "{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH}"',
                 f'"feedbacks_complaints_sync_status_path": "{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH}"',
+                f'"feedbacks_complaints_sync_status_job_path": "{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH}"',
             ):
                 if expected not in ui_html:
                     raise AssertionError(f"feedbacks UI must contain {expected!r}")

@@ -19,6 +19,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH,
     DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
+    DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH,
     DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH,
     DEFAULT_SHEET_FEEDBACKS_PATH,
@@ -52,9 +53,11 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
     export_requests: list[dict[str, object]] = []
     complaints_requests: list[str] = []
     complaints_sync_requests: list[dict[str, object]] = []
+    complaints_job_polls: list[str] = []
     failed_once: set[str] = set()
     large_feedbacks_mode = False
     prompt_saved = False
+    complaints_sync_completed = False
     selected_model = "gpt-5-mini"
     page_url = base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     with sync_playwright() as playwright:
@@ -156,7 +159,10 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             route.fulfill(
                 status=200,
                 headers={"Content-Type": "application/json; charset=utf-8"},
-                body=json.dumps(_complaints_payload(), ensure_ascii=False),
+                body=json.dumps(
+                    _complaints_payload(status_label="Отклонена" if complaints_sync_completed else "Ждёт ответа"),
+                    ensure_ascii=False,
+                ),
             )
 
         def fulfill_complaints_sync(route: object) -> None:
@@ -167,10 +173,57 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 headers={"Content-Type": "application/json; charset=utf-8"},
                 body=json.dumps(
                     {
-                        "contract_name": "seller_portal_feedbacks_complaints_status_sync",
-                        "contract_version": "read_only_v1",
-                        "finished_at": "2026-05-02T05:00:00Z",
-                        "aggregate": {"statuses_updated": 1, "pending_rows_read": 1, "answered_rows_read": 0},
+                        "contract_name": "sheet_vitrina_v1_feedbacks_complaints_status_sync_job",
+                        "contract_version": "v1",
+                        "run_id": "complaints-sync-smoke-run",
+                        "kind": "feedbacks_complaints_status_sync",
+                        "status": "queued",
+                        "already_running": False,
+                        "created_at": "2026-05-02T05:00:00Z",
+                        "started_at": "",
+                        "finished_at": "",
+                        "poll_url": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH + "?run_id=complaints-sync-smoke-run",
+                        "complaints_url": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
+                        "summary": {},
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+
+        def fulfill_complaints_sync_job(route: object) -> None:
+            nonlocal complaints_sync_completed
+            complaints_job_polls.append(route.request.url)
+            status = "success" if len(complaints_job_polls) >= 2 else "running"
+            if status == "success":
+                complaints_sync_completed = True
+            route.fulfill(
+                status=200,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                body=json.dumps(
+                    {
+                        "contract_name": "sheet_vitrina_v1_feedbacks_complaints_status_sync_job",
+                        "contract_version": "v1",
+                        "run_id": "complaints-sync-smoke-run",
+                        "kind": "feedbacks_complaints_status_sync",
+                        "status": status,
+                        "already_running": False,
+                        "created_at": "2026-05-02T05:00:00Z",
+                        "started_at": "2026-05-02T05:00:01Z",
+                        "finished_at": "2026-05-02T05:00:05Z" if status == "success" else "",
+                        "poll_url": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH + "?run_id=complaints-sync-smoke-run",
+                        "complaints_url": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
+                        "summary": {
+                            "pending_rows_read": 1,
+                            "answered_rows_read": 1,
+                            "direct_matches": 1,
+                            "strong_composite_matches": 0,
+                            "weak_rejected": 1,
+                            "statuses_updated": 1,
+                        },
+                        "statuses_updated": 1,
+                        "weak_rejected": 1,
+                        "direct_matches": 1,
+                        "strong_composite_matches": 0,
                     },
                     ensure_ascii=False,
                 ),
@@ -180,6 +233,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH, fulfill_export)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH, fulfill_complaints)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH, fulfill_complaints_sync)
+        context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH + "?**", fulfill_complaints_sync_job)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH, fulfill_ai_analyze)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH, fulfill_prompt)
         context.route("**" + DEFAULT_SHEET_WEB_VITRINA_READ_PATH + "?**", fulfill_web_vitrina_read)
@@ -210,10 +264,20 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             page.locator("[data-feedbacks-complaints-column-id='match_score']").click()
             if "Match score" in page.locator("[data-feedbacks-complaints-table] thead").inner_text():
                 raise AssertionError("complaints column visibility must hide optional columns")
+            if page.locator("button", has_text="Подать жалобу").count() or page.locator("button", has_text="Отправить жалобу").count():
+                raise AssertionError("public complaints UI must not expose submit controls")
+            before_sync_load_count = len(complaints_requests)
             page.locator("[data-feedbacks-complaints-sync]").click()
-            page.wait_for_function("() => document.querySelector('[data-feedbacks-complaints-status]')?.textContent.includes('Последний sync')")
+            page.wait_for_function("() => document.querySelector('[data-feedbacks-complaints-status]')?.textContent.includes('Запущено обновление статусов')")
+            page.wait_for_function("() => document.querySelector('[data-feedbacks-complaints-status]')?.textContent.includes('Последний sync: success')")
             if not complaints_sync_requests:
                 raise AssertionError("complaints status sync button must call the sync route")
+            if not complaints_job_polls:
+                raise AssertionError("complaints status sync UI must poll the job route")
+            if len(complaints_requests) <= before_sync_load_count:
+                raise AssertionError("complaints table must refresh after fake status sync completion")
+            if "Отклонена" not in page.locator("[data-feedbacks-complaints-table]").inner_text():
+                raise AssertionError("complaints table must render refreshed rows after status sync")
             page.locator("[data-feedbacks-subtab='reviews']").click()
 
             range_toggle = page.locator("[data-feedbacks-range-toggle]")
@@ -401,6 +465,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "ai_filter_works": True,
         "complaints_tab_visible": True,
         "complaints_sync_requests": len(complaints_sync_requests),
+        "complaints_job_polls": len(complaints_job_polls),
     }
 
 
@@ -486,7 +551,9 @@ def _ai_payload(rows: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
-def _complaints_payload() -> dict[str, object]:
+def _complaints_payload(*, status_label: str = "Ждёт ответа") -> dict[str, object]:
+    waiting_count = 1 if status_label == "Ждёт ответа" else 0
+    rejected_count = 1 if status_label == "Отклонена" else 0
     return {
         "contract_name": "sheet_vitrina_v1_feedbacks_complaints",
         "contract_version": "v1",
@@ -497,9 +564,9 @@ def _complaints_payload() -> dict[str, object]:
         },
         "summary": {
             "total": 1,
-            "waiting_response": 1,
+            "waiting_response": waiting_count,
             "satisfied": 0,
-            "rejected": 0,
+            "rejected": rejected_count,
             "error": 0,
         },
         "schema": {
@@ -525,7 +592,7 @@ def _complaints_payload() -> dict[str, object]:
         },
         "rows": [
             {
-                "complaint_status_label": "Ждёт ответа",
+                "complaint_status_label": status_label,
                 "wb_category_label": "Другое",
                 "complaint_text": "Просим проверить отзыв: тестовое описание.",
                 "submitted_at": "2026-05-02T04:00:00Z",

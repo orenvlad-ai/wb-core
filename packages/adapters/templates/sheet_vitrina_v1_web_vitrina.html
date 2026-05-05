@@ -2615,6 +2615,8 @@
           schemaColumns: [],
           visibleColumnIds: loadFeedbacksComplaintsVisibleColumns(),
           lastSyncReport: null,
+          lastSyncJob: null,
+          syncPollSequence: 0,
           error: ""
         },
         error: ""
@@ -6038,7 +6040,23 @@
         if (!response.ok) {
           throw new Error((payload && payload.error) ? payload.error : "complaints status sync returned " + response.status);
         }
+        if (!payload || payload.contract_name !== "sheet_vitrina_v1_feedbacks_complaints_status_sync_job") {
+          throw new Error("unexpected complaints status sync job payload");
+        }
+        const pollSequence = Number(complaints.syncPollSequence || 0) + 1;
+        complaints.syncPollSequence = pollSequence;
+        complaints.lastSyncJob = payload;
         complaints.lastSyncReport = payload;
+        complaints.syncing = isFeedbacksComplaintsSyncJobActive(payload);
+        renderFeedbacksComplaintsPanel();
+        const finalPayload = complaints.syncing
+          ? await pollFeedbacksComplaintsSyncJob(payload, pollSequence)
+          : payload;
+        if (finalPayload && complaints.syncPollSequence === pollSequence) {
+          complaints.lastSyncJob = finalPayload;
+          complaints.lastSyncReport = finalPayload;
+        }
+        complaints.syncing = false;
         await loadFeedbacksComplaints();
       } catch (error) {
         complaints.error = String(error && error.message ? error.message : error);
@@ -6048,24 +6066,86 @@
       }
     }
 
+    async function pollFeedbacksComplaintsSyncJob(initialPayload, pollSequence) {
+      const complaints = state.feedbacks.complaints;
+      let current = initialPayload || {};
+      while (isFeedbacksComplaintsSyncJobActive(current)) {
+        await new Promise(function(resolve) {
+          window.setTimeout(resolve, 2200);
+        });
+        if (complaints.syncPollSequence !== pollSequence) {
+          return null;
+        }
+        const pollUrl = feedbacksComplaintsSyncJobPollUrl(current);
+        if (!pollUrl) {
+          throw new Error("complaints status sync job route is missing");
+        }
+        const response = await fetch(pollUrl, {
+          method: "GET",
+          headers: {"Accept": "application/json"}
+        });
+        const payload = await readJsonResponse(response, "non-json response from complaints status sync job route");
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "complaints status sync job returned " + response.status);
+        }
+        if (!payload || payload.contract_name !== "sheet_vitrina_v1_feedbacks_complaints_status_sync_job") {
+          throw new Error("unexpected complaints status sync job payload");
+        }
+        current = payload;
+        complaints.lastSyncJob = payload;
+        complaints.lastSyncReport = payload;
+        complaints.syncing = isFeedbacksComplaintsSyncJobActive(payload);
+        renderFeedbacksComplaintsPanel();
+      }
+      return current;
+    }
+
+    function isFeedbacksComplaintsSyncJobActive(payload) {
+      const status = String((payload && payload.status) || "");
+      return status === "queued" || status === "running";
+    }
+
+    function feedbacksComplaintsSyncJobPollUrl(payload) {
+      if (payload && payload.poll_url) {
+        return String(payload.poll_url);
+      }
+      const runId = String((payload && payload.run_id) || "").trim();
+      const path = String(WEB_VITRINA_CONFIG.feedbacks_complaints_sync_status_job_path || "");
+      if (!runId || !path) {
+        return "";
+      }
+      return path + "?run_id=" + encodeURIComponent(runId);
+    }
+
     function renderFeedbacksComplaintsPanel() {
       const complaints = state.feedbacks.complaints || {};
+      const syncJob = complaints.lastSyncJob || complaints.lastSyncReport || {};
+      const syncActive = isFeedbacksComplaintsSyncJobActive(syncJob) || Boolean(complaints.syncing);
       if (feedbacksComplaintsReloadButton) {
-        feedbacksComplaintsReloadButton.disabled = Boolean(complaints.loading || complaints.syncing);
+        feedbacksComplaintsReloadButton.disabled = Boolean(complaints.loading || syncActive);
         feedbacksComplaintsReloadButton.textContent = complaints.loading ? "Загрузка…" : "Обновить журнал";
       }
       if (feedbacksComplaintsSyncButton) {
-        feedbacksComplaintsSyncButton.disabled = Boolean(complaints.loading || complaints.syncing);
-        feedbacksComplaintsSyncButton.textContent = complaints.syncing ? "Обновляем…" : "Обновить статусы";
+        feedbacksComplaintsSyncButton.disabled = Boolean(complaints.loading || syncActive);
+        feedbacksComplaintsSyncButton.textContent = syncActive ? "Обновляем…" : "Обновить статусы";
         feedbacksComplaintsSyncButton.title = "Read-only синхронизация из Seller Portal / Мои жалобы";
       }
       if (feedbacksComplaintsStatusNode) {
         const meta = complaints.meta || {};
-        const syncReport = complaints.lastSyncReport || {};
-        if (complaints.syncing) {
-          feedbacksComplaintsStatusNode.textContent = "Читаем Мои жалобы…";
-        } else if (syncReport.finished_at) {
-          feedbacksComplaintsStatusNode.textContent = "Последний sync: " + formatTimestampDisplay(syncReport.finished_at);
+        if (syncJob && syncJob.run_id) {
+          const status = String(syncJob.status || "unknown");
+          const parts = [
+            syncActive ? "Запущено обновление статусов" : "Последний sync: " + status,
+            "run_id " + String(syncJob.run_id || ""),
+            "status " + status
+          ];
+          if (syncJob.started_at) {
+            parts.push("start " + formatTimestampDisplay(syncJob.started_at));
+          }
+          if (syncJob.finished_at) {
+            parts.push("finish " + formatTimestampDisplay(syncJob.finished_at));
+          }
+          feedbacksComplaintsStatusNode.textContent = parts.join(" · ");
         } else if (complaints.loaded) {
           feedbacksComplaintsStatusNode.textContent = "Записей: " + formatNumber(Number(meta.record_count || (complaints.rows || []).length || 0), 0, true);
         } else {
@@ -6086,23 +6166,46 @@
         return;
       }
       const complaints = state.feedbacks.complaints || {};
-      if (!complaints.loaded || !complaints.summary) {
+      const syncJob = complaints.lastSyncJob || complaints.lastSyncReport || null;
+      if ((!complaints.loaded || !complaints.summary) && !(syncJob && syncJob.run_id)) {
         feedbacksComplaintsSummaryNode.innerHTML = "";
         return;
       }
       const summary = complaints.summary || {};
-      const cards = [
-        {label: "Всего", value: Number(summary.total || 0), detail: "runtime-журнал"},
-        {label: "Ждёт ответа", value: Number(summary.waiting_response || 0), detail: "отправлено, решение WB не получено"},
-        {label: "Удовлетворена", value: Number(summary.satisfied || 0), detail: "WB принял жалобу"},
-        {label: "Отклонена", value: Number(summary.rejected || 0), detail: "WB отказал"},
-        {label: "Ошибка", value: Number(summary.error || 0), detail: "техническая ошибка"}
-      ];
+      const cards = [];
+      if (complaints.loaded && complaints.summary) {
+        cards.push(
+          {label: "Всего", value: Number(summary.total || 0), detail: "runtime-журнал"},
+          {label: "Ждёт ответа", value: Number(summary.waiting_response || 0), detail: "отправлено, решение WB не получено"},
+          {label: "Удовлетворена", value: Number(summary.satisfied || 0), detail: "WB принял жалобу"},
+          {label: "Отклонена", value: Number(summary.rejected || 0), detail: "WB отказал"},
+          {label: "Ошибка", value: Number(summary.error || 0), detail: "техническая ошибка"}
+        );
+      }
+      if (syncJob && syncJob.run_id) {
+        const jobSummary = syncJob.summary || {};
+        cards.push(
+          {label: "Sync status", value: String(syncJob.status || "unknown"), detail: "run_id " + String(syncJob.run_id || "")},
+          {label: "Pending read", value: Number(jobSummary.pending_rows_read || 0), detail: "Ждут ответа"},
+          {label: "Answered read", value: Number(jobSummary.answered_rows_read || 0), detail: "Есть ответ"},
+          {label: "Direct matches", value: Number(jobSummary.direct_matches || syncJob.direct_matches || 0), detail: "direct feedback_id"},
+          {label: "Strong matches", value: Number(jobSummary.strong_composite_matches || syncJob.strong_composite_matches || 0), detail: "strict composite"},
+          {label: "Weak rejected", value: Number(jobSummary.weak_rejected || syncJob.weak_rejected || 0), detail: "false-match guard"},
+          {label: "Statuses updated", value: Number(jobSummary.statuses_updated || syncJob.statuses_updated || 0), detail: "runtime-журнал"}
+        );
+        if (syncJob.started_at || syncJob.finished_at) {
+          cards.push({
+            label: "Sync time",
+            value: formatTimestampDisplay(syncJob.finished_at || syncJob.started_at),
+            detail: syncJob.finished_at ? "finished" : "started"
+          });
+        }
+      }
       feedbacksComplaintsSummaryNode.innerHTML = cards.map(function(item) {
         return [
           '<article class="summary-card">',
           '<p class="summary-card-label">' + escapeHtml(item.label) + "</p>",
-          '<p class="summary-card-value">' + escapeHtml(formatNumber(item.value, 0, true)) + "</p>",
+          '<p class="summary-card-value">' + escapeHtml(typeof item.value === "number" ? formatNumber(item.value, 0, true) : String(item.value || "—")) + "</p>",
           '<p class="summary-card-detail">' + escapeHtml(item.detail) + "</p>",
           "</article>"
         ].join("");
