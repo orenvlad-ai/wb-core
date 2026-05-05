@@ -60,6 +60,7 @@ from apps.seller_portal_feedbacks_matching_replay import (  # noqa: E402
     normalize_rating,
     parse_stars,
     safe_text,
+    scroll_feedback_list,
     summarize_api_row,
     summarize_ui_row,
 )
@@ -84,6 +85,10 @@ DEFAULT_RUNTIME_DIR = Path(os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR", "/opt/w
 TEXT_WS_RE = re.compile(r"\s+")
 DRAFT_LIMIT = 500
 DESCRIPTION_FIELD_MARKER_ATTR = "data-wb-core-description-field"
+FEEDBACKS_TAB_LABEL = "Отзывы"
+FEEDBACKS_UNANSWERED_TAB_LABEL = "Ждут ответа"
+FEEDBACKS_ANSWERED_TAB_LABEL = "Есть ответ"
+ACTIONABILITY_SCROLL_ATTEMPTS = 12
 
 
 @dataclass(frozen=True)
@@ -590,38 +595,20 @@ def draft_one_candidate_modal(
         result["blocker"] = "API row unavailable for modal draft"
         return result
 
-    visible_rows = extract_visible_feedback_rows(page, max_rows=20)
-    result["visible_rows_checked"] = len(visible_rows)
     expected_ui = (candidate.get("match") or {}).get("best_ui_candidate") or {}
-    visible_match = find_visible_actionable_row(api_row, visible_rows, expected_ui=expected_ui)
-    if not visible_match.get("row"):
-        search_result = apply_article_search_for_candidate(page, api_row, expected_ui=expected_ui)
-        result["targeted_search"] = search_result
-        if search_result.get("ok"):
-            _wait_settle(page, 2500)
-            visible_rows = extract_visible_feedback_rows(page, max_rows=20)
-            result["visible_rows_checked_after_search"] = len(visible_rows)
-            visible_match = find_visible_actionable_row(api_row, visible_rows, expected_ui=expected_ui)
-    result["visible_row_match"] = visible_match.get("match") or {}
-    visible_row = visible_match.get("row") if isinstance(visible_match.get("row"), dict) else {}
-    if not visible_row:
-        result["blocker"] = (
-            "Exact Seller Portal cursor match exists, but actionable DOM row was not found after targeted "
-            "WB-article search."
-        )
-        return result
-    dom_id = str(visible_row.get("dom_scout_id") or "")
-    clicked_menu = _click_safe_row_menu(page, dom_id)
-    result["row_menu_click"] = clicked_menu
-    if not clicked_menu.get("ok"):
-        result["blocker"] = str(clicked_menu.get("reason") or "safe row menu not found")
-        return result
-    _wait_settle(page, 800)
-    menu_state = extract_open_row_menu_state(page)
-    result["menu_labels"] = menu_state.get("items") or []
-    if not menu_state.get("complaint_action_found"):
-        result["blocker"] = "Пожаловаться на отзыв action not found in row menu"
-        _safe_escape(page)
+    resolver = resolve_actionable_feedback_row(page, config, api_row, expected_ui=expected_ui)
+    result["actionability_resolver"] = resolver
+    result["visible_rows_checked"] = int(resolver.get("visible_rows_checked") or 0)
+    result["visible_rows_checked_after_search"] = int(resolver.get("visible_rows_checked_after_search") or 0)
+    result["visible_row_match"] = resolver.get("visible_row_match") or {}
+    result["targeted_search"] = resolver.get("targeted_search") or {}
+    result["row_menu_click"] = resolver.get("row_menu_click") or {}
+    result["menu_labels"] = resolver.get("menu_labels") or []
+    result["tab_used"] = str(resolver.get("tab_used") or "")
+    result["locator_strategy"] = str(resolver.get("locator_strategy") or "")
+    result["complaint_action_found"] = bool(resolver.get("complaint_action_found"))
+    if not resolver.get("actionable_row_found"):
+        result["blocker"] = str(resolver.get("block_reason") or "Exact Seller Portal cursor match exists, but actionable DOM row was not found")
         return result
 
     assert_safe_click_label(ROW_MENU_COMPLAINT_LABEL, purpose="open_complaint_modal")
@@ -634,6 +621,8 @@ def draft_one_candidate_modal(
     _wait_settle(page, 1500)
     modal_state = extract_complaint_modal_state(page)
     result["modal_opened"] = bool(modal_state.get("opened"))
+    if isinstance(result.get("actionability_resolver"), dict):
+        result["actionability_resolver"]["modal_opened_in_dry_run"] = bool(result["modal_opened"])
     result["categories_found"] = modal_state.get("categories") or []
     result["submit_button_label"] = str(modal_state.get("submit_button_label") or "")
     result["description_field_found"] = bool(modal_state.get("description_field_found"))
@@ -710,6 +699,297 @@ def draft_one_candidate_modal(
     if not result["draft_prepared"] and not result["blocker"]:
         result["blocker"] = "modal draft was not confirmed closed cleanly"
     return result
+
+
+def resolve_actionable_feedback_row(
+    page: Page,
+    config: DryRunConfig,
+    api_row: Mapping[str, Any],
+    *,
+    expected_ui: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    expected_ui = expected_ui or {}
+    result = empty_actionability_resolver_state()
+    result["feedback_id"] = str(api_row.get("feedback_id") or expected_ui.get("feedback_id") or "")
+    result["expected_ui_summary"] = summarize_ui_row(dict(expected_ui)) if expected_ui else {}
+    tabs = feedback_tab_candidates(api_row, expected_ui, requested_is_answered=config.is_answered)
+    result["tabs_tried"] = tabs
+    last_blocker = ""
+    for tab_label in tabs:
+        attempt = resolve_actionable_feedback_row_in_tab(
+            page,
+            config,
+            api_row,
+            expected_ui=expected_ui,
+            tab_label=tab_label,
+        )
+        result["attempts"].append(attempt)
+        result["visible_rows_checked"] = int(result["visible_rows_checked"] or 0) + int(attempt.get("visible_rows_checked") or 0)
+        result["visible_rows_checked_after_search"] = int(result["visible_rows_checked_after_search"] or 0) + int(
+            attempt.get("visible_rows_checked_after_search") or 0
+        )
+        last_blocker = str(attempt.get("block_reason") or last_blocker)
+        if attempt.get("actionable_row_found"):
+            result.update(
+                {
+                    "actionable_row_found": True,
+                    "feedback_id": result["feedback_id"],
+                    "tab_used": tab_label,
+                    "locator_strategy": str(attempt.get("locator_strategy") or ""),
+                    "row_visible": True,
+                    "menu_found": bool(attempt.get("menu_found")),
+                    "complaint_action_found": bool(attempt.get("complaint_action_found")),
+                    "complaint_action_available": bool(attempt.get("complaint_action_available")),
+                    "visible_row_match": attempt.get("visible_row_match") or {},
+                    "targeted_search": attempt.get("targeted_search") or {},
+                    "row_menu_click": attempt.get("row_menu_click") or {},
+                    "menu_labels": attempt.get("menu_labels") or [],
+                    "resolved_row_summary": summarize_ui_row(attempt.get("resolved_row") or {}),
+                    "block_reason": "",
+                }
+            )
+            return result
+        _safe_escape(page)
+        clear_article_search(page)
+    result["block_reason"] = last_blocker or "actionable DOM row was not found in tried feedback tabs"
+    return result
+
+
+def resolve_actionable_feedback_row_in_tab(
+    page: Page,
+    config: DryRunConfig,
+    api_row: Mapping[str, Any],
+    *,
+    expected_ui: Mapping[str, Any],
+    tab_label: str,
+) -> dict[str, Any]:
+    attempt: dict[str, Any] = {
+        "tab": tab_label,
+        "tab_clicked": False,
+        "visible_rows_checked": 0,
+        "visible_rows_checked_after_search": 0,
+        "scroll_attempts": [],
+        "targeted_search": {},
+        "visible_row_match": {},
+        "resolved_row": {},
+        "locator_strategy": "",
+        "row_visible": False,
+        "menu_found": False,
+        "complaint_action_found": False,
+        "complaint_action_available": False,
+        "actionable_row_found": False,
+        "block_reason": "",
+    }
+    clicked = _click_tab_like(page, tab_label)
+    attempt["tab_clicked"] = bool(clicked)
+    if not clicked and tab_label != FEEDBACKS_TAB_LABEL:
+        attempt["block_reason"] = f"feedback tab {tab_label!r} was not found"
+        return attempt
+    _wait_settle(page, 1800)
+    _wait_for_feedback_rows(page, timeout_ms=7000)
+
+    visible = find_actionable_visible_row_with_scroll(
+        page,
+        config,
+        api_row,
+        expected_ui=expected_ui,
+        locator_strategy="direct_visible_or_scroll",
+    )
+    attempt["visible_rows_checked"] = int(visible.get("visible_rows_checked") or 0)
+    attempt["scroll_attempts"].extend(visible.get("scroll_attempts") or [])
+    if visible.get("row"):
+        return confirm_resolved_row_menu(page, attempt, visible, locator_strategy=str(visible.get("locator_strategy") or "direct_visible_or_scroll"))
+
+    search_result = apply_article_search_for_candidate(page, api_row, expected_ui=expected_ui)
+    attempt["targeted_search"] = search_result
+    if search_result.get("ok"):
+        _wait_settle(page, 2500)
+        after_search = find_actionable_visible_row_with_scroll(
+            page,
+            config,
+            api_row,
+            expected_ui=expected_ui,
+            locator_strategy="article_search_visible_or_scroll",
+        )
+        attempt["visible_rows_checked_after_search"] = int(after_search.get("visible_rows_checked") or 0)
+        attempt["scroll_attempts"].extend(after_search.get("scroll_attempts") or [])
+        if after_search.get("row"):
+            return confirm_resolved_row_menu(
+                page,
+                attempt,
+                after_search,
+                locator_strategy=str(after_search.get("locator_strategy") or "article_search_visible_or_scroll"),
+            )
+
+    attempt["visible_row_match"] = visible.get("match") or {}
+    attempt["block_reason"] = actionability_block_reason(expected_ui, attempt)
+    return attempt
+
+
+def find_actionable_visible_row_with_scroll(
+    page: Page,
+    config: DryRunConfig,
+    api_row: Mapping[str, Any],
+    *,
+    expected_ui: Mapping[str, Any],
+    locator_strategy: str,
+) -> dict[str, Any]:
+    checked_total = 0
+    last_match: dict[str, Any] = {}
+    scroll_attempts: list[dict[str, Any]] = []
+    max_visible_rows = min(max(config.max_api_rows * 2, 20), 80)
+    for attempt_index in range(1, ACTIONABILITY_SCROLL_ATTEMPTS + 1):
+        visible_rows = extract_visible_feedback_rows(page, max_rows=max_visible_rows)
+        checked_total += len(visible_rows)
+        visible_match = find_visible_actionable_row(api_row, visible_rows, expected_ui=expected_ui)
+        last_match = visible_match.get("match") or last_match
+        visible_row = visible_match.get("row") if isinstance(visible_match.get("row"), dict) else {}
+        if visible_row:
+            return {
+                "row": visible_row,
+                "match": visible_match.get("match") or {},
+                "visible_rows_checked": checked_total,
+                "locator_strategy": f"{locator_strategy}:attempt_{attempt_index}",
+                "scroll_attempts": scroll_attempts,
+            }
+        scroll_result = scroll_feedback_list(page)
+        scroll_attempts.append(scroll_result)
+        _wait_settle(page, 800)
+        if not scroll_result.get("changed"):
+            break
+    return {
+        "row": {},
+        "match": last_match,
+        "visible_rows_checked": checked_total,
+        "locator_strategy": locator_strategy,
+        "scroll_attempts": scroll_attempts,
+    }
+
+
+def confirm_resolved_row_menu(
+    page: Page,
+    attempt: dict[str, Any],
+    visible_result: Mapping[str, Any],
+    *,
+    locator_strategy: str,
+) -> dict[str, Any]:
+    row = visible_result.get("row") if isinstance(visible_result.get("row"), dict) else {}
+    attempt["resolved_row"] = row
+    attempt["visible_row_match"] = visible_result.get("match") or {}
+    attempt["locator_strategy"] = locator_strategy
+    attempt["row_visible"] = bool(row)
+    dom_id = str(row.get("dom_scout_id") or "")
+    if not dom_id:
+        attempt["block_reason"] = "matched DOM row has no stable row id for menu click"
+        return attempt
+    clicked_menu = _click_safe_row_menu(page, dom_id)
+    attempt["row_menu_click"] = clicked_menu
+    attempt["menu_found"] = bool(clicked_menu.get("ok"))
+    if not clicked_menu.get("ok"):
+        attempt["block_reason"] = str(clicked_menu.get("reason") or "safe row menu not found")
+        return attempt
+    _wait_settle(page, 800)
+    menu_state = extract_open_row_menu_state(page)
+    attempt["menu_labels"] = menu_state.get("items") or []
+    attempt["complaint_action_found"] = bool(menu_state.get("complaint_action_found"))
+    attempt["complaint_action_available"] = bool(menu_state.get("complaint_action_found"))
+    if not menu_state.get("complaint_action_found"):
+        attempt["block_reason"] = "Пожаловаться на отзыв action not found in row menu"
+        _safe_escape(page)
+        return attempt
+    attempt["actionable_row_found"] = True
+    attempt["block_reason"] = ""
+    return attempt
+
+
+def feedback_tab_candidates(
+    api_row: Mapping[str, Any],
+    expected_ui: Mapping[str, Any] | None = None,
+    *,
+    requested_is_answered: str = "all",
+) -> list[str]:
+    expected_ui = expected_ui or {}
+    is_answered = coerce_boolish(api_row.get("is_answered"))
+    if is_answered is None:
+        is_answered = coerce_boolish(expected_ui.get("is_answered"))
+    if is_answered is None:
+        if requested_is_answered == "true":
+            is_answered = True
+        elif requested_is_answered == "false":
+            is_answered = False
+    if is_answered is True:
+        ordered = [FEEDBACKS_ANSWERED_TAB_LABEL, FEEDBACKS_TAB_LABEL, FEEDBACKS_UNANSWERED_TAB_LABEL]
+    elif is_answered is False:
+        ordered = [FEEDBACKS_UNANSWERED_TAB_LABEL, FEEDBACKS_TAB_LABEL, FEEDBACKS_ANSWERED_TAB_LABEL]
+    else:
+        ordered = [FEEDBACKS_TAB_LABEL, FEEDBACKS_UNANSWERED_TAB_LABEL, FEEDBACKS_ANSWERED_TAB_LABEL]
+    return unique_strings(ordered)
+
+
+def coerce_boolish(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in {"true", "1", "yes", "y", "answered", "есть ответ", "answered_feedback"}:
+        return True
+    if text in {"false", "0", "no", "n", "not_answered", "unanswered", "ждут ответа", "без ответа"}:
+        return False
+    return None
+
+
+def unique_strings(values: Iterable[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def clear_article_search(page: Page) -> dict[str, Any]:
+    try:
+        locator = page.locator('input[type="search"][placeholder*="Артикулам WB"]').first
+        if locator.count() < 1:
+            return {"ok": False, "reason": "article search field not found"}
+        locator.fill("", timeout=2000)
+        page.keyboard.press("Enter")
+        _wait_settle(page, 700)
+        return {"ok": True, "field": "Поиск по Артикулам WB"}
+    except PlaywrightError as exc:
+        return {"ok": False, "reason": safe_text(str(exc), 240)}
+
+
+def actionability_block_reason(expected_ui: Mapping[str, Any], attempt: Mapping[str, Any]) -> str:
+    if expected_ui and expected_ui.get("complaint_action_found") is False:
+        return "Seller Portal cursor row says complaint action is unavailable"
+    if (attempt.get("targeted_search") or {}).get("ok"):
+        return "exact cursor match exists, but actionable DOM row was not found after tab-aware scroll and WB-article search"
+    return "exact cursor match exists, but actionable DOM row was not found after tab-aware visible/scroll collection"
+
+
+def empty_actionability_resolver_state() -> dict[str, Any]:
+    return {
+        "feedback_id": "",
+        "tabs_tried": [],
+        "tab_used": "",
+        "attempts": [],
+        "expected_ui_summary": {},
+        "actionable_row_found": False,
+        "row_visible": False,
+        "menu_found": False,
+        "complaint_action_found": False,
+        "complaint_action_available": False,
+        "modal_opened_in_dry_run": False,
+        "locator_strategy": "",
+        "visible_rows_checked": 0,
+        "visible_rows_checked_after_search": 0,
+        "visible_row_match": {},
+        "targeted_search": {},
+        "row_menu_click": {},
+        "menu_labels": [],
+        "resolved_row_summary": {},
+        "block_reason": "",
+    }
 
 
 def find_visible_actionable_row(
@@ -1281,6 +1561,10 @@ def empty_modal_candidate_state() -> dict[str, Any]:
         "feedback_id": "",
         "visible_rows_checked": 0,
         "visible_rows_checked_after_search": 0,
+        "actionability_resolver": empty_actionability_resolver_state(),
+        "tab_used": "",
+        "locator_strategy": "",
+        "complaint_action_found": False,
         "visible_row_match": {},
         "targeted_search": {},
         "row_menu_click": {},

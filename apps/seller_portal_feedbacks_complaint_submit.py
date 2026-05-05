@@ -30,7 +30,6 @@ from playwright.sync_api import Error as PlaywrightError, Page, Request, Respons
 from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     DryRunConfig,
     analyze_feedback_rows,
-    apply_article_search_for_candidate,
     apply_exact_matches,
     build_candidate_records,
     build_draft_text,
@@ -47,6 +46,7 @@ from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     load_api_feedback_rows,
     normalize_requested_date,
     normalize_text,
+    resolve_actionable_feedback_row,
     should_open_modal_for_match,
     wait_for_description_field_ready,
 )
@@ -534,37 +534,31 @@ def submit_one_candidate(
     if not api_row:
         result["blocker"] = "API row unavailable for submit"
         return result
-    visible_rows = extract_visible_feedback_rows(page, max_rows=20)
     expected_ui = (candidate.get("match") or {}).get("best_ui_candidate") or {}
-    visible_match = find_visible_actionable_row(api_row, visible_rows, expected_ui=expected_ui)
-    if not visible_match.get("row"):
-        search_result = apply_article_search_for_candidate(page, api_row, expected_ui=expected_ui)
-        result["targeted_search"] = search_result
-        if search_result.get("ok"):
-            _wait_settle(page, 2500)
-            visible_rows = extract_visible_feedback_rows(page, max_rows=20)
-            visible_match = find_visible_actionable_row(api_row, visible_rows, expected_ui=expected_ui)
-    result["visible_row_match"] = visible_match.get("match") or {}
-    visible_row = visible_match.get("row") if isinstance(visible_match.get("row"), dict) else {}
+    resolver = resolve_actionable_feedback_row(page, to_dry_run_config(config), api_row, expected_ui=expected_ui)
+    result["actionability_resolver"] = resolver
+    result["visible_rows_checked"] = int(resolver.get("visible_rows_checked") or 0)
+    result["visible_rows_checked_after_search"] = int(resolver.get("visible_rows_checked_after_search") or 0)
+    result["visible_row_match"] = resolver.get("visible_row_match") or {}
+    result["targeted_search"] = resolver.get("targeted_search") or {}
+    result["row_menu_click"] = resolver.get("row_menu_click") or {}
+    result["menu_labels"] = resolver.get("menu_labels") or []
+    result["tab_used"] = str(resolver.get("tab_used") or "")
+    result["locator_strategy"] = str(resolver.get("locator_strategy") or "")
+    result["complaint_action_found"] = bool(resolver.get("complaint_action_found"))
+    visible_row = (resolver.get("attempts") or [{}])[-1].get("resolved_row") if resolver.get("attempts") else {}
+    if resolver.get("actionable_row_found"):
+        for attempt in resolver.get("attempts") or []:
+            if attempt.get("actionable_row_found"):
+                visible_row = attempt.get("resolved_row") or {}
+                break
     result["tag_diagnostics"] = {
         "api_review_tags": normalize_review_tags(api_row.get("review_tags") or []),
-        "ui_review_tags": normalize_review_tags(visible_row.get("review_tags") or []),
-        "combined_review_tags": normalize_review_tags([*(api_row.get("review_tags") or []), *(visible_row.get("review_tags") or [])]),
+        "ui_review_tags": normalize_review_tags((visible_row or {}).get("review_tags") or []),
+        "combined_review_tags": normalize_review_tags([*(api_row.get("review_tags") or []), *((visible_row or {}).get("review_tags") or [])]),
     }
-    if not visible_row:
-        result["blocker"] = "Exact cursor match exists, but actionable DOM row was not found"
-        return result
-    clicked_menu = _click_safe_row_menu(page, str(visible_row.get("dom_scout_id") or ""))
-    result["row_menu_click"] = clicked_menu
-    if not clicked_menu.get("ok"):
-        result["blocker"] = str(clicked_menu.get("reason") or "safe row menu not found")
-        return result
-    _wait_settle(page, 800)
-    menu_state = extract_open_row_menu_state(page)
-    result["menu_labels"] = menu_state.get("items") or []
-    if not menu_state.get("complaint_action_found"):
-        result["blocker"] = "Пожаловаться на отзыв action not found in row menu"
-        _safe_escape(page)
+    if not resolver.get("actionable_row_found"):
+        result["blocker"] = str(resolver.get("block_reason") or "Exact cursor match exists, but actionable DOM row was not found")
         return result
     assert_safe_click_label(ROW_MENU_COMPLAINT_LABEL, purpose="open_complaint_modal")
     action_click = click_open_row_menu_complaint_action(page)

@@ -12,15 +12,21 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
+    FEEDBACKS_ANSWERED_TAB_LABEL,
+    FEEDBACKS_TAB_LABEL,
+    FEEDBACKS_UNANSWERED_TAB_LABEL,
     NO_SUBMIT_MODE,
     SELLER_PORTAL_WRITE_ACTIONS_ALLOWED,
+    actionability_block_reason,
     build_aggregate,
     build_candidate_records,
     build_draft_text,
     choose_complaint_category,
+    coerce_boolish,
     description_is_ready_for_submit,
     description_persistence_result,
     empty_modal_candidate_state,
+    feedback_tab_candidates,
     fill_description_field,
     find_visible_actionable_row,
     no_submit_guards,
@@ -38,6 +44,7 @@ def main() -> None:
     _assert_candidate_selection()
     _assert_exact_only_guard()
     _assert_visible_row_cursor_guard()
+    _assert_actionability_tab_plan()
     _assert_category_other_fallback()
     _assert_draft_text_builder()
     _assert_description_fill_sequence()
@@ -123,6 +130,23 @@ def _assert_visible_row_cursor_guard() -> None:
     )
     if not visible_match.get("row") or (visible_match.get("match") or {}).get("match_status") != "exact":
         raise AssertionError(f"unique cursor-confirmed visible row must pass when rating is absent in DOM: {visible_match}")
+
+
+def _assert_actionability_tab_plan() -> None:
+    answered_tabs = feedback_tab_candidates({"is_answered": True}, {}, requested_is_answered="all")
+    if answered_tabs[:3] != [FEEDBACKS_ANSWERED_TAB_LABEL, FEEDBACKS_TAB_LABEL, FEEDBACKS_UNANSWERED_TAB_LABEL]:
+        raise AssertionError(f"answered rows must prefer answered tab: {answered_tabs}")
+    unanswered_tabs = feedback_tab_candidates({"is_answered": False}, {}, requested_is_answered="all")
+    if unanswered_tabs[:3] != [FEEDBACKS_UNANSWERED_TAB_LABEL, FEEDBACKS_TAB_LABEL, FEEDBACKS_ANSWERED_TAB_LABEL]:
+        raise AssertionError(f"unanswered rows must prefer unanswered tab: {unanswered_tabs}")
+    fallback_tabs = feedback_tab_candidates({}, {}, requested_is_answered="all")
+    if fallback_tabs[:3] != [FEEDBACKS_TAB_LABEL, FEEDBACKS_UNANSWERED_TAB_LABEL, FEEDBACKS_ANSWERED_TAB_LABEL]:
+        raise AssertionError(f"unknown answered state must try default reviews tab first: {fallback_tabs}")
+    if coerce_boolish("Есть ответ") is not True or coerce_boolish("Ждут ответа") is not False:
+        raise AssertionError("Russian answered-state labels must be parsed")
+    reason = actionability_block_reason({"complaint_action_found": False}, {"targeted_search": {"ok": True}})
+    if "unavailable" not in reason:
+        raise AssertionError(f"cursor actionability=false must produce explicit blocker: {reason}")
 
 
 def _assert_category_other_fallback() -> None:
