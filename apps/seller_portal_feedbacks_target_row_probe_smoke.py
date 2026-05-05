@@ -16,6 +16,7 @@ from apps.seller_portal_feedbacks_complaints_scout import (  # noqa: E402
     parse_feedback_rows_from_html,
     parse_row_menu_diagnostics_from_html,
 )
+from apps.seller_portal_feedbacks_actionable_resolver import config_from_target_probe  # noqa: E402
 from apps.seller_portal_feedbacks_target_row_probe import (  # noqa: E402
     CONTRACT_NAME,
     TargetRowProbeConfig,
@@ -37,6 +38,7 @@ def main() -> None:
     _assert_menu_and_modal_parsers()
     _assert_report_shape()
     _assert_guards_and_params()
+    _assert_shared_resolver_config()
     print("seller_portal_feedbacks_target_row_probe_smoke: OK")
 
 
@@ -174,6 +176,31 @@ def _assert_guards_and_params() -> None:
     guards = no_submit_guards(config)
     if guards["complaint_submit_clicked"] or guards["complaint_final_submit_allowed"] or guards["journal_write_allowed"]:
         raise AssertionError(f"read-only guard must forbid writes: {guards}")
+
+
+def _assert_shared_resolver_config() -> None:
+    config = TargetRowProbeConfig(
+        date="2026-04-04",
+        stars=(1,),
+        is_answered="all",
+        max_api_rows=20,
+        max_ui_rows=50,
+        open_menu=True,
+        open_complaint_modal=True,
+        mode="read-only",
+        storage_state_path=Path("/tmp/storage.json"),
+        wb_bot_python=Path("/tmp/python"),
+        output_dir=Path("/tmp/out"),
+        start_url="https://seller.wildberries.ru",
+        headless=True,
+        timeout_ms=5000,
+        write_artifacts=False,
+    )
+    shared = config_from_target_probe(config)
+    if shared.date_from != "2026-04-04" or shared.date_to != "2026-04-04" or shared.stars != (1,):
+        raise AssertionError(f"shared resolver must inherit target probe date/star filters: {shared}")
+    if shared.is_answered != "all" or shared.max_ui_rows != 50 or not shared.open_complaint_modal:
+        raise AssertionError(f"shared resolver must preserve no-submit actionability settings: {shared}")
 
 
 def _api_row(feedback_id: str) -> dict[str, object]:

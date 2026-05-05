@@ -42,6 +42,7 @@ def main() -> None:
     _assert_duplicate_guard_storage()
     _assert_denylist_and_selection_rules()
     _assert_explicit_submit_flag_required()
+    _assert_target_feedback_id_config()
     _assert_submit_result_classification()
     _assert_network_sanitizer()
     _assert_request_payload_sanitizer()
@@ -150,6 +151,34 @@ def _assert_explicit_submit_flag_required() -> None:
                 raise
             return
         raise AssertionError("real submit must require explicit confirmation flag before any API/browser work")
+
+
+def _assert_target_feedback_id_config() -> None:
+    with TemporaryDirectory(prefix="submit-target-config-smoke-") as tmp:
+        config = SubmitConfig(
+            date_from="2026-05-01",
+            date_to="2026-05-01",
+            stars=(1,),
+            is_answered="all",
+            max_api_rows=50,
+            max_submit=1,
+            include_review=True,
+            dry_run=True,
+            require_exact=True,
+            retry_errors=False,
+            submit_confirmation=False,
+            runtime_dir=Path(tmp),
+            storage_state_path=Path(tmp) / "storage_state.json",
+            wb_bot_python=Path("/usr/bin/python3"),
+            output_dir=Path(tmp),
+            start_url="https://seller.wildberries.ru",
+            headless=True,
+            timeout_ms=5000,
+            write_artifacts=False,
+            target_feedback_id="Ia1xepZzSXnGzIk4J5jY",
+        )
+    if config.target_feedback_id != "Ia1xepZzSXnGzIk4J5jY" or not config.dry_run:
+        raise AssertionError(f"target feedback no-submit diagnostic config must be explicit: {config}")
 
 
 def _assert_submit_result_classification() -> None:
