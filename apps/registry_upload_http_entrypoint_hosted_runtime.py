@@ -1660,7 +1660,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         tokens = [
             "Web-витрина",
             "Витрина",
-            "Расчет поставок",
+            "Поставки",
             "Отчеты",
             "Отзывы",
             "Загрузить и обновить",
