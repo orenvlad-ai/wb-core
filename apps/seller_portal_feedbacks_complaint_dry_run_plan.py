@@ -1019,6 +1019,7 @@ def apply_seller_portal_feedback_filters(
     expected_ui = expected_ui or {}
     date_from, date_to = feedback_filter_date_range(config, api_row, expected_ui=expected_ui)
     stars = feedback_filter_stars(config, api_row, expected_ui=expected_ui)
+    reset_seller_portal_viewport_for_filters(page)
     before_signature = feedback_list_signature(page)
     date_result = apply_seller_portal_date_filter(page, date_from=date_from, date_to=date_to)
     _wait_settle(page, 900)
@@ -1045,6 +1046,27 @@ def apply_seller_portal_feedback_filters(
         "selectors_used": [*(date_result.get("selectors_used") or []), *(star_result.get("selectors_used") or [])],
         "blocker": str(date_result.get("reason") or star_result.get("reason") or ""),
     }
+
+
+def reset_seller_portal_viewport_for_filters(page: Page) -> None:
+    try:
+        page.evaluate(
+            r"""
+() => {
+  window.scrollTo(0, 0);
+  if (document.scrollingElement) document.scrollingElement.scrollTop = 0;
+  const scrollers = Array.from(document.querySelectorAll('main, [class*="content"], [class*="Content"], [class*="scroll"], [class*="Scroll"]'));
+  for (const node of scrollers) {
+    try {
+      if (node.scrollHeight > node.clientHeight) node.scrollTop = 0;
+    } catch (_err) {}
+  }
+}
+            """
+        )
+        _wait_settle(page, 400)
+    except PlaywrightError:
+        return
 
 
 def feedback_filter_date_range(
@@ -1110,14 +1132,19 @@ def apply_seller_portal_date_filter(page: Page, *, date_from: str, date_to: str)
     .map((el, index) => {
       const rect = el.getBoundingClientRect();
       const text = labelFor(el);
+      const tag = el.tagName.toLowerCase();
+      const hasDateText = dateRe.test(text);
+      const hasUsableSize = rect.width >= 40 && rect.height >= 20;
       let score = 0;
-      if (dateRe.test(text)) score += 120;
+      if (tag === 'input') score += 25;
+      if (hasDateText) score += 120;
       if (/дата|период|date/i.test(text + ' ' + (el.getAttribute('class') || '') + ' ' + (el.getAttribute('data-testid') || ''))) score += 70;
       if (rect.top < 360) score += 20;
       if (/отзыв|оценка|фильтр/i.test(text)) score -= 30;
-      return {el, index, text, tag: el.tagName.toLowerCase(), rect: {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)}, score};
+      if (!hasUsableSize && !hasDateText) score -= 100;
+      return {el, index, text, tag, rect: {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)}, score, hasUsableSize, hasDateText};
     })
-    .filter((item) => item.score > 60)
+    .filter((item) => item.score > 60 && (item.hasUsableSize || item.hasDateText || item.tag === 'input'))
     .sort((a, b) => b.score - a.score || a.index - b.index);
   const target = clickables[0];
   if (!target) {

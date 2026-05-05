@@ -209,6 +209,7 @@ def _assert_filter_controller_sequence() -> None:
         try:
             page.set_content(
                 """
+                <div class="DateTiny" style="width:6px;height:6px"> </div>
                 <button id="dateButton">01.05.2026 - 05.05.2026</button>
                 <div id="datePopup" role="dialog" style="display:none">
                   <input placeholder="Дата от">
@@ -251,6 +252,9 @@ def _assert_filter_controller_sequence() -> None:
             result = apply_seller_portal_feedback_filters(page, config, api_row, expected_ui=expected_ui)
             if not result.get("date_filter_applied") or not result.get("star_filter_applied"):
                 raise AssertionError(f"date/star filters must be applied in the UI smoke: {result}")
+            open_rect = ((result.get("date_filter") or {}).get("open_control") or {}).get("rect") or {}
+            if int(open_rect.get("width") or 0) < 40 or int(open_rect.get("height") or 0) < 20:
+                raise AssertionError(f"date filter must not click tiny decorative date nodes: {result}")
             if result.get("requested_date_from") != "2026-05-04" or result.get("requested_date_to") != "2026-05-04":
                 raise AssertionError(f"candidate date filter must be exact-day: {result}")
             if result.get("requested_stars") != [1]:
