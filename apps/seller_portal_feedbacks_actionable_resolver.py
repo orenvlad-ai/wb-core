@@ -484,6 +484,8 @@ def status_tabs_for_row(config: ActionableResolverConfig, api_row: Mapping[str, 
         return [STATUS_TAB_ANSWERED]
     if config.is_answered == "false":
         return [STATUS_TAB_UNANSWERED]
+    if config.is_answered == "all":
+        return [STATUS_TAB_UNANSWERED, STATUS_TAB_ANSWERED]
     value = expected_ui.get("is_answered", api_row.get("is_answered"))
     if value is True or str(value).lower() in {"true", "1", "yes", "есть ответ"}:
         return [STATUS_TAB_ANSWERED, STATUS_TAB_ALL, STATUS_TAB_UNANSWERED]
