@@ -26,6 +26,7 @@ from apps.seller_portal_feedbacks_complaint_submit import (  # noqa: E402
     journal_record_for_submit,
     mark_denied_candidates,
     normalize_deny_feedback_ids,
+    order_candidates_for_actionability,
     run_submit,
     sanitize_submit_network_request,
     sanitize_submit_network_response,
@@ -65,6 +66,14 @@ def _assert_selection_rules() -> None:
         raise AssertionError("include_review=0 iteration must still skip review candidates")
     if select_submit_candidate_ids(results, max_submit=1, include_review=False) != ["yes-1"]:
         raise AssertionError("include_review=0 must skip review candidates")
+    api_order_candidates = [
+        _candidate("review-1", "review", "exact", "Просим проверить отзыв: review."),
+        _candidate("yes-1", "yes", "exact", "Просим проверить отзыв: yes."),
+        _candidate("yes-2", "yes", "exact", "Просим проверить отзыв: yes."),
+    ]
+    ordered = order_candidates_for_actionability(api_order_candidates, selected_ids=["yes-1", "yes-2", "review-1"])
+    if [item["feedback_id"] for item in ordered] != ["yes-1", "yes-2", "review-1"]:
+        raise AssertionError("resolver attempts must follow selected yes-before-review order, not API row order")
     if MAX_SUBMIT_HARD_CAP != 1:
         raise AssertionError("controlled submit hard cap must remain 1")
 

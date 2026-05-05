@@ -325,11 +325,10 @@ def run_submit(config: SubmitConfig) -> dict[str, Any]:
         ui_rows = report["ui"].get("rows") if isinstance(report["ui"].get("rows"), list) else []
         apply_exact_matches(candidates, selected_api_rows, ui_rows)
         enforce_submit_guards(candidates)
-        submit_candidates = [
-            candidate
-            for candidate in candidates
-            if should_try_actionability_resolver(candidate)
-        ]
+        submit_candidates = order_candidates_for_actionability(
+            candidates,
+            selected_ids=selected_ids,
+        )
         if submit_candidates:
             modal_report = submit_modals_for_candidates(config, submit_candidates, selected_api_rows, journal, run_id=run_id)
             report["session"] = modal_report.get("session") or report["session"]
@@ -381,6 +380,19 @@ def select_submit_candidate_ids(
             if len(selected) >= limit:
                 break
     return selected
+
+
+def order_candidates_for_actionability(
+    candidates: list[dict[str, Any]],
+    *,
+    selected_ids: list[str],
+) -> list[dict[str, Any]]:
+    selected_order = {str(feedback_id or ""): index for index, feedback_id in enumerate(selected_ids)}
+    eligible = [candidate for candidate in candidates if should_try_actionability_resolver(candidate)]
+    return sorted(
+        eligible,
+        key=lambda candidate: selected_order.get(str(candidate.get("feedback_id") or ""), len(selected_order)),
+    )
 
 
 def feedback_ids_already_in_journal(
