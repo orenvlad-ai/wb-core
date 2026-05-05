@@ -17,7 +17,9 @@ from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     FEEDBACKS_UNANSWERED_TAB_LABEL,
     NO_SUBMIT_MODE,
     SELLER_PORTAL_WRITE_ACTIONS_ALLOWED,
+    DryRunConfig,
     actionability_block_reason,
+    apply_seller_portal_feedback_filters,
     build_aggregate,
     build_candidate_records,
     build_draft_text,
@@ -26,6 +28,8 @@ from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     description_is_ready_for_submit,
     description_persistence_result,
     empty_modal_candidate_state,
+    feedback_filter_date_range,
+    feedback_filter_stars,
     feedback_tab_candidates,
     fill_description_field,
     find_visible_actionable_row,
@@ -46,6 +50,7 @@ def main() -> None:
     _assert_exact_only_guard()
     _assert_visible_row_cursor_guard()
     _assert_actionability_tab_plan()
+    _assert_filter_controller_sequence()
     _assert_category_other_fallback()
     _assert_draft_text_builder()
     _assert_description_fill_sequence()
@@ -155,6 +160,108 @@ def _assert_actionability_tab_plan() -> None:
     reason = actionability_block_reason({"complaint_action_found": False}, {"targeted_search": {"ok": True}})
     if "unavailable" not in reason:
         raise AssertionError(f"cursor actionability=false must produce explicit blocker: {reason}")
+
+
+def _assert_filter_controller_sequence() -> None:
+    config = DryRunConfig(
+        date_from="2026-05-01",
+        date_to="2026-05-04",
+        stars=(1,),
+        is_answered="all",
+        max_api_rows=50,
+        max_ai_candidates=12,
+        force_category_other=False,
+        mode=NO_SUBMIT_MODE,
+        runtime_dir=Path(".runtime"),
+        storage_state_path=Path(".runtime/storage_state.json"),
+        wb_bot_python=Path("wb_bot.py"),
+        output_dir=Path(".runtime/reports"),
+        start_url="https://seller.wildberries.ru",
+        headless=True,
+        timeout_ms=5000,
+        write_artifacts=False,
+        deny_feedback_ids=normalize_deny_feedback_ids([]),
+    )
+    api_row = {**_api("filtered-1"), "created_at": "2026-05-04T09:38:19Z", "product_valuation": 1}
+    expected_ui = {"review_datetime": "04.05.2026 в 14:38", "rating": "1"}
+    if feedback_filter_date_range(config, api_row, expected_ui=expected_ui) != ("2026-05-04", "2026-05-04"):
+        raise AssertionError("filter date range must prefer the exact candidate date")
+    if feedback_filter_stars(config, api_row, expected_ui=expected_ui) != (1,):
+        raise AssertionError("filter stars must prefer the candidate rating")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            page.set_content(
+                """
+                <button id="dateButton">01.05.2026 - 05.05.2026</button>
+                <div id="datePopup" role="dialog" style="display:none">
+                  <input placeholder="Дата от">
+                  <input placeholder="Дата до">
+                  <button id="dateApply">Применить</button>
+                </div>
+                <button id="filtersButton">Фильтры</button>
+                <div id="filterPopup" role="dialog" style="display:none">
+                  <div>Оценка отзыва</div>
+                  <label><input type="checkbox" checked>5★</label>
+                  <label><input type="checkbox" checked>4★</label>
+                  <label><input type="checkbox">3★</label>
+                  <label><input type="checkbox">2★</label>
+                  <label><input type="checkbox">1★</label>
+                  <button id="filterApply">Применить</button>
+                  <button>Сбросить</button>
+                </div>
+                <section id="rows">
+                  <article>Отзыв 1 01.05.2026 5★</article>
+                </section>
+                <script>
+                  const rows = document.querySelector('#rows');
+                  document.querySelector('#dateButton').addEventListener('click', () => {
+                    document.querySelector('#datePopup').style.display = 'block';
+                  });
+                  document.querySelector('#dateApply').addEventListener('click', () => {
+                    document.querySelector('#datePopup').style.display = 'none';
+                    rows.innerHTML = '<article>Отзыв RD 04.05.2026 1★ date</article>';
+                  });
+                  document.querySelector('#filtersButton').addEventListener('click', () => {
+                    document.querySelector('#filterPopup').style.display = 'block';
+                  });
+                  document.querySelector('#filterApply').addEventListener('click', () => {
+                    document.querySelector('#filterPopup').style.display = 'none';
+                    rows.innerHTML = '<article>Отзыв RD 04.05.2026 1★ date star</article>';
+                  });
+                </script>
+                """
+            )
+            result = apply_seller_portal_feedback_filters(page, config, api_row, expected_ui=expected_ui)
+            if not result.get("date_filter_applied") or not result.get("star_filter_applied"):
+                raise AssertionError(f"date/star filters must be applied in the UI smoke: {result}")
+            if result.get("requested_date_from") != "2026-05-04" or result.get("requested_date_to") != "2026-05-04":
+                raise AssertionError(f"candidate date filter must be exact-day: {result}")
+            if result.get("requested_stars") != [1]:
+                raise AssertionError(f"candidate star filter must be exact rating: {result}")
+            values = page.evaluate(
+                """
+                () => Array.from(document.querySelectorAll('#datePopup input')).map((input) => input.value)
+                """
+            )
+            if values != ["04.05.2026", "04.05.2026"]:
+                raise AssertionError(f"date filter inputs must be filled with Russian date values: {values}")
+            checked = page.evaluate(
+                """
+                () => Array.from(document.querySelectorAll('#filterPopup label')).filter((label) => label.querySelector('input').checked).map((label) => label.innerText.trim())
+                """
+            )
+            if checked != ["1★"]:
+                raise AssertionError(f"star filter must leave only 1-star selected: {checked}")
+            selectors = set(result.get("selectors_used") or [])
+            if not {"date_inputs", "date_apply", "review_rating_checkboxes", "filters_apply"}.issubset(selectors):
+                raise AssertionError(f"filter diagnostics must include selectors used: {result}")
+            if not any(str(item).startswith("filters_button:") for item in selectors):
+                raise AssertionError(f"filter diagnostics must include selectors used: {result}")
+        finally:
+            browser.close()
 
 
 def _assert_category_other_fallback() -> None:
