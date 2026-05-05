@@ -59,6 +59,10 @@ def _assert_selection_rules() -> None:
     ]
     if select_submit_candidate_ids(results, max_submit=1, include_review=True) != ["yes-1"]:
         raise AssertionError("submit selection must prefer yes before review")
+    if select_submit_candidate_ids(results, max_submit=1, max_candidates=3, include_review=True) != ["yes-1", "yes-2", "review-1"]:
+        raise AssertionError("actionability iteration must check all bounded yes candidates before review while final submit cap stays 1")
+    if select_submit_candidate_ids(results, max_submit=1, max_candidates=3, include_review=False) != ["yes-1", "yes-2"]:
+        raise AssertionError("include_review=0 iteration must still skip review candidates")
     if select_submit_candidate_ids(results, max_submit=1, include_review=False) != ["yes-1"]:
         raise AssertionError("include_review=0 must skip review candidates")
     if MAX_SUBMIT_HARD_CAP != 1:
