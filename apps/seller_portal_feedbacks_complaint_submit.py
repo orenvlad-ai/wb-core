@@ -41,6 +41,7 @@ from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     description_is_ready_for_submit,
     description_persistence_result,
     empty_modal_candidate_state,
+    expected_ui_for_filter_aware_resolver,
     fill_description_field,
     find_visible_actionable_row,
     load_api_feedback_rows,
@@ -48,6 +49,7 @@ from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     normalize_text,
     resolve_actionable_feedback_row,
     should_open_modal_for_match,
+    should_try_actionability_resolver,
     wait_for_description_field_ready,
 )
 from apps.seller_portal_feedbacks_complaints_scout import (  # noqa: E402
@@ -296,9 +298,7 @@ def run_submit(config: SubmitConfig) -> dict[str, Any]:
         submit_candidates = [
             candidate
             for candidate in candidates
-            if candidate.get("selected_for_dry_run")
-            and not candidate.get("skip_reason")
-            and should_open_modal_for_match(candidate.get("match") or {})
+            if should_try_actionability_resolver(candidate)
         ][: config.max_submit]
         if submit_candidates:
             modal_report = submit_modals_for_candidates(config, submit_candidates, selected_api_rows, journal, run_id=run_id)
@@ -421,7 +421,13 @@ def enforce_submit_guards(candidates: list[dict[str, Any]]) -> None:
             continue
         match = candidate.get("match") or {}
         if not should_open_modal_for_match(match):
-            candidate["skip_reason"] = f"match_status={match.get('match_status')} is not exact; submit blocked"
+            candidate["skip_reason"] = ""
+            candidate["filter_aware_resolver_required"] = True
+            candidate["preliminary_match_block_reason"] = (
+                f"match_status={match.get('match_status')} is not exact; filter-aware resolver must prove exact actionable DOM row"
+            )
+        else:
+            candidate["filter_aware_resolver_required"] = False
 
 
 def candidate_review_tags(candidate: Mapping[str, Any]) -> list[str]:
@@ -534,7 +540,7 @@ def submit_one_candidate(
     if not api_row:
         result["blocker"] = "API row unavailable for submit"
         return result
-    expected_ui = (candidate.get("match") or {}).get("best_ui_candidate") or {}
+    expected_ui = expected_ui_for_filter_aware_resolver(candidate)
     resolver = resolve_actionable_feedback_row(page, to_dry_run_config(config), api_row, expected_ui=expected_ui)
     result["actionability_resolver"] = resolver
     result["visible_rows_checked"] = int(resolver.get("visible_rows_checked") or 0)
@@ -1365,6 +1371,13 @@ def journal_record_for_submit(
 ) -> dict[str, Any]:
     ai = candidate.get("ai") or {}
     match = candidate.get("match") or {}
+    resolver_match = modal.get("visible_row_match") if isinstance(modal.get("visible_row_match"), Mapping) else {}
+    effective_match = resolver_match if resolver_match.get("match_status") == "exact" else match
+    effective_ui = (
+        effective_match.get("best_ui_candidate")
+        if isinstance(effective_match.get("best_ui_candidate"), Mapping)
+        else {}
+    )
     network = modal.get("submit_network_capture") or {}
     description_evidence = description_persistence_result(modal.get("draft_text") or "", "", observed=False)
     return {
@@ -1375,10 +1388,10 @@ def journal_record_for_submit(
         "complaint_status": status,
         "wb_category_label": str(modal.get("selected_category") or ""),
         "complaint_text": str(modal.get("draft_text") or ""),
-        "wb_complaint_row_fingerprint": str((match.get("best_ui_candidate") or {}).get("row_text_fingerprint") or ""),
-        "seller_portal_feedback_id": str((match.get("best_ui_candidate") or {}).get("seller_portal_feedback_id") or api_row.get("feedback_id") or ""),
-        "match_status": str(match.get("match_status") or ""),
-        "match_score": str(match.get("match_score") or ""),
+        "wb_complaint_row_fingerprint": str(effective_ui.get("row_text_fingerprint") or ""),
+        "seller_portal_feedback_id": str(effective_ui.get("seller_portal_feedback_id") or api_row.get("feedback_id") or ""),
+        "match_status": str(effective_match.get("match_status") or ""),
+        "match_score": str(effective_match.get("match_score") or ""),
         "rating": str(api_row.get("product_valuation") or api_row.get("rating") or ""),
         "review_created_at": str(api_row.get("created_at") or ""),
         "nm_id": str(api_row.get("nm_id") or ""),
@@ -1387,7 +1400,7 @@ def journal_record_for_submit(
         "review_text": str(api_row.get("text") or ""),
         "review_tags": normalize_review_tags(api_row.get("review_tags") or []),
         "tag_source": str(api_row.get("tag_source") or ""),
-        "ui_review_tags": normalize_review_tags(((match.get("best_ui_candidate") or {}).get("review_tags") or [])),
+        "ui_review_tags": normalize_review_tags((effective_ui or {}).get("review_tags") or []),
         "submit_tag_diagnostics": modal.get("tag_diagnostics") or candidate.get("tag_diagnostics") or {},
         "pros": str(api_row.get("pros") or ""),
         "cons": str(api_row.get("cons") or ""),

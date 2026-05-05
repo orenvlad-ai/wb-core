@@ -19,6 +19,7 @@ from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     SELLER_PORTAL_WRITE_ACTIONS_ALLOWED,
     DryRunConfig,
     actionability_block_reason,
+    apply_exact_matches,
     apply_seller_portal_feedback_filters,
     build_aggregate,
     build_candidate_records,
@@ -37,6 +38,7 @@ from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     normalize_deny_feedback_ids,
     render_markdown_report,
     select_ai_candidate_ids,
+    should_try_actionability_resolver,
     should_open_modal_for_match,
     score_visible_row_against_exact_cursor,
     wait_for_description_field_ready,
@@ -93,6 +95,18 @@ def _assert_exact_only_guard() -> None:
             raise AssertionError(f"{status} must not reach modal draft")
     if should_open_modal_for_match({"match_status": "exact", "safe_for_future_submit": False}):
         raise AssertionError("exact without safety flag must not reach modal draft")
+    api_row = _api("resolver-required")
+    records = build_candidate_records(
+        [api_row],
+        {"resolver-required": _ai("resolver-required", "yes")},
+        ["resolver-required"],
+    )
+    apply_exact_matches(records, [api_row], [])
+    record = records[0]
+    if record.get("skip_reason") or not record.get("filter_aware_resolver_required"):
+        raise AssertionError(f"preliminary not_found must defer to filter-aware resolver, got: {record}")
+    if not should_try_actionability_resolver(record):
+        raise AssertionError(f"selected candidate must reach resolver after preliminary not_found: {record}")
 
 
 def _assert_visible_row_cursor_guard() -> None:
