@@ -1411,9 +1411,17 @@ def inspect_seller_portal_rating_filter_popup(page: Page) -> dict[str, Any]:
   if (!rootItem) return {popup_opened: false, rating_section_opened: false, selected_star_values: [], rows: [], candidate_selectors: {}, reason: 'filters popup root not found'};
   const root = rootItem.el;
   const controls = Array.from(root.querySelectorAll('input[type="checkbox"], [role="checkbox"], [aria-checked], [class*="checkbox"], [class*="Checkbox"], [class*="check"], [class*="Check"]'))
-    .filter(visible);
+    .filter(visible)
+    .filter((el) => String(el.getAttribute('role') || '').toLowerCase() !== 'radio')
+    .filter((el) => !/Category-item__/.test(safeClass(el)));
+  const rowRootFor = (control) => (
+    control.closest('[class*="Category-options-checkbox-item"], [class*="options-checkbox-item"], [class*="Options-checkbox-item"], label, li, [role="option"], [role="menuitem"]')
+    || control.closest('[class*="row"], [class*="Row"], [class*="item"], [class*="Item"]')
+    || control.parentElement
+    || control
+  );
   const rawRows = controls.map((control, index) => {
-    let row = control.closest('label, li, [role="option"], [role="menuitem"], [class*="row"], [class*="Row"], [class*="item"], [class*="Item"], div') || control.parentElement || control;
+    let row = rowRootFor(control);
     let star = 0;
     let rowText = '';
     let current = row;
@@ -1427,9 +1435,17 @@ def inspect_seller_portal_rating_filter_popup(page: Page) -> dict[str, Any]:
     }
     return {control, row, index, star, text: labelFor(row), checked: isChecked(control, row), control_rect: rectFor(control), row_rect: rectFor(row), control_class: safeClass(control), row_class: safeClass(row), role: control.getAttribute('role') || '', aria_checked: control.getAttribute('aria-checked') || ''};
   });
-  let rows = rawRows.filter((item) => item.star >= 1 && item.star <= 5);
-  if (rows.length < 5 && rawRows.length >= 5) {
-    rows = rawRows.slice(0, 5).map((item, index) => ({...item, star: 5 - index, inferred_by_order: true}));
+  const deduped = [];
+  const seen = new Set();
+  rawRows.sort((a, b) => a.row_rect.y - b.row_rect.y || a.row_rect.x - b.row_rect.x || b.row_rect.width - a.row_rect.width).forEach((item) => {
+    const key = Math.round(item.row_rect.x / 4) + ':' + Math.round(item.row_rect.y / 4) + ':' + Math.round(item.row_rect.height / 4);
+    if (seen.has(key)) return;
+    seen.add(key);
+    deduped.push(item);
+  });
+  let rows = deduped.filter((item) => item.star >= 1 && item.star <= 5);
+  if (rows.length < 5 && deduped.length >= 5) {
+    rows = deduped.slice(0, 5).map((item, index) => ({...item, star: 5 - index, inferred_by_order: true}));
   }
   const unique = new Map();
   rows.forEach((item) => {
@@ -1460,6 +1476,7 @@ def inspect_seller_portal_rating_filter_popup(page: Page) -> dict[str, Any]:
     })),
     selected_star_values: selected,
     checkbox_nodes_seen: rawRows.length,
+    checkbox_rows_deduped: deduped.length,
     buttons,
     candidate_selectors: {
       popup_root: '[role=\"dialog\"], [aria-modal=\"true\"], [class*=\"popup\"], [class*=\"Popover\"], [class*=\"Dropdown\"], [class*=\"Drawer\"]',
@@ -1529,9 +1546,18 @@ def select_seller_portal_rating_filter_stars(page: Page, *, stars: Iterable[int]
   if (!rootItem) return {ok: false, reason: 'filters popup with review rating section was not found', selected_star_values_after: []};
   const root = rootItem.el;
   root.querySelectorAll('[' + marker + ']').forEach((el) => el.removeAttribute(marker));
-  const controls = Array.from(root.querySelectorAll('input[type="checkbox"], [role="checkbox"], [aria-checked], [class*="checkbox"], [class*="Checkbox"], [class*="check"], [class*="Check"]')).filter(visible);
+  const controls = Array.from(root.querySelectorAll('input[type="checkbox"], [role="checkbox"], [aria-checked], [class*="checkbox"], [class*="Checkbox"], [class*="check"], [class*="Check"]'))
+    .filter(visible)
+    .filter((el) => String(el.getAttribute('role') || '').toLowerCase() !== 'radio')
+    .filter((el) => !/Category-item__/.test(cls(el)));
+  const rowRootFor = (control) => (
+    control.closest('[class*="Category-options-checkbox-item"], [class*="options-checkbox-item"], [class*="Options-checkbox-item"], label, li, [role="option"], [role="menuitem"]')
+    || control.closest('[class*="row"], [class*="Row"], [class*="item"], [class*="Item"]')
+    || control.parentElement
+    || control
+  );
   const rawRows = controls.map((control, index) => {
-    let row = control.closest('label, li, [role="option"], [role="menuitem"], [class*="row"], [class*="Row"], [class*="item"], [class*="Item"], div') || control.parentElement || control;
+    let row = rowRootFor(control);
     let star = 0;
     let rowText = '';
     let current = row;
@@ -1545,10 +1571,18 @@ def select_seller_portal_rating_filter_stars(page: Page, *, stars: Iterable[int]
     }
     return {control, row, index, star, text: rowText || labelFor(row), checked: isChecked(control, row), state_known: stateKnown(control, row), rect: rectFor(row)};
   });
-  let rows = rawRows.filter((item) => item.star >= 1 && item.star <= 5);
+  const deduped = [];
+  const seen = new Set();
+  rawRows.sort((a, b) => a.rect.y - b.rect.y || a.rect.x - b.rect.x || b.rect.width - a.rect.width).forEach((item) => {
+    const key = Math.round(item.rect.x / 4) + ':' + Math.round(item.rect.y / 4) + ':' + Math.round(item.rect.height / 4);
+    if (seen.has(key)) return;
+    seen.add(key);
+    deduped.push(item);
+  });
+  let rows = deduped.filter((item) => item.star >= 1 && item.star <= 5);
   let selectorStrategy = 'text_or_aria_checkbox_rows';
-  if (rows.length < 5 && rawRows.length >= 5) {
-    rows = rawRows.slice(0, 5).map((item, index) => ({...item, star: 5 - index, inferred_by_order: true}));
+  if (rows.length < 5 && deduped.length >= 5) {
+    rows = deduped.slice(0, 5).map((item, index) => ({...item, star: 5 - index, inferred_by_order: true}));
     selectorStrategy = 'custom_checkbox_order_fallback_5_to_1';
   }
   const unique = new Map();
