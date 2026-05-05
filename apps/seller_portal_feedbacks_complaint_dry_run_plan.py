@@ -1258,6 +1258,13 @@ def apply_seller_portal_star_filter(page: Page, *, stars: Iterable[int]) -> dict
     except PlaywrightError as exc:
         result["select_stars"] = {"ok": False, "reason": safe_text(str(exc), 300)}
     _wait_settle(page, 350)
+    selected_after_js = {int(star) for star in result.get("selected_star_values_after") or [] if str(star).isdigit()}
+    if selected_after_js != set(requested):
+        fallback = click_seller_portal_rating_stars_by_mouse(page, popup_summary=before_state, stars=requested)
+        result["mouse_click_fallback"] = fallback
+        if fallback.get("ok"):
+            result["selectors_used"].append("mouse_click_star_checkbox")
+            _wait_settle(page, 450)
     after_state = inspect_seller_portal_rating_filter_popup(page)
     result["popup_after"] = after_state
     if after_state.get("selected_star_values"):
@@ -1278,6 +1285,29 @@ def apply_seller_portal_star_filter(page: Page, *, stars: Iterable[int]) -> dict
     if not result["applied"] and not result["reason"]:
         result["reason"] = str((result.get("select_stars") or {}).get("reason") or (result.get("open_filters") or {}).get("reason") or "star filter was not applied")
     return result
+
+
+def click_seller_portal_rating_stars_by_mouse(page: Page, *, popup_summary: Mapping[str, Any], stars: Iterable[int]) -> dict[str, Any]:
+    requested = sorted({int(star) for star in stars if 1 <= int(star) <= 5})
+    rows = popup_summary.get("rows") if isinstance(popup_summary.get("rows"), list) else []
+    clicks: list[dict[str, Any]] = []
+    for star in requested:
+        row = next((item for item in rows if isinstance(item, Mapping) and int(item.get("star") or 0) == star), None)
+        if not row:
+            clicks.append({"star": star, "ok": False, "reason": "star row not found for mouse fallback"})
+            continue
+        rect = row.get("control_rect") if isinstance(row.get("control_rect"), Mapping) else row.get("row_rect")
+        if not isinstance(rect, Mapping):
+            clicks.append({"star": star, "ok": False, "reason": "star row has no rect for mouse fallback"})
+            continue
+        x = float(rect.get("x") or 0) + max(4.0, min(float(rect.get("width") or 0) / 2.0, 16.0))
+        y = float(rect.get("y") or 0) + max(4.0, min(float(rect.get("height") or 0) / 2.0, 16.0))
+        try:
+            page.mouse.click(x, y)
+            clicks.append({"star": star, "ok": True, "x": round(x), "y": round(y), "strategy": "playwright_mouse_click_control_center"})
+        except PlaywrightError as exc:
+            clicks.append({"star": star, "ok": False, "reason": safe_text(str(exc), 240), "x": round(x), "y": round(y)})
+    return {"ok": any(item.get("ok") for item in clicks), "clicks": clicks}
 
 
 def open_seller_portal_filters_popup(page: Page) -> dict[str, Any]:
