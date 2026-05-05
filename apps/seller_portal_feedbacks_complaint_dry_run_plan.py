@@ -883,6 +883,19 @@ def resolve_actionable_feedback_row_in_tab(
     if visible.get("row"):
         return confirm_resolved_row_menu(page, attempt, visible, locator_strategy=str(visible.get("locator_strategy") or "filtered_direct_visible"))
 
+    scroll = find_actionable_visible_row_with_scroll(
+        page,
+        config,
+        api_row,
+        expected_ui=expected_ui,
+        locator_strategy="filtered_scroll_fallback",
+    )
+    attempt["visible_rows_checked_after_scroll"] = int(scroll.get("visible_rows_checked") or 0)
+    attempt["scroll_attempts"].extend(scroll.get("scroll_attempts") or [])
+    attempt["scroll_used"] = bool(scroll.get("scroll_attempts"))
+    if scroll.get("row"):
+        return confirm_resolved_row_menu(page, attempt, scroll, locator_strategy=str(scroll.get("locator_strategy") or "filtered_scroll_fallback"))
+
     search_result = apply_article_search_for_candidate(page, api_row, expected_ui=expected_ui)
     attempt["targeted_search"] = search_result
     attempt["search_used"] = bool(search_result.get("ok"))
@@ -903,20 +916,29 @@ def resolve_actionable_feedback_row_in_tab(
                 locator_strategy=str(after_search.get("locator_strategy") or "filtered_article_search_visible"),
             )
 
-    scroll = find_actionable_visible_row_with_scroll(
-        page,
-        config,
-        api_row,
-        expected_ui=expected_ui,
-        locator_strategy="filtered_scroll_fallback",
-    )
-    attempt["visible_rows_checked_after_scroll"] = int(scroll.get("visible_rows_checked") or 0)
-    attempt["scroll_attempts"].extend(scroll.get("scroll_attempts") or [])
-    attempt["scroll_used"] = bool(scroll.get("scroll_attempts"))
-    if scroll.get("row"):
-        return confirm_resolved_row_menu(page, attempt, scroll, locator_strategy=str(scroll.get("locator_strategy") or "filtered_scroll_fallback"))
+    after_search_scroll: dict[str, Any] = {}
+    if search_result.get("ok"):
+        after_search_scroll = find_actionable_visible_row_with_scroll(
+            page,
+            config,
+            api_row,
+            expected_ui=expected_ui,
+            locator_strategy="filtered_article_search_scroll_fallback",
+        )
+        attempt["visible_rows_checked_after_scroll"] = int(attempt["visible_rows_checked_after_scroll"] or 0) + int(
+            after_search_scroll.get("visible_rows_checked") or 0
+        )
+        attempt["scroll_attempts"].extend(after_search_scroll.get("scroll_attempts") or [])
+        if after_search_scroll.get("row"):
+            return confirm_resolved_row_menu(
+                page,
+                attempt,
+                after_search_scroll,
+                locator_strategy=str(after_search_scroll.get("locator_strategy") or "filtered_article_search_scroll_fallback"),
+            )
+    attempt["scroll_used"] = bool(attempt.get("scroll_attempts"))
 
-    attempt["visible_row_match"] = scroll.get("match") or visible.get("match") or {}
+    attempt["visible_row_match"] = after_search_scroll.get("match") or scroll.get("match") or visible.get("match") or {}
     attempt["block_reason"] = actionability_block_reason(expected_ui, attempt)
     return attempt
 
