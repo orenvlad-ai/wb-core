@@ -6,6 +6,7 @@ import argparse
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -1571,7 +1572,12 @@ def _add_probe_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--feedbacks-date-from", default=None, help="YYYY-MM-DD start date for feedbacks probe.")
     parser.add_argument("--feedbacks-date-to", default=None, help="YYYY-MM-DD end date for feedbacks probe.")
-    parser.add_argument("--timeout-seconds", type=float, default=180.0, help="HTTP probe timeout in seconds.")
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=180.0,
+        help="HTTP request timeout and remote loopback transport timeout in seconds.",
+    )
 
 
 def _collect_http_probe(
@@ -1582,6 +1588,7 @@ def _collect_http_probe(
     timeout_seconds: float,
     json_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    timeout_seconds = _validate_probe_timeout_seconds(timeout_seconds)
     request = urllib_request.Request(
         url=url,
         method=method,
@@ -2178,6 +2185,7 @@ def _collect_remote_loopback_surface(
     feedbacks_date_to: str | None,
     timeout_seconds: float,
 ) -> list[dict[str, Any]]:
+    timeout_seconds = _validate_probe_timeout_seconds(timeout_seconds)
     script = _build_remote_probe_script(
         base_url=target.loopback_base_url,
         route_paths=target.route_paths,
@@ -2189,29 +2197,116 @@ def _collect_remote_loopback_surface(
         timeout_seconds=timeout_seconds,
     )
     command = _ssh_command() + [target.ssh_destination, "python3", "-"]
-    result = subprocess.run(
-        command,
-        input=script,
-        text=True,
-        capture_output=True,
-        cwd=ROOT,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            input=script,
+            text=True,
+            capture_output=True,
+            cwd=ROOT,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return [
+            _loopback_transport_error(
+                target,
+                network_error=f"remote loopback probe timed out after {timeout_seconds:g} seconds",
+                stdout=exc.stdout,
+                stderr=exc.stderr,
+                timed_out=True,
+            )
+        ]
+    except OSError as exc:
+        return [
+            _loopback_transport_error(
+                target,
+                network_error=f"remote loopback probe failed to start: {exc}",
+            )
+        ]
     if result.returncode != 0:
         return [
-            {
-                "route": "loopback_transport",
-                "method": "SSH",
-                "url": target.ssh_destination,
-                "http_status": None,
-                "content_type": "",
-                "body_excerpt": result.stderr.strip(),
-                "json_body": None,
-                "network_error": result.stderr.strip() or result.stdout.strip() or f"ssh exit code {result.returncode}",
-            }
+            _loopback_transport_error(
+                target,
+                network_error=result.stderr.strip() or result.stdout.strip() or f"ssh exit code {result.returncode}",
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
         ]
-    payload = json.loads(result.stdout)
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        return [
+            _loopback_transport_error(
+                target,
+                network_error=f"remote loopback probe returned invalid JSON: {exc}",
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+        ]
     if not isinstance(payload, list):
-        raise ValueError("remote loopback probe must return a JSON list")
+        return [
+            _loopback_transport_error(
+                target,
+                network_error=f"remote loopback probe returned {type(payload).__name__}, expected list",
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+        ]
+    return payload
+
+
+def _validate_probe_timeout_seconds(timeout_seconds: float) -> float:
+    value = float(timeout_seconds)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("--timeout-seconds must be a finite value greater than 0")
+    return value
+
+
+def _coerce_process_output(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _combine_process_output(*values: Any) -> tuple[str, bool, int]:
+    text = "\n".join(
+        item
+        for item in (_coerce_process_output(value).strip() for value in values)
+        if item
+    )
+    raw = text.encode("utf-8", errors="replace")
+    body_truncated = len(raw) > PROBE_BODY_LIMIT_BYTES
+    if body_truncated:
+        raw = raw[:PROBE_BODY_LIMIT_BYTES]
+        text = raw.decode("utf-8", errors="replace")
+    return text, body_truncated, len(raw)
+
+
+def _loopback_transport_error(
+    target: HostedRuntimeTarget,
+    *,
+    network_error: str,
+    stdout: Any = "",
+    stderr: Any = "",
+    timed_out: bool = False,
+) -> dict[str, Any]:
+    body_excerpt, body_truncated, body_bytes_read = _combine_process_output(stderr, stdout)
+    payload: dict[str, Any] = {
+        "route": "loopback_transport",
+        "method": "SSH",
+        "url": target.ssh_destination,
+        "http_status": None,
+        "content_type": "",
+        "body_excerpt": body_excerpt,
+        "body_truncated": body_truncated,
+        "body_bytes_read": body_bytes_read,
+        "json_body": None,
+        "network_error": network_error,
+    }
+    if timed_out:
+        payload["timed_out"] = True
     return payload
 
 
@@ -2245,6 +2340,8 @@ def _build_remote_probe_script(
     }
     payload_json = json.dumps(payload, ensure_ascii=True)
     return f"""import json
+import os
+import ssl
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -2330,7 +2427,7 @@ def _collect(name, method, url, json_payload=None):
         request.add_header("Content-Type", "application/json; charset=utf-8")
         request.add_header("Content-Length", str(len(body)))
     try:
-        with urllib_request.urlopen(request, timeout=PAYLOAD["timeout_seconds"]) as response:
+        with _open_request(request, timeout_seconds=PAYLOAD["timeout_seconds"]) as response:
             body_text, body_truncated, body_bytes_read = _read_probe_response_body(response)
             return {{
                 "route": name,
@@ -2368,6 +2465,17 @@ def _collect(name, method, url, json_payload=None):
             "body_excerpt": "",
             "json_body": None,
             "network_error": str(exc.reason),
+        }}
+    except Exception as exc:
+        return {{
+            "route": name,
+            "method": method,
+            "url": url,
+            "http_status": None,
+            "content_type": "",
+            "body_excerpt": "",
+            "json_body": None,
+            "network_error": str(exc),
         }}
 
 results = [
