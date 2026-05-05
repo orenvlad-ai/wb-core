@@ -1151,10 +1151,15 @@ def apply_seller_portal_date_filter(page: Page, *, date_from: str, date_to: str)
   const inputs = Array.from(root.querySelectorAll('input')).filter(visible)
     .filter((el) => !['checkbox', 'radio', 'button', 'submit', 'hidden', 'search'].includes(String(el.getAttribute('type') || '').toLowerCase()))
     .map((el, index) => ({el, index, label: labelFor(el), value: String(el.value || ''), type: String(el.getAttribute('type') || '').toLowerCase()}));
-  const dateInputs = inputs.filter((item) => /дата|период|date|дд|мм|yyyy|гггг|\d{1,2}[.\/]\d{1,2}/i.test(item.label + ' ' + item.value + ' ' + item.type));
-  const selected = (dateInputs.length >= 2 ? dateInputs : (inputs.length >= 2 && /дата|период|date|календар/i.test(text(root.innerText || root.textContent || '')) ? inputs : [])).slice(0, 2);
+  const isDateLike = (item) => {
+    const haystack = item.label + ' ' + item.value + ' ' + item.type;
+    if (/itemsPerPage|Показать отзывов|page|perPage/i.test(haystack)) return false;
+    return /дата|период|date|дд|мм|yyyy|гггг|__.__.____|\d{1,2}[.\/]\d{1,2}/i.test(haystack);
+  };
+  const dateInputs = inputs.filter(isDateLike);
+  const selected = dateInputs.length >= 1 ? dateInputs.slice(0, Math.min(2, dateInputs.length)) : [];
   root.querySelectorAll('[' + marker + ']').forEach((el) => el.removeAttribute(marker));
-  if (selected.length < 2) return {ok: false, reason: 'two visible date inputs were not found', inputs_considered: inputs.map((item) => item.label).slice(0, 8)};
+  if (!selected.length) return {ok: false, reason: 'visible date input was not found', inputs_considered: inputs.map((item) => item.label).slice(0, 8)};
   const setValue = (node, value) => {
     const proto = node.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
     const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
@@ -1164,10 +1169,15 @@ def apply_seller_portal_date_filter(page: Page, *, date_from: str, date_to: str)
     node.dispatchEvent(new Event('change', {bubbles: true}));
     node.blur();
   };
-  setValue(selected[0].el, dateFrom);
-  setValue(selected[1].el, dateTo);
-  selected[0].el.setAttribute(marker, 'from');
-  selected[1].el.setAttribute(marker, 'to');
+  if (selected.length === 1) {
+    setValue(selected[0].el, dateFrom + ' - ' + dateTo);
+    selected[0].el.setAttribute(marker, 'range');
+  } else {
+    setValue(selected[0].el, dateFrom);
+    setValue(selected[1].el, dateTo);
+    selected[0].el.setAttribute(marker, 'from');
+    selected[1].el.setAttribute(marker, 'to');
+  }
   return {ok: true, fields: selected.map((item) => ({label: item.label.slice(0, 160), value: item.el.value || ''}))};
 }
             """,
@@ -1339,9 +1349,23 @@ def click_filter_apply_button(page: Page, *, context_hint: str) -> dict[str, Any
   const root = roots.find((node) => /Применить/i.test(node.innerText || node.textContent || '')) || document.body;
   const buttons = Array.from(root.querySelectorAll('button, [role="button"]')).filter(visible).map((el, index) => ({el, index, text: labelFor(el), disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true')}));
   const target = buttons.find((item) => /^Применить$/i.test(item.text) && !item.disabled) || buttons.find((item) => /Применить/i.test(item.text) && !item.disabled);
-  if (!target) return {ok: false, reason: 'apply button not found', context_hint: contextHint, visible_buttons: buttons.map((item) => item.text).filter(Boolean).slice(0, 12)};
-  target.el.click();
-  return {ok: true, label: target.text, context_hint: contextHint};
+  if (target) {
+    target.el.click();
+    return {ok: true, label: target.text, context_hint: contextHint, selector: 'button_or_role'};
+  }
+  const textCandidates = Array.from(root.querySelectorAll('button, [role="button"], a, div, span')).filter(visible).map((el, index) => {
+    const rect = el.getBoundingClientRect();
+    const text = labelFor(el);
+    const clickable = el.closest('button, [role="button"], a') || el;
+    return {el, clickable, index, text, disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'), rect: {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)}};
+  }).filter((item) => /^Применить$/i.test(item.text) && !item.disabled)
+    .sort((a, b) => a.rect.y - b.rect.y || a.index - b.index);
+  const textTarget = textCandidates[0];
+  if (textTarget) {
+    textTarget.clickable.click();
+    return {ok: true, label: textTarget.text, context_hint: contextHint, selector: 'visible_text', rect: textTarget.rect};
+  }
+  return {ok: false, reason: 'apply button not found', context_hint: contextHint, visible_buttons: buttons.map((item) => item.text).filter(Boolean).slice(0, 12)};
 }
             """,
             {"contextHint": context_hint},
