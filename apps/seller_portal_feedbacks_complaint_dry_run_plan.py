@@ -1292,10 +1292,36 @@ def click_seller_portal_rating_stars_by_mouse(page: Page, *, popup_summary: Mapp
     rows = popup_summary.get("rows") if isinstance(popup_summary.get("rows"), list) else []
     clicks: list[dict[str, Any]] = []
     requested_set = set(requested)
+
+    def _selected_values() -> set[int]:
+        state = inspect_seller_portal_rating_filter_popup(page)
+        return {int(value) for value in state.get("selected_star_values") or [] if str(value).isdigit()}
+
     for star in requested:
         row = next((item for item in rows if isinstance(item, Mapping) and int(item.get("star") or 0) == star), None)
         if not row:
             clicks.append({"star": star, "ok": False, "reason": "star row not found for mouse fallback"})
+            continue
+        locator = page.locator(f'[{SELLER_PORTAL_STAR_FILTER_MARKER_ATTR}="{star}"]').first
+        try:
+            if locator.count() > 0:
+                for position in ({"x": 60, "y": 20}, {"x": 90, "y": 20}, {"x": 130, "y": 20}, {"x": 30, "y": 20}):
+                    locator.click(position=position, force=True, timeout=1500)
+                    _wait_settle(page, 180)
+                    selected_after = _selected_values()
+                    clicks.append(
+                        {
+                            "star": star,
+                            "ok": True,
+                            "strategy": f"playwright_locator_click_row_position_{position['x']}_{position['y']}",
+                            "selected_star_values_after": sorted(selected_after),
+                        }
+                    )
+                    if selected_after == requested_set or star in selected_after:
+                        break
+        except PlaywrightError as exc:
+            clicks.append({"star": star, "ok": False, "reason": safe_text(str(exc), 240), "strategy": "playwright_locator_click_marked_row"})
+        if any(star in (item.get("selected_star_values_after") or []) for item in clicks if item.get("star") == star):
             continue
         control_rect = row.get("control_rect") if isinstance(row.get("control_rect"), Mapping) else {}
         row_rect = row.get("row_rect") if isinstance(row.get("row_rect"), Mapping) else {}
@@ -1321,6 +1347,9 @@ def click_seller_portal_rating_stars_by_mouse(page: Page, *, popup_summary: Mapp
                 [
                     ("row_left_plus_30", rx + 30.0, y),
                     ("row_left_plus_42", rx + 42.0, y),
+                    ("row_left_plus_60", rx + 60.0, y),
+                    ("row_left_plus_90", rx + 90.0, y),
+                    ("row_left_plus_130", rx + 130.0, y),
                     ("row_left_plus_18", rx + 18.0, y),
                 ]
             )
@@ -1333,8 +1362,7 @@ def click_seller_portal_rating_stars_by_mouse(page: Page, *, popup_summary: Mapp
             try:
                 page.mouse.click(x, y)
                 _wait_settle(page, 180)
-                state = inspect_seller_portal_rating_filter_popup(page)
-                selected_after = {int(value) for value in state.get("selected_star_values") or [] if str(value).isdigit()}
+                selected_after = _selected_values()
                 click_record = {
                     "star": star,
                     "ok": True,
