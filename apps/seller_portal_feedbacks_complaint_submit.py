@@ -295,6 +295,7 @@ def run_submit(config: SubmitConfig) -> dict[str, Any]:
         selected_ids = select_submit_candidate_ids(
             list(analysis_by_id.values()),
             max_submit=config.max_submit,
+            max_candidates=config.max_api_rows,
             include_review=config.include_review,
             deny_feedback_ids=config.deny_feedback_ids,
             existing_feedback_ids=existing_feedback_ids,
@@ -328,7 +329,7 @@ def run_submit(config: SubmitConfig) -> dict[str, Any]:
             candidate
             for candidate in candidates
             if should_try_actionability_resolver(candidate)
-        ][: config.max_submit]
+        ]
         if submit_candidates:
             modal_report = submit_modals_for_candidates(config, submit_candidates, selected_api_rows, journal, run_id=run_id)
             report["session"] = modal_report.get("session") or report["session"]
@@ -348,12 +349,14 @@ def select_submit_candidate_ids(
     results: list[Mapping[str, Any]],
     *,
     max_submit: int,
+    max_candidates: int | None = None,
     include_review: bool,
     deny_feedback_ids: tuple[str, ...] = (),
     existing_feedback_ids: tuple[str, ...] = (),
 ) -> list[str]:
     denied = {str(item or "").strip() for item in deny_feedback_ids if str(item or "").strip()}
     existing = {str(item or "").strip() for item in existing_feedback_ids if str(item or "").strip()}
+    limit = max(1, int(max_candidates if max_candidates is not None else max_submit))
     if include_review:
         selected: list[str] = []
         for fit in ("yes", "review"):
@@ -367,7 +370,7 @@ def select_submit_candidate_ids(
                     and feedback_id not in existing
                 ):
                     selected.append(feedback_id)
-                    if len(selected) >= max_submit:
+                    if len(selected) >= limit:
                         return selected
         return selected
     selected: list[str] = []
@@ -375,7 +378,7 @@ def select_submit_candidate_ids(
         feedback_id = str(result.get("feedback_id") or "")
         if result.get("complaint_fit") == "yes" and feedback_id and feedback_id not in denied and feedback_id not in existing:
             selected.append(feedback_id)
-            if len(selected) >= max_submit:
+            if len(selected) >= limit:
                 break
     return selected
 
@@ -518,7 +521,11 @@ def submit_modals_for_candidates(
                     return report
                 _wait_settle(page, 2500)
                 _wait_for_feedback_rows(page, timeout_ms=10000)
+                submit_clicks = 0
                 for candidate in submit_candidates:
+                    if not config.dry_run and submit_clicks >= config.max_submit:
+                        report["ui"]["blocker"] = f"max_submit hard cap reached after {submit_clicks} final click(s)"
+                        break
                     feedback_id = str(candidate.get("feedback_id") or "")
                     result = submit_one_candidate(
                         page,
@@ -530,8 +537,16 @@ def submit_modals_for_candidates(
                         run_id=run_id,
                     )
                     report["candidate_results"].append(result)
+                    if result.get("submit_clicked"):
+                        submit_clicks += int(result.get("submit_clicked_count") or 1)
                     if result.get("submit_clicked") and not config.dry_run:
                         _wait_settle(page, 1800)
+                        break
+                    if config.dry_run and result.get("blocker") == "dry_run=1; final submit not clicked":
+                        break
+                    if not candidate_state_allows_next_attempt(result):
+                        report["ui"]["blocker"] = str(result.get("blocker") or "candidate left modal/page state uncertain")
+                        break
                 report["success"] = any(bool(item.get("submit_success")) for item in report["candidate_results"])
             finally:
                 context.close()
@@ -765,6 +780,16 @@ def submit_one_candidate(
         result["close_method"] = close_modal_without_submit(page)
     result["modal_closed"] = True
     return result
+
+
+def candidate_state_allows_next_attempt(result: Mapping[str, Any]) -> bool:
+    if result.get("submit_clicked"):
+        return False
+    if not result.get("modal_opened"):
+        return True
+    if result.get("modal_closed") or result.get("close_method"):
+        return True
+    return False
 
 
 def submit_button_state(page: Page, label: str = "") -> dict[str, Any]:
