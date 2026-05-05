@@ -30,6 +30,7 @@ from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     fill_description_field,
     find_visible_actionable_row,
     no_submit_guards,
+    normalize_deny_feedback_ids,
     render_markdown_report,
     select_ai_candidate_ids,
     should_open_modal_for_match,
@@ -70,6 +71,13 @@ def _assert_candidate_selection() -> None:
         raise AssertionError(f"yes/review candidates must be selected: {records}")
     if by_id["no-1"]["selected_for_dry_run"] or by_id["no-1"]["skip_reason"] != "skipped complaint_fit=no":
         raise AssertionError(f"no candidates must be skipped: {records}")
+    deny = normalize_deny_feedback_ids(["yes-1"])
+    selected_with_deny = select_ai_candidate_ids(results, max_candidates=3, deny_feedback_ids=deny)
+    if selected_with_deny != ["yes-2", "review-1", "review-2"]:
+        raise AssertionError(f"denylist must be skipped during dry-run selection: {selected_with_deny}")
+    denied_records = build_candidate_records([_api("GPe9vrq0kctlSfobrgq2")], {"GPe9vrq0kctlSfobrgq2": _ai("GPe9vrq0kctlSfobrgq2", "yes")}, [], deny_feedback_ids=deny)
+    if "hard-denylisted" not in denied_records[0].get("skip_reason", ""):
+        raise AssertionError(f"default historical denylist must block dry-run candidate: {denied_records}")
 
 
 def _assert_exact_only_guard() -> None:

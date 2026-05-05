@@ -85,6 +85,7 @@ DEFAULT_RUNTIME_DIR = Path(os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR", "/opt/w
 TEXT_WS_RE = re.compile(r"\s+")
 DRAFT_LIMIT = 500
 DESCRIPTION_FIELD_MARKER_ATTR = "data-wb-core-description-field"
+DEFAULT_DENY_FEEDBACK_IDS = ("GPe9vrq0kctlSfobrgq2", "fdQpHhNXTosEkArTHAZF")
 FEEDBACKS_TAB_LABEL = "Отзывы"
 FEEDBACKS_UNANSWERED_TAB_LABEL = "Ждут ответа"
 FEEDBACKS_ANSWERED_TAB_LABEL = "Есть ответ"
@@ -109,6 +110,7 @@ class DryRunConfig:
     headless: bool
     timeout_ms: int
     write_artifacts: bool
+    deny_feedback_ids: tuple[str, ...]
 
 
 def main() -> None:
@@ -129,6 +131,12 @@ def main() -> None:
     parser.add_argument("--headed", action="store_true")
     parser.add_argument("--timeout-ms", type=int, default=20000)
     parser.add_argument("--no-artifacts", action="store_true")
+    parser.add_argument(
+        "--deny-feedback-id",
+        action="append",
+        default=[],
+        help="Feedback id to exclude from dry-run candidate selection. Can be repeated or comma-separated.",
+    )
     args = parser.parse_args()
 
     output_dir = (
@@ -153,6 +161,7 @@ def main() -> None:
         headless=not args.headed,
         timeout_ms=max(5000, int(args.timeout_ms)),
         write_artifacts=not bool(args.no_artifacts),
+        deny_feedback_ids=normalize_deny_feedback_ids(args.deny_feedback_id),
     )
     report = run_dry_run(config)
     if config.write_artifacts:
@@ -179,6 +188,7 @@ def run_dry_run(config: DryRunConfig) -> dict[str, Any]:
             "max_api_rows": config.max_api_rows,
             "max_ai_candidates": config.max_ai_candidates,
             "force_category_other": config.force_category_other,
+            "deny_feedback_ids": list(config.deny_feedback_ids),
         },
         "read_only_guards": no_submit_guards(),
         "api": {},
@@ -214,8 +224,12 @@ def run_dry_run(config: DryRunConfig) -> dict[str, Any]:
         return report
 
     analysis_by_id = {str(item.get("feedback_id") or ""): item for item in ai_report.get("results") or []}
-    selected_ids = select_ai_candidate_ids(list(analysis_by_id.values()), max_candidates=config.max_ai_candidates)
-    candidates = build_candidate_records(api_rows, analysis_by_id, selected_ids)
+    selected_ids = select_ai_candidate_ids(
+        list(analysis_by_id.values()),
+        max_candidates=config.max_ai_candidates,
+        deny_feedback_ids=config.deny_feedback_ids,
+    )
+    candidates = build_candidate_records(api_rows, analysis_by_id, selected_ids, deny_feedback_ids=config.deny_feedback_ids)
 
     selected_api_rows = [row for row in api_rows if str(row.get("feedback_id") or "") in selected_ids]
     if selected_api_rows:
@@ -348,11 +362,19 @@ def analyze_feedback_rows(config: DryRunConfig, rows: list[dict[str, Any]]) -> d
     return report
 
 
-def select_ai_candidate_ids(results: list[Mapping[str, Any]], *, max_candidates: int) -> list[str]:
+def select_ai_candidate_ids(
+    results: list[Mapping[str, Any]],
+    *,
+    max_candidates: int,
+    deny_feedback_ids: Iterable[str] = (),
+) -> list[str]:
     selected: list[str] = []
+    denied = {str(item or "").strip() for item in deny_feedback_ids if str(item or "").strip()}
     for fit in ("yes", "review"):
         for result in results:
             feedback_id = str(result.get("feedback_id") or "")
+            if feedback_id in denied:
+                continue
             if result.get("complaint_fit") == fit and feedback_id and feedback_id not in selected:
                 selected.append(feedback_id)
                 if len(selected) >= max_candidates:
@@ -364,24 +386,28 @@ def build_candidate_records(
     api_rows: list[dict[str, Any]],
     analysis_by_id: Mapping[str, Mapping[str, Any]],
     selected_ids: list[str],
+    deny_feedback_ids: Iterable[str] = (),
 ) -> list[dict[str, Any]]:
     selected_set = set(selected_ids)
+    denied = {str(item or "").strip() for item in deny_feedback_ids if str(item or "").strip()}
     records: list[dict[str, Any]] = []
     for row in api_rows:
         feedback_id = str(row.get("feedback_id") or "")
         analysis = dict(analysis_by_id.get(feedback_id) or {})
-        selected = feedback_id in selected_set
+        denied_feedback = bool(feedback_id and feedback_id in denied)
+        selected = feedback_id in selected_set and not denied_feedback
         fit = str(analysis.get("complaint_fit") or "unknown")
+        skip_reason = "hard-denylisted feedback_id; modal draft blocked" if denied_feedback else selection_reason(fit, selected)
         records.append(
             {
                 "feedback_id": feedback_id,
                 "api_summary": summarize_api_row(row),
                 "ai": summarize_ai_result(analysis),
                 "selected_for_dry_run": selected,
-                "selection_reason": selection_reason(fit, selected),
+                "selection_reason": "hard-denylisted feedback_id" if denied_feedback else selection_reason(fit, selected),
                 "match": {},
                 "modal": empty_modal_candidate_state(),
-                "skip_reason": "" if selected else selection_reason(fit, selected),
+                "skip_reason": "" if selected else skip_reason,
             }
         )
     return records
@@ -1708,6 +1734,16 @@ def normalize_requested_date(value: str) -> str:
     except ValueError as exc:
         raise ValueError("date-from/date-to must use YYYY-MM-DD") from exc
     return parsed.isoformat()
+
+
+def normalize_deny_feedback_ids(values: Iterable[Any]) -> tuple[str, ...]:
+    result: list[str] = []
+    for item in [*DEFAULT_DENY_FEEDBACK_IDS, *list(values or [])]:
+        for part in str(item or "").split(","):
+            text = part.strip()
+            if text and text not in result:
+                result.append(text)
+    return tuple(result)
 
 
 def chunks(rows: list[dict[str, Any]], size: int) -> Iterable[list[dict[str, Any]]]:
