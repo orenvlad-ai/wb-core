@@ -14,8 +14,10 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Any, Mapping
+from urllib.parse import parse_qsl, urlsplit
 from uuid import uuid4
 
 
@@ -23,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from playwright.sync_api import Error as PlaywrightError, Page, sync_playwright  # noqa: E402
+from playwright.sync_api import Error as PlaywrightError, Page, Response, sync_playwright  # noqa: E402
 
 from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     DryRunConfig,
@@ -42,7 +44,6 @@ from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     find_visible_actionable_row,
     load_api_feedback_rows,
     normalize_requested_date,
-    select_ai_candidate_ids,
     should_open_modal_for_match,
 )
 from apps.seller_portal_feedbacks_complaints_scout import (  # noqa: E402
@@ -82,7 +83,19 @@ CONTRACT_VERSION = "controlled_submit_v1"
 DEFAULT_RUNTIME_DIR = Path(os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR", "/opt/wb-core-runtime/state"))
 DEFAULT_OUTPUT_ROOT = Path("/opt/wb-core-runtime/state/feedbacks_complaint_submit")
 LOCAL_OUTPUT_ROOT = Path("artifacts/seller_portal_feedbacks_complaint_submit")
-MAX_SUBMIT_HARD_CAP = 3
+MAX_SUBMIT_HARD_CAP = 1
+DEFAULT_DENY_FEEDBACK_IDS = ("GPe9vrq0kctlSfobrgq2",)
+SUBMIT_RESULT_CONFIRMED_SUCCESS = "confirmed_success"
+SUBMIT_RESULT_CONFIRMED_VALIDATION_ERROR = "confirmed_validation_error"
+SUBMIT_RESULT_CONFIRMED_NETWORK_ERROR = "confirmed_network_error"
+SUBMIT_RESULT_UNCONFIRMED_AFTER_CLICK = "unconfirmed_after_click"
+SUBMIT_RELEVANT_URL_RE = re.compile(r"(complaint|claim|appeal|feedback|review|жалоб)", re.IGNORECASE)
+FORBIDDEN_QUERY_KEY_RE = re.compile(r"(authorization|authorize|token|cookie|secret|key|session|storage)", re.IGNORECASE)
+SUCCESS_TEXT_RE = re.compile(r"(жалоб[ауы].{0,60}(отправ|создан|принят)|успешно.{0,60}жалоб)", re.IGNORECASE)
+VALIDATION_TEXT_RE = re.compile(
+    r"(обязатель|заполн|выберите|нельзя|ошибк|проверьте|символ|лимит|не удалось|повторите|validation|invalid)",
+    re.IGNORECASE,
+)
 BAD_REASON_PHRASES = (
     "основание неясно",
     "оснований для жалобы неясно",
@@ -113,6 +126,7 @@ class SubmitConfig:
     headless: bool
     timeout_ms: int
     write_artifacts: bool
+    deny_feedback_ids: tuple[str, ...] = DEFAULT_DENY_FEEDBACK_IDS
 
 
 def main() -> None:
@@ -127,6 +141,12 @@ def main() -> None:
     parser.add_argument("--dry-run", choices=("0", "1"), default="1")
     parser.add_argument("--require-exact", choices=("0", "1"), default="1")
     parser.add_argument("--retry-errors", choices=("0", "1"), default="0")
+    parser.add_argument(
+        "--deny-feedback-id",
+        action="append",
+        default=[],
+        help="Feedback id that must never be selected for this runner. May be repeated or comma-separated.",
+    )
     parser.add_argument("--i-understand-this-submits-complaints", action="store_true")
     parser.add_argument("--runtime-dir", default=str(DEFAULT_RUNTIME_DIR if DEFAULT_RUNTIME_DIR.exists() else ".runtime"))
     parser.add_argument("--storage-state-path", default=str(DEFAULT_STORAGE_STATE_PATH))
@@ -159,6 +179,7 @@ def main() -> None:
         headless=not args.headed,
         timeout_ms=max(5000, int(args.timeout_ms)),
         write_artifacts=not bool(args.no_artifacts),
+        deny_feedback_ids=normalize_deny_feedback_ids(args.deny_feedback_id),
     )
     report = run_submit(config)
     if config.write_artifacts:
@@ -193,6 +214,7 @@ def run_submit(config: SubmitConfig) -> dict[str, Any]:
             "require_exact": config.require_exact,
             "retry_errors": config.retry_errors,
             "explicit_submit_flag": config.submit_confirmation,
+            "deny_feedback_ids": list(config.deny_feedback_ids),
         },
         "safety": {
             "hard_max_submit": MAX_SUBMIT_HARD_CAP,
@@ -200,6 +222,9 @@ def run_submit(config: SubmitConfig) -> dict[str, Any]:
             "exact_match_required": config.require_exact,
             "non_exact_submit_allowed": False,
             "complaint_submit_route_exposed": False,
+            "old_feedback_id_denylisted": "GPe9vrq0kctlSfobrgq2" in set(config.deny_feedback_ids),
+            "retry_old_submit_allowed": False,
+            "mass_submit_allowed": False,
         },
         "api": {},
         "ai": {},
@@ -216,6 +241,7 @@ def run_submit(config: SubmitConfig) -> dict[str, Any]:
     api_rows = api_report.get("rows") if isinstance(api_report.get("rows"), list) else []
     if not api_rows:
         report["aggregate"] = build_submit_aggregate([])
+        report["final_conclusion"] = "no_safe_candidate"
         report["finished_at"] = iso_now()
         return report
 
@@ -224,12 +250,25 @@ def run_submit(config: SubmitConfig) -> dict[str, Any]:
     if not ai_report.get("success"):
         report["errors"].append({"stage": "ai_analyze", "code": str(ai_report.get("error_code") or ""), "message": str(ai_report.get("blocker") or "")})
         report["aggregate"] = build_submit_aggregate([])
+        report["final_conclusion"] = "no_safe_candidate"
         report["finished_at"] = iso_now()
         return report
 
     analysis_by_id = {str(item.get("feedback_id") or ""): item for item in ai_report.get("results") or []}
-    selected_ids = select_submit_candidate_ids(list(analysis_by_id.values()), max_submit=config.max_submit, include_review=config.include_review)
+    existing_feedback_ids = feedback_ids_already_in_journal(
+        [str(row.get("feedback_id") or "") for row in api_rows],
+        journal,
+        retry_errors=config.retry_errors,
+    )
+    selected_ids = select_submit_candidate_ids(
+        list(analysis_by_id.values()),
+        max_submit=config.max_submit,
+        include_review=config.include_review,
+        deny_feedback_ids=config.deny_feedback_ids,
+        existing_feedback_ids=existing_feedback_ids,
+    )
     candidates = build_candidate_records(api_rows, analysis_by_id, selected_ids)
+    mark_denied_candidates(candidates, config.deny_feedback_ids)
     mark_existing_duplicates(candidates, journal, retry_errors=config.retry_errors)
     selected_api_rows = [
         row
@@ -264,21 +303,73 @@ def run_submit(config: SubmitConfig) -> dict[str, Any]:
             apply_modal_submit_results(candidates, modal_report.get("candidate_results") or [])
     report["candidates"] = candidates
     report["aggregate"] = build_submit_aggregate(candidates)
+    report["final_conclusion"] = determine_final_conclusion(candidates, report["errors"])
     report["finished_at"] = iso_now()
     return report
 
 
-def select_submit_candidate_ids(results: list[Mapping[str, Any]], *, max_submit: int, include_review: bool) -> list[str]:
+def select_submit_candidate_ids(
+    results: list[Mapping[str, Any]],
+    *,
+    max_submit: int,
+    include_review: bool,
+    deny_feedback_ids: tuple[str, ...] = (),
+    existing_feedback_ids: tuple[str, ...] = (),
+) -> list[str]:
+    denied = {str(item or "").strip() for item in deny_feedback_ids if str(item or "").strip()}
+    existing = {str(item or "").strip() for item in existing_feedback_ids if str(item or "").strip()}
     if include_review:
-        return select_ai_candidate_ids(results, max_candidates=max_submit)
+        selected: list[str] = []
+        for fit in ("yes", "review"):
+            for result in results:
+                feedback_id = str(result.get("feedback_id") or "").strip()
+                if (
+                    result.get("complaint_fit") == fit
+                    and feedback_id
+                    and feedback_id not in selected
+                    and feedback_id not in denied
+                    and feedback_id not in existing
+                ):
+                    selected.append(feedback_id)
+                    if len(selected) >= max_submit:
+                        return selected
+        return selected
     selected: list[str] = []
     for result in results:
         feedback_id = str(result.get("feedback_id") or "")
-        if result.get("complaint_fit") == "yes" and feedback_id:
+        if result.get("complaint_fit") == "yes" and feedback_id and feedback_id not in denied and feedback_id not in existing:
             selected.append(feedback_id)
             if len(selected) >= max_submit:
                 break
     return selected
+
+
+def feedback_ids_already_in_journal(
+    feedback_ids: list[str],
+    journal: JsonFileFeedbacksComplaintJournal,
+    *,
+    retry_errors: bool,
+) -> tuple[str, ...]:
+    existing: list[str] = []
+    for feedback_id in feedback_ids:
+        normalized = str(feedback_id or "").strip()
+        if not normalized:
+            continue
+        record = journal.find_by_feedback_id(normalized)
+        if not record:
+            continue
+        status = str(record.get("complaint_status") or "")
+        if status != "error" or not retry_errors:
+            existing.append(normalized)
+    return tuple(existing)
+
+
+def mark_denied_candidates(candidates: list[dict[str, Any]], deny_feedback_ids: tuple[str, ...]) -> None:
+    denied = {str(item or "").strip() for item in deny_feedback_ids if str(item or "").strip()}
+    for candidate in candidates:
+        feedback_id = str(candidate.get("feedback_id") or "").strip()
+        if feedback_id and feedback_id in denied:
+            candidate["skip_reason"] = "feedback_id is hard-denylisted for controlled submit"
 
 
 def mark_existing_duplicates(
@@ -401,7 +492,18 @@ def submit_one_candidate(
 ) -> dict[str, Any]:
     feedback_id = str(candidate.get("feedback_id") or "")
     result = empty_modal_candidate_state()
-    result.update({"feedback_id": feedback_id, "dry_run": config.dry_run, "submit_clicked": False, "submit_success": False})
+    result.update(
+        {
+            "feedback_id": feedback_id,
+            "dry_run": config.dry_run,
+            "submit_clicked": False,
+            "submit_clicked_count": 0,
+            "submit_success": False,
+            "submit_result": "",
+            "ai_result": dict(candidate.get("ai") or {}),
+            "exact_match_proof": dict(candidate.get("match") or {}),
+        }
+    )
     if not api_row:
         result["blocker"] = "API row unavailable for submit"
         return result
@@ -444,7 +546,9 @@ def submit_one_candidate(
     result["modal_opened"] = bool(modal_state.get("opened"))
     result["categories_found"] = modal_state.get("categories") or []
     result["submit_button_label"] = str(modal_state.get("submit_button_label") or "")
+    result["submit_button_state_before_fill"] = submit_button_state(page, result["submit_button_label"])
     result["description_field_found"] = bool(modal_state.get("description_field_found"))
+    result["validation_messages_before_click"] = modal_state.get("validation_hints") or []
     if detect_complaint_success_state(page).get("seen") and not result["modal_opened"]:
         result["blocker"] = "complaint action appears to create durable submitted state without modal"
         return result
@@ -483,23 +587,66 @@ def submit_one_candidate(
         return result
     after_fill_modal = extract_complaint_modal_state(page)
     result["submit_button_label"] = str(after_fill_modal.get("submit_button_label") or result["submit_button_label"])
+    result["description_field_present_before_click"] = bool(after_fill_modal.get("description_field_found") or result["description_field_found"])
+    result["submit_button_state_before_click"] = submit_button_state(page, result["submit_button_label"])
+    result["validation_messages_before_click"] = after_fill_modal.get("validation_hints") or result.get("validation_messages_before_click") or []
+    result["modal_state_before_click"] = {
+        "modal_opened": bool(after_fill_modal.get("opened")),
+        "modal_title": str(after_fill_modal.get("modal_title") or ""),
+        "categories": after_fill_modal.get("categories") or [],
+        "description_field_found": bool(after_fill_modal.get("description_field_found")),
+        "submit_button_label": str(after_fill_modal.get("submit_button_label") or result["submit_button_label"]),
+        "submit_button_enabled": bool((result.get("submit_button_state_before_click") or {}).get("enabled")),
+        "validation_messages": list(result.get("validation_messages_before_click") or []),
+    }
     if config.dry_run:
         result["blocker"] = "dry_run=1; final submit not clicked"
         result["close_method"] = close_modal_without_submit(page)
         result["modal_closed"] = True
         return result
+    if not (result.get("submit_button_state_before_click") or {}).get("enabled", True):
+        result["blocker"] = "final submit button is disabled before click"
+        result["close_method"] = close_modal_without_submit(page)
+        result["modal_closed"] = True
+        return result
+    captured_network: list[dict[str, Any]] = []
+    capture_state = {"enabled": True, "stage": "before_final_submit_click"}
+    page.on(
+        "response",
+        lambda response: capture_submit_network_response(
+            response,
+            captured=captured_network,
+            stage=str(capture_state.get("stage") or "submit"),
+            target_feedback_id=feedback_id,
+        ),
+    )
+    result["final_submit_click_started_at"] = iso_now()
+    capture_state["stage"] = "after_final_submit_click"
     submit_click = click_final_complaint_submit(page, result["submit_button_label"])
+    result["final_submit_click_finished_at"] = iso_now()
     result["final_submit_click"] = submit_click
     result["submit_clicked"] = bool(submit_click.get("ok"))
+    result["submit_clicked_count"] = 1 if submit_click.get("ok") else 0
     if not submit_click.get("ok"):
         result["blocker"] = str(submit_click.get("reason") or "final submit button could not be clicked")
         result["close_method"] = close_modal_without_submit(page)
         return result
     _wait_settle(page, 3500)
+    capture_state["stage"] = "post_submit_readback"
     success_state = detect_complaint_success_state(page)
     result["success_state"] = success_state
+    post_click_modal = extract_complaint_modal_state(page)
+    result["modal_state_after_click"] = {
+        "modal_opened": bool(post_click_modal.get("opened")),
+        "validation_messages": post_click_modal.get("validation_hints") or [],
+        "button_labels": post_click_modal.get("button_labels") or [],
+    }
+    result["visible_messages_after_click"] = extract_visible_submit_messages(page)
     result["complaint_status_after_submit"] = read_network_status_after_submit(config, page, feedback_id, request_headers)
-    submitted_like = bool(success_state.get("seen") or (result["complaint_status_after_submit"] or {}).get("submitted_like"))
+    result["post_submit_row_state"] = inspect_post_submit_row_state(page, api_row, candidate)
+    result["submit_network_capture"] = summarize_submit_network_capture(captured_network)
+    result["submit_result"] = classify_submit_result(result)
+    submitted_like = result["submit_result"] == SUBMIT_RESULT_CONFIRMED_SUCCESS
     result["submit_success"] = submitted_like
     status = "waiting_response" if submitted_like else "error"
     result["journal_record"] = journal_record_for_submit(
@@ -512,11 +659,133 @@ def submit_one_candidate(
     create_result = journal.create_or_update(result["journal_record"], retry_errors=config.retry_errors)
     result["journal_write"] = {"created": create_result.created, "duplicate": create_result.duplicate, "complaint_id": create_result.record.get("complaint_id")}
     if not submitted_like:
-        result["blocker"] = "submit clicked, but success/submitted state was not confirmed"
-    if result["modal_opened"]:
+        result["blocker"] = blocker_for_submit_result(result)
+    if (result.get("modal_state_after_click") or {}).get("modal_opened"):
         result["close_method"] = close_modal_without_submit(page)
     result["modal_closed"] = True
     return result
+
+
+def submit_button_state(page: Page, label: str = "") -> dict[str, Any]:
+    try:
+        return page.evaluate(
+            r"""
+(expectedLabel) => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+  };
+  const labelFor = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+  const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="modal"], [class*="Modal"], [class*="popup"], [class*="Popup"]')).filter(visible);
+  const root = dialogs[dialogs.length - 1] || document.body;
+  const expected = String(expectedLabel || '').trim().toLowerCase();
+  const buttons = Array.from(root.querySelectorAll('button, [role="button"], input[type="submit"]')).filter(visible)
+    .map((el) => ({
+      el,
+      label: labelFor(el),
+      disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true' || el.getAttribute('disabled') !== null)
+    }));
+  const target = buttons.find((item) => {
+    const lower = item.label.toLowerCase();
+    if (!lower) return false;
+    if (expected && lower === expected) return true;
+    return /^(отправить|подать|подать жалобу|отправить жалобу|пожаловаться)$/i.test(item.label);
+  });
+  if (!target) return {found: false, enabled: false, label: '', visible_button_labels: buttons.map((item) => item.label).filter(Boolean).slice(0, 12)};
+  const rect = target.el.getBoundingClientRect();
+  return {
+    found: true,
+    enabled: !target.disabled,
+    disabled: target.disabled,
+    label: target.label,
+    rect: {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)}
+  };
+}
+            """,
+            label,
+        )
+    except PlaywrightError as exc:
+        return {"found": False, "enabled": False, "reason": safe_text(str(exc), 400)}
+
+
+def extract_visible_submit_messages(page: Page) -> list[str]:
+    try:
+        payload = page.evaluate(
+            r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight;
+  };
+  const roots = Array.from(document.querySelectorAll(
+    '[role="status"], [role="alert"], [aria-live], [class*="Toast"], [class*="toast"], [class*="Notification"], [class*="notification"], [class*="Snackbar"], [class*="snackbar"], [role="dialog"], [aria-modal="true"]'
+  )).filter(visible);
+  return roots.map((root) => (root.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 40);
+}
+            """
+        )
+    except PlaywrightError:
+        payload = []
+    messages: list[str] = []
+    for item in payload if isinstance(payload, list) else []:
+        for line in str(item or "").split("\n"):
+            text = safe_text(" ".join(line.split()), 300)
+            if text and text not in messages:
+                messages.append(text)
+    return messages[:20]
+
+
+def inspect_post_submit_row_state(
+    page: Page,
+    api_row: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "checked": False,
+        "row_found": False,
+        "row_disappeared_or_moved": "unknown",
+        "complaint_action_still_visible": "unknown",
+        "badge_or_hint": "",
+        "menu_labels": [],
+        "reason": "",
+    }
+    if (extract_complaint_modal_state(page) or {}).get("opened"):
+        state["reason"] = "complaint modal still open after submit"
+        return state
+    try:
+        visible_rows = extract_visible_feedback_rows(page, max_rows=20)
+        expected_ui = (candidate.get("match") or {}).get("best_ui_candidate") or {}
+        visible_match = find_visible_actionable_row(api_row, visible_rows, expected_ui=expected_ui)
+        row = visible_match.get("row") if isinstance(visible_match.get("row"), dict) else {}
+        state["checked"] = True
+        state["visible_row_match"] = visible_match.get("match") or {}
+        state["row_found"] = bool(row)
+        state["row_disappeared_or_moved"] = False if row else True
+        if not row:
+            state["reason"] = "target row not visible in current feedbacks list after submit"
+            return state
+        state["badge_or_hint"] = safe_text(
+            " ".join(
+                str(row.get(key) or "")
+                for key in ("complaint_status", "complaint_hint", "status_text", "row_text")
+            ),
+            500,
+        )
+        clicked_menu = _click_safe_row_menu(page, str(row.get("dom_scout_id") or ""))
+        state["row_menu_click"] = clicked_menu
+        if clicked_menu.get("ok"):
+            _wait_settle(page, 500)
+            menu_state = extract_open_row_menu_state(page)
+            state["menu_labels"] = menu_state.get("items") or []
+            state["complaint_action_still_visible"] = bool(menu_state.get("complaint_action_found"))
+            _safe_escape(page)
+        else:
+            state["reason"] = str(clicked_menu.get("reason") or "row menu could not be opened after submit")
+    except Exception as exc:  # pragma: no cover - live fallback
+        state["reason"] = safe_text(str(exc), 500)
+    return state
 
 
 def click_final_complaint_submit(page: Page, label: str = "") -> dict[str, Any]:
@@ -578,6 +847,285 @@ def read_network_status_after_submit(
     return {"checked": True, "feedback_id": feedback_id, "reason": "feedback row not found after submit", "stats": stats}
 
 
+def capture_submit_network_response(
+    response: Response,
+    *,
+    captured: list[dict[str, Any]],
+    stage: str,
+    target_feedback_id: str,
+) -> None:
+    if len(captured) >= 80:
+        return
+    item = sanitize_submit_network_response(response, stage=stage, target_feedback_id=target_feedback_id)
+    if item:
+        captured.append(item)
+
+
+def sanitize_submit_network_response(response: Response, *, stage: str, target_feedback_id: str) -> dict[str, Any]:
+    try:
+        url = response.url
+        status = int(response.status)
+        content_type = str(response.headers.get("content-type") or "")
+        method = str(response.request.method or "")
+    except Exception:
+        return {}
+    payload: Any = None
+    payload_text = ""
+    if "json" in content_type.lower():
+        try:
+            payload = response.json()
+            payload_text = json.dumps(payload, ensure_ascii=False)[:180000]
+        except Exception:
+            payload = None
+            payload_text = ""
+    relevant_url = bool(SUBMIT_RELEVANT_URL_RE.search(url))
+    target_seen = bool(target_feedback_id and target_feedback_id in payload_text)
+    safe_body = extract_safe_submit_body(payload, target_feedback_id=target_feedback_id)
+    if not relevant_url and not target_seen and not safe_body:
+        return {}
+    split = urlsplit(url)
+    query_keys = sorted(
+        {
+            key
+            for key, _value in parse_qsl(split.query, keep_blank_values=True)
+            if not FORBIDDEN_QUERY_KEY_RE.search(str(key))
+        }
+    )[:20]
+    return {
+        "stage": safe_text(stage, 80),
+        "method": safe_text(method, 12),
+        "status": status,
+        "url_path": safe_text(f"{split.scheme}://{split.netloc}{split.path}", 260),
+        "query_keys": query_keys,
+        "content_type": safe_text(content_type, 120),
+        "complaint_like_url": relevant_url,
+        "target_feedback_id_seen": target_seen,
+        "payload_shape": payload_shape(payload),
+        "safe_body": safe_body,
+    }
+
+
+def extract_safe_submit_body(payload: Any, *, target_feedback_id: str) -> list[dict[str, Any]]:
+    safe_rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for mapping in iter_submit_mappings(payload):
+        safe = safe_submit_fact(mapping, target_feedback_id=target_feedback_id)
+        if not safe:
+            continue
+        key = json.dumps(safe, ensure_ascii=False, sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        safe_rows.append(safe)
+        if len(safe_rows) >= 40:
+            break
+    return safe_rows
+
+
+def iter_submit_mappings(payload: Any) -> list[Mapping[str, Any]]:
+    found: list[Mapping[str, Any]] = []
+
+    def walk(value: Any, depth: int = 0) -> None:
+        if depth > 7 or len(found) >= 120:
+            return
+        if isinstance(value, Mapping):
+            if submit_mapping_is_relevant(value):
+                found.append(value)
+            for nested in value.values():
+                if isinstance(nested, (Mapping, list)):
+                    walk(nested, depth + 1)
+        elif isinstance(value, list):
+            for item in value[:240]:
+                if isinstance(item, (Mapping, list)):
+                    walk(item, depth + 1)
+
+    walk(payload)
+    return found
+
+
+def submit_mapping_is_relevant(mapping: Mapping[str, Any]) -> bool:
+    keys = {str(key).lower() for key in mapping.keys()}
+    joined = " ".join(keys)
+    if any(token in joined for token in ("feedback", "review", "complaint", "claim", "appeal", "reason", "status", "error", "message", "success")):
+        return True
+    text = " ".join(str(value)[:160] for value in mapping.values() if isinstance(value, (str, int, float, bool)))
+    return bool(re.search(r"(жалоб|отзыв|успеш|ошиб|обяз|выберите|invalid|validation)", text, re.IGNORECASE))
+
+
+def safe_submit_fact(mapping: Mapping[str, Any], *, target_feedback_id: str) -> dict[str, Any]:
+    fact = {
+        "complaint_id": safe_text(deep_find_value(mapping, ("complaintId", "complaint_id", "claimId", "claim_id", "appealId", "appeal_id")), 120),
+        "feedback_id": safe_text(deep_find_value(mapping, ("feedbackId", "feedback_id", "feedbackID", "sellerPortalFeedbackId")), 120),
+        "review_id": safe_text(deep_find_value(mapping, ("reviewId", "review_id", "reviewID")), 120),
+        "status_text": safe_text(deep_find_value(mapping, ("status", "statusName", "state", "decision", "decisionText")), 160),
+        "success": safe_text(deep_find_value(mapping, ("success", "ok", "isSuccess")), 20),
+        "code": safe_text(deep_find_value(mapping, ("code", "errorCode", "statusCode")), 80),
+        "message": safe_text(deep_find_value(mapping, ("message", "error", "errorText", "title", "description")), 320),
+        "reason": safe_text(deep_find_value(mapping, ("reason", "reasonName", "category", "categoryName")), 180),
+    }
+    if target_feedback_id and target_feedback_id in {fact.get("feedback_id"), fact.get("review_id")}:
+        fact["target_feedback_id_match"] = True
+    return {key: value for key, value in fact.items() if value not in ("", None)}
+
+
+def deep_find_value(value: Any, names: tuple[str, ...]) -> str:
+    wanted = {name.lower() for name in names}
+    stack: list[Any] = [value]
+    while stack:
+        current = stack.pop(0)
+        if isinstance(current, Mapping):
+            for key, item in current.items():
+                key_text = str(key)
+                if key_text.lower() in wanted and isinstance(item, (str, int, float, bool)):
+                    return str(item)
+                if isinstance(item, (Mapping, list)):
+                    stack.append(item)
+        elif isinstance(current, list):
+            stack.extend(item for item in current[:50] if isinstance(item, (Mapping, list)))
+    return ""
+
+
+def payload_shape(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, Mapping):
+        return {
+            "type": "dict",
+            "keys": sorted(str(key) for key in payload.keys() if not FORBIDDEN_QUERY_KEY_RE.search(str(key)))[:30],
+        }
+    if isinstance(payload, list):
+        return {"type": "list", "length": len(payload)}
+    if payload is None:
+        return {"type": "none"}
+    return {"type": type(payload).__name__}
+
+
+def summarize_submit_network_capture(captured: list[Mapping[str, Any]]) -> dict[str, Any]:
+    endpoints: dict[str, dict[str, Any]] = {}
+    safe_body_count = 0
+    for item in captured:
+        path = str(item.get("url_path") or "")
+        endpoint = endpoints.setdefault(
+            path,
+            {
+                "url_path": path,
+                "methods": [],
+                "statuses": [],
+                "stages": [],
+                "response_count": 0,
+                "safe_body_count": 0,
+                "complaint_like_url": False,
+                "target_feedback_id_seen": False,
+            },
+        )
+        endpoint["response_count"] += 1
+        endpoint["complaint_like_url"] = bool(endpoint["complaint_like_url"] or item.get("complaint_like_url"))
+        endpoint["target_feedback_id_seen"] = bool(endpoint["target_feedback_id_seen"] or item.get("target_feedback_id_seen"))
+        body_count = len(item.get("safe_body") or [])
+        safe_body_count += body_count
+        endpoint["safe_body_count"] += body_count
+        for key, value in (("methods", item.get("method")), ("statuses", item.get("status")), ("stages", item.get("stage"))):
+            if value not in endpoint[key]:
+                endpoint[key].append(value)
+    safe_bodies = [row for item in captured for row in (item.get("safe_body") or []) if isinstance(row, Mapping)]
+    mutating = [
+        item
+        for item in captured
+        if str(item.get("method") or "").upper() in {"POST", "PUT", "PATCH", "DELETE"} and item.get("complaint_like_url")
+    ]
+    return {
+        "responses": [dict(item) for item in captured],
+        "endpoints_observed": list(endpoints.values()),
+        "response_count": len(captured),
+        "safe_body_count": safe_body_count,
+        "mutating_response_count": len(mutating),
+        "mutating_statuses": [int(item.get("status") or 0) for item in mutating],
+        "direct_feedback_id_found": any(row.get("target_feedback_id_match") for row in safe_bodies),
+        "complaint_id_found": any(bool(row.get("complaint_id")) for row in safe_bodies),
+        "success_text_seen": any(SUCCESS_TEXT_RE.search(" ".join(str(value) for value in row.values())) for row in safe_bodies),
+        "validation_text_seen": any(VALIDATION_TEXT_RE.search(" ".join(str(value) for value in row.values())) for row in safe_bodies),
+    }
+
+
+def classify_submit_result(result: Mapping[str, Any]) -> str:
+    network = result.get("submit_network_capture") if isinstance(result.get("submit_network_capture"), Mapping) else {}
+    post_status = result.get("complaint_status_after_submit") if isinstance(result.get("complaint_status_after_submit"), Mapping) else {}
+    row_state = result.get("post_submit_row_state") if isinstance(result.get("post_submit_row_state"), Mapping) else {}
+    messages = [str(item or "") for item in result.get("visible_messages_after_click") or []]
+    modal_after = result.get("modal_state_after_click") if isinstance(result.get("modal_state_after_click"), Mapping) else {}
+    validation_messages = messages + [str(item or "") for item in modal_after.get("validation_messages") or []]
+    mutating_statuses = [int(status or 0) for status in network.get("mutating_statuses") or []]
+    has_mutating_2xx = any(200 <= status < 300 for status in mutating_statuses)
+    has_mutating_4xx = any(400 <= status < 500 for status in mutating_statuses)
+    has_mutating_5xx = any(status >= 500 for status in mutating_statuses)
+    if has_mutating_5xx:
+        return SUBMIT_RESULT_CONFIRMED_NETWORK_ERROR
+    if has_mutating_4xx or network.get("validation_text_seen") or any(VALIDATION_TEXT_RE.search(text) for text in validation_messages):
+        return SUBMIT_RESULT_CONFIRMED_VALIDATION_ERROR
+    if (
+        (result.get("success_state") or {}).get("seen")
+        or post_status.get("submitted_like")
+        or row_state.get("complaint_action_still_visible") is False
+        or network.get("complaint_id_found")
+        or network.get("success_text_seen")
+        or (has_mutating_2xx and network.get("direct_feedback_id_found"))
+    ):
+        return SUBMIT_RESULT_CONFIRMED_SUCCESS
+    return SUBMIT_RESULT_UNCONFIRMED_AFTER_CLICK
+
+
+def blocker_for_submit_result(result: Mapping[str, Any]) -> str:
+    submit_result = str(result.get("submit_result") or "")
+    if submit_result == SUBMIT_RESULT_CONFIRMED_VALIDATION_ERROR:
+        return "submit clicked once; WB returned or displayed validation error"
+    if submit_result == SUBMIT_RESULT_CONFIRMED_NETWORK_ERROR:
+        return "submit clicked once; WB submit network response failed"
+    return "submit clicked once, but success was not confirmed by network/toast/post-row evidence"
+
+
+def compact_network_evidence(network: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "response_count": int(network.get("response_count") or 0),
+        "mutating_response_count": int(network.get("mutating_response_count") or 0),
+        "mutating_statuses": [int(item or 0) for item in network.get("mutating_statuses") or []][:8],
+        "direct_feedback_id_found": bool(network.get("direct_feedback_id_found")),
+        "complaint_id_found": bool(network.get("complaint_id_found")),
+        "success_text_seen": bool(network.get("success_text_seen")),
+        "validation_text_seen": bool(network.get("validation_text_seen")),
+        "endpoints_observed": [
+            {
+                "url_path": safe_text(str(item.get("url_path") or ""), 260),
+                "methods": [str(value) for value in item.get("methods") or []][:6],
+                "statuses": [int(value or 0) for value in item.get("statuses") or []][:8],
+                "response_count": int(item.get("response_count") or 0),
+            }
+            for item in network.get("endpoints_observed") or []
+            if isinstance(item, Mapping)
+        ][:8],
+    }
+
+
+def compact_ui_evidence(modal: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "submit_button_label": safe_text(str(modal.get("submit_button_label") or ""), 80),
+        "submit_button_enabled": bool((modal.get("submit_button_state_before_click") or {}).get("enabled")),
+        "description_field_present_before_click": bool(modal.get("description_field_present_before_click")),
+        "validation_messages_before_click": [safe_text(str(item), 220) for item in modal.get("validation_messages_before_click") or []][:8],
+        "visible_messages_after_click": [safe_text(str(item), 220) for item in modal.get("visible_messages_after_click") or []][:8],
+        "modal_open_after_click": bool((modal.get("modal_state_after_click") or {}).get("modal_opened")),
+        "success_toast_text": safe_text(str((modal.get("success_state") or {}).get("text") or ""), 260),
+    }
+
+
+def compact_post_submit_row_state(row_state: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "checked": bool(row_state.get("checked")),
+        "row_found": bool(row_state.get("row_found")),
+        "row_disappeared_or_moved": row_state.get("row_disappeared_or_moved"),
+        "complaint_action_still_visible": row_state.get("complaint_action_still_visible"),
+        "badge_or_hint": safe_text(str(row_state.get("badge_or_hint") or ""), 300),
+        "reason": safe_text(str(row_state.get("reason") or ""), 300),
+    }
+
+
 def journal_record_for_submit(
     api_row: Mapping[str, Any],
     candidate: Mapping[str, Any],
@@ -619,6 +1167,11 @@ def journal_record_for_submit(
         "ai_confidence": str(ai.get("confidence") or ""),
         "ai_confidence_label": str(ai.get("confidence_label") or ""),
         "submit_run_id": run_id,
+        "submit_clicked_count": int(modal.get("submit_clicked_count") or (1 if modal.get("submit_clicked") else 0)),
+        "submit_result": str(modal.get("submit_result") or ""),
+        "submit_network_evidence_summary": compact_network_evidence(modal.get("submit_network_capture") or {}),
+        "submit_ui_evidence_summary": compact_ui_evidence(modal),
+        "post_submit_row_state": compact_post_submit_row_state(modal.get("post_submit_row_state") or {}),
         "last_error": "" if status == "waiting_response" else str(modal.get("blocker") or "submit success not confirmed"),
         "raw_status_text": str((modal.get("success_state") or {}).get("text") or ""),
         "wb_decision_text": "",
@@ -642,6 +1195,7 @@ def build_submit_aggregate(candidates: list[Mapping[str, Any]]) -> dict[str, Any
     submitted = [item for item in modal if item.get("submit_success")]
     skipped = Counter(str(item.get("skip_reason") or "") for item in candidates if item.get("skip_reason"))
     ai_counts = Counter(str((item.get("ai") or {}).get("complaint_fit") or "unknown") for item in candidates)
+    submit_results = Counter(str(item.get("submit_result") or "") for item in modal if item.get("submit_result"))
     return {
         "api_rows_loaded": len(candidates),
         "ai_analyzed_count": sum(1 for item in candidates if (item.get("ai") or {}).get("complaint_fit")),
@@ -653,9 +1207,29 @@ def build_submit_aggregate(candidates: list[Mapping[str, Any]]) -> dict[str, Any
         "submitted_count": len(submitted),
         "submit_clicked_count": len(submit_clicked),
         "error_count": sum(1 for item in modal if item.get("submit_clicked") and not item.get("submit_success")),
+        "submit_result_counts": dict(submit_results),
         "skipped_existing_duplicates": sum(count for reason, count in skipped.items() if "already exists" in reason),
+        "skipped_denied_feedback_ids": sum(count for reason, count in skipped.items() if "hard-denylisted" in reason),
         "skipped_reasons": [{"reason": reason, "count": count} for reason, count in skipped.most_common(12) if reason],
     }
+
+
+def determine_final_conclusion(candidates: list[Mapping[str, Any]], errors: list[Mapping[str, Any]]) -> str:
+    modal_results = [item.get("modal") or {} for item in candidates]
+    submit_results = [str(item.get("submit_result") or "") for item in modal_results if item.get("submit_clicked")]
+    if SUBMIT_RESULT_CONFIRMED_SUCCESS in submit_results:
+        return "submitted_confirmed_waiting_response"
+    if SUBMIT_RESULT_CONFIRMED_VALIDATION_ERROR in submit_results:
+        return "submit_failed_validation"
+    if SUBMIT_RESULT_CONFIRMED_NETWORK_ERROR in submit_results:
+        return "submit_failed_network"
+    if SUBMIT_RESULT_UNCONFIRMED_AFTER_CLICK in submit_results:
+        return "submit_unconfirmed_error"
+    if errors:
+        return "no_safe_candidate"
+    if not any(item.get("selected_for_dry_run") and not item.get("skip_reason") for item in candidates):
+        return "no_safe_candidate"
+    return "no_submit_clicked"
 
 
 def is_reason_submit_ready(reason: str) -> bool:
@@ -663,6 +1237,16 @@ def is_reason_submit_ready(reason: str) -> bool:
     if len(text) < 12:
         return False
     return not any(phrase in text for phrase in BAD_REASON_PHRASES)
+
+
+def normalize_deny_feedback_ids(values: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    ids: list[str] = []
+    for raw in list(DEFAULT_DENY_FEEDBACK_IDS) + list(values or []):
+        for part in str(raw or "").split(","):
+            normalized = part.strip()
+            if normalized and normalized not in ids:
+                ids.append(normalized)
+    return tuple(ids)
 
 
 def _candidate_by_id(candidates: list[dict[str, Any]], feedback_id: str) -> dict[str, Any]:
@@ -708,6 +1292,7 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
         f"- Submit clicked: `{agg.get('submit_clicked_count', 0)}`",
         f"- Submitted: `{agg.get('submitted_count', 0)}`",
         f"- Errors: `{agg.get('error_count', 0)}`",
+        f"- Final conclusion: `{report.get('final_conclusion')}`",
         "",
         "## Candidates",
         "",
@@ -722,6 +1307,7 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
                 f"- `{candidate.get('feedback_id')}` fit `{ai.get('complaint_fit')}` match `{match.get('match_status')}` submitted `{modal.get('submit_success')}` clicked `{modal.get('submit_clicked')}`",
                 f"  API: `{api.get('created_at')}` rating `{api.get('rating')}` nm `{api.get('nm_id')}` article `{api.get('supplier_article')}` text `{api.get('review_text')}`",
                 f"  Complaint: category `{modal.get('selected_category')}` text `{modal.get('draft_text')}`",
+                f"  Evidence: result `{modal.get('submit_result')}` button `{modal.get('submit_button_label')}` network `{compact_network_evidence(modal.get('submit_network_capture') or {})}`",
                 f"  Skip/blocker: `{candidate.get('skip_reason') or modal.get('blocker') or ''}`",
             ]
         )
@@ -749,7 +1335,9 @@ def compact_stdout_report(report: Mapping[str, Any]) -> dict[str, Any]:
         "started_at": report.get("started_at"),
         "finished_at": report.get("finished_at"),
         "parameters": report.get("parameters"),
+        "safety": report.get("safety"),
         "aggregate": report.get("aggregate"),
+        "final_conclusion": report.get("final_conclusion"),
         "artifact_paths": report.get("artifact_paths"),
         "errors": report.get("errors"),
     }

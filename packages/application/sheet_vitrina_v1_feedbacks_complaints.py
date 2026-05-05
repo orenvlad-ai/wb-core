@@ -169,6 +169,26 @@ class JsonFileFeedbacksComplaintJournal:
                 return dict(records[index])
         return None
 
+    def update_metadata(self, feedback_id: str, fields: Mapping[str, Any]) -> dict[str, Any] | None:
+        normalized_id = str(feedback_id or "").strip()
+        if not normalized_id:
+            return None
+        blocked_keys = {"feedback_id", "complaint_id", "created_at"}
+        metadata = {str(key): value for key, value in fields.items() if str(key) not in blocked_keys}
+        if not metadata:
+            return None
+        with self._lock:
+            payload = self._read_payload()
+            records = payload.setdefault("records", [])
+            for index, record in enumerate(records):
+                if str(record.get("feedback_id") or "").strip() != normalized_id:
+                    continue
+                updated = {**dict(record), **metadata, "updated_at": _iso_now()}
+                records[index] = _normalize_record(updated)
+                self._write_payload(payload)
+                return dict(records[index])
+        return None
+
     def _read_payload(self) -> dict[str, Any]:
         if not self.path.exists():
             return {
@@ -677,6 +697,13 @@ def _normalize_record(record: Mapping[str, Any]) -> dict[str, Any]:
         "ai_confidence": _safe_text(record.get("ai_confidence"), 30),
         "ai_confidence_label": _safe_text(record.get("ai_confidence_label"), 40),
         "submit_run_id": _safe_text(record.get("submit_run_id"), 120),
+        "submit_clicked_count": _safe_int(record.get("submit_clicked_count")),
+        "submit_result": _safe_text(record.get("submit_result"), 80),
+        "submit_network_evidence_summary": _safe_json_value(record.get("submit_network_evidence_summary"), 2500),
+        "submit_ui_evidence_summary": _safe_json_value(record.get("submit_ui_evidence_summary"), 2500),
+        "post_submit_row_state": _safe_json_value(record.get("post_submit_row_state"), 1600),
+        "confirmation_probe_path": _safe_text(record.get("confirmation_probe_path"), 600),
+        "status_sync_report_path": _safe_text(record.get("status_sync_report_path"), 600),
         "status_sync_run_id": _safe_text(record.get("status_sync_run_id"), 120),
         "last_error": _safe_text(record.get("last_error"), 800),
         "raw_status_text": _safe_text(record.get("raw_status_text"), 800),
@@ -714,6 +741,37 @@ def _summary(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
 def _safe_text(value: Any, limit: int) -> str:
     text = " ".join(str(value or "").split())
     return text[: max(0, int(limit))]
+
+
+def _safe_json_value(value: Any, limit: int) -> Any:
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        used = 0
+        for key, item in value.items():
+            safe_key = _safe_text(key, 80)
+            safe_item = _safe_json_value(item, max(160, int(limit) // 3))
+            preview = json.dumps({safe_key: safe_item}, ensure_ascii=False, sort_keys=True)
+            used += len(preview)
+            if used > int(limit):
+                result["_truncated"] = True
+                break
+            result[safe_key] = safe_item
+        return result
+    if isinstance(value, list):
+        items: list[Any] = []
+        used = 0
+        for item in value[:20]:
+            safe_item = _safe_json_value(item, max(120, int(limit) // 4))
+            preview = json.dumps(safe_item, ensure_ascii=False, sort_keys=True)
+            used += len(preview)
+            if used > int(limit):
+                items.append({"_truncated": True})
+                break
+            items.append(safe_item)
+        return items
+    if isinstance(value, (bool, int, float)) or value is None:
+        return value
+    return _safe_text(value, min(int(limit), 800))
 
 
 def _safe_int(value: Any) -> int:

@@ -13,12 +13,20 @@ if str(ROOT) not in sys.path:
 
 from apps.seller_portal_feedbacks_complaint_submit import (  # noqa: E402
     MAX_SUBMIT_HARD_CAP,
+    SUBMIT_RESULT_CONFIRMED_NETWORK_ERROR,
+    SUBMIT_RESULT_CONFIRMED_SUCCESS,
+    SUBMIT_RESULT_CONFIRMED_VALIDATION_ERROR,
+    SUBMIT_RESULT_UNCONFIRMED_AFTER_CLICK,
     SubmitConfig,
     build_submit_aggregate,
+    classify_submit_result,
     enforce_submit_guards,
     is_reason_submit_ready,
     journal_record_for_submit,
+    mark_denied_candidates,
+    normalize_deny_feedback_ids,
     run_submit,
+    sanitize_submit_network_response,
     select_submit_candidate_ids,
 )
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import (  # noqa: E402
@@ -30,7 +38,10 @@ def main() -> None:
     _assert_selection_rules()
     _assert_exact_and_reason_guards()
     _assert_duplicate_guard_storage()
+    _assert_denylist_and_selection_rules()
     _assert_explicit_submit_flag_required()
+    _assert_submit_result_classification()
+    _assert_network_sanitizer()
     _assert_journal_record_shape()
     print("seller_portal_feedbacks_complaint_submit_smoke: OK")
 
@@ -42,12 +53,12 @@ def _assert_selection_rules() -> None:
         _ai("yes-1", "yes"),
         _ai("yes-2", "yes"),
     ]
-    if select_submit_candidate_ids(results, max_submit=3, include_review=True) != ["yes-1", "yes-2", "review-1"]:
+    if select_submit_candidate_ids(results, max_submit=1, include_review=True) != ["yes-1"]:
         raise AssertionError("submit selection must prefer yes before review")
-    if select_submit_candidate_ids(results, max_submit=3, include_review=False) != ["yes-1", "yes-2"]:
+    if select_submit_candidate_ids(results, max_submit=1, include_review=False) != ["yes-1"]:
         raise AssertionError("include_review=0 must skip review candidates")
-    if MAX_SUBMIT_HARD_CAP != 3:
-        raise AssertionError("controlled submit hard cap must remain 3")
+    if MAX_SUBMIT_HARD_CAP != 1:
+        raise AssertionError("controlled submit hard cap must remain 1")
 
 
 def _assert_exact_and_reason_guards() -> None:
@@ -84,6 +95,20 @@ def _assert_duplicate_guard_storage() -> None:
             raise AssertionError("same feedback_id must be deduped before submit")
 
 
+def _assert_denylist_and_selection_rules() -> None:
+    results = [_ai("GPe9vrq0kctlSfobrgq2", "yes"), _ai("fresh-yes", "yes"), _ai("fresh-review", "review")]
+    deny = normalize_deny_feedback_ids([])
+    if "GPe9vrq0kctlSfobrgq2" not in deny:
+        raise AssertionError("historical uncertain feedback_id must be denied by default")
+    selected = select_submit_candidate_ids(results, max_submit=1, include_review=True, deny_feedback_ids=deny)
+    if selected != ["fresh-yes"]:
+        raise AssertionError(f"denylist must force selection to skip old feedback_id: {selected}")
+    candidates = [_candidate("GPe9vrq0kctlSfobrgq2", "yes", "exact", "Просим проверить отзыв: тестовое описание.")]
+    mark_denied_candidates(candidates, deny)
+    if "hard-denylisted" not in candidates[0].get("skip_reason", ""):
+        raise AssertionError(f"denylisted candidate must be blocked: {candidates[0]}")
+
+
 def _assert_explicit_submit_flag_required() -> None:
     with TemporaryDirectory(prefix="submit-flag-smoke-") as tmp:
         config = SubmitConfig(
@@ -116,6 +141,51 @@ def _assert_explicit_submit_flag_required() -> None:
         raise AssertionError("real submit must require explicit confirmation flag before any API/browser work")
 
 
+def _assert_submit_result_classification() -> None:
+    click_only = {
+        "submit_clicked": True,
+        "submit_network_capture": {"mutating_statuses": []},
+        "success_state": {"seen": False},
+        "complaint_status_after_submit": {"submitted_like": False},
+        "post_submit_row_state": {"complaint_action_still_visible": "unknown"},
+        "visible_messages_after_click": [],
+        "modal_state_after_click": {"validation_messages": []},
+    }
+    if classify_submit_result(click_only) != SUBMIT_RESULT_UNCONFIRMED_AFTER_CLICK:
+        raise AssertionError("click alone must not be classified as success")
+    success = {**click_only, "success_state": {"seen": True, "text": "Жалоба отправлена"}}
+    if classify_submit_result(success) != SUBMIT_RESULT_CONFIRMED_SUCCESS:
+        raise AssertionError("success toast must confirm success")
+    validation = {**click_only, "visible_messages_after_click": ["Заполните обязательное поле"]}
+    if classify_submit_result(validation) != SUBMIT_RESULT_CONFIRMED_VALIDATION_ERROR:
+        raise AssertionError("validation message must classify validation failure")
+    network_error = {**click_only, "submit_network_capture": {"mutating_statuses": [500]}}
+    if classify_submit_result(network_error) != SUBMIT_RESULT_CONFIRMED_NETWORK_ERROR:
+        raise AssertionError("5xx mutating response must classify network failure")
+
+
+def _assert_network_sanitizer() -> None:
+    response = _FakeResponse(
+        url="https://seller-reviews.wildberries.ru/api/complaints?token=secret&limit=1",
+        method="POST",
+        status=200,
+        payload={
+            "success": True,
+            "complaintId": "complaint-1",
+            "feedbackId": "feedback-1",
+            "authorization": "must-not-leak",
+        },
+    )
+    item = sanitize_submit_network_response(response, stage="submit", target_feedback_id="feedback-1")
+    raw = repr(item).lower()
+    if "must-not-leak" in raw or "token" in raw or "authorization" in raw:
+        raise AssertionError(f"network sanitizer leaked forbidden data: {item}")
+    if item.get("method") != "POST" or item.get("status") != 200 or "complaintId" in raw:
+        raise AssertionError(f"network sanitizer must expose safe normalized facts, not raw body: {item}")
+    if not item.get("safe_body"):
+        raise AssertionError(f"network sanitizer must retain safe body facts: {item}")
+
+
 def _assert_journal_record_shape() -> None:
     record = journal_record_for_submit(
         _api("feedback-1"),
@@ -131,6 +201,8 @@ def _assert_journal_record_shape() -> None:
     )
     if record["complaint_status"] != "waiting_response" or record["wb_category_label"] != "Другое":
         raise AssertionError(f"journal record must use waiting response and WB category: {record}")
+    if record["submit_clicked_count"] != 0 or record["submit_result"] != "":
+        raise AssertionError(f"journal record must carry submit instrumentation fields: {record}")
     aggregate = build_submit_aggregate(
         [
             {
@@ -181,6 +253,23 @@ def _ai(feedback_id: str, fit: str) -> dict[str, str]:
         "confidence": "high",
         "confidence_label": "Высокая",
     }
+
+
+class _FakeRequest:
+    def __init__(self, method: str) -> None:
+        self.method = method
+
+
+class _FakeResponse:
+    def __init__(self, *, url: str, method: str, status: int, payload: dict[str, object]) -> None:
+        self.url = url
+        self.status = status
+        self.headers = {"content-type": "application/json"}
+        self.request = _FakeRequest(method)
+        self._payload = payload
+
+    def json(self) -> dict[str, object]:
+        return dict(self._payload)
 
 
 if __name__ == "__main__":
