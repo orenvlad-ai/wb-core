@@ -1483,7 +1483,9 @@ def inspect_seller_portal_rating_filter_popup(page: Page) -> dict[str, Any]:
     return {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)};
   };
   const labelFor = (el) => text(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '');
+  const rowInputChecked = (row) => row ? Array.from(row.querySelectorAll('input[type="checkbox"]')).some((input) => input.checked === true || input.getAttribute('aria-checked') === 'true') : false;
   const isChecked = (el, row) => {
+    if (rowInputChecked(row)) return true;
     const nodes = [el, row].filter(Boolean);
     for (const node of nodes) {
       const aria = node.getAttribute && node.getAttribute('aria-checked');
@@ -1538,6 +1540,10 @@ def inspect_seller_portal_rating_filter_popup(page: Page) -> dict[str, Any]:
   const dedupedByKey = new Map();
   const prefer = (current, next) => {
     if (!current) return next;
+    const currentInput = current.control && String(current.control.tagName || '').toUpperCase() === 'INPUT';
+    const nextInput = next.control && String(next.control.tagName || '').toUpperCase() === 'INPUT';
+    if (nextInput && !currentInput) return next;
+    if (currentInput && !nextInput) return current;
     const currentSmall = current.control_rect.width <= 80 && current.control_rect.height <= 80;
     const nextSmall = next.control_rect.width <= 80 && next.control_rect.height <= 80;
     if (nextSmall && !currentSmall) return next;
@@ -1615,7 +1621,10 @@ def select_seller_portal_rating_filter_stars(page: Page, *, stars: Iterable[int]
   const safeText = (value, limit = 120) => text(value).slice(0, limit);
   const labelFor = (el) => text(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '');
   const cls = (el) => String((el && el.getAttribute && el.getAttribute('class')) || '');
+  const rowInputChecked = (row) => row ? Array.from(row.querySelectorAll('input[type="checkbox"]')).some((input) => input.checked === true || input.getAttribute('aria-checked') === 'true') : false;
+  const rowHasInputState = (row) => row ? Array.from(row.querySelectorAll('input[type="checkbox"]')).length > 0 : false;
   const isChecked = (control, row) => {
+    if (rowInputChecked(row)) return true;
     for (const node of [control, row].filter(Boolean)) {
       const aria = node.getAttribute && node.getAttribute('aria-checked');
       const dataState = node.getAttribute && (node.getAttribute('data-state') || node.getAttribute('data-checked') || node.getAttribute('checked'));
@@ -1624,6 +1633,7 @@ def select_seller_portal_rating_filter_stars(page: Page, *, stars: Iterable[int]
     return false;
   };
   const stateKnown = (control, row) => {
+    if (rowHasInputState(row)) return true;
     for (const node of [control, row].filter(Boolean)) {
       if (node.checked === true || node.checked === false) return true;
       if (node.getAttribute && (node.hasAttribute('aria-checked') || node.hasAttribute('data-state') || node.hasAttribute('data-checked') || node.hasAttribute('checked'))) return true;
@@ -1681,6 +1691,10 @@ def select_seller_portal_rating_filter_stars(page: Page, *, stars: Iterable[int]
   const dedupedByKey = new Map();
   const prefer = (current, next) => {
     if (!current) return next;
+    const currentInput = current.control && String(current.control.tagName || '').toUpperCase() === 'INPUT';
+    const nextInput = next.control && String(next.control.tagName || '').toUpperCase() === 'INPUT';
+    if (nextInput && !currentInput) return next;
+    if (currentInput && !nextInput) return current;
     const currentSmall = current.control_rect.width <= 80 && current.control_rect.height <= 80;
     const nextSmall = next.control_rect.width <= 80 && next.control_rect.height <= 80;
     if (nextSmall && !currentSmall) return next;
@@ -1713,7 +1727,7 @@ def select_seller_portal_rating_filter_stars(page: Page, *, stars: Iterable[int]
     if (known && checked === shouldCheck) return;
     if (!known && !shouldCheck) return;
     const target = item.control || item.row;
-    const clickTarget = target.closest && target.closest('label, button, [role="checkbox"], [role="button"]') || target;
+    const clickTarget = String(target.tagName || '').toUpperCase() === 'INPUT' ? target : (target.closest && target.closest('label, button, [role="checkbox"], [role="button"]') || target);
     clickTarget.click();
     item.row.setAttribute(marker, String(item.star));
     clicked.push({star: item.star, target_state: shouldCheck, state_known_before: known, text: safeText(item.text), selector_strategy: selectorStrategy});
