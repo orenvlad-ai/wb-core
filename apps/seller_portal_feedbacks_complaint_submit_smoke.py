@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -26,6 +27,7 @@ from apps.seller_portal_feedbacks_complaint_submit import (  # noqa: E402
     mark_denied_candidates,
     normalize_deny_feedback_ids,
     run_submit,
+    sanitize_submit_network_request,
     sanitize_submit_network_response,
     select_submit_candidate_ids,
 )
@@ -42,6 +44,7 @@ def main() -> None:
     _assert_explicit_submit_flag_required()
     _assert_submit_result_classification()
     _assert_network_sanitizer()
+    _assert_request_payload_sanitizer()
     _assert_journal_record_shape()
     print("seller_portal_feedbacks_complaint_submit_smoke: OK")
 
@@ -100,6 +103,8 @@ def _assert_denylist_and_selection_rules() -> None:
     deny = normalize_deny_feedback_ids([])
     if "GPe9vrq0kctlSfobrgq2" not in deny:
         raise AssertionError("historical uncertain feedback_id must be denied by default")
+    if "fdQpHhNXTosEkArTHAZF" not in deny:
+        raise AssertionError("previous successful empty-description feedback_id must be denied by default")
     selected = select_submit_candidate_ids(results, max_submit=1, include_review=True, deny_feedback_ids=deny)
     if selected != ["fresh-yes"]:
         raise AssertionError(f"denylist must force selection to skip old feedback_id: {selected}")
@@ -162,6 +167,17 @@ def _assert_submit_result_classification() -> None:
     network_error = {**click_only, "submit_network_capture": {"mutating_statuses": [500]}}
     if classify_submit_result(network_error) != SUBMIT_RESULT_CONFIRMED_NETWORK_ERROR:
         raise AssertionError("5xx mutating response must classify network failure")
+    missing_payload = {
+        **click_only,
+        "success_state": {"seen": True, "text": "Жалоба отправлена"},
+        "submit_network_capture": {
+            "mutating_statuses": [200],
+            "submit_payload_checked": True,
+            "submit_payload_has_description": False,
+        },
+    }
+    if classify_submit_result(missing_payload) != SUBMIT_RESULT_UNCONFIRMED_AFTER_CLICK:
+        raise AssertionError("success toast with captured missing description payload must not classify as success")
 
 
 def _assert_network_sanitizer() -> None:
@@ -186,6 +202,39 @@ def _assert_network_sanitizer() -> None:
         raise AssertionError(f"network sanitizer must retain safe body facts: {item}")
 
 
+def _assert_request_payload_sanitizer() -> None:
+    intended = "Просим проверить отзыв: тестовое описание."
+    request = _FakeRequestWithBody(
+        url="https://seller-reviews.wildberries.ru/ns/fa-seller-api/reviews-ext-seller-portal/api/v1/feedbacks/complaints?token=secret",
+        method="PATCH",
+        payload={
+            "feedbackId": "feedback-1",
+            "description": intended,
+            "cookie": "must-not-leak",
+            "nested": {"authorization": "must-not-leak"},
+        },
+    )
+    item = sanitize_submit_network_request(request, stage="submit", target_feedback_id="feedback-1", intended_description=intended)
+    raw = repr(item).lower()
+    if "must-not-leak" in raw or "token" in raw or "authorization" in raw or "cookie" in raw:
+        raise AssertionError(f"request sanitizer leaked forbidden data: {item}")
+    summary = item.get("safe_body_summary") or {}
+    if not summary.get("has_description") or not summary.get("intended_description_seen") or summary.get("description_length") != len(intended):
+        raise AssertionError(f"request sanitizer must prove non-empty description: {item}")
+    missing = sanitize_submit_network_request(
+        _FakeRequestWithBody(
+            url="https://seller-reviews.wildberries.ru/ns/fa-seller-api/reviews-ext-seller-portal/api/v1/feedbacks/complaints",
+            method="PATCH",
+            payload={"feedbackId": "feedback-1", "category": "Другое"},
+        ),
+        stage="submit",
+        target_feedback_id="feedback-1",
+        intended_description=intended,
+    )
+    if (missing.get("safe_body_summary") or {}).get("has_description"):
+        raise AssertionError(f"missing payload description must be explicit false: {missing}")
+
+
 def _assert_journal_record_shape() -> None:
     record = journal_record_for_submit(
         _api("feedback-1"),
@@ -195,6 +244,14 @@ def _assert_journal_record_shape() -> None:
             "draft_text": "Просим проверить отзыв: тестовое описание.",
             "blocker": "",
             "success_state": {"text": "Жалоба отправлена"},
+            "modal_description_value_before_submit": "Просим проверить отзыв: тестовое описание.",
+            "description_value_match": True,
+            "submit_network_capture": {
+                "submit_payload_checked": True,
+                "submit_payload_has_description": True,
+                "submit_payload_description_length": len("Просим проверить отзыв: тестовое описание."),
+                "submit_payload_description_snippet": "Просим проверить отзыв: тестовое описание.",
+            },
         },
         status="waiting_response",
         run_id="run-1",
@@ -203,6 +260,12 @@ def _assert_journal_record_shape() -> None:
         raise AssertionError(f"journal record must use waiting response and WB category: {record}")
     if record["submit_clicked_count"] != 0 or record["submit_result"] != "":
         raise AssertionError(f"journal record must carry submit instrumentation fields: {record}")
+    if (
+        record["modal_description_value_before_submit"] != "Просим проверить отзыв: тестовое описание."
+        or record["submit_payload_has_description"] is not True
+        or record["description_persisted"] != "unknown"
+    ):
+        raise AssertionError(f"journal record must carry description persistence diagnostics: {record}")
     aggregate = build_submit_aggregate(
         [
             {
@@ -258,6 +321,14 @@ def _ai(feedback_id: str, fit: str) -> dict[str, str]:
 class _FakeRequest:
     def __init__(self, method: str) -> None:
         self.method = method
+
+
+class _FakeRequestWithBody:
+    def __init__(self, *, url: str, method: str, payload: dict[str, object]) -> None:
+        self.url = url
+        self.method = method
+        self.headers = {"content-type": "application/json"}
+        self.post_data = json.dumps(payload, ensure_ascii=False)
 
 
 class _FakeResponse:

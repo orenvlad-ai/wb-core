@@ -82,6 +82,7 @@ SELLER_PORTAL_WRITE_ACTIONS_ALLOWED = False
 DEFAULT_RUNTIME_DIR = Path(os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR", "/opt/wb-core-runtime/state"))
 TEXT_WS_RE = re.compile(r"\s+")
 DRAFT_LIMIT = 500
+DESCRIPTION_FIELD_MARKER_ATTR = "data-wb-core-description-field"
 
 
 @dataclass(frozen=True)
@@ -649,6 +650,7 @@ def draft_one_candidate_modal(
         result["modal_closed"] = not is_modal_visible(page)
         return result
     _wait_settle(page, 700)
+    result["description_field_ready_after_category"] = wait_for_description_field_ready(page, timeout_ms=min(config.timeout_ms, 6000))
     after_category_modal = extract_complaint_modal_state(page)
     result["description_field_found"] = bool(after_category_modal.get("description_field_found") or result["description_field_found"])
     result["submit_button_label"] = str(after_category_modal.get("submit_button_label") or result["submit_button_label"])
@@ -658,6 +660,10 @@ def draft_one_candidate_modal(
     fill_result = fill_description_field(page, draft_text)
     result["description_fill"] = fill_result
     result["description_field_found"] = bool(fill_result.get("ok") or result["description_field_found"])
+    result["modal_description_value_after_fill"] = str(fill_result.get("value_after_fill") or "")
+    result["modal_description_value_after_blur"] = str(fill_result.get("value_after_blur") or "")
+    result["modal_description_value_before_submit"] = str(fill_result.get("value_after_blur") or fill_result.get("value_after_fill") or "")
+    result["description_value_match"] = bool(fill_result.get("value_match"))
     if not fill_result.get("ok"):
         result["blocker"] = str(fill_result.get("reason") or "description field unavailable")
         result["close_method"] = close_modal_without_submit(page)
@@ -681,6 +687,7 @@ def draft_one_candidate_modal(
         result["modal_opened"]
         and result["selected_category"]
         and result["description_field_found"]
+        and result["description_value_match"]
         and result["modal_closed"]
         and not result["submit_clicked"]
         and not result["durable_submitted_state_after_close"]
@@ -871,16 +878,121 @@ def click_complaint_category(page: Page, category: str) -> dict[str, Any]:
 
 
 def fill_description_field(page: Page, draft_text: str) -> dict[str, Any]:
+    intended = str(draft_text or "")
+    if not intended.strip():
+        return {"ok": False, "reason": "description text is empty", "value_match": False}
+    ready = wait_for_description_field_ready(page, timeout_ms=5000)
+    if not ready.get("ok"):
+        return {**ready, "ok": False, "reason": str(ready.get("reason") or "description field not found"), "value_match": False}
+
+    result: dict[str, Any] = {
+        "ok": False,
+        "field_found": True,
+        "field_ready": ready,
+        "field_locator_strategy": str(ready.get("field_locator_strategy") or ""),
+        "tag": str(ready.get("tag") or ""),
+        "label": str(ready.get("label") or ""),
+        "placeholder": str(ready.get("placeholder") or ""),
+        "editable": bool(ready.get("editable")),
+        "visible": bool(ready.get("visible")),
+        "enabled": bool(ready.get("enabled")),
+        "intended_length": len(intended),
+        "value_after_fill": "",
+        "value_after_blur": "",
+        "value_match": False,
+        "attempts": [],
+    }
+    marker_selector = f'[{DESCRIPTION_FIELD_MARKER_ATTR}="1"]'
+    try:
+        field = page.locator(marker_selector).first
+        field.click(timeout=2500)
+        field.fill("", timeout=2500)
+        field.fill(intended, timeout=4500)
+        result["attempts"].append({"method": "playwright_locator_fill", "ok": True})
+    except PlaywrightError as exc:
+        result["attempts"].append({"method": "playwright_locator_fill", "ok": False, "reason": safe_text(str(exc), 300)})
+        fallback = _native_set_description_field_value(page, intended)
+        result["attempts"].append({"method": "native_value_setter", **fallback})
+
+    after_fill = inspect_description_field(page)
+    result["value_after_fill"] = str(after_fill.get("value") or "")
+    try:
+        page.locator(marker_selector).first.evaluate("(el) => { el.blur(); el.dispatchEvent(new Event('change', {bubbles: true})); }", timeout=1500)
+        page.wait_for_timeout(150)
+        result["attempts"].append({"method": "blur_change", "ok": True})
+    except PlaywrightError as exc:
+        result["attempts"].append({"method": "blur_change", "ok": False, "reason": safe_text(str(exc), 220)})
+
+    after_blur = inspect_description_field(page)
+    result["value_after_blur"] = str(after_blur.get("value") or "")
+    result["value_match"] = description_values_match(result["value_after_blur"], intended)
+
+    if not result["value_match"]:
+        fallback = _native_set_description_field_value(page, intended)
+        result["attempts"].append({"method": "native_value_setter_retry", **fallback})
+        retry_after_fill = inspect_description_field(page)
+        result["value_after_fill"] = str(retry_after_fill.get("value") or "")
+        try:
+            page.locator(marker_selector).first.evaluate("(el) => { el.blur(); el.dispatchEvent(new Event('change', {bubbles: true})); }", timeout=1500)
+            page.wait_for_timeout(150)
+        except PlaywrightError:
+            pass
+        retry_after_blur = inspect_description_field(page)
+        result["value_after_blur"] = str(retry_after_blur.get("value") or "")
+        result["value_match"] = description_values_match(result["value_after_blur"], intended)
+
+    result["value_length_after_fill"] = len(result["value_after_fill"])
+    result["value_length_after_blur"] = len(result["value_after_blur"])
+    result["ok"] = bool(result["field_found"] and result["editable"] and result["value_match"])
+    if not result["ok"]:
+        result["reason"] = "description field value mismatch after blur" if result["field_found"] else "description field not found"
+    return result
+
+
+def wait_for_description_field_ready(page: Page, *, timeout_ms: int = 5000) -> dict[str, Any]:
+    deadline = time.monotonic() + max(0.2, timeout_ms / 1000)
+    last_state: dict[str, Any] = {"ok": False, "reason": "description field not found"}
+    while time.monotonic() < deadline:
+        last_state = inspect_description_field(page)
+        if last_state.get("ok"):
+            return last_state
+        time.sleep(0.2)
+    return last_state
+
+
+def inspect_description_field(page: Page) -> dict[str, Any]:
     try:
         return page.evaluate(
             r"""
-(draftText) => {
+() => {
   const visible = (el) => {
     const style = window.getComputedStyle(el);
     const rect = el.getBoundingClientRect();
     return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
   };
-  const labelFor = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+  const text = (value, limit = 220) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit);
+  const labelFor = (el) => {
+    const parts = [
+      el.getAttribute('aria-label'),
+      el.getAttribute('placeholder'),
+      el.getAttribute('title'),
+      el.getAttribute('name'),
+      el.getAttribute('data-testid'),
+    ];
+    const id = el.getAttribute('id');
+    if (id) {
+      const explicit = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+      if (explicit) parts.push(explicit.innerText || explicit.textContent || '');
+    }
+    const label = el.closest('label');
+    if (label) parts.push(label.innerText || label.textContent || '');
+    let parent = el.parentElement;
+    for (let depth = 0; parent && depth < 4; depth += 1, parent = parent.parentElement) {
+      const parentText = text(parent.innerText || parent.textContent || '', 180);
+      if (/опишите ситуацию|опис|коммент|почему|подроб|причин/i.test(parentText)) parts.push(parentText);
+    }
+    return text(parts.filter(Boolean).join(' | '), 360);
+  };
   const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="modal"], [class*="Modal"], [class*="popup"], [class*="Popup"]')).filter(visible);
   const root = dialogs[dialogs.length - 1] || document.body;
   const controls = Array.from(root.querySelectorAll('textarea, input, [contenteditable="true"]')).filter(visible)
@@ -888,31 +1000,128 @@ def fill_description_field(page: Page, draft_text: str) -> dict[str, Any]:
       const type = String(el.getAttribute('type') || '').toLowerCase();
       return !['radio', 'checkbox', 'button', 'submit', 'hidden'].includes(type);
     })
-    .map((el) => ({el, label: labelFor(el)}));
-  const target = (
-    controls.find((item) => /опис|коммент|почему|подроб|причин/i.test(item.label)) ||
-    controls.find((item) => item.el.tagName === 'TEXTAREA') ||
-    controls[0]
-  );
-  if (!target) return {ok: false, reason: 'description field not found'};
+    .map((el, index) => {
+      const label = labelFor(el);
+      const tag = el.tagName.toLowerCase();
+      const type = String(el.getAttribute('type') || '').toLowerCase();
+      const disabled = Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true' || el.getAttribute('disabled') !== null);
+      const readonly = Boolean(el.readOnly || el.getAttribute('readonly') !== null);
+      let score = 0;
+      if (/опишите ситуацию/i.test(label)) score += 120;
+      if (/опис|коммент|почему|подроб|причин/i.test(label)) score += 80;
+      if (tag === 'textarea') score += 60;
+      if (el.isContentEditable) score += 45;
+      if (type === 'text' || !type) score += 25;
+      if (disabled || readonly) score -= 300;
+      return {el, index, label, tag, type, disabled, readonly, score};
+    })
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+  const target = controls[0];
+  root.querySelectorAll('[' + '%MARKER%' + ']').forEach((el) => el.removeAttribute('%MARKER%'));
+  if (!target) return {ok: false, reason: 'description field not found', controls_considered: 0};
   const el = target.el;
-  if (el.isContentEditable) {
-    el.focus();
-    el.textContent = draftText;
-  } else {
-    el.focus();
-    el.value = draftText;
-  }
-  el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: draftText}));
-  el.dispatchEvent(new Event('change', {bubbles: true}));
+  el.setAttribute('%MARKER%', '1');
   const rect = el.getBoundingClientRect();
-  return {ok: true, tag: el.tagName.toLowerCase(), label: target.label, value_length: draftText.length, rect: {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)}};
+  const value = el.isContentEditable ? (el.innerText || el.textContent || '') : (el.value || '');
+  const editable = Boolean(!target.disabled && !target.readonly);
+  return {
+    ok: editable,
+    reason: editable ? '' : 'description field is disabled or readonly',
+    field_locator_strategy: /опишите ситуацию/i.test(target.label) ? 'label_or_placeholder_opishite_situaciyu' : (target.tag === 'textarea' ? 'visible_textarea_fallback' : 'visible_textbox_fallback'),
+    tag: target.tag,
+    input_type: target.type,
+    label: target.label,
+    placeholder: text(el.getAttribute('placeholder') || '', 180),
+    visible: true,
+    enabled: !target.disabled,
+    editable,
+    value,
+    value_length: value.length,
+    controls_considered: controls.length,
+    rect: {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)}
+  };
 }
-            """,
-            draft_text,
+            """.replace("%MARKER%", DESCRIPTION_FIELD_MARKER_ATTR),
         )
     except PlaywrightError as exc:
         return {"ok": False, "reason": safe_text(str(exc), 300)}
+
+
+def _native_set_description_field_value(page: Page, draft_text: str) -> dict[str, Any]:
+    try:
+        return page.evaluate(
+            r"""
+({marker, draftText}) => {
+  const el = document.querySelector('[' + marker + '="1"]');
+  if (!el) return {ok: false, reason: 'marked description field not found'};
+  const setNativeValue = (node, value) => {
+    if (node.isContentEditable) {
+      node.focus();
+      node.textContent = '';
+      node.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'deleteContentBackward', data: null}));
+      node.textContent = value;
+      return;
+    }
+    const proto = node.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (descriptor && descriptor.set) {
+      descriptor.set.call(node, '');
+      node.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'deleteContentBackward', data: null}));
+      descriptor.set.call(node, value);
+    } else {
+      node.value = value;
+    }
+  };
+  el.focus();
+  setNativeValue(el, String(draftText || ''));
+  el.dispatchEvent(new InputEvent('beforeinput', {bubbles: true, inputType: 'insertText', data: String(draftText || '')}));
+  el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: String(draftText || '')}));
+  el.dispatchEvent(new KeyboardEvent('keyup', {bubbles: true, key: 'a'}));
+  el.dispatchEvent(new Event('change', {bubbles: true}));
+  el.blur();
+  const value = el.isContentEditable ? (el.innerText || el.textContent || '') : (el.value || '');
+  return {ok: value === String(draftText || ''), value_length: value.length};
+}
+            """,
+            {"marker": DESCRIPTION_FIELD_MARKER_ATTR, "draftText": draft_text},
+        )
+    except PlaywrightError as exc:
+        return {"ok": False, "reason": safe_text(str(exc), 300)}
+
+
+def description_values_match(actual: Any, intended: Any) -> bool:
+    actual_text = str(actual or "").strip()
+    intended_text = str(intended or "").strip()
+    if not actual_text or not intended_text:
+        return False
+    if actual_text == intended_text:
+        return True
+    return normalize_text(actual_text) == normalize_text(intended_text)
+
+
+def description_is_ready_for_submit(fill_result: Mapping[str, Any], intended_text: str) -> bool:
+    return bool(
+        fill_result.get("ok")
+        and fill_result.get("value_match")
+        and description_values_match(fill_result.get("value_after_blur") or fill_result.get("value_after_fill"), intended_text)
+    )
+
+
+def description_persistence_result(intended_text: Any, wb_description_text: Any, *, observed: bool = True) -> dict[str, Any]:
+    intended = str(intended_text or "").strip()
+    observed_text = str(wb_description_text or "").strip()
+    if not observed:
+        persisted: bool | str = "unknown"
+    elif not intended:
+        persisted = "unknown"
+    else:
+        persisted = description_values_match(observed_text, intended) or normalize_text(intended) in normalize_text(observed_text)
+    return {
+        "description_persisted": persisted,
+        "post_submit_wb_description_text": safe_text(observed_text, 500),
+        "intended_description_length": len(intended),
+        "wb_description_length": len(observed_text),
+    }
 
 
 def close_draft_modal_without_submit(page: Page) -> dict[str, Any]:
@@ -1067,7 +1276,12 @@ def empty_modal_candidate_state() -> dict[str, Any]:
         "selected_category": "",
         "category_click": {},
         "description_field_found": False,
+        "description_field_ready_after_category": {},
         "description_fill": {},
+        "modal_description_value_after_fill": "",
+        "modal_description_value_after_blur": "",
+        "modal_description_value_before_submit": "",
+        "description_value_match": False,
         "draft_text": "",
         "draft_prepared": False,
         "submit_button_label": "",
@@ -1243,6 +1457,7 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
                 f"  API: `{api.get('created_at')}` rating `{api.get('rating')}` nm `{api.get('nm_id')}` article `{api.get('supplier_article')}` text `{api.get('review_text')}`",
                 f"  AI: `{ai.get('category_label')}` / `{ai.get('confidence_label')}` reason `{ai.get('reason')}` evidence `{ai.get('evidence')}`",
                 f"  Draft: category `{modal.get('selected_category')}` submit `{modal.get('submit_button_label')}` clicked `{modal.get('submit_clicked')}` text `{modal.get('draft_text')}`",
+                f"  Description: match `{modal.get('description_value_match')}` after-fill length `{len(str(modal.get('modal_description_value_after_fill') or ''))}` after-blur length `{len(str(modal.get('modal_description_value_after_blur') or ''))}`",
                 f"  Skip/blocker: `{candidate.get('skip_reason') or modal.get('blocker') or ''}`",
             ]
         )

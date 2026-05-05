@@ -26,6 +26,7 @@ from playwright.sync_api import Page, Response, sync_playwright  # noqa: E402
 
 from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     apply_article_search_for_candidate,
+    description_persistence_result,
     find_visible_actionable_row,
 )
 from apps.seller_portal_feedbacks_complaints_scout import (  # noqa: E402
@@ -562,12 +563,25 @@ def apply_journal_confirmation_result(
         status_sync_run_id=run_id,
         last_error=reason if status == "error" else "",
     )
+    record = report.get("journal_before") if isinstance(report.get("journal_before"), Mapping) else {}
+    description_metadata = confirmation_description_metadata(record, report.get("confirmation") or {})
+    if updated and description_metadata:
+        updated = journal.update_metadata(config.feedback_id, description_metadata) or updated
     report["journal_update"] = {
         "applied": bool(updated),
         "status": status,
         "status_label": COMPLAINT_STATUS_LABELS.get(status, COMPLAINT_STATUS_LABELS["error"]),
         "last_error": reason if status == "error" else "",
+        "description_persisted": description_metadata.get("description_persisted", "unknown"),
     }
+
+
+def confirmation_description_metadata(record: Mapping[str, Any], confirmation: Mapping[str, Any]) -> dict[str, Any]:
+    chosen = choose_confirmation_match(confirmation)
+    row_summary = chosen.get("row_summary") if isinstance(chosen, Mapping) and isinstance(chosen.get("row_summary"), Mapping) else {}
+    if row_summary:
+        return description_persistence_result(record.get("complaint_text") or "", row_summary.get("complaint_description") or "", observed=True)
+    return description_persistence_result(record.get("complaint_text") or "", "", observed=False)
 
 
 def replay_config_for_record(config: ConfirmationConfig, record: Mapping[str, Any]) -> ReplayConfig:
