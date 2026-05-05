@@ -1291,22 +1291,63 @@ def click_seller_portal_rating_stars_by_mouse(page: Page, *, popup_summary: Mapp
     requested = sorted({int(star) for star in stars if 1 <= int(star) <= 5})
     rows = popup_summary.get("rows") if isinstance(popup_summary.get("rows"), list) else []
     clicks: list[dict[str, Any]] = []
+    requested_set = set(requested)
     for star in requested:
         row = next((item for item in rows if isinstance(item, Mapping) and int(item.get("star") or 0) == star), None)
         if not row:
             clicks.append({"star": star, "ok": False, "reason": "star row not found for mouse fallback"})
             continue
-        rect = row.get("control_rect") if isinstance(row.get("control_rect"), Mapping) else row.get("row_rect")
-        if not isinstance(rect, Mapping):
+        control_rect = row.get("control_rect") if isinstance(row.get("control_rect"), Mapping) else {}
+        row_rect = row.get("row_rect") if isinstance(row.get("row_rect"), Mapping) else {}
+        if not control_rect and not row_rect:
             clicks.append({"star": star, "ok": False, "reason": "star row has no rect for mouse fallback"})
             continue
-        x = float(rect.get("x") or 0) + max(4.0, min(float(rect.get("width") or 0) / 2.0, 16.0))
-        y = float(rect.get("y") or 0) + max(4.0, min(float(rect.get("height") or 0) / 2.0, 16.0))
-        try:
-            page.mouse.click(x, y)
-            clicks.append({"star": star, "ok": True, "x": round(x), "y": round(y), "strategy": "playwright_mouse_click_control_center"})
-        except PlaywrightError as exc:
-            clicks.append({"star": star, "ok": False, "reason": safe_text(str(exc), 240), "x": round(x), "y": round(y)})
+        points: list[tuple[str, float, float]] = []
+        if control_rect:
+            cx = float(control_rect.get("x") or 0)
+            cy = float(control_rect.get("y") or 0)
+            cw = float(control_rect.get("width") or 0)
+            ch = float(control_rect.get("height") or 0)
+            points.append(("control_center", cx + max(4.0, min(cw / 2.0, 16.0)), cy + max(4.0, min(ch / 2.0, 16.0))))
+            points.append(("control_right_visible_center", cx + max(8.0, min(cw + 8.0, 34.0)), cy + max(4.0, min(ch / 2.0, 16.0))))
+        if row_rect:
+            rx = float(row_rect.get("x") or 0)
+            ry = float(row_rect.get("y") or 0)
+            rh = float(row_rect.get("height") or 0)
+            y = ry + max(8.0, min(rh / 2.0, 24.0))
+            # WB's custom checkbox row reports a broad transparent hitbox;
+            # the visible square is offset to the right from row/control x.
+            points.extend(
+                [
+                    ("row_left_plus_30", rx + 30.0, y),
+                    ("row_left_plus_42", rx + 42.0, y),
+                    ("row_left_plus_18", rx + 18.0, y),
+                ]
+            )
+        seen: set[tuple[int, int]] = set()
+        for strategy, x, y in points:
+            key = (round(x), round(y))
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                page.mouse.click(x, y)
+                _wait_settle(page, 180)
+                state = inspect_seller_portal_rating_filter_popup(page)
+                selected_after = {int(value) for value in state.get("selected_star_values") or [] if str(value).isdigit()}
+                click_record = {
+                    "star": star,
+                    "ok": True,
+                    "x": round(x),
+                    "y": round(y),
+                    "strategy": f"playwright_mouse_click_{strategy}",
+                    "selected_star_values_after": sorted(selected_after),
+                }
+                clicks.append(click_record)
+                if selected_after == requested_set or star in selected_after:
+                    break
+            except PlaywrightError as exc:
+                clicks.append({"star": star, "ok": False, "reason": safe_text(str(exc), 240), "x": round(x), "y": round(y), "strategy": f"playwright_mouse_click_{strategy}"})
     return {"ok": any(item.get("ok") for item in clicks), "clicks": clicks}
 
 

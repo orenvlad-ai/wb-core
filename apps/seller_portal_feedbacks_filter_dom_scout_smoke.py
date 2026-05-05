@@ -16,6 +16,7 @@ from playwright.sync_api import sync_playwright  # noqa: E402
 from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     activate_seller_portal_rating_filter_section,
     click_filter_apply_button,
+    click_seller_portal_rating_stars_by_mouse,
     inspect_seller_portal_rating_filter_popup,
     open_seller_portal_filters_popup,
     select_seller_portal_rating_filter_stars,
@@ -30,6 +31,7 @@ from apps.seller_portal_feedbacks_filter_dom_scout import (  # noqa: E402
 
 def main() -> None:
     _assert_custom_star_popup_helpers()
+    _assert_mouse_fallback_handles_trusted_click_required()
     _assert_report_shape()
     print("seller_portal_feedbacks_filter_dom_scout_smoke: OK")
 
@@ -94,6 +96,56 @@ def _assert_custom_star_popup_helpers() -> None:
             applied = click_filter_apply_button(page, context_hint="filters")
             if not applied.get("ok") or page.locator("body").get_attribute("data-applied") != "1":
                 raise AssertionError(f"apply button must be parsed and clicked: {applied}")
+        finally:
+            browser.close()
+
+
+def _assert_mouse_fallback_handles_trusted_click_required() -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            page.set_content(
+                """
+                <button id="filtersButton">Фильтры</button>
+                <div id="filterPopup" role="dialog" style="display:none; width:420px; padding:16px">
+                  <aside>
+                    <button id="ratingSection">Оценка отзыва</button>
+                  </aside>
+                  <section id="ratingPanel">
+                    <div class="star-row" style="height:40px"><span role="checkbox" aria-checked="false" class="wb-checkbox" style="display:inline-block;width:16px;height:16px"></span><span>5★</span></div>
+                    <div class="star-row" style="height:40px"><span role="checkbox" aria-checked="false" class="wb-checkbox" style="display:inline-block;width:16px;height:16px"></span><span>4★</span></div>
+                    <div class="star-row" style="height:40px"><span role="checkbox" aria-checked="false" class="wb-checkbox" style="display:inline-block;width:16px;height:16px"></span><span>3★</span></div>
+                    <div class="star-row" style="height:40px"><span role="checkbox" aria-checked="false" class="wb-checkbox" style="display:inline-block;width:16px;height:16px"></span><span>2★</span></div>
+                    <div class="star-row" style="height:40px"><span role="checkbox" aria-checked="false" class="wb-checkbox" style="display:inline-block;width:16px;height:16px"></span><span>1★</span></div>
+                  </section>
+                  <button>Применить</button>
+                </div>
+                <script>
+                  document.querySelector('#filtersButton').addEventListener('click', () => {
+                    document.querySelector('#filterPopup').style.display = 'block';
+                  });
+                  document.querySelector('#filterPopup').addEventListener('click', (event) => {
+                    if (!event.isTrusted) return;
+                    const row = event.target.closest('.star-row');
+                    if (!row) return;
+                    const checkbox = row.querySelector('[role="checkbox"]');
+                    checkbox.setAttribute('aria-checked', checkbox.getAttribute('aria-checked') === 'true' ? 'false' : 'true');
+                  });
+                </script>
+                """
+            )
+            opened = open_seller_portal_filters_popup(page)
+            if not opened.get("ok"):
+                raise AssertionError(f"filters popup must open: {opened}")
+            before = inspect_seller_portal_rating_filter_popup(page)
+            selected_by_dom_click = select_seller_portal_rating_filter_stars(page, stars=[1])
+            if selected_by_dom_click.get("selected_star_values_after"):
+                raise AssertionError(f"fixture must require trusted mouse click: {selected_by_dom_click}")
+            fallback = click_seller_portal_rating_stars_by_mouse(page, popup_summary=before, stars=[1])
+            after = inspect_seller_portal_rating_filter_popup(page)
+            if not fallback.get("ok") or after.get("selected_star_values") != [1]:
+                raise AssertionError(f"mouse fallback must select 1-star: fallback={fallback} after={after}")
         finally:
             browser.close()
 
