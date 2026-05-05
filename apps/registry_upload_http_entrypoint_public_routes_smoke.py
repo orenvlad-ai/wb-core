@@ -55,8 +55,12 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/feedbacks/complaints",
         "/v1/sheet-vitrina-v1/feedbacks/complaints/sync-status",
         "/v1/sheet-vitrina-v1/feedbacks/complaints/sync-status/job",
+        "/v1/sheet-vitrina-v1/feedbacks/complaints/submit-selected",
+        "/v1/sheet-vitrina-v1/feedbacks/complaints/submit-job",
         "/v1/sheet-vitrina-v1/supply/factory-order/",
         "/v1/sheet-vitrina-v1/supply/wb-regional/",
+        "/login",
+        "/logout",
     }
     missing = sorted(required_paths - route_paths)
     if missing:
@@ -80,6 +84,12 @@ def main() -> None:
         raise AssertionError("rendered nginx block must include feedbacks complaints sync exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/feedbacks/complaints/sync-status/job {") != 1:
         raise AssertionError("rendered nginx block must include feedbacks complaints sync job exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/feedbacks/complaints/submit-selected {") != 1:
+        raise AssertionError("rendered nginx block must include feedbacks complaints submit-selected exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/feedbacks/complaints/submit-job {") != 1:
+        raise AssertionError("rendered nginx block must include feedbacks complaints submit job exactly once")
+    if rendered.count("location = /login {") != 1 or rendered.count("location = /logout {") != 1:
+        raise AssertionError("rendered nginx block must include WebCore auth routes exactly once")
     if rendered.count("location ^~ /v1/sheet-vitrina-v1/supply/factory-order/ {") != 1:
         raise AssertionError("rendered nginx block must include factory-order prefix exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start {") != 1:

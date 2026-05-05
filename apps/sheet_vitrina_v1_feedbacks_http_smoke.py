@@ -19,6 +19,8 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH,
     DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
+    DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH,
+    DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH,
     DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH,
@@ -311,6 +313,8 @@ def main() -> None:
                 'data-feedbacks-load',
                 'data-feedbacks-ai-analyze',
                 'data-feedbacks-export',
+                'data-feedbacks-submit-selected',
+                'Лог подачи жалоб',
                 'data-feedbacks-model',
                 '["review_tags", "Теги"]',
                 'data-feedbacks-subtab="prompt"',
@@ -324,6 +328,8 @@ def main() -> None:
                 f'"feedbacks_complaints_path": "{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH}"',
                 f'"feedbacks_complaints_sync_status_path": "{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH}"',
                 f'"feedbacks_complaints_sync_status_job_path": "{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH}"',
+                f'"feedbacks_complaints_submit_selected_path": "{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH}"',
+                f'"feedbacks_complaints_submit_job_path": "{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH}"',
             ):
                 if expected not in ui_html:
                     raise AssertionError(f"feedbacks UI must contain {expected!r}")

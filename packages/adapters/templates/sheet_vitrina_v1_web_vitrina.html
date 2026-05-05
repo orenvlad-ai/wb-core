@@ -496,6 +496,82 @@
       overflow-wrap: anywhere;
     }
 
+    .feedbacks-select-cell,
+    .feedbacks-complaint-status-cell {
+      text-align: center;
+      white-space: normal;
+    }
+
+    .feedbacks-select-cell input {
+      width: 16px;
+      height: 16px;
+      margin: 0;
+    }
+
+    .feedbacks-complaint-status {
+      display: inline-flex;
+      max-width: 100%;
+      border: 1px solid #d8e0ea;
+      border-radius: 6px;
+      padding: 2px 6px;
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 1.3;
+      background: #f7fafc;
+      color: #334155;
+      overflow-wrap: anywhere;
+    }
+
+    .feedbacks-complaint-status.status-error {
+      border-color: #fecaca;
+      background: #fff1f2;
+      color: #b42318;
+    }
+
+    .feedbacks-complaint-status.status-waiting_response {
+      border-color: #fde68a;
+      background: #fffbeb;
+      color: #92400e;
+    }
+
+    .feedbacks-complaint-status.status-satisfied {
+      border-color: #bbf7d0;
+      background: #f0fdf4;
+      color: #166534;
+    }
+
+    .feedbacks-complaint-status.status-rejected {
+      border-color: #dbe4f0;
+      background: #f8fafc;
+      color: #475569;
+    }
+
+    .feedbacks-submit-log {
+      margin-top: 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #ffffff;
+      overflow: hidden;
+    }
+
+    .feedbacks-submit-log-title {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+      font-weight: 800;
+      color: var(--text);
+    }
+
+    .feedbacks-submit-log-body {
+      max-height: 220px;
+      overflow: auto;
+      padding: 8px 10px;
+      font-size: 12px;
+      line-height: 1.45;
+      color: #334155;
+      white-space: pre-wrap;
+    }
+
     .feedbacks-ai-cell {
       white-space: normal;
     }
@@ -679,6 +755,18 @@
 
     .button.secondary:hover {
       background: #e9eef5;
+      transform: translateY(-1px);
+    }
+
+    .button.danger {
+      border-color: #b42318;
+      background: #b42318;
+      color: #ffffff;
+    }
+
+    .button.danger:hover {
+      border-color: #971d13;
+      background: #971d13;
       transform: translateY(-1px);
     }
 
@@ -1866,10 +1954,11 @@
     <nav class="unified-tab-strip" role="tablist" aria-label="Разделы sheet_vitrina_v1">
       <button class="unified-tab-button is-active" type="button" data-unified-tab-button="vitrina" role="tab" aria-selected="true">Витрина 2</button>
       <button class="unified-tab-button" type="button" data-unified-tab-button="factory-order" role="tab" aria-selected="false">Поставки</button>
-      <button class="unified-tab-button" type="button" data-unified-tab-button="reports" role="tab" aria-selected="false">Отчеты</button>
-      <button class="unified-tab-button" type="button" data-unified-tab-button="feedbacks" role="tab" aria-selected="false">Отзывы</button>
-      <button class="unified-tab-button" type="button" data-unified-tab-button="research" role="tab" aria-selected="false">Исследования</button>
-    </nav>
+	      <button class="unified-tab-button" type="button" data-unified-tab-button="reports" role="tab" aria-selected="false">Отчеты</button>
+	      <button class="unified-tab-button" type="button" data-unified-tab-button="feedbacks" role="tab" aria-selected="false">Отзывы</button>
+	      <button class="unified-tab-button" type="button" data-unified-tab-button="research" role="tab" aria-selected="false">Исследования</button>
+	      <a class="unified-tab-button" data-logout-link href="/logout">Выйти</a>
+	    </nav>
 
     <section class="unified-tab-panel" data-unified-tab-panel="vitrina">
     <section class="top-panel" data-top-panel>
@@ -2147,7 +2236,9 @@
 	            <button class="button primary" type="button" data-feedbacks-load>Загрузить отзывы</button>
 	            <button class="button secondary" type="button" data-feedbacks-ai-analyze disabled>AI-разбор отзывов</button>
 	            <button class="button secondary" type="button" data-feedbacks-export disabled>Скачать Excel</button>
+	            <button class="button danger" type="button" data-feedbacks-submit-selected disabled>Подать выбранные жалобы</button>
 	            <button class="button ghost" type="button" data-feedbacks-reset-widths>Сбросить ширины</button>
+	            <span class="research-result-note" data-feedbacks-submit-selected-count>Выбрано: 0</span>
 	            <span class="research-result-note" data-feedbacks-source-note>WB API / feedbacks</span>
 	          </div>
 	        </div>
@@ -2157,6 +2248,10 @@
 	        <div data-feedbacks-result>
 	          <p class="research-result-note">Выберите период и нажмите «Загрузить отзывы».</p>
 	        </div>
+	        <section class="feedbacks-submit-log" data-feedbacks-submit-log>
+	          <div class="feedbacks-submit-log-title">Лог подачи жалоб</div>
+	          <div class="feedbacks-submit-log-body" data-feedbacks-submit-log-body>Нет активного запуска.</div>
+	        </section>
 	        </section>
 
 	        <section class="feedbacks-subpanel" data-feedbacks-subpanel="prompt" hidden>
@@ -2397,6 +2492,9 @@
     const feedbacksLoadButton = document.querySelector("[data-feedbacks-load]");
     const feedbacksAiAnalyzeButton = document.querySelector("[data-feedbacks-ai-analyze]");
     const feedbacksExportButton = document.querySelector("[data-feedbacks-export]");
+    const feedbacksSubmitSelectedButton = document.querySelector("[data-feedbacks-submit-selected]");
+    const feedbacksSubmitSelectedCountNode = document.querySelector("[data-feedbacks-submit-selected-count]");
+    const feedbacksSubmitLogBodyNode = document.querySelector("[data-feedbacks-submit-log-body]");
     const feedbacksResetWidthsButton = document.querySelector("[data-feedbacks-reset-widths]");
     const feedbacksSourceNoteNode = document.querySelector("[data-feedbacks-source-note]");
     const feedbacksErrorNode = document.querySelector("[data-feedbacks-error]");
@@ -2437,8 +2535,10 @@
     const FEEDBACKS_COLUMN_WIDTHS_STORAGE_KEY = "wb_core_feedbacks_column_widths_v1";
     const FEEDBACKS_COMPLAINTS_VISIBLE_COLUMNS_STORAGE_KEY = "wb_core_feedbacks_complaints_visible_columns_v1";
     const FEEDBACKS_MIN_COLUMN_WIDTH = 72;
-    const FEEDBACKS_DEFAULT_COLUMN_WIDTHS = {
-      created_date: 112,
+	    const FEEDBACKS_DEFAULT_COLUMN_WIDTHS = {
+	      select: 54,
+	      complaint_status: 120,
+	      created_date: 112,
       product_valuation: 86,
       ai_complaint_fit: 156,
       ai_category: 180,
@@ -2608,12 +2708,24 @@
         promptDraft: "",
         savedPrompt: "",
         starterPrompt: "",
-        aiResults: {},
-        aiErrors: {},
-        aiProgress: null,
-        aiStopRequested: false,
-        aiFilter: "all",
-        requestSequence: 0,
+	        aiResults: {},
+	        aiErrors: {},
+	        aiProgress: null,
+	        aiStopRequested: false,
+	        aiFilter: "all",
+	        selectedFeedbackIds: new Set(),
+	        submitJob: {
+	          running: false,
+	          runId: "",
+	          status: "",
+	          events: [],
+	          skipped: [],
+	          submittedFeedbackIds: [],
+	          summary: null,
+	          error: "",
+	          pollSequence: 0
+	        },
+	        requestSequence: 0,
         dateFrom: "",
         dateTo: "",
         draftDateFrom: "",
@@ -2704,9 +2816,12 @@
     if (feedbacksAiAnalyzeButton) {
       feedbacksAiAnalyzeButton.addEventListener("click", analyzeFeedbacksWithAi);
     }
-    if (feedbacksExportButton) {
-      feedbacksExportButton.addEventListener("click", downloadFeedbacksExcel);
-    }
+	    if (feedbacksExportButton) {
+	      feedbacksExportButton.addEventListener("click", downloadFeedbacksExcel);
+	    }
+	    if (feedbacksSubmitSelectedButton) {
+	      feedbacksSubmitSelectedButton.addEventListener("click", submitSelectedFeedbackComplaints);
+	    }
     if (feedbacksResetWidthsButton) {
       feedbacksResetWidthsButton.addEventListener("click", resetFeedbacksColumnWidths);
     }
@@ -5076,15 +5191,16 @@
           : ("AI-разбор отзывов" + (queueCount ? " (" + queueCount + ")" : ""));
         feedbacksAiAnalyzeButton.title = "Отправляет по одному отзыву за запрос; максимум " + FEEDBACKS_AI_MAX_QUEUE_ROWS + " отзывов в очереди";
       }
-      if (feedbacksExportButton) {
-        feedbacksExportButton.disabled = state.feedbacks.loading || state.feedbacks.exporting || !state.feedbacks.loaded || !visibleFeedbackRows().length;
-        feedbacksExportButton.textContent = state.feedbacks.exporting ? "Готовим Excel…" : "Скачать Excel";
-        feedbacksExportButton.title = "Скачать Excel по текущему фильтру";
-      }
-      if (feedbacksErrorNode) {
-        feedbacksErrorNode.textContent = state.feedbacks.error || "";
-        feedbacksErrorNode.classList.toggle("is-error", !!state.feedbacks.error);
-      }
+	      if (feedbacksExportButton) {
+	        feedbacksExportButton.disabled = state.feedbacks.loading || state.feedbacks.exporting || !state.feedbacks.loaded || !visibleFeedbackRows().length;
+	        feedbacksExportButton.textContent = state.feedbacks.exporting ? "Готовим Excel…" : "Скачать Excel";
+	        feedbacksExportButton.title = "Скачать Excel по текущему фильтру";
+	      }
+	      renderFeedbacksSubmitControls();
+	      if (feedbacksErrorNode) {
+	        feedbacksErrorNode.textContent = state.feedbacks.error || "";
+	        feedbacksErrorNode.classList.toggle("is-error", !!state.feedbacks.error);
+	      }
       renderFeedbacksSummary();
       renderFeedbacksResult();
       renderFeedbacksPromptPanel();
@@ -5346,8 +5462,39 @@
       }
     }
 
-    function handleFeedbacksInputChange(event) {
-      const starNode = event.target.closest("[data-feedbacks-star]");
+	    function handleFeedbacksInputChange(event) {
+	      const selectAllNode = event.target.closest("[data-feedbacks-select-all]");
+	      if (selectAllNode) {
+	        const next = new Set(state.feedbacks.selectedFeedbackIds || []);
+	        feedbacksSelectableRows().forEach(function(row) {
+	          const feedbackId = feedbackRowId(row);
+	          if (!feedbackId) {
+	            return;
+	          }
+	          if (selectAllNode.checked) {
+	            next.add(feedbackId);
+	          } else {
+	            next.delete(feedbackId);
+	          }
+	        });
+	        state.feedbacks.selectedFeedbackIds = next;
+	        renderFeedbacksPanel();
+	        return;
+	      }
+	      const selectRowNode = event.target.closest("[data-feedbacks-select-row]");
+	      if (selectRowNode) {
+	        const feedbackId = String(selectRowNode.getAttribute("data-feedbacks-select-row") || "").trim();
+	        const next = new Set(state.feedbacks.selectedFeedbackIds || []);
+	        if (selectRowNode.checked) {
+	          next.add(feedbackId);
+	        } else {
+	          next.delete(feedbackId);
+	        }
+	        state.feedbacks.selectedFeedbackIds = next;
+	        renderFeedbacksPanel();
+	        return;
+	      }
+	      const starNode = event.target.closest("[data-feedbacks-star]");
       if (starNode) {
         const value = String(starNode.value || "");
         if (starNode.checked) {
@@ -5508,12 +5655,13 @@
       state.feedbacks.meta = null;
       state.feedbacks.aiResults = {};
       state.feedbacks.aiErrors = {};
-      state.feedbacks.aiProgress = null;
-      state.feedbacks.aiStopRequested = false;
-      state.feedbacks.aiFilter = "all";
-      if (!keepLoadedFlag) {
-        state.feedbacks.loaded = false;
-      }
+	      state.feedbacks.aiProgress = null;
+	      state.feedbacks.aiStopRequested = false;
+	      state.feedbacks.aiFilter = "all";
+	      state.feedbacks.selectedFeedbackIds = new Set();
+	      if (!keepLoadedFlag) {
+	        state.feedbacks.loaded = false;
+	      }
     }
 
     async function loadFeedbacks() {
@@ -5556,10 +5704,14 @@
         state.feedbacks.aiResults = {};
         state.feedbacks.aiErrors = {};
         state.feedbacks.aiProgress = null;
-        state.feedbacks.aiStopRequested = false;
-        state.feedbacks.aiFilter = "all";
-        state.feedbacks.loaded = true;
-      } catch (error) {
+	        state.feedbacks.aiStopRequested = false;
+	        state.feedbacks.aiFilter = "all";
+	        state.feedbacks.selectedFeedbackIds = new Set();
+	        state.feedbacks.loaded = true;
+	        if (!state.feedbacks.complaints.loading) {
+	          loadFeedbacksComplaints();
+	        }
+	      } catch (error) {
         if (requestId !== state.feedbacks.requestSequence) {
           return;
         }
@@ -5903,11 +6055,279 @@
       return message.length > 180 ? message.slice(0, 179).trim() + "…" : message;
     }
 
-    function feedbackRowId(row) {
-      return String((row && row.feedback_id) || "").trim();
-    }
+	    function feedbackRowId(row) {
+	      return String((row && row.feedback_id) || "").trim();
+	    }
 
-    function renderFeedbacksSummary() {
+	    function feedbacksComplaintRecordById() {
+	      const map = {};
+	      const rows = (state.feedbacks.complaints && Array.isArray(state.feedbacks.complaints.rows))
+	        ? state.feedbacks.complaints.rows
+	        : [];
+	      rows.forEach(function(record) {
+	        const feedbackId = String((record && record.feedback_id) || "").trim();
+	        if (feedbackId) {
+	          map[feedbackId] = record;
+	        }
+	      });
+	      return map;
+	    }
+
+	    function feedbacksComplaintRecordForRow(row) {
+	      const feedbackId = feedbackRowId(row);
+	      if (!feedbackId) {
+	        return null;
+	      }
+	      return feedbacksComplaintRecordById()[feedbackId] || null;
+	    }
+
+	    function feedbacksComplaintStatusForRow(row) {
+	      const record = feedbacksComplaintRecordForRow(row);
+	      return record ? String(record.complaint_status || "") : "";
+	    }
+
+	    function feedbacksAiCompleteForCurrentRows() {
+	      const rows = state.feedbacks.rows || [];
+	      if (!state.feedbacks.loaded || !rows.length || state.feedbacks.analyzing) {
+	        return false;
+	      }
+	      return rows.every(function(row) {
+	        const feedbackId = feedbackRowId(row);
+	        return feedbackId && (feedbacksAiResult(row) || feedbacksAiError(row));
+	      });
+	    }
+
+	    function feedbacksSubmitJobActive() {
+	      const job = state.feedbacks.submitJob || {};
+	      return Boolean(job.running || ["queued", "running"].includes(String(job.status || "")));
+	    }
+
+	    function feedbacksRowSelectionEnabled(row) {
+	      const feedbackId = feedbackRowId(row);
+	      if (!feedbackId || feedbacksSubmitJobActive() || !feedbacksAiCompleteForCurrentRows() || !(state.feedbacks.complaints || {}).loaded) {
+	        return false;
+	      }
+	      return !feedbacksComplaintRecordForRow(row);
+	    }
+
+	    function feedbacksSelectableRows() {
+	      return visibleFeedbackRows().filter(feedbacksRowSelectionEnabled);
+	    }
+
+	    function feedbacksAnySelectableRows() {
+	      return feedbacksSelectableRows().length > 0;
+	    }
+
+	    function feedbacksAllSelectableRowsSelected() {
+	      const rows = feedbacksSelectableRows();
+	      if (!rows.length) {
+	        return false;
+	      }
+	      return rows.every(function(row) {
+	        return state.feedbacks.selectedFeedbackIds.has(feedbackRowId(row));
+	      });
+	    }
+
+	    function cleanupFeedbacksSelection() {
+	      const allowed = new Set(feedbacksSelectableRows().map(feedbackRowId));
+	      const next = new Set();
+	      state.feedbacks.selectedFeedbackIds.forEach(function(feedbackId) {
+	        if (allowed.has(feedbackId)) {
+	          next.add(feedbackId);
+	        }
+	      });
+	      state.feedbacks.selectedFeedbackIds = next;
+	    }
+
+	    function renderFeedbacksSubmitControls() {
+	      cleanupFeedbacksSelection();
+	      const selectedCount = state.feedbacks.selectedFeedbackIds.size;
+	      const aiComplete = feedbacksAiCompleteForCurrentRows();
+	      const active = feedbacksSubmitJobActive();
+	      if (feedbacksSubmitSelectedButton) {
+	        feedbacksSubmitSelectedButton.disabled = !selectedCount || !aiComplete || active;
+	        feedbacksSubmitSelectedButton.textContent = active
+	          ? "Подача жалоб…"
+	          : ("Подать выбранные жалобы" + (selectedCount ? " (" + selectedCount + ")" : ""));
+	        feedbacksSubmitSelectedButton.title = aiComplete
+	          ? "Запускает guarded CLI-only submit job с hard safety gates"
+	          : "Сначала выполните AI-разбор текущих строк";
+	      }
+	      if (feedbacksSubmitSelectedCountNode) {
+	        feedbacksSubmitSelectedCountNode.textContent = "Выбрано: " + selectedCount;
+	      }
+	      renderFeedbacksSubmitLog();
+	    }
+
+		    function renderFeedbacksSubmitLog() {
+	      if (!feedbacksSubmitLogBodyNode) {
+	        return;
+	      }
+	      const job = state.feedbacks.submitJob || {};
+	      if (!job.runId && !(job.events || []).length) {
+	        feedbacksSubmitLogBodyNode.textContent = "Нет активного запуска.";
+	        return;
+	      }
+	      const lines = [];
+	      lines.push("run_id: " + (job.runId || "—"));
+	      lines.push("status: " + (job.status || "—"));
+	      const summary = job.summary || {};
+	      if (summary && typeof summary === "object") {
+	        lines.push(
+	          "selected/tested/submitted/skipped/errors: " +
+	          [job.selectedCount || summary.selected_count || 0, job.testedCount || summary.tested_count || 0, job.submittedCount || summary.submitted_count || 0, job.skippedCount || summary.skipped_count || 0, job.errorCount || summary.error_count || 0].join("/")
+	        );
+	      }
+	      (job.events || []).slice(-80).forEach(function(event) {
+	        const parts = [
+	          String(event.timestamp || ""),
+	          String(event.event || ""),
+	          String(event.feedback_id || ""),
+	          String(event.status || ""),
+	          String(event.message || "")
+	        ].filter(Boolean);
+	        lines.push(parts.join(" · "));
+	      });
+	      if (job.error) {
+	        lines.push("error: " + job.error);
+	      }
+		      feedbacksSubmitLogBodyNode.textContent = lines.join("\n");
+		    }
+
+	    async function submitSelectedFeedbackComplaints() {
+	      const selectedIds = Array.from(state.feedbacks.selectedFeedbackIds || []).filter(Boolean);
+	      if (!selectedIds.length || feedbacksSubmitJobActive() || !feedbacksAiCompleteForCurrentRows()) {
+	        return;
+	      }
+	      if (!WEB_VITRINA_CONFIG.feedbacks_complaints_submit_selected_path) {
+	        state.feedbacks.error = "Route submit-selected не настроен.";
+	        renderFeedbacksPanel();
+	        return;
+	      }
+	      const stars = Array.from(state.feedbacks.selectedStars || []).sort();
+	      state.feedbacks.submitJob = {
+	        running: true,
+	        runId: "",
+	        status: "queued",
+	        events: [{event: "job_started", message: "Запуск submit-selected из UI", status: "queued", timestamp: new Date().toISOString()}],
+	        skipped: [],
+	        submittedFeedbackIds: [],
+	        summary: null,
+	        error: "",
+	        pollSequence: Number((state.feedbacks.submitJob || {}).pollSequence || 0) + 1
+	      };
+	      state.feedbacks.error = "";
+	      renderFeedbacksPanel();
+	      try {
+	        const response = await fetch(WEB_VITRINA_CONFIG.feedbacks_complaints_submit_selected_path, {
+	          method: "POST",
+	          headers: {
+	            "Accept": "application/json",
+	            "Content-Type": "application/json; charset=utf-8"
+	          },
+	          body: JSON.stringify({
+	            feedback_ids: selectedIds,
+	            max_submit: Math.min(5, selectedIds.length),
+	            date_from: state.feedbacks.dateFrom,
+	            date_to: state.feedbacks.dateTo,
+	            stars: stars,
+	            is_answered: state.feedbacks.isAnswered || "all",
+	            max_api_rows: Math.max(50, (state.feedbacks.rows || []).length)
+	          })
+	        });
+	        const payload = await readJsonResponse(response, "non-json response from submit-selected route");
+	        if (!response.ok) {
+	          throw new Error((payload && payload.error) ? payload.error : "submit-selected returned " + response.status);
+	        }
+	        if (!payload || payload.contract_name !== "sheet_vitrina_v1_feedbacks_complaints_submit_job") {
+	          throw new Error("unexpected submit-selected job payload");
+	        }
+	        applyFeedbacksSubmitJobPayload(payload);
+	        const pollSequence = Number(state.feedbacks.submitJob.pollSequence || 0);
+	        const finalPayload = feedbacksSubmitJobActive()
+	          ? await pollFeedbacksSubmitJob(payload.run_id, pollSequence)
+	          : payload;
+	        if (finalPayload && pollSequence === Number(state.feedbacks.submitJob.pollSequence || 0)) {
+	          applyFeedbacksSubmitJobPayload(finalPayload);
+	        }
+	        state.feedbacks.submitJob.running = false;
+	        state.feedbacks.selectedFeedbackIds = new Set();
+	        await loadFeedbacksComplaints();
+	      } catch (error) {
+	        state.feedbacks.submitJob.running = false;
+	        state.feedbacks.submitJob.status = "error";
+	        state.feedbacks.submitJob.error = String(error && error.message ? error.message : error);
+	        state.feedbacks.error = state.feedbacks.submitJob.error;
+	      } finally {
+	        renderFeedbacksPanel();
+	      }
+	    }
+
+	    async function pollFeedbacksSubmitJob(runId, pollSequence) {
+	      let latest = null;
+	      for (let attempt = 0; attempt < 240; attempt += 1) {
+	        if (pollSequence !== Number((state.feedbacks.submitJob || {}).pollSequence || 0)) {
+	          return latest;
+	        }
+	        await sleep(1500);
+	        const url = feedbacksSubmitJobPollUrl(runId);
+	        if (!url) {
+	          throw new Error("submit job route is missing");
+	        }
+	        const response = await fetch(url, {method: "GET", headers: {"Accept": "application/json"}});
+	        const payload = await readJsonResponse(response, "non-json response from submit job route");
+	        if (!response.ok) {
+	          throw new Error((payload && payload.error) ? payload.error : "submit job returned " + response.status);
+	        }
+	        if (!payload || payload.contract_name !== "sheet_vitrina_v1_feedbacks_complaints_submit_job") {
+	          throw new Error("unexpected submit job payload");
+	        }
+	        latest = payload;
+	        applyFeedbacksSubmitJobPayload(payload);
+	        renderFeedbacksPanel();
+	        if (!["queued", "running"].includes(String(payload.status || ""))) {
+	          return payload;
+	        }
+	      }
+	      throw new Error("submit job polling timed out");
+	    }
+
+	    function feedbacksSubmitJobPollUrl(runId) {
+	      const path = String(WEB_VITRINA_CONFIG.feedbacks_complaints_submit_job_path || "");
+	      if (!path || !runId) {
+	        return "";
+	      }
+	      const url = new URL(path, window.location.origin);
+	      url.searchParams.set("run_id", runId);
+	      return url.toString();
+	    }
+
+	    function sleep(ms) {
+	      return new Promise(function(resolve) {
+	        window.setTimeout(resolve, ms);
+	      });
+	    }
+
+	    function applyFeedbacksSubmitJobPayload(payload) {
+	      const current = state.feedbacks.submitJob || {};
+	      state.feedbacks.submitJob = Object.assign({}, current, {
+	        running: ["queued", "running"].includes(String(payload.status || "")),
+	        runId: String(payload.run_id || current.runId || ""),
+	        status: String(payload.status || ""),
+	        selectedCount: Number(payload.selected_count || 0),
+	        testedCount: Number(payload.tested_count || 0),
+	        submittedCount: Number(payload.submitted_count || 0),
+	        skippedCount: Number(payload.skipped_count || 0),
+	        errorCount: Number(payload.error_count || 0),
+	        events: Array.isArray(payload.events) ? payload.events : [],
+	        skipped: Array.isArray(payload.skipped) ? payload.skipped : [],
+	        submittedFeedbackIds: Array.isArray(payload.submitted_feedback_ids) ? payload.submitted_feedback_ids : [],
+	        summary: payload.summary || null,
+	        error: String(payload.error || "")
+	      });
+	    }
+
+	    function renderFeedbacksSummary() {
       if (!feedbacksSummaryNode) {
         return;
       }
@@ -6042,11 +6462,13 @@
       } catch (error) {
         complaints.error = String(error && error.message ? error.message : error);
         complaints.loaded = false;
-      } finally {
-        complaints.loading = false;
-        renderFeedbacksComplaintsPanel();
-      }
-    }
+	      } finally {
+	        complaints.loading = false;
+	        renderFeedbacksComplaintsPanel();
+	        renderFeedbacksResult();
+	        renderFeedbacksSubmitControls();
+	      }
+	    }
 
     async function syncFeedbacksComplaintsStatuses() {
       const complaints = state.feedbacks.complaints;
@@ -6384,11 +6806,19 @@
           return '<col data-feedbacks-column="' + escapeHtml(column[0]) + '" style="width:' + feedbacksColumnWidth(column[0]) + 'px">';
         }).join(""),
         '</colgroup>',
-        '<thead><tr>',
-        columns.map(function(column) {
-          const headerTitle = column[0] === "ai_reason" ? ' title="Причина = текст для поля WB «Опишите ситуацию»"' : "";
-          return '<th class="feedbacks-resizable-th" data-feedbacks-column-key="' + escapeHtml(column[0]) + '" style="width:' + feedbacksColumnWidth(column[0]) + 'px"' + headerTitle + '>' +
-            escapeHtml(column[1]) +
+	        '<thead><tr>',
+	        columns.map(function(column) {
+	          if (column[0] === "select") {
+	            const disabled = !feedbacksAnySelectableRows();
+	            const checked = feedbacksAllSelectableRowsSelected();
+	            return '<th class="feedbacks-resizable-th feedbacks-select-cell" data-feedbacks-column-key="select" style="width:' + feedbacksColumnWidth("select") + 'px">' +
+	              '<input type="checkbox" data-feedbacks-select-all aria-label="Выбрать все отзывы"' + (checked ? " checked" : "") + (disabled ? " disabled" : "") + ">" +
+	              '<span class="feedbacks-column-resize-handle" data-feedbacks-column-resize="select" aria-hidden="true"></span>' +
+	              "</th>";
+	          }
+	          const headerTitle = column[0] === "ai_reason" ? ' title="Причина = текст для поля WB «Опишите ситуацию»"' : "";
+	          return '<th class="feedbacks-resizable-th" data-feedbacks-column-key="' + escapeHtml(column[0]) + '" style="width:' + feedbacksColumnWidth(column[0]) + 'px"' + headerTitle + '>' +
+	            escapeHtml(column[1]) +
             '<span class="feedbacks-column-resize-handle" data-feedbacks-column-resize="' + escapeHtml(column[0]) + '" aria-hidden="true"></span>' +
             "</th>";
         }).join(""),
@@ -6398,9 +6828,11 @@
       ].join("");
     }
 
-    function feedbacksTableColumns() {
-      return [
-        ["created_date", "Дата"],
+	    function feedbacksTableColumns() {
+	      return [
+	        ["select", ""],
+	        ["complaint_status", "Жалоба"],
+	        ["created_date", "Дата"],
         ["product_valuation", "Звёзды"],
         ["ai_complaint_fit", "Подходит для жалобы"],
         ["ai_category", "Категория"],
@@ -6425,21 +6857,51 @@
       }, 0);
     }
 
-    function renderFeedbacksRow(row, columns) {
-      return "<tr>" + columns.map(function(column) {
-        const key = column[0];
-        const isText = ["text", "pros", "cons", "answer_text", "product_name", "ai_reason"].includes(key);
-        if (key.indexOf("ai_") === 0) {
-          return renderFeedbacksAiCell(row, key);
-        }
+	    function renderFeedbacksRow(row, columns) {
+	      return "<tr>" + columns.map(function(column) {
+	        const key = column[0];
+	        const isText = ["text", "pros", "cons", "answer_text", "product_name", "ai_reason"].includes(key);
+	        if (key === "select") {
+	          return renderFeedbacksSelectCell(row);
+	        }
+	        if (key === "complaint_status") {
+	          return renderFeedbacksComplaintStatusCell(row);
+	        }
+	        if (key.indexOf("ai_") === 0) {
+	          return renderFeedbacksAiCell(row, key);
+	        }
         if (key === "review_tags") {
           return '<td class="feedbacks-tags-cell">' + renderFeedbackReviewTags(row.review_tags) + "</td>";
         }
         const rawValue = row[key];
         const value = rawValue === null || typeof rawValue === "undefined" || rawValue === "" ? "—" : String(rawValue);
         return '<td' + (isText ? ' class="feedbacks-text-cell"' : "") + ">" + (isText ? '<span class="feedbacks-text-clip">' : "") + escapeHtml(value) + (isText ? "</span>" : "") + "</td>";
-      }).join("") + "</tr>";
-    }
+	      }).join("") + "</tr>";
+	    }
+
+	    function renderFeedbacksSelectCell(row) {
+	      const feedbackId = feedbackRowId(row);
+	      const status = feedbacksComplaintStatusForRow(row);
+	      const disabled = !feedbacksRowSelectionEnabled(row);
+	      const checked = feedbackId && state.feedbacks.selectedFeedbackIds.has(feedbackId);
+	      const title = status
+	        ? "Жалоба уже есть в журнале"
+	        : (!feedbacksAiCompleteForCurrentRows() ? "Сначала выполните AI-разбор текущих строк" : "Выбрать для guarded submit");
+	      return '<td class="feedbacks-select-cell">' +
+	        '<input type="checkbox" data-feedbacks-select-row="' + escapeHtml(feedbackId) + '" aria-label="Выбрать отзыв" title="' + escapeHtml(title) + '"' +
+	        (checked ? " checked" : "") + (disabled ? " disabled" : "") + ">" +
+	        "</td>";
+	    }
+
+	    function renderFeedbacksComplaintStatusCell(row) {
+	      const record = feedbacksComplaintRecordForRow(row);
+	      if (!record) {
+	        return '<td class="feedbacks-complaint-status-cell">—</td>';
+	      }
+	      const status = String(record.complaint_status || "");
+	      const label = String(record.complaint_status_label || status || "—");
+	      return '<td class="feedbacks-complaint-status-cell"><span class="feedbacks-complaint-status status-' + escapeHtml(status) + '">' + escapeHtml(label) + "</span></td>";
+	    }
 
     function normalizeFeedbackReviewTags(value) {
       const input = Array.isArray(value) ? value : (value ? [value] : []);

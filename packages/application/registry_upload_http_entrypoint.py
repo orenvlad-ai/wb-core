@@ -847,6 +847,12 @@ class RegistryUploadHttpEntrypoint:
     def handle_sheet_feedbacks_complaints_sync_status_job_request(self, run_id: str) -> dict[str, Any]:
         return self.feedbacks_complaints_block.get_sync_status_job(run_id)
 
+    def handle_sheet_feedbacks_complaints_submit_selected_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.feedbacks_complaints_block.submit_selected(payload)
+
+    def handle_sheet_feedbacks_complaints_submit_job_request(self, run_id: str) -> dict[str, Any]:
+        return self.feedbacks_complaints_block.get_submit_job(run_id)
+
     def handle_sheet_refresh_request(
         self,
         as_of_date: str | None = None,
