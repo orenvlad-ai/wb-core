@@ -1291,25 +1291,34 @@ def open_seller_portal_filters_popup(page: Page) -> dict[str, Any]:
     return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
   };
   const labelFor = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
-  const candidates = Array.from(document.querySelectorAll('button, [role="button"], a, div, span'))
+  const buildCandidates = (selector, allowTextFallback) => Array.from(document.querySelectorAll(selector))
     .filter(visible)
     .map((el, index) => {
       const rect = el.getBoundingClientRect();
       const text = labelFor(el);
-      const clickable = el.closest('button, [role="button"], a') || el;
+      const interactive = el.matches('button, [role="button"], a') ? el : el.closest('button, [role="button"], a');
+      const clickable = interactive || (allowTextFallback ? el : null);
+      const disabled = Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true' || (interactive && interactive.getAttribute('aria-disabled') === 'true'));
       let score = 0;
       if (/^Фильтры$/i.test(text)) score += 160;
       else if (/фильтр/i.test(text)) score += 80;
+      if (interactive) score += 80;
       if (rect.top < 420) score += 20;
       if (/Применить|Сбросить|Оценка отзыва/i.test(text)) score -= 60;
-      return {el, clickable, index, text, tag: el.tagName.toLowerCase(), score};
+      return {el, clickable, index, text, tag: el.tagName.toLowerCase(), score, disabled, interactive: Boolean(interactive)};
     })
-    .filter((item) => item.score > 70)
+    .filter((item) => item.score > 70 && item.clickable && !item.disabled)
     .sort((a, b) => b.score - a.score || a.index - b.index);
+  let candidates = buildCandidates('button, [role="button"], a', false);
+  let selectorStrategy = 'interactive_button_or_role';
+  if (!candidates.length) {
+    candidates = buildCandidates('div, span', true);
+    selectorStrategy = 'visible_text_fallback';
+  }
   const target = candidates[0];
   if (!target) return {ok: false, reason: 'filters button not found', visible_candidates: candidates.map((item) => item.text).slice(0, 8)};
   target.clickable.click();
-  return {ok: true, selector: target.tag, text: target.text, selector_strategy: /^Фильтры$/i.test(target.text) ? 'exact_visible_text' : 'filter_text_fallback'};
+  return {ok: true, selector: target.tag, text: target.text, selector_strategy: selectorStrategy, interactive: target.interactive};
 }
             """
         )
