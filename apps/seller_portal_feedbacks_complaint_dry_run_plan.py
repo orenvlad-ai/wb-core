@@ -1413,7 +1413,8 @@ def inspect_seller_portal_rating_filter_popup(page: Page) -> dict[str, Any]:
   const controls = Array.from(root.querySelectorAll('input[type="checkbox"], [role="checkbox"], [aria-checked], [class*="checkbox"], [class*="Checkbox"], [class*="check"], [class*="Check"]'))
     .filter(visible)
     .filter((el) => String(el.getAttribute('role') || '').toLowerCase() !== 'radio')
-    .filter((el) => !/Category-item__/.test(safeClass(el)));
+    .filter((el) => !/Category-item__/.test(safeClass(el)))
+    .filter((el) => !/Category-options-checkbox-item__/.test(safeClass(el)));
   const rowRootFor = (control) => (
     control.closest('[class*="Category-options-checkbox-item"], [class*="options-checkbox-item"], [class*="Options-checkbox-item"], label, li, [role="option"], [role="menuitem"]')
     || control.closest('[class*="row"], [class*="Row"], [class*="item"], [class*="Item"]')
@@ -1435,14 +1436,20 @@ def inspect_seller_portal_rating_filter_popup(page: Page) -> dict[str, Any]:
     }
     return {control, row, index, star, text: labelFor(row), checked: isChecked(control, row), control_rect: rectFor(control), row_rect: rectFor(row), control_class: safeClass(control), row_class: safeClass(row), role: control.getAttribute('role') || '', aria_checked: control.getAttribute('aria-checked') || ''};
   });
-  const deduped = [];
-  const seen = new Set();
+  const dedupedByKey = new Map();
+  const prefer = (current, next) => {
+    if (!current) return next;
+    const currentSmall = current.control_rect.width <= 80 && current.control_rect.height <= 80;
+    const nextSmall = next.control_rect.width <= 80 && next.control_rect.height <= 80;
+    if (nextSmall && !currentSmall) return next;
+    if (nextSmall === currentSmall && /Form-checkbox-simple|checkbox/i.test(next.control_class) && !/Form-checkbox-simple|checkbox/i.test(current.control_class)) return next;
+    return current;
+  };
   rawRows.sort((a, b) => a.row_rect.y - b.row_rect.y || a.row_rect.x - b.row_rect.x || b.row_rect.width - a.row_rect.width).forEach((item) => {
     const key = Math.round(item.row_rect.x / 4) + ':' + Math.round(item.row_rect.y / 4) + ':' + Math.round(item.row_rect.height / 4);
-    if (seen.has(key)) return;
-    seen.add(key);
-    deduped.push(item);
+    dedupedByKey.set(key, prefer(dedupedByKey.get(key), item));
   });
+  const deduped = Array.from(dedupedByKey.values()).sort((a, b) => a.row_rect.y - b.row_rect.y || a.row_rect.x - b.row_rect.x);
   let rows = deduped.filter((item) => item.star >= 1 && item.star <= 5);
   if (rows.length < 5 && deduped.length >= 5) {
     rows = deduped.slice(0, 5).map((item, index) => ({...item, star: 5 - index, inferred_by_order: true}));
@@ -1549,7 +1556,8 @@ def select_seller_portal_rating_filter_stars(page: Page, *, stars: Iterable[int]
   const controls = Array.from(root.querySelectorAll('input[type="checkbox"], [role="checkbox"], [aria-checked], [class*="checkbox"], [class*="Checkbox"], [class*="check"], [class*="Check"]'))
     .filter(visible)
     .filter((el) => String(el.getAttribute('role') || '').toLowerCase() !== 'radio')
-    .filter((el) => !/Category-item__/.test(cls(el)));
+    .filter((el) => !/Category-item__/.test(cls(el)))
+    .filter((el) => !/Category-options-checkbox-item__/.test(cls(el)));
   const rowRootFor = (control) => (
     control.closest('[class*="Category-options-checkbox-item"], [class*="options-checkbox-item"], [class*="Options-checkbox-item"], label, li, [role="option"], [role="menuitem"]')
     || control.closest('[class*="row"], [class*="Row"], [class*="item"], [class*="Item"]')
@@ -1569,16 +1577,22 @@ def select_seller_portal_rating_filter_stars(page: Page, *, stars: Iterable[int]
         break;
       }
     }
-    return {control, row, index, star, text: rowText || labelFor(row), checked: isChecked(control, row), state_known: stateKnown(control, row), rect: rectFor(row)};
+    return {control, row, index, star, text: rowText || labelFor(row), checked: isChecked(control, row), state_known: stateKnown(control, row), rect: rectFor(row), control_rect: rectFor(control), control_class: cls(control)};
   });
-  const deduped = [];
-  const seen = new Set();
+  const dedupedByKey = new Map();
+  const prefer = (current, next) => {
+    if (!current) return next;
+    const currentSmall = current.control_rect.width <= 80 && current.control_rect.height <= 80;
+    const nextSmall = next.control_rect.width <= 80 && next.control_rect.height <= 80;
+    if (nextSmall && !currentSmall) return next;
+    if (nextSmall === currentSmall && /Form-checkbox-simple|checkbox/i.test(next.control_class) && !/Form-checkbox-simple|checkbox/i.test(current.control_class)) return next;
+    return current;
+  };
   rawRows.sort((a, b) => a.rect.y - b.rect.y || a.rect.x - b.rect.x || b.rect.width - a.rect.width).forEach((item) => {
     const key = Math.round(item.rect.x / 4) + ':' + Math.round(item.rect.y / 4) + ':' + Math.round(item.rect.height / 4);
-    if (seen.has(key)) return;
-    seen.add(key);
-    deduped.push(item);
+    dedupedByKey.set(key, prefer(dedupedByKey.get(key), item));
   });
+  const deduped = Array.from(dedupedByKey.values()).sort((a, b) => a.rect.y - b.rect.y || a.rect.x - b.rect.x);
   let rows = deduped.filter((item) => item.star >= 1 && item.star <= 5);
   let selectorStrategy = 'text_or_aria_checkbox_rows';
   if (rows.length < 5 && deduped.length >= 5) {
