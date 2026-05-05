@@ -170,7 +170,7 @@ def resolve_feedback_actionability(
                     "complaint_action_click": attempt.get("complaint_action_click") or {},
                     "close_method": str(attempt.get("close_method") or ""),
                     "submit_button_label": str(attempt.get("submit_button_label") or ""),
-                    "block_reason": "",
+                    "block_reason": str(attempt.get("block_reason") or ""),
                 }
             )
             return result
@@ -556,7 +556,7 @@ def empty_actionability_result() -> dict[str, Any]:
         "complaint_action_click": {},
         "close_method": "",
         "submit_button_label": "",
-                    "block_reason": str(attempt.get("block_reason") or ""),
+        "block_reason": "",
     }
 
 
