@@ -226,6 +226,7 @@ def load_api_rows(config: TargetRowProbeConfig) -> dict[str, Any]:
         "sample_rows": [],
         "rows": [],
         "meta": {},
+        "status_breakdown": {},
         "blocker": "",
     }
     try:
@@ -253,9 +254,79 @@ def load_api_rows(config: TargetRowProbeConfig) -> dict[str, Any]:
             "rows": rows,
             "meta": payload.get("meta") or {},
             "summary": payload.get("summary") or {},
+            "status_breakdown": load_api_status_breakdown(config),
         }
     )
     return report
+
+
+def load_api_status_breakdown(config: TargetRowProbeConfig) -> dict[str, Any]:
+    by_status: dict[str, dict[str, Any]] = {}
+    all_rows_by_status: dict[str, list[dict[str, Any]]] = {}
+    errors: list[dict[str, Any]] = []
+    for is_answered in ("false", "true", "all"):
+        try:
+            payload = SheetVitrinaV1FeedbacksBlock().build(
+                date_from=config.date,
+                date_to=config.date,
+                stars=list(config.stars),
+                is_answered=is_answered,
+            )
+            rows = [row for row in payload.get("rows") or [] if isinstance(row, dict)]
+        except Exception as exc:
+            errors.append({"is_answered": is_answered, "code": exc.__class__.__name__, "message": safe_text(str(exc), 400)})
+            rows = []
+        all_rows_by_status[is_answered] = rows
+        ids = [str(row.get("feedback_id") or "") for row in rows if str(row.get("feedback_id") or "")]
+        created_dates = Counter(normalize_date_key(row.get("created_date") or row.get("created_at")) for row in rows)
+        by_status[is_answered] = {
+            "count": len(rows),
+            "unique_feedback_ids": len(set(ids)),
+            "duplicate_feedback_ids": sorted(feedback_id for feedback_id, count in Counter(ids).items() if count > 1),
+            "created_dates": {key: value for key, value in sorted(created_dates.items()) if key},
+            "rows_with_tags": sum(1 for row in rows if row.get("review_tags")),
+            "sample_feedback_ids": ids[:10],
+        }
+    false_ids = {str(row.get("feedback_id") or "") for row in all_rows_by_status.get("false") or [] if str(row.get("feedback_id") or "")}
+    true_ids = {str(row.get("feedback_id") or "") for row in all_rows_by_status.get("true") or [] if str(row.get("feedback_id") or "")}
+    all_ids = {str(row.get("feedback_id") or "") for row in all_rows_by_status.get("all") or [] if str(row.get("feedback_id") or "")}
+    union_ids = false_ids | true_ids
+    day_boundary_rows = [
+        {
+            "feedback_id": str(row.get("feedback_id") or ""),
+            "created_at": str(row.get("created_at") or ""),
+            "created_date": str(row.get("created_date") or ""),
+            "normalized_date": normalize_date_key(row.get("created_date") or row.get("created_at")),
+            "is_answered": row.get("is_answered"),
+        }
+        for row in all_rows_by_status.get("all") or []
+        if normalize_date_key(row.get("created_date") or row.get("created_at")) and normalize_date_key(row.get("created_date") or row.get("created_at")) != config.date
+    ]
+    explanation = "API breakdown collected."
+    if not errors:
+        if all_ids == union_ids and not (false_ids & true_ids):
+            explanation = (
+                "is_answered=all equals the deduped union of false+true buckets; "
+                "a manual 15/previous 16 difference should be treated as a status-slice, UI filter or live-data timing difference, not a duplicate overlap."
+            )
+        elif false_ids & true_ids:
+            explanation = "false/true buckets overlap by feedback_id; dedup is required before comparing with is_answered=all."
+        elif all_ids != union_ids:
+            explanation = "is_answered=all differs from false+true union; compare missing/extra ids before treating UI count mismatch as a selector bug."
+    return {
+        "date": config.date,
+        "stars": list(config.stars),
+        "by_is_answered": by_status,
+        "false_true_intersection_count": len(false_ids & true_ids),
+        "false_true_intersection_ids": sorted(false_ids & true_ids)[:20],
+        "false_true_union_count": len(union_ids),
+        "all_minus_union_ids": sorted(all_ids - union_ids)[:20],
+        "union_minus_all_ids": sorted(union_ids - all_ids)[:20],
+        "day_boundary_rows": day_boundary_rows[:20],
+        "day_boundary_count": len(day_boundary_rows),
+        "errors": errors,
+        "truthful_explanation": explanation,
+    }
 
 
 def collect_seller_portal_rows(config: TargetRowProbeConfig, api_rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -367,6 +438,9 @@ def collect_dom_rows_for_tab(page: Page, config: TargetRowProbeConfig, tab_label
         "date_filter_applied": False,
         "star_filter_applied": False,
         "selected_stars": [],
+        "selected_star_values_before": [],
+        "selected_star_values_after": [],
+        "star_apply_clicked": False,
         "list_update_observed": False,
         "visible_rows_after_filter": 0,
         "rows_collected": 0,
@@ -386,6 +460,9 @@ def collect_dom_rows_for_tab(page: Page, config: TargetRowProbeConfig, tab_label
     report["date_filter_applied"] = bool(filters.get("date_filter_applied"))
     report["star_filter_applied"] = bool(filters.get("star_filter_applied"))
     report["selected_stars"] = filters.get("current_selected_stars") or []
+    report["selected_star_values_before"] = filters.get("selected_star_values_before") or []
+    report["selected_star_values_after"] = filters.get("selected_star_values_after") or []
+    report["star_apply_clicked"] = bool(filters.get("star_apply_clicked"))
     report["list_update_observed"] = bool(filters.get("list_update_observed"))
     _wait_for_feedback_rows(page, timeout_ms=7000)
     visible_now = extract_visible_feedback_rows(page, max_rows=max(10, min(config.max_ui_rows, 80)))
@@ -425,6 +502,10 @@ def apply_probe_filters(page: Page, config: TargetRowProbeConfig) -> dict[str, A
         "star_filter": star_result,
         "date_filter_applied": bool(date_result.get("applied")),
         "star_filter_applied": bool(star_result.get("applied")),
+        "star_filter_requested": list(config.stars),
+        "selected_star_values_before": star_result.get("selected_star_values_before") or [],
+        "selected_star_values_after": star_result.get("selected_star_values_after") or star_result.get("selected_stars") or [],
+        "star_apply_clicked": bool(star_result.get("apply_clicked")),
         "status_tab_selected": True,
         "list_signature_before": before_signature,
         "list_signature_after": after_signature,
@@ -712,8 +793,15 @@ def summarize_filter_application(tab_reports: list[Mapping[str, Any]]) -> dict[s
         "status_tab_selected": bool(clicked),
         "date_filter_applied": bool(clicked) and all(bool(item.get("date_filter_applied")) for item in clicked),
         "star_filter_applied": bool(clicked) and all(bool(item.get("star_filter_applied")) for item in clicked),
+        "star_apply_clicked": bool(clicked) and all(bool(item.get("star_apply_clicked")) for item in clicked),
         "list_update_observed": any(bool(item.get("list_update_observed")) for item in clicked),
         "selected_stars": sorted({int(star) for item in clicked for star in item.get("selected_stars") or [] if str(star).isdigit()}),
+        "selected_star_values_before": sorted(
+            {int(star) for item in clicked for star in item.get("selected_star_values_before") or [] if str(star).isdigit()}
+        ),
+        "selected_star_values_after": sorted(
+            {int(star) for item in clicked for star in item.get("selected_star_values_after") or [] if str(star).isdigit()}
+        ),
         "rows_visible_after_filter": sum(int(item.get("visible_rows_after_filter") or 0) for item in clicked),
         "rows_collected": sum(int(item.get("rows_collected") or 0) for item in clicked),
         "blockers": [str(item.get("blocker") or "") for item in tab_reports if item.get("blocker")],
@@ -797,6 +885,8 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
     comparison = report.get("count_comparison") or {}
     aggregate = report.get("matching_aggregate") or {}
     action = report.get("actionability") or {}
+    api_breakdown = api.get("status_breakdown") or {}
+    by_answered = api_breakdown.get("by_is_answered") or {}
     lines = [
         "# Seller Portal Feedback Target Row Probe",
         "",
@@ -812,11 +902,23 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
         f"- Counts match DOM/cursor: `{comparison.get('counts_match')}` / `{comparison.get('cursor_counts_match')}`",
         f"- Date filter applied: `{filters.get('date_filter_applied')}`",
         f"- Star filter applied: `{filters.get('star_filter_applied')}`",
+        f"- Star apply clicked: `{filters.get('star_apply_clicked')}`",
+        f"- Selected stars before/after: `{filters.get('selected_star_values_before')}` / `{filters.get('selected_star_values_after')}`",
         f"- Status tabs checked: `{', '.join(filters.get('status_tabs_checked') or [])}`",
         f"- Rows visible/collected: `{filters.get('rows_visible_after_filter')}` / `{filters.get('rows_collected')}`",
         f"- Exact/high/ambiguous/not_found: `{aggregate.get('exact_count', 0)}` / `{aggregate.get('high_count', 0)}` / `{aggregate.get('ambiguous_count', 0)}` / `{aggregate.get('not_found_count', 0)}`",
         f"- First exact feedback_id: `{aggregate.get('first_exact_feedback_id')}`",
         f"- Submit clicked: `{(report.get('read_only_guards') or {}).get('submit_clicked_count')}`",
+        "",
+        "## API Status Breakdown",
+        "",
+        f"- false: `{(by_answered.get('false') or {}).get('count')}`",
+        f"- true: `{(by_answered.get('true') or {}).get('count')}`",
+        f"- all: `{(by_answered.get('all') or {}).get('count')}`",
+        f"- false/true intersection: `{api_breakdown.get('false_true_intersection_count')}`",
+        f"- false+true union: `{api_breakdown.get('false_true_union_count')}`",
+        f"- day-boundary rows: `{api_breakdown.get('day_boundary_count')}`",
+        f"- Explanation: `{api_breakdown.get('truthful_explanation')}`",
         "",
         "## API Samples",
         "",
@@ -879,6 +981,7 @@ def compact_stdout_report(report: Mapping[str, Any]) -> dict[str, Any]:
             key: (report.get("api") or {}).get(key)
             for key in ("success", "row_count", "total_available_rows", "limited", "rows_with_tags", "sample_feedback_ids", "blocker")
         },
+        "api_status_breakdown": (report.get("api") or {}).get("status_breakdown"),
         "session": report.get("session"),
         "navigation": report.get("navigation"),
         "seller_portal": {

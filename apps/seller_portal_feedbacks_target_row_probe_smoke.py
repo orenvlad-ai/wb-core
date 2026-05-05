@@ -112,8 +112,28 @@ def _assert_report_shape() -> None:
         "finished_at": "2026-04-04T00:00:01Z",
         "parameters": {"date": "2026-04-04", "stars": [1], "is_answered": "all"},
         "read_only_guards": no_submit_guards(),
-        "api": {"sample_rows": [{"feedback_id": "api-report", "created_at": "2026-04-04T12:00:00Z", "rating": "1", "nm_id": "1", "supplier_article": "a", "review_tags": [], "review_text": "text"}]},
-        "seller_portal": {"filters": {"date_filter_applied": True, "star_filter_applied": True, "status_tabs_checked": ["Ждут ответа", "Есть ответ"], "rows_visible_after_filter": 2, "rows_collected": 1}},
+        "api": {
+            "sample_rows": [{"feedback_id": "api-report", "created_at": "2026-04-04T12:00:00Z", "rating": "1", "nm_id": "1", "supplier_article": "a", "review_tags": [], "review_text": "text"}],
+            "status_breakdown": {
+                "by_is_answered": {"false": {"count": 1}, "true": {"count": 0}, "all": {"count": 1}},
+                "false_true_intersection_count": 0,
+                "false_true_union_count": 1,
+                "day_boundary_count": 0,
+                "truthful_explanation": "fixture",
+            },
+        },
+        "seller_portal": {
+            "filters": {
+                "date_filter_applied": True,
+                "star_filter_applied": True,
+                "star_apply_clicked": True,
+                "selected_star_values_before": [5],
+                "selected_star_values_after": [1],
+                "status_tabs_checked": ["Ждут ответа", "Есть ответ"],
+                "rows_visible_after_filter": 2,
+                "rows_collected": 1,
+            }
+        },
         "count_comparison": compare_counts(api_total_count=1, dom_rows=[ui], cursor_rows=[ui]),
         "matches": matches,
         "matching_aggregate": build_probe_match_aggregate(matches, [api], [ui]),
@@ -121,7 +141,7 @@ def _assert_report_shape() -> None:
         "errors": [],
     }
     markdown = render_markdown_report(report)
-    if "Seller Portal Feedback Target Row Probe" not in markdown or "Counts match" not in markdown:
+    if "Seller Portal Feedback Target Row Probe" not in markdown or "API Status Breakdown" not in markdown:
         raise AssertionError(f"markdown shape mismatch: {markdown}")
     with TemporaryDirectory(prefix="target-row-probe-smoke-") as tmp:
         paths = write_report_artifacts(dict(report), Path(tmp))

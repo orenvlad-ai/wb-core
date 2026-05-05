@@ -256,8 +256,12 @@ def _assert_filter_controller_sequence() -> None:
             if checked != ["1★"]:
                 raise AssertionError(f"star filter must leave only 1-star selected: {checked}")
             selectors = set(result.get("selectors_used") or [])
-            if not {"date_inputs", "date_apply", "review_rating_checkboxes", "filters_apply"}.issubset(selectors):
+            if not {"date_inputs", "date_apply", "filters_apply"}.issubset(selectors):
                 raise AssertionError(f"filter diagnostics must include selectors used: {result}")
+            if not any(
+                item in selectors for item in ("review_rating_checkboxes", "text_or_aria_checkbox_rows", "custom_checkbox_order_fallback_5_to_1")
+            ):
+                raise AssertionError(f"filter diagnostics must include rating selector strategy: {result}")
             if not any(str(item).startswith("filters_button:") for item in selectors):
                 raise AssertionError(f"filter diagnostics must include selectors used: {result}")
         finally:
