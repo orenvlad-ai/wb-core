@@ -108,6 +108,12 @@
       "methods": ["POST"]
     },
     {
+      "name": "sheet_vitrina_feedbacks_complaints_sync_status_job",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/complaints/sync-status/job",
+      "methods": ["GET"]
+    },
+    {
       "name": "sheet_vitrina_web_vitrina",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/web-vitrina",

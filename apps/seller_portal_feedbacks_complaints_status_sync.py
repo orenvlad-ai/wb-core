@@ -79,8 +79,9 @@ def run_status_sync_for_runtime(
     headless: bool = True,
     timeout_ms: int = 20000,
     write_artifacts: bool = True,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_id = str(run_id or "").strip() or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     journal = JsonFileFeedbacksComplaintJournal(runtime_dir)
     records_before = journal.list_records()
     scout_config = ScoutConfig(
