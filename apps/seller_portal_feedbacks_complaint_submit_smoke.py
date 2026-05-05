@@ -79,8 +79,8 @@ def _assert_exact_and_reason_guards() -> None:
     by_id = {item["feedback_id"]: item for item in candidates}
     if by_id["exact-good"].get("skip_reason"):
         raise AssertionError(f"exact yes with ready reason must pass: {by_id['exact-good']}")
-    if "not exact" not in by_id["high"].get("skip_reason", ""):
-        raise AssertionError(f"high match must be blocked: {by_id['high']}")
+    if by_id["high"].get("skip_reason") or not by_id["high"].get("filter_aware_resolver_required"):
+        raise AssertionError(f"high preliminary match must defer to filter-aware resolver: {by_id['high']}")
     if "not submit-eligible" not in by_id["no-fit"].get("skip_reason", ""):
         raise AssertionError(f"complaint_fit=no must be blocked: {by_id['no-fit']}")
     if "placeholder" not in by_id["bad-reason"].get("skip_reason", ""):

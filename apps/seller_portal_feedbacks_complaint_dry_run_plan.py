@@ -93,6 +93,7 @@ FEEDBACKS_ANSWERED_TAB_LABEL = "Есть ответ"
 ACTIONABILITY_SCROLL_ATTEMPTS = 12
 SELLER_PORTAL_DATE_FILTER_MARKER_ATTR = "data-wb-core-filter-date-input"
 SELLER_PORTAL_STAR_FILTER_MARKER_ATTR = "data-wb-core-filter-star-row"
+FILTER_AWARE_RESOLVER_REQUIRED_REASON = "preliminary_match_not_exact; filter-aware resolver required"
 
 
 @dataclass(frozen=True)
@@ -247,7 +248,7 @@ def run_dry_run(config: DryRunConfig) -> dict[str, Any]:
         exact_candidates = [
             candidate
             for candidate in candidates
-            if candidate.get("selected_for_dry_run") and should_open_modal_for_match(candidate.get("match") or {})
+            if should_try_actionability_resolver(candidate)
         ]
         if exact_candidates:
             modal_report = draft_modals_for_exact_candidates(config, exact_candidates, selected_api_rows)
@@ -533,12 +534,32 @@ def apply_exact_matches(
             continue
         if should_open_modal_for_match(match):
             candidate["skip_reason"] = ""
+            candidate["filter_aware_resolver_required"] = False
         else:
-            candidate["skip_reason"] = f"match_status={match.get('match_status')} is not exact; modal draft blocked"
+            candidate["skip_reason"] = ""
+            candidate["filter_aware_resolver_required"] = True
+            candidate["preliminary_match_block_reason"] = (
+                f"match_status={match.get('match_status')} is not exact; filter-aware resolver must prove exact actionable DOM row"
+            )
 
 
 def should_open_modal_for_match(match: Mapping[str, Any]) -> bool:
     return bool(match.get("match_status") == "exact" and match.get("safe_for_future_submit"))
+
+
+def should_try_actionability_resolver(candidate: Mapping[str, Any]) -> bool:
+    if not candidate.get("selected_for_dry_run") or candidate.get("skip_reason"):
+        return False
+    match = candidate.get("match") if isinstance(candidate.get("match"), Mapping) else {}
+    return bool(should_open_modal_for_match(match) or candidate.get("filter_aware_resolver_required"))
+
+
+def expected_ui_for_filter_aware_resolver(candidate: Mapping[str, Any]) -> Mapping[str, Any]:
+    match = candidate.get("match") if isinstance(candidate.get("match"), Mapping) else {}
+    if not should_open_modal_for_match(match):
+        return {}
+    best_ui = match.get("best_ui_candidate") if isinstance(match.get("best_ui_candidate"), Mapping) else {}
+    return best_ui or {}
 
 
 def draft_modals_for_exact_candidates(
@@ -624,7 +645,7 @@ def draft_one_candidate_modal(
         result["blocker"] = "API row unavailable for modal draft"
         return result
 
-    expected_ui = (candidate.get("match") or {}).get("best_ui_candidate") or {}
+    expected_ui = expected_ui_for_filter_aware_resolver(candidate)
     resolver = resolve_actionable_feedback_row(page, config, api_row, expected_ui=expected_ui)
     result["actionability_resolver"] = resolver
     result["visible_rows_checked"] = int(resolver.get("visible_rows_checked") or 0)
