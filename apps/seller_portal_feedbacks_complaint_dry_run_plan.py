@@ -61,7 +61,6 @@ from apps.seller_portal_feedbacks_matching_replay import (  # noqa: E402
     normalize_rating,
     parse_stars,
     safe_text,
-    scroll_feedback_list,
     summarize_api_row,
     summarize_ui_row,
 )
@@ -948,35 +947,29 @@ def find_actionable_visible_row_with_scroll(
     expected_ui: Mapping[str, Any],
     locator_strategy: str,
 ) -> dict[str, Any]:
-    checked_total = 0
-    last_match: dict[str, Any] = {}
-    scroll_attempts: list[dict[str, Any]] = []
     max_visible_rows = min(max(config.max_api_rows * 2, 20), 80)
-    for attempt_index in range(1, ACTIONABILITY_SCROLL_ATTEMPTS + 1):
-        visible_rows = extract_visible_feedback_rows(page, max_rows=max_visible_rows)
-        checked_total += len(visible_rows)
-        visible_match = find_visible_actionable_row(api_row, visible_rows, expected_ui=expected_ui)
-        last_match = visible_match.get("match") or last_match
-        visible_row = visible_match.get("row") if isinstance(visible_match.get("row"), dict) else {}
-        if visible_row:
-            return {
-                "row": visible_row,
-                "match": visible_match.get("match") or {},
-                "visible_rows_checked": checked_total,
-                "locator_strategy": f"{locator_strategy}:attempt_{attempt_index}",
-                "scroll_attempts": scroll_attempts,
-            }
-        scroll_result = scroll_feedback_list(page)
-        scroll_attempts.append(scroll_result)
-        _wait_settle(page, 800)
-        if not scroll_result.get("changed"):
-            break
+    date_from, _date_to = feedback_filter_date_range(config, api_row, expected_ui=expected_ui)
+    collected_rows, scroll_stats = collect_feedback_rows_with_scroll(
+        page,
+        max_rows=max_visible_rows,
+        date_from=date_from or config.date_from,
+    )
+    visible_match = find_visible_actionable_row(api_row, collected_rows, expected_ui=expected_ui)
+    visible_row = visible_match.get("row") if isinstance(visible_match.get("row"), dict) else {}
+    if visible_row:
+        return {
+            "row": visible_row,
+            "match": visible_match.get("match") or {},
+            "visible_rows_checked": len(collected_rows),
+            "locator_strategy": f"{locator_strategy}:collected_scroll",
+            "scroll_attempts": [scroll_stats],
+        }
     return {
         "row": {},
-        "match": last_match,
-        "visible_rows_checked": checked_total,
+        "match": visible_match.get("match") or {},
+        "visible_rows_checked": len(collected_rows),
         "locator_strategy": locator_strategy,
-        "scroll_attempts": scroll_attempts,
+        "scroll_attempts": [scroll_stats],
     }
 
 
