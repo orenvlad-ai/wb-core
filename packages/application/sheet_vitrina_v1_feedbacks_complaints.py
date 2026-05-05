@@ -702,6 +702,12 @@ def _normalize_record(record: Mapping[str, Any]) -> dict[str, Any]:
         "submit_network_evidence_summary": _safe_json_value(record.get("submit_network_evidence_summary"), 2500),
         "submit_ui_evidence_summary": _safe_json_value(record.get("submit_ui_evidence_summary"), 2500),
         "post_submit_row_state": _safe_json_value(record.get("post_submit_row_state"), 1600),
+        "modal_description_value_before_submit": _safe_text(record.get("modal_description_value_before_submit"), 1000),
+        "submit_payload_has_description": _normalize_bool_unknown(record.get("submit_payload_has_description")),
+        "submit_payload_description_length": _safe_int(record.get("submit_payload_description_length")),
+        "submit_payload_description_snippet": _safe_text(record.get("submit_payload_description_snippet"), 260),
+        "post_submit_wb_description_text": _safe_text(record.get("post_submit_wb_description_text"), 1000),
+        "description_persisted": _normalize_bool_unknown(record.get("description_persisted")),
         "confirmation_probe_path": _safe_text(record.get("confirmation_probe_path"), 600),
         "status_sync_report_path": _safe_text(record.get("status_sync_report_path"), 600),
         "status_sync_run_id": _safe_text(record.get("status_sync_run_id"), 120),
@@ -721,6 +727,17 @@ def _normalize_status(value: Any) -> str:
     if status in COMPLAINT_STATUS_LABELS:
         return status
     return "error"
+
+
+def _normalize_bool_unknown(value: Any) -> bool | str:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in {"true", "yes", "1", "да"}:
+        return True
+    if text in {"false", "no", "0", "нет"}:
+        return False
+    return "unknown"
 
 
 def _summary(rows: list[Mapping[str, Any]]) -> dict[str, Any]:

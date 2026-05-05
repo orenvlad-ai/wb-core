@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
 
 from playwright.sync_api import Error as PlaywrightError, Page, Response, sync_playwright  # noqa: E402
 
+from apps.seller_portal_feedbacks_complaint_dry_run_plan import description_persistence_result  # noqa: E402
 from apps.seller_portal_feedbacks_complaints_scout import (  # noqa: E402
     BUSINESS_TZ,
     DEFAULT_START_URL,
@@ -781,12 +782,25 @@ def apply_probe_journal_result(
         status_sync_run_id=run_id,
         last_error=last_error if status == "error" else "",
     )
+    record = report.get("journal_before") if isinstance(report.get("journal_before"), Mapping) else {}
+    description_metadata = probe_description_metadata(record, confirmation)
+    if updated and description_metadata:
+        updated = journal.update_metadata(config.feedback_id, description_metadata) or updated
     report["journal_update"] = {
         "applied": bool(updated),
         "status": status,
         "status_label": COMPLAINT_STATUS_LABELS.get(status, COMPLAINT_STATUS_LABELS["error"]),
         "last_error": last_error,
+        "description_persisted": description_metadata.get("description_persisted", "unknown"),
     }
+
+
+def probe_description_metadata(record: Mapping[str, Any], confirmation: Mapping[str, Any]) -> dict[str, Any]:
+    chosen = choose_probe_match(confirmation)
+    row_summary = chosen.get("row_summary") if isinstance(chosen, Mapping) and isinstance(chosen.get("row_summary"), Mapping) else {}
+    if row_summary:
+        return description_persistence_result(record.get("complaint_text") or "", row_summary.get("complaint_description") or "", observed=True)
+    return description_persistence_result(record.get("complaint_text") or "", "", observed=False)
 
 
 def empty_my_complaints_probe() -> dict[str, Any]:

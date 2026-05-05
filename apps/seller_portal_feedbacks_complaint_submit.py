@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from playwright.sync_api import Error as PlaywrightError, Page, Response, sync_playwright  # noqa: E402
+from playwright.sync_api import Error as PlaywrightError, Page, Request, Response, sync_playwright  # noqa: E402
 
 from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     DryRunConfig,
@@ -39,12 +39,16 @@ from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     choose_complaint_category,
     click_complaint_category,
     collect_matching_rows,
+    description_is_ready_for_submit,
+    description_persistence_result,
     empty_modal_candidate_state,
     fill_description_field,
     find_visible_actionable_row,
     load_api_feedback_rows,
     normalize_requested_date,
+    normalize_text,
     should_open_modal_for_match,
+    wait_for_description_field_ready,
 )
 from apps.seller_portal_feedbacks_complaints_scout import (  # noqa: E402
     BUSINESS_TZ,
@@ -84,13 +88,14 @@ DEFAULT_RUNTIME_DIR = Path(os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR", "/opt/w
 DEFAULT_OUTPUT_ROOT = Path("/opt/wb-core-runtime/state/feedbacks_complaint_submit")
 LOCAL_OUTPUT_ROOT = Path("artifacts/seller_portal_feedbacks_complaint_submit")
 MAX_SUBMIT_HARD_CAP = 1
-DEFAULT_DENY_FEEDBACK_IDS = ("GPe9vrq0kctlSfobrgq2",)
+DEFAULT_DENY_FEEDBACK_IDS = ("GPe9vrq0kctlSfobrgq2", "fdQpHhNXTosEkArTHAZF")
 SUBMIT_RESULT_CONFIRMED_SUCCESS = "confirmed_success"
 SUBMIT_RESULT_CONFIRMED_VALIDATION_ERROR = "confirmed_validation_error"
 SUBMIT_RESULT_CONFIRMED_NETWORK_ERROR = "confirmed_network_error"
 SUBMIT_RESULT_UNCONFIRMED_AFTER_CLICK = "unconfirmed_after_click"
 SUBMIT_RELEVANT_URL_RE = re.compile(r"(complaint|claim|appeal|feedback|review|жалоб)", re.IGNORECASE)
 FORBIDDEN_QUERY_KEY_RE = re.compile(r"(authorization|authorize|token|cookie|secret|key|session|storage)", re.IGNORECASE)
+DESCRIPTION_BODY_KEY_RE = re.compile(r"(description|comment|message|text|reason|complaint|claim|appeal|опис|коммент|причин)", re.IGNORECASE)
 SUCCESS_TEXT_RE = re.compile(r"(жалоб[ауы].{0,60}(отправ|создан|принят)|успешно.{0,60}жалоб)", re.IGNORECASE)
 VALIDATION_TEXT_RE = re.compile(
     r"(обязатель|заполн|выберите|нельзя|ошибк|проверьте|символ|лимит|не удалось|повторите|validation|invalid)",
@@ -223,6 +228,7 @@ def run_submit(config: SubmitConfig) -> dict[str, Any]:
             "non_exact_submit_allowed": False,
             "complaint_submit_route_exposed": False,
             "old_feedback_id_denylisted": "GPe9vrq0kctlSfobrgq2" in set(config.deny_feedback_ids),
+            "previous_successful_feedback_id_denylisted": "fdQpHhNXTosEkArTHAZF" in set(config.deny_feedback_ids),
             "retry_old_submit_allowed": False,
             "mass_submit_allowed": False,
         },
@@ -572,6 +578,7 @@ def submit_one_candidate(
         result["close_method"] = close_modal_without_submit(page)
         return result
     _wait_settle(page, 700)
+    result["description_field_ready_after_category"] = wait_for_description_field_ready(page, timeout_ms=min(config.timeout_ms, 6000))
     draft_text = build_draft_text((candidate.get("ai") or {}))
     if not is_reason_submit_ready(draft_text):
         result["blocker"] = "complaint text is empty or diagnostic placeholder"
@@ -581,8 +588,16 @@ def submit_one_candidate(
     fill_result = fill_description_field(page, draft_text)
     result["description_fill"] = fill_result
     result["description_field_found"] = bool(fill_result.get("ok"))
+    result["modal_description_value_after_fill"] = str(fill_result.get("value_after_fill") or "")
+    result["modal_description_value_after_blur"] = str(fill_result.get("value_after_blur") or "")
+    result["modal_description_value_before_submit"] = str(fill_result.get("value_after_blur") or fill_result.get("value_after_fill") or "")
+    result["description_value_match"] = bool(fill_result.get("value_match"))
     if not fill_result.get("ok"):
         result["blocker"] = str(fill_result.get("reason") or "description field unavailable")
+        result["close_method"] = close_modal_without_submit(page)
+        return result
+    if not description_is_ready_for_submit(fill_result, draft_text):
+        result["blocker"] = "description field value mismatch before final submit; submit blocked"
         result["close_method"] = close_modal_without_submit(page)
         return result
     after_fill_modal = extract_complaint_modal_state(page)
@@ -595,6 +610,8 @@ def submit_one_candidate(
         "modal_title": str(after_fill_modal.get("modal_title") or ""),
         "categories": after_fill_modal.get("categories") or [],
         "description_field_found": bool(after_fill_modal.get("description_field_found")),
+        "description_value_match": bool(result.get("description_value_match")),
+        "modal_description_value_before_submit": str(result.get("modal_description_value_before_submit") or ""),
         "submit_button_label": str(after_fill_modal.get("submit_button_label") or result["submit_button_label"]),
         "submit_button_enabled": bool((result.get("submit_button_state_before_click") or {}).get("enabled")),
         "validation_messages": list(result.get("validation_messages_before_click") or []),
@@ -610,7 +627,18 @@ def submit_one_candidate(
         result["modal_closed"] = True
         return result
     captured_network: list[dict[str, Any]] = []
+    captured_requests: list[dict[str, Any]] = []
     capture_state = {"enabled": True, "stage": "before_final_submit_click"}
+    page.on(
+        "request",
+        lambda request: capture_submit_network_request(
+            request,
+            captured=captured_requests,
+            stage=str(capture_state.get("stage") or "submit"),
+            target_feedback_id=feedback_id,
+            intended_description=draft_text,
+        ),
+    )
     page.on(
         "response",
         lambda response: capture_submit_network_response(
@@ -644,7 +672,9 @@ def submit_one_candidate(
     result["visible_messages_after_click"] = extract_visible_submit_messages(page)
     result["complaint_status_after_submit"] = read_network_status_after_submit(config, page, feedback_id, request_headers)
     result["post_submit_row_state"] = inspect_post_submit_row_state(page, api_row, candidate)
-    result["submit_network_capture"] = summarize_submit_network_capture(captured_network)
+    result["submit_network_capture"] = summarize_submit_network_capture(captured_network, captured_requests=captured_requests)
+    result["submit_payload_has_description"] = (result["submit_network_capture"] or {}).get("submit_payload_has_description")
+    result["submit_payload_description_length"] = int((result["submit_network_capture"] or {}).get("submit_payload_description_length") or 0)
     result["submit_result"] = classify_submit_result(result)
     submitted_like = result["submit_result"] == SUBMIT_RESULT_CONFIRMED_SUCCESS
     result["submit_success"] = submitted_like
@@ -861,6 +891,81 @@ def capture_submit_network_response(
         captured.append(item)
 
 
+def capture_submit_network_request(
+    request: Request,
+    *,
+    captured: list[dict[str, Any]],
+    stage: str,
+    target_feedback_id: str,
+    intended_description: str,
+) -> None:
+    if len(captured) >= 80:
+        return
+    item = sanitize_submit_network_request(
+        request,
+        stage=stage,
+        target_feedback_id=target_feedback_id,
+        intended_description=intended_description,
+    )
+    if item:
+        captured.append(item)
+
+
+def sanitize_submit_network_request(
+    request: Request,
+    *,
+    stage: str,
+    target_feedback_id: str,
+    intended_description: str,
+) -> dict[str, Any]:
+    try:
+        url = request.url
+        method = str(request.method or "")
+        post_data = request.post_data or ""
+    except Exception:
+        return {}
+    if method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return {}
+    relevant_url = bool(SUBMIT_RELEVANT_URL_RE.search(url))
+    target_seen = bool(target_feedback_id and target_feedback_id in post_data)
+    intended_seen = bool(intended_description and intended_description in post_data)
+    payload: Any = None
+    content_type = ""
+    try:
+        content_type = str(request.headers.get("content-type") or "")
+    except Exception:
+        content_type = ""
+    if post_data:
+        try:
+            payload = json.loads(post_data)
+        except Exception:
+            payload = None
+    body_summary = summarize_submit_request_body(payload, post_data, target_feedback_id=target_feedback_id, intended_description=intended_description)
+    if not relevant_url and not target_seen and not intended_seen and not body_summary.get("has_description"):
+        return {}
+    split = urlsplit(url)
+    query_keys = sorted(
+        {
+            key
+            for key, _value in parse_qsl(split.query, keep_blank_values=True)
+            if not FORBIDDEN_QUERY_KEY_RE.search(str(key))
+        }
+    )[:20]
+    return {
+        "stage": safe_text(stage, 80),
+        "method": safe_text(method, 12),
+        "url_path": safe_text(f"{split.scheme}://{split.netloc}{split.path}", 260),
+        "query_keys": query_keys,
+        "content_type": safe_text(content_type, 120),
+        "complaint_like_url": relevant_url,
+        "submit_api_like_url": bool(re.search(r"/feedbacks/complaints", split.path, re.IGNORECASE)),
+        "body_present": bool(post_data),
+        "target_feedback_id_seen": target_seen or bool(body_summary.get("target_feedback_id_seen")),
+        "payload_shape": payload_shape(payload),
+        "safe_body_summary": body_summary,
+    }
+
+
 def sanitize_submit_network_response(response: Response, *, stage: str, target_feedback_id: str) -> dict[str, Any]:
     try:
         url = response.url
@@ -998,7 +1103,70 @@ def payload_shape(payload: Any) -> dict[str, Any]:
     return {"type": type(payload).__name__}
 
 
-def summarize_submit_network_capture(captured: list[Mapping[str, Any]]) -> dict[str, Any]:
+def summarize_submit_request_body(
+    payload: Any,
+    post_data: str,
+    *,
+    target_feedback_id: str,
+    intended_description: str,
+) -> dict[str, Any]:
+    intended = str(intended_description or "").strip()
+    raw = str(post_data or "")
+    description_values: list[dict[str, Any]] = []
+    safe_keys: set[str] = set()
+
+    def walk(value: Any, path: tuple[str, ...] = (), depth: int = 0) -> None:
+        if depth > 7 or len(description_values) >= 12:
+            return
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                key_text = str(key)
+                if not FORBIDDEN_QUERY_KEY_RE.search(key_text):
+                    safe_keys.add(key_text)
+                next_path = (*path, key_text)
+                if isinstance(item, str) and DESCRIPTION_BODY_KEY_RE.search(key_text):
+                    text = item.strip()
+                    if text:
+                        description_values.append(
+                            {
+                                "key_path": ".".join(next_path[-4:]),
+                                "length": len(text),
+                                "snippet": safe_text(text, 180),
+                                "matches_intended": bool(intended and normalize_text(text) == normalize_text(intended)),
+                            }
+                        )
+                elif isinstance(item, (Mapping, list)):
+                    walk(item, next_path, depth + 1)
+        elif isinstance(value, list):
+            for index, item in enumerate(value[:160]):
+                if isinstance(item, (Mapping, list)):
+                    walk(item, (*path, str(index)), depth + 1)
+
+    walk(payload)
+    intended_seen = bool(intended and intended in raw)
+    best = sorted(description_values, key=lambda item: (bool(item.get("matches_intended")), int(item.get("length") or 0)), reverse=True)
+    selected = best[0] if best else {}
+    has_description = bool(intended_seen or description_values)
+    description_length = int(selected.get("length") or (len(intended) if intended_seen else 0))
+    description_snippet = str(selected.get("snippet") or (safe_text(intended, 180) if intended_seen else ""))
+    return {
+        "has_description": has_description,
+        "intended_description_seen": intended_seen or any(bool(item.get("matches_intended")) for item in description_values),
+        "description_length": description_length,
+        "description_snippet": description_snippet,
+        "description_key_path": safe_text(str(selected.get("key_path") or ""), 160),
+        "description_candidates": best[:4],
+        "target_feedback_id_seen": bool(target_feedback_id and target_feedback_id in raw),
+        "safe_body_keys": sorted(safe_keys)[:30],
+    }
+
+
+def summarize_submit_network_capture(
+    captured: list[Mapping[str, Any]],
+    *,
+    captured_requests: list[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    captured_requests = captured_requests or []
     endpoints: dict[str, dict[str, Any]] = {}
     safe_body_count = 0
     for item in captured:
@@ -1031,17 +1199,41 @@ def summarize_submit_network_capture(captured: list[Mapping[str, Any]]) -> dict[
         for item in captured
         if str(item.get("method") or "").upper() in {"POST", "PUT", "PATCH", "DELETE"} and item.get("complaint_like_url")
     ]
+    request_mutating = [
+        item
+        for item in captured_requests
+        if str(item.get("method") or "").upper() in {"POST", "PUT", "PATCH", "DELETE"} and item.get("complaint_like_url")
+    ]
+    request_body_summaries = [
+        item.get("safe_body_summary")
+        for item in request_mutating
+        if item.get("body_present")
+        and item.get("submit_api_like_url")
+        and isinstance(item.get("safe_body_summary"), Mapping)
+    ]
+    payload_checked = bool(request_body_summaries)
+    has_description = any(bool(summary.get("has_description")) for summary in request_body_summaries)
+    description_lengths = [int(summary.get("description_length") or 0) for summary in request_body_summaries]
+    description_snippet = next((str(summary.get("description_snippet") or "") for summary in request_body_summaries if summary.get("description_snippet")), "")
     return {
         "responses": [dict(item) for item in captured],
+        "requests": [dict(item) for item in captured_requests],
         "endpoints_observed": list(endpoints.values()),
         "response_count": len(captured),
+        "request_count": len(captured_requests),
         "safe_body_count": safe_body_count,
         "mutating_response_count": len(mutating),
+        "mutating_request_count": len(request_mutating),
         "mutating_statuses": [int(item.get("status") or 0) for item in mutating],
         "direct_feedback_id_found": any(row.get("target_feedback_id_match") for row in safe_bodies),
         "complaint_id_found": any(bool(row.get("complaint_id")) for row in safe_bodies),
         "success_text_seen": any(SUCCESS_TEXT_RE.search(" ".join(str(value) for value in row.values())) for row in safe_bodies),
         "validation_text_seen": any(VALIDATION_TEXT_RE.search(" ".join(str(value) for value in row.values())) for row in safe_bodies),
+        "submit_payload_checked": payload_checked,
+        "submit_payload_has_description": has_description if payload_checked else "unknown",
+        "submit_payload_intended_description_seen": any(bool(summary.get("intended_description_seen")) for summary in request_body_summaries),
+        "submit_payload_description_length": max(description_lengths) if description_lengths else 0,
+        "submit_payload_description_snippet": safe_text(description_snippet, 180),
     }
 
 
@@ -1060,6 +1252,8 @@ def classify_submit_result(result: Mapping[str, Any]) -> str:
         return SUBMIT_RESULT_CONFIRMED_NETWORK_ERROR
     if has_mutating_4xx or network.get("validation_text_seen") or any(VALIDATION_TEXT_RE.search(text) for text in validation_messages):
         return SUBMIT_RESULT_CONFIRMED_VALIDATION_ERROR
+    if network.get("submit_payload_checked") and network.get("submit_payload_has_description") is False:
+        return SUBMIT_RESULT_UNCONFIRMED_AFTER_CLICK
     if (
         (result.get("success_state") or {}).get("seen")
         or post_status.get("submitted_like")
@@ -1084,12 +1278,19 @@ def blocker_for_submit_result(result: Mapping[str, Any]) -> str:
 def compact_network_evidence(network: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "response_count": int(network.get("response_count") or 0),
+        "request_count": int(network.get("request_count") or 0),
         "mutating_response_count": int(network.get("mutating_response_count") or 0),
+        "mutating_request_count": int(network.get("mutating_request_count") or 0),
         "mutating_statuses": [int(item or 0) for item in network.get("mutating_statuses") or []][:8],
         "direct_feedback_id_found": bool(network.get("direct_feedback_id_found")),
         "complaint_id_found": bool(network.get("complaint_id_found")),
         "success_text_seen": bool(network.get("success_text_seen")),
         "validation_text_seen": bool(network.get("validation_text_seen")),
+        "submit_payload_checked": bool(network.get("submit_payload_checked")),
+        "submit_payload_has_description": network.get("submit_payload_has_description", "unknown"),
+        "submit_payload_intended_description_seen": bool(network.get("submit_payload_intended_description_seen")),
+        "submit_payload_description_length": int(network.get("submit_payload_description_length") or 0),
+        "submit_payload_description_snippet": safe_text(str(network.get("submit_payload_description_snippet") or ""), 180),
         "endpoints_observed": [
             {
                 "url_path": safe_text(str(item.get("url_path") or ""), 260),
@@ -1108,6 +1309,8 @@ def compact_ui_evidence(modal: Mapping[str, Any]) -> dict[str, Any]:
         "submit_button_label": safe_text(str(modal.get("submit_button_label") or ""), 80),
         "submit_button_enabled": bool((modal.get("submit_button_state_before_click") or {}).get("enabled")),
         "description_field_present_before_click": bool(modal.get("description_field_present_before_click")),
+        "description_value_match": bool(modal.get("description_value_match")),
+        "modal_description_value_before_submit_length": len(str(modal.get("modal_description_value_before_submit") or "")),
         "validation_messages_before_click": [safe_text(str(item), 220) for item in modal.get("validation_messages_before_click") or []][:8],
         "visible_messages_after_click": [safe_text(str(item), 220) for item in modal.get("visible_messages_after_click") or []][:8],
         "modal_open_after_click": bool((modal.get("modal_state_after_click") or {}).get("modal_opened")),
@@ -1136,6 +1339,8 @@ def journal_record_for_submit(
 ) -> dict[str, Any]:
     ai = candidate.get("ai") or {}
     match = candidate.get("match") or {}
+    network = modal.get("submit_network_capture") or {}
+    description_evidence = description_persistence_result(modal.get("draft_text") or "", "", observed=False)
     return {
         "complaint_id": str(uuid4()),
         "feedback_id": str(api_row.get("feedback_id") or candidate.get("feedback_id") or ""),
@@ -1172,6 +1377,12 @@ def journal_record_for_submit(
         "submit_network_evidence_summary": compact_network_evidence(modal.get("submit_network_capture") or {}),
         "submit_ui_evidence_summary": compact_ui_evidence(modal),
         "post_submit_row_state": compact_post_submit_row_state(modal.get("post_submit_row_state") or {}),
+        "modal_description_value_before_submit": str(modal.get("modal_description_value_before_submit") or ""),
+        "submit_payload_has_description": network.get("submit_payload_has_description", "unknown"),
+        "submit_payload_description_length": int(network.get("submit_payload_description_length") or 0),
+        "submit_payload_description_snippet": safe_text(str(network.get("submit_payload_description_snippet") or ""), 180),
+        "post_submit_wb_description_text": description_evidence["post_submit_wb_description_text"],
+        "description_persisted": description_evidence["description_persisted"],
         "last_error": "" if status == "waiting_response" else str(modal.get("blocker") or "submit success not confirmed"),
         "raw_status_text": str((modal.get("success_state") or {}).get("text") or ""),
         "wb_decision_text": "",
@@ -1307,6 +1518,7 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
                 f"- `{candidate.get('feedback_id')}` fit `{ai.get('complaint_fit')}` match `{match.get('match_status')}` submitted `{modal.get('submit_success')}` clicked `{modal.get('submit_clicked')}`",
                 f"  API: `{api.get('created_at')}` rating `{api.get('rating')}` nm `{api.get('nm_id')}` article `{api.get('supplier_article')}` text `{api.get('review_text')}`",
                 f"  Complaint: category `{modal.get('selected_category')}` text `{modal.get('draft_text')}`",
+                f"  Description: match `{modal.get('description_value_match')}` before-submit length `{len(str(modal.get('modal_description_value_before_submit') or ''))}` payload `{(modal.get('submit_network_capture') or {}).get('submit_payload_has_description', 'unknown')}` length `{(modal.get('submit_network_capture') or {}).get('submit_payload_description_length', 0)}`",
                 f"  Evidence: result `{modal.get('submit_result')}` button `{modal.get('submit_button_label')}` network `{compact_network_evidence(modal.get('submit_network_capture') or {})}`",
                 f"  Skip/blocker: `{candidate.get('skip_reason') or modal.get('blocker') or ''}`",
             ]

@@ -18,15 +18,20 @@ from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     build_candidate_records,
     build_draft_text,
     choose_complaint_category,
+    description_is_ready_for_submit,
+    description_persistence_result,
     empty_modal_candidate_state,
+    fill_description_field,
     find_visible_actionable_row,
     no_submit_guards,
     render_markdown_report,
     select_ai_candidate_ids,
     should_open_modal_for_match,
     score_visible_row_against_exact_cursor,
+    wait_for_description_field_ready,
     write_report_artifacts,
 )
+from playwright.sync_api import sync_playwright  # noqa: E402
 
 
 def main() -> None:
@@ -35,6 +40,7 @@ def main() -> None:
     _assert_visible_row_cursor_guard()
     _assert_category_other_fallback()
     _assert_draft_text_builder()
+    _assert_description_fill_sequence()
     _assert_no_submit_guard_and_aggregate()
     _assert_report_shape()
     print("seller_portal_feedbacks_complaint_dry_run_plan_smoke: OK")
@@ -143,6 +149,53 @@ def _assert_draft_text_builder() -> None:
     long = build_draft_text({"reason": "а" * 1000, "evidence": "б" * 1000})
     if len(long) > 500:
         raise AssertionError("draft text must be bounded")
+
+
+def _assert_description_fill_sequence() -> None:
+    intended = "Отзыв описывает другой товар, а не свойства товара из карточки."
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div role="dialog" aria-modal="true">
+                  <label for="desc">Опишите ситуацию</label>
+                  <textarea id="desc" placeholder="Опишите ситуацию"></textarea>
+                  <button>Отправить</button>
+                </div>
+                <script>
+                  window.inputEvents = 0;
+                  window.changeEvents = 0;
+                  const desc = document.querySelector('#desc');
+                  desc.addEventListener('input', () => { window.inputEvents += 1; });
+                  desc.addEventListener('change', () => { window.changeEvents += 1; });
+                </script>
+                """
+            )
+            ready = wait_for_description_field_ready(page, timeout_ms=1000)
+            if not ready.get("ok") or ready.get("field_locator_strategy") != "label_or_placeholder_opishite_situaciyu":
+                raise AssertionError(f"description field must be detected by label/placeholder: {ready}")
+            fill = fill_description_field(page, intended)
+            if not fill.get("ok") or not description_is_ready_for_submit(fill, intended):
+                raise AssertionError(f"description fill must set and preserve value after blur: {fill}")
+            events = page.evaluate("() => ({inputEvents: window.inputEvents, changeEvents: window.changeEvents, value: document.querySelector('#desc').value})")
+            if events["value"] != intended or events["inputEvents"] < 1 or events["changeEvents"] < 1:
+                raise AssertionError(f"description fill must trigger controlled-field events: {events}")
+
+            page.set_content('<div role="dialog" aria-modal="true"><button>Отправить</button></div>')
+            missing = fill_description_field(page, intended)
+            if missing.get("ok") or description_is_ready_for_submit(missing, intended):
+                raise AssertionError(f"missing description field must block submit readiness: {missing}")
+        finally:
+            browser.close()
+
+    persisted = description_persistence_result(intended, intended)
+    if persisted["description_persisted"] is not True:
+        raise AssertionError(f"matching WB description must persist true: {persisted}")
+    empty = description_persistence_result(intended, "")
+    if empty["description_persisted"] is not False:
+        raise AssertionError(f"empty WB description must persist false: {empty}")
 
 
 def _assert_no_submit_guard_and_aggregate() -> None:

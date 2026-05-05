@@ -65,10 +65,17 @@ def _assert_journal_create_dedupe_status_update() -> None:
                 "status_sync_report_path": "/tmp/status-sync.json",
                 "confirmation_probe_path": "/tmp/confirmation.json",
                 "submit_network_evidence_summary": {"methods": ["POST"], "statuses": [200]},
+                "modal_description_value_before_submit": "Описание перед отправкой",
+                "submit_payload_has_description": True,
+                "submit_payload_description_length": 24,
+                "post_submit_wb_description_text": "Описание перед отправкой",
+                "description_persisted": True,
             },
         )
         if not metadata or metadata["status_sync_report_path"] != "/tmp/status-sync.json":
             raise AssertionError(f"metadata update must preserve post-submit evidence paths: {metadata}")
+        if metadata["submit_payload_has_description"] is not True or metadata["description_persisted"] is not True:
+            raise AssertionError(f"metadata update must preserve description diagnostics: {metadata}")
         payload = SheetVitrinaV1FeedbacksComplaintsBlock(runtime_dir=Path(tmp), journal=journal).build_table()
         if payload["contract_name"] != "sheet_vitrina_v1_feedbacks_complaints" or payload["summary"]["satisfied"] != 1:
             raise AssertionError(f"table contract mismatch: {payload}")
