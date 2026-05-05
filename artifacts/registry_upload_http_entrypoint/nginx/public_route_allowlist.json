@@ -114,6 +114,18 @@
       "methods": ["GET"]
     },
     {
+      "name": "sheet_vitrina_feedbacks_complaints_submit_selected",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/complaints/submit-selected",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_feedbacks_complaints_submit_job",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/complaints/submit-job",
+      "methods": ["GET"]
+    },
+    {
       "name": "sheet_vitrina_web_vitrina",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/web-vitrina",
@@ -202,6 +214,18 @@
       "match": "exact",
       "path": "/sheet-vitrina-v1/operator",
       "methods": ["GET"]
+    },
+    {
+      "name": "webcore_login",
+      "match": "exact",
+      "path": "/login",
+      "methods": ["GET", "POST"]
+    },
+    {
+      "name": "webcore_logout",
+      "match": "exact",
+      "path": "/logout",
+      "methods": ["GET", "POST"]
     }
   ]
 }

@@ -26,11 +26,20 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `GET /v1/sheet-vitrina-v1/feedbacks/ai-prompt`
 - `POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt`
 - `POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze`
+- `GET /v1/sheet-vitrina-v1/feedbacks/complaints`
+- `POST /v1/sheet-vitrina-v1/feedbacks/complaints/sync-status`
+- `GET /v1/sheet-vitrina-v1/feedbacks/complaints/sync-status/job`
+- `POST /v1/sheet-vitrina-v1/feedbacks/complaints/submit-selected`
+- `GET /v1/sheet-vitrina-v1/feedbacks/complaints/submit-job`
 - `GET /v1/sheet-vitrina-v1/plan`
 - `GET /v1/sheet-vitrina-v1/status`
 - `GET /v1/sheet-vitrina-v1/job`
 - `GET /sheet-vitrina-v1/operator`
 - `GET /sheet-vitrina-v1/vitrina`
+- `GET /login`
+- `POST /login`
+- `GET /logout`
+- `POST /logout`
 - `GET /v1/sheet-vitrina-v1/web-vitrina`
 - `POST /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/status`
@@ -193,6 +202,11 @@ Hosted service должна предоставлять current repo entrypoint e
 - `SHEET_VITRINA_REFRESH_HTTP_PATH`
 - `SHEET_VITRINA_STATUS_HTTP_PATH`
 - `SHEET_VITRINA_OPERATOR_UI_PATH`
+- `WB_CORE_WEB_AUTH_USERNAME`
+- `WB_CORE_WEB_AUTH_PASSWORD_HASH`
+- `WB_CORE_WEB_AUTH_SESSION_SECRET`
+
+Production WebCore auth is app-level session auth, not nginx basic auth. The password hash uses the entrypoint PBKDF2-HMAC format `pbkdf2_sha256$iterations$salt_b64$digest_b64`; plaintext credentials must stay outside Git/docs/logs and are handed to the owner separately. `WB_CORE_WEB_AUTH_REQUIRED=1` may be set to fail closed when auth env is incomplete.
 
 Current required upstream secret contract stays:
 - `WB_API_TOKEN`
@@ -282,7 +296,7 @@ Promo current correctness guard:
 
 Feedbacks tab/route guard:
 - run `python3 apps/sheet_vitrina_v1_feedbacks_http_smoke.py`, `python3 apps/sheet_vitrina_v1_feedbacks_ai_smoke.py` and `python3 apps/sheet_vitrina_v1_feedbacks_browser_smoke.py` after changes touching the `Отзывы` tab, `GET /v1/sheet-vitrina-v1/feedbacks`, `feedbacks/ai-prompt`, `feedbacks/ai-analyze`, official feedbacks adapter/token path, OpenAI adapter path, server-side prompt storage or feedbacks date/filter/table UI.
-- Live/public closure must read `/sheet-vitrina-v1/vitrina`, one bounded `GET /v1/sheet-vitrina-v1/feedbacks?...`, `GET/POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt` and one bounded small `POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze` on the hosted runtime when AI feedback analysis changes. This verifies route wiring, `WB_API_TOKEN` permission for feedbacks, `OPENAI_API_KEY` visibility to the service without printing the key, friendly upstream error surfacing and normalized JSON shape without `/load`, Google Sheets/GAS, Seller Portal bot, complaint submission or accepted-truth persistence.
+- Live/public closure must first prove unauthenticated operator/product routes are blocked by login/401 and then authenticate through the app-level login cookie before reading `/sheet-vitrina-v1/vitrina`, one bounded `GET /v1/sheet-vitrina-v1/feedbacks?...`, `GET/POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt` and one bounded small `POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze` on the hosted runtime when AI feedback analysis changes. This verifies route wiring, auth cookie compatibility for same-origin fetches, `WB_API_TOKEN` permission for feedbacks, `OPENAI_API_KEY` visibility to the service without printing the key, friendly upstream error surfacing and normalized JSON shape without `/load`, Google Sheets/GAS, bypassing Seller Portal safety gates or accepted-truth persistence.
 
 Google Sheets, GAS, `clasp`, `/v1/sheet-vitrina-v1/load` and `invalid_grant` are not active blockers for web-vitrina completion. If a task explicitly changes archived Apps Script guard code, verify blocked/archived behavior only.
 
@@ -329,6 +343,8 @@ Public probe validates:
 - `GET /v1/sheet-vitrina-v1/feedbacks` returns `200` + JSON `sheet_vitrina_v1_feedbacks` v1 for a bounded valid query (`date_from`, `date_to`, optional `stars`, `is_answered`). It is read-only over official WB `GET /api/v1/feedbacks` with canonical `WB_API_TOKEN`; it must not trigger refresh, `/load`, Google Sheets/GAS, complaint submission or runtime persistence. If the hosted token lacks feedbacks permission, 401/403 is a real live blocker for the `Отзывы` feature rather than a deploy-script success.
 - `GET /v1/sheet-vitrina-v1/feedbacks/ai-prompt` and `POST /v1/sheet-vitrina-v1/feedbacks/ai-prompt` manage server-side operational prompt config in the hosted runtime dir. This prompt is not ЕБД, accepted truth, ready snapshot truth or browser-local truth.
 - `POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze` runs a bounded OpenAI Responses API structured-output call over loaded feedback rows. The browser processes the current visible/filtered operator set as a bounded sequential queue and sends exactly one feedback row per request; large visible sets must be rejected client-side with a clear narrowing message. The route still enforces a hard cap of 3 rows per request as a safety guard. Results and per-row failures remain transient for the current UI session and must not persist AI labels, submit complaints, call Seller Portal or write Google Sheets/GAS.
+- `POST /v1/sheet-vitrina-v1/feedbacks/complaints/submit-selected` is an auth-protected operator route for selected feedback rows. It must return quickly with a submit job `run_id`, reject `feedback_ids>20` and `max_submit>5`, allow only one active job, skip existing complaint-journal ids, and reuse the guarded Seller Portal submit runner/actionable resolver. It is not a public bypass around exact/actionable/description gates.
+- `GET /v1/sheet-vitrina-v1/feedbacks/complaints/submit-job?run_id=...` returns bounded safe job state/events/counters/report paths for that route without secrets, headers, cookies, bearer tokens or storage state.
 - `GET /v1/sheet-vitrina-v1/daily-report` returns `200` + JSON for both states:
   - `status=available` when ready snapshots for `default_business_as_of_date(now)` and `default_business_as_of_date(now)-1 day` are present and their `yesterday_closed` slots are comparable;
   - `status=unavailable` with truthful `reason` when one of those ready snapshots is missing or structurally unusable;

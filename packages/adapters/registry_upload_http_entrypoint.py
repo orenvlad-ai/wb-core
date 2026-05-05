@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 from dataclasses import asdict
 from email.parser import BytesParser
 from email.policy import default as default_email_policy
+import hashlib
+import hmac
+import html
 import json
 import os
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 import socketserver
+import time
 from typing import Any, Mapping
 from urllib import parse as urllib_parse
 
@@ -64,6 +70,10 @@ DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH = "/v1/sheet-vitrina-v1/feed
 DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH = (
     "/v1/sheet-vitrina-v1/feedbacks/complaints/sync-status/job"
 )
+DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH = (
+    "/v1/sheet-vitrina-v1/feedbacks/complaints/submit-selected"
+)
+DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH = "/v1/sheet-vitrina-v1/feedbacks/complaints/submit-job"
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_SHEET_LOAD_PATH = "/v1/sheet-vitrina-v1/load"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
@@ -76,6 +86,10 @@ DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH = "/v1/sheet-vitrina-v1/seller-portal-r
 DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH = "/v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip"
 DEFAULT_SHEET_OPERATOR_UI_PATH = "/sheet-vitrina-v1/operator"
 DEFAULT_SHEET_WEB_VITRINA_UI_PATH = "/sheet-vitrina-v1/vitrina"
+DEFAULT_WEB_AUTH_LOGIN_PATH = "/login"
+DEFAULT_WEB_AUTH_LOGOUT_PATH = "/logout"
+WEB_AUTH_COOKIE_NAME = "wb_core_web_session"
+WEB_AUTH_DEFAULT_MAX_AGE_SECONDS = 8 * 60 * 60
 DEFAULT_FACTORY_ORDER_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/status"
 DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"
 DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH = (
@@ -212,6 +226,14 @@ def _build_handler(
     class RegistryUploadHandler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802
             parsed = urllib_parse.urlparse(self.path)
+            if parsed.path == DEFAULT_WEB_AUTH_LOGIN_PATH:
+                _handle_web_auth_login(self, parsed.query)
+                return
+            if parsed.path == DEFAULT_WEB_AUTH_LOGOUT_PATH:
+                _handle_web_auth_logout(self)
+                return
+            if not _ensure_web_auth(self, parsed):
+                return
             if parsed.path == upload_path:
                 try:
                     payload = _load_request_payload(self)
@@ -592,6 +614,35 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, _with_complaints_sync_job_urls(result))
                 return
 
+            if parsed.path == DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_sheet_feedbacks_complaints_submit_selected_request(payload)
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                except SheetVitrinaV1FeedbacksComplaintsError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus(exc.http_status),
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina feedbacks complaints submit job failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(self, HTTPStatus.OK, _with_complaints_submit_job_urls(result))
+                return
+
             if parsed.path == DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH:
                 try:
                     job_payload = entrypoint.start_seller_portal_session_check_job(
@@ -787,6 +838,14 @@ def _build_handler(
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urllib_parse.urlparse(self.path)
+            if parsed.path == DEFAULT_WEB_AUTH_LOGIN_PATH:
+                _write_login_form_response(self, parsed.query)
+                return
+            if parsed.path == DEFAULT_WEB_AUTH_LOGOUT_PATH:
+                _handle_web_auth_logout(self)
+                return
+            if not _ensure_web_auth(self, parsed):
+                return
             if parsed.path == DEFAULT_SHEET_WEB_VITRINA_UI_PATH:
                 _write_html_response(
                     self,
@@ -1033,6 +1092,37 @@ def _build_handler(
                     return
 
                 _write_json_response(self, HTTPStatus.OK, _with_complaints_sync_job_urls(payload))
+                return
+
+            if parsed.path == DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH:
+                try:
+                    run_id = _resolve_single_query_param(parsed.query, "run_id")
+                    if not run_id:
+                        raise ValueError("run_id query parameter is required")
+                    payload = entrypoint.handle_sheet_feedbacks_complaints_submit_job_request(run_id)
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                except SheetVitrinaV1FeedbacksComplaintsError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus(exc.http_status),
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina feedbacks complaints submit job failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(self, HTTPStatus.OK, _with_complaints_submit_job_urls(payload))
                 return
 
             if parsed.path == DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH:
@@ -1454,6 +1544,8 @@ def _build_handler(
 
         def do_DELETE(self) -> None:  # noqa: N802
             parsed = urllib_parse.urlparse(self.path)
+            if not _ensure_web_auth(self, parsed):
+                return
             if parsed.path in {
                 DEFAULT_FACTORY_ORDER_DELETE_STOCK_FF_PATH,
                 DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FACTORY_PATH,
@@ -1917,6 +2009,335 @@ def _write_binary_response(
     handler.wfile.write(body)
 
 
+def _web_auth_config() -> dict[str, Any]:
+    username = str(os.environ.get("WB_CORE_WEB_AUTH_USERNAME", "") or "").strip()
+    password_hash = str(os.environ.get("WB_CORE_WEB_AUTH_PASSWORD_HASH", "") or "").strip()
+    session_secret = str(os.environ.get("WB_CORE_WEB_AUTH_SESSION_SECRET", "") or "").strip()
+    required = _truthy_env("WB_CORE_WEB_AUTH_REQUIRED")
+    max_age = _safe_positive_int(
+        os.environ.get("WB_CORE_WEB_AUTH_SESSION_MAX_AGE_SECONDS"),
+        WEB_AUTH_DEFAULT_MAX_AGE_SECONDS,
+    )
+    enabled = bool(username and password_hash and session_secret)
+    configured = enabled or not required
+    return {
+        "enabled": enabled,
+        "configured": configured,
+        "required": required,
+        "username": username,
+        "password_hash": password_hash,
+        "session_secret": session_secret,
+        "max_age": max_age,
+    }
+
+
+def _ensure_web_auth(handler: BaseHTTPRequestHandler, parsed: urllib_parse.ParseResult) -> bool:
+    config = _web_auth_config()
+    if not config["configured"]:
+        _write_auth_setup_error(handler, parsed.path)
+        return False
+    if not config["enabled"]:
+        return True
+    if _authenticated_web_user(handler, config):
+        return True
+    if _is_json_route(parsed.path, handler):
+        _write_json_response(
+            handler,
+            HTTPStatus.UNAUTHORIZED,
+            {
+                "error": "authentication_required",
+                "login_url": DEFAULT_WEB_AUTH_LOGIN_PATH,
+            },
+        )
+        return False
+    location = DEFAULT_WEB_AUTH_LOGIN_PATH
+    next_path = parsed.path + (("?" + parsed.query) if parsed.query else "")
+    if next_path and next_path != DEFAULT_WEB_AUTH_LOGIN_PATH:
+        location += "?" + urllib_parse.urlencode({"next": next_path})
+    _write_redirect_response(handler, HTTPStatus.SEE_OTHER, location)
+    return False
+
+
+def _handle_web_auth_login(handler: BaseHTTPRequestHandler, query: str) -> None:
+    config = _web_auth_config()
+    if not config["configured"]:
+        _write_auth_setup_error(handler, DEFAULT_WEB_AUTH_LOGIN_PATH)
+        return
+    if not config["enabled"]:
+        _write_redirect_response(handler, HTTPStatus.SEE_OTHER, DEFAULT_SHEET_WEB_VITRINA_UI_PATH)
+        return
+    try:
+        payload = _load_login_payload(handler)
+    except ValueError:
+        _write_login_form_response(handler, query, error="Не удалось прочитать форму входа.")
+        return
+    username = str(payload.get("username") or "").strip()
+    password = str(payload.get("password") or "")
+    next_path = _safe_next_path(str(payload.get("next") or _resolve_single_query_param(query, "next") or DEFAULT_SHEET_WEB_VITRINA_UI_PATH))
+    if username != config["username"] or not _verify_pbkdf2_password(password, config["password_hash"]):
+        _write_login_form_response(handler, urllib_parse.urlencode({"next": next_path}), error="Неверный логин или пароль.")
+        return
+    cookie = _build_session_cookie(handler, username, config)
+    _write_redirect_response(handler, HTTPStatus.SEE_OTHER, next_path, headers={"Set-Cookie": cookie})
+
+
+def _handle_web_auth_logout(handler: BaseHTTPRequestHandler) -> None:
+    _write_redirect_response(
+        handler,
+        HTTPStatus.SEE_OTHER,
+        DEFAULT_WEB_AUTH_LOGIN_PATH,
+        headers={"Set-Cookie": _expired_session_cookie(handler)},
+    )
+
+
+def _write_login_form_response(
+    handler: BaseHTTPRequestHandler,
+    query: str,
+    *,
+    error: str = "",
+) -> None:
+    config = _web_auth_config()
+    if not config["configured"]:
+        _write_auth_setup_error(handler, DEFAULT_WEB_AUTH_LOGIN_PATH)
+        return
+    next_path = _safe_next_path(_resolve_single_query_param(query, "next") or DEFAULT_SHEET_WEB_VITRINA_UI_PATH)
+    error_markup = (
+        '<p class="login-error">' + html.escape(error, quote=True) + "</p>"
+        if error
+        else ""
+    )
+    body = f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Вход в WebCore</title>
+  <style>
+    body {{ margin:0; min-height:100vh; display:grid; place-items:center; font-family:Inter,Arial,sans-serif; background:#f4f7fb; color:#1f2937; }}
+    main {{ width:min(360px, calc(100vw - 32px)); border:1px solid #d8e0ea; border-radius:8px; background:#fff; padding:24px; box-shadow:0 12px 36px rgba(15,23,42,.08); }}
+    h1 {{ margin:0 0 14px; font-size:22px; line-height:1.2; }}
+    label {{ display:block; margin:12px 0 6px; font-size:12px; font-weight:800; color:#526071; }}
+    input {{ box-sizing:border-box; width:100%; min-height:40px; border:1px solid #cbd5e1; border-radius:6px; padding:8px 10px; font:inherit; }}
+    button {{ width:100%; min-height:40px; margin-top:16px; border:0; border-radius:6px; background:#2463eb; color:#fff; font:inherit; font-weight:800; cursor:pointer; }}
+    .login-error {{ margin:0 0 12px; color:#b42318; font-size:13px; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Вход в WebCore</h1>
+    {error_markup}
+    <form method="post" action="{html.escape(DEFAULT_WEB_AUTH_LOGIN_PATH, quote=True)}">
+      <input type="hidden" name="next" value="{html.escape(next_path, quote=True)}">
+      <label for="username">Логин</label>
+      <input id="username" name="username" autocomplete="username" autofocus required>
+      <label for="password">Пароль</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit">Войти</button>
+    </form>
+  </main>
+</body>
+</html>"""
+    _write_html_response(handler, HTTPStatus.OK, body)
+
+
+def _write_auth_setup_error(handler: BaseHTTPRequestHandler, path: str) -> None:
+    if _is_json_path(path):
+        _write_json_response(
+            handler,
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            {"error": "web auth is required but not configured"},
+        )
+        return
+    _write_html_response(
+        handler,
+        HTTPStatus.SERVICE_UNAVAILABLE,
+        "<!doctype html><meta charset=\"utf-8\"><title>WebCore auth</title><p>WebCore auth is required but not configured.</p>",
+    )
+
+
+def _write_redirect_response(
+    handler: BaseHTTPRequestHandler,
+    status: HTTPStatus,
+    location: str,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> None:
+    body = b""
+    handler.send_response(status.value)
+    handler.send_header("Location", location)
+    for key, value in (headers or {}).items():
+        handler.send_header(str(key), str(value))
+    handler.send_header("Content-Length", "0")
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def _load_login_payload(handler: BaseHTTPRequestHandler) -> dict[str, str]:
+    raw_length = handler.headers.get("Content-Length", "").strip()
+    if not raw_length:
+        raise ValueError("login request body is required")
+    try:
+        content_length = int(raw_length)
+    except ValueError as exc:
+        raise ValueError("Content-Length must be integer") from exc
+    if content_length <= 0:
+        raise ValueError("login request body must not be empty")
+    raw_body = handler.rfile.read(content_length)
+    content_type = str(handler.headers.get("Content-Type", "") or "").lower()
+    if "application/json" in content_type:
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("login JSON must be valid") from exc
+        if not isinstance(payload, Mapping):
+            raise ValueError("login JSON must be an object")
+        return {str(key): str(value) for key, value in payload.items()}
+    form = urllib_parse.parse_qs(raw_body.decode("utf-8"), keep_blank_values=True)
+    return {key: str(values[0] if values else "") for key, values in form.items()}
+
+
+def _authenticated_web_user(handler: BaseHTTPRequestHandler, config: Mapping[str, Any]) -> str:
+    cookie_value = _request_cookie(handler, WEB_AUTH_COOKIE_NAME)
+    if not cookie_value or "." not in cookie_value:
+        return ""
+    payload_b64, signature_b64 = cookie_value.rsplit(".", 1)
+    expected_signature = _base64url_encode(
+        hmac.new(
+            str(config.get("session_secret") or "").encode("utf-8"),
+            payload_b64.encode("ascii"),
+            hashlib.sha256,
+        ).digest()
+    )
+    if not hmac.compare_digest(signature_b64, expected_signature):
+        return ""
+    try:
+        payload = json.loads(_base64url_decode(payload_b64).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, Mapping):
+        return ""
+    username = str(payload.get("u") or "")
+    expires_at = int(payload.get("exp") or 0)
+    if username != str(config.get("username") or ""):
+        return ""
+    if expires_at < int(time.time()):
+        return ""
+    return username
+
+
+def _build_session_cookie(handler: BaseHTTPRequestHandler, username: str, config: Mapping[str, Any]) -> str:
+    max_age = int(config.get("max_age") or WEB_AUTH_DEFAULT_MAX_AGE_SECONDS)
+    payload = _base64url_encode(
+        json.dumps(
+            {
+                "u": username,
+                "exp": int(time.time()) + max_age,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    signature = _base64url_encode(
+        hmac.new(
+            str(config.get("session_secret") or "").encode("utf-8"),
+            payload.encode("ascii"),
+            hashlib.sha256,
+        ).digest()
+    )
+    return _session_cookie_header(
+        handler,
+        f"{payload}.{signature}",
+        max_age=max_age,
+    )
+
+
+def _expired_session_cookie(handler: BaseHTTPRequestHandler) -> str:
+    return _session_cookie_header(handler, "", max_age=0)
+
+
+def _session_cookie_header(handler: BaseHTTPRequestHandler, value: str, *, max_age: int) -> str:
+    parts = [
+        f"{WEB_AUTH_COOKIE_NAME}={value}",
+        "Path=/",
+        "HttpOnly",
+        "SameSite=Lax",
+        f"Max-Age={max(0, int(max_age))}",
+    ]
+    if _request_origin(handler).startswith("https://"):
+        parts.append("Secure")
+    return "; ".join(parts)
+
+
+def _verify_pbkdf2_password(password: str, encoded_hash: str) -> bool:
+    try:
+        algorithm, raw_iterations, salt_b64, digest_b64 = encoded_hash.split("$", 3)
+        iterations = int(raw_iterations)
+    except ValueError:
+        return False
+    if algorithm != "pbkdf2_sha256" or iterations < 100_000:
+        return False
+    try:
+        salt = _base64url_decode(salt_b64)
+        expected = _base64url_decode(digest_b64)
+    except ValueError:
+        return False
+    actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return hmac.compare_digest(actual, expected)
+
+
+def _request_cookie(handler: BaseHTTPRequestHandler, name: str) -> str:
+    cookie_header = str(handler.headers.get("Cookie", "") or "")
+    for part in cookie_header.split(";"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        if key.strip() == name:
+            return value.strip()
+    return ""
+
+
+def _base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _base64url_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    try:
+        return base64.urlsafe_b64decode((value + padding).encode("ascii"))
+    except (binascii.Error, UnicodeEncodeError) as exc:
+        raise ValueError("invalid base64url value") from exc
+
+
+def _safe_next_path(value: str) -> str:
+    next_path = str(value or "").strip() or DEFAULT_SHEET_WEB_VITRINA_UI_PATH
+    if not next_path.startswith("/") or next_path.startswith("//"):
+        return DEFAULT_SHEET_WEB_VITRINA_UI_PATH
+    if next_path.startswith(DEFAULT_WEB_AUTH_LOGIN_PATH):
+        return DEFAULT_SHEET_WEB_VITRINA_UI_PATH
+    return next_path
+
+
+def _is_json_route(path: str, handler: BaseHTTPRequestHandler) -> bool:
+    accept = str(handler.headers.get("Accept", "") or "").lower()
+    return _is_json_path(path) or "application/json" in accept
+
+
+def _is_json_path(path: str) -> bool:
+    return str(path or "").startswith("/v1/")
+
+
+def _truthy_env(name: str) -> bool:
+    return str(os.environ.get(name, "") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _safe_positive_int(value: Any, default: int) -> int:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return default
+    return normalized if normalized > 0 else default
+
+
 def _build_content_disposition(disposition: str, filename: str) -> str:
     raw_filename = str(filename or "").strip() or "download.bin"
     ascii_fallback = "".join(char if ord(char) < 128 and char not in {'"', "\\"} else "_" for char in raw_filename)
@@ -1955,6 +2376,19 @@ def _with_complaints_sync_job_urls(payload: Mapping[str, Any]) -> dict[str, Any]
         return normalized
     normalized["poll_url"] = (
         f"{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH}?"
+        f"{urllib_parse.urlencode({'run_id': run_id})}"
+    )
+    normalized["complaints_url"] = DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH
+    return normalized
+
+
+def _with_complaints_submit_job_urls(payload: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    run_id = str(normalized.get("run_id", "") or "").strip()
+    if not run_id:
+        return normalized
+    normalized["poll_url"] = (
+        f"{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH}?"
         f"{urllib_parse.urlencode({'run_id': run_id})}"
     )
     normalized["complaints_url"] = DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH
@@ -2128,6 +2562,9 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "feedbacks_complaints_path": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
         "feedbacks_complaints_sync_status_path": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH,
         "feedbacks_complaints_sync_status_job_path": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH,
+        "feedbacks_complaints_submit_selected_path": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH,
+        "feedbacks_complaints_submit_job_path": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH,
+        "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
         "job_path": job_path,
         "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
         "seller_recovery_status_path": DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,

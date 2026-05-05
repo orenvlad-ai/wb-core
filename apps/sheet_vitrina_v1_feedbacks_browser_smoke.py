@@ -21,6 +21,8 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH,
+    DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH,
+    DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH,
     DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH,
     DEFAULT_SHEET_FEEDBACKS_PATH,
     DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
@@ -54,10 +56,13 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
     complaints_requests: list[str] = []
     complaints_sync_requests: list[dict[str, object]] = []
     complaints_job_polls: list[str] = []
+    complaints_submit_requests: list[dict[str, object]] = []
+    complaints_submit_job_polls: list[str] = []
     failed_once: set[str] = set()
     large_feedbacks_mode = False
     prompt_saved = False
     complaints_sync_completed = False
+    complaints_submit_completed = False
     selected_model = "gpt-5-mini"
     page_url = base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     with sync_playwright() as playwright:
@@ -237,11 +242,139 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 ),
             )
 
+        def fulfill_complaints_submit(route: object) -> None:
+            payload = json.loads(route.request.post_data or "{}")
+            feedback_ids = payload.get("feedback_ids") if isinstance(payload, dict) else None
+            if not isinstance(feedback_ids, list) or not feedback_ids:
+                raise AssertionError(f"submit-selected request must include feedback_ids, got {payload}")
+            if "browser-1" in [str(item) for item in feedback_ids]:
+                raise AssertionError("submit-selected request must not include already journaled feedback rows")
+            max_submit = int(payload.get("max_submit") or 0)
+            if max_submit < 1 or max_submit > 5:
+                raise AssertionError(f"submit-selected request must enforce max_submit <= 5, got {payload}")
+            complaints_submit_requests.append(payload)
+            route.fulfill(
+                status=200,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                body=json.dumps(
+                    {
+                        "contract_name": "sheet_vitrina_v1_feedbacks_complaints_submit_job",
+                        "contract_version": "v1",
+                        "run_id": "complaints-submit-smoke-run",
+                        "kind": "feedbacks_complaints_submit_selected",
+                        "status": "queued",
+                        "created_at": "2026-05-06T05:00:00Z",
+                        "started_at": "",
+                        "finished_at": "",
+                        "selected_count": len(feedback_ids),
+                        "tested_count": 0,
+                        "submitted_count": 0,
+                        "skipped_count": 0,
+                        "error_count": 0,
+                        "events": [
+                            {
+                                "event": "job_started",
+                                "message": "Submit-selected smoke queued",
+                                "status": "queued",
+                                "timestamp": "2026-05-06T05:00:00Z",
+                            }
+                        ],
+                        "submitted_feedback_ids": [],
+                        "skipped": [],
+                        "summary": {"selected_count": len(feedback_ids), "max_submit": max_submit},
+                        "poll_url": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH + "?run_id=complaints-submit-smoke-run",
+                        "complaints_url": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+
+        def fulfill_complaints_submit_job(route: object) -> None:
+            nonlocal complaints_submit_completed
+            complaints_submit_job_polls.append(route.request.url)
+            status = "success" if len(complaints_submit_job_polls) >= 2 else "running"
+            if status == "success":
+                complaints_submit_completed = True
+            selected_ids = [
+                str(item)
+                for item in ((complaints_submit_requests[-1] or {}).get("feedback_ids") if complaints_submit_requests else [])
+            ]
+            selected_id = selected_ids[0] if selected_ids else "browser-2"
+            events = [
+                {
+                    "event": "job_started",
+                    "message": "Submit-selected smoke running",
+                    "status": "running",
+                    "timestamp": "2026-05-06T05:00:01Z",
+                },
+                {
+                    "event": "row_selected",
+                    "feedback_id": selected_id,
+                    "message": "Row selected by operator",
+                    "status": "running",
+                    "timestamp": "2026-05-06T05:00:02Z",
+                },
+            ]
+            if status == "success":
+                events.extend(
+                    [
+                        {
+                            "event": "row_submit_confirmed_success",
+                            "feedback_id": selected_id,
+                            "message": "WB accepted submit",
+                            "status": "success",
+                            "timestamp": "2026-05-06T05:00:04Z",
+                        },
+                        {
+                            "event": "job_finished",
+                            "message": "Submit-selected smoke finished",
+                            "status": "success",
+                            "timestamp": "2026-05-06T05:00:05Z",
+                        },
+                    ]
+                )
+            route.fulfill(
+                status=200,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                body=json.dumps(
+                    {
+                        "contract_name": "sheet_vitrina_v1_feedbacks_complaints_submit_job",
+                        "contract_version": "v1",
+                        "run_id": "complaints-submit-smoke-run",
+                        "kind": "feedbacks_complaints_submit_selected",
+                        "status": status,
+                        "created_at": "2026-05-06T05:00:00Z",
+                        "started_at": "2026-05-06T05:00:01Z",
+                        "finished_at": "2026-05-06T05:00:05Z" if status == "success" else "",
+                        "selected_count": len(selected_ids) or 1,
+                        "tested_count": 1 if status == "success" else 0,
+                        "submitted_count": 1 if status == "success" else 0,
+                        "skipped_count": 0,
+                        "error_count": 0,
+                        "events": events,
+                        "submitted_feedback_ids": [selected_id] if status == "success" else [],
+                        "skipped": [],
+                        "summary": {
+                            "selected_count": len(selected_ids) or 1,
+                            "tested_count": 1 if status == "success" else 0,
+                            "submitted_count": 1 if status == "success" else 0,
+                            "skipped_count": 0,
+                            "error_count": 0,
+                        },
+                        "poll_url": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH + "?run_id=complaints-submit-smoke-run",
+                        "complaints_url": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_PATH + "?**", fulfill_feedbacks)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH, fulfill_export)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH, fulfill_complaints)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH, fulfill_complaints_sync)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH + "?**", fulfill_complaints_sync_job)
+        context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH, fulfill_complaints_submit)
+        context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH + "?**", fulfill_complaints_submit_job)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH, fulfill_ai_analyze)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH, fulfill_prompt)
         context.route("**" + DEFAULT_SHEET_WEB_VITRINA_READ_PATH + "?**", fulfill_web_vitrina_read)
@@ -282,6 +415,9 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 raise AssertionError("complaints status sync button must call the sync route")
             if not complaints_job_polls:
                 raise AssertionError("complaints status sync UI must poll the job route")
+            page.wait_for_function(
+                "() => document.querySelector('[data-feedbacks-complaints-table]')?.textContent.includes('Отклонена')"
+            )
             if len(complaints_requests) <= before_sync_load_count:
                 raise AssertionError("complaints table must refresh after fake status sync completion")
             if "Отклонена" not in page.locator("[data-feedbacks-complaints-table]").inner_text():
@@ -336,8 +472,12 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                     raise AssertionError(f"feedbacks table must include AI header {expected_header!r}")
             if "Теги" not in page.locator("[data-feedbacks-table] thead").inner_text():
                 raise AssertionError("feedbacks table must include review tags column")
+            if "Жалоба" not in page.locator("[data-feedbacks-table] thead").inner_text():
+                raise AssertionError("feedbacks table must include complaint status column")
             if "Плохое качество" not in page.locator("[data-feedbacks-table] tbody").inner_text():
                 raise AssertionError("feedbacks table must render review tag chips/text")
+            if page.locator("[data-feedbacks-select-row]:not([disabled])").count() != 0:
+                raise AssertionError("feedback row selection must stay disabled before AI analysis is complete")
             if not page.locator("[data-feedbacks-ai-analyze]").is_enabled():
                 raise AssertionError("AI analyze button must become enabled after feedbacks load")
             if not page.locator("[data-feedbacks-export]").is_enabled():
@@ -419,7 +559,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 raise AssertionError(f"feedbacks AI queue must send one row per request, got {ai_request_batches}")
             if ai_request_batches[0] != ["browser-1"] or ai_request_batches[1] != ["browser-2"]:
                 raise AssertionError(f"feedbacks AI queue must follow visible row order, got {ai_request_batches[:3]}")
-            first_fit = page.locator("[data-feedbacks-table] tbody tr").nth(0).locator("td").nth(2).inner_text()
+            first_fit = page.locator("[data-feedbacks-table] tbody tr").nth(0).locator("td").nth(4).inner_text()
             if "Да" not in first_fit:
                 raise AssertionError(f"AI-positive feedbacks must sort first, got {first_fit!r}")
             table_text_after_ai = page.locator("[data-feedbacks-table] tbody").inner_text()
@@ -443,11 +583,16 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             if filtered_count != 24:
                 raise AssertionError(f"AI filter yes must leave analyzed queue rows, got {filtered_count}")
 
+            page.locator("[data-feedbacks-subtab='reviews']").click()
             large_feedbacks_mode = True
             page.locator("[data-feedbacks-load]").click()
             page.wait_for_function("() => document.querySelectorAll('[data-feedbacks-table] tbody tr').length === 650")
-            if page.locator("[data-feedbacks-table-scroll]").evaluate("node => node.scrollHeight <= node.clientHeight"):
-                raise AssertionError("large feedbacks table must stay inside internal scroll container")
+            page.wait_for_selector("[data-feedbacks-table-scroll]", state="visible")
+            large_scroll_metrics = page.locator("[data-feedbacks-table-scroll]").last.evaluate(
+                "node => ({scrollHeight: node.scrollHeight, clientHeight: node.clientHeight, rows: document.querySelectorAll('[data-feedbacks-table] tbody tr').length})"
+            )
+            if large_scroll_metrics["scrollHeight"] <= large_scroll_metrics["clientHeight"]:
+                raise AssertionError(f"large feedbacks table must stay inside internal scroll container: {large_scroll_metrics}")
             request_count_before_large_queue = len(ai_request_batches)
             page.locator("[data-feedbacks-ai-analyze]").click()
             page.wait_for_function(
@@ -455,6 +600,44 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             )
             if len(ai_request_batches) != request_count_before_large_queue:
                 raise AssertionError("oversized feedbacks AI queue must fail before sending row requests")
+
+            large_feedbacks_mode = False
+            page.reload(wait_until="domcontentloaded")
+            page.wait_for_selector("[data-unified-tab-button='feedbacks']")
+            page.locator("[data-unified-tab-button='feedbacks']").click()
+            page.locator("[data-feedbacks-load]").click()
+            page.wait_for_function("() => document.querySelectorAll('[data-feedbacks-table] tbody tr').length === 24")
+            page.locator("[data-feedbacks-ai-analyze]").click()
+            page.wait_for_function(
+                "() => document.querySelector('[data-feedbacks-source-note]')?.textContent.includes('AI готово')"
+            )
+            page.wait_for_function("() => Array.from(document.querySelectorAll('[data-feedbacks-select-row]')).some(node => !node.disabled)")
+            if page.locator('[data-feedbacks-select-row="browser-1"]').count() != 1:
+                raise AssertionError("feedbacks table must render a row checkbox for the journaled row")
+            if not page.locator('[data-feedbacks-select-row="browser-1"]').is_disabled():
+                raise AssertionError("existing complaint journal records must disable selection")
+            first_enabled_checkbox = page.locator("[data-feedbacks-select-row]:not([disabled])").first
+            selected_feedback_id = first_enabled_checkbox.get_attribute("data-feedbacks-select-row")
+            if not selected_feedback_id:
+                raise AssertionError("enabled submit checkbox must expose feedback_id")
+            first_enabled_checkbox.check()
+            if not page.locator("[data-feedbacks-submit-selected]").is_enabled():
+                raise AssertionError("submit-selected button must enable after an analyzed, non-journaled row is selected")
+            if "Выбрано: 1" not in page.locator("[data-feedbacks-submit-selected-count]").inner_text():
+                raise AssertionError("submit-selected UI must show selected count")
+            page.locator("[data-feedbacks-submit-selected]").click()
+            page.wait_for_function(
+                "() => document.querySelector('[data-feedbacks-submit-log-body]')?.textContent.includes('row_submit_confirmed_success')"
+            )
+            submit_log_text = page.locator("[data-feedbacks-submit-log-body]").inner_text()
+            if "status: success" not in submit_log_text:
+                raise AssertionError(f"submit-selected log must render final job status, got {submit_log_text!r}")
+            if not complaints_submit_requests:
+                raise AssertionError("submit-selected button must call backend route")
+            if complaints_submit_requests[-1].get("feedback_ids") != [selected_feedback_id]:
+                raise AssertionError(f"submit-selected payload must include selected id only, got {complaints_submit_requests[-1]}")
+            if not complaints_submit_job_polls:
+                raise AssertionError("submit-selected UI must poll job route")
         finally:
             browser.close()
 
@@ -480,6 +663,8 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "complaints_tab_visible": True,
         "complaints_sync_requests": len(complaints_sync_requests),
         "complaints_job_polls": len(complaints_job_polls),
+        "complaints_submit_requests": len(complaints_submit_requests),
+        "complaints_submit_job_polls": len(complaints_submit_job_polls),
     }
 
 
@@ -621,7 +806,7 @@ def _complaints_payload(*, status_label: str = "Ждёт ответа") -> dict[
                 "ai_complaint_fit_label": "Да",
                 "ai_category_label": "Другое",
                 "ai_reason": "Просим проверить отзыв: тестовое описание.",
-                "feedback_id": "complaint-feedback-1",
+                "feedback_id": "browser-1",
                 "match_status": "exact",
                 "match_score": "1.0",
                 "last_error": "",

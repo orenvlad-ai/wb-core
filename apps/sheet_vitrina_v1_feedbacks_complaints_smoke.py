@@ -18,6 +18,8 @@ if str(ROOT) not in sys.path:
 
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
+    DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH,
+    DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
@@ -40,6 +42,7 @@ def main() -> None:
     _assert_journal_create_dedupe_status_update()
     _assert_error_retry()
     _assert_table_contract_and_fake_async_sync()
+    _assert_fake_submit_selected_job()
     _assert_duplicate_running_job_guard()
     _assert_error_job_and_missing_run_id()
     _assert_http_sync_job_routes()
@@ -138,6 +141,70 @@ def _assert_table_contract_and_fake_async_sync() -> None:
         for required in ("Статус жалобы", "Категория WB", "Текст жалобы", "Match status"):
             if required not in labels:
                 raise AssertionError(f"complaint table schema missing {required!r}: {labels}")
+
+
+def _assert_fake_submit_selected_job() -> None:
+    with TemporaryDirectory(prefix="feedbacks-complaints-submit-job-") as tmp:
+        journal = JsonFileFeedbacksComplaintJournal(Path(tmp))
+        journal.create_or_update(_record("feedback-existing"))
+        submit_called: list[dict[str, object]] = []
+
+        def fake_submit(payload: object) -> dict[str, object]:
+            submit_called.append(dict(payload or {}))
+            return {
+                "contract_name": "sheet_vitrina_v1_feedbacks_complaints_submit_job",
+                "contract_version": "v1",
+                "run_id": str(dict(payload or {}).get("run_id") or "submit-run"),
+                "finished_at": "2026-05-06T00:00:00Z",
+                "aggregate": {
+                    "selected_count": 2,
+                    "tested_count": 2,
+                    "submitted_count": 1,
+                    "skipped_count": 1,
+                    "error_count": 0,
+                },
+                "rows": [
+                    {"feedback_id": "feedback-new", "submitted": True, "submit_clicked": True},
+                    {"feedback_id": "feedback-existing", "submitted": False, "skip_reason": "already exists"},
+                ],
+                "events": [
+                    {
+                        "timestamp": "2026-05-06T00:00:00Z",
+                        "event": "row_submit_confirmed_success",
+                        "feedback_id": "feedback-new",
+                        "message": "fake success",
+                        "status": "success",
+                    }
+                ],
+            }
+
+        block = SheetVitrinaV1FeedbacksComplaintsBlock(runtime_dir=Path(tmp), journal=journal, submit_runner=fake_submit)
+        started = block.submit_selected(
+            {
+                "feedback_ids": ["feedback-new", "feedback-existing"],
+                "max_submit": 1,
+                "date_from": "2026-05-06",
+                "date_to": "2026-05-06",
+                "stars": [1],
+                "is_answered": "all",
+            }
+        )
+        if started["contract_name"] != "sheet_vitrina_v1_feedbacks_complaints_submit_job" or not started["run_id"]:
+            raise AssertionError(f"submit-selected must return submit job contract: {started}")
+        result = _wait_submit_job(block, str(started["run_id"]), {"success"})
+        if not submit_called:
+            raise AssertionError("submit job must invoke guarded submit runner")
+        if result["submitted_count"] != 1 or result["skipped_count"] != 1:
+            raise AssertionError(f"submit job must expose submitted/skipped counts: {result}")
+        if not any(event.get("event") == "row_submit_confirmed_success" for event in result.get("events") or []):
+            raise AssertionError(f"submit job must expose bounded event log: {result}")
+        try:
+            block.submit_selected({"feedback_ids": ["x"], "max_submit": 6, "date_from": "2026-05-06", "date_to": "2026-05-06", "stars": [1]})
+        except ValueError as exc:
+            if "hard cap" not in str(exc):
+                raise AssertionError(f"max_submit>5 must be rejected clearly: {exc}")
+        else:
+            raise AssertionError("max_submit>5 must be rejected")
 
 
 def _assert_duplicate_running_job_guard() -> None:
@@ -239,10 +306,36 @@ def _assert_http_sync_job_routes() -> None:
                 },
             }
 
+        def fake_submit(payload: object) -> dict[str, object]:
+            return {
+                "contract_name": "sheet_vitrina_v1_feedbacks_complaints_submit_job",
+                "contract_version": "v1",
+                "run_id": str(dict(payload or {}).get("run_id") or "submit-http"),
+                "finished_at": "2026-05-06T00:00:00Z",
+                "aggregate": {
+                    "selected_count": 1,
+                    "tested_count": 1,
+                    "submitted_count": 0,
+                    "skipped_count": 1,
+                    "error_count": 0,
+                },
+                "rows": [{"feedback_id": "feedback-http-new", "submitted": False, "skip_reason": "fake skipped"}],
+                "events": [
+                    {
+                        "timestamp": "2026-05-06T00:00:00Z",
+                        "event": "row_error",
+                        "feedback_id": "feedback-http-new",
+                        "message": "fake skipped",
+                        "status": "skipped",
+                    }
+                ],
+            }
+
         complaints_block = SheetVitrinaV1FeedbacksComplaintsBlock(
             runtime_dir=runtime_dir,
             journal=journal,
             status_sync_runner=fake_sync,
+            submit_runner=fake_submit,
         )
         entrypoint = RegistryUploadHttpEntrypoint(runtime_dir=runtime_dir, feedbacks_complaints_block=complaints_block)
         config = RegistryUploadHttpEntrypointConfig(
@@ -282,6 +375,27 @@ def _assert_http_sync_job_routes() -> None:
             )
             if missing_code != 422 or "run_id" not in str(missing_payload.get("error")):
                 raise AssertionError(f"missing run_id must return 422 JSON: {missing_code} {missing_payload}")
+            code, submit_start = _post_json(
+                f"{base_url}{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH}",
+                {
+                    "feedback_ids": ["feedback-http-new"],
+                    "max_submit": 1,
+                    "date_from": "2026-05-06",
+                    "date_to": "2026-05-06",
+                    "stars": [1],
+                    "is_answered": "all",
+                },
+            )
+            if code != 200 or submit_start.get("contract_name") != "sheet_vitrina_v1_feedbacks_complaints_submit_job":
+                raise AssertionError(f"submit-selected route must return job payload: {code} {submit_start}")
+            submit_job_payload = _wait_http_submit_job(base_url, str(submit_start["run_id"]))
+            if submit_job_payload["status"] != "success" or submit_job_payload["summary"]["skipped_count"] != 1:
+                raise AssertionError(f"submit job route must expose fake submit summary: {submit_job_payload}")
+            missing_submit_code, missing_submit_payload = _get_json(
+                f"{base_url}{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH}"
+            )
+            if missing_submit_code != 422 or "run_id" not in str(missing_submit_payload.get("error")):
+                raise AssertionError(f"missing submit run_id must return 422 JSON: {missing_submit_code} {missing_submit_payload}")
         finally:
             server.shutdown()
             server.server_close()
@@ -327,6 +441,21 @@ def _wait_job(
     raise AssertionError(f"job {run_id} did not reach {expected_statuses}, latest={latest}")
 
 
+def _wait_submit_job(
+    block: SheetVitrinaV1FeedbacksComplaintsBlock,
+    run_id: str,
+    expected_statuses: set[str],
+) -> dict[str, object]:
+    deadline = time.monotonic() + 5
+    latest: dict[str, object] = {}
+    while time.monotonic() < deadline:
+        latest = block.get_submit_job(run_id)
+        if latest.get("status") in expected_statuses:
+            return latest
+        time.sleep(0.02)
+    raise AssertionError(f"submit job {run_id} did not reach {expected_statuses}, latest={latest}")
+
+
 def _wait_http_job(base_url: str, run_id: str) -> dict[str, object]:
     deadline = time.monotonic() + 5
     latest: dict[str, object] = {}
@@ -340,6 +469,21 @@ def _wait_http_job(base_url: str, run_id: str) -> dict[str, object]:
             return latest
         time.sleep(0.05)
     raise AssertionError(f"http job {run_id} did not finish, latest={latest}")
+
+
+def _wait_http_submit_job(base_url: str, run_id: str) -> dict[str, object]:
+    deadline = time.monotonic() + 5
+    latest: dict[str, object] = {}
+    while time.monotonic() < deadline:
+        code, latest = _get_json(
+            f"{base_url}{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH}?run_id={run_id}"
+        )
+        if code != 200:
+            raise AssertionError(f"submit job route returned {code}: {latest}")
+        if latest.get("status") in {"success", "error"}:
+            return latest
+        time.sleep(0.05)
+    raise AssertionError(f"http submit job {run_id} did not finish, latest={latest}")
 
 
 def _post_json(url: str, payload: dict[str, object]) -> tuple[int, dict[str, object]]:

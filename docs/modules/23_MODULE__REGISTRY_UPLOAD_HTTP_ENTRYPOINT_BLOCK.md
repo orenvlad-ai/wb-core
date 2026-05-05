@@ -65,6 +65,8 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/feedbacks/complaints"
   - "POST /v1/sheet-vitrina-v1/feedbacks/complaints/sync-status"
   - "GET /v1/sheet-vitrina-v1/feedbacks/complaints/sync-status/job?run_id=..."
+  - "POST /v1/sheet-vitrina-v1/feedbacks/complaints/submit-selected"
+  - "GET /v1/sheet-vitrina-v1/feedbacks/complaints/submit-job?run_id=..."
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
   - "GET /v1/sheet-vitrina-v1/job"
@@ -72,6 +74,10 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip"
   - "GET /sheet-vitrina-v1/operator"
   - "GET /sheet-vitrina-v1/vitrina"
+  - "GET /login"
+  - "POST /login"
+  - "GET /logout"
+  - "POST /logout"
   - "GET /v1/sheet-vitrina-v1/web-vitrina"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/status"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"
@@ -88,6 +94,7 @@ related_runners:
   - "apps/registry_upload_http_entrypoint_live.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime.py"
   - "apps/registry_upload_http_entrypoint_smoke.py"
+  - "apps/registry_upload_http_entrypoint_auth_smoke.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"
   - "apps/registry_upload_http_entrypoint_public_routes_smoke.py"
   - "apps/sheet_vitrina_v1_seller_portal_recovery_http_smoke.py"
@@ -124,7 +131,7 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под строгую feedbacks загрузку и operator UI: `Отзывы` получает chunked WB feedbacks read route with final server-side date/star/answered filtering, official WB review tags/chips (`review_tags` from fields such as `bables`) and diagnostic meta, XLSX export route for the current table including tags, server-side AI prompt+model discovery config, public `feedbacks/ai-prompt` + `feedbacks/ai-analyze` routes that pass tags into AI input, operational complaint journal read route and async read-only complaints status sync job route; AI labels stay transient UI/session output, while real complaint submit is CLI-only through a guarded Seller Portal runner and is not exposed as a public submit route. The guarded runner verifies the WB `Опишите ситуацию` field value after blur before final submit, records sanitized request-payload description evidence when available, and blocks future submit when AI reason says text is absent while API/UI review tags exist. Uncertain submit attempts are confirmed only by read-only CLI confirmation/detail-network probes with direct-id/strict-strong-composite proof."
+update_note: "Обновлён под simple WebCore auth, strict feedbacks загрузку и operator UI: `Отзывы` получает chunked WB feedbacks read route with final server-side date/star/answered filtering, official WB review tags/chips (`review_tags` from fields such as `bables`) and diagnostic meta, XLSX export route for the current table including tags, server-side AI prompt+model discovery config, protected `feedbacks/ai-prompt` + `feedbacks/ai-analyze` routes that pass tags into AI input, operational complaint journal read route, async read-only complaints status sync job route and protected async `submit-selected` job route. AI labels stay transient UI/session output; real complaint submit is guarded-runner-only through the existing Seller Portal runner/resolver path, with CLI explicit flag in CLI mode and auth-protected selected-row job in operator UI. The guarded runner verifies the WB `Опишите ситуацию` field value after blur before final submit, records sanitized request-payload description evidence when available, and blocks future submit when AI reason says text is absent while API/UI review tags exist. Uncertain submit attempts are confirmed only by read-only CLI confirmation/detail-network probes with direct-id/strict-strong-composite proof."
 ---
 
 # 1. Идентификатор и статус
@@ -191,6 +198,7 @@ update_note: "Обновлён под строгую feedbacks загрузку 
   - `200` для `accepted`
   - `409` для duplicate `dataset_version`
   - `422` для contract-level rejection после parse/validation
+- Public/operator WebCore surface is guarded by simple app-level session auth when runtime env provides `WB_CORE_WEB_AUTH_USERNAME`, `WB_CORE_WEB_AUTH_PASSWORD_HASH` and `WB_CORE_WEB_AUTH_SESSION_SECRET` (or `WB_CORE_WEB_AUTH_REQUIRED=1`). `GET /login` renders the login form, `POST /login` verifies the PBKDF2-HMAC password hash and sets an httpOnly SameSite=Lax session cookie, and `GET/POST /logout` clears it. HTML routes redirect unauthenticated users to login; JSON/API routes return 401 JSON. Health/infrastructure probes may stay public when explicitly required, but operator/product routes under `/sheet-vitrina-v1` and `/v1/...` are protected in production.
 - Для `sheet_vitrina_v1` тот же entrypoint обслуживает narrow operator surface в двух блоках:
   - `POST /v1/sheet-vitrina-v1/refresh` = existing heavy server-side action
   - `POST /v1/sheet-vitrina-v1/load` = thin operator action, который пишет уже готовый snapshot в live sheet через existing bound Apps Script bridge, но operator-facing result отдельно distinguishes technical bridge completion from confirmed sheet update
@@ -207,7 +215,9 @@ update_note: "Обновлён под строгую feedbacks загрузку 
   - `GET /v1/sheet-vitrina-v1/feedbacks/complaints` = read-only JSON contract for the operational complaint journal inside runtime state. It returns complaint rows/statuses for the `Отзывы -> Жалобы` table and is not accepted truth/ЕБД/Google Sheets/GAS.
   - `POST /v1/sheet-vitrina-v1/feedbacks/complaints/sync-status` = async read-only Seller Portal `Мои жалобы` status sync job launcher. The public call does not hold the HTTP stream for browser automation; it quickly returns `sheet_vitrina_v1_feedbacks_complaints_status_sync_job` with `run_id`, `status`, `already_running`, `poll_url` and `complaints_url`. Runtime job state is operational JSON under the runtime dir, not accepted truth/ЕБД, and only one active sync job is allowed at a time; duplicate launches return the existing active `run_id`.
   - `GET /v1/sheet-vitrina-v1/feedbacks/complaints/sync-status/job?run_id=...` = cheap job read surface for that status sync. It returns queued/running/success/error state, created/started/finished times, safe report paths and summary counters (`pending_rows_read`, `answered_rows_read`, direct/strong matches, weak rejected, statuses updated), never cookies/headers/storage_state. Finished jobs point to reports under `feedbacks_complaints_status_sync/<run_id>/`.
-  - The background job runs only `apps/seller_portal_feedbacks_complaints_status_sync.py`: it may run the bounded browser scanner to update only the runtime complaint journal statuses (`Ждёт ответа`, `Удовлетворена`, `Отклонена`, `Ошибка`) after direct-id or strict strong-composite matches, reports direct/strong/weak counters, must reject weak matches, and must not submit complaints. Real complaint submission remains CLI-only via `apps/seller_portal_feedbacks_complaint_submit.py` with explicit submit flag, hard max-submit cap `5` for small controlled batches, hard denylist for the historical uncertain `GPe9vrq0kctlSfobrgq2` plus the previous successful empty-description investigation id `fdQpHhNXTosEkArTHAZF`, exact-match requirement, API/UI tag diagnostics, deterministic `reason_contradicts_review_tags` safety block and evidence-based post-click classification. The runner checks fresh AI `yes` candidates first and then `review` candidates through the shared actionability resolver, skipping non-actionable exact-cursor rows and continuing through eligible candidates until the explicit cap or candidate exhaustion; it continues after confirmed success but stops immediately on validation/network/unconfirmed submit results or uncertain modal/page state. Preliminary unfiltered non-exact matching never authorizes submit; it may only defer the candidate to the shared date/star/status filter-aware actionable-row resolver, and final submit stays blocked unless that resolver proves an exact actionable Seller Portal DOM row. The submit runner records sanitized network/toast/validation/modal/row evidence, blocks final submit if the scoped `Опишите ситуацию` field value is not preserved after blur, records sanitized request-payload description presence when the browser exposes it, and treats click-only outcomes as `Ошибка`; one-off post-submit uncertainty confirmation is CLI-only via `apps/seller_portal_feedbacks_complaint_confirmation.py` and deeper read-only detail/network inspection is CLI-only via `apps/seller_portal_feedbacks_complaints_detail_probe.py`.
+  - `POST /v1/sheet-vitrina-v1/feedbacks/complaints/submit-selected` = auth-protected operator launcher for selected feedback complaint submits. It accepts `feedback_ids`, current filter context and `max_submit`, rejects more than 20 ids and `max_submit>5`, returns quickly with `sheet_vitrina_v1_feedbacks_complaints_submit_job`, allows only one active submit job, skips existing journal records/denylist entries and delegates real browser work to the existing guarded Seller Portal submit runner rather than a weaker HTTP-only submit path.
+  - `GET /v1/sheet-vitrina-v1/feedbacks/complaints/submit-job?run_id=...` = cheap job read surface for submit-selected. It returns queued/running/success/error state, selected/tested/submitted/skipped/error counters, bounded safe events, submitted ids, skipped reasons and report paths without headers/cookies/tokens/storage_state.
+  - The background status-sync job runs only `apps/seller_portal_feedbacks_complaints_status_sync.py`: it may run the bounded browser scanner to update only the runtime complaint journal statuses (`Ждёт ответа`, `Удовлетворена`, `Отклонена`, `Ошибка`) after direct-id or strict strong-composite matches, reports direct/strong/weak counters, must reject weak matches, and must not submit complaints. Real complaint submission remains guarded-runner-only via `apps/seller_portal_feedbacks_complaint_submit.py`: CLI mode requires explicit submit flag, while protected `submit-selected` delegates selected rows into the same runner path. The runner keeps hard max-submit cap `5` for small controlled batches, hard denylist for the historical uncertain `GPe9vrq0kctlSfobrgq2` plus the previous successful empty-description investigation id `fdQpHhNXTosEkArTHAZF`, exact-match requirement, API/UI tag diagnostics, deterministic `reason_contradicts_review_tags` safety block and evidence-based post-click classification. The runner checks fresh AI `yes` candidates first and then `review` candidates through the shared actionability resolver, skipping non-actionable exact-cursor rows and continuing through eligible candidates until the explicit cap or candidate exhaustion; it continues after confirmed success but stops immediately on validation/network/unconfirmed submit results or uncertain modal/page state. Preliminary unfiltered non-exact matching never authorizes submit; it may only defer the candidate to the shared date/star/status filter-aware actionable-row resolver, and final submit stays blocked unless that resolver proves an exact actionable Seller Portal DOM row. The submit runner records sanitized network/toast/validation/modal/row evidence, blocks final submit if the scoped `Опишите ситуацию` field value is not preserved after blur, records sanitized request-payload description presence when the browser exposes it, and treats click-only outcomes as `Ошибка`; one-off post-submit uncertainty confirmation is CLI-only via `apps/seller_portal_feedbacks_complaint_confirmation.py` and deeper read-only detail/network inspection is CLI-only via `apps/seller_portal_feedbacks_complaints_detail_probe.py`.
   - `GET /v1/sheet-vitrina-v1/plan` = existing cheap date-aware ready-snapshot read
   - `GET /v1/sheet-vitrina-v1/status` = cheap metadata read для последнего persisted refresh result, where root `status` is semantic snapshot outcome rather than mere ready-snapshot existence
   - `GET /v1/sheet-vitrina-v1/job` = cheap poll/read surface для live operator log и async action state
@@ -560,7 +570,7 @@ update_note: "Обновлён под строгую feedbacks загрузку 
 
 - Для первого live inbound boundary используется стандартный `http.server`.
 - Это не является решением, что production target обязан жить на этом же framework-path.
-- Deploy/auth-hardening остаются отдельными шагами вне исходного module proof, но task-level execution handoff для public route change всё равно требует live publish verification.
+- Simple WebCore auth is now part of the entrypoint contract for production public/operator surfaces; task-level execution handoff for any public route change still requires live publish verification.
 
 ## 3.2 Completion semantics для public route changes
 
