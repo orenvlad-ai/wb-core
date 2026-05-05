@@ -45,6 +45,7 @@ from apps.seller_portal_relogin_session import (  # noqa: E402
     DEFAULT_STORAGE_STATE_PATH,
     DEFAULT_WB_BOT_PYTHON,
 )
+from packages.application.feedback_review_tags import known_review_tags_from_text, normalize_review_tags  # noqa: E402
 from packages.application.sheet_vitrina_v1_feedbacks import SheetVitrinaV1FeedbacksBlock  # noqa: E402
 
 
@@ -709,6 +710,9 @@ def seller_portal_network_feedback_to_ui_row(feedback: Mapping[str, Any], *, is_
     text = str(info.get("feedbackText") or "").strip()
     pros = combine_reason_text(info.get("feedbackTextPros"), info.get("goodReasons"))
     cons = combine_reason_text(info.get("feedbackTextCons"), info.get("badReasons"))
+    pros_tags = normalize_review_tags(info.get("goodReasons") or known_review_tags_from_text(pros))
+    cons_tags = normalize_review_tags(info.get("badReasons") or known_review_tags_from_text(cons))
+    review_tags = normalize_review_tags([*pros_tags, *cons_tags, *known_review_tags_from_text(text)])
     media_indicators = seller_portal_media_indicators(info)
     row_text = " ".join(part for part in (text, pros, cons) if part)
     normalized_review = normalize_text(row_text)
@@ -727,6 +731,10 @@ def seller_portal_network_feedback_to_ui_row(feedback: Mapping[str, Any], *, is_
         "wb_article": str(product.get("wbArticle") or ""),
         "nm_id": str(product.get("wbArticle") or ""),
         "text_snippet": safe_text(text, 700),
+        "review_tags": review_tags,
+        "pros_tags": pros_tags,
+        "cons_tags": cons_tags,
+        "tag_source": "seller_portal_cursor" if review_tags else "none",
         "pros_snippet": safe_text(pros, 700),
         "cons_snippet": safe_text(cons, 700),
         "comment_snippet": "",
@@ -1360,6 +1368,8 @@ def summarize_api_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "supplier_article": safe_text(str(row.get("supplier_article") or ""), 120),
         "product_name": safe_text(str(row.get("product_name") or ""), 160),
         "review_text": safe_text(api_review_text(row), 220),
+        "review_tags": normalize_review_tags(row.get("review_tags") or []),
+        "tag_source": str(row.get("tag_source") or ""),
         "is_answered": bool(row.get("is_answered")),
         "photo_count": int(row.get("photo_count") or 0),
         "video_count": int(row.get("video_count") or 0),
@@ -1380,6 +1390,8 @@ def summarize_ui_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "supplier_article": safe_text(str(row.get("supplier_article") or ""), 120),
         "product_title": safe_text(str(row.get("product_title") or ""), 160),
         "review_text": safe_text(ui_review_text(row), 220),
+        "review_tags": normalize_review_tags(row.get("review_tags") or []),
+        "tag_source": str(row.get("tag_source") or ""),
         "media_indicators": [str(item) for item in row.get("media_indicators") or []],
         "hidden_feedback_id": str(row.get("hidden_feedback_id") or ""),
         "row_text_fingerprint": str(row.get("row_text_fingerprint") or ""),
@@ -1389,18 +1401,22 @@ def summarize_ui_row(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def api_review_text(row: Mapping[str, Any]) -> str:
+    base_values = (row.get("text"), row.get("pros"), row.get("cons"))
+    tag_text = " ".join(normalize_review_tags(row.get("review_tags") or [])) if not any(str(value or "").strip() for value in base_values) else ""
     return " ".join(
-        safe_text(str(row.get(key) or ""), 500)
-        for key in ("text", "pros", "cons")
-        if str(row.get(key) or "").strip()
+        safe_text(str(value or ""), 500)
+        for value in (*base_values, tag_text)
+        if str(value or "").strip()
     )
 
 
 def ui_review_text(row: Mapping[str, Any]) -> str:
+    base_values = (row.get("text_snippet"), row.get("pros_snippet"), row.get("cons_snippet"), row.get("comment_snippet"))
+    tag_text = " ".join(normalize_review_tags(row.get("review_tags") or [])) if not any(str(value or "").strip() for value in base_values) else ""
     return " ".join(
-        safe_text(str(row.get(key) or ""), 500)
-        for key in ("text_snippet", "pros_snippet", "cons_snippet", "comment_snippet")
-        if str(row.get(key) or "").strip()
+        safe_text(str(value or ""), 500)
+        for value in (*base_values, tag_text)
+        if str(value or "").strip()
     )
 
 

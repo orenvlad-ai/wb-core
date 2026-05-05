@@ -93,6 +93,7 @@ class FakeFeedbacksSource:
                         "brandName": "Brand",
                     },
                     "text": "Проблема с упаковкой",
+                    "bables": ["плохое качество", "плохое качество"],
                     "pros": "",
                     "cons": "Упаковка",
                     "photoLinks": [{"fullSize": "https://example.test/photo.jpg"}],
@@ -194,6 +195,8 @@ def main() -> None:
     rows = payload.get("rows") or []
     if [row.get("feedback_id") for row in rows] != ["unanswered-1", "answered-5"]:
         raise AssertionError(f"feedback rows must be filtered by stars and sorted desc, got {rows}")
+    if rows[0].get("review_tags") != ["Плохое качество"] or rows[0].get("tag_source") != "official_wb_api":
+        raise AssertionError(f"official WB bables must normalize into review_tags, got {rows[0]}")
     summary = payload.get("summary") or {}
     if summary.get("total") != 2 or summary.get("answered") != 1 or summary.get("unanswered") != 1:
         raise AssertionError(f"feedback summary mismatch: {summary}")
@@ -204,6 +207,8 @@ def main() -> None:
         raise AssertionError(f"feedback diagnostics must expose chunks/pages, got: {meta}")
     if meta.get("raw_fetched_count") != 3 or meta.get("deduped_count") != 3 or meta.get("final_filtered_count") != 2:
         raise AssertionError(f"feedback diagnostics counts mismatch: {meta}")
+    if meta.get("rows_with_tags_count") != 1 or meta.get("tag_source") != "official_wb_api":
+        raise AssertionError(f"feedback tag diagnostics mismatch: {meta}")
     if meta.get("earliest_feedback_date") != "2026-04-28" or meta.get("latest_feedback_date") != "2026-04-29":
         raise AssertionError(f"feedback diagnostics date range mismatch: {meta}")
 
@@ -265,12 +270,14 @@ def main() -> None:
         raise AssertionError(f"feedbacks export filename mismatch: {filename}")
     workbook_rows = read_first_sheet_rows(workbook_bytes)
     expected_headers = [
-        "Дата", "Оценка", "nmId", "Артикул", "Товар", "Текст отзыва", "Плюсы", "Минусы",
+        "Дата", "Оценка", "nmId", "Артикул", "Товар", "Текст отзыва", "Теги отзыва", "Плюсы", "Минусы",
         "Есть ответ", "Ответ продавца", "Фото", "Видео", "Подходит для жалобы", "Категория AI",
         "Причина AI", "Уверенность AI", "ID отзыва",
     ]
     if workbook_rows[0] != expected_headers or len(workbook_rows) != 2:
         raise AssertionError(f"feedbacks export workbook mismatch: {workbook_rows}")
+    if "Плохое качество" not in workbook_rows[1]:
+        raise AssertionError(f"feedbacks export must include joined review tags: {workbook_rows}")
 
     with TemporaryDirectory(prefix="sheet-vitrina-feedbacks-http-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
@@ -305,6 +312,7 @@ def main() -> None:
                 'data-feedbacks-ai-analyze',
                 'data-feedbacks-export',
                 'data-feedbacks-model',
+                '["review_tags", "Теги"]',
                 'data-feedbacks-subtab="prompt"',
                 'data-feedbacks-subtab="complaints"',
                 'data-feedbacks-complaints-sync',
@@ -340,6 +348,8 @@ def main() -> None:
                 raise AssertionError(f"feedbacks route summary mismatch: {route_payload}")
             if route_payload.get("meta", {}).get("final_filtered_count") != 2:
                 raise AssertionError(f"feedbacks route diagnostics mismatch: {route_payload}")
+            if ((route_payload.get("rows") or [{}])[0]).get("review_tags") != ["Плохое качество"]:
+                raise AssertionError(f"feedbacks route must include review_tags: {route_payload}")
 
             export_status, export_headers, export_body = _post_binary(
                 f"{base_url}{DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH}",
@@ -359,8 +369,11 @@ def main() -> None:
             )
             if export_status != 200 or "spreadsheetml.sheet" not in export_headers.get("Content-Type", ""):
                 raise AssertionError(f"feedbacks export route mismatch: {export_status} {export_headers}")
-            if len(read_first_sheet_rows(export_body)) != 2:
+            exported_rows = read_first_sheet_rows(export_body)
+            if len(exported_rows) != 2:
                 raise AssertionError("feedbacks export route workbook must contain header + one row")
+            if "Плохое качество" not in exported_rows[1]:
+                raise AssertionError(f"feedbacks export route must include review tags: {exported_rows}")
 
             invalid_status, invalid_payload = _get_json(
                 f"{base_url}{DEFAULT_SHEET_FEEDBACKS_PATH}?date_from=2026-04-27&date_to=2026-04-29&stars=6"

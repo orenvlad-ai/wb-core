@@ -67,6 +67,7 @@ from apps.seller_portal_relogin_session import (  # noqa: E402
     DEFAULT_STORAGE_STATE_PATH,
     DEFAULT_WB_BOT_PYTHON,
 )
+from packages.application.feedback_review_tags import normalize_review_tags, reason_contradicts_review_tags  # noqa: E402
 from packages.application.sheet_vitrina_v1_feedbacks import SheetVitrinaV1FeedbacksBlock  # noqa: E402
 from packages.application.sheet_vitrina_v1_feedbacks_ai import (  # noqa: E402
     MAX_ROWS_PER_RUN,
@@ -482,6 +483,20 @@ def apply_exact_matches(
             continue
         match = match_one_api_row(api_row, ui_rows)
         candidate["match"] = match
+        review_tags = normalize_review_tags(
+            [
+                *((candidate.get("api_summary") or {}).get("review_tags") or []),
+                *((match.get("best_ui_candidate") or {}).get("review_tags") or []),
+            ]
+        )
+        candidate["tag_diagnostics"] = {
+            "api_review_tags": normalize_review_tags((candidate.get("api_summary") or {}).get("review_tags") or []),
+            "ui_review_tags": normalize_review_tags(((match.get("best_ui_candidate") or {}).get("review_tags") or [])),
+            "combined_review_tags": review_tags,
+        }
+        if reason_contradicts_review_tags((candidate.get("ai") or {}).get("reason"), review_tags):
+            candidate["skip_reason"] = "reason_contradicts_review_tags; modal draft blocked"
+            continue
         if should_open_modal_for_match(match):
             candidate["skip_reason"] = ""
         else:
@@ -1454,7 +1469,7 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
         lines.extend(
             [
                 f"- `{candidate.get('feedback_id')}` selected `{candidate.get('selected_for_dry_run')}` fit `{ai.get('complaint_fit')}` match `{match.get('match_status')}` modal `{modal.get('draft_prepared')}`",
-                f"  API: `{api.get('created_at')}` rating `{api.get('rating')}` nm `{api.get('nm_id')}` article `{api.get('supplier_article')}` text `{api.get('review_text')}`",
+                f"  API: `{api.get('created_at')}` rating `{api.get('rating')}` nm `{api.get('nm_id')}` article `{api.get('supplier_article')}` text `{api.get('review_text')}` tags `{', '.join(api.get('review_tags') or [])}`",
                 f"  AI: `{ai.get('category_label')}` / `{ai.get('confidence_label')}` reason `{ai.get('reason')}` evidence `{ai.get('evidence')}`",
                 f"  Draft: category `{modal.get('selected_category')}` submit `{modal.get('submit_button_label')}` clicked `{modal.get('submit_clicked')}` text `{modal.get('draft_text')}`",
                 f"  Description: match `{modal.get('description_value_match')}` after-fill length `{len(str(modal.get('modal_description_value_after_fill') or ''))}` after-blur length `{len(str(modal.get('modal_description_value_after_blur') or ''))}`",

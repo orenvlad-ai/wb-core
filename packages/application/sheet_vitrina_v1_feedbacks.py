@@ -11,6 +11,7 @@ from packages.adapters.wb_feedbacks import (
     WbFeedbacksHttpStatusError,
     WbFeedbacksTransportError,
 )
+from packages.application.feedback_review_tags import extract_official_wb_review_tags, review_tags_display
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes
 from packages.business_time import CANONICAL_BUSINESS_TIMEZONE, current_business_date_iso
 
@@ -33,6 +34,7 @@ FEEDBACKS_EXPORT_COLUMNS = [
     ("Артикул", "supplier_article"),
     ("Товар", "product_name"),
     ("Текст отзыва", "text"),
+    ("Теги отзыва", "review_tags"),
     ("Плюсы", "pros"),
     ("Минусы", "cons"),
     ("Есть ответ", "is_answered_label"),
@@ -165,6 +167,8 @@ class SheetVitrinaV1FeedbacksBlock:
         ]
         rows.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
         summary = _build_summary(rows)
+        rows_with_tags_count = sum(1 for row in rows if row.get("review_tags"))
+        tag_sources = sorted({str(row.get("tag_source") or "none") for row in rows if row.get("review_tags")})
         fetched_at = self.now_factory().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         final_dates = sorted({str(row.get("created_date") or "") for row in rows if row.get("created_date")})
         return {
@@ -192,6 +196,9 @@ class SheetVitrinaV1FeedbacksBlock:
                 "raw_fetched_count": len(raw_rows),
                 "deduped_count": len(deduped_rows),
                 "final_filtered_count": len(rows),
+                "tag_source": ",".join(tag_sources) if tag_sources else "none",
+                "rows_with_tags_count": rows_with_tags_count,
+                "tag_enrichment_status": "official_wb_api_fields" if rows_with_tags_count else "no_tags_in_normalized_rows",
                 "truncated": truncated,
                 "truncation_reason": ",".join(sorted(set(filter(None, truncation_reasons)))) if truncated else "",
                 "cap": MAX_TOTAL_RAW_ROWS,
@@ -210,6 +217,7 @@ class SheetVitrinaV1FeedbacksBlock:
                     {"key": "product_name", "label": "Товар"},
                     {"key": "brand_name", "label": "Бренд"},
                     {"key": "text", "label": "Отзыв"},
+                    {"key": "review_tags", "label": "Теги"},
                     {"key": "pros", "label": "Плюсы"},
                     {"key": "cons", "label": "Минусы"},
                     {"key": "answer_text", "label": "Ответ"},
@@ -323,6 +331,7 @@ def _coerce_fetch_result(value: WbFeedbacksFetchResult | list[Mapping[str, Any]]
 
 def _normalize_feedback_row(item: Mapping[str, Any]) -> dict[str, Any]:
     product = _mapping(item.get("productDetails")) or _mapping(item.get("product")) or {}
+    tag_info = extract_official_wb_review_tags(item)
     answer = item.get("answer")
     answer_text = ""
     if isinstance(answer, Mapping):
@@ -352,6 +361,11 @@ def _normalize_feedback_row(item: Mapping[str, Any]) -> dict[str, Any]:
         "product_name": str(product.get("productName") or item.get("productName") or "").strip(),
         "brand_name": str(product.get("brandName") or item.get("brandName") or "").strip(),
         "text": str(item.get("text") or "").strip(),
+        "review_tags": tag_info["review_tags"],
+        "pros_tags": tag_info["pros_tags"],
+        "cons_tags": tag_info["cons_tags"],
+        "tag_source": tag_info["tag_source"],
+        "tag_source_fields": tag_info["tag_source_fields"],
         "pros": str(item.get("pros") or "").strip(),
         "cons": str(item.get("cons") or "").strip(),
         "answer_text": answer_text,
@@ -466,6 +480,8 @@ def _row_matches_request(
 def _export_cell_value(row: Mapping[str, Any], key: str) -> Any:
     if key == "is_answered_label":
         return "Да" if bool(row.get("is_answered")) else "Нет"
+    if key in {"review_tags", "pros_tags", "cons_tags"}:
+        return review_tags_display(row.get(key) or [])
     value = row.get(key)
     if value is None:
         return ""

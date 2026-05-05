@@ -120,7 +120,13 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             rows = payload.get("rows") if isinstance(payload, dict) else None
             if not isinstance(rows, list) or not rows:
                 raise AssertionError("feedbacks export must send current visible rows")
-            export_requests.append({"row_count": len(rows), "first_id": str((rows[0] or {}).get("feedback_id") or "")})
+            export_requests.append(
+                {
+                    "row_count": len(rows),
+                    "first_id": str((rows[0] or {}).get("feedback_id") or ""),
+                    "first_tags": list((rows[0] or {}).get("review_tags") or []),
+                }
+            )
             route.fulfill(
                 status=200,
                 headers={
@@ -139,6 +145,8 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 raise AssertionError(f"feedbacks AI queue must send exactly one row per request, got {len(rows)}")
             row = rows[0] if isinstance(rows[0], dict) else {}
             feedback_id = str(row.get("feedback_id") or "")
+            if feedback_id == "browser-1" and row.get("review_tags") != ["Плохое качество"]:
+                raise AssertionError(f"feedbacks AI analyze request must include review_tags, got {row}")
             ai_request_batches.append([feedback_id])
             if feedback_id == "browser-2" and feedback_id not in failed_once:
                 failed_once.add(feedback_id)
@@ -326,6 +334,10 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             for expected_header in ("Подходит для жалобы", "Категория", "Причина", "Уверенность"):
                 if expected_header not in page.locator("[data-feedbacks-table] thead").inner_text():
                     raise AssertionError(f"feedbacks table must include AI header {expected_header!r}")
+            if "Теги" not in page.locator("[data-feedbacks-table] thead").inner_text():
+                raise AssertionError("feedbacks table must include review tags column")
+            if "Плохое качество" not in page.locator("[data-feedbacks-table] tbody").inner_text():
+                raise AssertionError("feedbacks table must render review tag chips/text")
             if not page.locator("[data-feedbacks-ai-analyze]").is_enabled():
                 raise AssertionError("AI analyze button must become enabled after feedbacks load")
             if not page.locator("[data-feedbacks-export]").is_enabled():
@@ -337,6 +349,8 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 raise AssertionError(f"feedbacks export download must be xlsx, got {download.suggested_filename!r}")
             if not export_requests or export_requests[-1]["row_count"] != 24:
                 raise AssertionError(f"feedbacks export must use current visible rows, got {export_requests}")
+            if export_requests[-1]["first_tags"] != ["Плохое качество"]:
+                raise AssertionError(f"feedbacks export must send review_tags, got {export_requests[-1]}")
             page.locator('[data-feedbacks-star][value="2"]').click()
             if page.locator("[data-feedbacks-table]").count() != 0:
                 raise AssertionError("changing feedback filters must clear stale loaded table before next load")
@@ -500,6 +514,8 @@ def _feedbacks_payload(*, row_count: int) -> dict[str, object]:
                 "product_name": "Товар A",
                 "brand_name": "Brand",
                 "text": "Текст отзыва " + ("длинный фрагмент " * 8),
+                "review_tags": ["Плохое качество"] if index == 1 else [],
+                "tag_source": "official_wb_api" if index == 1 else "none",
                 "pros": "Плюсы",
                 "cons": "",
                 "answer_text": "",

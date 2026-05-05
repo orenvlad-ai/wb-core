@@ -70,6 +70,10 @@ def _assert_exact_and_reason_guards() -> None:
         _candidate("high", "yes", "high", "Просим проверить отзыв: покупатель описывает получение заказа."),
         _candidate("no-fit", "no", "exact", "Жалобу не подавать: обычная товарная претензия."),
         _candidate("bad-reason", "yes", "exact", "Недостаточно данных."),
+        {
+            **_candidate("tag-contradiction", "review", "exact", "Просим проверить отзыв: низкая оценка без текста и описания."),
+            "api_summary": {"review_tags": ["Плохое качество"]},
+        },
     ]
     enforce_submit_guards(candidates)
     by_id = {item["feedback_id"]: item for item in candidates}
@@ -81,6 +85,8 @@ def _assert_exact_and_reason_guards() -> None:
         raise AssertionError(f"complaint_fit=no must be blocked: {by_id['no-fit']}")
     if "placeholder" not in by_id["bad-reason"].get("skip_reason", ""):
         raise AssertionError(f"diagnostic reason must be blocked: {by_id['bad-reason']}")
+    if by_id["tag-contradiction"].get("skip_reason") != "reason_contradicts_review_tags":
+        raise AssertionError(f"reason/tag contradiction must be blocked: {by_id['tag-contradiction']}")
     if not is_reason_submit_ready("Просим проверить отзыв: тестовое описание."):
         raise AssertionError("ready complaint reason must pass")
     if is_reason_submit_ready("Основание неясно."):
@@ -266,6 +272,8 @@ def _assert_journal_record_shape() -> None:
         or record["description_persisted"] != "unknown"
     ):
         raise AssertionError(f"journal record must carry description persistence diagnostics: {record}")
+    if record["review_tags"] != ["Плохое качество"] or record["tag_source"] != "official_wb_api":
+        raise AssertionError(f"journal record must carry review tag diagnostics: {record}")
     aggregate = build_submit_aggregate(
         [
             {
@@ -297,6 +305,8 @@ def _api(feedback_id: str) -> dict[str, object]:
         "created_at": "2026-05-01T12:00:00Z",
         "product_valuation": 1,
         "text": "Отзыв",
+        "review_tags": ["Плохое качество"],
+        "tag_source": "official_wb_api",
         "pros": "",
         "cons": "",
         "nm_id": 123456,
