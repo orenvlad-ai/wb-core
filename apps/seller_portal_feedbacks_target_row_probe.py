@@ -27,6 +27,7 @@ from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     apply_seller_portal_date_filter,
     apply_seller_portal_star_filter,
     click_filter_apply_button,
+    close_draft_modal_without_submit,
     feedback_list_signature,
     inspect_seller_portal_filter_state,
 )
@@ -636,9 +637,12 @@ def materialize_and_check_actionability(page: Page, config: TargetRowProbeConfig
     result["submit_button_label"] = str(modal_state.get("submit_button_label") or "")
     result["submit_clicked"] = False
     result["durable_success_state_seen"] = bool(detect_complaint_success_state(page).get("seen"))
-    result["close_method"] = close_modal_without_submit(page)
+    close_result = close_draft_modal_without_submit(page)
+    result["close_method"] = str(close_result.get("close_method") or "")
+    result["modal_closed"] = bool(close_result.get("modal_closed"))
     _wait_settle(page, 600)
-    result["modal_closed"] = not bool(extract_complaint_modal_state(page).get("opened"))
+    if not result["modal_closed"]:
+        result["modal_closed"] = not bool(extract_complaint_modal_state(page).get("opened"))
     result["durable_success_state_after_close"] = bool(detect_complaint_success_state(page).get("seen"))
     return result
 
