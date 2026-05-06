@@ -1224,6 +1224,20 @@ def apply_seller_portal_date_filter(page: Page, *, date_from: str, date_to: str)
         result["reason"] = safe_text(str(exc), 300)
         return result
     _wait_settle(page, 800)
+    calendar_select = select_seller_portal_calendar_date_range(page, date_from_ru=date_from_ru, date_to_ru=date_to_ru)
+    result["calendar_select"] = calendar_select
+    if calendar_select.get("ok"):
+        result["selectors_used"].append("date_calendar")
+        _wait_settle(page, 1200)
+        state = inspect_seller_portal_filter_state(page)
+        visible_range = str(state.get("visible_date_range") or "")
+        visible_alignment = inspect_visible_feedback_date_alignment(page, date_from=date_from, date_to=date_to)
+        if (date_from_ru in visible_range and date_to_ru in visible_range) or visible_alignment.get("all_visible_rows_in_range"):
+            result["visible_date_range_after"] = visible_range
+            result["visible_date_alignment_after"] = visible_alignment
+            result["committed"] = True
+            result["applied"] = True
+            return result
     try:
         filled = page.evaluate(
             r"""
@@ -1328,6 +1342,93 @@ def apply_seller_portal_date_filter(page: Page, *, date_from: str, date_to: str)
             or "date filter input was filled but the Seller Portal did not confirm applying it"
         )
     return result
+
+
+def select_seller_portal_calendar_date_range(page: Page, *, date_from_ru: str, date_to_ru: str) -> dict[str, Any]:
+    start_day = _day_from_ru_date(date_from_ru)
+    end_day = _day_from_ru_date(date_to_ru)
+    if not start_day or not end_day:
+        return {"ok": False, "reason": "date day is unavailable"}
+    try:
+        return page.evaluate(
+            r"""
+({startDay, endDay}) => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+  };
+  const text = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const rectFor = (el) => {
+    const rect = el.getBoundingClientRect();
+    return {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)};
+  };
+  const cls = (el) => String(el.getAttribute('class') || '');
+  const input = document.querySelector('input#PeriodDatepicker, input[name="PeriodDatepicker"], input[placeholder*="дд"], input[placeholder*="__.__"]');
+  const roots = [];
+  if (input) {
+    let current = input.parentElement;
+    for (let depth = 0; current && depth < 8; depth += 1, current = current.parentElement) {
+      if (!visible(current)) continue;
+      const body = text(current.innerText || current.textContent || '');
+      const numericCells = Array.from(current.querySelectorAll('button, [role="button"], td, div, span')).filter(visible).filter((node) => /^\d{1,2}$/.test(text(node.innerText || node.textContent || node.getAttribute('aria-label') || '')));
+      if (numericCells.length >= 20 || /Calendar|Date|Picker|datepicker|calendar|календар/i.test(cls(current) + ' ' + body)) roots.push(current);
+    }
+  }
+  Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="Calendar"], [class*="calendar"], [class*="Date"], [class*="date"], [class*="Picker"], [class*="picker"], [class*="Popover"], [class*="popover"], [class*="Dropdown"], [class*="dropdown"]'))
+    .filter(visible)
+    .forEach((node) => roots.push(node));
+  const uniqueRoots = Array.from(new Set(roots)).filter((node) => node !== document.body);
+  const root = uniqueRoots
+    .map((node) => {
+      const cells = Array.from(node.querySelectorAll('button, [role="button"], td, div, span')).filter(visible).filter((cell) => /^\d{1,2}$/.test(text(cell.innerText || cell.textContent || cell.getAttribute('aria-label') || '')));
+      const rect = rectFor(node);
+      return {node, cells, rect, body: text(node.innerText || node.textContent || '').slice(0, 400), className: cls(node).slice(0, 160)};
+    })
+    .filter((item) => item.cells.length >= 20)
+    .sort((a, b) => b.cells.length - a.cells.length || (a.rect.y - b.rect.y))[0];
+  if (!root) {
+    return {ok: false, reason: 'calendar day grid root not found', roots_considered: uniqueRoots.length};
+  }
+  const clickDay = (day) => {
+    const candidates = root.cells
+      .map((cell, index) => {
+        const label = text(cell.innerText || cell.textContent || cell.getAttribute('aria-label') || '');
+        const rect = rectFor(cell);
+        const disabled = Boolean(cell.disabled || cell.getAttribute('aria-disabled') === 'true') || /disabled|outside|other-month/i.test(cls(cell));
+        const clickable = cell.closest('button, [role="button"]') || cell;
+        let score = 0;
+        if (Number(label) === Number(day)) score += 100;
+        if (cell.matches('button, [role="button"]')) score += 20;
+        if (!disabled) score += 20;
+        return {cell, clickable, index, label, rect, disabled, className: cls(cell).slice(0, 120), score};
+      })
+      .filter((item) => Number(item.label) === Number(day) && !item.disabled)
+      .sort((a, b) => b.score - a.score || a.rect.y - b.rect.y || a.rect.x - b.rect.x);
+    const target = candidates[0];
+    if (!target) return {ok: false, day, reason: 'day cell not found', sample_labels: root.cells.map((cell) => text(cell.innerText || cell.textContent || cell.getAttribute('aria-label') || '')).slice(0, 60)};
+    target.clickable.click();
+    return {ok: true, day, label: target.label, rect: target.rect, class_name: target.className};
+  };
+  const first = clickDay(startDay);
+  const second = Number(endDay) === Number(startDay) ? {ok: true, day: endDay, skipped_same_day: true} : clickDay(endDay);
+  return {ok: Boolean(first.ok && second.ok), first, second, root: {rect: root.rect, class_name: root.className, text: root.body, day_cell_count: root.cells.length}};
+}
+            """,
+            {"startDay": start_day, "endDay": end_day},
+        )
+    except PlaywrightError as exc:
+        return {"ok": False, "reason": safe_text(str(exc), 300)}
+
+
+def _day_from_ru_date(value: str) -> int:
+    match = re.match(r"^(\d{1,2})[.]", str(value or "").strip())
+    if not match:
+        return 0
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return 0
 
 
 def drive_seller_portal_date_inputs(page: Page, *, date_from_ru: str, date_to_ru: str) -> dict[str, Any]:
