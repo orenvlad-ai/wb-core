@@ -1337,10 +1337,8 @@ def drive_seller_portal_date_inputs(page: Page, *, date_from_ru: str, date_to_ru
         range_locator = page.locator(f'[{marker}="range"]').first
         if range_locator.count() > 0:
             value = f"{date_from_ru} - {date_to_ru}"
-            range_locator.click(timeout=1500, force=True)
-            range_locator.fill(value, timeout=2500, force=True)
-            dispatch = dispatch_date_input_enter(range_locator)
-            result["fields"].append({"marker": "range", "value": value, "dispatch": dispatch})
+            typed = type_date_input_value(range_locator, value)
+            result["fields"].append({"marker": "range", "value": value, "typed": typed})
             result["ok"] = True
             return result
     except PlaywrightError as exc:
@@ -1349,15 +1347,12 @@ def drive_seller_portal_date_inputs(page: Page, *, date_from_ru: str, date_to_ru
         from_locator = page.locator(f'[{marker}="from"]').first
         to_locator = page.locator(f'[{marker}="to"]').first
         if from_locator.count() > 0 and to_locator.count() > 0:
-            from_locator.click(timeout=1500, force=True)
-            from_locator.fill(date_from_ru, timeout=2500, force=True)
-            to_locator.click(timeout=1500, force=True)
-            to_locator.fill(date_to_ru, timeout=2500, force=True)
-            dispatch = dispatch_date_input_enter(to_locator)
+            typed_from = type_date_input_value(from_locator, date_from_ru)
+            typed_to = type_date_input_value(to_locator, date_to_ru)
             result["fields"].extend(
                 [
-                    {"marker": "from", "value": date_from_ru},
-                    {"marker": "to", "value": date_to_ru, "dispatch": dispatch},
+                    {"marker": "from", "value": date_from_ru, "typed": typed_from},
+                    {"marker": "to", "value": date_to_ru, "typed": typed_to},
                 ]
             )
             result["ok"] = True
@@ -1369,7 +1364,32 @@ def drive_seller_portal_date_inputs(page: Page, *, date_from_ru: str, date_to_ru
     return result
 
 
-def dispatch_date_input_enter(locator: Any) -> dict[str, Any]:
+def type_date_input_value(locator: Any, value: str) -> dict[str, Any]:
+    result: dict[str, Any] = {"ok": False, "value_after": "", "attempts": []}
+    try:
+        locator.click(timeout=1500, force=True)
+        result["attempts"].append({"method": "force_click", "ok": True})
+    except PlaywrightError as exc:
+        result["attempts"].append({"method": "force_click", "ok": False, "reason": safe_text(str(exc), 160)})
+    try:
+        locator.fill("", timeout=1500, force=True)
+        locator.press_sequentially(value, delay=12, timeout=4000)
+        result["attempts"].append({"method": "press_sequentially", "ok": True})
+    except PlaywrightError as exc:
+        result["attempts"].append({"method": "press_sequentially", "ok": False, "reason": safe_text(str(exc), 180)})
+        try:
+            locator.fill(value, timeout=2500, force=True)
+            result["attempts"].append({"method": "force_fill_fallback", "ok": True})
+        except PlaywrightError as fill_exc:
+            result["attempts"].append({"method": "force_fill_fallback", "ok": False, "reason": safe_text(str(fill_exc), 180)})
+    dispatch = dispatch_date_input_change(locator)
+    result["attempts"].append({"method": "dispatch_change_blur", **dispatch})
+    result["value_after"] = str(dispatch.get("value") or "")
+    result["ok"] = any(item.get("ok") for item in result["attempts"]) and value in result["value_after"]
+    return result
+
+
+def dispatch_date_input_change(locator: Any) -> dict[str, Any]:
     try:
         return locator.evaluate(
             r"""
@@ -1377,9 +1397,7 @@ def dispatch_date_input_enter(locator: Any) -> dict[str, Any]:
   el.focus();
   el.dispatchEvent(new Event('input', {bubbles: true}));
   el.dispatchEvent(new Event('change', {bubbles: true}));
-  for (const type of ['keydown', 'keypress', 'keyup']) {
-    el.dispatchEvent(new KeyboardEvent(type, {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true}));
-  }
+  el.blur();
   return {ok: true, value: String(el.value || '')};
 }
             """,
@@ -1397,18 +1415,12 @@ def commit_seller_portal_date_filter(page: Page) -> list[dict[str, Any]]:
             locator = page.locator(selector).first
             if locator.count() < 1:
                 continue
-            locator.press("Enter", timeout=1200)
-            attempts.append({"method": "marked_input_enter", "selector": selector, "ok": True})
+            dispatch = dispatch_date_input_change(locator)
+            attempts.append({"method": "marked_input_change_blur", "selector": selector, **dispatch})
             _wait_settle(page, 400)
             break
         except PlaywrightError as exc:
-            attempts.append({"method": "marked_input_enter", "selector": selector, "ok": False, "reason": safe_text(str(exc), 180)})
-    try:
-        page.keyboard.press("Enter")
-        attempts.append({"method": "keyboard_enter", "ok": True})
-        _wait_settle(page, 400)
-    except PlaywrightError as exc:
-        attempts.append({"method": "keyboard_enter", "ok": False, "reason": safe_text(str(exc), 180)})
+            attempts.append({"method": "marked_input_change_blur", "selector": selector, "ok": False, "reason": safe_text(str(exc), 180)})
     try:
         page.mouse.click(24, 24)
         attempts.append({"method": "outside_click", "ok": True})

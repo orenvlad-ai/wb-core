@@ -307,12 +307,10 @@ def _assert_date_filter_commits_without_apply_button() -> None:
                   document.querySelector('#dateButton').addEventListener('click', () => {
                     document.querySelector('#datePopup').style.display = 'block';
                   });
-                  document.querySelector('#datePopup input').addEventListener('keydown', (event) => {
-                    if (event.key === 'Enter') {
-                      document.querySelector('#datePopup').style.display = 'none';
-                      document.querySelector('#dateButton').innerText = event.target.value;
-                      rows.innerHTML = '<article>Отзыв 02.05.2026 1★ committed</article>';
-                    }
+                  document.querySelector('#datePopup input').addEventListener('change', (event) => {
+                    document.querySelector('#datePopup').style.display = 'none';
+                    document.querySelector('#dateButton').innerText = event.target.value;
+                    rows.innerHTML = '<article>Отзыв 02.05.2026 1★ committed</article>';
                   });
                 </script>
                 """
