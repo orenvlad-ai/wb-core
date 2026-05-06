@@ -833,7 +833,7 @@ def build_targeted_search_stats(
 
 def scroll_feedback_list(page: Page) -> dict[str, Any]:
     try:
-        return page.evaluate(
+        js_result = page.evaluate(
             r"""
 () => {
   const visible = (el) => {
@@ -868,6 +868,73 @@ def scroll_feedback_list(page: Page) -> dict[str, Any]:
 }
             """
         )
+        if js_result.get("changed"):
+            return js_result
+        wheel_target = page.evaluate(
+            r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 160 && rect.height > 40;
+  };
+  const textOf = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+  const rows = Array.from(document.querySelectorAll('[data-testid="Base-table-row"][role="button"], [data-testid="Base-table-row"], [role="row"], [class*="row"], [class*="Row"]'))
+    .filter(visible)
+    .map((el) => {
+      const rect = el.getBoundingClientRect();
+      return {el, rect, text: textOf(el).slice(0, 180)};
+    })
+    .filter((item) => item.rect.top >= 0 && item.rect.top < window.innerHeight);
+  const row = rows.find((item) => /(\d{1,2}[./]\d{1,2}[./]\d{2,4}|\b\d{6,}\b|[★])/i.test(item.text)) || rows[0];
+  const list = row ? row.el.closest('[data-testid*="table"], [class*="Table"], [class*="table"], main, section') : null;
+  const rect = (list && visible(list) ? list : (row && row.el) || document.body).getBoundingClientRect();
+  const x = Math.min(Math.max(rect.left + rect.width / 2, 40), window.innerWidth - 40);
+  const y = Math.min(Math.max((row ? row.rect.top + row.rect.height / 2 : rect.top + Math.min(rect.height * 0.65, 520)), 80), window.innerHeight - 80);
+  return {
+    ok: true,
+    x,
+    y,
+    delta: Math.max(520, Math.floor(window.innerHeight * 0.82)),
+    first_row_text_before: rows.length ? rows[0].text : '',
+    row_count_before: rows.length
+  };
+}
+            """
+        )
+        if not wheel_target.get("ok"):
+            return js_result
+        page.mouse.move(float(wheel_target.get("x") or 800), float(wheel_target.get("y") or 600))
+        page.mouse.wheel(0, int(wheel_target.get("delta") or 700))
+        time.sleep(0.2)
+        after = page.evaluate(
+            r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 160 && rect.height > 40;
+  };
+  const rows = Array.from(document.querySelectorAll('[data-testid="Base-table-row"][role="button"], [data-testid="Base-table-row"], [role="row"], [class*="row"], [class*="Row"]'))
+    .filter(visible)
+    .map((el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 180));
+  return {first_row_text_after: rows[0] || '', row_count_after: rows.length};
+}
+            """
+        )
+        return {
+            "changed": bool(
+                (after.get("first_row_text_after") and after.get("first_row_text_after") != wheel_target.get("first_row_text_before"))
+                or int(after.get("row_count_after") or 0) > int(wheel_target.get("row_count_before") or 0)
+            ),
+            "target": "mouse_wheel_virtual_feedback_list",
+            "fallback_after": js_result,
+            "x": round(float(wheel_target.get("x") or 0)),
+            "y": round(float(wheel_target.get("y") or 0)),
+            "delta": int(wheel_target.get("delta") or 0),
+            "row_count_before": int(wheel_target.get("row_count_before") or 0),
+            "row_count_after": int(after.get("row_count_after") or 0),
+        }
     except PlaywrightError as exc:
         return {"changed": False, "error": safe_text(str(exc), 300)}
 

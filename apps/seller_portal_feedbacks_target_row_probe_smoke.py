@@ -201,8 +201,12 @@ def _assert_shared_resolver_config() -> None:
         raise AssertionError(f"shared resolver must inherit target probe date/star filters: {shared}")
     if shared.is_answered != "all" or shared.max_ui_rows != 50 or not shared.open_complaint_modal:
         raise AssertionError(f"shared resolver must preserve no-submit actionability settings: {shared}")
-    if status_tabs_for_row(shared, {"is_answered": True}, {}) != ["Ждут ответа", "Есть ответ"]:
-        raise AssertionError("shared resolver all-mode must follow target-row probe status tab order")
+    if status_tabs_for_row(shared, {"is_answered": True}, {}) != ["Есть ответ", "Ждут ответа"]:
+        raise AssertionError("shared resolver all-mode must start answered rows in the answered tab")
+    if status_tabs_for_row(shared, {"is_answered": False}, {}) != ["Ждут ответа", "Есть ответ"]:
+        raise AssertionError("shared resolver all-mode must start unanswered rows in the unanswered tab")
+    if status_tabs_for_row(shared, {}, {}) != ["Ждут ответа", "Есть ответ"]:
+        raise AssertionError("shared resolver all-mode must try both status tabs when row status is unknown")
 
 
 def _api_row(feedback_id: str) -> dict[str, object]:

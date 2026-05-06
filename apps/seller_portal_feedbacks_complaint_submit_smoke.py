@@ -22,6 +22,7 @@ from apps.seller_portal_feedbacks_complaint_submit import (  # noqa: E402
     build_submit_aggregate,
     classify_submit_result,
     enforce_submit_guards,
+    ai_result_submit_readiness,
     is_reason_submit_ready,
     journal_record_for_submit,
     mark_denied_candidates,
@@ -85,6 +86,7 @@ def _assert_exact_and_reason_guards() -> None:
         _candidate("exact-good", "yes", "exact", "Просим проверить отзыв: покупатель описывает получение заказа."),
         _candidate("high", "yes", "high", "Просим проверить отзыв: покупатель описывает получение заказа."),
         _candidate("no-fit", "no", "exact", "Жалобу не подавать: обычная товарная претензия."),
+        _candidate("no-ready", "no", "exact", "Просим проверить отзыв: покупатель получил другой товар вместо заказанного."),
         _candidate("bad-reason", "yes", "exact", "Недостаточно данных."),
         {
             **_candidate("tag-contradiction", "review", "exact", "Просим проверить отзыв: низкая оценка без текста и описания."),
@@ -97,8 +99,10 @@ def _assert_exact_and_reason_guards() -> None:
         raise AssertionError(f"exact yes with ready reason must pass: {by_id['exact-good']}")
     if by_id["high"].get("skip_reason") or not by_id["high"].get("filter_aware_resolver_required"):
         raise AssertionError(f"high preliminary match must defer to filter-aware resolver: {by_id['high']}")
-    if "not submit-eligible" not in by_id["no-fit"].get("skip_reason", ""):
+    if "ai_no_not_submit_ready" not in by_id["no-fit"].get("skip_reason", ""):
         raise AssertionError(f"complaint_fit=no must be blocked: {by_id['no-fit']}")
+    if by_id["no-ready"].get("skip_reason"):
+        raise AssertionError(f"operator-selected complaint-ready no must pass gates: {by_id['no-ready']}")
     if "placeholder" not in by_id["bad-reason"].get("skip_reason", ""):
         raise AssertionError(f"diagnostic reason must be blocked: {by_id['bad-reason']}")
     if by_id["tag-contradiction"].get("skip_reason") != "reason_contradicts_review_tags":
@@ -107,6 +111,10 @@ def _assert_exact_and_reason_guards() -> None:
         raise AssertionError("ready complaint reason must pass")
     if is_reason_submit_ready("Основание неясно."):
         raise AssertionError("diagnostic reason must not pass")
+    if ai_result_submit_readiness({"complaint_fit": "no", "category_label": "Другое", "reason": "Жалобу не подавать: обычная претензия."}).get("eligible"):
+        raise AssertionError("AI no with explicit no-submit reason must not be submit-ready")
+    if not ai_result_submit_readiness({"complaint_fit": "no", "category_label": "Другое", "reason": "Просим проверить отзыв: покупатель описывает другой товар."}).get("eligible"):
+        raise AssertionError("operator-selected AI no with factual complaint reason/category must be submit-ready")
 
 
 def _assert_duplicate_guard_storage() -> None:

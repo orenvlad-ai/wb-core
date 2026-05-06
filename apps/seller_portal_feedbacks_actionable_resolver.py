@@ -14,12 +14,16 @@ from typing import Any, Mapping
 from playwright.sync_api import Error as PlaywrightError, Page  # noqa: E402
 
 from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
+    apply_article_search_for_candidate,
     apply_seller_portal_date_filter,
     apply_seller_portal_star_filter,
     choose_complaint_category,
     click_complaint_category,
+    clear_article_search,
     close_draft_modal_without_submit,
     feedback_list_signature,
+    find_visible_actionable_row,
+    inspect_visible_feedback_date_alignment,
     fill_description_field,
     inspect_seller_portal_filter_state,
     reset_seller_portal_viewport_for_filters,
@@ -138,6 +142,10 @@ def resolve_feedback_actionability(
         result["list_update_observed"] = bool(result["list_update_observed"] or attempt.get("list_update_observed"))
         result["scroll_used"] = bool(result["scroll_used"] or attempt.get("scroll_used"))
         result["search_used"] = bool(result["search_used"] or attempt.get("search_used"))
+        result["visible_rows_checked_after_search"] += int(attempt.get("visible_rows_checked_after_search") or 0)
+        result["visible_rows_checked_after_scroll"] += int(attempt.get("visible_rows_checked_after_scroll") or 0)
+        if attempt.get("targeted_search"):
+            result["targeted_search"] = attempt.get("targeted_search") or {}
         last_blocker = str(attempt.get("block_reason") or last_blocker)
         if attempt.get("actionable_row_found"):
             result.update(
@@ -156,6 +164,9 @@ def resolve_feedback_actionability(
                     "description_value_match": bool(attempt.get("description_value_match")),
                     "modal_closed": bool(attempt.get("modal_closed")),
                     "submit_clicked": bool(attempt.get("submit_clicked")),
+                    "visible_rows_checked_after_search": int(attempt.get("visible_rows_checked_after_search") or 0),
+                    "visible_rows_checked_after_scroll": int(attempt.get("visible_rows_checked_after_scroll") or 0),
+                    "targeted_search": attempt.get("targeted_search") or {},
                     "visible_row_match": attempt.get("visible_row_match") or {},
                     "resolved_row": attempt.get("resolved_row") or {},
                     "resolved_row_summary": summarize_ui_row(attempt.get("resolved_row") or {}),
@@ -175,6 +186,7 @@ def resolve_feedback_actionability(
             )
             return result
         _safe_escape(page)
+        clear_article_search(page)
     result["block_reason"] = last_blocker or "actionable DOM row was not found in tried feedback tabs"
     return result
 
@@ -214,18 +226,71 @@ def resolve_in_tab(
     attempt["scroll_used"] = True
     attempt["scroll_attempts"].append(scroll_stats)
     attempt["dom_rows_collected"] = len(collected_rows)
-    match = match_one_api_row_to_dom(api_row, collected_rows)
+    attempt["visible_rows_checked_after_scroll"] = len(collected_rows)
+    collected_visible = find_exact_dom_row(api_row, collected_rows, expected_ui=expected_ui)
+    match = collected_visible.get("match") or match_one_api_row_to_dom(api_row, collected_rows)
     attempt["visible_row_match"] = match
-    if match.get("match_status") == "exact" and match.get("dom_scout_id"):
-        row = next((item for item in collected_rows if str(item.get("dom_scout_id") or "") == str(match.get("dom_scout_id") or "")), {})
+    if collected_visible.get("row"):
         return confirm_and_maybe_draft(
             page,
             attempt,
-            {"row": row, "match": match, "visible_rows_checked": len(collected_rows), "locator_strategy": "shared_target_probe_collected_dom"},
+            {
+                "row": collected_visible.get("row") or {},
+                "match": match,
+                "visible_rows_checked": len(collected_rows),
+                "locator_strategy": "shared_target_probe_collected_dom",
+            },
             config,
             preferred_category=preferred_category,
             description_text=description_text,
         )
+
+    search_result = apply_article_search_for_candidate(page, api_row, expected_ui=expected_ui)
+    attempt["targeted_search"] = search_result
+    attempt["search_used"] = bool(search_result.get("ok"))
+    if search_result.get("ok"):
+        _wait_settle(page, 2500)
+        after_search = find_exact_visible_dom_row(page, api_row, expected_ui=expected_ui)
+        attempt["visible_rows_checked_after_search"] = int(after_search.get("visible_rows_checked") or 0)
+        if after_search.get("row"):
+            after_search = {
+                **after_search,
+                "locator_strategy": "shared_target_probe_article_search_visible",
+            }
+            return confirm_and_maybe_draft(
+                page,
+                attempt,
+                after_search,
+                config,
+                preferred_category=preferred_category,
+                description_text=description_text,
+            )
+        searched_rows, searched_scroll_stats = collect_filtered_dom_rows(
+            page,
+            config,
+            api_row,
+            expected_ui=expected_ui,
+            tab_label=tab_label,
+        )
+        attempt["scroll_attempts"].append({"after_search": True, **searched_scroll_stats})
+        attempt["dom_rows_collected"] += len(searched_rows)
+        attempt["visible_rows_checked_after_scroll"] += len(searched_rows)
+        searched_visible = find_exact_dom_row(api_row, searched_rows, expected_ui=expected_ui)
+        if searched_visible.get("row"):
+            return confirm_and_maybe_draft(
+                page,
+                attempt,
+                {
+                    "row": searched_visible.get("row") or {},
+                    "match": searched_visible.get("match") or {},
+                    "visible_rows_checked": len(searched_rows),
+                    "locator_strategy": "shared_target_probe_article_search_collected_dom",
+                },
+                config,
+                preferred_category=preferred_category,
+                description_text=description_text,
+            )
+        attempt["visible_row_match"] = searched_visible.get("match") or attempt["visible_row_match"]
     attempt["block_reason"] = "exact actionable DOM row was not found after target-probe filter/materialization path"
     return attempt
 
@@ -247,13 +312,15 @@ def apply_target_filters(
     _wait_settle(page, 1200)
     after_signature = feedback_list_signature(page)
     state = inspect_seller_portal_filter_state(page)
+    visible_date_alignment = inspect_visible_feedback_date_alignment(page, date_from=date_from, date_to=date_to)
+    date_filter_applied = bool(date_result.get("applied") or visible_date_alignment.get("all_visible_rows_in_range"))
     return {
         "requested_date_from": date_from,
         "requested_date_to": date_to,
         "requested_stars": list(stars),
         "date_filter": date_result,
         "star_filter": star_result,
-        "date_filter_applied": bool(date_result.get("applied")),
+        "date_filter_applied": date_filter_applied,
         "star_filter_applied": bool(star_result.get("applied")),
         "star_filter_requested": list(stars),
         "selected_star_values_before": star_result.get("selected_star_values_before") or [],
@@ -263,6 +330,7 @@ def apply_target_filters(
         "list_signature_before": before_signature,
         "list_signature_after": after_signature,
         "list_update_observed": bool(after_signature.get("fingerprint") and after_signature.get("fingerprint") != before_signature.get("fingerprint")),
+        "visible_date_alignment": visible_date_alignment,
         "current_visible_date_range": state.get("visible_date_range") or "",
         "current_selected_stars": state.get("selected_stars") or star_result.get("selected_stars") or [],
         "selectors_used": [*(date_result.get("selectors_used") or []), *(star_result.get("selectors_used") or [])],
@@ -301,12 +369,19 @@ def collect_filtered_dom_rows(
 
 def find_exact_visible_dom_row(page: Page, api_row: Mapping[str, Any], *, expected_ui: Mapping[str, Any]) -> dict[str, Any]:
     rows = extract_visible_feedback_rows(page, max_rows=80)
-    match = match_one_api_row_to_dom(api_row, rows)
-    row: dict[str, Any] = {}
-    if match.get("match_status") == "exact":
-        dom_id = str(match.get("dom_scout_id") or "")
-        row = next((item for item in rows if str(item.get("dom_scout_id") or "") == dom_id), {})
+    found = find_exact_dom_row(api_row, rows, expected_ui=expected_ui)
+    row = found.get("row") if isinstance(found.get("row"), dict) else {}
+    match = found.get("match") or match_one_api_row_to_dom(api_row, rows)
     return {"row": row, "match": match, "visible_rows_checked": len(rows), "locator_strategy": "shared_target_probe_visible_dom"}
+
+
+def find_exact_dom_row(api_row: Mapping[str, Any], dom_rows: list[dict[str, Any]], *, expected_ui: Mapping[str, Any]) -> dict[str, Any]:
+    visible_match = find_visible_actionable_row(api_row, dom_rows, expected_ui=expected_ui)
+    row = visible_match.get("row") if isinstance(visible_match.get("row"), dict) else {}
+    match = visible_match.get("match") if isinstance(visible_match.get("match"), dict) else {}
+    if row and str(match.get("match_status") or "") == "exact" and str(row.get("dom_scout_id") or ""):
+        return {"row": row, "match": {**match, "dom_scout_id": str(row.get("dom_scout_id") or "")}}
+    return {"row": {}, "match": match or match_one_api_row_to_dom(api_row, dom_rows)}
 
 
 def match_one_api_row_to_dom(api_row: Mapping[str, Any], dom_rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -484,13 +559,17 @@ def status_tabs_for_row(config: ActionableResolverConfig, api_row: Mapping[str, 
         return [STATUS_TAB_ANSWERED]
     if config.is_answered == "false":
         return [STATUS_TAB_UNANSWERED]
-    if config.is_answered == "all":
-        return [STATUS_TAB_UNANSWERED, STATUS_TAB_ANSWERED]
     value = expected_ui.get("is_answered", api_row.get("is_answered"))
     if value is True or str(value).lower() in {"true", "1", "yes", "есть ответ"}:
+        if config.is_answered == "all":
+            return [STATUS_TAB_ANSWERED, STATUS_TAB_UNANSWERED]
         return [STATUS_TAB_ANSWERED, STATUS_TAB_ALL, STATUS_TAB_UNANSWERED]
     if value is False or str(value).lower() in {"false", "0", "no", "ждут ответа"}:
+        if config.is_answered == "all":
+            return [STATUS_TAB_UNANSWERED, STATUS_TAB_ANSWERED]
         return [STATUS_TAB_UNANSWERED, STATUS_TAB_ALL, STATUS_TAB_ANSWERED]
+    if config.is_answered == "all":
+        return [STATUS_TAB_UNANSWERED, STATUS_TAB_ANSWERED]
     return [STATUS_TAB_ALL, STATUS_TAB_UNANSWERED, STATUS_TAB_ANSWERED]
 
 
@@ -543,8 +622,11 @@ def empty_actionability_result() -> dict[str, Any]:
         "list_update_observed": False,
         "search_used": False,
         "scroll_used": False,
+        "targeted_search": {},
         "dom_rows_collected": 0,
         "visible_rows_checked": 0,
+        "visible_rows_checked_after_search": 0,
+        "visible_rows_checked_after_scroll": 0,
         "visible_row_match": {},
         "resolved_row": {},
         "resolved_row_summary": {},
@@ -572,8 +654,11 @@ def empty_attempt(tab_label: str) -> dict[str, Any]:
         "list_update_observed": False,
         "search_used": False,
         "scroll_used": False,
+        "targeted_search": {},
         "dom_rows_collected": 0,
         "visible_rows_checked": 0,
+        "visible_rows_checked_after_search": 0,
+        "visible_rows_checked_after_scroll": 0,
         "scroll_attempts": [],
         "filter_controller": {},
         "visible_row_match": {},

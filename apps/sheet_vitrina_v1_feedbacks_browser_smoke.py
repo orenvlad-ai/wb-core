@@ -71,6 +71,9 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         context.add_init_script(
             "if (!window.sessionStorage.getItem('wb_core_feedbacks_broken_widths_seeded')) {"
             "window.localStorage.setItem('wb_core_feedbacks_column_widths_v1', '{broken-json');"
+            "window.localStorage.setItem('wb_core_feedbacks_range_v2', JSON.stringify({"
+            "version:1,date_from:'2026-04-20',date_to:'2026-04-24',default_end_date:'2026-04-24'"
+            "}));"
             "window.sessionStorage.setItem('wb_core_feedbacks_broken_widths_seeded', '1');"
             "}"
         )
@@ -426,8 +429,19 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
 
             range_toggle = page.locator("[data-feedbacks-range-toggle]")
             range_popover = page.locator("[data-feedbacks-range-popover]")
+            if "24.04.2026 - 30.04.2026" not in page.locator("[data-feedbacks-range-label]").inner_text():
+                raise AssertionError("feedbacks default range must be current server week and ignore stale localStorage")
             range_toggle.click()
             _assert_node_hidden(range_popover, False, "feedbacks range picker must open")
+            page.locator('[data-feedbacks-preset="week"]').click()
+            if "24.04.2026 - 30.04.2026" not in page.locator("[data-feedbacks-range-summary]").inner_text():
+                raise AssertionError("feedbacks week preset must count from current server date")
+            page.locator('[data-feedbacks-preset="two_weeks"]').click()
+            if "17.04.2026 - 30.04.2026" not in page.locator("[data-feedbacks-range-summary]").inner_text():
+                raise AssertionError("feedbacks two-weeks preset must count from current server date")
+            page.locator('[data-feedbacks-preset="month"]').click()
+            if "31.03.2026 - 30.04.2026" not in page.locator("[data-feedbacks-range-summary]").inner_text():
+                raise AssertionError("feedbacks month preset must count from current server date")
             if page.locator('[data-feedbacks-range-day="2026-04-25"]').count() != 1:
                 page.locator("[data-feedbacks-range-prev]").click()
             for day in ("2026-04-25", "2026-04-26", "2026-04-27", "2026-04-28", "2026-04-29"):

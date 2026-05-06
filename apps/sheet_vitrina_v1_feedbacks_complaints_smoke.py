@@ -34,6 +34,8 @@ from packages.application.sheet_vitrina_v1_feedbacks_complaints import (  # noqa
     JsonFileFeedbacksComplaintJournal,
     SheetVitrinaV1FeedbacksComplaintsError,
     SheetVitrinaV1FeedbacksComplaintsBlock,
+    _submit_events_from_submit_report,
+    _submit_skip_event_code,
 )
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
 
@@ -43,6 +45,7 @@ def main() -> None:
     _assert_error_retry()
     _assert_table_contract_and_fake_async_sync()
     _assert_fake_submit_selected_job()
+    _assert_submit_selected_skip_event_shape()
     _assert_duplicate_running_job_guard()
     _assert_error_job_and_missing_run_id()
     _assert_http_sync_job_routes()
@@ -205,6 +208,29 @@ def _assert_fake_submit_selected_job() -> None:
                 raise AssertionError(f"max_submit>5 must be rejected clearly: {exc}")
         else:
             raise AssertionError("max_submit>5 must be rejected")
+
+
+def _assert_submit_selected_skip_event_shape() -> None:
+    report = {
+        "candidates": [
+            {
+                "feedback_id": "not-actionable",
+                "match": {"match_status": "high"},
+                "modal": {"blocker": "exact actionable DOM row was not found after target-probe filter/materialization path"},
+            }
+        ]
+    }
+    row = {
+        "feedback_id": "not-actionable",
+        "submitted": False,
+        "submit_clicked": False,
+        "block_reason": "exact actionable DOM row was not found after target-probe filter/materialization path",
+    }
+    events = _submit_events_from_submit_report("not-actionable", report, row)
+    if any(event.get("event") == "row_error" for event in events):
+        raise AssertionError(f"candidate-level not-actionable skip must not emit duplicate row_error: {events}")
+    if _submit_skip_event_code(str(row["block_reason"])) != "row_skipped_not_actionable":
+        raise AssertionError("not-actionable blocker must be classified as a controlled skip")
 
 
 def _assert_duplicate_running_job_guard() -> None:

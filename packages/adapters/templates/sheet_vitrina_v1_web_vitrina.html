@@ -2579,6 +2579,8 @@
     const FEEDBACKS_WB_CATEGORY_LABEL_SET = new Set(Object.values(FEEDBACKS_WB_CATEGORY_LABELS));
     const FEEDBACKS_COLUMN_WIDTHS_STORAGE_KEY = "wb_core_feedbacks_column_widths_v1";
     const FEEDBACKS_COMPLAINTS_VISIBLE_COLUMNS_STORAGE_KEY = "wb_core_feedbacks_complaints_visible_columns_v1";
+    const FEEDBACKS_RANGE_STORAGE_KEY = "wb_core_feedbacks_range_v2";
+    const FEEDBACKS_RANGE_STORAGE_VERSION = 2;
     const FEEDBACKS_MIN_COLUMN_WIDTH = 72;
 	    const FEEDBACKS_DEFAULT_COLUMN_WIDTHS = {
 	      select: 54,
@@ -5133,7 +5135,7 @@
         return;
       }
       if (!state.feedbacks.initialized) {
-        applyFeedbacksDefaultRange();
+        applyFeedbacksDefaultRange({allowStored: true});
         state.feedbacks.initialized = true;
         loadFeedbacksPrompt();
       }
@@ -5174,15 +5176,80 @@
         || formatIsoDate(new Date());
     }
 
-    function applyFeedbacksDefaultRange() {
-      const endDate = feedbacksDefaultEndDate();
-      const startDate = shiftIsoDate(endDate, -6);
+    function applyFeedbacksDefaultRange(options) {
+      const settings = options || {};
+      const stored = settings.allowStored && !settings.forceCurrent ? loadFeedbacksStoredRange() : null;
+      const endDate = stored ? stored.dateTo : feedbacksDefaultEndDate();
+      const startDate = stored ? stored.dateFrom : shiftIsoDate(endDate, -6);
       state.feedbacks.dateFrom = startDate;
       state.feedbacks.dateTo = endDate;
       state.feedbacks.draftDateFrom = startDate;
       state.feedbacks.draftDateTo = endDate;
       state.feedbacks.rangeVisibleMonthStart = startOfMonthIso(endDate);
       state.feedbacks.rangeAwaitingEnd = false;
+    }
+
+    function loadFeedbacksStoredRange() {
+      try {
+        const raw = window.localStorage.getItem(FEEDBACKS_RANGE_STORAGE_KEY);
+        if (!raw) {
+          return null;
+        }
+        const payload = JSON.parse(raw);
+        if (!payload || Number(payload.version || 0) !== FEEDBACKS_RANGE_STORAGE_VERSION) {
+          return null;
+        }
+        if (normalizeIsoDate(payload.default_end_date || "") !== feedbacksDefaultEndDate()) {
+          return null;
+        }
+        const dateFrom = normalizeIsoDate(payload.date_from || "");
+        const dateTo = normalizeIsoDate(payload.date_to || "");
+        if (!feedbacksStoredRangeIsValid(dateFrom, dateTo)) {
+          return null;
+        }
+        return {dateFrom: dateFrom, dateTo: dateTo};
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function feedbacksStoredRangeIsValid(dateFrom, dateTo) {
+      if (!dateFrom || !dateTo || dateFrom > dateTo || dateTo > feedbacksDefaultEndDate()) {
+        return false;
+      }
+      let days = 1;
+      let cursor = dateFrom;
+      while (cursor < dateTo) {
+        days += 1;
+        cursor = shiftIsoDate(cursor, 1);
+        if (days > FEEDBACKS_MAX_RANGE_DAYS) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    function persistFeedbacksRange() {
+      try {
+        window.localStorage.setItem(FEEDBACKS_RANGE_STORAGE_KEY, JSON.stringify({
+          version: FEEDBACKS_RANGE_STORAGE_VERSION,
+          default_end_date: feedbacksDefaultEndDate(),
+          date_from: state.feedbacks.dateFrom,
+          date_to: state.feedbacks.dateTo,
+          saved_at: new Date().toISOString(),
+          saved_at_ms: Date.now()
+        }));
+      } catch (error) {
+        // Broken localStorage must not break feedback filters.
+      }
+    }
+
+    function clearFeedbacksStoredRange() {
+      try {
+        window.localStorage.removeItem(FEEDBACKS_RANGE_STORAGE_KEY);
+      } catch (error) {
+        // Broken localStorage must not break reset.
+      }
     }
 
     function renderFeedbacksPanel() {
@@ -5303,7 +5370,7 @@
           if (!selected) {
             return;
           }
-          const endDate = state.feedbacks.draftDateTo || feedbacksDefaultEndDate();
+          const endDate = feedbacksDefaultEndDate();
           state.feedbacks.draftDateTo = endDate;
           state.feedbacks.draftDateFrom = shiftIsoDate(endDate, -(selected.days - 1));
           state.feedbacks.rangeAwaitingEnd = false;
@@ -5447,12 +5514,14 @@
       state.feedbacks.dateTo = state.feedbacks.draftDateTo;
       state.feedbacks.activeRangePicker = false;
       state.feedbacks.error = "";
+      persistFeedbacksRange();
       clearFeedbacksLoadedResult();
       renderFeedbacksPanel();
     }
 
     function resetFeedbacksRangeToDefault() {
-      applyFeedbacksDefaultRange();
+      clearFeedbacksStoredRange();
+      applyFeedbacksDefaultRange({forceCurrent: true});
       state.feedbacks.activeRangePicker = false;
       state.feedbacks.error = "";
       clearFeedbacksLoadedResult();
@@ -6297,7 +6366,7 @@
 
 	    async function pollFeedbacksSubmitJob(runId, pollSequence) {
 	      let latest = null;
-	      for (let attempt = 0; attempt < 240; attempt += 1) {
+	      for (let attempt = 0; attempt < 1200; attempt += 1) {
 	        if (pollSequence !== Number((state.feedbacks.submitJob || {}).pollSequence || 0)) {
 	          return latest;
 	        }
@@ -6321,7 +6390,7 @@
 	          return payload;
 	        }
 	      }
-	      throw new Error("submit job polling timed out");
+	      throw new Error("submit job polling timed out after 30 minutes");
 	    }
 
 	    function feedbacksSubmitJobPollUrl(runId) {
