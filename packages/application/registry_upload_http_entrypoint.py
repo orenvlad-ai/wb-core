@@ -3262,7 +3262,7 @@ def _default_web_vitrina_page_period(
     *,
     available_snapshot_dates: Iterable[str],
 ) -> tuple[str, str] | None:
-    """Default UI period: latest four server-readable business dates, inclusive."""
+    """Default UI period: latest three server-readable business dates, inclusive."""
 
     date_columns = [str(item) for item in getattr(contract.meta, "date_columns", []) if str(item)]
     readable_dates = {str(item) for item in available_snapshot_dates if str(item)}
@@ -3281,10 +3281,10 @@ def _default_web_vitrina_page_period(
         end_date = date.fromisoformat(period_end)
     except ValueError:
         return None
-    period_start = (end_date - timedelta(days=3)).isoformat()
+    period_start = (end_date - timedelta(days=2)).isoformat()
     expected_dates = [
         (date.fromisoformat(period_start) + timedelta(days=offset)).isoformat()
-        for offset in range(4)
+        for offset in range(3)
     ]
     if any(item not in readable_dates for item in expected_dates):
         return None
