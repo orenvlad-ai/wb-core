@@ -392,7 +392,8 @@ class JsonFileFeedbacksComplaintsStatusSyncJobStore:
             for index, job in enumerate(payload.get("jobs", [])):
                 if not isinstance(job, Mapping) or str(job.get("status") or "") not in JOB_ACTIVE_STATUSES:
                     continue
-                if _job_active_age_seconds(job, self.now_factory) < JOB_INTERRUPTION_STALE_SECONDS:
+                has_finished_at = bool(str(job.get("finished_at") or "").strip())
+                if not has_finished_at and _job_active_age_seconds(job, self.now_factory) < JOB_INTERRUPTION_STALE_SECONDS:
                     continue
                 payload["jobs"][index] = _normalize_sync_job(
                     {
@@ -602,7 +603,8 @@ class JsonFileFeedbacksComplaintsSubmitJobStore:
             for index, job in enumerate(payload.get("jobs", [])):
                 if not isinstance(job, Mapping) or str(job.get("status") or "") not in JOB_ACTIVE_STATUSES:
                     continue
-                if _job_active_age_seconds(job, self.now_factory) < JOB_INTERRUPTION_STALE_SECONDS:
+                has_finished_at = bool(str(job.get("finished_at") or "").strip())
+                if not has_finished_at and _job_active_age_seconds(job, self.now_factory) < JOB_INTERRUPTION_STALE_SECONDS:
                     continue
                 payload["jobs"][index] = _normalize_submit_job(
                     {
