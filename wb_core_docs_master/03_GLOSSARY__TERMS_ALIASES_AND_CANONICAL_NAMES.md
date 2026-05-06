@@ -21,7 +21,7 @@ update_triggers:
   - "изменение canonical naming"
   - "появление нового публичного термина"
   - "изменение operator-visible labels"
-built_from_commit: "e65dc30240e49651c2c660b179acbbd6b2accbd1"
+built_from_commit: "3faca550ee0d005b6be13635d015757c71d4bb80"
 ---
 
 # Summary
@@ -54,8 +54,9 @@ built_from_commit: "e65dc30240e49651c2c660b179acbbd6b2accbd1"
 | `manual_monthly_plan_report_baseline` | `Исторические данные для отчёта`, `baseline` | separate runtime SQLite source used only by plan-report for full-month operator XLSX aggregates; not a general historical backfill |
 | `feedbacks` | `Отзывы`, `sheet_vitrina_v1_feedbacks` | read-only official WB feedbacks route/tab; not accepted truth persistence and not complaint submission |
 | `feedbacks AI` | `AI анализ отзывов`, `feedbacks/ai-prompt`, `feedbacks/ai-analyze` | transient operator review aid over loaded feedback rows via server-side prompt + OpenAI call; not `AI_EXPORT`, not ЕБД and not complaint automation |
-| `feedbacks complaints` | `Жалобы`, `feedbacks/complaints`, `complaint journal` | nested `Отзывы` runtime journal/status-sync contour for complaint evidence/status; read/status routes only, not public complaint submit UI |
-| `Seller Portal complaint submit` | `guarded complaint submit`, `complaint CLI runner` | CLI-only guarded real submit lane with exact match, hard caps and confirmation/detail probes; not web UI, not auto-submit and not accepted truth persistence |
+| `feedbacks complaints` | `Жалобы`, `feedbacks/complaints`, `complaint journal` | nested `Отзывы` runtime journal/status-sync contour for complaint evidence/status plus protected selected-row submit-job surface; not accepted truth persistence and not broad/auto-submit |
+| `Seller Portal complaint submit` | `guarded complaint submit`, `selected complaint submit`, `complaint support runner` | guarded real submit lane with exact feedback/AI-row match, hard caps and confirmation/detail probes; protected selected-row operator job may submit chosen rows, but public unauthenticated/broad auto-submit remains forbidden |
+| `WebCore app auth` | `login session`, `operator auth`, `app-level auth` | simple app-level login/session boundary for public/operator WebCore routes; credentials live in runtime env, not repo |
 | `owner runtime API` | `wb-ai-api.service`, `localhost owner API`, `127.0.0.1:8000` | EU host-local owner runtime for bot-backed web-source/seller-funnel handoff; not public nginx route and not `api.selleros.pro` surface |
 | `research_sku_group_comparison` | `Исследования`, `Сравнение групп SKU` | read-only retrospective comparison of two SKU groups over persisted ready snapshots; no causal/statistical claims |
 | `promo current invariant smoke` | `promo invariant guard` | read-only live/public guard for current promo row visibility and expected ended/no-download artifact handling |
@@ -67,6 +68,9 @@ built_from_commit: "e65dc30240e49651c2c660b179acbbd6b2accbd1"
 | `https://api.selleros.pro` | `production URL`, `current public endpoint` | required current live public endpoint; IP-only HTTP is not an acceptable production contour |
 | `api.selleros.pro` | `current live DNS name`, `production domain` | required DNS name for current EU hosted contour and nginx `server_name`; not by itself proof that a target is old selleros |
 | `current-live HTTPS/TLS invariant` | `EU domain/TLS invariant`, `443 ssl guard` | current-live target validation requires `public_base_url=https://api.selleros.pro`, server names `89.191.226.88` + `api.selleros.pro`, TLS enabled and LetsEncrypt paths for the domain |
+| `auth-aware canonical probes` | `loopback-probe`, `public-probe`, `probe session cookie` | hosted probes login through app-level auth when configured, keep the short-lived cookie in memory only and do not print secrets |
+| `canonical fast probe` | `default loopback/public probe`, `skip refresh by default` | default deploy verification health path is fast and does not run heavy refresh unless explicitly requested |
+| `deep refresh probe` | `--include-refresh`, `explicit refresh probe` | explicit deploy/debug probe that exercises `POST /v1/sheet-vitrina-v1/refresh`; timeout/failure is a controlled blocker, not a hang |
 | `public-probe system CA fallback` | `secure public probe fallback` | hosted public probe first uses secure system CA fallback before the legacy insecure diagnostic fallback |
 | `ЕБД` | `единая база данных` | user-facing alias for shared server-side accepted truth/runtime layer `wb-core`; not Google Sheets/GAS, browser UI, localStorage or report-private manual state |
 | `stock-report` | `Отчёт по остаткам` | read-only previous-closed stock report with active SKU selector |
@@ -87,7 +91,7 @@ built_from_commit: "e65dc30240e49651c2c660b179acbbd6b2accbd1"
 
 - Final production naming для будущих hosted/runtime/deploy слоёв ещё не зафиксирован.
 - Текущий main-confirmed uploaded package уже фиксируется как `102` metrics rows / `95` enabled+show_in_data metric keys в current truth; operator-facing `DATA_VITRINA` при этом materialize-ит тот же server-driven row set как thin two-day `date_matrix` (`1631` source rows -> `1698` rendered rows на `yesterday_closed + today_current`) без локального subset path.
-- User-facing labels for current web-vitrina are now centralized around `Витрина`, `Загрузить и обновить`, `Загрузка данных`, `Обновить группу`, `Отчёты`, `Отчёт по остаткам`, `Выполнение плана`, `Исторические данные для отчёта`, `Отзывы`, `Жалобы`, `Исследования`, `Товар в акции` and `ЕБД`.
+- User-facing labels for current web-vitrina are now centralized around `Витрина`, `Поставки`, `Загрузить и обновить`, `Загрузка данных`, `Обновить группу`, `Отчёты`, `Отчёт по остаткам`, `Выполнение плана`, `Исторические данные для отчёта`, `Отзывы`, `Жалобы`, `Исследования`, `Товар в акции` and `ЕБД`.
 
 # Not in scope
 

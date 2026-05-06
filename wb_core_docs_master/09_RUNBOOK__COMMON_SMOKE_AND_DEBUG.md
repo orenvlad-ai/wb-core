@@ -58,7 +58,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "e65dc30240e49651c2c660b179acbbd6b2accbd1"
+built_from_commit: "3faca550ee0d005b6be13635d015757c71d4bb80"
 ---
 
 # Summary
@@ -267,12 +267,16 @@ python3 apps/registry_upload_http_entrypoint_hosted_runtime.py print-plan
 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py deploy --dry-run
 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py loopback-probe --as-of-date AUTO_YESTERDAY
 python3 apps/registry_upload_http_entrypoint_hosted_runtime.py public-probe --as-of-date AUTO_YESTERDAY
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py public-probe --as-of-date AUTO_YESTERDAY --include-refresh
 SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1 \
   python3 apps/registry_upload_http_entrypoint_hosted_runtime.py public-probe --as-of-date AUTO_YESTERDAY
 ```
 
 Norm:
 - `public-probe` for current live uses the HTTPS production URL `https://api.selleros.pro`;
+- canonical `loopback-probe` / `public-probe` are auth-aware and fast by default: they login with runtime app credentials when configured, keep the session cookie in memory only and skip heavy refresh unless `--include-refresh` is explicit;
+- `--include-refresh` is the deep refresh probe for `POST /v1/sheet-vitrina-v1/refresh`; timeout or refresh failure must return a controlled blocker/error, not hang the runner;
+- `--skip-refresh` remains a compatibility force-skip flag and must not be treated as the only successful production verification path;
 - the runner should use secure verification first, including system-CA fallback for local trust-store gaps;
 - `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1` is diagnostic-only and must not redefine the production contour as insecure.
 
@@ -321,6 +325,12 @@ Current feedbacks AI secret/env path:
 - `OPENAI_API_KEY`
 - optional `OPENAI_MODEL`, `OPENAI_API_BASE_URL`, `OPENAI_TIMEOUT_SECONDS`
 - AI feedback labels are transient operator output, not accepted truth or ЕБД persistence
+
+Current WebCore app auth env path:
+- `WB_CORE_WEB_AUTH_USERNAME`
+- `WB_CORE_WEB_AUTH_PASSWORD_HASH`
+- `WB_CORE_WEB_AUTH_SESSION_SECRET`
+- these values live in runtime env only; probes/status may report configured/not-configured but must not print values.
 
 Current promo runtime env override when hosted runtime needs explicit seller session path:
 - `PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH`
@@ -503,7 +513,7 @@ Operational rule:
   - daily timer target = `POST /v1/sheet-vitrina-v1/refresh` with `{"auto_refresh": true}`; it builds server-side ready snapshots only and never auto-loads Google Sheets
 - current bounded `factory-order` supply contour is server/operator-only:
   - live closure still requires deploy + loopback/public probe + one controlled download/upload/calculate/download scenario if those routes changed;
-  - the same closure rule now covers the sibling regional block under `Расчёт поставок`: shared `stock_ff` upload lifecycle, regional calculate, summary table and per-district XLSX routes are part of the same operator/public contour;
+  - the same closure rule now covers the sibling regional block under `Поставки`: shared `stock_ff` upload lifecycle, regional calculate, summary table and per-district XLSX routes are part of the same operator/public contour;
   - sheet/GAS write verify stays out of scope; archived GAS changes require only guard push/verify.
   - if the task changes upload state handling, closure additionally verifies auto-upload-after-file-pick plus `upload -> current uploaded file download -> delete -> absent state`;
   - for inbound upload contract changes, controlled live scenario must cover both mixed positive/zero rows and zero-only files, and status must truthfully expose accepted empty datasets as `row_count = 0`;
@@ -552,7 +562,7 @@ Use this section for current website/operator/public verification. Legacy Google
 - current COST_PRICE checkpoint проверяется по accepted/rejected server upload result, separate runtime current state и server-side refresh/read integration;
 - applicable себестоимость резолвится server-side по `group + latest effective_from <= slot_date`;
 - operator-facing derived rows используют canonical keys `total_proxy_profit_rub` и `proxy_margin_pct_total`;
-- `GET /sheet-vitrina-v1/vitrina` поднимает primary unified web/operator page без SPA/build pipeline: first/default tab `Витрина`, sibling tabs `Расчет поставок`, `Отчеты`, `Отзывы` and `Исследования`;
+- `GET /sheet-vitrina-v1/vitrina` поднимает primary unified web/operator page без SPA/build pipeline: first/default tab `Витрина`, sibling tabs `Поставки`, `Отчёты`, `Отзывы` and `Исследования`;
 - `GET /sheet-vitrina-v1/operator` остаётся compatibility entry и рендерит тот же unified shell, а не отдельный truth owner;
 - `GET /v1/sheet-vitrina-v1/web-vitrina` остаётся cheap read-only JSON path: default v1 shape = `contract_name / contract_version / page_route / read_route / meta / status_summary / schema / rows / capabilities`, optional `as_of_date` stays on том же route и не имеет права trigger-ить refresh/upstream fetch;
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition` now adds the page-only payload for `/sheet-vitrina-v1/vitrina`: `composition_name / composition_version / meta / summary_cards / filter_surface / table_surface / status_summary / capabilities`; default page-composition keeps source-status details unloaded, route still stays read-only and must not trigger refresh/upstream fetch;
@@ -572,11 +582,11 @@ Use this section for current website/operator/public verification. Legacy Google
 - `GET /v1/sheet-vitrina-v1/feedbacks` is read-only over official WB feedbacks and supports bounded `date_from/date_to`, `stars` and `is_answered`; hosted 401/403 from WB token permission is a real blocker for the `Отзывы` feature, not a silent fallback to another token name;
 - feedbacks AI prompt/analyze routes manage operational prompt config and transient structured output only; they must not write accepted truth, submit complaints, call Seller Portal or use Google Sheets/GAS;
 - `POST /v1/sheet-vitrina-v1/feedbacks/export.xlsx` exports the currently filtered/loaded feedback table as operator XLSX, not accepted truth or a new source layer;
-- `GET /v1/sheet-vitrina-v1/feedbacks/complaints` and `POST /v1/sheet-vitrina-v1/feedbacks/complaints/sync-status` are runtime complaint journal/status surfaces; they may read status evidence from WB `Мои жалобы`, but must not submit complaints from the public UI;
-- real Seller Portal complaint submit remains a CLI-only guarded lane; completion for such tasks must prove exact matching, hard caps and confirmation/detail read-only probe behavior instead of relying on web UI buttons;
+- `GET /v1/sheet-vitrina-v1/feedbacks/complaints` and `POST /v1/sheet-vitrina-v1/feedbacks/complaints/sync-status` are runtime complaint journal/status surfaces; they may read status evidence from WB `Мои жалобы`;
+- `POST /v1/sheet-vitrina-v1/feedbacks/complaints/submit-selected` and `GET /v1/sheet-vitrina-v1/feedbacks/complaints/submit-job` are auth-protected selected-row submit job surfaces; completion for such tasks must prove exact matching, hard caps, selected non-journaled rows and confirmation/detail read-only probe behavior instead of broad UI automation;
 - `GET /v1/sheet-vitrina-v1/research/sku-group-comparison/options` and `POST .../calculate` are read-only over active SKU/config, non-financial metric options and persisted ready snapshots; missing dates/values surface partial/unavailable coverage and are not zero-filled;
 - one-off `apps/sheet_vitrina_v1_ready_fact_reconcile.py dry-run|apply` can repair missing accepted report facts from persisted ready snapshots, but must not overwrite existing accepted diffs or fabricate blank ready values as zero;
-- operator page state is browser-owned only: current top-level tab, active subsection under `Отчёты` / `Расчёт поставок` and stock-report SKU selection persist in namespaced `localStorage`; reload must restore the last valid state, while empty/broken storage or obsolete `nmId` values must fall back safely to current defaults/current active SKU truth;
+- operator page state is browser-owned only: current top-level tab, active subsection under `Отчёты` / `Поставки` and stock-report SKU selection persist in namespaced `localStorage`; reload must restore the last valid state, while empty/broken storage or obsolete `nmId` values must fall back safely to current defaults/current active SKU truth;
 - daily-report factor lists are now full valid sets sorted by `matched_sku_count desc` and aggregate strength; factor rows surface label + arrow + `N SKU` + truthful aggregate summary instead of plain `вверх/вниз` text;
 - daily-report response now includes `metric_ranking_diagnostics`, so a short decline list can be diagnosed from the payload itself instead of being treated as a UI cap bug;
 - в block `Автообновления` `Автоцепочка` должна быть backend-driven description current daily chain, а не legacy sheet write; current truthful wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: server-side refresh ready snapshot for website/operator web-vitrina`;

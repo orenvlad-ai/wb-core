@@ -39,7 +39,7 @@ update_triggers:
   - "изменение current main-confirmed contour"
   - "merge нового bounded модуля"
   - "смена главного project gap"
-built_from_commit: "e65dc30240e49651c2c660b179acbbd6b2accbd1"
+built_from_commit: "3faca550ee0d005b6be13635d015757c71d4bb80"
 ---
 
 # Summary
@@ -55,9 +55,9 @@ built_from_commit: "e65dc30240e49651c2c660b179acbbd6b2accbd1"
 - bounded live wiring `28` уже смёржен и переводит `promo_by_price` из blocked gap в current server-owned source seam внутри existing refresh/runtime/read-side contour, с diagnostics-only promo artifact/preflight surface и live/public current invariant guard.
 - web-vitrina line `29–31` уже смёржена и является active user-facing surface: `/sheet-vitrina-v1/vitrina` + `/v1/sheet-vitrina-v1/web-vitrina`.
 - research block `32` уже смёржен как read-only MVP вкладки `Исследования` для сравнения двух групп SKU по persisted ready snapshots.
-- current operator UI unified вокруг `/sheet-vitrina-v1/vitrina`: first tab `Витрина`, sibling tabs `Расчет поставок`, `Отчеты`, `Отзывы` и `Исследования`; `/sheet-vitrina-v1/operator` остаётся compatibility entry на тот же shell.
-- current `Отзывы` checkpoint now includes strict server-side feedback filtering/export and nested `Жалобы`: complaint journal/status sync are read-only runtime routes, while real Seller Portal complaint submit remains a guarded CLI-only lane with exact-match/hard-cap checks and confirmation/detail probes for uncertain attempts.
-- current hosted EU checkpoint now includes repo-owned localhost owner runtime wiring (`wb-ai-api.service` on `127.0.0.1:8000`) for bot-backed web-source/seller-funnel handoff; public nginx remains product route publication, not the owner API path.
+- current operator UI unified вокруг `/sheet-vitrina-v1/vitrina`: first tab `Витрина`, sibling tabs `Поставки`, `Отчёты`, `Отзывы` и `Исследования`; `/sheet-vitrina-v1/operator` остаётся compatibility entry на тот же shell.
+- current `Отзывы` checkpoint includes strict server-side feedback filtering/export, official WB review tags/actionable resolver, transient AI review and nested `Жалобы`: complaint journal/status sync remain runtime evidence routes, and real Seller Portal submit is limited to protected selected-row operator jobs / guarded support runners with exact-match, hard-cap and confirmation/detail evidence checks.
+- current hosted EU checkpoint now includes repo-owned localhost owner runtime wiring (`wb-ai-api.service` on `127.0.0.1:8000`), app-level auth/session boundary for the public/operator surface, auth-aware canonical probes and explicit deep refresh probe policy; public nginx remains product route publication, not the owner API path.
 
 # Current norm
 
@@ -103,8 +103,8 @@ Confirmed contour на текущем `main`:
   - primary manual action `Загрузить и обновить` refreshes server-side ready snapshot without Google Sheets `/load`;
   - compact table toolbar combines period/search/filter/column/sort controls; default no-query history opens the latest four server-readable business dates ending on backend-owned `today_current_date` when available;
   - bottom `Загрузка данных` is lazy: initial state shows only `not_loaded` + `Загрузить`, then explicit read-only `surface=page_composition&include_source_status=1` loads grouped source status table (`WB API`, `Seller Portal / бот`, `Прочие источники`) with date-scoped `Обновить группу`;
-  - `Отзывы` tab is read-only over official WB feedbacks API through canonical `WB_API_TOKEN`, with bounded 62-day date picker independent from ready-snapshot dates, chunked `take/skip` loading, final server-side filters (`date_from/date_to/stars/is_answered`), diagnostic meta, Excel export, resizable columns and transient AI-assisted review through server-side prompt+model config/OpenAI route; AI labels are not accepted truth, Seller Portal automation or Google Sheets/GAS state;
-  - nested `Жалобы` under `Отзывы` exposes runtime complaint journal and read-only status sync from WB `Мои жалобы`; real complaint submit is not a public UI route and remains only a guarded CLI runner with exact feedback/AI-row match, hard caps and read-only confirmation/detail-network probes for uncertain submit outcomes;
+  - `Отзывы` tab is read-only over official WB feedbacks API through canonical `WB_API_TOKEN`, with bounded 62-day date picker independent from ready-snapshot dates, chunked `take/skip` loading, final server-side filters (`date_from/date_to/stars/is_answered`), diagnostic meta, Excel export, resizable columns, official review tags/actionable complaint resolver and transient AI-assisted review through server-side prompt+model config/OpenAI route; AI labels are not accepted truth, Seller Portal automation or Google Sheets/GAS state;
+  - nested `Жалобы` under `Отзывы` exposes runtime complaint journal, read-only status sync from WB `Мои жалобы` and a protected selected-row async submit job for already loaded/analyzed feedback rows; this is not an unauthenticated public/broad/auto-submit path and still requires exact feedback/AI-row match, hard caps and read-only confirmation/detail-network probes for uncertain submit outcomes;
   - `Исследования` tab provides read-only `research_sku_group_comparison`: two mutually exclusive SKU groups, non-financial metrics, compact date ranges, candidate-only `Товар в акции` chip from latest closed-day promo truth and no causal/statistical claims;
   - `GET /v1/sheet-vitrina-v1/plan-report` adds read-only `Выполнение плана` over accepted closed-day `fin_report_daily.fin_buyout_rub` + `ads_compact.ads_sum`, H1/H2 plan params, per-block coverage and optional server-side monthly baseline;
   - plan-report baseline routes (`baseline-template.xlsx`, `baseline-upload`, `baseline-status`) store operator monthly aggregates in separate runtime SQLite state used only by the plan report;
@@ -118,7 +118,7 @@ Confirmed contour на текущем `main`:
   - current production endpoint = `https://api.selleros.pro`; current-live EU nginx must publish both `server_name 89.191.226.88 api.selleros.pro;` and `listen 443 ssl` with LetsEncrypt cert/key paths for `api.selleros.pro`;
   - IP-only or HTTP-only EU publication is production outage drift; `deploy`, `deploy-and-verify` and `apply-nginx-routes` fail locally before mutation when current-live hostname/TLS invariants are broken;
   - old selleros identity = `selleros-root` / `178.72.152.177`; its target JSON is rollback-only/deprecated and mutating deploy/apply-nginx/restart/update paths fail fast unless the explicit emergency rollback override is set.
-  - current EU target deploy owns the localhost owner runtime dependencies for SellerPortalBot/web-source handoff: host OS deps, `/opt/wb-web-bot/venv`, `/opt/wb-ai/venv`, `wb-ai-api.service`, pinned Playwright/psycopg2/FastAPI/Uvicorn/requests versions and status/launcher behavior that degrades as truthful JSON instead of public 500.
+  - current EU target deploy owns the localhost owner runtime dependencies for SellerPortalBot/web-source handoff and the app-level public/operator auth contour: host OS deps, `/opt/wb-web-bot/venv`, `/opt/wb-ai/venv`, `wb-ai-api.service`, pinned Playwright/psycopg2/FastAPI/Uvicorn/requests versions, auth-aware probe login cookies in memory only, and status/launcher behavior that degrades as truthful JSON instead of public 500.
 
 ## Authoritative source of truth
 
@@ -133,13 +133,13 @@ Confirmed contour на текущем `main`:
 # Known gaps
 
 - full legacy parity по всем historical metric sections и registry rows;
-- repo-owned hosted deploy/probe contract around current website/operator runtime is documented and includes EU current-live target metadata, managed public-route publishing, HTTPS domain/TLS invariants, secure public-probe system-CA fallback and rollback-only old selleros write guards; production storage binding and final auth-hardening remain separate completion boundaries;
+- repo-owned hosted deploy/probe contract around current website/operator runtime is documented and includes EU current-live target metadata, managed public-route publishing, HTTPS domain/TLS invariants, app-level auth, auth-aware fast canonical probes, explicit deep refresh probe and rollback-only old selleros write guards; broader storage/failover hardening remains a separate completion boundary;
 - окончательная судьба `AI_EXPORT` как compatibility contract;
 - materialized `packages/domain`, `infra/`, `tests/`, `api/`, `jobs/`, `db/`.
 
 # Not in scope
 
 - перенос всего legacy 1:1;
-- утверждение, что actual deploy rights или final production hardening уже materialized в repo;
+- утверждение, что all production hardening/failover controls уже final;
 - broad operator UX redesign beyond the current unified vitrina/supply/reports/feedbacks/research shell;
 - полный architectural redesign `wb-core`.
