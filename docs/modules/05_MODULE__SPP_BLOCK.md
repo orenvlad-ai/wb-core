@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-05-SPP-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по уже перенесённому блоку `spp_block`."
-scope: "Legacy-source, target contract, артефакты, кодовые части и подтверждённый official-api checkpoint для `spp`."
+scope: "Current Seller Portal SPP source, legacy sales-row fallback, target contract, артефакты и кодовые части для `spp`."
 source_basis:
   - "migration/33_spp_block_contract.md"
   - "migration/36_spp_block_legacy_sample_source.md"
@@ -17,7 +17,8 @@ related_modules:
   - "packages/application/spp_block.py"
 related_tables: []
 related_endpoints:
-  - "GET /api/v1/supplier/sales?dateFrom=..."
+  - "Seller Portal discounts-prices list/goods/filter (`discountOnSite`) [current-only]"
+  - "GET /api/v1/supplier/sales?dateFrom=... [legacy sales-row average fallback]"
 related_runners:
   - "apps/spp_block_smoke.py"
   - "apps/spp_block_http_smoke.py"
@@ -29,7 +30,7 @@ related_docs:
   - "migration/36_spp_block_legacy_sample_source.md"
   - "artifacts/spp_block/evidence/initial__spp__evidence.md"
 source_of_truth_level: "module_canonical"
-update_note: "Добавлен как канонический модульный документ по текущему состоянию `main`; фиксирует merged official-api checkpoint блока `spp_block`."
+update_note: "Обновлён current SPP source contract: visible/current SPP берётся из Seller Portal `discountOnSite`, а historical sales-row average остаётся только legacy fallback."
 ---
 
 # 1. Идентификатор и статус
@@ -41,14 +42,18 @@ update_note: "Добавлен как канонический модульны�
 - `status_checkpoint`: рабочий checkpoint подтверждён
 - `status_main`: модуль смёржен в `main`
 
-# 2. Legacy-source и legacy semantics
+# 2. Current-source и legacy semantics
 
-- Legacy-source фиксируется как `GET /api/v1/supplier/sales?dateFrom=...` + current RAW/APPLY semantics.
-- Результат задаётся на уровне `snapshot_date + nmId`.
-- Ключевая semantics:
+- Current-source для consumer-visible SPP фиксируется как Seller Portal `discounts-prices` table/API field `discountOnSite`.
+- `discountOnSite` нормализуется в долю: `23 => 0.23`, `0.23 => 0.23`.
+- Этот source current-only: он доказывает текущую visible WB discount/SPP на момент fetch, но не даёт исторические date-specific values.
+- Historical dates без persisted current-visible evidence должны оставаться unavailable/skipped, а не заполняться current value.
+- Legacy fallback остаётся только для явного compatibility/source mode `statistics_sales_avg`: `GET /api/v1/supplier/sales?dateFrom=...`.
+- Legacy fallback semantics:
   - raw оставляет sales rows только за `snapshot_date`
   - `spp` нормализуется в долю: `>1 => /100`
   - apply пишет в `DATA` среднее `spp_avg` по sales rows
+- Legacy sales-row average не является current-visible Seller Portal SPP и не должен masquerade as fresh current visible truth.
 
 # 3. Target contract и смысл результата
 
@@ -61,7 +66,8 @@ update_note: "Добавлен как канонический модульны�
   - `kind = "empty"`
   - `items = []`
   - `count = 0`
-- Целевой смысл блока: bounded yesterday-style snapshot `spp` по requested `nmId`.
+- Целевой смысл блока: current-visible `spp` по requested `nmId`, если current Seller Portal source доступен.
+- Исторический `spp` по старым датам возможен только при наличии доказуемого persisted historical current-visible source; legacy sales average не считается таким доказательством.
 
 # 4. Артефакты по модулю
 

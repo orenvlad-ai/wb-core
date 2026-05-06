@@ -37,6 +37,12 @@ def main() -> None:
     items = {
         (item["date"], item["nm_id"]): item for item in result["result"]["items"]
     }
+    equal_probe = items[("2026-04-01", 210184534)]
+    if equal_probe["promo_count_by_price"] != 1.0:
+        raise AssertionError("expected equality price=plan to count for 2026-04-01/210184534")
+    if equal_probe["promo_participation"] != 1.0:
+        raise AssertionError("expected equality price=plan participation=1 for 2026-04-01/210184534")
+
     probe = items[("2026-04-03", 210184534)]
     if probe["promo_count_by_price"] != 2.0:
         raise AssertionError("expected promo_count_by_price=2.0 for 2026-04-03/210184534")

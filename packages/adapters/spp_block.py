@@ -1,13 +1,34 @@
 """Адаптерная граница блока spp."""
 
+from datetime import datetime
 import json
 from collections import defaultdict
+import os
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 from urllib import error, parse, request as urllib_request
+from zoneinfo import ZoneInfo
 
 from packages.adapters.official_api_runtime import DEFAULT_WB_API_TOKEN_ENV, load_runtime_config
 from packages.contracts.spp_block import SppRequest
+
+BUSINESS_TIMEZONE = ZoneInfo("Asia/Yekaterinburg")
+SPP_SOURCE_MODE_ENV = "WB_CORE_SPP_SOURCE_MODE"
+SPP_SOURCE_MODE_AUTO = "auto"
+SPP_SOURCE_MODE_STATISTICS_SALES_AVG = "statistics_sales_avg"
+SPP_SOURCE_MODE_SELLER_PORTAL_DISCOUNT_ON_SITE = "seller_portal_discount_on_site"
+SPP_SOURCE_MODES = {
+    SPP_SOURCE_MODE_AUTO,
+    SPP_SOURCE_MODE_STATISTICS_SALES_AVG,
+    SPP_SOURCE_MODE_SELLER_PORTAL_DISCOUNT_ON_SITE,
+}
+SELLER_PORTAL_STORAGE_STATE_ENV = "PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH"
+DEFAULT_SELLER_PORTAL_STORAGE_STATE_PATH = "/opt/wb-web-bot/storage_state.json"
+SELLER_PORTAL_DISCOUNTS_PAGE_URL = "https://seller.wildberries.ru/discount-and-prices/main-table"
+SELLER_PORTAL_DISCOUNTS_FILTER_URL = (
+    "https://discounts-prices.wildberries.ru"
+    "/ns/dp-api/discounts-prices/suppliers/api/v1/list/goods/filter"
+)
 
 
 class SppSource(Protocol):
@@ -15,6 +36,10 @@ class SppSource(Protocol):
 
     def fetch(self, request: SppRequest) -> Mapping[str, Any]:
         raise NotImplementedError("adapter skeleton only")
+
+
+SellerPortalGoodsFetcher = Callable[[list[int]], list[Mapping[str, Any]]]
+BusinessDateFactory = Callable[[], str]
 
 
 class ArtifactBackedSppSource:
@@ -35,8 +60,112 @@ class ArtifactBackedSppSource:
         raise ValueError(f"unsupported scenario: {scenario}")
 
 
+class SellerPortalDiscountOnSiteSppSource:
+    """Current-visible SPP adapter backed by Seller Portal discountOnSite."""
+
+    def __init__(
+        self,
+        *,
+        storage_state_path: str | Path | None = None,
+        timeout_seconds: float = 60.0,
+        headless: bool = True,
+        goods_fetcher: SellerPortalGoodsFetcher | None = None,
+        business_date_factory: BusinessDateFactory | None = None,
+    ) -> None:
+        self._storage_state_path = Path(
+            str(
+                storage_state_path
+                or os.environ.get(SELLER_PORTAL_STORAGE_STATE_ENV, "").strip()
+                or DEFAULT_SELLER_PORTAL_STORAGE_STATE_PATH
+            )
+        )
+        self._timeout_seconds = timeout_seconds
+        self._headless = headless
+        self._goods_fetcher = goods_fetcher
+        self._business_date_factory = business_date_factory or _current_business_date
+
+    def fetch(self, request: SppRequest) -> Mapping[str, Any]:
+        if request.snapshot_date != self._business_date_factory():
+            return {
+                "snapshot_date": request.snapshot_date,
+                "requested_nm_ids": request.nm_ids,
+                "source": {
+                    "mode": SPP_SOURCE_MODE_SELLER_PORTAL_DISCOUNT_ON_SITE,
+                    "endpoint": "Seller Portal discounts-prices list/goods/filter",
+                    "temporal_capability": "current_only",
+                    "status": "historical_unavailable",
+                },
+                "data": {"items": []},
+            }
+
+        goods = (
+            self._goods_fetcher(request.nm_ids)
+            if self._goods_fetcher is not None
+            else self._fetch_goods_from_seller_portal(request.nm_ids)
+        )
+        items = _discount_on_site_goods_to_spp_items(goods, request.nm_ids)
+        return {
+            "snapshot_date": request.snapshot_date,
+            "requested_nm_ids": request.nm_ids,
+            "source": {
+                "mode": SPP_SOURCE_MODE_SELLER_PORTAL_DISCOUNT_ON_SITE,
+                "endpoint": "Seller Portal discounts-prices list/goods/filter",
+                "temporal_capability": "current_only",
+            },
+            "data": {"items": items},
+        }
+
+    def _fetch_goods_from_seller_portal(self, nm_ids: list[int]) -> list[Mapping[str, Any]]:
+        if not self._storage_state_path.exists():
+            raise RuntimeError("seller portal storage_state.json is missing for current SPP source")
+
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise RuntimeError("playwright is required for seller portal current SPP source") from exc
+
+        timeout_ms = max(1, int(self._timeout_seconds * 1000))
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=self._headless)
+            context = browser.new_context(storage_state=str(self._storage_state_path), locale="ru-RU")
+            page = context.new_page()
+            captured_headers: dict[str, str] = {}
+
+            def _capture_headers(request: Any) -> None:
+                nonlocal captured_headers
+                if captured_headers or "list/goods/filter" not in str(request.url):
+                    return
+                captured_headers = _safe_seller_portal_headers(request.all_headers())
+
+            page.on("request", _capture_headers)
+            try:
+                page.goto(SELLER_PORTAL_DISCOUNTS_PAGE_URL, wait_until="domcontentloaded", timeout=timeout_ms)
+                page.wait_for_timeout(3000)
+                if not captured_headers:
+                    raise RuntimeError("seller portal discounts-prices request headers were not captured")
+
+                goods: list[Mapping[str, Any]] = []
+                for nm_id in nm_ids:
+                    response = context.request.post(
+                        SELLER_PORTAL_DISCOUNTS_FILTER_URL,
+                        headers=captured_headers,
+                        data=_seller_portal_filter_body(nm_id),
+                        timeout=timeout_ms,
+                    )
+                    if response.status != 200:
+                        raise RuntimeError(
+                            "seller portal discounts-prices request failed "
+                            f"with status {response.status} for nmId={nm_id}"
+                        )
+                    payload = response.json()
+                    goods.extend(_seller_portal_goods_list(payload))
+                return goods
+            finally:
+                browser.close()
+
+
 class HttpBackedSppSource:
-    """Минимальный HTTP adapter к official statistics sales endpoint."""
+    """SPP adapter with current Seller Portal source and legacy sales-average fallback."""
 
     def __init__(
         self,
@@ -44,13 +173,24 @@ class HttpBackedSppSource:
         token_env_var: str = DEFAULT_WB_API_TOKEN_ENV,
         base_url_env_var: str = "WB_STATISTICS_API_BASE_URL",
         timeout_seconds: float = 30.0,
+        source_mode: str | None = None,
+        seller_portal_source: SellerPortalDiscountOnSiteSppSource | None = None,
     ) -> None:
         self._default_base_url = base_url.rstrip("/")
         self._token_env_var = token_env_var
         self._base_url_env_var = base_url_env_var
         self._default_timeout_seconds = timeout_seconds
+        self._source_mode = source_mode
+        self._seller_portal_source = seller_portal_source
 
     def fetch(self, request: SppRequest) -> Mapping[str, Any]:
+        source_mode = self._resolve_source_mode()
+        if source_mode == SPP_SOURCE_MODE_SELLER_PORTAL_DISCOUNT_ON_SITE:
+            source = self._seller_portal_source or SellerPortalDiscountOnSiteSppSource(
+                timeout_seconds=self._default_timeout_seconds
+            )
+            return source.fetch(request)
+
         runtime = load_runtime_config(
             token_env_var=self._token_env_var,
             default_base_url=self._default_base_url,
@@ -71,10 +211,33 @@ class HttpBackedSppSource:
         return {
             "snapshot_date": request.snapshot_date,
             "requested_nm_ids": request.nm_ids,
+            "source": {
+                "mode": SPP_SOURCE_MODE_STATISTICS_SALES_AVG,
+                "endpoint": "GET /api/v1/supplier/sales?dateFrom=<YYYY-MM-DD>",
+                "temporal_capability": "sales_rows_by_date",
+            },
             "data": {
                 "items": aggregated,
             },
         }
+
+    def _resolve_source_mode(self) -> str:
+        raw_mode = str(self._source_mode or os.environ.get(SPP_SOURCE_MODE_ENV, "")).strip().lower()
+        mode = raw_mode or SPP_SOURCE_MODE_AUTO
+        if mode not in SPP_SOURCE_MODES:
+            raise ValueError(
+                f"{SPP_SOURCE_MODE_ENV} must be one of: {', '.join(sorted(SPP_SOURCE_MODES))}"
+            )
+        if mode != SPP_SOURCE_MODE_AUTO:
+            return mode
+
+        storage_state = Path(
+            os.environ.get(SELLER_PORTAL_STORAGE_STATE_ENV, "").strip()
+            or DEFAULT_SELLER_PORTAL_STORAGE_STATE_PATH
+        )
+        if storage_state.exists():
+            return SPP_SOURCE_MODE_SELLER_PORTAL_DISCOUNT_ON_SITE
+        return SPP_SOURCE_MODE_STATISTICS_SALES_AVG
 
     def _get_sales(
         self,
@@ -154,3 +317,79 @@ class HttpBackedSppSource:
         if len(source) >= 10 and source[2:3] == ".":
             return f"{source[6:10]}-{source[3:5]}-{source[:2]}"
         return ""
+
+
+def _current_business_date() -> str:
+    return datetime.now(tz=BUSINESS_TIMEZONE).date().isoformat()
+
+
+def _safe_seller_portal_headers(raw_headers: Mapping[str, str]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for key, value in raw_headers.items():
+        normalized = str(key).lower()
+        if normalized.startswith(":") or normalized in {"content-length", "cookie", "accept-encoding"}:
+            continue
+        headers[str(key)] = str(value)
+    return headers
+
+
+def _seller_portal_filter_body(nm_id: int) -> dict[str, Any]:
+    return {
+        "limit": 50,
+        "offset": 0,
+        "code": str(nm_id),
+        "facets": [],
+        "filterWithoutPrice": False,
+        "filterWithLeftovers": False,
+        "filterWithoutCompetitivePrice": False,
+        "sort": "price",
+        "sortOrder": 0,
+    }
+
+
+def _seller_portal_goods_list(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    data = payload.get("data")
+    if not isinstance(data, Mapping):
+        return []
+    goods = data.get("listGoods")
+    if not isinstance(goods, list):
+        return []
+    return [item for item in goods if isinstance(item, Mapping)]
+
+
+def _discount_on_site_goods_to_spp_items(
+    goods: list[Mapping[str, Any]],
+    requested_nm_ids: list[int],
+) -> list[Mapping[str, Any]]:
+    requested = set(requested_nm_ids)
+    by_nm_id: dict[int, Mapping[str, Any]] = {}
+    for item in goods:
+        nm_id = item.get("nmID")
+        if not isinstance(nm_id, int) or nm_id not in requested or nm_id in by_nm_id:
+            continue
+        by_nm_id[nm_id] = item
+
+    items: list[Mapping[str, Any]] = []
+    for nm_id in sorted(by_nm_id.keys()):
+        raw_discount = by_nm_id[nm_id].get("discountOnSite")
+        normalized = _normalize_discount_on_site(raw_discount)
+        if normalized is None:
+            continue
+        items.append(
+            {
+                "nmId": nm_id,
+                "spp_avg": normalized,
+                "spp_count": 1,
+                "source_field": "discountOnSite",
+            }
+        )
+    return items
+
+
+def _normalize_discount_on_site(raw_value: Any) -> float | None:
+    if not isinstance(raw_value, (int, float)):
+        return None
+    value = float(raw_value)
+    if value < 0:
+        return None
+    return value / 100.0 if value > 1 else value

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 
 HEADER_NM_ID = "Артикул WB"
 HEADER_PLAN_PRICE = "Плановая цена для акции"
+RUB_PRICE_QUANT = Decimal("0.01")
 
 
 @dataclass(frozen=True)
@@ -120,7 +122,10 @@ def evaluate_candidate_rows(
         else [
             row
             for row in ordered_rows
-            if float(price_seller_discounted) < float(row.plan_price)
+            if is_promo_price_eligible(
+                price_seller_discounted=price_seller_discounted,
+                plan_price=row.plan_price,
+            )
         ]
     )
     candidate_plan_prices = tuple(float(row.plan_price) for row in ordered_rows)
@@ -138,6 +143,37 @@ def evaluate_candidate_rows(
         promo_entry_price_best=max(candidate_plan_prices) if candidate_plan_prices else 0.0,
         promo_participation=1.0 if eligible_rows else 0.0,
     )
+
+
+def is_promo_price_eligible(
+    *,
+    price_seller_discounted: object,
+    plan_price: object,
+) -> bool:
+    seller_price = normalize_rub_price(price_seller_discounted)
+    promo_plan_price = normalize_rub_price(plan_price)
+    if seller_price is None or promo_plan_price is None:
+        return False
+    return seller_price <= promo_plan_price
+
+
+def normalize_rub_price(value: object) -> Decimal | None:
+    numeric = parse_decimal(value)
+    if numeric is None:
+        return None
+    return numeric.quantize(RUB_PRICE_QUANT, rounding=ROUND_HALF_UP)
+
+
+def parse_decimal(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    text = str(value).strip().replace("\xa0", "").replace("%", "").replace(",", ".")
+    if not text:
+        return None
+    try:
+        return Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
 
 
 def parse_float(value: object) -> float | None:

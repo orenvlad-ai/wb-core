@@ -293,7 +293,7 @@ def _seed_neighbor_date_price_truth(
     price_truth_by_date = {
         "2026-04-20": {
             requested_nm_ids[0]: 900.0,
-            requested_nm_ids[1]: 1000.0,
+            requested_nm_ids[1]: 1000.01,
             requested_nm_ids[2]: 1700.0,
         },
         "2026-04-21": {
