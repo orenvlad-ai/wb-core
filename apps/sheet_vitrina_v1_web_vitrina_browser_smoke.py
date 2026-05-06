@@ -394,9 +394,14 @@ def run_browser_checks(
                   const toolbar = document.querySelector('[data-table-toolbar]');
                   const tableShell = document.querySelector('[data-table-shell]');
                   const labels = toolbar ? Array.from(toolbar.querySelectorAll('.filter-label')).map((node) => (node.textContent || '').trim()).filter(Boolean) : [];
+                  const fieldWidths = toolbar ? Object.fromEntries(Array.from(toolbar.querySelectorAll('.toolbar-field')).map((node) => [
+                    (node.querySelector('.filter-label') || {}).textContent ? (node.querySelector('.filter-label').textContent || '').trim() : 'unknown',
+                    Math.round(node.getBoundingClientRect().width)
+                  ])) : {};
                   const toolbarText = toolbar ? (toolbar.innerText || '') : '';
                   const resetText = toolbar ? ((toolbar.querySelector('[data-reset-filters]') || {}).textContent || '').trim() : '';
                   const rect = toolbar ? toolbar.getBoundingClientRect() : {height: 0};
+                  const toolbarStyle = toolbar ? getComputedStyle(toolbar) : {overflowX: '', overflowY: ''};
                   const beforeTable = !!toolbar && !!tableShell && !!(toolbar.compareDocumentPosition(tableShell) & Node.DOCUMENT_POSITION_FOLLOWING);
                   const logoutLink = document.querySelector('[data-logout-link]');
                   const tablist = document.querySelector('[role="tablist"]');
@@ -404,9 +409,12 @@ def run_browser_checks(
                     exists: !!toolbar,
                     beforeTable: beforeTable,
                     labels: labels,
+                    fieldWidths: fieldWidths,
                     toolbarText: toolbarText,
                     resetText: resetText,
                     height: Math.round(rect.height),
+                    overflowX: toolbarStyle.overflowX,
+                    overflowY: toolbarStyle.overflowY,
                     oldHeadingCount: Array.from(document.querySelectorAll('h2')).filter((node) => (node.textContent || '').trim() === 'Фильтры и настройки').length,
                     oldPanelTextVisible: (document.body.innerText || '').includes('Search/select/sort и выбор видимых столбцов'),
                     oldResetTextVisible: (document.body.innerText || '').includes('Сбросить фильтры'),
@@ -438,6 +446,9 @@ def run_browser_checks(
                 or table_toolbar["logoutHref"] != "/logout"
                 or table_toolbar["logoutInTablist"]
                 or table_toolbar["logoutLooksLikeTab"]
+                or table_toolbar["overflowX"] != "visible"
+                or table_toolbar["overflowY"] != "visible"
+                or int(table_toolbar["fieldWidths"].get("Поиск") or 0) > 180
                 or table_toolbar["columnManagerCount"] != 1
                 or table_toolbar["columnResetCount"] != 1
                 or missing_toolbar_labels
@@ -445,7 +456,7 @@ def run_browser_checks(
                 raise AssertionError(
                     f"table controls must live in one compact toolbar above the table, got {table_toolbar}, missing={missing_toolbar_labels}"
                 )
-            if table_toolbar["height"] > 130:
+            if table_toolbar["height"] > 78:
                 raise AssertionError(f"table toolbar must stay compact, got {table_toolbar}")
             compact_widths = _measure_compact_widths(page, strict=expected_percent_rows is not None)
             percent_formatting = _check_percent_formatting(page, expected_rows=expected_percent_rows)
