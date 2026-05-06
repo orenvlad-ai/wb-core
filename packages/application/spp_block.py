@@ -25,7 +25,7 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> SppEnvelope:
                 snapshot_date=snapshot_date,
                 count=0,
                 items=[],
-                detail="no sales rows returned for requested nmIds and snapshot date",
+                detail="no SPP rows returned for requested nmIds and snapshot date",
             )
         )
 
