@@ -1202,8 +1202,7 @@
       border: 1px solid var(--border);
       border-radius: 6px;
       background: #ffffff;
-      overflow-x: auto;
-      overscroll-behavior-x: contain;
+      overflow: visible;
     }
 
     .table-filter-controls {
@@ -1219,28 +1218,33 @@
       display: flex;
       flex-direction: column;
       gap: 3px;
-      flex: 0 1 108px;
-      min-width: 96px;
+      flex: 1 1 124px;
+      min-width: 108px;
+      max-width: 164px;
     }
 
     .toolbar-field-range {
       flex: 0 0 222px;
       min-width: 222px;
+      max-width: none;
     }
 
     .toolbar-field-search {
-      flex: 1 1 154px;
-      min-width: 142px;
+      flex: 0 0 168px;
+      min-width: 150px;
+      max-width: 168px;
     }
 
     .toolbar-field-columns {
-      flex: 0 0 92px;
-      min-width: 92px;
+      flex: 0 0 104px;
+      min-width: 104px;
+      max-width: none;
     }
 
     .toolbar-field-actions {
       flex: 0 0 86px;
       min-width: 86px;
+      max-width: none;
       align-self: flex-end;
     }
 
@@ -1894,41 +1898,44 @@
       }
 
       .table-control-toolbar {
-        flex-wrap: nowrap;
+        flex-wrap: wrap;
         align-items: flex-end;
-        overflow-x: auto;
+        overflow: visible;
         padding-bottom: 8px;
-        overscroll-behavior-x: contain;
       }
 
       .table-filter-controls {
-        flex: 0 0 auto;
-        flex-wrap: nowrap;
-        min-width: max-content;
+        flex: 1 1 100%;
+        flex-wrap: wrap;
+        min-width: 0;
       }
 
       .toolbar-field {
-        flex: 0 0 148px;
+        flex: 1 1 148px;
+        max-width: none;
       }
 
       .toolbar-field-range {
-        flex-basis: 250px;
+        flex: 1 1 250px;
+        min-width: 220px;
       }
 
       .toolbar-field-search {
-        flex-basis: 180px;
+        flex: 1 1 140px;
+        min-width: 120px;
+        max-width: 170px;
       }
 
       .toolbar-field-columns {
-        flex-basis: 116px;
+        flex: 1 1 116px;
       }
 
       .toolbar-field-actions {
-        flex-basis: 98px;
+        flex: 0 0 98px;
       }
 
       .filter-card-wide {
-        flex-basis: 190px;
+        flex-basis: 140px;
       }
 
       .panel-meta {

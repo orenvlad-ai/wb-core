@@ -69,14 +69,17 @@ def _check_vitrina_popovers(page: object) -> dict[str, object]:
 
     history_toggle.click()
     _assert_node_hidden(history_popover, False, "history popover must open from trigger")
+    _assert_toolbar_popover_visible(page, "[data-history-popover]", "history popover")
     history_toggle.click()
     _assert_node_hidden(history_popover, True, "history popover must close from the same trigger")
 
     history_toggle.click()
     _assert_node_hidden(history_popover, False, "history popover must reopen")
+    _assert_toolbar_popover_visible(page, "[data-history-popover]", "history popover")
     page.locator("[data-column-manager] > summary").click()
     _assert_node_hidden(history_popover, True, "opening column manager must close history popover")
     _assert_details_open(page.locator("[data-column-manager]"), True, "column manager must open")
+    _assert_toolbar_popover_visible(page, "[data-column-manager] .column-manager-panel", "column manager panel")
 
     metric_checkbox = page.locator('[data-column-visibility-id="metric_key"]')
     before_checked = metric_checkbox.is_checked()
@@ -95,6 +98,7 @@ def _check_vitrina_popovers(page: object) -> dict[str, object]:
 
     page.locator("[data-column-manager] > summary").click()
     _assert_details_open(page.locator("[data-column-manager]"), True, "column manager trigger must open")
+    _assert_toolbar_popover_visible(page, "[data-column-manager] .column-manager-panel", "column manager panel")
     page.locator("[data-column-manager] > summary").click()
     _assert_details_open(page.locator("[data-column-manager]"), False, "column manager trigger must close")
 
@@ -104,6 +108,48 @@ def _check_vitrina_popovers(page: object) -> dict[str, object]:
         "column_multiselect_inside_click_keeps_open": True,
         "column_manager_outside_click_closes": True,
     }
+
+
+def _assert_toolbar_popover_visible(page: object, selector: str, label: str) -> None:
+    state = page.evaluate(
+        """(selector) => {
+          const toolbar = document.querySelector('[data-table-toolbar]');
+          const node = document.querySelector(selector);
+          if (!toolbar || !node) {
+            return {exists: !!node, toolbarExists: !!toolbar};
+          }
+          const toolbarRect = toolbar.getBoundingClientRect();
+          const rect = node.getBoundingClientRect();
+          const toolbarStyle = getComputedStyle(toolbar);
+          const nodeStyle = getComputedStyle(node);
+          return {
+            exists: true,
+            toolbarExists: true,
+            toolbarOverflowX: toolbarStyle.overflowX,
+            toolbarOverflowY: toolbarStyle.overflowY,
+            display: nodeStyle.display,
+            visibility: nodeStyle.visibility,
+            height: Math.round(rect.height),
+            width: Math.round(rect.width),
+            top: Math.round(rect.top),
+            toolbarBottom: Math.round(toolbarRect.bottom),
+            belowToolbar: rect.top >= toolbarRect.bottom - 1
+          };
+        }""",
+        selector,
+    )
+    if (
+        not state.get("exists")
+        or not state.get("toolbarExists")
+        or state.get("toolbarOverflowX") != "visible"
+        or state.get("toolbarOverflowY") != "visible"
+        or state.get("display") == "none"
+        or state.get("visibility") == "hidden"
+        or int(state.get("height") or 0) <= 80
+        or int(state.get("width") or 0) <= 120
+        or not state.get("belowToolbar")
+    ):
+        raise AssertionError(f"{label} must be visibly open outside the compact toolbar clipping area, got {state}")
 
 
 def _check_research_popovers(page: object) -> dict[str, object]:
