@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "e65dc30240e49651c2c660b179acbbd6b2accbd1"
+built_from_commit: "3faca550ee0d005b6be13635d015757c71d4bb80"
 ---
 
 # Summary
@@ -41,7 +41,7 @@ built_from_commit: "e65dc30240e49651c2c660b179acbbd6b2accbd1"
 | `11–12` | `rule-based` | смёржены в `main` |
 | `13–16` | `table-facing` / `projection` / `wide-matrix` | смёржены в `main` |
 | `17–19` | `archived sheet-side scaffold/write/presentation` | Google Sheets contour archived / do not use; retained only as migration evidence |
-| `20–23` | `registry upload line` | смёржены в `main` до live HTTP entrypoint plus hosted public-route allowlist/deploy publication boundary, EU current-live target metadata, production HTTPS/domain/TLS invariant and rollback-only selleros write guard |
+| `20–23` | `registry upload line` | смёржены в `main` до live HTTP entrypoint plus hosted public-route allowlist/deploy publication boundary, app-level auth, auth-aware canonical probes, EU current-live target metadata, production HTTPS/domain/TLS invariant and rollback-only selleros write guard |
 | `24–26` | `web/operator + archived sheet-side history` | current web/operator contour active; Google Sheets/GAS side archived |
 | `27` | `browser-capture collector` | смёржен в `main` как bounded local promo XLSX collector contour |
 | `28` | `browser-capture live wiring` | смёржен в `main` как promo live source seam inside refresh/runtime/read-side |
@@ -95,9 +95,12 @@ Current main-confirmed operator flow:
 - `POST /v1/sheet-vitrina-v1/feedbacks/ai-analyze`
 - `GET /v1/sheet-vitrina-v1/feedbacks/complaints`
 - `POST /v1/sheet-vitrina-v1/feedbacks/complaints/sync-status`
+- `POST /v1/sheet-vitrina-v1/feedbacks/complaints/submit-selected`
+- `GET /v1/sheet-vitrina-v1/feedbacks/complaints/submit-job`
 - `GET /v1/sheet-vitrina-v1/research/sku-group-comparison/options`
 - `POST /v1/sheet-vitrina-v1/research/sku-group-comparison/calculate`
 - `POST /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start`
+- `GET /login`, `POST /login`, `GET /logout`, `POST /logout`
 - `GET /sheet-vitrina-v1/operator`
 - `GET /sheet-vitrina-v1/vitrina`
 - former Google Sheets `prepare/upload/load DATA_VITRINA` flow is archived and blocked by guards
@@ -121,15 +124,15 @@ Current live promo source flow:
 - refresh-integrated `promo_refresh_light_gc_v1` runs after normalized archive + ready snapshot persistence, deletes only guarded old/debug/duplicate candidates, protects current run and unknown/incomplete artifacts, and records a structured `promo_artifact_gc` summary
 
 Current repo-owned unified web/operator surface:
-- primary route = `GET /sheet-vitrina-v1/vitrina`; first/default tab = `Витрина`, sibling tabs = `Расчет поставок`, `Отчеты`, `Отзывы` and `Исследования`
+- primary route = `GET /sheet-vitrina-v1/vitrina`; first/default tab = `Витрина`, sibling tabs = `Поставки`, `Отчёты`, `Отзывы` and `Исследования`
 - compatibility route = `GET /sheet-vitrina-v1/operator`; it renders the same unified shell and is not a separate source-of-truth owner
-- page uses current read/action routes: `POST /v1/sheet-vitrina-v1/refresh`, `GET /v1/sheet-vitrina-v1/status`, `GET /v1/sheet-vitrina-v1/job`, `GET /v1/sheet-vitrina-v1/daily-report`, `GET /v1/sheet-vitrina-v1/stock-report`, `GET /v1/sheet-vitrina-v1/plan-report`, `GET /v1/sheet-vitrina-v1/feedbacks`, `feedbacks/export.xlsx`, `feedbacks/ai-prompt`, `feedbacks/ai-analyze`, `feedbacks/complaints`, `feedbacks/complaints/sync-status`, research SKU-group comparison routes, seller-session/recovery routes and `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh`
+- page uses current read/action routes: `POST /v1/sheet-vitrina-v1/refresh`, `GET /v1/sheet-vitrina-v1/status`, `GET /v1/sheet-vitrina-v1/job`, `GET /v1/sheet-vitrina-v1/daily-report`, `GET /v1/sheet-vitrina-v1/stock-report`, `GET /v1/sheet-vitrina-v1/plan-report`, `GET /v1/sheet-vitrina-v1/feedbacks`, `feedbacks/export.xlsx`, `feedbacks/ai-prompt`, `feedbacks/ai-analyze`, `feedbacks/complaints`, `feedbacks/complaints/sync-status`, `feedbacks/complaints/submit-selected`, `feedbacks/complaints/submit-job`, research SKU-group comparison routes, seller-session/recovery routes and `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh`
 - former Google Sheets `/load` stays archived/blocked and is not needed for current web-vitrina completion
 - `GET /v1/sheet-vitrina-v1/web-vitrina` stays server-owned and library-agnostic on the default path: current v1 shape is `meta + status_summary + schema + rows + capabilities`, built only from existing ready snapshot/current truth and optional `as_of_date`
 - phase-2 web-vitrina materializes repo-owned `web_vitrina_view_model` over that stable contract: current schema = `columns + rows + groups + sections + formatters + filters + sorts + state_model`
 - phase-3 web-vitrina materializes repo-owned `web_vitrina_gravity_table_adapter` over that `view_model`: current Gravity-specific surface = `columns + rows + renderers + groupings + filters + sorts + use_table_options + table_props + state_surface`
 - phase-4 web-vitrina materializes repo-owned `web_vitrina_page_composition` via optional `surface=page_composition`; the page shell renders summary, compact toolbar/history controls, main table and then bottom `Действия и состояния`
-- the same unified shell exposes `Отзывы` as a manual read-only WB feedbacks table with strict server-side date/star/answered filters, 62-day feedback date picker, chunked WB pagination, diagnostic meta, Excel export for the current table, resizable columns, optional transient AI review columns and nested `Жалобы` over runtime complaint journal/status sync; prompt storage and AI output are operational/transient, not ЕБД/accepted truth
+- the same unified shell exposes `Отзывы` as a manual read-only WB feedbacks table with strict server-side date/star/answered filters, 62-day feedback date picker, chunked WB pagination, diagnostic meta, Excel export for the current table, resizable columns, official review tags/actionable resolver, optional transient AI review columns and nested `Жалобы` over runtime complaint journal/status sync plus protected selected-row submit jobs; prompt storage and AI output are operational/transient, not ЕБД/accepted truth
 - the same unified shell exposes `Исследования` as read-only SKU group comparison; options/calculate use active SKU truth, selectable non-financial metrics and persisted ready snapshots only
 - current live vitrina action/status semantics:
   - `Загрузить и обновить` = canonical `POST /v1/sheet-vitrina-v1/refresh` + page reread, without Google Sheets write dependency
@@ -162,13 +165,13 @@ Current repo-owned unified web/operator surface:
 - job/log surface is detailed and machine-useful: source/module/adapter/endpoint steps, source result kinds/counts, metric batch summaries and write results stay server-driven and can be exported per completed run through `GET /v1/sheet-vitrina-v1/job?job_id=...&format=text&download=1`
 - server-side business timezone = `Asia/Yekaterinburg` for default `as_of_date`, `today_current` and operator-facing freshness dates
 - live daily auto-refresh = repo-owned artifacts `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.{service,timer}` -> installed on host as `wb-core-sheet-vitrina-refresh.timer` -> existing `POST /v1/sheet-vitrina-v1/refresh` at `11:00, 20:00 Asia/Yekaterinburg` (`06:00 UTC` and `15:00 UTC` on current host) with `{"auto_refresh": true}`; daily path builds server-side ready snapshot only and never loads Google Sheets
-- active hosted target = `wb-core-eu-root` / `89.191.226.88` / `/opt/wb-core-runtime/state`; production public endpoint is `https://api.selleros.pro`; current-live nginx must keep `server_name 89.191.226.88 api.selleros.pro;` plus `listen 443 ssl`; old `selleros-root` / `178.72.152.177` is rollback-only and routine writes are blocked before SSH/rsync/nginx/systemd
+- active hosted target = `wb-core-eu-root` / `89.191.226.88` / `/opt/wb-core-runtime/state`; production public endpoint is `https://api.selleros.pro`; app-level auth protects the public/operator surface; canonical probes are auth-aware and fast by default, with heavy refresh only under explicit `--include-refresh`; current-live nginx must keep `server_name 89.191.226.88 api.selleros.pro;` plus `listen 443 ssl`; old `selleros-root` / `178.72.152.177` is rollback-only and routine writes are blocked before SSH/rsync/nginx/systemd
 - source matrix is explicit: group A bot/web-source historical, group B WB API historical/date-period capable, group C WB API current-snapshot-only, group D other/manual/browser-collector overlays
 - `seller_funnel_snapshot` materialization can receive enabled/relevant `nm_ids`; strict validation is applied after relevant-row filtering, so invalid non-relevant rows are logged as `ignored_non_relevant_invalid_rows` instead of poisoning the snapshot
 - bot-backed current-day sync probes `/opt/wb-web-bot/storage_state.json` before seller portal capture; invalidated browser state surfaces as `seller_portal_session_invalid` / human `сессия seller portal больше не действует; требуется повторный вход`
 - seller-portal auth recovery on selleros uses repo-owned localhost-only noVNC/Xvfb path via `apps/seller_portal_relogin_session.py`; unified UI exposes session-check/start/status/stop/launcher controls with per-run `run_id`, safe stop and canonical supplier confirmation
 - steady-state bot-backed source materialization on EU uses localhost owner runtime API `http://127.0.0.1:8000` owned by `wb-ai-api.service` after `/opt/wb-web-bot/bot` capture and `/opt/wb-ai/run_web_source_handoff.py`; env overrides for web-source/seller-funnel base URLs are exceptional owner-runtime relocation knobs, not public nginx routes
-- real complaint submit for `Отзывы/Жалобы` is intentionally outside the web UI: only guarded CLI runners may submit after exact feedback/AI-row match and hard caps, while confirmation/detail probes are read-only evidence for uncertain attempts
+- real complaint submit for `Отзывы/Жалобы` is intentionally guarded: protected selected-row operator jobs and support runners may submit only after exact feedback/AI-row match and hard caps, while confirmation/detail probes are read-only evidence for uncertain attempts; broad/unauthenticated/automatic submit remains forbidden
 - historical/date-period families (`seller_funnel_snapshot`, `web_source_snapshot`, `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`) now use persisted accepted closed-day semantics for `yesterday_closed`
 - current-snapshot-only families (`prices_snapshot`, `ads_bids`) capture upstream truth only as current snapshot, but an already accepted snapshot for business day D must materialize as `yesterday_closed=D` on D+1; later invalid auto/manual attempts must not blank prior-day accepted truth or already accepted same-day truth
 - semantic reduction is now source-aware instead of naive two-slot worst-case:
@@ -185,7 +188,7 @@ Current repo-owned unified web/operator surface:
 - live retry completion is bounded by repo-owned runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py` plus repo-owned artifacts `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.{service,timer}` installed on host as `wb-core-sheet-vitrina-closure-retry.timer`; the runner covers due `yesterday_closed` for the full historical/date-period matrix and same-day current-only capture retries only within the current business day
 
 Current additional operator supply flow on the same page:
-- top-level tab `Расчёт поставок` keeps the existing page pattern and now materializes two bounded sibling blocks: `Заказ на фабрике` and `Поставка на Wildberries`
+- top-level tab `Поставки` keeps the existing page pattern and materializes two bounded sibling blocks: `Заказ на фабрике` and `Поставка на Wildberries`
 - operator vocabulary inside these sibling blocks is unified around `period average / lead times / safety / batch / cycle`; factory now materializes `cycle_order_days`, while WB regional keeps the same math under `cycle_supply_days`
 - current operator UX uses auto-upload after file selection, subtle delete icons for current uploaded files and a clickable `sheet_vitrina_v1` link to the bound live spreadsheet
 - `Остатки ФФ` is a shared server-owned dataset block for both calculations; the same uploaded workbook/state is reused, not duplicated

@@ -28,7 +28,7 @@ update_triggers:
   - "перенос новой legacy capability"
   - "изменение migration boundary"
   - "закрытие крупного compatibility gap"
-built_from_commit: "e65dc30240e49651c2c660b179acbbd6b2accbd1"
+built_from_commit: "3faca550ee0d005b6be13635d015757c71d4bb80"
 ---
 
 # Summary
@@ -46,9 +46,9 @@ built_from_commit: "e65dc30240e49651c2c660b179acbbd6b2accbd1"
 | legacy `FORMULAS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `registry_upload_bundle_v1_block` | current uploaded set перенесён | historical sheet-side seed and upload bundle держат `7` formulas rows, нужных authoritative `metrics_v2`; Google Sheets seed is archived |
 | legacy `DATA`/vitrina readback | `sheet_vitrina_v1_mvp_end_to_end_block` + `promo_live_source_wiring_block` | bounded replacement есть | rows materialize-ятся по uploaded package; `COST_PRICE` overlay и promo-backed `promo_by_price` rows уже server-side integrated в current refresh/runtime/read-side contour |
 | legacy report historical fact gaps | accepted temporal slots + `manual_monthly_plan_report_baseline` + one-off ready-fact reconcile | bounded server-side replacement есть | plan-report may use controlled monthly XLSX baseline only for full-month aggregates; ready snapshots may be one-off reconcile input for missing accepted `fin_report_daily` / `ads_compact` slots; neither path revives Google Sheets/GAS as report truth |
-| feedback complaints / Seller Portal complaint handling | `Отзывы` nested `Жалобы` runtime journal/status sync + guarded CLI submit/probe runners | bounded replacement есть for status/evidence; public submit UI deliberately absent | current web UI reads complaint evidence/status only; real submit is CLI-only with exact match/hard caps, and uncertain results require read-only confirmation/detail probes |
+| feedback complaints / Seller Portal complaint handling | `Отзывы` nested `Жалобы` runtime journal/status sync + protected selected-row submit job + guarded support/probe runners | bounded replacement есть for status/evidence and selected-row submit; broad public/auto-submit deliberately absent | current auth-protected web UI can submit only selected/analyzed rows through a bounded async job; real submit still requires exact match/hard caps, and uncertain results require read-only confirmation/detail probes |
 | legacy `AI_EXPORT` | отдельного полного replacement пока нет | open gap | compatibility boundary ещё не закрыт |
-| `wb-ai-research` ingest/runtime вокруг registry | `registry_upload_file_backed_service_block`, `registry_upload_db_backed_runtime_block`, `registry_upload_http_entrypoint_block` | перенесено bounded chain-ом | repo-owned deploy/probe contract, EU current-live target metadata, managed public-route allowlist, production HTTPS/domain/TLS invariant and rollback-only selleros write guard есть; final auth/storage hardening остаётся отдельно |
+| `wb-ai-research` ingest/runtime вокруг registry | `registry_upload_file_backed_service_block`, `registry_upload_db_backed_runtime_block`, `registry_upload_http_entrypoint_block` | перенесено bounded chain-ом | repo-owned deploy/probe contract, app-level auth, auth-aware canonical probes, EU current-live target metadata, managed public-route allowlist, production HTTPS/domain/TLS invariant and rollback-only selleros write guard есть; broader storage/failover hardening остаётся отдельно |
 | `wb-ai-research` snapshot consumers | source/data blocks `01–10` | largely migrated | current repo owns contracts/artifacts/smokes |
 | `wb-web-bot` browser web-source capture | `web_source_snapshot_block` consumer boundary + `promo_xlsx_collector_block` precursor + `promo_live_source_wiring_block` | bounded thin adapter boundary materialized | wb-core now owns canonical hydration/modal/drawer semantics, sidecar contract, workbook inspection, normalized promo archive, refresh-integrated promo artifact GC and live promo source wiring, but not the whole browser runtime |
 
@@ -64,7 +64,7 @@ built_from_commit: "e65dc30240e49651c2c660b179acbbd6b2accbd1"
 - repo-owned promo collector output уже wire-ится в current live metric/read-side line for `promo_by_price`; open tail остаётся только beyond the current wired promo-backed metric subset and beyond current `COST_PRICE` overlay;
 - current reports are website/server-owned: `daily-report`, `stock-report` and `plan-report` are not a revived sheet-side reporting truth layer; user-facing `ЕБД` means the shared server-side accepted truth/runtime layer, not Google Sheets/GAS or browser-local state;
 - окончательная судьба `AI_EXPORT`; bounded feedbacks AI review is a separate transient operator aid and does not close this compatibility gap;
-- actual production-grade rights/wiring/hardening вокруг уже repo-owned hosted deploy contract.
+- remaining production-grade storage/failover hardening around the already repo-owned hosted deploy/auth/probe contract.
 
 # Not in scope
 
