@@ -265,6 +265,15 @@ def _assert_submit_job_store_keeps_fresh_active_jobs() -> None:
                             "finished_at": "",
                             "events": [],
                         },
+                        {
+                            "run_id": "active-with-finished",
+                            "kind": "feedbacks_complaints_submit_selected",
+                            "status": "running",
+                            "created_at": "2026-05-06T00:04:00Z",
+                            "started_at": "2026-05-06T00:04:00Z",
+                            "finished_at": "2026-05-06T00:04:30Z",
+                            "events": [],
+                        },
                     ],
                 }
             )
@@ -283,6 +292,8 @@ def _assert_submit_job_store_keeps_fresh_active_jobs() -> None:
             raise AssertionError(f"fresh running submit job must not be interrupted by store construction: {by_id['fresh']}")
         if by_id["stale"]["status"] != "error" or "runtime service restarted" not in by_id["stale"].get("error", ""):
             raise AssertionError(f"stale running submit job must be marked interrupted: {by_id['stale']}")
+        if by_id["active-with-finished"]["status"] != "error":
+            raise AssertionError(f"running submit job with finished_at must not hold the active lock: {by_id['active-with-finished']}")
 
 
 def _assert_duplicate_running_job_guard() -> None:
