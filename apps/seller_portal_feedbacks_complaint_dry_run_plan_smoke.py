@@ -37,6 +37,7 @@ from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     find_visible_actionable_row,
     no_submit_guards,
     normalize_deny_feedback_ids,
+    open_seller_portal_feedback_status_tab,
     render_markdown_report,
     select_ai_candidate_ids,
     should_try_actionability_resolver,
@@ -54,6 +55,7 @@ def main() -> None:
     _assert_visible_row_cursor_guard()
     _assert_actionability_tab_plan()
     _assert_filter_controller_sequence()
+    _assert_status_tab_opens_direct_url()
     _assert_date_filter_commits_without_apply_button()
     _assert_calendar_date_filter_uses_save_button()
     _assert_category_other_fallback()
@@ -286,6 +288,31 @@ def _assert_filter_controller_sequence() -> None:
             if not any(str(item).startswith("filters_button:") for item in selectors):
                 raise AssertionError(f"filter diagnostics must include selectors used: {result}")
         finally:
+            browser.close()
+
+
+def _assert_status_tab_opens_direct_url() -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
+        try:
+            context.route(
+                "https://seller.wildberries.ru/feedbacks/feedbacks-tab/not-answered",
+                lambda route: route.fulfill(status=200, body="<button>Ждут ответа</button><button>Есть ответ</button><table><tr><td>row</td></tr></table>"),
+            )
+            context.route(
+                "https://seller.wildberries.ru/feedbacks/feedbacks-tab/answered",
+                lambda route: route.fulfill(status=200, body="<button>Ждут ответа</button><button>Есть ответ</button><table><tr><td>answered</td></tr></table>"),
+            )
+            page.goto("https://seller.wildberries.ru/feedbacks/feedbacks-tab/not-answered")
+            result = open_seller_portal_feedback_status_tab(page, FEEDBACKS_ANSWERED_TAB_LABEL)
+            if not result.get("ok") or result.get("strategy") != "direct_status_tab_url":
+                raise AssertionError(f"answered status tab must open by direct URL/reload: {result}")
+            if "/feedbacks-tab/answered" not in page.url:
+                raise AssertionError(f"answered status URL must stick: {page.url}")
+        finally:
+            context.close()
             browser.close()
 
 
