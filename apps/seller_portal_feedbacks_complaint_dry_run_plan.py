@@ -1290,6 +1290,11 @@ def apply_seller_portal_date_filter(page: Page, *, date_from: str, date_to: str)
             result["selectors_used"].append("date_inputs")
     except PlaywrightError as exc:
         result["fill_inputs"] = {"ok": False, "reason": safe_text(str(exc), 300)}
+    if result.get("inputs_filled"):
+        driven = drive_seller_portal_date_inputs(page, date_from_ru=date_from_ru, date_to_ru=date_to_ru)
+        result["real_input_drive"] = driven
+        if driven.get("ok"):
+            result["selectors_used"].append("date_real_input")
     try:
         applied = click_filter_apply_button(page, context_hint="date")
         result["date_apply_click"] = applied
@@ -1298,19 +1303,98 @@ def apply_seller_portal_date_filter(page: Page, *, date_from: str, date_to: str)
             result["selectors_used"].append("date_apply")
     except Exception as exc:  # pragma: no cover - live fallback
         result["date_apply_click"] = {"ok": False, "reason": safe_text(str(exc), 300)}
+    commit_attempts = commit_seller_portal_date_filter(page)
+    result["commit_attempts"] = commit_attempts
+    if any(item.get("ok") for item in commit_attempts):
+        result["selectors_used"].append("date_commit")
+    _wait_settle(page, 1200)
     state = inspect_seller_portal_filter_state(page)
     visible_range = str(state.get("visible_date_range") or "")
+    visible_alignment = inspect_visible_feedback_date_alignment(page, date_from=date_from, date_to=date_to)
     result["visible_date_range_after"] = visible_range
-    result["committed"] = bool(result["apply_clicked"] or (date_from_ru in visible_range and date_to_ru in visible_range))
+    result["visible_date_alignment_after"] = visible_alignment
+    result["committed"] = bool(
+        result["apply_clicked"]
+        or (date_from_ru in visible_range and date_to_ru in visible_range)
+        or visible_alignment.get("all_visible_rows_in_range")
+    )
     result["applied"] = bool(result["committed"])
     if not result["applied"] and not result["reason"]:
         result["reason"] = str(
             (result.get("fill_inputs") or {}).get("reason")
+            or (result.get("real_input_drive") or {}).get("reason")
             or (result.get("date_apply_click") or {}).get("reason")
             or (result.get("open_control") or {}).get("reason")
             or "date filter input was filled but the Seller Portal did not confirm applying it"
         )
     return result
+
+
+def drive_seller_portal_date_inputs(page: Page, *, date_from_ru: str, date_to_ru: str) -> dict[str, Any]:
+    result: dict[str, Any] = {"ok": False, "fields": [], "reason": ""}
+    marker = SELLER_PORTAL_DATE_FILTER_MARKER_ATTR
+    try:
+        range_locator = page.locator(f'[{marker}="range"]').first
+        if range_locator.count() > 0:
+            value = f"{date_from_ru} - {date_to_ru}"
+            range_locator.click(timeout=1500)
+            range_locator.fill(value, timeout=2500)
+            range_locator.press("Enter", timeout=1500)
+            result["fields"].append({"marker": "range", "value": value})
+            result["ok"] = True
+            return result
+    except PlaywrightError as exc:
+        result["reason"] = safe_text(str(exc), 240)
+    try:
+        from_locator = page.locator(f'[{marker}="from"]').first
+        to_locator = page.locator(f'[{marker}="to"]').first
+        if from_locator.count() > 0 and to_locator.count() > 0:
+            from_locator.click(timeout=1500)
+            from_locator.fill(date_from_ru, timeout=2500)
+            from_locator.press("Tab", timeout=1500)
+            to_locator.fill(date_to_ru, timeout=2500)
+            to_locator.press("Enter", timeout=1500)
+            result["fields"].extend(
+                [
+                    {"marker": "from", "value": date_from_ru},
+                    {"marker": "to", "value": date_to_ru},
+                ]
+            )
+            result["ok"] = True
+            return result
+    except PlaywrightError as exc:
+        result["reason"] = safe_text(str(exc), 240)
+    if not result["reason"]:
+        result["reason"] = "marked date input was not found"
+    return result
+
+
+def commit_seller_portal_date_filter(page: Page) -> list[dict[str, Any]]:
+    attempts: list[dict[str, Any]] = []
+    marker = SELLER_PORTAL_DATE_FILTER_MARKER_ATTR
+    for selector in (f'[{marker}="range"]', f'[{marker}="to"]', f'[{marker}="from"]'):
+        try:
+            locator = page.locator(selector).first
+            if locator.count() < 1:
+                continue
+            locator.press("Enter", timeout=1200)
+            attempts.append({"method": "marked_input_enter", "selector": selector, "ok": True})
+            _wait_settle(page, 400)
+            break
+        except PlaywrightError as exc:
+            attempts.append({"method": "marked_input_enter", "selector": selector, "ok": False, "reason": safe_text(str(exc), 180)})
+    try:
+        page.keyboard.press("Enter")
+        attempts.append({"method": "keyboard_enter", "ok": True})
+        _wait_settle(page, 400)
+    except PlaywrightError as exc:
+        attempts.append({"method": "keyboard_enter", "ok": False, "reason": safe_text(str(exc), 180)})
+    try:
+        page.mouse.click(24, 24)
+        attempts.append({"method": "outside_click", "ok": True})
+    except PlaywrightError as exc:
+        attempts.append({"method": "outside_click", "ok": False, "reason": safe_text(str(exc), 180)})
+    return attempts
 
 
 def apply_seller_portal_star_filter(page: Page, *, stars: Iterable[int]) -> dict[str, Any]:

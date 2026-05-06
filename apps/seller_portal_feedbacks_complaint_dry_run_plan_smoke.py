@@ -20,6 +20,7 @@ from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     DryRunConfig,
     actionability_block_reason,
     apply_exact_matches,
+    apply_seller_portal_date_filter,
     apply_seller_portal_feedback_filters,
     build_aggregate,
     build_candidate_records,
@@ -53,6 +54,7 @@ def main() -> None:
     _assert_visible_row_cursor_guard()
     _assert_actionability_tab_plan()
     _assert_filter_controller_sequence()
+    _assert_date_filter_commits_without_apply_button()
     _assert_category_other_fallback()
     _assert_draft_text_builder()
     _assert_description_fill_sequence()
@@ -282,6 +284,47 @@ def _assert_filter_controller_sequence() -> None:
                 raise AssertionError(f"filter diagnostics must include rating selector strategy: {result}")
             if not any(str(item).startswith("filters_button:") for item in selectors):
                 raise AssertionError(f"filter diagnostics must include selectors used: {result}")
+        finally:
+            browser.close()
+
+
+def _assert_date_filter_commits_without_apply_button() -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            page.set_content(
+                """
+                <button id="dateButton">07.05.2026 - 07.05.2026</button>
+                <div id="datePopup" role="dialog" style="display:none">
+                  <input placeholder="PeriodDatepicker">
+                </div>
+                <section id="rows">
+                  <article>Отзыв 07.05.2026 5★ current</article>
+                </section>
+                <script>
+                  const rows = document.querySelector('#rows');
+                  document.querySelector('#dateButton').addEventListener('click', () => {
+                    document.querySelector('#datePopup').style.display = 'block';
+                  });
+                  document.querySelector('#datePopup input').addEventListener('keydown', (event) => {
+                    if (event.key === 'Enter') {
+                      document.querySelector('#datePopup').style.display = 'none';
+                      document.querySelector('#dateButton').innerText = event.target.value;
+                      rows.innerHTML = '<article>Отзыв 02.05.2026 1★ committed</article>';
+                    }
+                  });
+                </script>
+                """
+            )
+            result = apply_seller_portal_date_filter(page, date_from="2026-05-02", date_to="2026-05-02")
+            if not result.get("applied") or not result.get("inputs_filled"):
+                raise AssertionError(f"date filter must commit via real input events when no apply button exists: {result}")
+            selectors = set(result.get("selectors_used") or [])
+            if "date_real_input" not in selectors or "date_commit" not in selectors:
+                raise AssertionError(f"date filter diagnostics must include real input commit selectors: {result}")
+            if result.get("visible_date_range_after") != "02.05.2026 - 02.05.2026":
+                raise AssertionError(f"date filter must verify the committed visible date range: {result}")
         finally:
             browser.close()
 
