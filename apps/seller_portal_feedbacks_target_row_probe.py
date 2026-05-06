@@ -426,9 +426,18 @@ def collect_seller_portal_rows(config: TargetRowProbeConfig, api_rows: list[dict
                     }
                 )
                 report["success"] = bool(dom_rows or cursor_rows)
-                first_exact = first_exact_match(api_rows, dom_rows)
-                if first_exact and config.open_menu:
-                    report["page_actionability"] = materialize_and_check_actionability(page, config, first_exact)
+                if config.open_menu:
+                    actionability_candidates: list[dict[str, Any]] = []
+                    for exact_match in first_exact_matches(api_rows, dom_rows, limit=5):
+                        actionability = materialize_and_check_actionability(page, config, exact_match)
+                        actionability_candidates.append(actionability)
+                        if actionability.get("complaint_action_found"):
+                            report["page_actionability"] = actionability
+                            break
+                    if actionability_candidates:
+                        report["page_actionability_candidates"] = actionability_candidates
+                        if not report["page_actionability"].get("complaint_action_found"):
+                            report["page_actionability"] = actionability_candidates[0]
             finally:
                 context.close()
                 browser.close()
@@ -536,10 +545,19 @@ def match_one_api_row_to_dom(api_row: Mapping[str, Any], dom_rows: list[dict[str
 
 
 def first_exact_match(api_rows: list[dict[str, Any]], dom_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for match in first_exact_matches(api_rows, dom_rows, limit=1):
+        return match
+    return None
+
+
+def first_exact_matches(api_rows: list[dict[str, Any]], dom_rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
     for match in match_api_rows_to_dom(api_rows, dom_rows):
         if match.get("match_status") == "exact" and match.get("dom_scout_id"):
-            return match
-    return None
+            matches.append(match)
+            if len(matches) >= limit:
+                break
+    return matches
 
 
 def materialize_and_check_actionability(page: Page, config: TargetRowProbeConfig, match: Mapping[str, Any]) -> dict[str, Any]:
@@ -558,6 +576,7 @@ def materialize_and_check_actionability(page: Page, config: TargetRowProbeConfig
             "feedback_id": str(match.get("api_feedback_id") or ""),
             "tab_used": str(shared.get("tab_used") or match.get("tab_used") or ""),
             "match": dict(match),
+            "tabs_tried": shared.get("tabs_tried") or [],
             "row_visible": bool(shared.get("row_visible")),
             "row_menu_found": bool(shared.get("row_menu_found") or shared.get("menu_found")),
             "menu_items": shared.get("menu_labels") or [],
@@ -572,6 +591,17 @@ def materialize_and_check_actionability(page: Page, config: TargetRowProbeConfig
             "durable_success_state_seen": bool((shared.get("attempts") or [{}])[-1].get("durable_success_state_seen")) if shared.get("attempts") else False,
             "durable_success_state_after_close": bool((shared.get("attempts") or [{}])[-1].get("durable_success_state_after_close")) if shared.get("attempts") else False,
             "filter_controller": shared.get("filter_controller") or {},
+            "date_filter_applied": bool(shared.get("date_filter_applied")),
+            "star_filter_applied": bool(shared.get("star_filter_applied")),
+            "selected_star_values_after": shared.get("selected_star_values_after") or [],
+            "search_used": bool(shared.get("search_used")),
+            "scroll_used": bool(shared.get("scroll_used")),
+            "targeted_search": shared.get("targeted_search") or {},
+            "dom_rows_collected": int(shared.get("dom_rows_collected") or 0),
+            "visible_rows_checked": int(shared.get("visible_rows_checked") or 0),
+            "visible_rows_checked_after_search": int(shared.get("visible_rows_checked_after_search") or 0),
+            "visible_rows_checked_after_scroll": int(shared.get("visible_rows_checked_after_scroll") or 0),
+            "attempts": shared.get("attempts") or [],
             "visible_row_match": shared.get("visible_row_match") or {},
             "row_menu_click": shared.get("row_menu_click") or {},
             "complaint_action_click": shared.get("complaint_action_click") or {},
