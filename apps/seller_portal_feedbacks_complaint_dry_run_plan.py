@@ -1467,22 +1467,39 @@ def drive_seller_portal_date_inputs(page: Page, *, date_from_ru: str, date_to_ru
 
 def type_date_input_value(locator: Any, value: str) -> dict[str, Any]:
     result: dict[str, Any] = {"ok": False, "value_after": "", "attempts": []}
+
+    def _read_value() -> str:
+        try:
+            return str(locator.evaluate("(el) => String(el.value || '')", timeout=1000) or "")
+        except PlaywrightError:
+            return ""
+
+    def _clear_and_type(text_value: str, *, method: str) -> None:
+        locator.fill("", timeout=1500, force=True)
+        locator.press_sequentially(text_value, delay=12, timeout=5000)
+        result["attempts"].append({"method": method, "ok": True, "value_after_type": _read_value()})
+
     try:
         locator.click(timeout=1500, force=True)
         result["attempts"].append({"method": "force_click", "ok": True})
     except PlaywrightError as exc:
         result["attempts"].append({"method": "force_click", "ok": False, "reason": safe_text(str(exc), 160)})
     try:
-        locator.fill("", timeout=1500, force=True)
-        locator.press_sequentially(value, delay=12, timeout=4000)
-        result["attempts"].append({"method": "press_sequentially", "ok": True})
+        _clear_and_type(value, method="press_sequentially_formatted")
     except PlaywrightError as exc:
-        result["attempts"].append({"method": "press_sequentially", "ok": False, "reason": safe_text(str(exc), 180)})
+        result["attempts"].append({"method": "press_sequentially_formatted", "ok": False, "reason": safe_text(str(exc), 180)})
         try:
             locator.fill(value, timeout=2500, force=True)
             result["attempts"].append({"method": "force_fill_fallback", "ok": True})
         except PlaywrightError as fill_exc:
             result["attempts"].append({"method": "force_fill_fallback", "ok": False, "reason": safe_text(str(fill_exc), 180)})
+    typed_value = _read_value()
+    digits = re.sub(r"\D+", "", value)
+    if value not in typed_value and digits:
+        try:
+            _clear_and_type(digits, method="press_sequentially_digits")
+        except PlaywrightError as exc:
+            result["attempts"].append({"method": "press_sequentially_digits", "ok": False, "reason": safe_text(str(exc), 180)})
     dispatch = dispatch_date_input_change(locator)
     result["attempts"].append({"method": "dispatch_change_blur", **dispatch})
     result["value_after"] = str(dispatch.get("value") or "")
