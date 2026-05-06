@@ -713,7 +713,7 @@ def status_tabs_for_request(is_answered: str) -> list[str]:
         return [STATUS_TAB_ANSWERED]
     if is_answered == "false":
         return [STATUS_TAB_UNANSWERED]
-    return [STATUS_TAB_UNANSWERED, STATUS_TAB_ANSWERED]
+    return [STATUS_TAB_ANSWERED, STATUS_TAB_UNANSWERED]
 
 
 def build_scout_config(config: TargetRowProbeConfig) -> ScoutConfig:
