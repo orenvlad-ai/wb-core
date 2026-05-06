@@ -31,6 +31,7 @@ DEFAULT_SYNC_REPORT_DIRNAME = "feedbacks_complaints_status_sync"
 DEFAULT_SUBMIT_JOB_DIRNAME = "feedbacks_complaints_submit_jobs"
 DEFAULT_SUBMIT_REPORT_DIRNAME = "feedbacks_complaint_submit"
 JOB_ACTIVE_STATUSES = {"queued", "running"}
+JOB_INTERRUPTION_STALE_SECONDS = 45 * 60
 SUBMIT_JOB_MAX_SELECTED_IDS = 20
 SUBMIT_JOB_MAX_SUBMIT_HARD_CAP = 5
 SUBMIT_JOB_EVENTS_LIMIT = 200
@@ -352,7 +353,10 @@ class JsonFileFeedbacksComplaintsStatusSyncJobStore:
             for index, job in enumerate(jobs):
                 if str(job.get("run_id") or "").strip() != run_id:
                     continue
-                jobs[index] = _normalize_sync_job({**dict(job), **dict(patch)})
+                normalized_patch = dict(patch)
+                if str(normalized_patch.get("status") or "") in JOB_ACTIVE_STATUSES and "finished_at" not in normalized_patch:
+                    normalized_patch["finished_at"] = ""
+                jobs[index] = _normalize_sync_job({**dict(job), **normalized_patch})
                 self._write_payload_unlocked(store_payload)
                 return
 
@@ -387,6 +391,8 @@ class JsonFileFeedbacksComplaintsStatusSyncJobStore:
             now = _iso_now(self.now_factory)
             for index, job in enumerate(payload.get("jobs", [])):
                 if not isinstance(job, Mapping) or str(job.get("status") or "") not in JOB_ACTIVE_STATUSES:
+                    continue
+                if _job_active_age_seconds(job, self.now_factory) < JOB_INTERRUPTION_STALE_SECONDS:
                     continue
                 payload["jobs"][index] = _normalize_sync_job(
                     {
@@ -557,7 +563,10 @@ class JsonFileFeedbacksComplaintsSubmitJobStore:
             for index, job in enumerate(jobs):
                 if str(job.get("run_id") or "").strip() != run_id:
                     continue
-                jobs[index] = _normalize_submit_job({**dict(job), **dict(patch)})
+                normalized_patch = dict(patch)
+                if str(normalized_patch.get("status") or "") in JOB_ACTIVE_STATUSES and "finished_at" not in normalized_patch:
+                    normalized_patch["finished_at"] = ""
+                jobs[index] = _normalize_submit_job({**dict(job), **normalized_patch})
                 self._write_payload_unlocked(store_payload)
                 return
 
@@ -592,6 +601,8 @@ class JsonFileFeedbacksComplaintsSubmitJobStore:
             now = _iso_now(self.now_factory)
             for index, job in enumerate(payload.get("jobs", [])):
                 if not isinstance(job, Mapping) or str(job.get("status") or "") not in JOB_ACTIVE_STATUSES:
+                    continue
+                if _job_active_age_seconds(job, self.now_factory) < JOB_INTERRUPTION_STALE_SECONDS:
                     continue
                 payload["jobs"][index] = _normalize_submit_job(
                     {
@@ -1159,7 +1170,11 @@ def _submit_job_patch_from_report(report: Mapping[str, Any]) -> dict[str, Any]:
     events = report.get("events") if isinstance(report.get("events"), list) else []
     rows = report.get("rows") if isinstance(report.get("rows"), list) else []
     skipped = [
-        _submit_skip(str(row.get("feedback_id") or ""), "row_skipped", str(row.get("skip_reason") or row.get("block_reason") or "not submitted"))
+        _submit_skip(
+            str(row.get("feedback_id") or ""),
+            _submit_skip_event_code(str(row.get("skip_reason") or row.get("block_reason") or "not submitted")),
+            str(row.get("skip_reason") or row.get("block_reason") or "not submitted"),
+        )
         for row in rows
         if isinstance(row, Mapping) and not row.get("submitted") and not row.get("submit_clicked")
     ]
@@ -1549,3 +1564,17 @@ def _iso_now(now_factory: Any | None = None) -> str:
     if isinstance(now, datetime):
         return now.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _job_active_age_seconds(job: Mapping[str, Any], now_factory: Any | None = None) -> float:
+    now_value = now_factory() if now_factory else datetime.now(timezone.utc)
+    now = now_value if isinstance(now_value, datetime) else datetime.now(timezone.utc)
+    now = now.astimezone(timezone.utc)
+    timestamp = str(job.get("started_at") or job.get("created_at") or "").strip()
+    if not timestamp:
+        return 0.0
+    try:
+        started = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return JOB_INTERRUPTION_STALE_SECONDS
+    return max(0.0, (now - started).total_seconds())

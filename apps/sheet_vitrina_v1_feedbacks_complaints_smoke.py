@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import socket
 import sys
@@ -32,6 +33,7 @@ from packages.application.registry_upload_http_entrypoint import RegistryUploadH
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import (  # noqa: E402
     COMPLAINT_STATUS_LABELS,
     JsonFileFeedbacksComplaintJournal,
+    JsonFileFeedbacksComplaintsSubmitJobStore,
     SheetVitrinaV1FeedbacksComplaintsError,
     SheetVitrinaV1FeedbacksComplaintsBlock,
     _submit_events_from_submit_report,
@@ -46,6 +48,7 @@ def main() -> None:
     _assert_table_contract_and_fake_async_sync()
     _assert_fake_submit_selected_job()
     _assert_submit_selected_skip_event_shape()
+    _assert_submit_job_store_keeps_fresh_active_jobs()
     _assert_duplicate_running_job_guard()
     _assert_error_job_and_missing_run_id()
     _assert_http_sync_job_routes()
@@ -231,6 +234,55 @@ def _assert_submit_selected_skip_event_shape() -> None:
         raise AssertionError(f"candidate-level not-actionable skip must not emit duplicate row_error: {events}")
     if _submit_skip_event_code(str(row["block_reason"])) != "row_skipped_not_actionable":
         raise AssertionError("not-actionable blocker must be classified as a controlled skip")
+
+
+def _assert_submit_job_store_keeps_fresh_active_jobs() -> None:
+    with TemporaryDirectory(prefix="feedbacks-complaints-submit-store-") as tmp:
+        runtime_dir = Path(tmp)
+        store_path = runtime_dir / "feedbacks_complaints_submit_jobs" / "jobs.json"
+        store_path.parent.mkdir(parents=True)
+        store_path.write_text(
+            json.dumps(
+                {
+                    "contract_name": "sheet_vitrina_v1_feedbacks_complaints_submit_jobs",
+                    "contract_version": "v1",
+                    "jobs": [
+                        {
+                            "run_id": "fresh",
+                            "kind": "feedbacks_complaints_submit_selected",
+                            "status": "running",
+                            "created_at": "2026-05-06T00:00:00Z",
+                            "started_at": "2026-05-06T00:00:00Z",
+                            "finished_at": "",
+                            "events": [],
+                        },
+                        {
+                            "run_id": "stale",
+                            "kind": "feedbacks_complaints_submit_selected",
+                            "status": "running",
+                            "created_at": "2026-05-05T22:00:00Z",
+                            "started_at": "2026-05-05T22:00:00Z",
+                            "finished_at": "",
+                            "events": [],
+                        },
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        journal = JsonFileFeedbacksComplaintJournal(runtime_dir)
+        JsonFileFeedbacksComplaintsSubmitJobStore(
+            runtime_dir,
+            journal=journal,
+            now_factory=lambda: datetime(2026, 5, 6, 0, 5, tzinfo=timezone.utc),
+        )
+        payload = json.loads(store_path.read_text(encoding="utf-8"))
+        by_id = {item["run_id"]: item for item in payload["jobs"]}
+        if by_id["fresh"]["status"] != "running" or by_id["fresh"].get("finished_at"):
+            raise AssertionError(f"fresh running submit job must not be interrupted by store construction: {by_id['fresh']}")
+        if by_id["stale"]["status"] != "error" or "runtime service restarted" not in by_id["stale"].get("error", ""):
+            raise AssertionError(f"stale running submit job must be marked interrupted: {by_id['stale']}")
 
 
 def _assert_duplicate_running_job_guard() -> None:
