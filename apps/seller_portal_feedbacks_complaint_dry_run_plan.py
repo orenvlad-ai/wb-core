@@ -1502,6 +1502,8 @@ def type_date_input_value(locator: Any, value: str) -> dict[str, Any]:
             result["attempts"].append({"method": "press_sequentially_digits", "ok": False, "reason": safe_text(str(exc), 180)})
     dispatch = dispatch_date_input_change(locator)
     result["attempts"].append({"method": "dispatch_change_blur", **dispatch})
+    enter = press_marked_date_input_enter(locator)
+    result["attempts"].append({"method": "marked_input_enter_after_valid_mask", **enter})
     result["value_after"] = str(dispatch.get("value") or "")
     result["ok"] = any(item.get("ok") for item in result["attempts"]) and value in result["value_after"]
     return result
@@ -1525,6 +1527,16 @@ def dispatch_date_input_change(locator: Any) -> dict[str, Any]:
         return {"ok": False, "reason": safe_text(str(exc), 180)}
 
 
+def press_marked_date_input_enter(locator: Any) -> dict[str, Any]:
+    try:
+        locator.press("Enter", timeout=1200)
+        _wait_settle(locator.page, 350)
+        value = locator.evaluate("(el) => String(el.value || '')", timeout=1000)
+        return {"ok": True, "value": str(value or "")}
+    except PlaywrightError as exc:
+        return {"ok": False, "reason": safe_text(str(exc), 180)}
+
+
 def commit_seller_portal_date_filter(page: Page) -> list[dict[str, Any]]:
     attempts: list[dict[str, Any]] = []
     marker = SELLER_PORTAL_DATE_FILTER_MARKER_ATTR
@@ -1536,6 +1548,9 @@ def commit_seller_portal_date_filter(page: Page) -> list[dict[str, Any]]:
             dispatch = dispatch_date_input_change(locator)
             attempts.append({"method": "marked_input_change_blur", "selector": selector, **dispatch})
             _wait_settle(page, 400)
+            enter = press_marked_date_input_enter(locator)
+            attempts.append({"method": "marked_input_enter_after_change", "selector": selector, **enter})
+            _wait_settle(page, 700)
             break
         except PlaywrightError as exc:
             attempts.append({"method": "marked_input_change_blur", "selector": selector, "ok": False, "reason": safe_text(str(exc), 180)})
