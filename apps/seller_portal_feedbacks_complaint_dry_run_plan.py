@@ -858,9 +858,10 @@ def resolve_actionable_feedback_row_in_tab(
         "actionable_row_found": False,
         "block_reason": "",
     }
-    clicked = _click_tab_like(page, tab_label)
-    attempt["tab_clicked"] = bool(clicked)
-    if not clicked and tab_label != FEEDBACKS_TAB_LABEL:
+    tab_open = open_seller_portal_feedback_status_tab(page, tab_label)
+    attempt["tab_open"] = tab_open
+    attempt["tab_clicked"] = bool(tab_open.get("ok"))
+    if not tab_open.get("ok") and tab_label != FEEDBACKS_TAB_LABEL:
         attempt["block_reason"] = f"feedback tab {tab_label!r} was not found"
         return attempt
     _wait_settle(page, 1800)
@@ -941,6 +942,53 @@ def resolve_actionable_feedback_row_in_tab(
     attempt["visible_row_match"] = after_search_scroll.get("match") or scroll.get("match") or visible.get("match") or {}
     attempt["block_reason"] = actionability_block_reason(expected_ui, attempt)
     return attempt
+
+
+def open_seller_portal_feedback_status_tab(page: Page, tab_label: str) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "ok": False,
+        "requested_tab": tab_label,
+        "strategy": "",
+        "url_before": "",
+        "url_after": "",
+        "clicked": False,
+        "reason": "",
+    }
+    try:
+        result["url_before"] = page.url
+    except PlaywrightError:
+        result["url_before"] = ""
+    direct_path = {
+        FEEDBACKS_ANSWERED_TAB_LABEL: "/feedbacks/feedbacks-tab/answered",
+        FEEDBACKS_UNANSWERED_TAB_LABEL: "/feedbacks/feedbacks-tab/not-answered",
+    }.get(tab_label)
+    if direct_path:
+        try:
+            page.goto(f"https://seller.wildberries.ru{direct_path}", wait_until="domcontentloaded")
+            _wait_settle(page, 2400)
+            _wait_for_feedback_rows(page, timeout_ms=9000)
+            result["url_after"] = page.url
+            result["strategy"] = "direct_status_tab_url"
+            result["ok"] = direct_path in page.url
+            if not result["ok"]:
+                result["reason"] = f"direct status tab URL did not stick: {page.url}"
+            return result
+        except PlaywrightError as exc:
+            result["strategy"] = "direct_status_tab_url"
+            result["reason"] = safe_text(str(exc), 300)
+    try:
+        clicked = _click_tab_like(page, tab_label)
+        _wait_settle(page, 1800)
+        result["clicked"] = bool(clicked)
+        result["ok"] = bool(clicked)
+        result["strategy"] = result.get("strategy") or "tab_text_click"
+        result["url_after"] = page.url
+        if not result["ok"] and not result["reason"]:
+            result["reason"] = "feedback tab text was not found"
+    except PlaywrightError as exc:
+        result["strategy"] = result.get("strategy") or "tab_text_click"
+        result["reason"] = safe_text(str(exc), 300)
+    return result
 
 
 def find_actionable_visible_row_once(

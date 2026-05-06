@@ -26,13 +26,13 @@ from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     inspect_visible_feedback_date_alignment,
     fill_description_field,
     inspect_seller_portal_filter_state,
+    open_seller_portal_feedback_status_tab,
     reset_seller_portal_viewport_for_filters,
     wait_for_description_field_ready,
 )
 from apps.seller_portal_feedbacks_complaints_scout import (  # noqa: E402
     ROW_MENU_COMPLAINT_LABEL,
     _click_safe_row_menu,
-    _click_tab_like,
     _safe_escape,
     _wait_for_feedback_rows,
     _wait_settle,
@@ -202,9 +202,10 @@ def resolve_in_tab(
     description_text: str,
 ) -> dict[str, Any]:
     attempt = empty_attempt(tab_label)
-    clicked = _click_tab_like(page, tab_label)
-    attempt["tab_clicked"] = bool(clicked)
-    if not clicked and tab_label != STATUS_TAB_ALL:
+    tab_open = open_seller_portal_feedback_status_tab(page, tab_label)
+    attempt["tab_open"] = tab_open
+    attempt["tab_clicked"] = bool(tab_open.get("ok"))
+    if not tab_open.get("ok") and tab_label != STATUS_TAB_ALL:
         attempt["block_reason"] = f"feedback tab {tab_label!r} was not found"
         return attempt
     _wait_settle(page, 1800)

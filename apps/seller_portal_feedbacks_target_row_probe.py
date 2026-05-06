@@ -36,6 +36,7 @@ from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     feedback_list_signature,
     inspect_seller_portal_filter_state,
     inspect_visible_feedback_date_alignment,
+    open_seller_portal_feedback_status_tab,
 )
 from apps.seller_portal_feedbacks_complaints_scout import (  # noqa: E402
     BUSINESS_TZ,
@@ -464,9 +465,10 @@ def collect_dom_rows_for_tab(page: Page, config: TargetRowProbeConfig, tab_label
         "filter_controller": {},
         "blocker": "",
     }
-    clicked = _click_tab_like(page, tab_label)
-    report["tab_clicked"] = bool(clicked)
-    if not clicked:
+    tab_open = open_seller_portal_feedback_status_tab(page, tab_label)
+    report["tab_open"] = tab_open
+    report["tab_clicked"] = bool(tab_open.get("ok"))
+    if not tab_open.get("ok"):
         report["blocker"] = f"status tab {tab_label!r} was not found"
         return report, []
     _wait_settle(page, 1800)
