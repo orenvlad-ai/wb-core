@@ -17,7 +17,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.promo_live_source import PromoLiveSourceBlock
-from packages.application.promo_metric_truth import PromoCandidateRow, evaluate_candidate_rows
+from packages.application.promo_metric_truth import (
+    PromoCandidateRow,
+    evaluate_candidate_rows,
+    is_promo_price_eligible,
+    normalize_rub_price,
+)
 from packages.application.promo_xlsx_collector_block import parse_period_text
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
@@ -360,8 +365,8 @@ def _assert_historical_interval_replay_cache_fill(requested_nm_ids: list[int]) -
         payload_items = {item.nm_id: item for item in payload.items}
         if payload_items[requested_nm_ids[0]].promo_participation != 1.0:
             raise AssertionError("covered nm_id with current < planned must participate via interval replay")
-        if payload_items[requested_nm_ids[1]].promo_participation != 0.0:
-            raise AssertionError("covered nm_id with current >= planned must stay non-participating")
+        if payload_items[requested_nm_ids[1]].promo_participation != 1.0:
+            raise AssertionError("covered nm_id with current == planned must participate via interval replay")
         exact_payload, _ = runtime.load_temporal_source_snapshot(
             source_key="promo_by_price",
             snapshot_date=INTERVAL_REPLAY_DATE,
@@ -392,6 +397,8 @@ def _assert_historical_interval_replay_cache_fill(requested_nm_ids: list[int]) -
 
 
 def _assert_candidate_entry_price_metric_cases() -> str:
+    _assert_currency_safe_eligibility_cases()
+
     ineligible = _evaluate_metric_truth_case(
         nm_id=210183919,
         plan_prices=[483.0, 488.0, 498.0, 493.0],
@@ -440,12 +447,49 @@ def _assert_candidate_entry_price_metric_cases() -> str:
     ) != (0.0, 0.0, 498.0):
         raise AssertionError(f"missing seller price candidate entry-price case mismatch, got {missing_price}")
 
+    equal_price = _evaluate_metric_truth_case(
+        nm_id=210183919,
+        plan_prices=[508.0],
+        price_seller_discounted=508.0,
+    )
+    if (
+        equal_price.promo_participation,
+        equal_price.promo_count_by_price,
+        equal_price.promo_entry_price_best,
+    ) != (1.0, 1.0, 508.0):
+        raise AssertionError(f"equal seller/plan price must be eligible, got {equal_price}")
+
     return (
         "ineligible_candidate_entry=498.0; "
         "multi_eligible_count=2_entry=571.0; "
         "no_candidate_entry=0.0; "
-        "missing_price_entry=498.0"
+        "missing_price_entry=498.0; "
+        "equal_price_count=1_entry=508.0; "
+        "currency_precision=kopeck"
     )
+
+
+def _assert_currency_safe_eligibility_cases() -> None:
+    cases = [
+        (508, 508, True),
+        (508.0, 508, True),
+        (507.99, 508, True),
+        (508.004, 508, True),
+        (508.49, 508, False),
+        (None, 508, False),
+        (508, None, False),
+    ]
+    for seller_price, plan_price, expected in cases:
+        actual = is_promo_price_eligible(
+            price_seller_discounted=seller_price,
+            plan_price=plan_price,
+        )
+        if actual is not expected:
+            raise AssertionError(
+                f"currency eligibility mismatch for seller={seller_price} plan={plan_price}: {actual}"
+            )
+    if str(normalize_rub_price(508.004)) != "508.00":
+        raise AssertionError("promo price normalization must quantize fractional rubles to kopecks")
 
 
 def _evaluate_metric_truth_case(
@@ -878,7 +922,7 @@ def _seed_neighbor_date_price_truth(
     price_truth_by_date = {
         "2026-04-20": {
             requested_nm_ids[0]: 900.0,
-            requested_nm_ids[1]: 1000.0,
+            requested_nm_ids[1]: 1000.01,
             requested_nm_ids[2]: 1700.0,
         },
         "2026-04-21": {

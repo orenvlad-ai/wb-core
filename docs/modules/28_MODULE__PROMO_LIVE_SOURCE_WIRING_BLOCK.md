@@ -133,11 +133,15 @@ Refresh diagnostics для `promo_by_price` дополнительно surface-�
   - сначала строится `candidate set` из covering campaign rows для `SKU + date`, где SKU есть в archived workbook, дата попадает в `promo_start_at..promo_end_at`, а `Плановая цена для акции` валидна;
   - campaign interval / identity / `Плановая цена для акции` берутся из archived promo workbook + metadata;
   - `price_seller_discounted` берётся как already materialized daily metric truth для exact date из runtime `prices_snapshot`;
-  - `eligible set` = candidate rows, где `price_seller_discounted < Плановая цена для акции`;
+  - `eligible set` = candidate rows, где `price_seller_discounted <= Плановая цена для акции` after deterministic ruble/kopeck normalization;
   - `promo_participation` = `1` when eligible set is non-empty, else `0`;
   - `promo_count_by_price` = count of eligible rows;
   - `promo_entry_price_best` = max(`Плановая цена для акции`) по candidate rows, not eligible rows; при пустом candidate set остаётся truthful empty `0`;
   - если candidate set есть, но `price_seller_discounted` отсутствует, source may remain `incomplete`, participation/count stay non-positive, но `promo_entry_price_best` продолжает surface-ить max candidate plan price.
+- Currency comparison rule:
+  - source numeric values are parsed as decimal rubles and quantized to `0.01` with half-up rounding before comparison;
+  - equality at currency precision counts as participation/count;
+  - missing seller price or missing plan price never creates fake-positive participation/count.
 - overlap rule is deterministic and additive across covering campaigns for the same SKU/date.
 - Workbook alone не считается sufficient:
   - promo title / period / promo status / promo_id / period_id идут из sidecar/card truth

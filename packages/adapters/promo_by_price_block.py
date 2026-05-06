@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
+from packages.application.promo_metric_truth import is_promo_price_eligible
 from packages.contracts.promo_by_price_block import PromoByPriceRequest
 
 
@@ -111,7 +112,10 @@ class RuleBackedPromoByPriceSource:
                     eligible_rules = [
                         rule
                         for rule in active_rules
-                        if price < rule["plan_price"]
+                        if is_promo_price_eligible(
+                            price_seller_discounted=price,
+                            plan_price=rule["plan_price"],
+                        )
                     ]
                     count = float(len(eligible_rules))
                     participation = 1.0 if count > 0 else 0.0
