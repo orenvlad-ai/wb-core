@@ -344,12 +344,12 @@ def run_browser_checks(
                   dateTo: (document.querySelector('[data-history-date-to]') || {}).value || ''
                 })"""
             )
-            if initial_history_state["label"].strip() != "17.04.2026 - 20.04.2026":
+            if initial_history_state["label"].strip() != "18.04.2026 - 20.04.2026":
                 raise AssertionError(f"default compact history label mismatch, got {initial_history_state}")
             if not initial_history_state["popoverHidden"]:
                 raise AssertionError(f"history picker popover must be closed by default, got {initial_history_state}")
-            if initial_history_state["dateFrom"] != "2026-04-17" or initial_history_state["dateTo"] != "2026-04-20":
-                raise AssertionError(f"default history range must be latest four days, got {initial_history_state}")
+            if initial_history_state["dateFrom"] != "2026-04-18" or initial_history_state["dateTo"] != "2026-04-20":
+                raise AssertionError(f"default history range must be latest three dates, got {initial_history_state}")
             visible_body_text = page.locator("body").inner_text()
             for forbidden_history_text in (
                 "История",
@@ -385,7 +385,7 @@ def run_browser_checks(
                 "group": page.locator("[data-filter-control='group']").count() == 1,
                 "scope_kind": page.locator("[data-filter-control='scope_kind']").count() == 1,
                 "metric": page.locator("[data-filter-control='metric']").count() == 1,
-                "sort": page.locator("[data-filter-control='sort']").count() == 1,
+                "sort_absent": page.locator("[data-filter-control='sort']").count() == 0,
             }
             if not all(filter_controls.values()):
                 raise AssertionError(f"missing filter controls: {filter_controls}")
@@ -394,22 +394,35 @@ def run_browser_checks(
                   const toolbar = document.querySelector('[data-table-toolbar]');
                   const tableShell = document.querySelector('[data-table-shell]');
                   const labels = toolbar ? Array.from(toolbar.querySelectorAll('.filter-label')).map((node) => (node.textContent || '').trim()).filter(Boolean) : [];
+                  const toolbarText = toolbar ? (toolbar.innerText || '') : '';
+                  const resetText = toolbar ? ((toolbar.querySelector('[data-reset-filters]') || {}).textContent || '').trim() : '';
                   const rect = toolbar ? toolbar.getBoundingClientRect() : {height: 0};
                   const beforeTable = !!toolbar && !!tableShell && !!(toolbar.compareDocumentPosition(tableShell) & Node.DOCUMENT_POSITION_FOLLOWING);
+                  const logoutLink = document.querySelector('[data-logout-link]');
+                  const tablist = document.querySelector('[role="tablist"]');
                   return {
                     exists: !!toolbar,
                     beforeTable: beforeTable,
                     labels: labels,
+                    toolbarText: toolbarText,
+                    resetText: resetText,
                     height: Math.round(rect.height),
                     oldHeadingCount: Array.from(document.querySelectorAll('h2')).filter((node) => (node.textContent || '').trim() === 'Фильтры и настройки').length,
                     oldPanelTextVisible: (document.body.innerText || '').includes('Search/select/sort и выбор видимых столбцов'),
                     oldResetTextVisible: (document.body.innerText || '').includes('Сбросить фильтры'),
+                    forbiddenSortVisible: toolbarText.includes('Сортировка'),
+                    forbiddenScopeVisible: toolbarText.includes('Scope'),
+                    forbiddenSummaryVisible: labels.includes('Итог') || /\\b\\d+\\s+из\\s+\\d+\\s+строк\\b/.test(toolbarText),
+                    logoutText: logoutLink ? (logoutLink.textContent || '').trim() : '',
+                    logoutHref: logoutLink ? (logoutLink.getAttribute('href') || '') : '',
+                    logoutInTablist: !!(logoutLink && tablist && tablist.contains(logoutLink)),
+                    logoutLooksLikeTab: !!(logoutLink && (logoutLink.getAttribute('class') || '').includes('unified-tab-button')),
                     columnManagerCount: document.querySelectorAll('[data-column-manager]').length,
                     columnResetCount: document.querySelectorAll('[data-columns-reset]').length
                   };
                 }"""
             )
-            expected_toolbar_labels = {"Диапазон", "Поиск", "Секции", "Группа", "Scope", "Метрики", "Столбцы", "Сортировка"}
+            expected_toolbar_labels = {"Диапазон", "Поиск", "Секции", "Группа", "Тип строк", "Метрики", "Столбцы"}
             missing_toolbar_labels = expected_toolbar_labels.difference(set(table_toolbar["labels"]))
             if (
                 not table_toolbar["exists"]
@@ -417,6 +430,14 @@ def run_browser_checks(
                 or table_toolbar["oldHeadingCount"]
                 or table_toolbar["oldPanelTextVisible"]
                 or table_toolbar["oldResetTextVisible"]
+                or table_toolbar["forbiddenSortVisible"]
+                or table_toolbar["forbiddenScopeVisible"]
+                or table_toolbar["forbiddenSummaryVisible"]
+                or table_toolbar["resetText"] != "Сброс"
+                or table_toolbar["logoutText"] != "Выйти"
+                or table_toolbar["logoutHref"] != "/logout"
+                or table_toolbar["logoutInTablist"]
+                or table_toolbar["logoutLooksLikeTab"]
                 or table_toolbar["columnManagerCount"] != 1
                 or table_toolbar["columnResetCount"] != 1
                 or missing_toolbar_labels
@@ -544,7 +565,7 @@ def run_browser_checks(
                 )
                 page.wait_for_function("() => document.querySelector('[data-history-popover]').hidden", timeout=5000)
                 page.wait_for_function(
-                    "() => (document.querySelector('[data-history-label]').textContent || '').trim() === '17.04.2026 - 20.04.2026'",
+                    "() => (document.querySelector('[data-history-label]').textContent || '').trim() === '18.04.2026 - 20.04.2026'",
                     timeout=5000,
                 )
                 page.wait_for_function(
@@ -666,7 +687,7 @@ def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
         "nodes => nodes.map(node => ({id: node.getAttribute('data-unified-tab-button') || '', text: (node.textContent || '').trim(), active: node.classList.contains('is-active')}))"
     )
     tab_texts = [item["text"] for item in tabs]
-    if tab_texts != ["Витрина", "Расчет поставок", "Отчеты", "Отзывы", "Исследования"]:
+    if tab_texts != ["Витрина", "Поставки", "Отчёты", "Отзывы", "Исследования"]:
         raise AssertionError(f"operator route must expose the unified top tabs, got {tabs}")
     active_tabs = [item["id"] for item in tabs if item["active"]]
     if active_tabs != ["vitrina"]:
@@ -761,7 +782,7 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
           };
         }"""
     )
-    if payload["unified_tabs"] != ["Витрина", "Расчет поставок", "Отчеты", "Отзывы", "Исследования"]:
+    if payload["unified_tabs"] != ["Витрина", "Поставки", "Отчёты", "Отзывы", "Исследования"]:
         raise AssertionError(f"web-vitrina must expose the unified top tabs, got {payload}")
     if payload["active_unified_tab"] != "Витрина" or payload["update_tab_count"] != 0:
         raise AssertionError(f"web-vitrina must default to Vitrina and omit update-data tab, got {payload}")

@@ -48,10 +48,19 @@
       overscroll-behavior-x: none;
     }
 
+    .shell-header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 0 0 10px;
+      padding: 0 8px;
+    }
+
     .unified-tab-strip {
       display: flex;
       gap: 10px;
-      margin: 0 0 10px 8px;
+      margin: 0;
       flex-wrap: wrap;
     }
 
@@ -81,6 +90,28 @@
       color: var(--text);
       border-color: var(--border);
       box-shadow: 0 -8px 18px rgba(17, 24, 39, 0.04);
+    }
+
+    .shell-logout-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 30px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel-subtle);
+      color: var(--muted);
+      padding: 5px 9px;
+      font-size: 12px;
+      font-weight: 700;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+
+    .shell-logout-link:hover {
+      border-color: var(--border-strong);
+      color: var(--text);
+      background: #ffffff;
     }
 
     .unified-tab-panel[hidden] {
@@ -835,9 +866,9 @@
 
     .summary-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-      gap: 8px;
-      margin-bottom: 8px;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 6px;
+      margin-bottom: 6px;
     }
 
     .summary-card {
@@ -845,7 +876,7 @@
       border: 1px solid var(--border);
       border-radius: 6px;
       box-shadow: var(--shadow);
-      padding: 10px 12px;
+      padding: 7px 9px;
     }
 
     .summary-card-label {
@@ -857,18 +888,20 @@
     }
 
     .summary-card-value {
-      margin-top: 4px;
-      font-size: 18px;
+      margin-top: 3px;
+      font-size: 13px;
       font-weight: 700;
-      line-height: 1.15;
-      word-break: break-word;
+      line-height: 1.25;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .summary-card-detail {
-      margin-top: 4px;
-      font-size: 11px;
+      margin-top: 3px;
+      font-size: 10.5px;
       color: var(--muted);
-      line-height: 1.45;
+      line-height: 1.35;
       word-break: break-word;
     }
 
@@ -1162,67 +1195,66 @@
     .table-control-toolbar {
       display: flex;
       align-items: flex-end;
-      gap: 8px;
-      flex-wrap: wrap;
-      margin: 8px 0;
-      padding: 7px 8px;
+      gap: 6px;
+      flex-wrap: nowrap;
+      margin: 6px 0;
+      padding: 5px 6px;
       border: 1px solid var(--border);
       border-radius: 6px;
       background: #ffffff;
+      overflow-x: auto;
+      overscroll-behavior-x: contain;
     }
 
     .table-filter-controls {
       display: flex;
       align-items: flex-end;
-      gap: 8px;
-      flex: 1 1 480px;
+      gap: 6px;
+      flex: 1 1 auto;
       min-width: 0;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
     }
 
     .toolbar-field {
       display: flex;
       flex-direction: column;
-      gap: 4px;
-      flex: 0 1 124px;
-      min-width: 110px;
-    }
-
-    .toolbar-field-range {
-      flex-basis: 240px;
-      min-width: 220px;
-    }
-
-    .toolbar-field-search {
-      flex: 1 1 170px;
-      min-width: 150px;
-    }
-
-    .toolbar-field-columns {
-      flex-basis: 100px;
+      gap: 3px;
+      flex: 0 1 108px;
       min-width: 96px;
     }
 
+    .toolbar-field-range {
+      flex: 0 0 222px;
+      min-width: 222px;
+    }
+
+    .toolbar-field-search {
+      flex: 1 1 154px;
+      min-width: 142px;
+    }
+
+    .toolbar-field-columns {
+      flex: 0 0 92px;
+      min-width: 92px;
+    }
+
     .toolbar-field-actions {
-      flex: 0 0 auto;
-      min-width: 120px;
-      align-self: stretch;
-      justify-content: flex-end;
+      flex: 0 0 86px;
+      min-width: 86px;
+      align-self: flex-end;
     }
 
     .toolbar-actions {
       display: flex;
       align-items: center;
-      justify-content: flex-end;
-      gap: 8px;
-      min-height: 34px;
+      justify-content: stretch;
+      min-height: 30px;
     }
 
-    .toolbar-summary {
-      max-width: 96px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+    .toolbar-actions .button {
+      width: 100%;
+      min-height: 30px;
+      padding: 5px 8px;
     }
 
     .column-manager {
@@ -1329,7 +1361,7 @@
       display: flex;
       justify-content: flex-start;
       align-items: center;
-      min-height: 40px;
+      min-height: 32px;
     }
 
     .history-compact-control {
@@ -1338,13 +1370,13 @@
       justify-content: space-between;
       gap: 10px;
       width: 100%;
-      min-height: 36px;
+      min-height: 30px;
       border: 1px solid var(--border);
       border-radius: 6px;
       background: #ffffff;
-      padding: 7px 10px;
+      padding: 5px 8px;
       font: inherit;
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 700;
       color: var(--text);
       cursor: pointer;
@@ -1591,10 +1623,10 @@
     .input,
     .select {
       width: 100%;
-      min-height: 34px;
+      min-height: 30px;
       border: 1px solid var(--border);
       border-radius: 4px;
-      padding: 6px 10px;
+      padding: 5px 8px;
       font: inherit;
       font-size: 12px;
       color: var(--text);
@@ -1841,6 +1873,11 @@
         padding: 12px;
       }
 
+      .shell-header {
+        align-items: stretch;
+        padding: 0;
+      }
+
       .top-panel,
       .panel {
         padding: 12px;
@@ -1887,7 +1924,7 @@
       }
 
       .toolbar-field-actions {
-        flex-basis: 124px;
+        flex-basis: 98px;
       }
 
       .filter-card-wide {
@@ -1951,14 +1988,16 @@
 </head>
 <body>
   <main class="page" data-web-vitrina-page="web_vitrina_page_composition">
-    <nav class="unified-tab-strip" role="tablist" aria-label="Разделы sheet_vitrina_v1">
-      <button class="unified-tab-button is-active" type="button" data-unified-tab-button="vitrina" role="tab" aria-selected="true">Витрина 2</button>
-      <button class="unified-tab-button" type="button" data-unified-tab-button="factory-order" role="tab" aria-selected="false">Поставки</button>
-	      <button class="unified-tab-button" type="button" data-unified-tab-button="reports" role="tab" aria-selected="false">Отчеты</button>
-	      <button class="unified-tab-button" type="button" data-unified-tab-button="feedbacks" role="tab" aria-selected="false">Отзывы</button>
-	      <button class="unified-tab-button" type="button" data-unified-tab-button="research" role="tab" aria-selected="false">Исследования</button>
-	      <a class="unified-tab-button" data-logout-link href="/logout">Выйти</a>
-	    </nav>
+    <header class="shell-header">
+      <nav class="unified-tab-strip" role="tablist" aria-label="Разделы sheet_vitrina_v1">
+        <button class="unified-tab-button is-active" type="button" data-unified-tab-button="vitrina" role="tab" aria-selected="true">Витрина</button>
+        <button class="unified-tab-button" type="button" data-unified-tab-button="factory-order" role="tab" aria-selected="false">Поставки</button>
+        <button class="unified-tab-button" type="button" data-unified-tab-button="reports" role="tab" aria-selected="false">Отчёты</button>
+        <button class="unified-tab-button" type="button" data-unified-tab-button="feedbacks" role="tab" aria-selected="false">Отзывы</button>
+        <button class="unified-tab-button" type="button" data-unified-tab-button="research" role="tab" aria-selected="false">Исследования</button>
+      </nav>
+      <a class="shell-logout-link" data-logout-link href="/logout">Выйти</a>
+    </header>
 
     <section class="unified-tab-panel" data-unified-tab-panel="vitrina">
     <section class="top-panel" data-top-panel>
@@ -2047,12 +2086,11 @@
         </details>
       </div>
       <div class="toolbar-field toolbar-field-actions">
-        <span class="filter-label">Итог</span>
         <div class="toolbar-actions">
-          <p class="filter-summary toolbar-summary" data-filter-summary>Загрузка…</p>
-          <button class="button secondary" type="button" data-reset-filters>Сбросить</button>
+          <button class="button secondary" type="button" data-reset-filters>Сброс</button>
         </div>
       </div>
+      <p class="filter-summary" data-filter-summary hidden>Загрузка…</p>
       <p class="panel-meta" data-filter-meta hidden>загрузка фильтров…</p>
     </section>
 
@@ -2139,7 +2177,7 @@
     </section>
 
     <section class="unified-tab-panel operator-embed-panel" data-unified-tab-panel="reports" hidden>
-      <iframe class="operator-embed-frame" title="Отчеты" data-operator-embed-frame="reports" scrolling="no"></iframe>
+      <iframe class="operator-embed-frame" title="Отчёты" data-operator-embed-frame="reports" scrolling="no"></iframe>
     </section>
 
 	    <section class="unified-tab-panel" data-unified-tab-panel="feedbacks" hidden>
@@ -3942,20 +3980,7 @@
           buildControlHtml(control),
           "</label>"
         ].join("");
-      }).join("") + [
-        '<label class="filter-card toolbar-field">',
-        '<span class="filter-label">Сортировка</span>',
-        '<select class="select" data-filter-control="sort">',
-        (surface.sort_options || []).map(function(option) {
-          return (
-            '<option value="' + escapeHtml(option.value) + '">' +
-            escapeHtml(option.label) +
-            "</option>"
-          );
-        }).join(""),
-        "</select>",
-        "</label>"
-      ].join("");
+      }).join("");
 
       filterControlsNode.querySelectorAll("[data-filter-control]").forEach(function(node) {
         node.addEventListener("input", handleFilterInput);
@@ -3976,7 +4001,7 @@
         return "Группа";
       }
       if (controlId === "scope_kind") {
-        return "Scope";
+        return "Тип строк";
       }
       if (controlId === "metric") {
         return "Метрики";
@@ -4167,7 +4192,7 @@
       if (!endCandidate) {
         return null;
       }
-      const dateFrom = shiftIsoDate(endCandidate, -3);
+      const dateFrom = shiftIsoDate(endCandidate, -2);
       const dateTo = endCandidate;
       if (!state.history.availableDateSet.has(dateFrom) || !state.history.availableDateSet.has(dateTo)) {
         return null;

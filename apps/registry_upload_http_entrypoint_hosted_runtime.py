@@ -1856,7 +1856,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Web-витрина",
             "Витрина",
             "Поставки",
-            "Отчеты",
+            "Отчёты",
             "Отзывы",
             "Загрузить и обновить",
             "Загрузка данных",
