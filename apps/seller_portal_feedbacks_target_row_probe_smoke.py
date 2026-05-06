@@ -131,7 +131,7 @@ def _assert_report_shape() -> None:
                 "star_apply_clicked": True,
                 "selected_star_values_before": [5],
                 "selected_star_values_after": [1],
-                "status_tabs_checked": ["Ждут ответа", "Есть ответ"],
+                "status_tabs_checked": ["Есть ответ", "Ждут ответа"],
                 "rows_visible_after_filter": 2,
                 "rows_collected": 1,
             }
@@ -154,8 +154,8 @@ def _assert_report_shape() -> None:
 def _assert_guards_and_params() -> None:
     if parse_stars("1") != (1,) or parse_stars("1,2") != (1, 2):
         raise AssertionError("star parser failed")
-    if status_tabs_for_request("all") != ["Ждут ответа", "Есть ответ"]:
-        raise AssertionError("all status must probe unanswered and answered tabs")
+    if status_tabs_for_request("all") != ["Есть ответ", "Ждут ответа"]:
+        raise AssertionError("all status must probe answered and unanswered tabs")
     config = TargetRowProbeConfig(
         date="2026-04-04",
         stars=(1,),

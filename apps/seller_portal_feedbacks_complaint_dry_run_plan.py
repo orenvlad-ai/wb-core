@@ -1337,10 +1337,10 @@ def drive_seller_portal_date_inputs(page: Page, *, date_from_ru: str, date_to_ru
         range_locator = page.locator(f'[{marker}="range"]').first
         if range_locator.count() > 0:
             value = f"{date_from_ru} - {date_to_ru}"
-            range_locator.click(timeout=1500)
-            range_locator.fill(value, timeout=2500)
-            range_locator.press("Enter", timeout=1500)
-            result["fields"].append({"marker": "range", "value": value})
+            range_locator.click(timeout=1500, force=True)
+            range_locator.fill(value, timeout=2500, force=True)
+            dispatch = dispatch_date_input_enter(range_locator)
+            result["fields"].append({"marker": "range", "value": value, "dispatch": dispatch})
             result["ok"] = True
             return result
     except PlaywrightError as exc:
@@ -1349,15 +1349,15 @@ def drive_seller_portal_date_inputs(page: Page, *, date_from_ru: str, date_to_ru
         from_locator = page.locator(f'[{marker}="from"]').first
         to_locator = page.locator(f'[{marker}="to"]').first
         if from_locator.count() > 0 and to_locator.count() > 0:
-            from_locator.click(timeout=1500)
-            from_locator.fill(date_from_ru, timeout=2500)
-            from_locator.press("Tab", timeout=1500)
-            to_locator.fill(date_to_ru, timeout=2500)
-            to_locator.press("Enter", timeout=1500)
+            from_locator.click(timeout=1500, force=True)
+            from_locator.fill(date_from_ru, timeout=2500, force=True)
+            to_locator.click(timeout=1500, force=True)
+            to_locator.fill(date_to_ru, timeout=2500, force=True)
+            dispatch = dispatch_date_input_enter(to_locator)
             result["fields"].extend(
                 [
                     {"marker": "from", "value": date_from_ru},
-                    {"marker": "to", "value": date_to_ru},
+                    {"marker": "to", "value": date_to_ru, "dispatch": dispatch},
                 ]
             )
             result["ok"] = True
@@ -1367,6 +1367,26 @@ def drive_seller_portal_date_inputs(page: Page, *, date_from_ru: str, date_to_ru
     if not result["reason"]:
         result["reason"] = "marked date input was not found"
     return result
+
+
+def dispatch_date_input_enter(locator: Any) -> dict[str, Any]:
+    try:
+        return locator.evaluate(
+            r"""
+(el) => {
+  el.focus();
+  el.dispatchEvent(new Event('input', {bubbles: true}));
+  el.dispatchEvent(new Event('change', {bubbles: true}));
+  for (const type of ['keydown', 'keypress', 'keyup']) {
+    el.dispatchEvent(new KeyboardEvent(type, {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true}));
+  }
+  return {ok: true, value: String(el.value || '')};
+}
+            """,
+            timeout=1500,
+        )
+    except PlaywrightError as exc:
+        return {"ok": False, "reason": safe_text(str(exc), 180)}
 
 
 def commit_seller_portal_date_filter(page: Page) -> list[dict[str, Any]]:
@@ -1584,19 +1604,21 @@ def open_seller_portal_filters_popup(page: Page) -> dict[str, Any]:
     .filter(visible)
     .map((el, index) => {
       const rect = el.getBoundingClientRect();
-      const text = labelFor(el);
       const interactive = el.matches('button, [role="button"], a') ? el : el.closest('button, [role="button"], a');
+      const interactiveText = interactive ? labelFor(interactive) : '';
+      const text = labelFor(el) || interactiveText;
       const clickable = interactive || (allowTextFallback ? el : null);
       const disabled = Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true' || (interactive && interactive.getAttribute('aria-disabled') === 'true'));
+      const haystack = (text + ' ' + interactiveText).trim();
       let score = 0;
-      if (/^Фильтры$/i.test(text)) score += 160;
-      else if (/фильтр/i.test(text)) score += 80;
+      if (/^Фильтры$/i.test(haystack)) score += 180;
+      else if (/фильтр/i.test(haystack)) score += 100;
       if (interactive) score += 80;
       if (rect.top < 420) score += 20;
-      if (/Применить|Сбросить|Оценка отзыва/i.test(text)) score -= 60;
-      return {el, clickable, index, text, tag: el.tagName.toLowerCase(), score, disabled, interactive: Boolean(interactive)};
+      if (/Применить|Сбросить|Оценка отзыва/i.test(haystack)) score -= 60;
+      return {el, clickable, index, text, tag: el.tagName.toLowerCase(), score, disabled, interactive: Boolean(interactive), haystack};
     })
-    .filter((item) => item.score > 70 && item.clickable && !item.disabled)
+    .filter((item) => /фильтр/i.test(item.haystack) && item.score > 70 && item.clickable && !item.disabled)
     .sort((a, b) => b.score - a.score || a.index - b.index);
   let candidates = buildCandidates('button, [role="button"], a', false);
   let selectorStrategy = 'interactive_button_or_role';
