@@ -295,6 +295,7 @@ def _assert_date_filter_commits_without_apply_button() -> None:
         try:
             page.set_content(
                 """
+                <button id="home" style="position:fixed;left:0;top:0;width:60px;height:60px">home</button>
                 <button id="dateButton">07.05.2026 - 07.05.2026</button>
                 <div id="datePopup" role="dialog" style="display:none">
                   <input placeholder="PeriodDatepicker">
@@ -304,6 +305,8 @@ def _assert_date_filter_commits_without_apply_button() -> None:
                 </section>
                 <script>
                   const rows = document.querySelector('#rows');
+                  window.topLeftClicked = false;
+                  document.querySelector('#home').addEventListener('click', () => { window.topLeftClicked = true; });
                   document.querySelector('#dateButton').addEventListener('click', () => {
                     document.querySelector('#datePopup').style.display = 'block';
                   });
@@ -323,6 +326,11 @@ def _assert_date_filter_commits_without_apply_button() -> None:
                 raise AssertionError(f"date filter diagnostics must include real input commit selectors: {result}")
             if result.get("visible_date_range_after") != "02.05.2026 - 02.05.2026":
                 raise AssertionError(f"date filter must verify the committed visible date range: {result}")
+            commit_methods = [str(item.get("method") or "") for item in result.get("commit_attempts") or []]
+            if "outside_click" in commit_methods or "escape_close_datepicker" not in commit_methods:
+                raise AssertionError(f"date commit must not use unsafe top-left outside clicks: {result}")
+            if page.evaluate("() => window.topLeftClicked === true"):
+                raise AssertionError(f"date commit must not click Seller Portal nav/header while closing datepicker: {result}")
         finally:
             browser.close()
 

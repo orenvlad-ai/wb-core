@@ -1540,6 +1540,11 @@ def press_marked_date_input_enter(locator: Any) -> dict[str, Any]:
 def commit_seller_portal_date_filter(page: Page) -> list[dict[str, Any]]:
     attempts: list[dict[str, Any]] = []
     marker = SELLER_PORTAL_DATE_FILTER_MARKER_ATTR
+    url_before = ""
+    try:
+        url_before = page.url
+    except PlaywrightError:
+        url_before = ""
     for selector in (f'[{marker}="range"]', f'[{marker}="to"]', f'[{marker}="from"]'):
         try:
             locator = page.locator(selector).first
@@ -1555,10 +1560,21 @@ def commit_seller_portal_date_filter(page: Page) -> list[dict[str, Any]]:
         except PlaywrightError as exc:
             attempts.append({"method": "marked_input_change_blur", "selector": selector, "ok": False, "reason": safe_text(str(exc), 180)})
     try:
-        page.mouse.click(24, 24)
-        attempts.append({"method": "outside_click", "ok": True})
+        page.keyboard.press("Escape")
+        _wait_settle(page, 250)
+        attempts.append({"method": "escape_close_datepicker", "ok": True})
     except PlaywrightError as exc:
-        attempts.append({"method": "outside_click", "ok": False, "reason": safe_text(str(exc), 180)})
+        attempts.append({"method": "escape_close_datepicker", "ok": False, "reason": safe_text(str(exc), 180)})
+    try:
+        attempts.append(
+            {
+                "method": "navigation_guard",
+                "ok": not url_before or page.url == url_before,
+                "url_changed": bool(url_before and page.url != url_before),
+            }
+        )
+    except PlaywrightError as exc:
+        attempts.append({"method": "navigation_guard", "ok": False, "reason": safe_text(str(exc), 180)})
     return attempts
 
 
