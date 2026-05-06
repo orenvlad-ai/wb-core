@@ -35,6 +35,7 @@ from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     close_draft_modal_without_submit,
     feedback_list_signature,
     inspect_seller_portal_filter_state,
+    inspect_visible_feedback_date_alignment,
 )
 from apps.seller_portal_feedbacks_complaints_scout import (  # noqa: E402
     BUSINESS_TZ,
@@ -500,13 +501,15 @@ def apply_probe_filters(page: Page, config: TargetRowProbeConfig) -> dict[str, A
     _wait_settle(page, 1200)
     after_signature = feedback_list_signature(page)
     state = inspect_seller_portal_filter_state(page)
+    visible_date_alignment = inspect_visible_feedback_date_alignment(page, date_from=config.date, date_to=config.date)
+    date_filter_applied = bool(date_result.get("applied") or visible_date_alignment.get("all_visible_rows_in_range"))
     return {
         "requested_date_from": config.date,
         "requested_date_to": config.date,
         "requested_stars": list(config.stars),
         "date_filter": date_result,
         "star_filter": star_result,
-        "date_filter_applied": bool(date_result.get("applied")),
+        "date_filter_applied": date_filter_applied,
         "star_filter_applied": bool(star_result.get("applied")),
         "star_filter_requested": list(config.stars),
         "selected_star_values_before": star_result.get("selected_star_values_before") or [],
@@ -516,6 +519,7 @@ def apply_probe_filters(page: Page, config: TargetRowProbeConfig) -> dict[str, A
         "list_signature_before": before_signature,
         "list_signature_after": after_signature,
         "list_update_observed": bool(after_signature.get("fingerprint") and after_signature.get("fingerprint") != before_signature.get("fingerprint")),
+        "visible_date_alignment": visible_date_alignment,
         "current_visible_date_range": state.get("visible_date_range") or "",
         "current_selected_stars": state.get("selected_stars") or star_result.get("selected_stars") or [],
         "selectors_used": [*(date_result.get("selectors_used") or []), *(star_result.get("selectors_used") or [])],

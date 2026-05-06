@@ -114,6 +114,15 @@ BAD_REASON_PHRASES = (
     "оценить вручную",
     "оценить основание вручную",
 )
+NO_COMPLAINT_REASON_PHRASES = (
+    "жалобу не подавать",
+    "не подавать жалобу",
+    "не следует подавать жалобу",
+    "не надо подавать жалобу",
+    "нет оснований для жалобы",
+    "оснований для жалобы нет",
+    "не является основанием для жалобы",
+)
 
 
 @dataclass(frozen=True)
@@ -306,7 +315,7 @@ def run_submit(config: SubmitConfig) -> dict[str, Any]:
             is_target = str(candidate.get("feedback_id") or "") == config.target_feedback_id
             candidate["target_feedback_id_requested"] = is_target
             if is_target:
-                candidate["ai_eligible_for_submit"] = (candidate.get("ai") or {}).get("complaint_fit") in {"yes", "review"}
+                candidate["ai_eligible_for_submit"] = ai_result_submit_readiness(candidate.get("ai") or {}).get("eligible")
     mark_denied_candidates(candidates, config.deny_feedback_ids)
     mark_existing_duplicates(candidates, journal, retry_errors=config.retry_errors)
     selected_api_rows = [
@@ -446,13 +455,16 @@ def enforce_submit_guards(candidates: list[dict[str, Any]]) -> None:
         if not candidate.get("selected_for_dry_run") or candidate.get("skip_reason"):
             continue
         ai = candidate.get("ai") or {}
-        fit = str(ai.get("complaint_fit") or "")
-        if fit not in {"yes", "review"}:
-            candidate["skip_reason"] = f"complaint_fit={fit} is not submit-eligible"
+        readiness = ai_result_submit_readiness(ai)
+        if not readiness.get("eligible"):
+            candidate["skip_reason"] = str(readiness.get("reason") or "AI result is not submit-ready")
             continue
         reason = str(ai.get("reason") or "").strip()
         if not is_reason_submit_ready(reason):
             candidate["skip_reason"] = "AI reason is empty or diagnostic placeholder; submit blocked"
+            continue
+        if reason_says_no_complaint(reason):
+            candidate["skip_reason"] = "ai_no_not_submit_ready: AI reason says complaint must not be submitted"
             continue
         review_tags = candidate_review_tags(candidate)
         candidate["tag_diagnostics"] = {
@@ -1578,6 +1590,30 @@ def is_reason_submit_ready(reason: str) -> bool:
     if len(text) < 12:
         return False
     return not any(phrase in text for phrase in BAD_REASON_PHRASES)
+
+
+def reason_says_no_complaint(reason: str) -> bool:
+    text = " ".join(str(reason or "").strip().lower().split())
+    return any(phrase in text for phrase in NO_COMPLAINT_REASON_PHRASES)
+
+
+def ai_result_submit_readiness(ai: Mapping[str, Any]) -> dict[str, Any]:
+    fit = str(ai.get("complaint_fit") or "").strip().lower()
+    reason = str(ai.get("reason") or "").strip()
+    if fit in {"yes", "review"}:
+        if reason_says_no_complaint(reason):
+            return {"eligible": False, "reason": "ai_no_not_submit_ready: AI reason says complaint must not be submitted"}
+        return {"eligible": True, "reason": ""}
+    if fit == "no":
+        if reason_says_no_complaint(reason):
+            return {"eligible": False, "reason": "ai_no_not_submit_ready: AI result explicitly says not to submit"}
+        if not is_reason_submit_ready(reason):
+            return {"eligible": False, "reason": "ai_no_not_submit_ready: AI no result has no factual complaint-ready reason"}
+        category = normalize_text(ai.get("category_label") or ai.get("category") or "")
+        if not category:
+            return {"eligible": False, "reason": "ai_no_not_submit_ready: AI no result has no complaint-ready category"}
+        return {"eligible": True, "reason": "operator-selected AI no row has complaint-ready reason/category"}
+    return {"eligible": False, "reason": f"complaint_fit={fit or 'unknown'} is not submit-eligible"}
 
 
 def normalize_deny_feedback_ids(values: list[str] | tuple[str, ...]) -> tuple[str, ...]:

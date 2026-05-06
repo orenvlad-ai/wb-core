@@ -1050,19 +1050,22 @@ def apply_seller_portal_feedback_filters(
     after_signature = feedback_list_signature(page)
     list_update = bool(after_signature.get("fingerprint") and after_signature.get("fingerprint") != before_signature.get("fingerprint"))
     state = inspect_seller_portal_filter_state(page)
+    visible_date_alignment = inspect_visible_feedback_date_alignment(page, date_from=date_from, date_to=date_to)
+    date_filter_applied = bool(date_result.get("applied") or visible_date_alignment.get("all_visible_rows_in_range"))
     return {
         "requested_date_from": date_from,
         "requested_date_to": date_to,
         "requested_stars": list(stars),
         "date_filter": date_result,
         "star_filter": star_result,
-        "date_filter_applied": bool(date_result.get("applied")),
+        "date_filter_applied": date_filter_applied,
         "star_filter_applied": bool(star_result.get("applied")),
         "status_tab_selected": True,
         "reset_clear_used": False,
         "list_signature_before": before_signature,
         "list_signature_after": after_signature,
         "list_update_observed": list_update,
+        "visible_date_alignment": visible_date_alignment,
         "current_visible_date_range": state.get("visible_date_range") or "",
         "current_selected_stars": state.get("selected_stars") or star_result.get("selected_stars") or [],
         "selectors_used": [*(date_result.get("selectors_used") or []), *(star_result.get("selectors_used") or [])],
@@ -1089,6 +1092,40 @@ def reset_seller_portal_viewport_for_filters(page: Page) -> None:
         _wait_settle(page, 400)
     except PlaywrightError:
         return
+
+
+def inspect_visible_feedback_date_alignment(page: Page, *, date_from: str, date_to: str, max_rows: int = 30) -> dict[str, Any]:
+    try:
+        rows = extract_visible_feedback_rows(page, max_rows=max_rows)
+    except PlaywrightError as exc:
+        return {
+            "row_count": 0,
+            "dates": [],
+            "rows_in_range": 0,
+            "rows_out_of_range": 0,
+            "all_visible_rows_in_range": False,
+            "error": safe_text(str(exc), 300),
+        }
+    dates: list[str] = []
+    rows_in_range = 0
+    rows_out_of_range = 0
+    for row in rows:
+        date_key = normalize_date_key(row.get("review_date") or row.get("review_datetime") or row.get("created_at"))
+        if not date_key:
+            continue
+        dates.append(date_key)
+        if date_from <= date_key <= date_to:
+            rows_in_range += 1
+        else:
+            rows_out_of_range += 1
+    unique_dates = sorted(set(dates))
+    return {
+        "row_count": len(rows),
+        "dates": unique_dates,
+        "rows_in_range": rows_in_range,
+        "rows_out_of_range": rows_out_of_range,
+        "all_visible_rows_in_range": bool(dates) and rows_out_of_range == 0,
+    }
 
 
 def feedback_filter_date_range(
@@ -1264,9 +1301,15 @@ def apply_seller_portal_date_filter(page: Page, *, date_from: str, date_to: str)
     state = inspect_seller_portal_filter_state(page)
     visible_range = str(state.get("visible_date_range") or "")
     result["visible_date_range_after"] = visible_range
-    result["applied"] = bool(result["inputs_filled"] or (date_from_ru in visible_range and date_to_ru in visible_range))
+    result["committed"] = bool(result["apply_clicked"] or (date_from_ru in visible_range and date_to_ru in visible_range))
+    result["applied"] = bool(result["committed"])
     if not result["applied"] and not result["reason"]:
-        result["reason"] = str((result.get("fill_inputs") or {}).get("reason") or (result.get("open_control") or {}).get("reason") or "date filter was not applied")
+        result["reason"] = str(
+            (result.get("fill_inputs") or {}).get("reason")
+            or (result.get("date_apply_click") or {}).get("reason")
+            or (result.get("open_control") or {}).get("reason")
+            or "date filter input was filled but the Seller Portal did not confirm applying it"
+        )
     return result
 
 

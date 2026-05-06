@@ -1042,7 +1042,7 @@ def _run_guarded_submit_selected_for_runtime(
             break
         else:
             reason = str(row_result.get("skip_reason") or row_result.get("block_reason") or "not submitted")
-            event_code = "row_skipped_ai_no_not_submit_ready" if "complaint_fit=no" in reason or "Жалобу не подавать" in reason else "row_error"
+            event_code = _submit_skip_event_code(reason)
             skipped.append(_submit_skip(feedback_id, event_code, reason))
             report["events"].append(_submit_event(event_code, feedback_id=feedback_id, message=reason, status="skipped"))
             report["aggregate"]["skipped_count"] += 1
@@ -1135,9 +1135,18 @@ def _submit_events_from_submit_report(feedback_id: str, submit_report: Mapping[s
         events.append(_submit_event("row_submit_clicked", feedback_id=feedback_id, message="Final submit clicked once by guarded runner", status="running"))
     if row_result.get("submitted"):
         events.append(_submit_event("row_submit_confirmed_success", feedback_id=feedback_id, message="WB submit success confirmed by guarded runner", status="success"))
-    elif modal.get("blocker"):
-        events.append(_submit_event("row_error", feedback_id=feedback_id, message=str(modal.get("blocker") or ""), status="skipped"))
     return events
+
+
+def _submit_skip_event_code(reason: str) -> str:
+    normalized = reason.lower()
+    if "complaint_fit=no" in normalized or "жалобу не подавать" in normalized or "ai_no_not_submit_ready" in normalized:
+        return "row_skipped_ai_no_not_submit_ready"
+    if "actionable dom row" in normalized or "not found" in normalized or "safe row menu not found" in normalized:
+        return "row_skipped_not_actionable"
+    if "complaint already exists" in normalized:
+        return "row_skipped_existing_complaint"
+    return "row_skipped"
 
 
 def _submit_job_patch_from_report(report: Mapping[str, Any]) -> dict[str, Any]:
