@@ -55,6 +55,7 @@ def main() -> None:
     _assert_actionability_tab_plan()
     _assert_filter_controller_sequence()
     _assert_date_filter_commits_without_apply_button()
+    _assert_calendar_date_filter_uses_save_button()
     _assert_category_other_fallback()
     _assert_draft_text_builder()
     _assert_description_fill_sequence()
@@ -331,6 +332,59 @@ def _assert_date_filter_commits_without_apply_button() -> None:
                 raise AssertionError(f"date commit must not use unsafe top-left outside clicks: {result}")
             if page.evaluate("() => window.topLeftClicked === true"):
                 raise AssertionError(f"date commit must not click Seller Portal nav/header while closing datepicker: {result}")
+        finally:
+            browser.close()
+
+
+def _assert_calendar_date_filter_uses_save_button() -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            page.set_content(
+                """
+                <button id="dateButton">07.05.2026 - 07.05.2026</button>
+                <div id="calendar" class="DatePickerMenu__fixture" style="display:none">
+                  <div class="CalendarBody__month__fixture">
+                    <div class="CalendarBody__month-name__fixture">Апрель</div>
+                    <button class="Day__fixture" type="button">2</button>
+                  </div>
+                  <div class="CalendarBody__month__fixture">
+                    <div class="CalendarBody__month-name__fixture">Май</div>
+                    <button class="Day__fixture" type="button">1</button>
+                    <button id="may2" class="Day__fixture" type="button">2</button>
+                    <button class="Day__fixture Day--disabled__fixture" disabled type="button">3</button>
+                  </div>
+                  <button id="saveDate" type="button" disabled>Сохранить</button>
+                </div>
+                <section id="rows">
+                  <article>Отзыв 07.05.2026 5★ current</article>
+                </section>
+                <script>
+                  const rows = document.querySelector('#rows');
+                  document.querySelector('#dateButton').addEventListener('click', () => {
+                    document.querySelector('#calendar').style.display = 'block';
+                  });
+                  document.querySelector('#may2').addEventListener('click', () => {
+                    window.selectedMay2 = true;
+                    document.querySelector('#saveDate').disabled = false;
+                  });
+                  document.querySelector('#saveDate').addEventListener('click', () => {
+                    document.querySelector('#calendar').style.display = 'none';
+                    document.querySelector('#dateButton').innerText = '02.05.2026 - 02.05.2026';
+                    rows.innerHTML = '<article>Отзыв 02.05.2026 1★ calendar</article>';
+                  });
+                </script>
+                """
+            )
+            result = apply_seller_portal_date_filter(page, date_from="2026-05-02", date_to="2026-05-02")
+            if not result.get("applied") or not ((result.get("calendar_select") or {}).get("ok")):
+                raise AssertionError(f"date filter must use calendar day selection when the calendar is available: {result}")
+            if not page.evaluate("() => window.selectedMay2 === true"):
+                raise AssertionError(f"calendar selection must choose the requested month/day, not the first matching day: {result}")
+            selectors = set(result.get("selectors_used") or [])
+            if "date_calendar" not in selectors:
+                raise AssertionError(f"date filter diagnostics must include calendar selector: {result}")
         finally:
             browser.close()
 

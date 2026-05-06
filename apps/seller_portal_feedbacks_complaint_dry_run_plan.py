@@ -1347,12 +1347,18 @@ def apply_seller_portal_date_filter(page: Page, *, date_from: str, date_to: str)
 def select_seller_portal_calendar_date_range(page: Page, *, date_from_ru: str, date_to_ru: str) -> dict[str, Any]:
     start_day = _day_from_ru_date(date_from_ru)
     end_day = _day_from_ru_date(date_to_ru)
+    start_month = _month_name_from_ru_date(date_from_ru)
+    end_month = _month_name_from_ru_date(date_to_ru)
     if not start_day or not end_day:
         return {"ok": False, "reason": "date day is unavailable"}
-    try:
-        return page.evaluate(
-            r"""
-({startDay, endDay}) => {
+    if not start_month or not end_month:
+        return {"ok": False, "reason": "date month is unavailable"}
+
+    def _step(action: str, *, day: int = 0, month_name: str = "") -> dict[str, Any]:
+        try:
+            return page.evaluate(
+                r"""
+({action, day, monthName}) => {
   const visible = (el) => {
     const style = window.getComputedStyle(el);
     const rect = el.getBoundingClientRect();
@@ -1364,62 +1370,86 @@ def select_seller_portal_calendar_date_range(page: Page, *, date_from_ru: str, d
     return {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)};
   };
   const cls = (el) => String(el.getAttribute('class') || '');
-  const input = document.querySelector('input#PeriodDatepicker, input[name="PeriodDatepicker"], input[placeholder*="дд"], input[placeholder*="__.__"]');
-  const roots = [];
-  if (input) {
-    let current = input.parentElement;
-    for (let depth = 0; current && depth < 8; depth += 1, current = current.parentElement) {
-      if (!visible(current)) continue;
-      const body = text(current.innerText || current.textContent || '');
-      const numericCells = Array.from(current.querySelectorAll('button, [role="button"], td, div, span')).filter(visible).filter((node) => /^\d{1,2}$/.test(text(node.innerText || node.textContent || node.getAttribute('aria-label') || '')));
-      if (numericCells.length >= 20 || /Calendar|Date|Picker|datepicker|calendar|календар/i.test(cls(current) + ' ' + body)) roots.push(current);
-    }
+  const disabled = (el) => Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true') || /disabled|outside|other-month/i.test(cls(el));
+
+  if (action === 'open') {
+    const alreadyOpen = Array.from(document.querySelectorAll('[class*="DatePickerMenu"], [class*="CalendarBody"], [class*="Calendar"]')).some(visible);
+    if (alreadyOpen) return {ok: true, already_open: true};
+    const input = document.querySelector('input#PeriodDatepicker, input[name="PeriodDatepicker"], input[placeholder*="дд"], input[placeholder*="__.__"]');
+    const icon = input ? input.closest('[class*="Date-input"]')?.querySelector('button, [role="button"]') : null;
+    const target = icon || input;
+    if (!target) return {ok: false, reason: 'period datepicker input/icon not found'};
+    target.click();
+    return {ok: true, clicked: target.tagName.toLowerCase(), rect: rectFor(target)};
   }
-  Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="Calendar"], [class*="calendar"], [class*="Date"], [class*="date"], [class*="Picker"], [class*="picker"], [class*="Popover"], [class*="popover"], [class*="Dropdown"], [class*="dropdown"]'))
-    .filter(visible)
-    .forEach((node) => roots.push(node));
-  const uniqueRoots = Array.from(new Set(roots)).filter((node) => node !== document.body);
-  const root = uniqueRoots
-    .map((node) => {
-      const cells = Array.from(node.querySelectorAll('button, [role="button"], td, div, span')).filter(visible).filter((cell) => /^\d{1,2}$/.test(text(cell.innerText || cell.textContent || cell.getAttribute('aria-label') || '')));
-      const rect = rectFor(node);
-      return {node, cells, rect, body: text(node.innerText || node.textContent || '').slice(0, 400), className: cls(node).slice(0, 160)};
-    })
-    .filter((item) => item.cells.length >= 20)
-    .sort((a, b) => b.cells.length - a.cells.length || (a.rect.y - b.rect.y))[0];
-  if (!root) {
-    return {ok: false, reason: 'calendar day grid root not found', roots_considered: uniqueRoots.length};
-  }
-  const clickDay = (day) => {
-    const candidates = root.cells
-      .map((cell, index) => {
-        const label = text(cell.innerText || cell.textContent || cell.getAttribute('aria-label') || '');
-        const rect = rectFor(cell);
-        const disabled = Boolean(cell.disabled || cell.getAttribute('aria-disabled') === 'true') || /disabled|outside|other-month/i.test(cls(cell));
-        const clickable = cell.closest('button, [role="button"]') || cell;
+
+  if (action === 'click_day') {
+    const requestedMonth = String(monthName || '').toLowerCase();
+    const monthRoots = Array.from(document.querySelectorAll('[class*="CalendarBody__month__"]'))
+      .filter(visible)
+      .map((node, index) => {
+        const name = text(Array.from(node.querySelectorAll('[class*="month-name"]')).map((item) => item.innerText || item.textContent || '').join(' ')).toLowerCase();
+        const buttons = Array.from(node.querySelectorAll('button, [role="button"]')).filter(visible);
+        return {node, index, name, buttons, rect: rectFor(node), className: cls(node).slice(0, 160), body: text(node.innerText || node.textContent || '').slice(0, 260)};
+      });
+    const month = monthRoots.find((item) => item.name.includes(requestedMonth));
+    if (!month) return {ok: false, reason: 'calendar month not found', requested_month: requestedMonth, months_seen: monthRoots.map((item) => item.name).slice(0, 16)};
+    const candidates = month.buttons
+      .map((button, index) => {
+        const label = text(button.innerText || button.textContent || button.getAttribute('aria-label') || '');
+        const rect = rectFor(button);
         let score = 0;
         if (Number(label) === Number(day)) score += 100;
-        if (cell.matches('button, [role="button"]')) score += 20;
-        if (!disabled) score += 20;
-        return {cell, clickable, index, label, rect, disabled, className: cls(cell).slice(0, 120), score};
+        if (!disabled(button)) score += 20;
+        if (/^Day__/.test(cls(button))) score += 10;
+        return {button, index, label, rect, disabled: disabled(button), className: cls(button).slice(0, 120), score};
       })
       .filter((item) => Number(item.label) === Number(day) && !item.disabled)
       .sort((a, b) => b.score - a.score || a.rect.y - b.rect.y || a.rect.x - b.rect.x);
     const target = candidates[0];
-    if (!target) return {ok: false, day, reason: 'day cell not found', sample_labels: root.cells.map((cell) => text(cell.innerText || cell.textContent || cell.getAttribute('aria-label') || '')).slice(0, 60)};
-    target.clickable.click();
-    return {ok: true, day, label: target.label, rect: target.rect, class_name: target.className};
-  };
-  const first = clickDay(startDay);
-  const second = Number(endDay) === Number(startDay) ? {ok: true, day: endDay, skipped_same_day: true} : clickDay(endDay);
-  return {ok: Boolean(first.ok && second.ok), first, second, root: {rect: root.rect, class_name: root.className, text: root.body, day_cell_count: root.cells.length}};
-}
-            """,
-            {"startDay": start_day, "endDay": end_day},
-        )
-    except PlaywrightError as exc:
-        return {"ok": False, "reason": safe_text(str(exc), 300)}
+    if (!target) return {ok: false, reason: 'calendar day cell not found', requested_month: requestedMonth, day, sample_labels: month.buttons.map((button) => text(button.innerText || button.textContent || button.getAttribute('aria-label') || '')).slice(0, 80)};
+    target.button.click();
+    return {ok: true, requested_month: requestedMonth, day, label: target.label, rect: target.rect, class_name: target.className, month: {name: month.name, rect: month.rect, class_name: month.className, text: month.body, day_cell_count: month.buttons.length}};
+  }
 
+  if (action === 'save') {
+    const buttons = Array.from(document.querySelectorAll('button, [role="button"]'))
+      .filter(visible)
+      .map((button, index) => ({button, index, label: text(button.innerText || button.textContent || button.getAttribute('aria-label') || button.getAttribute('title') || ''), rect: rectFor(button), disabled: disabled(button), className: cls(button).slice(0, 120)}))
+      .filter((item) => /^Сохранить$/i.test(item.label))
+      .sort((a, b) => Number(a.disabled) - Number(b.disabled) || a.rect.y - b.rect.y || a.index - b.index);
+    const target = buttons[0];
+    if (!target) return {ok: false, reason: 'calendar save button not found'};
+    if (target.disabled) return {ok: false, reason: 'calendar save button is disabled', rect: target.rect, class_name: target.className};
+    target.button.click();
+    return {ok: true, label: target.label, rect: target.rect, class_name: target.className};
+  }
+
+  return {ok: false, reason: 'unknown calendar action'};
+}
+                """,
+                {"action": action, "day": day, "monthName": month_name},
+            )
+        except PlaywrightError as exc:
+            return {"ok": False, "reason": safe_text(str(exc), 300), "action": action}
+
+    opened = _step("open")
+    _wait_settle(page, 1200)
+    first = _step("click_day", day=start_day, month_name=start_month)
+    _wait_settle(page, 600)
+    second: dict[str, Any]
+    if start_day == end_day and start_month == end_month:
+        save = _step("save")
+        if save.get("ok"):
+            _wait_settle(page, 1200)
+            return {"ok": bool(opened.get("ok") and first.get("ok")), "opened": opened, "first": first, "second": {"ok": True, "day": end_day, "skipped_same_day": True}, "save": save}
+        second = _step("click_day", day=end_day, month_name=end_month)
+    else:
+        second = _step("click_day", day=end_day, month_name=end_month)
+    _wait_settle(page, 600)
+    save = _step("save")
+    _wait_settle(page, 1200)
+    return {"ok": bool(opened.get("ok") and first.get("ok") and second.get("ok") and save.get("ok")), "opened": opened, "first": first, "second": second, "save": save}
 
 def _day_from_ru_date(value: str) -> int:
     match = re.match(r"^(\d{1,2})[.]", str(value or "").strip())
@@ -1429,6 +1459,30 @@ def _day_from_ru_date(value: str) -> int:
         return int(match.group(1))
     except ValueError:
         return 0
+
+
+def _month_name_from_ru_date(value: str) -> str:
+    match = re.match(r"^\d{1,2}[.](\d{1,2})[.]", str(value or "").strip())
+    if not match:
+        return ""
+    try:
+        month = int(match.group(1))
+    except ValueError:
+        return ""
+    return {
+        1: "январь",
+        2: "февраль",
+        3: "март",
+        4: "апрель",
+        5: "май",
+        6: "июнь",
+        7: "июль",
+        8: "август",
+        9: "сентябрь",
+        10: "октябрь",
+        11: "ноябрь",
+        12: "декабрь",
+    }.get(month, "")
 
 
 def drive_seller_portal_date_inputs(page: Page, *, date_from_ru: str, date_to_ru: str) -> dict[str, Any]:
