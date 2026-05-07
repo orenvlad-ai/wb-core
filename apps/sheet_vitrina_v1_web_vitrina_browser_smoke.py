@@ -830,6 +830,7 @@ def _check_unified_tab_navigation(page: object) -> dict[str, object]:
         }""",
         timeout=5000,
     )
+    factory_dark_layout = _check_embedded_operator_dark_layout(page, "factory-order")
     page.locator('[data-unified-tab-button="reports"]').click()
     page.wait_for_function(
         """() => {
@@ -839,6 +840,7 @@ def _check_unified_tab_navigation(page: object) -> dict[str, object]:
         }""",
         timeout=5000,
     )
+    reports_dark_layout = _check_embedded_operator_dark_layout(page, "reports")
     page.locator('[data-unified-tab-button="research"]').click()
     page.wait_for_function(
         """() => {
@@ -1007,6 +1009,8 @@ def _check_unified_tab_navigation(page: object) -> dict[str, object]:
     return {
         "factory_order_embed": True,
         "reports_embed": True,
+        "factory_order_dark_layout": factory_dark_layout,
+        "reports_dark_layout": reports_dark_layout,
         "research_tab": True,
         "research_calculate_table": page.locator("[data-research-result-table] tbody tr").count(),
         "research_promo_filter": research_flow,
@@ -1014,6 +1018,86 @@ def _check_unified_tab_navigation(page: object) -> dict[str, object]:
         "research_result_grid": result_grid,
         "restored_default_tab": True,
     }
+
+
+def _check_embedded_operator_dark_layout(page: object, embedded_tab: str) -> dict[str, object]:
+    frame = page.frame_locator(f'[data-operator-embed-frame="{embedded_tab}"]')
+    frame.locator("body").wait_for(timeout=10000)
+    if embedded_tab == "factory-order":
+        frame.locator('[data-supply-section-button="factory"]').wait_for(timeout=10000)
+    elif embedded_tab == "reports":
+        frame.locator('[data-report-section-button="daily"]').wait_for(timeout=10000)
+    else:
+        raise AssertionError(f"unsupported embedded operator tab {embedded_tab!r}")
+    payload = frame.locator("body").evaluate(
+        """(body, embeddedTab) => {
+          const numbers = value => (value.match(/\\d+(?:\\.\\d+)?/g) || []).map(Number);
+          const isDark = value => {
+            const rgb = numbers(value);
+            return rgb.length >= 3 && rgb[0] < 45 && rgb[1] < 50 && rgb[2] < 60;
+          };
+          const root = document.documentElement;
+          const rootStyles = getComputedStyle(root);
+          const activePanel = document.querySelector(`[data-tab-panel="${embeddedTab}"]`);
+          const block = activePanel ? activePanel.querySelector(".block") : null;
+          const control = activePanel ? activePanel.querySelector("input:not([type='checkbox']), select, .stock-selector-summary") : null;
+          const subsectionStrip = activePanel ? activePanel.querySelector(".subsection-strip") : null;
+          const activeSubsection = activePanel ? activePanel.querySelector(".subsection-button.is-active") : null;
+          const primary = activePanel ? activePanel.querySelector(".primary-button") : null;
+          const secondary = activePanel ? activePanel.querySelector(".secondary-button") : null;
+          const card = activePanel ? activePanel.querySelector(".dataset-card, .report-card, .plan-report-card, .stock-report-item") : null;
+          const tableSurface = activePanel ? activePanel.querySelector(".district-table-wrap, .plan-report-table-wrap, .log-viewport") : null;
+          const primaryRgb = primary ? numbers(getComputedStyle(primary).backgroundColor) : [];
+          const activeSubsectionRgb = activeSubsection ? numbers(getComputedStyle(activeSubsection).backgroundColor) : [];
+          const buttonHeights = Array.from(activePanel ? activePanel.querySelectorAll(".action-button") : [])
+            .map(node => Math.round(node.getBoundingClientRect().height))
+            .filter(Boolean);
+          return {
+            bodyClass: body.className,
+            rootAccent: rootStyles.getPropertyValue("--accent").trim(),
+            rootAccentHover: rootStyles.getPropertyValue("--accent-hover").trim(),
+            rootAccentActive: rootStyles.getPropertyValue("--accent-active").trim(),
+            rootAccentSoft: rootStyles.getPropertyValue("--accent-soft").trim(),
+            rootAccentFocus: rootStyles.getPropertyValue("--accent-focus").trim(),
+            topTabsHiddenInEmbed: getComputedStyle(document.querySelector(".tab-strip")).display === "none",
+            blockBg: block ? getComputedStyle(block).backgroundColor : "",
+            cardBg: card ? getComputedStyle(card).backgroundColor : "",
+            controlBg: control ? getComputedStyle(control).backgroundColor : "",
+            subsectionDisplay: subsectionStrip ? getComputedStyle(subsectionStrip).display : "",
+            subsectionBg: subsectionStrip ? getComputedStyle(subsectionStrip).backgroundColor : "",
+            activeSubsectionBg: activeSubsection ? getComputedStyle(activeSubsection).backgroundColor : "",
+            primaryBg: primary ? getComputedStyle(primary).backgroundColor : "",
+            secondaryBg: secondary ? getComputedStyle(secondary).backgroundColor : "",
+            tableSurfaceBg: tableSurface ? getComputedStyle(tableSurface).backgroundColor : "",
+            blockIsDark: block ? isDark(getComputedStyle(block).backgroundColor) : false,
+            cardIsDark: card ? isDark(getComputedStyle(card).backgroundColor) : false,
+            controlIsDark: control ? isDark(getComputedStyle(control).backgroundColor) : false,
+            primaryIsViolet: primaryRgb.length >= 3 && primaryRgb[0] === 139 && primaryRgb[1] === 92 && primaryRgb[2] === 246,
+            primaryLooksGreen: primaryRgb.length >= 3 && primaryRgb[1] > primaryRgb[0] && primaryRgb[1] > primaryRgb[2],
+            activeSubsectionUsesAccent: activeSubsectionRgb.length >= 3 && activeSubsectionRgb[0] === 139 && activeSubsectionRgb[1] === 92 && activeSubsectionRgb[2] === 246,
+            equalActionButtonHeights: buttonHeights.length === 0 || Math.max(...buttonHeights) - Math.min(...buttonHeights) <= 2,
+            buttonHeights,
+            staleVitrina2: body.textContent.includes("Витрина 2"),
+          };
+        }""",
+        embedded_tab,
+    )
+    for key in ("blockIsDark", "controlIsDark", "equalActionButtonHeights"):
+        if not payload.get(key):
+            raise AssertionError(f"{embedded_tab} embedded operator dark invariant failed for {key}: {payload}")
+    if embedded_tab == "factory-order" and not payload.get("primaryIsViolet"):
+        raise AssertionError(f"factory-order primary action must use violet accent, got {payload}")
+    if embedded_tab == "reports" and not payload.get("cardIsDark"):
+        raise AssertionError(f"reports cards must render dark, got {payload}")
+    if embedded_tab == "reports" and not payload.get("activeSubsectionUsesAccent"):
+        raise AssertionError(f"reports segmented active state must use violet accent, got {payload}")
+    if payload.get("primaryLooksGreen") or payload.get("staleVitrina2"):
+        raise AssertionError(f"{embedded_tab} must not use green primary accent or stale label, got {payload}")
+    if payload.get("rootAccent") != "#8B5CF6" or payload.get("rootAccentHover") != "#A78BFA" or payload.get("rootAccentActive") != "#7C3AED":
+        raise AssertionError(f"{embedded_tab} must use the violet operator accent tokens, got {payload}")
+    if payload.get("subsectionDisplay") != "flex":
+        raise AssertionError(f"{embedded_tab} subsection selector must remain a horizontal segmented control, got {payload}")
+    return payload
 
 
 def _check_load_refresh_action(
