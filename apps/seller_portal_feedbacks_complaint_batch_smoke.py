@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from apps.seller_portal_feedbacks_complaint_batch import (  # noqa: E402
     _batch_aggregate,
+    _has_pending_feedback_ids_for_day,
     _merge_candidate_state,
     _not_submitted_feedback_ids_for_day,
     _reason_group,
@@ -32,6 +33,7 @@ def main() -> None:
                 _candidate("wb-1", "yes", blocker="already_complained_in_wb: complaint action is disabled"),
                 _candidate("no-1", "no", skip_reason="skipped complaint_fit=no"),
                 _candidate("pending-1", "review", selected=True),
+                _candidate("slot-1", "review", skip_reason="skipped because max_ai_candidates slots were already filled"),
             ],
         },
     )
@@ -41,7 +43,7 @@ def main() -> None:
         run_report={"run_id": "run-2", "candidates": [_candidate("pending-1", "review", submit_success=True)]},
     )
     aggregate = _batch_aggregate(state, [{"runs": [{"run_id": "run-1"}, {"run_id": "run-2"}]}])
-    if aggregate["ai_candidates_to_complain"] != 4:
+    if aggregate["ai_candidates_to_complain"] != 5:
         raise AssertionError(f"yes/review denominator must exclude AI no: {aggregate} state={state}")
     if aggregate["submitted"] != 2:
         raise AssertionError(f"submitted retry pass must update pending candidate: {aggregate} state={state}")
@@ -52,6 +54,8 @@ def main() -> None:
     denied_next = _not_submitted_feedback_ids_for_day(state, "2026-04-01")
     if denied_next != ("journal-1", "wb-1"):
         raise AssertionError(f"non-journal skips must be denied on the next bounded run: {denied_next!r}")
+    if not _has_pending_feedback_ids_for_day(state, "2026-04-01"):
+        raise AssertionError(f"max_ai_candidates overflow must stay pending for continuation: {state}")
     if _reason_group("description field value mismatch before final submit") != "description_not_persisted":
         raise AssertionError("description mismatch must be grouped as description_not_persisted")
     source_error = _systemic_blocker(
