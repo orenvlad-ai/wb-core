@@ -23,11 +23,14 @@ from apps.seller_portal_feedbacks_complaints_scout import (  # noqa: E402
     DEFAULT_START_URL,
     ScoutConfig,
     check_session,
-    navigate_to_feedbacks_questions,
     scout_my_complaints,
 )
 from apps.seller_portal_feedbacks_matching_replay import safe_text  # noqa: E402
-from apps.seller_portal_relogin_session import DEFAULT_STORAGE_STATE_PATH, DEFAULT_WB_BOT_PYTHON  # noqa: E402
+from apps.seller_portal_relogin_session import (  # noqa: E402
+    DEFAULT_STORAGE_STATE_PATH,
+    DEFAULT_WB_BOT_PYTHON,
+    read_storage_state_supplier_context,
+)
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import (  # noqa: E402
     COMPLAINT_STATUS_LABELS,
     CONTRACT_NAME,
@@ -158,12 +161,17 @@ def run_status_sync_for_runtime(
         return report
 
     session = check_session(scout_config)
+    session = _augment_session_with_storage_supplier_context(session, storage_state_path)
     report["session"] = session
-    if not session.get("ok"):
+    if not session.get("ok") and not _can_try_direct_complaints_routes(session):
         report["errors"].append({"stage": "session", "code": str(session.get("status") or ""), "message": str(session.get("message") or "")})
         report["finished_at"] = _iso_now()
         _maybe_write(report, output_dir, write_artifacts)
         return report
+    if not session.get("ok"):
+        report["session"]["preflight_warning"] = (
+            "generic Seller Portal probe failed; continuing with direct read-only complaints status URLs"
+        )
 
     try:
         with sync_playwright() as playwright:
@@ -178,13 +186,20 @@ def run_status_sync_for_runtime(
             page = context.new_page()
             page.set_default_timeout(timeout_ms)
             try:
-                navigation = navigate_to_feedbacks_questions(page, scout_config)
-                report["navigation"] = navigation
-                if not navigation.get("success"):
-                    report["errors"].append({"stage": "navigation", "code": "not_reached", "message": str(navigation.get("blocker") or "")})
+                my = scout_my_complaints(page, scout_config)
+                report["my_complaints"] = my
+                report["navigation"] = {
+                    "success": bool(my.get("success")),
+                    "method": "direct_complaints_status_urls",
+                    "pending_final_url": str((my.get("pending") or {}).get("navigation", {}).get("final_url") or ""),
+                    "answered_final_url": str((my.get("answered") or {}).get("navigation", {}).get("final_url") or ""),
+                    "blocker": str(my.get("blocker") or ""),
+                }
+                if not my.get("success") or my.get("blocker"):
+                    report["errors"].append(
+                        {"stage": "my_complaints_navigation", "code": "not_reached", "message": str(my.get("blocker") or "")}
+                    )
                 else:
-                    my = scout_my_complaints(page, scout_config)
-                    report["my_complaints"] = my
                     _apply_status_updates(
                         report,
                         journal,
@@ -228,6 +243,48 @@ def _filter_records_by_status(records: list[dict[str, Any]], statuses: set[str] 
     if statuses is None:
         return list(records)
     return [record for record in records if str(record.get("complaint_status") or "").strip() in statuses]
+
+
+def _augment_session_with_storage_supplier_context(session: Mapping[str, Any], storage_state_path: Path) -> dict[str, Any]:
+    augmented = dict(session)
+    storage_context = read_storage_state_supplier_context(storage_state_path)
+    session_context = augmented.get("supplier_context") if isinstance(augmented.get("supplier_context"), Mapping) else {}
+    session_ids = {
+        str(value or "").strip()
+        for value in (
+            session_context.get("current_supplier_id"),
+            session_context.get("current_supplier_external_id"),
+            session_context.get("analytics_supplier_id"),
+        )
+        if str(value or "").strip()
+    }
+    if storage_context:
+        augmented["storage_state_supplier_context"] = storage_context
+    if not session_ids and storage_context:
+        augmented["supplier_context"] = storage_context
+    return augmented
+
+
+def _can_try_direct_complaints_routes(session: Mapping[str, Any]) -> bool:
+    status = str(session.get("status") or "").strip()
+    if status == "session_valid_wrong_org":
+        return False
+    if status not in {"seller_portal_session_invalid", "seller_portal_session_probe_failed"}:
+        return False
+    supplier_context = session.get("supplier_context") if isinstance(session.get("supplier_context"), Mapping) else {}
+    supplier_ids = {
+        str(value or "").strip()
+        for value in (
+            supplier_context.get("current_supplier_id"),
+            supplier_context.get("current_supplier_external_id"),
+            supplier_context.get("analytics_supplier_id"),
+        )
+        if str(value or "").strip()
+    }
+    canonical_id = str(os.environ.get("SELLER_PORTAL_CANONICAL_SUPPLIER_ID", "") or "").strip()
+    if canonical_id and supplier_ids and supplier_ids != {canonical_id}:
+        return False
+    return True
 
 
 def _apply_status_updates(
