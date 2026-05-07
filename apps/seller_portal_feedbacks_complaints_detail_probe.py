@@ -46,6 +46,14 @@ from apps.seller_portal_feedbacks_complaints_status_sync import (  # noqa: E402
 )
 from apps.seller_portal_feedbacks_matching_replay import safe_text  # noqa: E402
 from apps.seller_portal_relogin_session import DEFAULT_STORAGE_STATE_PATH, DEFAULT_WB_BOT_PYTHON  # noqa: E402
+from apps.seller_portal_automation_guard import (  # noqa: E402
+    SellerPortalAutomationBusy,
+    SellerPortalStorageStatePolicyError,
+    acquire_seller_portal_automation_lock,
+    busy_response_payload,
+    seller_portal_storage_state_path,
+    validate_storage_state_path_for_runtime,
+)
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import (  # noqa: E402
     COMPLAINT_STATUS_LABELS,
     JsonFileFeedbacksComplaintJournal,
@@ -87,7 +95,7 @@ def main() -> None:
     parser.add_argument("--feedback-id", required=True)
     parser.add_argument("--mode", choices=(READ_ONLY_MODE,), default=READ_ONLY_MODE)
     parser.add_argument("--runtime-dir", default=str(DEFAULT_RUNTIME_DIR if DEFAULT_RUNTIME_DIR.exists() else ".runtime"))
-    parser.add_argument("--storage-state-path", default=str(DEFAULT_STORAGE_STATE_PATH))
+    parser.add_argument("--storage-state-path", default=str(seller_portal_storage_state_path(DEFAULT_STORAGE_STATE_PATH)))
     parser.add_argument("--wb-bot-python", default=str(DEFAULT_WB_BOT_PYTHON))
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
@@ -161,6 +169,7 @@ def run_detail_probe(config: DetailProbeConfig) -> dict[str, Any]:
             "submit_clicked_during_runner": 0,
         },
         "journal_before": dict(journal_before or {}),
+        "automation_lock": {},
         "session": {},
         "navigation": {},
         "my_complaints": empty_my_complaints_probe(),
@@ -176,19 +185,47 @@ def run_detail_probe(config: DetailProbeConfig) -> dict[str, Any]:
         report["finished_at"] = iso_now()
         return report
 
-    scout_config = build_scout_config(config)
-    session = check_session(scout_config)
-    report["session"] = session
-    if not session.get("ok"):
-        report["errors"].append({"stage": "session", "code": str(session.get("status") or ""), "message": str(session.get("message") or "")})
-        report["confirmation"]["reason"] = "Seller Portal session is not valid"
-        apply_probe_journal_result(config, journal, report, run_id)
+    lock = None
+    try:
+        storage_state_path = (
+            seller_portal_storage_state_path(DEFAULT_STORAGE_STATE_PATH)
+            if config.storage_state_path == DEFAULT_STORAGE_STATE_PATH
+            else config.storage_state_path
+        )
+        validate_storage_state_path_for_runtime(storage_state_path, config.runtime_dir)
+        lock = acquire_seller_portal_automation_lock(
+            runtime_dir=config.runtime_dir,
+            owner=CONTRACT_NAME,
+            purpose="complaints_detail_probe",
+            run_id=run_id,
+            expected_max_seconds=max(120, int(config.timeout_ms / 1000) + 120),
+        )
+        report["automation_lock"] = lock.public_payload()
+        config = DetailProbeConfig(**{**config.__dict__, "storage_state_path": storage_state_path})
+    except SellerPortalAutomationBusy as exc:
+        report["errors"].append({"stage": "automation_lock", **busy_response_payload(exc.lock_payload)})
+        report["confirmation"]["reason"] = "Seller Portal automation already running"
+        report["finished_at"] = iso_now()
+        return report
+    except SellerPortalStorageStatePolicyError as exc:
+        report["errors"].append({"stage": "storage_state_policy", "code": exc.code, "message": safe_text(str(exc), 800)})
+        report["confirmation"]["reason"] = "storage_state path is not allowed for this runtime"
         report["finished_at"] = iso_now()
         return report
 
-    captured: list[dict[str, Any]] = []
-    current_stage = {"value": "before_my_complaints"}
     try:
+        scout_config = build_scout_config(config)
+        session = check_session(scout_config)
+        report["session"] = session
+        if not session.get("ok"):
+            report["errors"].append({"stage": "session", "code": str(session.get("status") or ""), "message": str(session.get("message") or "")})
+            report["confirmation"]["reason"] = "Seller Portal session is not valid"
+            apply_probe_journal_result(config, journal, report, run_id)
+            report["finished_at"] = iso_now()
+            return report
+
+        captured: list[dict[str, Any]] = []
+        current_stage = {"value": "before_my_complaints"}
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=config.headless)
             context = browser.new_context(
@@ -222,6 +259,9 @@ def run_detail_probe(config: DetailProbeConfig) -> dict[str, Any]:
                 browser.close()
     except Exception as exc:  # pragma: no cover - live fallback
         report["errors"].append({"stage": "browser_detail_probe", "code": exc.__class__.__name__, "message": safe_text(str(exc), 800)})
+    finally:
+        if lock is not None:
+            lock.release()
 
     report["network"] = summarize_network_capture(captured)
     report["confirmation"] = evaluate_detail_probe_confirmation(journal_before, report["my_complaints"], captured)

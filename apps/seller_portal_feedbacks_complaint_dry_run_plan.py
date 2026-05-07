@@ -68,6 +68,14 @@ from apps.seller_portal_relogin_session import (  # noqa: E402
     DEFAULT_STORAGE_STATE_PATH,
     DEFAULT_WB_BOT_PYTHON,
 )
+from apps.seller_portal_automation_guard import (  # noqa: E402
+    SellerPortalAutomationBusy,
+    SellerPortalStorageStatePolicyError,
+    busy_response_payload,
+    seller_portal_automation_lock,
+    seller_portal_storage_state_path,
+    validate_storage_state_path_for_runtime,
+)
 from packages.application.feedback_review_tags import normalize_review_tags, reason_contradicts_review_tags  # noqa: E402
 from packages.application.sheet_vitrina_v1_feedbacks import SheetVitrinaV1FeedbacksBlock  # noqa: E402
 from packages.application.sheet_vitrina_v1_feedbacks_ai import (  # noqa: E402
@@ -127,7 +135,7 @@ def main() -> None:
     parser.add_argument("--force-category-other", choices=("0", "1"), default="1")
     parser.add_argument("--mode", choices=(NO_SUBMIT_MODE,), default=NO_SUBMIT_MODE)
     parser.add_argument("--runtime-dir", default=str(DEFAULT_RUNTIME_DIR if DEFAULT_RUNTIME_DIR.exists() else ".runtime"))
-    parser.add_argument("--storage-state-path", default=str(DEFAULT_STORAGE_STATE_PATH))
+    parser.add_argument("--storage-state-path", default=str(seller_portal_storage_state_path(DEFAULT_STORAGE_STATE_PATH)))
     parser.add_argument("--wb-bot-python", default=str(DEFAULT_WB_BOT_PYTHON))
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
@@ -176,6 +184,32 @@ def main() -> None:
 def run_dry_run(config: DryRunConfig) -> dict[str, Any]:
     if config.mode != NO_SUBMIT_MODE:
         raise RuntimeError("complaint dry-run supports no-submit mode only")
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    try:
+        storage_state_path = (
+            seller_portal_storage_state_path(DEFAULT_STORAGE_STATE_PATH)
+            if config.storage_state_path == DEFAULT_STORAGE_STATE_PATH
+            else config.storage_state_path
+        )
+        validate_storage_state_path_for_runtime(storage_state_path, config.runtime_dir)
+        locked_config = DryRunConfig(**{**config.__dict__, "storage_state_path": storage_state_path})
+        with seller_portal_automation_lock(
+            runtime_dir=locked_config.runtime_dir,
+            owner=CONTRACT_NAME,
+            purpose="complaint_dry_run_plan",
+            run_id=run_id,
+            expected_max_seconds=max(180, int(locked_config.timeout_ms / 1000) + 240),
+        ) as lock:
+            return _run_dry_run_locked(locked_config, automation_lock=lock.public_payload())
+    except SellerPortalAutomationBusy as exc:
+        return _dry_run_preflight_error_report(config, "automation_lock", busy_response_payload(exc.lock_payload))
+    except SellerPortalStorageStatePolicyError as exc:
+        return _dry_run_preflight_error_report(config, "storage_state_policy", {"code": exc.code, "message": safe_text(str(exc), 800)})
+
+
+def _run_dry_run_locked(config: DryRunConfig, *, automation_lock: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    if config.mode != NO_SUBMIT_MODE:
+        raise RuntimeError("complaint dry-run supports no-submit mode only")
 
     report: dict[str, Any] = {
         "contract_name": CONTRACT_NAME,
@@ -196,6 +230,7 @@ def run_dry_run(config: DryRunConfig) -> dict[str, Any]:
         "read_only_guards": no_submit_guards(),
         "api": {},
         "ai": {},
+        "automation_lock": dict(automation_lock or {}),
         "session": {},
         "navigation": {},
         "ui": {},
@@ -268,6 +303,42 @@ def run_dry_run(config: DryRunConfig) -> dict[str, Any]:
     report["read_only_guards"]["submit_clicked_count"] = report["aggregate"]["submit_clicked_count"]
     report["finished_at"] = iso_now()
     return report
+
+
+def _dry_run_preflight_error_report(config: DryRunConfig, stage: str, error: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "contract_name": CONTRACT_NAME,
+        "contract_version": CONTRACT_VERSION,
+        "mode": config.mode,
+        "started_at": iso_now(),
+        "finished_at": iso_now(),
+        "parameters": {
+            "date_from": config.date_from,
+            "date_to": config.date_to,
+            "stars": list(config.stars),
+            "is_answered": config.is_answered,
+            "max_api_rows": config.max_api_rows,
+            "max_ai_candidates": config.max_ai_candidates,
+            "force_category_other": config.force_category_other,
+            "deny_feedback_ids": list(config.deny_feedback_ids),
+        },
+        "read_only_guards": no_submit_guards(),
+        "api": {},
+        "ai": {},
+        "automation_lock": error.get("lock") or {},
+        "session": {},
+        "navigation": {},
+        "ui": {},
+        "candidates": [],
+        "aggregate": empty_aggregate(),
+        "errors": [
+            {
+                "stage": stage,
+                "code": str(error.get("code") or stage),
+                "message": str(error.get("message") or ""),
+            }
+        ],
+    }
 
 
 def load_api_feedback_rows(config: DryRunConfig) -> dict[str, Any]:

@@ -78,6 +78,14 @@ from apps.seller_portal_feedbacks_matching_replay import (  # noqa: E402
     ui_row_matches_requested_filters,
 )
 from apps.seller_portal_relogin_session import DEFAULT_STORAGE_STATE_PATH, DEFAULT_WB_BOT_PYTHON  # noqa: E402
+from apps.seller_portal_automation_guard import (  # noqa: E402
+    SellerPortalAutomationBusy,
+    SellerPortalStorageStatePolicyError,
+    acquire_seller_portal_automation_lock,
+    busy_response_payload,
+    seller_portal_storage_state_path,
+    validate_storage_state_path_for_runtime,
+)
 from packages.application.feedback_review_tags import normalize_review_tags  # noqa: E402
 from packages.application.sheet_vitrina_v1_feedbacks import SheetVitrinaV1FeedbacksBlock  # noqa: E402
 
@@ -121,7 +129,7 @@ def main() -> None:
     parser.add_argument("--open-menu", choices=("0", "1"), default="1")
     parser.add_argument("--open-complaint-modal", choices=("0", "1"), default="1")
     parser.add_argument("--mode", choices=(NO_SUBMIT_MODE, "read-only"), default="read-only")
-    parser.add_argument("--storage-state-path", default=str(DEFAULT_STORAGE_STATE_PATH))
+    parser.add_argument("--storage-state-path", default=str(seller_portal_storage_state_path(DEFAULT_STORAGE_STATE_PATH)))
     parser.add_argument("--wb-bot-python", default=str(DEFAULT_WB_BOT_PYTHON))
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
@@ -338,28 +346,55 @@ def load_api_status_breakdown(config: TargetRowProbeConfig) -> dict[str, Any]:
 
 
 def collect_seller_portal_rows(config: TargetRowProbeConfig, api_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    scout_config = build_scout_config(config)
-    session = check_session(scout_config)
     report: dict[str, Any] = {
         "success": False,
-        "session": session,
+        "automation_lock": {},
+        "session": {},
         "navigation": {},
         "seller_portal": empty_seller_portal_report(),
         "page_actionability": empty_actionability(),
         "errors": [],
     }
-    if not session.get("ok"):
-        report["seller_portal"]["blocker"] = "Seller Portal session is not valid"
-        report["errors"].append(
-            {
-                "stage": "session",
-                "code": str(session.get("status") or "session_invalid"),
-                "message": str(session.get("message") or "Seller Portal session is not valid"),
-            }
-        )
-        return report
-
+    lock = None
     try:
+        runtime_dir = _runtime_dir_from_output(config.output_dir)
+        storage_state_path = (
+            seller_portal_storage_state_path(DEFAULT_STORAGE_STATE_PATH)
+            if config.storage_state_path == DEFAULT_STORAGE_STATE_PATH
+            else config.storage_state_path
+        )
+        validate_storage_state_path_for_runtime(storage_state_path, runtime_dir)
+        lock = acquire_seller_portal_automation_lock(
+            runtime_dir=runtime_dir,
+            owner=CONTRACT_NAME,
+            purpose="target_row_probe",
+            run_id=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+            expected_max_seconds=max(120, int(config.timeout_ms / 1000) + 180),
+        )
+        report["automation_lock"] = lock.public_payload()
+        config = TargetRowProbeConfig(**{**config.__dict__, "storage_state_path": storage_state_path})
+    except SellerPortalAutomationBusy as exc:
+        report["seller_portal"]["blocker"] = "Seller Portal automation already running"
+        report["errors"].append({"stage": "automation_lock", **busy_response_payload(exc.lock_payload)})
+        return report
+    except SellerPortalStorageStatePolicyError as exc:
+        report["seller_portal"]["blocker"] = safe_text(str(exc), 500)
+        report["errors"].append({"stage": "storage_state_policy", "code": exc.code, "message": safe_text(str(exc), 800)})
+        return report
+    try:
+        scout_config = build_scout_config(config)
+        session = check_session(scout_config)
+        report["session"] = session
+        if not session.get("ok"):
+            report["seller_portal"]["blocker"] = "Seller Portal session is not valid"
+            report["errors"].append(
+                {
+                    "stage": "session",
+                    "code": str(session.get("status") or "session_invalid"),
+                    "message": str(session.get("message") or "Seller Portal session is not valid"),
+                }
+            )
+            return report
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=config.headless)
             context = browser.new_context(
@@ -445,7 +480,18 @@ def collect_seller_portal_rows(config: TargetRowProbeConfig, api_rows: list[dict
     except Exception as exc:  # pragma: no cover - live browser fallback
         report["seller_portal"]["blocker"] = safe_text(str(exc), 500)
         report["errors"].append({"stage": "browser_probe", "code": exc.__class__.__name__, "message": safe_text(str(exc), 800)})
+    finally:
+        if lock is not None:
+            lock.release()
     return report
+
+
+def _runtime_dir_from_output(output_dir: Path) -> Path:
+    text = str(output_dir)
+    live = "/opt/wb-core-runtime/state"
+    if text == live or text.startswith(live + "/"):
+        return Path(live)
+    return output_dir
 
 
 def collect_dom_rows_for_tab(page: Page, config: TargetRowProbeConfig, tab_label: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
