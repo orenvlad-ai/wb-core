@@ -318,10 +318,10 @@ def _systemic_blocker(run_report: Mapping[str, Any]) -> str:
         if not isinstance(error, Mapping):
             continue
         stage = str(error.get("stage") or "")
-        if stage in {"session", "navigation", "submit_browser"}:
+        if stage in {"api_feedbacks", "session", "navigation", "submit_browser"}:
             return str(error.get("message") or stage)
     conclusion = str(run_report.get("final_conclusion") or "")
-    if conclusion in {"submit_unconfirmed_error", "submit_failed_validation", "submit_failed_network"}:
+    if conclusion in {"source_error", "submit_unconfirmed_error", "submit_failed_validation", "submit_failed_network"}:
         return conclusion
     return ""
 
