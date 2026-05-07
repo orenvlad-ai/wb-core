@@ -64,6 +64,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
     complaints_sync_completed = False
     complaints_submit_completed = False
     selected_model = "gpt-5-mini"
+    feedbacks_dark_layout: dict[str, object] = {}
     page_url = base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -448,6 +449,51 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             if "Отклонена" not in page.locator("[data-feedbacks-complaints-table]").inner_text():
                 raise AssertionError("complaints table must render refreshed rows after status sync")
             page.locator("[data-feedbacks-subtab='reviews']").click()
+            feedbacks_dark_layout = page.evaluate(
+                """() => {
+                    const numbers = (value) => (value.match(/\\d+(?:\\.\\d+)?/g) || []).map(Number);
+                    const bodyBg = getComputedStyle(document.body).backgroundColor;
+                    const bodyRgb = numbers(bodyBg);
+                    const tabStrip = document.querySelector(".unified-tab-strip");
+                    const actionToolbar = document.querySelector(".feedbacks-action-toolbar");
+                    const tableTools = document.querySelector(".feedbacks-table-tools");
+                    const resetButton = document.querySelector("[data-feedbacks-reset-widths]");
+                    const sourceNote = document.querySelector("[data-feedbacks-source-note]");
+                    const actionButtons = actionToolbar ? Array.from(actionToolbar.querySelectorAll("button")) : [];
+                    const buttonHeights = actionButtons
+                        .map((node) => Math.round(node.getBoundingClientRect().height))
+                        .filter((height) => height > 0);
+                    return {
+                        bodyBg,
+                        isDarkBody: bodyRgb.length >= 3 && bodyRgb[0] < 40 && bodyRgb[1] < 45 && bodyRgb[2] < 55,
+                        tabLabels: Array.from(document.querySelectorAll("[data-unified-tab-button]")).map((node) => node.textContent.trim()),
+                        tabStripDisplay: tabStrip ? getComputedStyle(tabStrip).display : "",
+                        tabStripFlexDirection: tabStrip ? getComputedStyle(tabStrip).flexDirection : "",
+                        hasActionToolbar: Boolean(actionToolbar),
+                        hasFilterPanel: Boolean(document.querySelector(".feedbacks-filter-panel")),
+                        sourceNoteInFilterPanel: Boolean(sourceNote && sourceNote.closest(".feedbacks-filter-panel")),
+                        tableToolsContainsReset: Boolean(tableTools && resetButton && tableTools.contains(resetButton)),
+                        actionToolbarContainsReset: Boolean(actionToolbar && resetButton && actionToolbar.contains(resetButton)),
+                        dangerGroupSeparated: Boolean(document.querySelector(".feedbacks-action-group.is-danger [data-feedbacks-submit-selected]")),
+                        selectedPillVisible: Boolean(document.querySelector(".feedbacks-selection-pill[data-feedbacks-submit-selected-count]")),
+                        buttonHeights,
+                        equalActionButtonHeights: buttonHeights.length >= 4 && Math.max(...buttonHeights) - Math.min(...buttonHeights) <= 2,
+                    };
+                }"""
+            )
+            if not feedbacks_dark_layout.get("isDarkBody"):
+                raise AssertionError(f"operator surface must use a dark body background, got {feedbacks_dark_layout}")
+            if "Витрина 2" in feedbacks_dark_layout.get("tabLabels", []):
+                raise AssertionError(f"unified tabs must not render stale label 'Витрина 2': {feedbacks_dark_layout}")
+            if "Витрина" not in feedbacks_dark_layout.get("tabLabels", []):
+                raise AssertionError(f"unified tabs must include restored 'Витрина' label: {feedbacks_dark_layout}")
+            if feedbacks_dark_layout.get("tabStripDisplay") != "flex" or feedbacks_dark_layout.get("tabStripFlexDirection") != "row":
+                raise AssertionError(f"unified main menu must remain horizontal: {feedbacks_dark_layout}")
+            for key in ("hasActionToolbar", "hasFilterPanel", "sourceNoteInFilterPanel", "tableToolsContainsReset", "dangerGroupSeparated", "selectedPillVisible", "equalActionButtonHeights"):
+                if not feedbacks_dark_layout.get(key):
+                    raise AssertionError(f"feedbacks dark toolbar layout invariant failed for {key}: {feedbacks_dark_layout}")
+            if feedbacks_dark_layout.get("actionToolbarContainsReset"):
+                raise AssertionError(f"reset-widths control must be outside the primary feedback actions: {feedbacks_dark_layout}")
 
             range_toggle = page.locator("[data-feedbacks-range-toggle]")
             range_popover = page.locator("[data-feedbacks-range-popover]")
@@ -704,6 +750,8 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "complaints_job_polls": len(complaints_job_polls),
         "complaints_submit_requests": len(complaints_submit_requests),
         "complaints_submit_job_polls": len(complaints_submit_job_polls),
+        "feedbacks_dark_toolbar": True,
+        "feedbacks_action_button_heights": feedbacks_dark_layout.get("buttonHeights", []),
     }
 
 
