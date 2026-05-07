@@ -64,6 +64,7 @@ class _FakeSellerRecoveryController:
             "timeout": "Восстановление завершено по таймауту",
             "error": "Восстановление завершено с ошибкой",
         }.get(final_status, "")
+        can_download_launcher = bool(self.current_run_id) and status == "awaiting_login" and launcher_enabled
         return {
             "status": status,
             "status_label": {
@@ -102,12 +103,19 @@ class _FakeSellerRecoveryController:
             "can_start": not running,
             "can_stop": running,
             "launcher_enabled": launcher_enabled,
+            "launcher_ready": can_download_launcher,
+            "can_download_launcher": can_download_launcher,
+            "can_open_login_window": False,
+            "open_login_window_url": "",
+            "launcher_url": launcher_download_path if can_download_launcher else "",
             "launcher_download_path": launcher_download_path,
+            "reason": summary,
             "run_id": self.current_run_id,
             "current_run_id": self.current_run_id,
             "run_is_final": bool(final_status),
             "run_final_status": final_status,
             "run_final_label": final_label,
+            "final_marker": final_status,
             "started_at": "2026-04-23T10:00:00+05:00" if self.current_run_id else "",
             "finished_at": "2026-04-23T10:01:00+05:00" if final_status else "",
             "session_status": "session_invalid" if status in {"idle", "starting", "awaiting_login", "stopped"} else "session_valid_canonical",
@@ -128,7 +136,13 @@ class _FakeSellerRecoveryController:
             "can_start": True,
             "can_stop": False,
             "launcher_enabled": False,
+            "launcher_ready": False,
+            "can_download_launcher": False,
+            "can_open_login_window": False,
+            "open_login_window_url": "",
+            "launcher_url": "",
             "launcher_download_path": launcher_download_path,
+            "reason": "Сохранённая seller-сессия больше не действует.",
         }
 
     def read_status(self, *, launcher_download_path: str, run_id: str | None = None) -> dict[str, object]:
@@ -336,21 +350,35 @@ def main() -> None:
                     "launcher route must return truthful unavailable JSON before awaiting_login, "
                     f"got {unavailable_code} / {unavailable_payload}"
                 )
+            if unavailable_payload.get("launcher_status") != "no_active_run" or unavailable_payload.get("retryable") is not False:
+                raise AssertionError(f"launcher route must classify no-active-run as controlled 409, got {unavailable_payload}")
 
             start_code, start_payload = _post_json(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH, {"replace": True})
             if start_code != 200 or start_payload.get("status") != "starting" or not start_payload.get("run_id"):
                 raise AssertionError(f"start must surface current run startup with run_id, got {start_code} / {start_payload}")
-            if start_payload.get("launcher_enabled") is not False:
+            if start_payload.get("launcher_enabled") is not False or start_payload.get("can_download_launcher") is not False:
                 raise AssertionError("starting status must keep launcher disabled until browser window is ready")
-
-            status_code, status_payload = _get_json(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH)
-            if status_code != 200 or status_payload.get("status") != "starting":
-                raise AssertionError(f"first status after start must still surface startup, got {status_code} / {status_payload}")
+            starting_launcher_code, starting_launcher_payload = _get_json_allow_error(
+                base_url + DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH
+            )
+            if (
+                starting_launcher_code != 409
+                or starting_launcher_payload.get("launcher_status") != "run_starting"
+                or starting_launcher_payload.get("retryable") is not True
+            ):
+                raise AssertionError(
+                    "launcher route must classify starting as retryable controlled 409, "
+                    f"got {starting_launcher_code} / {starting_launcher_payload}"
+                )
 
             status_code, status_payload = _get_json(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH)
             if status_code != 200 or status_payload.get("status") != "awaiting_login":
                 raise AssertionError(f"status after startup must switch to awaiting_login, got {status_code} / {status_payload}")
-            if status_payload.get("launcher_enabled") is not True:
+            if (
+                status_payload.get("launcher_enabled") is not True
+                or status_payload.get("launcher_ready") is not True
+                or status_payload.get("can_download_launcher") is not True
+            ):
                 raise AssertionError("awaiting_login payload must enable launcher download once the browser window is visible")
             run_id = str(status_payload.get("run_id") or "").strip()
             scoped_status_code, scoped_status_payload = _get_json(
@@ -388,7 +416,7 @@ def main() -> None:
             second_start_code, second_start_payload = _post_json(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH, {"replace": True})
             if second_start_code != 200 or second_start_payload.get("status") != "not_needed" or second_start_payload.get("run_final_status") != "not_needed":
                 raise AssertionError(f"not_needed start must finish immediately with final outcome, got {second_start_code} / {second_start_payload}")
-            if controller.calls != ["check", "status:", "launcher", "start:True", "status:", "status:", f"status:{run_id}", "launcher", "stop", "start:True"]:
+            if controller.calls != ["check", "status:", "status:", "start:True", "status:", "status:", f"status:{run_id}", "status:", "launcher", "stop", "start:True"]:
                 raise AssertionError(f"unexpected recovery controller lifecycle, got {controller.calls}")
 
             print("seller_portal_session_check_http: ok -> lightweight session-check route is wired")

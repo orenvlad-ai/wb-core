@@ -2663,6 +2663,14 @@
     const EMBEDDED_UNIFIED_TABS = new Set(["factory-order", "reports"]);
     const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", FEEDBACKS_UNIFIED_TAB, RESEARCH_UNIFIED_TAB]);
     const FLOATING_DETAILS_SELECTOR = "details[data-column-manager], details[data-research-picker], details[data-feedbacks-complaints-column-manager]";
+    const SELLER_RECOVERY_ACTIVE_STATUSES = new Set([
+      "starting",
+      "awaiting_login",
+      "saving_session",
+      "validating_session",
+      "checking_canonical_supplier",
+      "triggering_refresh"
+    ]);
     const formattersById = new Map();
     const renderersById = new Map();
     const sortOptionsByValue = new Map();
@@ -2705,7 +2713,17 @@
       },
       sellerRecovery: {
         launcherEnabled: false,
+        launcherReady: false,
+        canDownloadLauncher: false,
+        canOpenLoginWindow: false,
         launcherPath: WEB_VITRINA_CONFIG.seller_recovery_launcher_path || "",
+        launcherUrl: "",
+        runId: "",
+        runStatus: "",
+        running: false,
+        finalMarker: "",
+        reason: "",
+        summary: "",
         statusLabel: "",
         tone: "neutral",
         checkedAt: ""
@@ -2814,6 +2832,7 @@
       },
       sessionHighlights: {}
     };
+    let sellerRecoveryPollHandle = null;
 
     if (openOperatorLink) {
       openOperatorLink.href = WEB_VITRINA_CONFIG.operator_path;
@@ -3407,7 +3426,15 @@
       loadRefreshButton.disabled = !!disabled;
       sourceStatusLoadButton.disabled = !!disabled;
       loadingTableBodyNode.querySelectorAll("button").forEach(function(button) {
-        button.disabled = !!disabled;
+        if (disabled) {
+          button.disabled = true;
+          return;
+        }
+        if (button.matches("[data-session-launcher]")) {
+          button.disabled = !Boolean(state.sellerRecovery.canDownloadLauncher || state.sellerRecovery.launcherReady || state.sellerRecovery.launcherEnabled);
+          return;
+        }
+        button.disabled = false;
       });
     }
 
@@ -3769,6 +3796,7 @@
         '<span class="activity-group-main">',
         '<span>' + escapeHtml(group.label || groupId) + '</span>',
         renderSellerSessionState(group),
+        renderSellerRecoveryState(group),
         '<span class="activity-group-updated">Последнее обновление: ' + escapeHtml(updatedText) + '</span>',
         renderGroupActionState(actionState),
         '</span>',
@@ -3834,12 +3862,28 @@
       return '<span class="seller-session-state tone-' + escapeHtml(tone) + '" data-session-state>' + escapeHtml(status) + '</span>';
     }
 
+    function renderSellerRecoveryState(group) {
+      if (!group.session_controls) {
+        return "";
+      }
+      const recovery = state.sellerRecovery || {};
+      const label = recovery.statusLabel || "не запускалось";
+      const runId = String(recovery.runId || "").trim();
+      const marker = recovery.finalMarker ? (" · финал: " + recovery.finalMarker) : "";
+      const runText = runId ? (" · " + runId) : "";
+      const detail = [recovery.summary, recovery.reason].filter(Boolean).join(" · ");
+      const title = [runId ? ("run_id: " + runId) : "", detail].filter(Boolean).join(" · ");
+      return '<span class="seller-session-state tone-' + escapeHtml(normalizeTone(recovery.tone || "neutral")) + '" data-session-recovery-state title="' + escapeHtml(title) + '">' +
+        escapeHtml("Recovery: " + label + runText + marker) +
+        "</span>";
+    }
+
     function renderSellerSessionControls(group) {
       if (!group.session_controls) {
         return "";
       }
       const launcherPath = state.sellerRecovery.launcherPath || WEB_VITRINA_CONFIG.seller_recovery_launcher_path || "";
-      const launcherDisabled = state.sellerRecovery.launcherEnabled ? "" : " disabled";
+      const launcherDisabled = (state.sellerRecovery.canDownloadLauncher || state.sellerRecovery.launcherReady || state.sellerRecovery.launcherEnabled) ? "" : " disabled";
       return [
         '<span class="seller-session-controls" data-seller-session-controls>',
         '<button class="button secondary seller-session-button" type="button" data-session-check>Проверить сессию</button>',
@@ -8200,6 +8244,26 @@
       }
     }
 
+    function sellerRecoveryIsActive(payload) {
+      const normalized = payload || state.sellerRecovery || {};
+      const runStatus = String(normalized.run_status || normalized.runStatus || normalized.status || "").trim();
+      return Boolean(normalized.running) || SELLER_RECOVERY_ACTIVE_STATUSES.has(runStatus);
+    }
+
+    function clearSellerRecoveryPoll() {
+      if (sellerRecoveryPollHandle) {
+        window.clearTimeout(sellerRecoveryPollHandle);
+        sellerRecoveryPollHandle = null;
+      }
+    }
+
+    function scheduleSellerRecoveryPoll(delayMs) {
+      clearSellerRecoveryPoll();
+      sellerRecoveryPollHandle = window.setTimeout(function() {
+        refreshSellerRecoveryStatus();
+      }, Number(delayMs) || 1500);
+    }
+
     async function runSourceRefreshAndReload() {
       const actionId = state.actionSequence + 1;
       state.actionSequence = actionId;
@@ -8464,7 +8528,28 @@
         if (!finalJob || finalJob.status !== "success") {
           throw new Error((finalJob && (finalJob.error || finalJob.status)) || "seller recovery start job failed");
         }
-        applySellerRecoveryPayload((finalJob && finalJob.result) || payload || {}, {render: false});
+        const recoveryPayload = (finalJob && finalJob.result) || payload || {};
+        applySellerRecoveryPayload(recoveryPayload, {render: false});
+        const runStatus = String(recoveryPayload.run_status || recoveryPayload.status || "");
+        if (runStatus === "starting") {
+          appendVisibleActionLogLine(
+            "Окно входа Seller Portal готовится. Launcher не скачивается до статуса «Нужно войти».",
+            {statusLabel: "Готовим окно", tone: "warning", detail: String(recoveryPayload.summary || recoveryPayload.reason || "")}
+          );
+        } else if (Boolean(recoveryPayload.can_download_launcher || recoveryPayload.launcher_ready || recoveryPayload.launcher_enabled)) {
+          appendVisibleActionLogLine(
+            "Окно входа Seller Portal готово. Launcher доступен.",
+            {statusLabel: "Нужно войти", tone: "warning", detail: String(recoveryPayload.summary || recoveryPayload.reason || "")}
+          );
+        } else if (Boolean(recoveryPayload.run_is_final)) {
+          appendVisibleActionLogLine(
+            String(recoveryPayload.summary || recoveryPayload.reason || "Recovery run завершён."),
+            {statusLabel: String(recoveryPayload.run_status_label || recoveryPayload.status_label || "Финал"), tone: normalizeTone(recoveryPayload.run_status_tone || recoveryPayload.status_tone || "neutral"), detail: String(recoveryPayload.final_marker || recoveryPayload.run_final_status || "")}
+          );
+        }
+        if (sellerRecoveryIsActive(recoveryPayload)) {
+          scheduleSellerRecoveryPoll(1200);
+        }
         setStatusBadge({label: "Запущено", tone: "warning", detail: "recovery flow requested"});
         await loadPageComposition({includeSourceStatus: state.sourceStatus.loaded});
       } catch (error) {
@@ -8494,13 +8579,30 @@
 
     function applySellerRecoveryPayload(payload, options) {
       const normalized = payload || {};
+      const runStatus = String(normalized.run_status || normalized.status || "");
+      const canDownload = Boolean(normalized.can_download_launcher || normalized.launcher_ready || normalized.launcher_enabled);
       state.sellerRecovery = {
-        launcherEnabled: Boolean(normalized.launcher_enabled),
+        launcherEnabled: canDownload,
+        launcherReady: Boolean(normalized.launcher_ready || canDownload),
+        canDownloadLauncher: canDownload,
+        canOpenLoginWindow: Boolean(normalized.can_open_login_window),
         launcherPath: String(normalized.launcher_download_path || WEB_VITRINA_CONFIG.seller_recovery_launcher_path || ""),
+        launcherUrl: String(normalized.launcher_url || ""),
+        runId: String(normalized.run_id || normalized.current_run_id || state.sellerRecovery.runId || ""),
+        runStatus: runStatus,
+        running: Boolean(normalized.running),
+        finalMarker: String(normalized.final_marker || normalized.run_final_status || ""),
+        reason: String(normalized.reason || ""),
+        summary: String(normalized.summary || ""),
         statusLabel: String(normalized.run_status_label || normalized.status_label || normalized.status || ""),
         tone: normalizeTone(normalized.run_status_tone || normalized.status_tone || "neutral"),
         checkedAt: String(normalized.updated_at || normalized.checked_at || new Date().toISOString())
       };
+      if (sellerRecoveryIsActive(normalized)) {
+        scheduleSellerRecoveryPoll(1500);
+      } else {
+        clearSellerRecoveryPoll();
+      }
       if (!options || options.render !== false) {
         renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
       }
@@ -8511,7 +8613,11 @@
       if (!statusPath) {
         throw new Error("seller recovery status path is missing");
       }
-      const response = await fetch(statusPath, {
+      const statusUrl = new URL(statusPath, window.location.origin);
+      if (state.sellerRecovery.runId) {
+        statusUrl.searchParams.set("run_id", state.sellerRecovery.runId);
+      }
+      const response = await fetch(statusUrl.toString(), {
         method: "GET",
         headers: {"Accept": "application/json"}
       });
@@ -8541,8 +8647,14 @@
         if (actionId !== state.actionSequence) {
           return;
         }
-        if (!statusPayload.launcher_enabled) {
-          throw new Error(String(statusPayload.summary || statusPayload.status_label || statusPayload.status || "launcher is not ready"));
+        if (!Boolean(statusPayload.can_download_launcher || statusPayload.launcher_ready || statusPayload.launcher_enabled)) {
+          const waitMessage = String(statusPayload.summary || statusPayload.reason || statusPayload.status_label || "Окно входа ещё готовится. Launcher станет доступен после статуса «Нужно войти».");
+          appendVisibleActionLogLine(
+            waitMessage,
+            {statusLabel: "Готовим окно", tone: "warning", detail: waitMessage}
+          );
+          scheduleSellerRecoveryPoll(1200);
+          return;
         }
         const downloadPath = String(statusPayload.launcher_download_path || state.sellerRecovery.launcherPath || WEB_VITRINA_CONFIG.seller_recovery_launcher_path || "");
         if (!downloadPath) {
@@ -8556,6 +8668,15 @@
           try {
             const payload = await readJsonResponse(response, "non-json response from seller recovery launcher route");
             message = String((payload && payload.error) || message);
+            if (response.status === 409) {
+              const waitMessage = String((payload && (payload.summary || payload.reason)) || message);
+              appendVisibleActionLogLine(
+                waitMessage,
+                {statusLabel: "Готовим окно", tone: "warning", detail: waitMessage}
+              );
+              scheduleSellerRecoveryPoll(1200);
+              return;
+            }
           } catch (error) {
             // Keep the HTTP status when the server returned a non-JSON failure page.
           }

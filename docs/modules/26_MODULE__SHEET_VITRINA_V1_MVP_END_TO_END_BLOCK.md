@@ -92,6 +92,8 @@ related_runners:
   - "apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py"
   - "apps/sheet_vitrina_v1_operator_load_smoke.py"
   - "apps/sheet_vitrina_v1_seller_portal_recovery_http_smoke.py"
+  - "apps/sheet_vitrina_v1_seller_portal_recovery_ui_smoke.py"
+  - "apps/sheet_vitrina_v1_seller_portal_recovery_live_smoke.py"
   - "apps/factory_order_supply_smoke.py"
   - "apps/sheet_vitrina_v1_factory_order_http_smoke.py"
   - "apps/web_source_temporal_adapter_smoke.py"
@@ -238,8 +240,8 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - embedded compatibility panel additionally keeps compact manual block `Ручная загрузка данных` с active action `Загрузить данные`; former Google Sheets action `Отправить данные` is archived/disabled, не является active runtime/update/write/load/verify target, and appears only as archived/manual-context history
   - session controls are exposed in the unified `Витрина` loading table for `Seller Portal / бот` after source-status details are explicitly loaded; the archived manual operator panel remains available only as embedded compatibility context:
     - `Проверить сессию` выполняет cheap probe against saved `storage_state.json` и truthfully различает `session_valid_canonical / session_valid_wrong_org / session_invalid / session_missing / session_probe_error`
-    - `Восстановить сессию` стартует repo-owned recovery lifecycle и немедленно создаёт текущий `run_id`
-    - `Скачать launcher для Mac` отдаёт reusable `.command`, который сам поднимает SSH tunnel к localhost-only noVNC, ждёт local HTTP-ready, poll-ит status конкретного `run_id` и печатает финальную строку `Восстановление завершено: <final_status>`
+    - `Восстановить сессию` стартует repo-owned recovery lifecycle и немедленно создаёт текущий `run_id`; UI treats `run_status=starting` as normal "окно готовится", polls `status?run_id=...` and does not try to fetch launcher until `launcher_ready` / `can_download_launcher=true`
+    - `Скачать launcher для Mac` отдаёт reusable `.command` только when launcher readiness is explicit; if the backend returns controlled `409` because the run is still starting or the launcher is not yet ready, the UI keeps a warning/retry state instead of fatal download copy. The `.command` itself поднимает SSH tunnel к localhost-only noVNC, ждёт local HTTP-ready, poll-ит status конкретного `run_id` и печатает финальную строку `Восстановление завершено: <final_status>`
     - `Остановить восстановление` cleanup-ит только temporary contour и не удаляет saved seller session
     - operator UI одновременно показывает отдельно session state и run state: `Текущий запуск / Статус запуска / Финал запуска / Статус сессии / Старт / Завершение`
     - recovery run truthfully проходит through `starting / awaiting_login / saving_session / validating_session / checking_canonical_supplier / triggering_refresh` and must end as one explicit final outcome: `completed / not_needed / stopped / timeout / error`
@@ -566,6 +568,7 @@ Bounded допущение:
 - Promo current correctness checklist: additionally run `python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py` after changes touching `promo_by_price`, promo archive/artifact validation, promo collector diagnostics/status handling, expected `ended_without_download` campaign handling, refresh orchestration, promo temporal acceptance/fallback, promo source-status reduction, or web-vitrina read/page-composition paths that can affect promo metric row visibility. If local CA verification blocks the public read, use `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1 python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py` only as the accepted local diagnostic fallback; route timeout or bad payload remains a blocker.
 - This guard verifies public `status` / `web-vitrina` / `plan`, `promo_by_price[today_current]` diagnostics, coherent `requested_count / covered_count`, zero fatal/true artifact loss counters when exposed, diagnostic-only ended/no-download artifacts and non-blank current promo rows. It does not use `/load`, Google Sheets/GAS, Sheets or browser/localStorage truth.
 - Feedbacks MVP checklist: after changes touching the `Отзывы` tab, `GET /v1/sheet-vitrina-v1/feedbacks`, official feedbacks adapter/token path or unified-shell feedbacks date/filter/table UI, run `python3 apps/sheet_vitrina_v1_feedbacks_http_smoke.py` and `python3 apps/sheet_vitrina_v1_feedbacks_browser_smoke.py`. Live/public closure additionally verifies `/sheet-vitrina-v1/vitrina` and one bounded feedbacks GET against the hosted runtime; no `/load`, Google Sheets/GAS, Seller Portal bot or feedback persistence step is involved.
+- Seller Portal recovery checklist: after changes touching `seller-portal-session/check`, recovery `start/status/stop/launcher` routes or the unified `Seller Portal / бот` controls, run `python3 apps/sheet_vitrina_v1_seller_portal_recovery_http_smoke.py` and `python3 apps/sheet_vitrina_v1_seller_portal_recovery_ui_smoke.py`; live/public closure additionally runs `python3 apps/sheet_vitrina_v1_seller_portal_recovery_live_smoke.py --attempts 10 --start-route web` against `https://api.selleros.pro`.
 - Если `clasp` credentials для archived guard publish, live runtime access или publish rights недоступны, final handoff обязан явно назвать blocker и не маркировать задачу как fully complete.
 
 # 4. Артефакты и wiring по модулю

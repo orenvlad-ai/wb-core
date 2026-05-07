@@ -928,16 +928,31 @@ def _build_handler(
 
             if parsed.path == DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH:
                 try:
+                    status_payload = entrypoint.handle_seller_portal_recovery_status_request(
+                        launcher_download_path=DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+                        run_id=None,
+                    )
+                    if not bool(status_payload.get("can_download_launcher") or status_payload.get("launcher_ready")):
+                        _write_json_response(
+                            self,
+                            HTTPStatus.CONFLICT,
+                            _seller_recovery_launcher_unavailable_payload(status_payload),
+                        )
+                        return
                     request_origin = _request_origin(self)
                     archive_bytes, filename = entrypoint.handle_seller_portal_recovery_launcher_request(
                         public_status_url=f"{request_origin}{DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH}",
                         public_operator_url=f"{request_origin}{sheet_operator_ui_path}",
                     )
                 except RuntimeError as exc:
+                    status_payload = entrypoint.handle_seller_portal_recovery_status_request(
+                        launcher_download_path=DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+                        run_id=None,
+                    )
                     _write_json_response(
                         self,
                         HTTPStatus.CONFLICT,
-                        {"error": f"seller portal recovery launcher unavailable: {exc}"},
+                        _seller_recovery_launcher_unavailable_payload(status_payload, error=str(exc)),
                     )
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
@@ -2367,6 +2382,50 @@ def _with_sheet_job_urls(payload: Mapping[str, Any], job_path: str) -> dict[str,
     normalized["download_path"] = _build_sheet_job_download_url(job_path, job_id)
     normalized["log_filename"] = f"sheet-vitrina-v1-{operation}-{job_id}.txt"
     return normalized
+
+
+def _seller_recovery_launcher_unavailable_payload(
+    status_payload: Mapping[str, Any] | None,
+    *,
+    error: str = "",
+) -> dict[str, Any]:
+    status = dict(status_payload or {})
+    run_status = str(status.get("run_status") or status.get("status") or "idle").strip() or "idle"
+    run_id = str(status.get("run_id") or status.get("current_run_id") or "").strip()
+    run_is_final = bool(status.get("run_is_final")) or run_status in {"completed", "not_needed", "stopped", "timeout", "error"}
+    if bool(status.get("requested_run_mismatch")):
+        code = "run_replaced"
+    elif not run_id or run_status == "idle":
+        code = "no_active_run"
+    elif run_status == "starting":
+        code = "run_starting"
+    elif run_status == "awaiting_login":
+        code = "launcher_artifact_missing"
+    elif run_is_final:
+        code = "run_final"
+    else:
+        code = "launcher_not_ready"
+    reason = str(status.get("reason") or status.get("summary") or status.get("message") or error or "").strip()
+    if not reason:
+        reason = "seller recovery launcher is not ready for the current run"
+    return {
+        "error": f"seller portal recovery launcher unavailable: {reason}",
+        "status": "launcher_unavailable",
+        "launcher_status": code,
+        "run_id": run_id,
+        "run_status": run_status,
+        "running": bool(status.get("running")),
+        "launcher_ready": False,
+        "can_download_launcher": False,
+        "can_open_login_window": bool(status.get("can_open_login_window")),
+        "launcher_url": "",
+        "launcher_download_path": str(status.get("launcher_download_path") or DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH),
+        "summary": str(status.get("summary") or reason),
+        "reason": reason,
+        "final_marker": str(status.get("final_marker") or ""),
+        "run_final_status": str(status.get("run_final_status") or ""),
+        "retryable": code in {"run_starting", "launcher_not_ready", "launcher_artifact_missing"},
+    }
 
 
 def _with_complaints_sync_job_urls(payload: Mapping[str, Any]) -> dict[str, Any]:

@@ -6,7 +6,9 @@ import base64
 import io
 from importlib import util
 import json
+import os
 from pathlib import Path
+import signal
 import sys
 import tempfile
 import zipfile
@@ -244,9 +246,47 @@ def main() -> None:
         if "sed -n 's/.*\"status\"" in launcher_text or 'sed -n \'s/.*"status"' in launcher_text:
             raise AssertionError("launcher script must not parse nested JSON status fields via greedy sed")
 
+        MODULE._write_status(  # type: ignore[attr-defined]
+            config,
+            {
+                "run_id": "seller-recovery-stop-run",
+                "status": "awaiting_login",
+                "message": "temporary noVNC session is ready for login",
+                "started_at": "2026-04-23T00:00:00Z",
+            },
+        )
+        config.pid_path.write_text("4242", encoding="utf-8")
+        running_state = {"running": True}
+        kill_calls: list[tuple[int, signal.Signals]] = []
+        original_pid_is_running = MODULE._pid_is_running  # type: ignore[attr-defined]
+        original_killpg = os.killpg
+        original_sleep = MODULE.time.sleep  # type: ignore[attr-defined]
+
+        def fake_killpg(pid: int, sig: signal.Signals) -> None:
+            kill_calls.append((pid, sig))
+            running_state["running"] = False
+
+        try:
+            MODULE._pid_is_running = lambda _pid: running_state["running"]  # type: ignore[assignment]
+            os.killpg = fake_killpg  # type: ignore[assignment]
+            MODULE.time.sleep = lambda _seconds: None  # type: ignore[assignment]
+            stop_payload = MODULE.stop_relogin_session(config)
+        finally:
+            MODULE._pid_is_running = original_pid_is_running  # type: ignore[assignment]
+            os.killpg = original_killpg  # type: ignore[assignment]
+            MODULE.time.sleep = original_sleep  # type: ignore[assignment]
+
+        if stop_payload.get("status") != "stopped" or stop_payload.get("running") is not False:
+            raise AssertionError(f"stop must report stopped for an operator-requested active run, got {stop_payload}")
+        if kill_calls != [(4242, signal.SIGTERM)]:
+            raise AssertionError(f"stop must terminate the active supervisor process group once, got {kill_calls}")
+        if config.pid_path.exists():
+            raise AssertionError("stop must remove supervisor.pid after cleanup")
+
         print("seller_portal_relogin_session_capture: ok -> capture_completed after browser login")
         print("seller_portal_relogin_session_supplier_switch: ok -> canonical supplier enforced before final save")
         print("seller_portal_relogin_session_launcher: ok -> archive contains reusable Mac launcher script")
+        print("seller_portal_relogin_session_stop: ok -> operator stop reports stopped, not unexpected_exit")
         print("smoke-check passed")
 
 

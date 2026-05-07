@@ -48,6 +48,10 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/plan-report/baseline-upload",
         "/v1/sheet-vitrina-v1/plan-report/baseline-status",
         "/v1/sheet-vitrina-v1/seller-portal-session/check",
+        "/v1/sheet-vitrina-v1/seller-portal-recovery/status",
+        "/v1/sheet-vitrina-v1/seller-portal-recovery/start",
+        "/v1/sheet-vitrina-v1/seller-portal-recovery/stop",
+        "/v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip",
         "/v1/sheet-vitrina-v1/feedbacks",
         "/v1/sheet-vitrina-v1/feedbacks/export.xlsx",
         "/v1/sheet-vitrina-v1/feedbacks/ai-prompt",
@@ -94,6 +98,10 @@ def main() -> None:
         raise AssertionError("rendered nginx block must include factory-order prefix exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start {") != 1:
         raise AssertionError("rendered nginx block must include web-vitrina seller recovery start exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/seller-portal-recovery/status {") != 1:
+        raise AssertionError("rendered nginx block must include seller recovery status exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip {") != 1:
+        raise AssertionError("rendered nginx block must include seller recovery launcher exactly once")
 
     sample_nginx = """server {
     server_name api.selleros.pro;
