@@ -310,14 +310,14 @@ update_note: "Обновлён под simple WebCore auth, strict feedbacks за
   - если valid closed-day truth ещё не принят, но для той же даты уже есть `accepted_current_snapshot`, visible `yesterday_closed` может использовать его только как `latest_confirmed`/yellow fallback with `resolution_rule=accepted_current_from_prior_closed_day_latest_confirmed`; это не создаёт `accepted_closed_day_snapshot` и не закрывает persisted retry/owner-runner blocker.
 - Final source matrix теперь materialized server-side как четыре группы:
   - A. bot/web-source historical / closed-day-capable = `seller_funnel_snapshot`, `web_source_snapshot`
-  - B. WB API historical/date-period capable = `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`
-  - C. WB API current-snapshot-only = `prices_snapshot`, `ads_bids`
+  - B. WB API historical/date-period capable = `sales_funnel_history`, `sf_period`, `stocks`, `ads_compact`, `fin_report_daily`
+  - C. current-snapshot accepted rollover = `prices_snapshot`, `ads_bids`, `spp`
   - D. other/non-WB/manual/browser-collector = `cost_price`, `promo_by_price`
 - Temporal status policy now stays source-aware inside those groups instead of treating every family as "оба слота обязательны":
   - `dual_day_capable` = `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `sf_period`, `ads_compact`, `cost_price`, `promo_by_price`
   - `dual_day_intraday_tolerant` = `spp`, `fin_report_daily`
   - `yesterday_closed_only` = `stocks`
-  - `accepted_current_rollover` = `prices_snapshot`, `ads_bids`
+  - `accepted_current_rollover` = `prices_snapshot`, `ads_bids`, `spp`
 - Group A + B используют one-way accepted closed-day contract для `yesterday_closed`:
   - closed slot сначала читает уже сохранённый accepted snapshot/runtime cache;
   - если valid exact-date truth ещё не принят, auto/retry contour создаёт или продолжает persisted retry state `closure_pending / closure_retrying / closure_rate_limited / closure_exhausted`;
@@ -327,12 +327,13 @@ update_note: "Обновлён под simple WebCore auth, strict feedbacks за
 - Source-aware slot reduction now follows the policy tag rather than a coarse worst-slot rule:
   - `seller_funnel_snapshot` и `web_source_snapshot` остаются полноценными two-slot sources; problematic `today_current` keeps source/card/aggregate yellow or red.
   - `stocks` still reads authoritative exact-date historical CSV/runtime truth for `yesterday_closed`, but `today_current` is now a truthful non-required `not_available` slot and must not degrade source status or aggregate semantic status.
-  - `spp` и `fin_report_daily` keep `today_current` requestable, but intraday current-day non-yield (`empty`, `zero-like`, `invalid_exact_snapshot`, `no-result`, bounded `429/timeout`, preserved/runtime-cache current fallback) is non-blocking when `yesterday_closed` is confirmed success.
+  - `fin_report_daily` keeps `today_current` requestable, but intraday current-day non-yield (`empty`, `zero-like`, `invalid_exact_snapshot`, `no-result`, bounded `429/timeout`, preserved/runtime-cache current fallback) is non-blocking when `yesterday_closed` is confirmed success.
 - Group C использует отдельный non-destructive same-day accepted contract:
   - upstream truth снимается только как current snapshot, но accepted snapshot закрытого business day D обязан materialize-иться как `yesterday_closed=D` на D+1 через persisted accepted-current seam;
   - contour не делает destructive historical refetch для D и не заменяет already accepted snapshot blank/error только потому, что upstream historical path unsupported;
   - `today_current` может long-retry-иться только в пределах текущего business day / current capture window;
   - later invalid/blank/zero candidate сохраняет и prior-day accepted truth, и earlier accepted current snapshot того же дня;
+  - `spp` uses Seller Portal `discountOnSite` as this current-visible source; legacy WB Statistics sales-average SPP remains an explicit fallback mode and is not accepted as fresh current-visible truth.
   - только новый valid current snapshot может заменить уже accepted same-day snapshot.
 - `promo_by_price` в current checkpoint больше не остаётся blocked gap:
   - `today_current` trigger-ит bounded repo-owned promo collector run поверх existing seller session reuse contour;

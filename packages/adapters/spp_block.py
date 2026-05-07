@@ -120,7 +120,7 @@ class SellerPortalDiscountOnSiteSppSource:
             raise RuntimeError("seller portal storage_state.json is missing for current SPP source")
 
         try:
-            from playwright.sync_api import sync_playwright
+            from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError, sync_playwright
         except ImportError as exc:
             raise RuntimeError("playwright is required for seller portal current SPP source") from exc
 
@@ -129,18 +129,23 @@ class SellerPortalDiscountOnSiteSppSource:
             browser = playwright.chromium.launch(headless=self._headless)
             context = browser.new_context(storage_state=str(self._storage_state_path), locale="ru-RU")
             page = context.new_page()
-            captured_headers: dict[str, str] = {}
-
-            def _capture_headers(request: Any) -> None:
-                nonlocal captured_headers
-                if captured_headers or "list/goods/filter" not in str(request.url):
-                    return
-                captured_headers = _safe_seller_portal_headers(request.all_headers())
-
-            page.on("request", _capture_headers)
             try:
-                page.goto(SELLER_PORTAL_DISCOUNTS_PAGE_URL, wait_until="domcontentloaded", timeout=timeout_ms)
-                page.wait_for_timeout(3000)
+                try:
+                    with page.expect_request(
+                        lambda item: "list/goods/filter" in str(item.url),
+                        timeout=timeout_ms,
+                    ) as request_info:
+                        page.goto(
+                            SELLER_PORTAL_DISCOUNTS_PAGE_URL,
+                            wait_until="domcontentloaded",
+                            timeout=timeout_ms,
+                        )
+                    captured_headers = _safe_seller_portal_request_headers(request_info.value)
+                except PlaywrightTimeoutError as exc:
+                    raise RuntimeError("seller portal discounts-prices request was not observed") from exc
+                except PlaywrightError as exc:
+                    raise RuntimeError(f"seller portal discounts-prices request capture failed: {exc}") from exc
+
                 if not captured_headers:
                     raise RuntimeError("seller portal discounts-prices request headers were not captured")
 
@@ -331,6 +336,22 @@ def _safe_seller_portal_headers(raw_headers: Mapping[str, str]) -> dict[str, str
             continue
         headers[str(key)] = str(value)
     return headers
+
+
+def _safe_seller_portal_request_headers(request_object: Any) -> dict[str, str]:
+    raw_headers = getattr(request_object, "headers", None)
+    if isinstance(raw_headers, Mapping):
+        headers = _safe_seller_portal_headers(raw_headers)
+        if headers:
+            return headers
+
+    all_headers = getattr(request_object, "all_headers", None)
+    if callable(all_headers):
+        try:
+            return _safe_seller_portal_headers(all_headers())
+        except Exception:
+            return {}
+    return {}
 
 
 def _seller_portal_filter_body(nm_id: int) -> dict[str, Any]:

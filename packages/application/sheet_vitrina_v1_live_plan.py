@@ -106,7 +106,7 @@ HISTORICAL_CLOSED_DAY_SOURCE_KEYS = STRICT_CLOSED_DAY_SOURCE_KEYS | {
     "fin_report_daily",
 }
 CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "promo_by_price"}
-CURRENT_SNAPSHOT_ONLY_ROLLOVER_SOURCE_KEYS = {"prices_snapshot", "ads_bids"}
+CURRENT_SNAPSHOT_ONLY_ROLLOVER_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "spp"}
 ACCEPTED_CURRENT_SOURCE_KEYS = HISTORICAL_CLOSED_DAY_SOURCE_KEYS | CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS
 EXACT_DATE_RUNTIME_CACHE_SOURCE_KEYS = {"sales_funnel_history", "stocks", "promo_by_price"}
 TEMPORAL_ROLE_PROVISIONAL_CURRENT = "provisional_current_snapshot"
@@ -134,7 +134,7 @@ SOURCE_CLASSIFICATION_GROUPS = {
     "web_source_snapshot": "A_bot_web_source_historical_closed_day_capable",
     "sales_funnel_history": "B_wb_api_date_period_capable",
     "sf_period": "B_wb_api_date_period_capable",
-    "spp": "B_wb_api_date_period_capable",
+    "spp": "C_seller_portal_current_snapshot_with_accepted_current_rollover",
     "stocks": "B_wb_api_date_period_capable",
     "ads_compact": "B_wb_api_date_period_capable",
     "fin_report_daily": "B_wb_api_date_period_capable",

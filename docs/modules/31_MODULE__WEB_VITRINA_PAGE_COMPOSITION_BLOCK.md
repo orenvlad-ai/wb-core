@@ -323,8 +323,8 @@ update_note: "Phase 4 live page composition остаётся server-driven; вк
   - snapshot row existence alone is never enough for green.
 - source-aware temporal policy is now part of that read-side truth:
   - `stocks` stays green when only non-required `today_current` is blank/`not_available`;
-  - `spp` / `fin_report_daily` stay green when `yesterday_closed` is confirmed and intraday `today_current` only produced tolerated non-final current-day output;
-  - `prices_snapshot` and `ads_bids` stay green for accepted-current rollover, same-day accepted preservation and latest confirmed filled values; missing required current without accepted fallback remains not OK;
+  - `fin_report_daily` stays green when `yesterday_closed` is confirmed and intraday `today_current` only produced tolerated non-final current-day output;
+  - `prices_snapshot`, `ads_bids` and `spp` stay green for accepted-current rollover, same-day accepted preservation and latest confirmed filled values; missing required current without accepted fallback remains not OK;
   - `promo_by_price` stays green when accepted/runtime-cached latest confirmed values fill the visible cells, while invalid attempts without fallback remain not OK;
   - `seller_funnel_snapshot` / `web_source_snapshot` remain strict two-slot sources and keep the summary cards degraded on broken `today_current`.
 - `Загрузить и обновить` on the vitrina now reuse-ит the canonical refresh contour and no longer depends on `/load` or Google Sheet auth to refresh the web-vitrina itself.
