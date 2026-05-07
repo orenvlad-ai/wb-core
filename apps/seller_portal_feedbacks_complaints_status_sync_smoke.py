@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
+import os
 import sys
 from tempfile import TemporaryDirectory
 
@@ -11,7 +13,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from apps.seller_portal_feedbacks_complaints_status_sync import _apply_status_updates  # noqa: E402
+from apps.seller_portal_feedbacks_complaints_status_sync import (  # noqa: E402
+    _apply_status_updates,
+    _augment_session_with_storage_supplier_context,
+    _can_try_direct_complaints_routes,
+)
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import JsonFileFeedbacksComplaintJournal  # noqa: E402
 
 
@@ -121,7 +127,64 @@ def main() -> None:
             raise AssertionError(f"deep pending collection stats must be surfaced: {report}")
         if report["aggregate"]["answered_oldest_review_date"] != "2026-04-01":
             raise AssertionError(f"historical answered scan date must be surfaced: {report}")
+    _assert_direct_complaints_session_fallback()
     print("seller_portal_feedbacks_complaints_status_sync_smoke: OK")
+
+
+def _assert_direct_complaints_session_fallback() -> None:
+    previous = os.environ.get("SELLER_PORTAL_CANONICAL_SUPPLIER_ID")
+    os.environ["SELLER_PORTAL_CANONICAL_SUPPLIER_ID"] = "canonical-supplier-id"
+    try:
+        with TemporaryDirectory(prefix="complaints-status-session-smoke-") as tmp:
+            storage = Path(tmp) / "storage_state.json"
+            storage.write_text(
+                json.dumps(
+                    {
+                        "cookies": [
+                            {
+                                "name": "x-supplier-id",
+                                "value": "canonical-supplier-id",
+                                "domain": "seller.wildberries.ru",
+                                "path": "/",
+                            },
+                            {
+                                "name": "x-supplier-id-external",
+                                "value": "canonical-supplier-id",
+                                "domain": ".wildberries.ru",
+                                "path": "/",
+                            },
+                        ],
+                        "origins": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            session = _augment_session_with_storage_supplier_context(
+                {
+                    "ok": False,
+                    "status": "seller_portal_session_invalid",
+                    "supplier_context": {},
+                },
+                storage,
+            )
+            if not _can_try_direct_complaints_routes(session):
+                raise AssertionError(f"canonical storage supplier should allow direct complaints probe: {session}")
+            wrong = _augment_session_with_storage_supplier_context(
+                {
+                    "ok": False,
+                    "status": "seller_portal_session_invalid",
+                    "supplier_context": {"current_supplier_id": "wrong-supplier-id"},
+                },
+                storage,
+            )
+            if _can_try_direct_complaints_routes(wrong):
+                raise AssertionError(f"wrong supplier must not allow direct complaints probe: {wrong}")
+    finally:
+        if previous is None:
+            os.environ.pop("SELLER_PORTAL_CANONICAL_SUPPLIER_ID", None)
+        else:
+            os.environ["SELLER_PORTAL_CANONICAL_SUPPLIER_ID"] = previous
 
 
 def _record(
