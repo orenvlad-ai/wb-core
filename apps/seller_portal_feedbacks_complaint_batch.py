@@ -213,6 +213,8 @@ def run_batch(
                 break
             if submitted_count >= max_submit and "max_submit hard cap reached" in blocker:
                 continue
+            if _has_pending_feedback_ids_for_day(candidate_state, day):
+                continue
             day_report["stopped_reason"] = "day_exhausted_or_no_more_safe_candidates"
             break
         if not day_report["stopped_reason"]:
@@ -270,7 +272,9 @@ def _merge_candidate_state(candidate_state: dict[str, dict[str, Any]], *, day: s
         if state.get("status") == "submitted":
             continue
         reason = str(candidate.get("skip_reason") or modal.get("blocker") or "")
-        if reason:
+        if reason == "skipped because max_ai_candidates slots were already filled":
+            state.update({"status": "pending", "reason": reason})
+        elif reason:
             group = _reason_group(reason)
             state.update({"status": "not_submitted", "reason_group": group, "reason": reason})
         elif candidate.get("selected_for_dry_run"):
@@ -284,6 +288,13 @@ def _not_submitted_feedback_ids_for_day(candidate_state: Mapping[str, Mapping[st
         if str(state.get("date") or "") == day
         and str(state.get("status") or "") == "not_submitted"
         and str(state.get("feedback_id") or "")
+    )
+
+
+def _has_pending_feedback_ids_for_day(candidate_state: Mapping[str, Mapping[str, Any]], day: str) -> bool:
+    return any(
+        str(state.get("date") or "") == day and str(state.get("status") or "") == "pending"
+        for state in candidate_state.values()
     )
 
 
