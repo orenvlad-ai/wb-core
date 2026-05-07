@@ -46,7 +46,7 @@ def main() -> None:
 
     for token in (
         "Обновление данных",
-        "Расчёт поставок",
+        "Поставки",
         "Отчёты",
         "Ежедневные отчёты",
             "Отчёт по остаткам",
@@ -182,7 +182,7 @@ def main() -> None:
     if filtered_rows:
         raise AssertionError("stock-report selector semantics must exclude deselected SKU from the rendered row set")
 
-    print("reports_ui_sections: ok -> Обновление данных / Расчёт поставок / Отчёты")
+    print("reports_ui_sections: ok -> Обновление данных / Поставки / Отчёты")
     print("reports_ui_subsections: ok -> daily / stock / plan")
     print("reports_ui_plan_baseline_controls: ok -> template / upload / status")
     print("reports_ui_stock_selector: ok -> full active SKU config, default=all, empty-selection validation")

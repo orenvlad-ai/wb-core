@@ -6,28 +6,37 @@
   <title>__SHEET_VITRINA_V1_OPERATOR_PAGE_TITLE__</title>
   <style>
     :root {
-      color-scheme: light;
-      --page-bg: #f3f5f7;
-      --panel-bg: #ffffff;
-      --border: #d7dee7;
-      --border-strong: #c6d3e4;
-      --text: #18212b;
-      --muted: #637182;
-      --accent: #0b63f6;
-      --accent-hover: #084dc7;
-      --idle-bg: #eef2f6;
-      --idle-text: #415364;
-      --loading-bg: #fff2d9;
-      --loading-text: #8b5a00;
-      --warning-bg: #fff2d9;
-      --warning-text: #8b5a00;
-      --success-bg: #e7f6ed;
-      --success-text: #157347;
-      --error-bg: #fdeaea;
-      --error-text: #b42318;
-      --shadow: 0 18px 48px rgba(17, 24, 39, 0.08);
-      --radius: 18px;
-      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      color-scheme: dark;
+      --page-bg: #0f1115;
+      --panel-bg: #17191f;
+      --panel-subtle: #1f222a;
+      --panel-elevated: #20242c;
+      --control-bg: #111318;
+      --control-bg-hover: #242933;
+      --border: #2b3038;
+      --border-strong: #3a414d;
+      --text: #f4f4f5;
+      --muted: #9aa3af;
+      --muted-strong: #c5cad3;
+      --accent: #8B5CF6;
+      --accent-hover: #A78BFA;
+      --accent-active: #7C3AED;
+      --accent-soft: rgba(139, 92, 246, 0.14);
+      --accent-border: rgba(139, 92, 246, 0.38);
+      --accent-focus: rgba(139, 92, 246, 0.36);
+      --idle-bg: rgba(148, 163, 184, 0.13);
+      --idle-text: #cbd5e1;
+      --loading-bg: rgba(245, 158, 11, 0.15);
+      --loading-text: #fbbf24;
+      --warning-bg: rgba(245, 158, 11, 0.15);
+      --warning-text: #fbbf24;
+      --success-bg: rgba(34, 197, 94, 0.14);
+      --success-text: #86efac;
+      --error-bg: rgba(248, 113, 113, 0.14);
+      --error-text: #fca5a5;
+      --shadow: 0 18px 44px rgba(0, 0, 0, 0.28);
+      --radius: 8px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
     }
 
     * {
@@ -38,8 +47,8 @@
       margin: 0;
       min-height: 100vh;
       background:
-        radial-gradient(circle at top left, rgba(11, 99, 246, 0.06), transparent 34%),
-        linear-gradient(180deg, #f8fafc 0%, var(--page-bg) 100%);
+        radial-gradient(circle at 50% -24%, rgba(255, 255, 255, 0.06), transparent 32rem),
+        var(--page-bg);
       color: var(--text);
     }
 
@@ -102,7 +111,7 @@
     }
 
     .tab-button:hover {
-      background: #eef4ff;
+      background: var(--control-bg-hover);
       color: var(--text);
       transform: translateY(-1px);
     }
@@ -135,13 +144,13 @@
       display: inline-flex;
       align-items: center;
       text-decoration: none;
-      border-bottom: 1px solid rgba(11, 99, 246, 0.22);
+      border-bottom: 1px solid var(--accent-border);
       transition: border-color 120ms ease, color 120ms ease;
     }
 
     .eyebrow-link:hover {
       color: var(--accent);
-      border-color: rgba(11, 99, 246, 0.46);
+      border-color: var(--accent-border);
     }
 
     .section-lead {
@@ -650,8 +659,8 @@
     .stock-selector-action {
       appearance: none;
       border: 0;
-      background: #ecf3ff;
-      color: #184e96;
+      background: var(--accent-soft);
+      color: #ddd6fe;
       border-radius: 999px;
       padding: 6px 10px;
       font: inherit;
@@ -985,9 +994,9 @@
     }
 
     .subsection-button.is-active {
-      background: #ffffff;
-      border-color: rgba(11, 99, 246, 0.2);
-      color: #0b4fd0;
+      background: var(--accent-soft);
+      border-color: var(--accent-border);
+      color: #ddd6fe;
       box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
     }
 
@@ -1050,9 +1059,9 @@
     }
 
     .field input:focus {
-      outline: 2px solid rgba(11, 99, 246, 0.18);
+      outline: 2px solid var(--accent-focus);
       outline-offset: 1px;
-      border-color: rgba(11, 99, 246, 0.38);
+      border-color: var(--accent-border);
     }
 
     .field-note {
@@ -1248,6 +1257,354 @@
 
     .district-table tbody tr:last-child td {
       border-bottom: 0;
+    }
+
+    /* Dark embedded operator UI: reports and supply tabs share the unified vitrina surface tokens. */
+    .tab-strip {
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      background: rgba(23, 25, 31, 0.92);
+      padding: 4px;
+      gap: 2px;
+      margin: 0 0 10px;
+    }
+
+    .tab-button {
+      min-height: 34px;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--muted);
+      padding: 8px 12px;
+      font-size: 14px;
+      font-weight: 650;
+      transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+    }
+
+    .tab-button:hover {
+      background: var(--control-bg-hover);
+      color: var(--text);
+      transform: none;
+    }
+
+    .tab-button.is-active {
+      background: var(--panel-subtle);
+      border-color: var(--border-strong);
+      color: var(--text);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+    }
+
+    .panel,
+    .block,
+    .dataset-card,
+    .report-hero-card,
+    .report-card,
+    .stock-report-item,
+    .plan-report-card,
+    .district-table-wrap,
+    .log-viewport,
+    .stock-selector-summary,
+    .stock-selector-panel,
+    .stock-selector-option {
+      background: var(--panel-bg);
+      border-color: var(--border);
+      color: var(--text);
+      box-shadow: none;
+    }
+
+    .panel {
+      border-radius: var(--radius);
+      padding: 18px;
+    }
+
+    body.is-embedded .panel {
+      background: transparent;
+      border: 0;
+      border-radius: 0;
+      padding: 0;
+    }
+
+    .block,
+    .dataset-card,
+    .report-card,
+    .stock-report-item,
+    .plan-report-card {
+      border-radius: var(--radius);
+      background: var(--panel-subtle);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    }
+
+    .report-hero-card {
+      background: var(--panel-subtle);
+    }
+
+    .section-lead,
+    .field-note,
+    .dataset-status,
+    .dataset-upload-hint,
+    .report-card p,
+    .plan-report-card p,
+    .report-note,
+    .report-period,
+    .stock-selector-hint,
+    .stock-selector-empty,
+    .plan-report-baseline p,
+    .plan-report-baseline-details,
+    .status-label,
+    .report-list-meta {
+      color: var(--muted);
+    }
+
+    .eyebrow-link {
+      color: var(--muted-strong);
+      border-bottom-color: var(--accent-border);
+    }
+
+    .eyebrow-link:hover,
+    .dataset-file-link {
+      color: var(--accent-hover);
+      border-color: var(--accent-border);
+    }
+
+    .block-title,
+    .meta-grid dt,
+    .summary-grid dt,
+    .stock-selector-label,
+    .field label,
+    .plan-report-table thead th,
+    .district-table th {
+      color: var(--muted-strong);
+    }
+
+    .meta-grid dd,
+    .summary-grid dd,
+    .report-kpis dd,
+    .report-list-title,
+    .plan-report-metric-label,
+    .dataset-card h3,
+    .report-hero-title h3,
+    .report-card h3,
+    .plan-report-card h3,
+    .plan-report-baseline h3 {
+      color: var(--text);
+    }
+
+    .action-button,
+    .log-download-button {
+      min-height: 34px;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 700;
+      transform: none;
+    }
+
+    .primary-button {
+      border: 1px solid var(--accent);
+      background: var(--accent);
+      color: #ffffff;
+    }
+
+    .primary-button:hover:not(:disabled) {
+      border-color: var(--accent-hover);
+      background: var(--accent-hover);
+      color: #ffffff;
+      transform: none;
+    }
+
+    .secondary-button,
+    .log-download-button,
+    .stock-selector-action {
+      border: 1px solid var(--border);
+      background: var(--control-bg);
+      color: var(--text);
+    }
+
+    .secondary-button:hover:not(:disabled),
+    .log-download-button:hover:not(:disabled),
+    .stock-selector-action:hover:not(:disabled) {
+      border-color: var(--border-strong);
+      background: var(--control-bg-hover);
+      color: var(--text);
+      transform: none;
+    }
+
+    .action-button:disabled,
+    .log-download-button:disabled,
+    .dataset-delete-button:disabled,
+    .stock-selector-action:disabled {
+      border-color: rgba(58, 65, 77, 0.7);
+      background: rgba(31, 34, 42, 0.58);
+      color: #697180;
+      opacity: 1;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .field input:not([type="checkbox"]),
+    .field select,
+    .dataset-actions input[type="file"],
+    .plan-report-baseline-actions input[type="file"] {
+      min-height: 34px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--control-bg);
+      color: var(--text);
+      color-scheme: dark;
+      padding: 8px 10px;
+      font: inherit;
+      font-size: 12px;
+    }
+
+    .field input:not([type="checkbox"]):focus,
+    .field select:focus,
+    .stock-selector-summary:focus,
+    .action-button:focus,
+    .log-download-button:focus,
+    .subsection-button:focus,
+    .tab-button:focus {
+      outline: 2px solid var(--accent-focus);
+      outline-offset: 1px;
+      border-color: var(--accent);
+    }
+
+    .subsection-strip {
+      gap: 4px;
+      margin-top: 18px;
+      padding: 4px;
+      border-radius: 9px;
+      border-color: var(--border);
+      background: var(--panel-subtle);
+    }
+
+    .subsection-button {
+      min-height: 34px;
+      border-radius: 7px;
+      color: var(--muted);
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 800;
+      transform: none;
+    }
+
+    .subsection-button:hover {
+      background: var(--control-bg-hover);
+      color: var(--text);
+      transform: none;
+    }
+
+    .subsection-button.is-active {
+      background: var(--accent-soft);
+      border-color: var(--accent-border);
+      color: #ddd6fe;
+      box-shadow: none;
+    }
+
+    .factory-grid,
+    .dataset-grid,
+    .field-grid,
+    .grid,
+    .report-card-grid,
+    .plan-report-grid {
+      gap: 12px;
+    }
+
+    .factory-grid,
+    .supply-panel,
+    .report-panel {
+      margin-top: 16px;
+    }
+
+    .block-actions,
+    .dataset-actions,
+    .factory-actions,
+    .plan-report-baseline-actions,
+    .stock-report-toolbar {
+      align-items: center;
+      gap: 8px;
+    }
+
+    .dataset-actions input[type="file"],
+    .plan-report-baseline-actions input[type="file"] {
+      max-width: 100%;
+      padding: 6px 10px;
+    }
+
+    .dataset-delete-button {
+      border: 1px solid rgba(248, 113, 113, 0.42);
+      background: rgba(127, 29, 29, 0.24);
+      color: #fecaca;
+    }
+
+    .dataset-delete-button:hover:not(:disabled) {
+      border-color: rgba(248, 113, 113, 0.72);
+      background: rgba(153, 27, 27, 0.42);
+      color: #ffffff;
+    }
+
+    .stock-selector-panel {
+      background: var(--panel-elevated);
+      border-color: var(--border-strong);
+      box-shadow: var(--shadow);
+    }
+
+    .stock-selector-action {
+      border-radius: 999px;
+      color: #ddd6fe;
+      background: var(--accent-soft);
+      border-color: var(--accent-border);
+    }
+
+    .stock-selector-option {
+      background: var(--control-bg);
+      border-color: var(--border);
+    }
+
+    .stock-selector-option:hover {
+      border-color: var(--accent-border);
+      background: var(--control-bg-hover);
+    }
+
+    .report-list-item,
+    .plan-report-baseline,
+    .plan-report-table th,
+    .plan-report-table td,
+    .district-table th,
+    .district-table td {
+      border-color: var(--border);
+    }
+
+    .plan-report-table thead th,
+    .district-table th {
+      background: #1b1e26;
+    }
+
+    .plan-report-table tbody tr:hover td,
+    .district-table tbody tr:hover td {
+      background: #181c23;
+    }
+
+    .log-viewport,
+    .district-table-wrap,
+    .plan-report-table-wrap {
+      background: var(--control-bg);
+      border-color: var(--border);
+    }
+
+    .log-block {
+      color: var(--muted-strong);
+    }
+
+    .report-count,
+    .report-delta,
+    .badge.is-idle,
+    .plan-report-status-badge.is-unknown {
+      background: var(--idle-bg);
+      color: var(--idle-text);
+    }
+
+    .stock-report-chip {
+      border: 1px solid rgba(248, 113, 113, 0.34);
     }
 
     @media (max-width: 760px) {
