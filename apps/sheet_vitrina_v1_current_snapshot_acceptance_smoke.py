@@ -46,11 +46,13 @@ def main() -> None:
         requested_nm_ids,
         probe_nm_id,
     )
+    spp_note = _assert_spp_current_snapshot_rollover_and_blank_preserve(bundle, requested_nm_ids, probe_nm_id)
     _assert_manual_invalid_without_acceptance_does_not_schedule_retry(bundle, requested_nm_ids)
 
     print("auto_retry_current_only: ok -> closure_retrying created for prices_snapshot[today_current] and ads_bids[today_current]")
     print(f"preserved_current_snapshot: ok -> {preserved_note}")
     print(f"rollover_preserved_yesterday_closed: ok -> {rollover_note}")
+    print(f"spp_current_snapshot_rollover: ok -> {spp_note}")
     print("manual_no_retry_leak: ok -> invalid manual current-only run stayed non-destructive and unscheduled")
     print("smoke-check passed")
 
@@ -417,6 +419,131 @@ def _assert_manual_invalid_without_acceptance_does_not_schedule_retry(
             raise AssertionError(f"manual invalid ads refresh must not leak persisted retry state, got {ads_closure_state}")
 
 
+def _assert_spp_current_snapshot_rollover_and_blank_preserve(
+    bundle: dict[str, object],
+    requested_nm_ids: list[int],
+    probe_nm_id: int,
+) -> str:
+    with TemporaryDirectory(prefix="sheet-vitrina-spp-rollover-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        result = runtime.ingest_bundle(bundle, activated_at=ACTIVATED_AT)
+        if result.status != "accepted":
+            raise AssertionError(f"fixture ingest must be accepted, got {result}")
+
+        scenario = _CurrentOnlyScenario(requested_nm_ids=requested_nm_ids, mode="valid")
+        now_factory = _MutableNowFactory("2026-04-19T06:00:00+00:00")
+        entrypoint = _build_entrypoint(
+            runtime=runtime,
+            refreshed_at_factory=_SequenceTimestampFactory(
+                [
+                    "2026-04-19T06:05:00Z",
+                    "2026-04-20T06:05:00Z",
+                    "2026-04-20T14:05:00Z",
+                ]
+            ),
+            now_factory=now_factory,
+            prices_block=_SyntheticPricesBlock(scenario),
+            ads_bids_block=_SyntheticAdsBidsBlock(scenario),
+            spp_block=_SyntheticSppBlock(scenario),
+            requested_nm_ids=requested_nm_ids,
+        )
+
+        day_d_refresh = entrypoint._run_sheet_refresh(
+            as_of_date=AS_OF_DATE,
+            log=None,
+            execution_mode=EXECUTION_MODE_AUTO_DAILY,
+        )
+        if day_d_refresh["status"] != "success":
+            raise AssertionError("day D refresh must succeed for current SPP acceptance")
+        accepted_spp, accepted_spp_at = runtime.load_temporal_source_slot_snapshot(
+            source_key="spp",
+            snapshot_date=CURRENT_DATE,
+            snapshot_role=TEMPORAL_ROLE_ACCEPTED_CURRENT,
+        )
+        if accepted_spp is None:
+            raise AssertionError("successful current SPP fetch must persist exact business-date accepted_current evidence")
+        if getattr(accepted_spp.items[0], "spp", None) != 0.23:
+            raise AssertionError(f"accepted current SPP must keep day-D value, got {accepted_spp}")
+        if accepted_spp_at != "2026-04-19T06:00:00Z":
+            raise AssertionError(f"accepted current SPP must keep day-D capture timestamp, got {accepted_spp_at}")
+
+        now_factory.value = "2026-04-20T06:00:00+00:00"
+        rollover_refresh = entrypoint._run_sheet_refresh(
+            as_of_date=ROLLOVER_AS_OF_DATE,
+            log=None,
+            execution_mode=EXECUTION_MODE_AUTO_DAILY,
+        )
+        if rollover_refresh["status"] != "success":
+            raise AssertionError("day D+1 refresh must succeed for SPP rollover")
+        rollover_plan = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=ROLLOVER_AS_OF_DATE)
+        rollover_status = _status_rows(rollover_plan)
+        rollover_rows = _data_rows(rollover_plan)
+        yesterday_status = rollover_status["spp[yesterday_closed]"]
+        if yesterday_status[1] != "success":
+            raise AssertionError(f"SPP prior current snapshot must materialize yesterday_closed, got {yesterday_status}")
+        if "accepted_closed_from_prior_current_snapshot" not in str(yesterday_status[10]):
+            raise AssertionError(f"SPP yesterday_closed must expose accepted-current rollover note, got {yesterday_status}")
+        if _yesterday_value(rollover_rows[f"SKU:{probe_nm_id}|spp"]) != 0.23:
+            raise AssertionError("day-D accepted SPP must materialize into D+1 yesterday_closed")
+        if _today_value(rollover_rows[f"SKU:{probe_nm_id}|spp"]) != 0.31:
+            raise AssertionError("day D+1 valid SPP must materialize into today_current")
+
+        scenario.mode = "invalid"
+        now_factory.value = "2026-04-20T14:00:00+00:00"
+        invalid_refresh = entrypoint._run_sheet_refresh(
+            as_of_date=ROLLOVER_AS_OF_DATE,
+            log=None,
+            execution_mode=EXECUTION_MODE_MANUAL_OPERATOR,
+        )
+        if invalid_refresh["status"] != "success":
+            raise AssertionError("later invalid SPP refresh must preserve accepted ready values")
+        invalid_plan = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=ROLLOVER_AS_OF_DATE)
+        invalid_status = _status_rows(invalid_plan)
+        invalid_rows = _data_rows(invalid_plan)
+        today_status = invalid_status["spp[today_current]"]
+        if today_status[1] != "success":
+            raise AssertionError(f"invalid later SPP attempt must keep accepted current snapshot visible, got {today_status}")
+        if "accepted_current_preserved_after_invalid_attempt" not in str(today_status[10]):
+            raise AssertionError(f"invalid later SPP attempt must explain preserved accepted snapshot, got {today_status}")
+        if _yesterday_value(invalid_rows[f"SKU:{probe_nm_id}|spp"]) != 0.23:
+            raise AssertionError("invalid D+1 attempt must preserve day-D yesterday SPP")
+        if _today_value(invalid_rows[f"SKU:{probe_nm_id}|spp"]) != 0.31:
+            raise AssertionError("invalid D+1 attempt must preserve already accepted current SPP")
+
+    with TemporaryDirectory(prefix="sheet-vitrina-spp-no-evidence-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        result = runtime.ingest_bundle(bundle, activated_at=ACTIVATED_AT)
+        if result.status != "accepted":
+            raise AssertionError(f"fixture ingest must be accepted, got {result}")
+
+        scenario = _CurrentOnlyScenario(requested_nm_ids=requested_nm_ids, mode="invalid")
+        entrypoint = _build_entrypoint(
+            runtime=runtime,
+            refreshed_at_factory=_SequenceTimestampFactory(["2026-04-20T16:05:00Z"]),
+            now_factory=_MutableNowFactory("2026-04-20T16:00:00+00:00"),
+            prices_block=_SyntheticPricesBlock(scenario),
+            ads_bids_block=_SyntheticAdsBidsBlock(scenario),
+            spp_block=_SyntheticSppBlock(scenario),
+            requested_nm_ids=requested_nm_ids,
+        )
+        refresh_payload = entrypoint._run_sheet_refresh(
+            as_of_date=ROLLOVER_AS_OF_DATE,
+            log=None,
+            execution_mode=EXECUTION_MODE_MANUAL_OPERATOR,
+        )
+        if refresh_payload["status"] != "success":
+            raise AssertionError("SPP no-evidence refresh must remain non-destructive")
+        plan = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=ROLLOVER_AS_OF_DATE)
+        status = _status_rows(plan)["spp[yesterday_closed]"]
+        rows = _data_rows(plan)
+        if status[1] != "missing":
+            raise AssertionError(f"SPP historical date without exact evidence must stay missing, got {status}")
+        if _yesterday_value(rows[f"SKU:{probe_nm_id}|spp"]) != "":
+            raise AssertionError("SPP historical date without exact evidence must not be fabricated")
+
+    return f"{yesterday_status[10]} | {today_status[10]}"
+
+
 def _build_entrypoint(
     *,
     runtime: RegistryUploadDbBackedRuntime,
@@ -424,6 +551,7 @@ def _build_entrypoint(
     now_factory: "_MutableNowFactory",
     prices_block: object,
     ads_bids_block: object,
+    spp_block: object | None = None,
     requested_nm_ids: list[int],
 ) -> RegistryUploadHttpEntrypoint:
     entrypoint = RegistryUploadHttpEntrypoint(
@@ -438,6 +566,7 @@ def _build_entrypoint(
         now_factory=now_factory,
         prices_block=prices_block,
         ads_bids_block=ads_bids_block,
+        spp_block=spp_block or _SyntheticSuccessBlock("spp", requested_nm_ids),
         requested_nm_ids=requested_nm_ids,
     )
     return entrypoint
@@ -449,6 +578,7 @@ def _build_live_plan(
     now_factory: "_MutableNowFactory",
     prices_block: object,
     ads_bids_block: object,
+    spp_block: object,
     requested_nm_ids: list[int],
 ):
     from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock
@@ -462,7 +592,7 @@ def _build_live_plan(
         sales_funnel_history_block=_SyntheticSuccessBlock("sales_funnel_history", requested_nm_ids),
         prices_snapshot_block=prices_block,
         sf_period_block=_SyntheticSuccessBlock("sf_period", requested_nm_ids),
-        spp_block=_SyntheticSuccessBlock("spp", requested_nm_ids),
+        spp_block=spp_block,
         ads_bids_block=ads_bids_block,
         stocks_block=_SyntheticSuccessBlock("stocks", requested_nm_ids),
         ads_compact_block=_SyntheticSuccessBlock("ads_compact", requested_nm_ids),
@@ -530,6 +660,41 @@ class _SyntheticAdsBidsBlock:
                         nm_id=nm_id,
                         ads_bid_search=0.0 if zero_filled else float(search_base + index),
                         ads_bid_recommendations=0.0 if zero_filled else float(recommendations_base + index),
+                    )
+                    for index, nm_id in enumerate(self.scenario.requested_nm_ids)
+                ],
+            )
+        )
+
+
+class _SyntheticSppBlock:
+    def __init__(self, scenario: _CurrentOnlyScenario) -> None:
+        self.scenario = scenario
+
+    def execute(self, request: object) -> SimpleNamespace:
+        snapshot_date = str(getattr(request, "snapshot_date"))
+        if snapshot_date not in {CURRENT_DATE, NEXT_CURRENT_DATE}:
+            raise AssertionError(f"SPP current-only path must only request today_current date, got {snapshot_date}")
+        if self.scenario.mode == "invalid":
+            return SimpleNamespace(
+                result=SimpleNamespace(
+                    kind="empty",
+                    snapshot_date=snapshot_date,
+                    count=0,
+                    items=[],
+                    detail="no SPP rows returned for requested nmIds and snapshot date",
+                )
+            )
+        spp_base = 0.23 if snapshot_date == CURRENT_DATE else 0.31
+        return SimpleNamespace(
+            result=SimpleNamespace(
+                kind="success",
+                snapshot_date=snapshot_date,
+                count=len(self.scenario.requested_nm_ids),
+                items=[
+                    SimpleNamespace(
+                        nm_id=nm_id,
+                        spp=round(float(spp_base + index / 1000), 6),
                     )
                     for index, nm_id in enumerate(self.scenario.requested_nm_ids)
                 ],

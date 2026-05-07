@@ -12,6 +12,7 @@ from packages.adapters.spp_block import (  # noqa: E402
     SellerPortalDiscountOnSiteSppSource,
     _discount_on_site_goods_to_spp_items,
     _normalize_discount_on_site,
+    _safe_seller_portal_request_headers,
 )
 from packages.application.spp_block import SppBlock  # noqa: E402
 from packages.contracts.spp_block import SppRequest  # noqa: E402
@@ -104,11 +105,31 @@ def test_http_source_routes_to_configured_seller_portal_source() -> None:
     _assert_close(result.items[0].spp, 0.23, "routed source spp")
 
 
+def test_seller_portal_header_capture_uses_sync_headers_property() -> None:
+    class RequestWithHeaders:
+        headers = {
+            "authorizev3": "redacted",
+            "wb-seller-lk": "redacted",
+            "cookie": "must-not-forward",
+            "accept-encoding": "gzip",
+        }
+
+        def all_headers(self) -> dict[str, str]:
+            raise RuntimeError("all_headers must not be required after request capture")
+
+    headers = _safe_seller_portal_request_headers(RequestWithHeaders())
+    _assert_equal(headers.get("authorizev3"), "redacted", "authorizev3 header captured")
+    _assert_equal(headers.get("wb-seller-lk"), "redacted", "wb seller header captured")
+    _assert_equal("cookie" in headers, False, "cookie header omitted")
+    _assert_equal("accept-encoding" in headers, False, "accept-encoding header omitted")
+
+
 def main() -> None:
     test_discount_on_site_normalization()
     test_goods_to_items()
     test_current_only_source()
     test_http_source_routes_to_configured_seller_portal_source()
+    test_seller_portal_header_capture_uses_sync_headers_property()
     print("spp_source_correctness: ok")
 
 
