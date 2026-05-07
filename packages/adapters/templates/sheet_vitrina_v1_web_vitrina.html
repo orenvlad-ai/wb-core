@@ -6666,7 +6666,7 @@
             "Accept": "application/json",
             "Content-Type": "application/json; charset=utf-8"
           },
-	          body: JSON.stringify({max_complaint_rows: 500})
+	          body: JSON.stringify({max_complaint_rows: 500, record_statuses: ["waiting_response"]})
         });
         const payload = await readJsonResponse(response, "non-json response from complaints status sync route");
         if (!response.ok) {
@@ -6760,7 +6760,7 @@
       if (feedbacksComplaintsSyncButton) {
         feedbacksComplaintsSyncButton.disabled = Boolean(complaints.loading || syncActive);
         feedbacksComplaintsSyncButton.textContent = syncActive ? "Обновляем…" : "Обновить статусы";
-        feedbacksComplaintsSyncButton.title = "Read-only синхронизация из Seller Portal / Мои жалобы";
+        feedbacksComplaintsSyncButton.title = "Read-only синхронизация из Seller Portal / Мои жалобы для статуса Ждёт ответа";
       }
       if (feedbacksComplaintsStatusNode) {
         const meta = complaints.meta || {};

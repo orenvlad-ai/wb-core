@@ -29,6 +29,7 @@ from apps.seller_portal_feedbacks_complaints_scout import (  # noqa: E402
 from apps.seller_portal_feedbacks_matching_replay import safe_text  # noqa: E402
 from apps.seller_portal_relogin_session import DEFAULT_STORAGE_STATE_PATH, DEFAULT_WB_BOT_PYTHON  # noqa: E402
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import (  # noqa: E402
+    COMPLAINT_STATUS_LABELS,
     CONTRACT_NAME,
     JsonFileFeedbacksComplaintJournal,
 )
@@ -38,6 +39,8 @@ SYNC_CONTRACT_NAME = "seller_portal_feedbacks_complaints_status_sync"
 DEFAULT_RUNTIME_DIR = Path(os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR", "/opt/wb-core-runtime/state"))
 DEFAULT_OUTPUT_ROOT = Path("/opt/wb-core-runtime/state/feedbacks_complaints_status_sync")
 LOCAL_OUTPUT_ROOT = Path("artifacts/seller_portal_feedbacks_complaints_status_sync")
+DEFAULT_RECORD_STATUSES = ("waiting_response",)
+ALL_RECORD_STATUSES = tuple(COMPLAINT_STATUS_LABELS.keys())
 
 
 def main() -> None:
@@ -48,6 +51,11 @@ def main() -> None:
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
     parser.add_argument("--max-complaint-rows", type=int, default=500)
+    parser.add_argument(
+        "--record-statuses",
+        default=",".join(DEFAULT_RECORD_STATUSES),
+        help="Comma-separated local complaint_status values to reconcile; use 'all' only for diagnostics.",
+    )
     parser.add_argument("--headed", action="store_true")
     parser.add_argument("--timeout-ms", type=int, default=20000)
     parser.add_argument("--no-artifacts", action="store_true")
@@ -61,6 +69,7 @@ def main() -> None:
         output_dir=output_dir,
         start_url=str(args.start_url).rstrip("/") or DEFAULT_START_URL,
         max_complaint_rows=max(1, int(args.max_complaint_rows)),
+        record_statuses=args.record_statuses,
         headless=not args.headed,
         timeout_ms=max(5000, int(args.timeout_ms)),
         write_artifacts=not bool(args.no_artifacts),
@@ -76,6 +85,7 @@ def run_status_sync_for_runtime(
     output_dir: Path | None = None,
     start_url: str = DEFAULT_START_URL,
     max_complaint_rows: int = 500,
+    record_statuses: Any = DEFAULT_RECORD_STATUSES,
     headless: bool = True,
     timeout_ms: int = 20000,
     write_artifacts: bool = True,
@@ -84,6 +94,9 @@ def run_status_sync_for_runtime(
     run_id = str(run_id or "").strip() or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     journal = JsonFileFeedbacksComplaintJournal(runtime_dir)
     records_before = journal.list_records()
+    target_statuses = _normalize_record_statuses(record_statuses)
+    target_records = _filter_records_by_status(records_before, target_statuses)
+    status_counts_before = Counter(str(record.get("complaint_status") or "") for record in records_before)
     scout_config = ScoutConfig(
         mode="scout-complaints",
         storage_state_path=storage_state_path,
@@ -110,6 +123,7 @@ def run_status_sync_for_runtime(
             "seller_portal_write_actions_allowed": False,
             "complaint_submission_allowed": False,
             "status_sync_only": True,
+            "record_status_scope": "all" if target_statuses is None else sorted(target_statuses),
         },
         "session": {},
         "navigation": {},
@@ -117,6 +131,13 @@ def run_status_sync_for_runtime(
         "updates": [],
         "aggregate": {
             "local_records_before": len(records_before),
+            "local_waiting_records_before": int(status_counts_before.get("waiting_response", 0)),
+            "local_satisfied_records_skipped": 0 if target_statuses is None or "satisfied" in target_statuses else int(status_counts_before.get("satisfied", 0)),
+            "local_rejected_records_skipped": 0 if target_statuses is None or "rejected" in target_statuses else int(status_counts_before.get("rejected", 0)),
+            "local_error_records_skipped": 0 if target_statuses is None or "error" in target_statuses else int(status_counts_before.get("error", 0)),
+            "target_records_before": len(target_records),
+            "records_scanned": len(target_records),
+            "record_status_scope": "all" if target_statuses is None else sorted(target_statuses),
             "pending_rows_read": 0,
             "answered_rows_read": 0,
             "matched_local_complaints": 0,
@@ -125,6 +146,17 @@ def run_status_sync_for_runtime(
         },
         "errors": [],
     }
+    if not target_records:
+        report["session"] = {
+            "ok": True,
+            "status": "skipped_no_target_records",
+            "message": "no local complaint records match status sync scope",
+        }
+        report["navigation"] = {"success": False, "skipped": True, "reason": "no_target_records"}
+        report["finished_at"] = _iso_now()
+        _maybe_write(report, output_dir, write_artifacts)
+        return report
+
     session = check_session(scout_config)
     report["session"] = session
     if not session.get("ok"):
@@ -153,7 +185,14 @@ def run_status_sync_for_runtime(
                 else:
                     my = scout_my_complaints(page, scout_config)
                     report["my_complaints"] = my
-                    _apply_status_updates(report, journal, records_before, my, run_id=run_id)
+                    _apply_status_updates(
+                        report,
+                        journal,
+                        records_before,
+                        my,
+                        run_id=run_id,
+                        record_statuses="all" if target_statuses is None else sorted(target_statuses),
+                    )
             finally:
                 context.close()
                 browser.close()
@@ -164,6 +203,33 @@ def run_status_sync_for_runtime(
     return report
 
 
+def _normalize_record_statuses(raw: Any) -> set[str] | None:
+    if raw is None:
+        return set(DEFAULT_RECORD_STATUSES)
+    if isinstance(raw, str):
+        parts = [part.strip().lower() for part in raw.replace(";", ",").split(",")]
+    elif isinstance(raw, (list, tuple, set)):
+        parts = [str(part or "").strip().lower() for part in raw]
+    else:
+        parts = [str(raw or "").strip().lower()]
+    normalized = [part for part in parts if part]
+    if not normalized:
+        return set(DEFAULT_RECORD_STATUSES)
+    if any(part in {"all", "*"} for part in normalized):
+        return None
+    allowed = set(ALL_RECORD_STATUSES)
+    unknown = sorted({part for part in normalized if part not in allowed})
+    if unknown:
+        raise ValueError(f"unknown complaint_status for status sync scope: {', '.join(unknown)}")
+    return set(normalized)
+
+
+def _filter_records_by_status(records: list[dict[str, Any]], statuses: set[str] | None) -> list[dict[str, Any]]:
+    if statuses is None:
+        return list(records)
+    return [record for record in records if str(record.get("complaint_status") or "").strip() in statuses]
+
+
 def _apply_status_updates(
     report: dict[str, Any],
     journal: JsonFileFeedbacksComplaintJournal,
@@ -171,7 +237,30 @@ def _apply_status_updates(
     my_complaints: Mapping[str, Any],
     *,
     run_id: str,
+    record_statuses: Any = DEFAULT_RECORD_STATUSES,
 ) -> None:
+    all_records = list(records)
+    target_statuses = _normalize_record_statuses(record_statuses)
+    records = _filter_records_by_status(all_records, target_statuses)
+    status_counts = Counter(str(record.get("complaint_status") or "") for record in all_records)
+    aggregate = report.setdefault("aggregate", {})
+    aggregate.setdefault("local_records_before", len(all_records))
+    aggregate.setdefault("local_waiting_records_before", int(status_counts.get("waiting_response", 0)))
+    aggregate.setdefault(
+        "local_satisfied_records_skipped",
+        0 if target_statuses is None or "satisfied" in target_statuses else int(status_counts.get("satisfied", 0)),
+    )
+    aggregate.setdefault(
+        "local_rejected_records_skipped",
+        0 if target_statuses is None or "rejected" in target_statuses else int(status_counts.get("rejected", 0)),
+    )
+    aggregate.setdefault(
+        "local_error_records_skipped",
+        0 if target_statuses is None or "error" in target_statuses else int(status_counts.get("error", 0)),
+    )
+    aggregate.setdefault("target_records_before", len(records))
+    aggregate.setdefault("records_scanned", len(records))
+    aggregate.setdefault("record_status_scope", "all" if target_statuses is None else sorted(target_statuses))
     local_by_id = {str(record.get("feedback_id") or ""): record for record in records if record.get("feedback_id")}
     pending_rows = list(((my_complaints.get("pending") or {}).get("rows") or []))
     answered_rows = list(((my_complaints.get("answered") or {}).get("rows") or []))
@@ -385,6 +474,11 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
         f"- Started: `{report.get('started_at')}`",
         f"- Finished: `{report.get('finished_at')}`",
         f"- Session: `{(report.get('session') or {}).get('status')}`",
+        f"- Record status scope: `{agg.get('record_status_scope')}`",
+        f"- Local waiting records before: `{agg.get('local_waiting_records_before', 0)}`",
+        f"- Records scanned: `{agg.get('records_scanned', 0)}`",
+        f"- Final records skipped: `{int(agg.get('local_satisfied_records_skipped') or 0) + int(agg.get('local_rejected_records_skipped') or 0)}`",
+        f"- Error records skipped: `{agg.get('local_error_records_skipped', 0)}`",
         f"- Pending rows read: `{agg.get('pending_rows_read', 0)}`",
         f"- Answered rows read: `{agg.get('answered_rows_read', 0)}`",
         f"- Matched local complaints: `{agg.get('matched_local_complaints', 0)}`",

@@ -31,6 +31,9 @@ def main() -> None:
                 complaint_text="Отзыв касается вскрытой коробки.",
             )
         )
+        journal.create_or_update(_record("already-satisfied", "Текст final satisfied", "Другое", status="satisfied"))
+        journal.create_or_update(_record("already-rejected", "Текст final rejected", "Другое", status="rejected"))
+        journal.create_or_update(_record("existing-error", "Текст error", "Другое", status="error"))
         report = {"aggregate": {}, "updates": []}
         rows = {
             "pending": {
@@ -60,6 +63,9 @@ def main() -> None:
                     _row("unrelated visible text", "Другое", decision="approved", status="answered", hidden_feedback_id="direct-feedback"),
                     _row("unmatched", "Другое", decision="approved", status="answered"),
                     _row("чужой отзыв", "Другое", decision="rejected", status="answered", description="другое описание"),
+                    _row("Текст final satisfied", "Другое", decision="rejected", status="answered"),
+                    _row("Текст final rejected", "Другое", decision="approved", status="answered"),
+                    _row("Текст error", "Другое", decision="approved", status="answered"),
                     _row(
                         "Коробка была вскрыта",
                         "Другое",
@@ -85,7 +91,21 @@ def main() -> None:
             raise AssertionError(f"direct feedback_id row must override text mismatch: {statuses}")
         if statuses["pros-only-feedback"] != "satisfied":
             raise AssertionError(f"pros/cons fallback must match the right answered row once: {statuses}")
-        if report["aggregate"]["unmatched_rows"] != 2:
+        if statuses["already-satisfied"] != "satisfied":
+            raise AssertionError(f"final satisfied record must be skipped by default: {statuses}")
+        if statuses["already-rejected"] != "rejected":
+            raise AssertionError(f"final rejected record must be skipped by default: {statuses}")
+        if statuses["existing-error"] != "error":
+            raise AssertionError(f"error record must be skipped by default: {statuses}")
+        if report["aggregate"]["records_scanned"] != 5:
+            raise AssertionError(f"default status sync scope must scan only waiting records: {report}")
+        if report["aggregate"]["local_satisfied_records_skipped"] != 1:
+            raise AssertionError(f"satisfied records must be counted as skipped: {report}")
+        if report["aggregate"]["local_rejected_records_skipped"] != 1:
+            raise AssertionError(f"rejected records must be counted as skipped: {report}")
+        if report["aggregate"]["local_error_records_skipped"] != 1:
+            raise AssertionError(f"error records must be counted as skipped: {report}")
+        if report["aggregate"]["unmatched_rows"] != 5:
             raise AssertionError(f"unmatched row must be reported: {report}")
         if report["aggregate"]["duplicate_row_matches_skipped"] != 1:
             raise AssertionError(f"duplicate pending/answered match must be skipped: {report}")
@@ -112,10 +132,11 @@ def _record(
     pros: str = "",
     complaint_text: str = "Просим проверить отзыв: тест.",
     last_error: str = "",
+    status: str = "waiting_response",
 ) -> dict[str, object]:
     return {
         "feedback_id": feedback_id,
-        "complaint_status": "waiting_response",
+        "complaint_status": status,
         "wb_category_label": category,
         "complaint_text": complaint_text,
         "review_text": text,
