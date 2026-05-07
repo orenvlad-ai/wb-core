@@ -220,7 +220,7 @@ def run_submit(config: SubmitConfig) -> dict[str, Any]:
         raise RuntimeError("real complaint submission requires --i-understand-this-submits-complaints")
     if config.max_submit > MAX_SUBMIT_HARD_CAP:
         raise RuntimeError(f"max_submit hard cap is {MAX_SUBMIT_HARD_CAP}")
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     journal = JsonFileFeedbacksComplaintJournal(config.runtime_dir)
     dry_config = to_dry_run_config(config)
     report: dict[str, Any] = {
@@ -267,6 +267,18 @@ def run_submit(config: SubmitConfig) -> dict[str, Any]:
 
     api_report = load_api_feedback_rows(dry_config)
     report["api"] = api_report
+    if not api_report.get("success"):
+        report["errors"].append(
+            {
+                "stage": "api_feedbacks",
+                "code": str(api_report.get("error_code") or "api_feedbacks_source_error"),
+                "message": str(api_report.get("blocker") or "feedback rows source fetch failed"),
+            }
+        )
+        report["aggregate"] = build_submit_aggregate([])
+        report["final_conclusion"] = "source_error"
+        report["finished_at"] = iso_now()
+        return report
     api_rows = api_report.get("rows") if isinstance(api_report.get("rows"), list) else []
     if not api_rows:
         report["aggregate"] = build_submit_aggregate([])

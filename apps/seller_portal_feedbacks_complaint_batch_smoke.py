@@ -14,6 +14,7 @@ from apps.seller_portal_feedbacks_complaint_batch import (  # noqa: E402
     _batch_aggregate,
     _merge_candidate_state,
     _reason_group,
+    _systemic_blocker,
 )
 
 
@@ -49,6 +50,15 @@ def main() -> None:
         raise AssertionError(f"disabled already-complained reason must be grouped: {aggregate}")
     if _reason_group("description field value mismatch before final submit") != "description_not_persisted":
         raise AssertionError("description mismatch must be grouped as description_not_persisted")
+    source_error = _systemic_blocker(
+        {
+            "final_conclusion": "source_error",
+            "aggregate": {},
+            "errors": [{"stage": "api_feedbacks", "message": "required env WB_API_TOKEN is not set"}],
+        }
+    )
+    if "WB_API_TOKEN" not in source_error:
+        raise AssertionError(f"API/source failures must stop the batch explicitly: {source_error!r}")
     print("seller_portal_feedbacks_complaint_batch_smoke: OK")
 
 
