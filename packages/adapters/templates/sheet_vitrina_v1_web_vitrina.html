@@ -7,27 +7,32 @@
   <title>__SHEET_VITRINA_V1_WEB_VITRINA_PAGE_TITLE__</title>
   <style>
     :root {
-      color-scheme: light;
-      --page-bg: #f4f6f8;
-      --panel-bg: #ffffff;
-      --panel-subtle: #f7f8fb;
-      --border: #d7dde6;
-      --border-strong: #c6cfda;
-      --text: #202a36;
-      --muted: #5f6f81;
-      --accent: #2f6fed;
-      --accent-hover: #255acc;
-      --success-bg: #edf7f0;
-      --success-text: #166534;
-      --warning-bg: #fff8eb;
-      --warning-text: #92400e;
-      --error-bg: #fdf0ef;
-      --error-text: #b42318;
-      --shadow: 0 14px 34px rgba(17, 24, 39, 0.07);
-      --radius: 12px;
-      --sticky-shadow: inset -1px 0 0 rgba(199, 207, 217, 0.95);
+      color-scheme: dark;
+      --page-bg: #0f1115;
+      --panel-bg: #17191f;
+      --panel-subtle: #1f222a;
+      --panel-elevated: #20242c;
+      --control-bg: #111318;
+      --control-bg-hover: #242933;
+      --border: #2b3038;
+      --border-strong: #3a414d;
+      --text: #f4f4f5;
+      --muted: #9aa3af;
+      --muted-strong: #c5cad3;
+      --accent: #10a37f;
+      --accent-hover: #0e8f70;
+      --accent-soft: rgba(16, 163, 127, 0.16);
+      --success-bg: rgba(34, 197, 94, 0.14);
+      --success-text: #86efac;
+      --warning-bg: rgba(245, 158, 11, 0.15);
+      --warning-text: #fbbf24;
+      --error-bg: rgba(248, 113, 113, 0.14);
+      --error-text: #fca5a5;
+      --shadow: 0 18px 44px rgba(0, 0, 0, 0.28);
+      --radius: 8px;
+      --sticky-shadow: inset -1px 0 0 rgba(58, 65, 77, 0.98);
       --table-font-size: 10.5px;
-      font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
     }
 
     * {
@@ -37,7 +42,9 @@
     body {
       margin: 0;
       min-height: 100vh;
-      background: var(--page-bg);
+      background:
+        radial-gradient(circle at 50% -24%, rgba(255, 255, 255, 0.06), transparent 32rem),
+        var(--page-bg);
       color: var(--text);
       overscroll-behavior-x: none;
     }
@@ -67,30 +74,28 @@
 
     .unified-tab-button {
       appearance: none;
-      border: 1px solid var(--border-strong);
-      border-bottom: 0;
-      border-radius: 14px 14px 0 0;
-      background: #f8fbff;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      background: transparent;
       color: var(--muted);
       font: inherit;
       font-size: 14px;
-      font-weight: 700;
-      padding: 12px 18px;
+      font-weight: 650;
+      padding: 8px 12px;
       cursor: pointer;
-      transition: background-color 120ms ease, color 120ms ease, transform 120ms ease;
+      transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
     }
 
     .unified-tab-button:hover {
-      background: #eef4ff;
+      background: var(--control-bg-hover);
       color: var(--text);
-      transform: translateY(-1px);
     }
 
     .unified-tab-button.is-active {
-      background: var(--panel-bg);
+      background: var(--panel-subtle);
       color: var(--text);
-      border-color: var(--border);
-      box-shadow: 0 -8px 18px rgba(17, 24, 39, 0.04);
+      border-color: var(--border-strong);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
     }
 
     .shell-logout-link {
@@ -413,10 +418,6 @@
       min-width: 150px;
     }
 
-    .feedbacks-toolbar {
-      grid-template-columns: repeat(6, minmax(140px, 1fr));
-    }
-
     .feedbacks-subtabs {
       display: inline-flex;
       gap: 4px;
@@ -451,6 +452,93 @@
       display: none;
     }
 
+    .feedbacks-workspace {
+      display: grid;
+      gap: 10px;
+    }
+
+    .feedbacks-filter-panel,
+    .feedbacks-action-toolbar,
+    .feedbacks-table-tools {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--panel-subtle);
+      padding: 10px;
+    }
+
+    .feedbacks-filter-panel {
+      display: grid;
+      gap: 10px;
+    }
+
+    .feedbacks-filter-grid {
+      display: grid;
+      grid-template-columns: minmax(300px, 1.4fr) minmax(260px, 1.1fr) minmax(150px, 0.7fr) minmax(190px, 0.8fr);
+      gap: 10px;
+      align-items: end;
+    }
+
+    .feedbacks-filter-grid .research-field,
+    .feedbacks-filter-grid .research-field-wide {
+      grid-column: auto;
+    }
+
+    .feedbacks-action-toolbar,
+    .feedbacks-table-tools {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .feedbacks-action-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .feedbacks-action-group.is-danger {
+      margin-left: auto;
+      padding-left: 10px;
+      border-left: 1px solid var(--border);
+    }
+
+    .feedbacks-selection-pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 32px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--control-bg);
+      color: var(--muted-strong);
+      padding: 5px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .feedbacks-source-helper {
+      margin: 0;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .feedbacks-table-tools-main {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .feedbacks-table-tools-title {
+      color: var(--muted-strong);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
     .feedbacks-star-list {
       display: flex;
       flex-wrap: wrap;
@@ -464,7 +552,8 @@
       min-height: 34px;
       border: 1px solid var(--border);
       border-radius: 6px;
-      background: #ffffff;
+      background: var(--control-bg);
+      color: var(--text);
       padding: 6px 8px;
       font-size: 12px;
       font-weight: 700;
@@ -1880,6 +1969,303 @@
       display: none !important;
     }
 
+    /* Dark operator surface overrides for legacy light hardcoded controls. */
+    .shell-header {
+      align-items: center;
+      padding: 0;
+    }
+
+    .unified-tab-strip {
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      background: rgba(23, 25, 31, 0.92);
+      padding: 4px;
+      gap: 2px;
+    }
+
+    .shell-logout-link,
+    .top-panel,
+    .panel,
+    .operator-embed-panel,
+    .summary-card,
+    .activity-card,
+    .activity-card.is-secondary,
+    .activity-summary-item,
+    .table-control-toolbar,
+    .column-manager-toggle,
+    .history-compact-control,
+    .research-picker-summary,
+    .research-range-control,
+    .research-option,
+    .column-checkbox,
+    .state-box,
+    .feedbacks-submit-log {
+      background: var(--panel-bg);
+      border-color: var(--border);
+      color: var(--text);
+    }
+
+    .top-panel,
+    .panel,
+    .operator-embed-panel {
+      box-shadow: none;
+    }
+
+    .activity-card,
+    .feedbacks-filter-panel,
+    .feedbacks-action-toolbar,
+    .feedbacks-table-tools,
+    .table-control-toolbar {
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    }
+
+    .button {
+      min-height: 34px;
+      border-radius: 6px;
+      gap: 6px;
+      white-space: nowrap;
+    }
+
+    .button.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #06140f;
+      font-weight: 800;
+    }
+
+    .button.primary:hover:not(:disabled) {
+      border-color: var(--accent-hover);
+      background: var(--accent-hover);
+      transform: none;
+    }
+
+    .button.secondary,
+    .button.ghost,
+    .shell-logout-link {
+      background: var(--control-bg);
+      color: var(--text);
+    }
+
+    .button.secondary:hover:not(:disabled),
+    .button.ghost:hover:not(:disabled),
+    .shell-logout-link:hover {
+      border-color: var(--border-strong);
+      background: var(--control-bg-hover);
+      transform: none;
+    }
+
+    .button.danger {
+      border-color: rgba(248, 113, 113, 0.48);
+      background: rgba(127, 29, 29, 0.34);
+      color: #fecaca;
+    }
+
+    .button.danger:hover:not(:disabled) {
+      border-color: rgba(248, 113, 113, 0.72);
+      background: rgba(153, 27, 27, 0.5);
+      transform: none;
+    }
+
+    .button:disabled,
+    .button.is-disabled {
+      border-color: rgba(58, 65, 77, 0.7);
+      background: rgba(31, 34, 42, 0.58);
+      color: #697180;
+      opacity: 1;
+    }
+
+    .input,
+    .select,
+    .activity-group-date-input {
+      min-height: 34px;
+      border-color: var(--border);
+      border-radius: 6px;
+      background: var(--control-bg);
+      color: var(--text);
+      color-scheme: dark;
+    }
+
+    .input:focus,
+    .select:focus,
+    .button:focus,
+    .research-range-control:focus,
+    .history-compact-control:focus,
+    .column-manager-toggle:focus {
+      outline: 2px solid rgba(16, 163, 127, 0.25);
+      border-color: var(--accent);
+    }
+
+    .research-range-popover,
+    .research-picker-panel,
+    .column-manager-panel,
+    .history-popover {
+      background: var(--panel-elevated);
+      border-color: var(--border-strong);
+      box-shadow: var(--shadow);
+      color: var(--text);
+    }
+
+    .history-month-nav,
+    .history-day {
+      background: var(--control-bg);
+      color: var(--text);
+    }
+
+    .history-day:hover:not(:disabled),
+    .history-month-nav:hover:not(:disabled) {
+      border-color: var(--accent);
+      background: var(--control-bg-hover);
+    }
+
+    .history-day:disabled,
+    .history-month-nav:disabled {
+      background: rgba(31, 34, 42, 0.55);
+      color: #626b78;
+    }
+
+    .history-day.in-range {
+      background: rgba(16, 163, 127, 0.16);
+      border-color: rgba(16, 163, 127, 0.36);
+      color: #a7f3d0;
+    }
+
+    .history-day.range-edge {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #06140f;
+    }
+
+    .table-shell,
+    .activity-log-body {
+      background: var(--control-bg);
+      border-color: var(--border);
+    }
+
+    .vitrina-table {
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+    }
+
+    .vitrina-table th,
+    .vitrina-table td {
+      background: var(--control-bg);
+      border-color: var(--border);
+      color: var(--text);
+    }
+
+    .vitrina-table thead th {
+      background: #1b1e26;
+      color: var(--muted-strong);
+    }
+
+    .vitrina-table tbody tr:hover td {
+      background: #181c23;
+    }
+
+    .table-spacer-cell,
+    .group-row td,
+    .sku-separator-row td,
+    .activity-group-row td {
+      background: #191d24;
+      color: var(--muted-strong);
+    }
+
+    .cell-badge,
+    .cell-row-kind,
+    .feedbacks-ai-fit {
+      background: var(--panel-subtle);
+      color: var(--muted-strong);
+    }
+
+    .cell-placeholder,
+    .activity-group-updated,
+    .activity-group-run-state,
+    .activity-group-date-label,
+    .seller-session-state {
+      color: var(--muted);
+    }
+
+    .tone-neutral {
+      background: rgba(148, 163, 184, 0.13);
+      color: #cbd5e1;
+    }
+
+    .summary-card-label,
+    .filter-label {
+      letter-spacing: 0.06em;
+    }
+
+    .feedbacks-subtabs {
+      background: var(--panel-subtle);
+      border-color: var(--border);
+    }
+
+    .feedbacks-subtab-button.is-active {
+      background: var(--control-bg-hover);
+      color: var(--text);
+      box-shadow: none;
+    }
+
+    .feedbacks-tag-chip {
+      border-color: rgba(16, 163, 127, 0.32);
+      background: rgba(16, 163, 127, 0.12);
+      color: #a7f3d0;
+    }
+
+    .feedbacks-complaint-status,
+    .feedbacks-complaint-status.status-rejected,
+    .feedbacks-complaint-status.status-skipped,
+    .feedbacks-complaint-status.status-processed_not_submitted {
+      border-color: var(--border-strong);
+      background: var(--panel-subtle);
+      color: var(--muted-strong);
+    }
+
+    .feedbacks-complaint-status.status-error {
+      border-color: rgba(248, 113, 113, 0.42);
+      background: var(--error-bg);
+      color: var(--error-text);
+    }
+
+    .feedbacks-complaint-status.status-waiting_response {
+      border-color: rgba(251, 191, 36, 0.36);
+      background: var(--warning-bg);
+      color: var(--warning-text);
+    }
+
+    .feedbacks-complaint-status.status-satisfied {
+      border-color: rgba(134, 239, 172, 0.34);
+      background: var(--success-bg);
+      color: var(--success-text);
+    }
+
+    .feedbacks-submit-log-title {
+      border-color: var(--border);
+      color: var(--muted-strong);
+    }
+
+    .feedbacks-submit-log-body {
+      color: var(--muted-strong);
+      background: var(--control-bg);
+    }
+
+    .feedbacks-ai-fit.fit-yes,
+    .feedbacks-ai-fit.fit-error {
+      background: var(--error-bg);
+      color: var(--error-text);
+    }
+
+    .feedbacks-ai-fit.fit-review {
+      background: var(--warning-bg);
+      color: var(--warning-text);
+    }
+
+    .feedbacks-ai-fit.fit-no,
+    .cell-row-kind.total {
+      background: var(--success-bg);
+      color: var(--success-text);
+    }
+
     @media (max-width: 900px) {
       .page {
         padding: 12px;
@@ -1976,10 +2362,24 @@
       }
 
       .activity-layout,
-      .feedbacks-toolbar,
+      .feedbacks-filter-grid,
       .research-form-grid,
       .history-fields {
         grid-template-columns: 1fr;
+      }
+
+      .feedbacks-action-toolbar,
+      .feedbacks-table-tools {
+        align-items: stretch;
+      }
+
+      .feedbacks-action-group,
+      .feedbacks-action-group.is-danger,
+      .feedbacks-table-tools-main {
+        width: 100%;
+        margin-left: 0;
+        padding-left: 0;
+        border-left: 0;
       }
 
       .research-field-wide {
@@ -2005,7 +2405,7 @@
   <main class="page" data-web-vitrina-page="web_vitrina_page_composition">
     <header class="shell-header">
       <nav class="unified-tab-strip" role="tablist" aria-label="Разделы sheet_vitrina_v1">
-        <button class="unified-tab-button is-active" type="button" data-unified-tab-button="vitrina" role="tab" aria-selected="true">Витрина 2</button>
+        <button class="unified-tab-button is-active" type="button" data-unified-tab-button="vitrina" role="tab" aria-selected="true">Витрина</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="factory-order" role="tab" aria-selected="false">Поставки</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="reports" role="tab" aria-selected="false">Отчёты</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="feedbacks" role="tab" aria-selected="false">Отзывы</button>
@@ -2214,97 +2614,110 @@
 	        </div>
 
 	        <section class="feedbacks-subpanel" data-feedbacks-subpanel="reviews">
+	          <div class="feedbacks-workspace">
+	            <div class="feedbacks-filter-panel">
+	              <div class="feedbacks-filter-grid">
+	                <div class="research-field" data-feedbacks-range-field>
+	                  <span class="filter-label">Период отзывов</span>
+	                  <div class="research-range-picker">
+	                    <button class="research-range-control" type="button" data-feedbacks-range-toggle aria-expanded="false">
+	                      <span class="research-range-label" data-feedbacks-range-label>Период не выбран</span>
+	                      <span aria-hidden="true">▾</span>
+	                    </button>
+	                    <div class="research-range-popover" data-feedbacks-range-popover hidden>
+	                      <div class="history-picker-head">
+	                        <button class="history-month-nav" type="button" data-feedbacks-range-prev aria-label="Предыдущий месяц">‹</button>
+	                        <p class="history-month-label" data-feedbacks-range-month-label>месяц</p>
+	                        <button class="history-month-nav" type="button" data-feedbacks-range-next aria-label="Следующий месяц">›</button>
+	                      </div>
+	                      <div class="research-range-calendar" data-feedbacks-range-calendar></div>
+	                      <div class="history-presets-panel">
+	                        <div class="history-preset-list" data-feedbacks-presets></div>
+	                      </div>
+	                      <div class="history-fields">
+	                        <label class="filter-card">
+	                          <span class="filter-label">Начало периода</span>
+	                          <input class="input" type="date" data-feedbacks-date-from>
+	                        </label>
+	                        <label class="filter-card">
+	                          <span class="filter-label">Конец периода</span>
+	                          <input class="input" type="date" data-feedbacks-date-to>
+	                        </label>
+	                      </div>
+	                      <div class="filters-footer">
+	                        <p class="filter-summary" data-feedbacks-range-summary>Период не выбран</p>
+	                        <div class="history-actions">
+	                          <button class="button secondary" type="button" data-feedbacks-range-reset>Сбросить</button>
+	                          <button class="button primary" type="button" data-feedbacks-range-save>Сохранить</button>
+	                        </div>
+	                      </div>
+	                    </div>
+	                  </div>
+	                </div>
 
-	        <div class="research-form-grid feedbacks-toolbar">
-	          <div class="research-field research-field-wide" data-feedbacks-range-field>
-            <span class="filter-label">Период отзывов</span>
-            <div class="research-range-picker">
-              <button class="research-range-control" type="button" data-feedbacks-range-toggle aria-expanded="false">
-                <span class="research-range-label" data-feedbacks-range-label>Период не выбран</span>
-                <span aria-hidden="true">▾</span>
-              </button>
-              <div class="research-range-popover" data-feedbacks-range-popover hidden>
-                <div class="history-picker-head">
-                  <button class="history-month-nav" type="button" data-feedbacks-range-prev aria-label="Предыдущий месяц">‹</button>
-                  <p class="history-month-label" data-feedbacks-range-month-label>месяц</p>
-                  <button class="history-month-nav" type="button" data-feedbacks-range-next aria-label="Следующий месяц">›</button>
-                </div>
-                <div class="research-range-calendar" data-feedbacks-range-calendar></div>
-                <div class="history-presets-panel">
-                  <div class="history-preset-list" data-feedbacks-presets></div>
-                </div>
-                <div class="history-fields">
-                  <label class="filter-card">
-                    <span class="filter-label">Начало периода</span>
-                    <input class="input" type="date" data-feedbacks-date-from>
-                  </label>
-                  <label class="filter-card">
-                    <span class="filter-label">Конец периода</span>
-                    <input class="input" type="date" data-feedbacks-date-to>
-                  </label>
-                </div>
-                <div class="filters-footer">
-                  <p class="filter-summary" data-feedbacks-range-summary>Период не выбран</p>
-                  <div class="history-actions">
-                    <button class="button secondary" type="button" data-feedbacks-range-reset>Сбросить</button>
-                    <button class="button primary" type="button" data-feedbacks-range-save>Сохранить</button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
+	                <div class="research-field">
+	                  <span class="filter-label">Звёзды</span>
+	                  <div class="feedbacks-star-list" data-feedbacks-star-list>
+	                    <label class="feedbacks-star-option"><input type="checkbox" data-feedbacks-star value="1" checked>1</label>
+	                    <label class="feedbacks-star-option"><input type="checkbox" data-feedbacks-star value="2" checked>2</label>
+	                    <label class="feedbacks-star-option"><input type="checkbox" data-feedbacks-star value="3" checked>3</label>
+	                    <label class="feedbacks-star-option"><input type="checkbox" data-feedbacks-star value="4" checked>4</label>
+	                    <label class="feedbacks-star-option"><input type="checkbox" data-feedbacks-star value="5" checked>5</label>
+	                  </div>
+	                </div>
 
-          <div class="research-field research-field-wide">
-            <span class="filter-label">Звёзды</span>
-            <div class="feedbacks-star-list" data-feedbacks-star-list>
-              <label class="feedbacks-star-option"><input type="checkbox" data-feedbacks-star value="1" checked>1</label>
-              <label class="feedbacks-star-option"><input type="checkbox" data-feedbacks-star value="2" checked>2</label>
-              <label class="feedbacks-star-option"><input type="checkbox" data-feedbacks-star value="3" checked>3</label>
-              <label class="feedbacks-star-option"><input type="checkbox" data-feedbacks-star value="4" checked>4</label>
-              <label class="feedbacks-star-option"><input type="checkbox" data-feedbacks-star value="5" checked>5</label>
-            </div>
-          </div>
+	                <label class="research-field">
+	                  <span class="filter-label">Ответ</span>
+	                  <select class="select" data-feedbacks-is-answered>
+	                    <option value="all">Все</option>
+	                    <option value="false">Без ответа</option>
+	                    <option value="true">С ответом</option>
+	                  </select>
+	                </label>
 
-	          <label class="research-field">
-	            <span class="filter-label">Ответ</span>
-	            <select class="select" data-feedbacks-is-answered>
-              <option value="all">Все</option>
-              <option value="false">Без ответа</option>
-              <option value="true">С ответом</option>
-	            </select>
-	          </label>
+	                <label class="research-field">
+	                  <span class="filter-label">AI-разбор</span>
+	                  <select class="select" data-feedbacks-ai-filter disabled>
+	                    <option value="all">Все</option>
+	                    <option value="yes">Подходит для жалобы</option>
+	                    <option value="review">На проверку</option>
+	                    <option value="no">Не подходит</option>
+	                    <option value="unanalyzed">Не разобрано</option>
+	                  </select>
+	                </label>
+	              </div>
+	              <p class="feedbacks-source-helper" data-feedbacks-source-note>WB API / feedbacks</p>
+	            </div>
 
-	          <label class="research-field">
-	            <span class="filter-label">AI-разбор</span>
-	            <select class="select" data-feedbacks-ai-filter disabled>
-	              <option value="all">Все</option>
-	              <option value="yes">Подходит для жалобы</option>
-	              <option value="review">На проверку</option>
-	              <option value="no">Не подходит</option>
-	              <option value="unanalyzed">Не разобрано</option>
-	            </select>
-	          </label>
+	            <div class="feedbacks-action-toolbar" aria-label="Действия с отзывами">
+	              <div class="feedbacks-action-group">
+	                <button class="button primary" type="button" data-feedbacks-load>Загрузить отзывы</button>
+	                <button class="button secondary" type="button" data-feedbacks-ai-analyze disabled>AI-разбор отзывов</button>
+	                <button class="button secondary" type="button" data-feedbacks-export disabled>Скачать Excel</button>
+	              </div>
+	              <div class="feedbacks-action-group is-danger">
+	                <span class="feedbacks-selection-pill" data-feedbacks-submit-selected-count>Выбрано: 0</span>
+	                <button class="button danger" type="button" data-feedbacks-submit-selected disabled>Подать выбранные жалобы</button>
+	              </div>
+	            </div>
 
-	          <div class="research-field research-actions">
-	            <button class="button primary" type="button" data-feedbacks-load>Загрузить отзывы</button>
-	            <button class="button secondary" type="button" data-feedbacks-ai-analyze disabled>AI-разбор отзывов</button>
-	            <button class="button secondary" type="button" data-feedbacks-export disabled>Скачать Excel</button>
-	            <button class="button danger" type="button" data-feedbacks-submit-selected disabled>Подать выбранные жалобы</button>
-	            <button class="button ghost" type="button" data-feedbacks-reset-widths>Сбросить ширины</button>
-	            <span class="research-result-note" data-feedbacks-submit-selected-count>Выбрано: 0</span>
-	            <span class="research-result-note" data-feedbacks-source-note>WB API / feedbacks</span>
+	            <p class="research-error" data-feedbacks-error></p>
+	            <div class="summary-grid" data-feedbacks-summary></div>
+	            <div class="feedbacks-table-tools" aria-label="Настройки таблицы отзывов">
+	              <div class="feedbacks-table-tools-main">
+	                <span class="feedbacks-table-tools-title">Таблица отзывов</span>
+	                <button class="button ghost" type="button" data-feedbacks-reset-widths>Сбросить ширины</button>
+	              </div>
+	              <p class="feedbacks-source-helper">Ширины столбцов сохраняются в этом браузере.</p>
+	            </div>
+	            <div data-feedbacks-result>
+	              <p class="research-result-note">Выберите период и нажмите «Загрузить отзывы».</p>
+	            </div>
+	            <section class="feedbacks-submit-log" data-feedbacks-submit-log>
+	              <div class="feedbacks-submit-log-title">Лог подачи жалоб</div>
+	              <div class="feedbacks-submit-log-body" data-feedbacks-submit-log-body>Нет активного запуска.</div>
+	            </section>
 	          </div>
-	        </div>
-
-        <p class="research-error" data-feedbacks-error></p>
-        <div class="summary-grid" data-feedbacks-summary></div>
-	        <div data-feedbacks-result>
-	          <p class="research-result-note">Выберите период и нажмите «Загрузить отзывы».</p>
-	        </div>
-	        <section class="feedbacks-submit-log" data-feedbacks-submit-log>
-	          <div class="feedbacks-submit-log-title">Лог подачи жалоб</div>
-	          <div class="feedbacks-submit-log-body" data-feedbacks-submit-log-body>Нет активного запуска.</div>
-	        </section>
 	        </section>
 
 	        <section class="feedbacks-subpanel" data-feedbacks-subpanel="prompt" hidden>
