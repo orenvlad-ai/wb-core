@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 from apps.seller_portal_feedbacks_complaint_batch import (  # noqa: E402
     _batch_aggregate,
     _merge_candidate_state,
+    _not_submitted_feedback_ids_for_day,
     _reason_group,
     _systemic_blocker,
 )
@@ -48,6 +49,9 @@ def main() -> None:
         raise AssertionError(f"already-in-journal reason must be grouped: {aggregate}")
     if aggregate["not_submitted_reasons"].get("already_complained_in_wb") != 1:
         raise AssertionError(f"disabled already-complained reason must be grouped: {aggregate}")
+    denied_next = _not_submitted_feedback_ids_for_day(state, "2026-04-01")
+    if denied_next != ("journal-1", "wb-1"):
+        raise AssertionError(f"non-journal skips must be denied on the next bounded run: {denied_next!r}")
     if _reason_group("description field value mismatch before final submit") != "description_not_persisted":
         raise AssertionError("description mismatch must be grouped as description_not_persisted")
     source_error = _systemic_blocker(
