@@ -1954,26 +1954,31 @@ class RegistryUploadHttpEntrypoint:
                 replace=replace_existing,
             )
             finished_at = self.activated_at_factory()
+            run_status = str(payload.get("run_status") or payload.get("status") or "").strip()
+            operation_result = _seller_portal_recovery_operation_result(run_status)
+            semantic_status = _seller_portal_recovery_operation_semantic_status(run_status)
             result = dict(payload)
             result.update(
                 {
                     "operation": "session_recovery_start",
+                    "operation_result": operation_result,
                     "started_at": started_at,
                     "finished_at": finished_at,
                     "duration_seconds": _duration_seconds(started_at, finished_at),
-                    "semantic_status": "warning",
+                    "semantic_status": semantic_status,
                     "semantic_label": str(payload.get("status_label") or "Запрошено"),
-                    "semantic_tone": "warning",
-                    "semantic_reason": str(payload.get("summary") or payload.get("message") or ""),
+                    "semantic_tone": semantic_status,
+                    "semantic_reason": str(payload.get("reason") or payload.get("summary") or payload.get("message") or ""),
                 }
             )
             emit(
                 _format_log_event(
                     "seller_recovery_finish",
-                    result="success",
-                    run_status=str(payload.get("run_status") or payload.get("status") or ""),
+                    result=operation_result,
+                    run_status=run_status,
                     running=bool(payload.get("running")),
-                    reason=str(payload.get("summary") or payload.get("message") or ""),
+                    launcher_ready=bool(payload.get("launcher_ready") or payload.get("can_download_launcher")),
+                    reason=str(payload.get("reason") or payload.get("summary") or payload.get("message") or ""),
                     duration_seconds=result["duration_seconds"],
                 )
             )
@@ -2278,6 +2283,9 @@ def _build_seller_portal_recovery_payload(
     requested_run_id = str(raw.get("requested_run_id") or "").strip()
     requested_run_mismatch = bool(requested_run_id and current_run_id and requested_run_id != current_run_id)
     run_is_final = run_status in {"completed", "not_needed", "stopped", "timeout", "error"}
+    can_download_launcher = bool(run_id) and run_status == "awaiting_login" and not requested_run_mismatch
+    final_marker = _seller_portal_recovery_final_marker(run_status) if run_is_final else ""
+    reason = summary or str(raw.get("message") or "").strip()
     return {
         "status": run_status,
         "status_label": _seller_portal_recovery_status_label(run_status),
@@ -2304,8 +2312,14 @@ def _build_seller_portal_recovery_payload(
             "checking_canonical_supplier",
             "triggering_refresh",
         },
-        "launcher_enabled": bool(run_id) and run_status == "awaiting_login" and not requested_run_mismatch,
+        "launcher_enabled": can_download_launcher,
+        "launcher_ready": can_download_launcher,
+        "can_download_launcher": can_download_launcher,
+        "can_open_login_window": False,
+        "open_login_window_url": "",
+        "launcher_url": launcher_download_path if can_download_launcher else "",
         "launcher_download_path": launcher_download_path,
+        "reason": reason,
         "updated_at": _format_optional_business_timestamp(str(raw.get("updated_at") or "") or None),
         "started_at": _format_optional_business_timestamp(str(raw.get("started_at") or "") or None),
         "deadline_at": _format_optional_business_timestamp(str(raw.get("deadline_at") or "") or None),
@@ -2317,6 +2331,7 @@ def _build_seller_portal_recovery_payload(
         "run_is_final": run_is_final,
         "run_final_status": run_status if run_is_final else "",
         "run_final_label": _seller_portal_recovery_final_label(run_status) if run_is_final else "",
+        "final_marker": final_marker,
         "organization_confirmed": organization_confirmed if canonical_configured else None,
         "organization_switch_applied": bool(raw.get("organization_switch_applied")),
         "expected_supplier_id": expected_supplier_id,
@@ -2362,6 +2377,7 @@ def _build_seller_portal_session_check_payload(
         status,
         canonical_configured=canonical_configured,
     )
+    reason = summary or str(raw.get("message") or "").strip()
     return {
         "status": status,
         "status_label": _seller_portal_session_check_status_label(status),
@@ -2379,7 +2395,22 @@ def _build_seller_portal_session_check_payload(
         "can_start": canonical_configured,
         "can_stop": False,
         "launcher_enabled": False,
+        "launcher_ready": False,
+        "can_download_launcher": False,
+        "can_open_login_window": False,
+        "open_login_window_url": "",
+        "launcher_url": "",
         "launcher_download_path": launcher_download_path,
+        "reason": reason,
+        "run_id": "",
+        "current_run_id": "",
+        "run_status": "idle",
+        "run_status_label": _seller_portal_recovery_status_label("idle"),
+        "run_status_tone": _seller_portal_recovery_status_tone("idle"),
+        "run_is_final": False,
+        "run_final_status": "",
+        "run_final_label": "",
+        "final_marker": "",
         "updated_at": _format_optional_business_timestamp(str(raw.get("updated_at") or "") or None),
         "started_at": "",
         "deadline_at": "",
@@ -2538,6 +2569,30 @@ def _seller_portal_recovery_status_tone(status: str) -> str:
     return "error"
 
 
+def _seller_portal_recovery_operation_result(status: str) -> str:
+    normalized = str(status or "").strip()
+    if normalized in {"completed", "not_needed"}:
+        return "success"
+    if normalized == "awaiting_login":
+        return "launcher_ready"
+    if normalized in {"starting", "saving_session", "validating_session", "checking_canonical_supplier", "triggering_refresh"}:
+        return "accepted"
+    if normalized in {"stopped", "timeout"}:
+        return normalized
+    if normalized == "error":
+        return "failed"
+    return "unknown"
+
+
+def _seller_portal_recovery_operation_semantic_status(status: str) -> str:
+    normalized = str(status or "").strip()
+    if normalized in {"completed", "not_needed"}:
+        return "success"
+    if normalized == "error":
+        return "error"
+    return "warning"
+
+
 def _seller_portal_session_check_status_tone(status: str) -> str:
     if status == "session_valid_canonical":
         return "success"
@@ -2685,6 +2740,12 @@ def _seller_portal_recovery_final_label(status: str) -> str:
         return "Восстановление завершено по таймауту"
     if status == "error":
         return "Восстановление завершено с ошибкой"
+    return ""
+
+
+def _seller_portal_recovery_final_marker(status: str) -> str:
+    if status in {"completed", "not_needed", "stopped", "timeout", "error"}:
+        return status
     return ""
 
 

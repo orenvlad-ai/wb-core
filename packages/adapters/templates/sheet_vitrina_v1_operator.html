@@ -4089,11 +4089,40 @@
         updateSellerRecoveryButtons();
         setSellerRecoveryMessage("Готовим launcher для Mac...", "");
         try {
-          const response = await fetch(sellerRecoveryPayload.launcher_download_path, {
+          const recoveryStatusPath = sellerRecoveryObservedRunId
+            ? config.seller_recovery_status_path + "?run_id=" + encodeURIComponent(sellerRecoveryObservedRunId)
+            : config.seller_recovery_status_path;
+          const statusResponse = await fetch(recoveryStatusPath, {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+          });
+          const statusPayload = await readJson(statusResponse);
+          if (!statusResponse.ok) {
+            throw new Error(valueOrDash(statusPayload.error) + " (HTTP " + statusResponse.status + ")");
+          }
+          renderSellerRecovery(statusPayload);
+          if (!Boolean(statusPayload.can_download_launcher || statusPayload.launcher_ready || statusPayload.launcher_enabled)) {
+            setSellerRecoveryMessage(
+              valueOrDash(statusPayload.summary || statusPayload.reason || "Окно входа ещё готовится. Launcher станет доступен после статуса «Нужно войти»."),
+              "warning"
+            );
+            scheduleSellerRecoveryPoll();
+            return;
+          }
+          const downloadPath = statusPayload.launcher_download_path || sellerRecoveryPayload.launcher_download_path;
+          const response = await fetch(downloadPath, {
             method: "GET"
           });
           if (!response.ok) {
             const payload = await readJson(response);
+            if (response.status === 409) {
+              setSellerRecoveryMessage(
+                valueOrDash(payload.summary || payload.reason || payload.error || "Окно входа ещё готовится. Повторите скачивание после статуса «Нужно войти»."),
+                "warning"
+              );
+              await loadSellerRecoveryStatus();
+              return;
+            }
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
           const blob = await response.blob();

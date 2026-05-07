@@ -275,6 +275,7 @@ def start_relogin_session(config: ReloginSessionConfig, *, replace: bool = False
 
 def stop_relogin_session(config: ReloginSessionConfig) -> dict[str, Any]:
     pid = _read_pid(config.pid_path)
+    was_running = bool(pid is not None and _pid_is_running(pid))
     if pid is not None and _pid_is_running(pid):
         try:
             os.killpg(pid, signal.SIGTERM)
@@ -288,7 +289,7 @@ def stop_relogin_session(config: ReloginSessionConfig) -> dict[str, Any]:
     if config.pid_path.exists():
         config.pid_path.unlink()
     payload = read_session_status(config, with_probe=False)
-    if str(payload.get("status") or "").strip() in RECOVERY_RUN_FINAL_STATUSES:
+    if not was_running and str(payload.get("status") or "").strip() in RECOVERY_RUN_FINAL_STATUSES:
         return payload
     payload["status"] = "stopped"
     payload["running"] = False
