@@ -165,6 +165,7 @@ def run_batch(
         report["days"].append(day_report)
         day_had_systemic_error = False
         for run_index in range(1, max_runs_per_day + 1):
+            denied_after_previous_attempt = _not_submitted_feedback_ids_for_day(candidate_state, day)
             config = SubmitConfig(
                 date_from=day,
                 date_to=day,
@@ -185,7 +186,7 @@ def run_batch(
                 headless=headless,
                 timeout_ms=timeout_ms,
                 write_artifacts=False,
-                deny_feedback_ids=(),
+                deny_feedback_ids=denied_after_previous_attempt,
                 target_feedback_id="",
             )
             run_report = dict(run_submit(config))
@@ -274,6 +275,16 @@ def _merge_candidate_state(candidate_state: dict[str, dict[str, Any]], *, day: s
             state.update({"status": "not_submitted", "reason_group": group, "reason": reason})
         elif candidate.get("selected_for_dry_run"):
             state.update({"status": "pending", "reason": "selected but not attempted yet"})
+
+
+def _not_submitted_feedback_ids_for_day(candidate_state: Mapping[str, Mapping[str, Any]], day: str) -> tuple[str, ...]:
+    return tuple(
+        str(state.get("feedback_id") or "")
+        for state in candidate_state.values()
+        if str(state.get("date") or "") == day
+        and str(state.get("status") or "") == "not_submitted"
+        and str(state.get("feedback_id") or "")
+    )
 
 
 def _finalize_unprocessed(candidate_state: dict[str, dict[str, Any]]) -> None:
