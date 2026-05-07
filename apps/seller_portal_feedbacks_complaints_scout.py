@@ -85,7 +85,7 @@ FEEDBACK_ID_RE = re.compile(r"(?:feedback|review|comment)[_-]?(?:id)?[=:_/ -]*([
 ROW_MENU_COMPLAINT_LABEL = "Пожаловаться на отзыв"
 ROW_MENU_RETURN_LABEL = "Запросить возврат"
 ROW_MENU_EXPECTED_LABELS = (ROW_MENU_RETURN_LABEL, ROW_MENU_COMPLAINT_LABEL)
-MAX_COMPLAINT_SCROLL_ATTEMPTS = 45
+MAX_COMPLAINT_SCROLL_ATTEMPTS = 140
 ALREADY_COMPLAINED_HINT_RE = re.compile(
     r"(уже\s+пожал|жалоб[ауы]\s+уже|вы\s+уже\s+пожал|на\s+этот\s+отзыв\s+уже)",
     re.IGNORECASE,
@@ -571,20 +571,27 @@ def scout_one_complaint_modal(page: Page, row: dict[str, Any] | str) -> dict[str
 
 def scout_my_complaints(page: Page, config: ScoutConfig) -> dict[str, Any]:
     report = _empty_my_complaints_report()
-    if not _click_tab_like(page, "Мои жалобы"):
-        report["blocker"] = "Мои жалобы tab was not found"
-        return report
-    _wait_settle(page, 2500)
     for tab_label, key in (("Ждут ответа", "pending"), ("Есть ответ", "answered")):
-        clicked = _click_tab_like(page, tab_label)
-        _wait_settle(page, 2000)
+        navigation = open_my_complaints_status_tab(page, config, key, tab_label)
+        if not navigation.get("ok"):
+            report[key] = {
+                "tab_clicked": bool(navigation.get("tab_clicked")),
+                "visible_rows": 0,
+                "rows": [],
+                "field_availability": {},
+                "collection_stats": {},
+                "navigation": navigation,
+            }
+            report["blocker"] = str(navigation.get("blocker") or "Мои жалобы status tab was not reached")
+            continue
         rows, collection_stats = collect_complaint_rows_with_scroll(page, max_rows=config.max_complaint_rows)
         report[key] = {
-            "tab_clicked": clicked,
+            "tab_clicked": bool(navigation.get("tab_clicked")),
             "visible_rows": len(rows),
             "rows": rows,
             "field_availability": field_availability(rows),
             "collection_stats": collection_stats,
+            "navigation": navigation,
         }
     report["pending_count_visible"] = report["pending"]["visible_rows"]
     report["answered_count_visible"] = report["answered"]["visible_rows"]
@@ -593,6 +600,51 @@ def scout_my_complaints(page: Page, config: ScoutConfig) -> dict[str, Any]:
     report["status_decision_fields_available"] = field_availability(answered_rows).get("decision_label", False)
     report["success"] = True
     return report
+
+
+def open_my_complaints_status_tab(page: Page, config: ScoutConfig, key: str, tab_label: str) -> dict[str, Any]:
+    suffix = "not-answered" if key == "pending" else "answered"
+    direct_url = f"{config.start_url}/feedbacks/complaints-tab/{suffix}"
+    result: dict[str, Any] = {
+        "ok": False,
+        "method": "direct_url",
+        "direct_url": direct_url,
+        "final_url": "",
+        "tab_label": tab_label,
+        "tab_clicked": False,
+        "blocker": "",
+    }
+    try:
+        page.goto(direct_url, wait_until="domcontentloaded")
+        _wait_settle(page, 3000)
+        result["final_url"] = page.url
+        if _looks_like_login(page):
+            result["blocker"] = "seller portal redirected to login/auth page"
+            return result
+        if _my_complaints_status_tab_loaded(page, tab_label):
+            result["ok"] = True
+            return result
+    except PlaywrightError as exc:
+        result["blocker"] = _safe_text(str(exc), 260)
+
+    if not _click_tab_like(page, "Мои жалобы"):
+        result["method"] = "direct_url_then_tab_fallback"
+        result["blocker"] = result["blocker"] or "Мои жалобы tab was not found"
+        result["final_url"] = page.url
+        return result
+    _wait_settle(page, 1500)
+    clicked = _click_tab_like(page, tab_label)
+    result["method"] = "direct_url_then_tab_fallback"
+    result["tab_clicked"] = clicked
+    _wait_settle(page, 2000)
+    result["final_url"] = page.url
+    if _looks_like_login(page):
+        result["blocker"] = "seller portal redirected to login/auth page"
+        return result
+    result["ok"] = bool(clicked and _my_complaints_status_tab_loaded(page, tab_label))
+    if not result["ok"] and not result["blocker"]:
+        result["blocker"] = f"{tab_label} tab was not reached"
+    return result
 
 
 def extract_visible_feedback_rows(page: Page, *, max_rows: int) -> list[dict[str, Any]]:
@@ -608,6 +660,7 @@ def extract_visible_complaint_rows(page: Page, *, max_rows: int) -> list[dict[st
 def collect_complaint_rows_with_scroll(page: Page, *, max_rows: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     max_rows = max(1, int(max_rows))
     max_visible_read = min(max(max_rows, 20), 160)
+    max_attempts = max(8, min(MAX_COMPLAINT_SCROLL_ATTEMPTS, max_rows + 20))
     collected: dict[str, dict[str, Any]] = {}
     attempts_log: list[dict[str, Any]] = []
     idle_attempts = 0
@@ -615,7 +668,9 @@ def collect_complaint_rows_with_scroll(page: Page, *, max_rows: int) -> tuple[li
     oldest_date = ""
     newest_date = ""
     attempts = 0
-    for attempts in range(1, MAX_COMPLAINT_SCROLL_ATTEMPTS + 1):
+    pages_visited: set[int] = set()
+    pagination_moves = 0
+    for attempts in range(1, max_attempts + 1):
         visible_rows = extract_visible_complaint_rows(page, max_rows=max_visible_read)
         new_count = 0
         for row in visible_rows:
@@ -645,30 +700,222 @@ def collect_complaint_rows_with_scroll(page: Page, *, max_rows: int) -> tuple[li
                 "newest_review_date": newest_date,
             }
         )
+        pagination_state = get_complaints_pagination_state(page)
+        attempts_log[-1]["pagination"] = pagination_state
+        current_page = _safe_int(pagination_state.get("current_page"))
+        if current_page > 0:
+            pages_visited.add(current_page)
         if len(collected) >= max_rows:
             stop_reason = "max_complaint_rows_reached"
             break
-        idle_attempts = idle_attempts + 1 if new_count == 0 else 0
-        if idle_attempts >= 4:
-            stop_reason = "no_new_complaint_rows_after_scroll"
-            break
         scroll_result = scroll_complaints_list(page)
         attempts_log[-1]["scroll"] = scroll_result
-        _wait_settle(page, 900)
-        if not scroll_result.get("changed"):
-            idle_attempts += 1
+        if scroll_result.get("changed"):
+            _wait_settle(page, 700)
+            idle_attempts = 0
+            continue
+
+        next_page = click_next_complaints_page(page)
+        attempts_log[-1]["next_page"] = next_page
+        if next_page.get("changed"):
+            pagination_moves += 1
+            idle_attempts = 0
+            continue
+
+        idle_attempts = idle_attempts + 1 if new_count == 0 else 0
+        if idle_attempts >= 4:
+            stop_reason = "no_new_complaint_rows_after_scroll_or_pagination"
+            break
     rows = list(collected.values())[:max_rows]
     for index, row in enumerate(rows):
         row["row_index"] = index
     return rows, {
         "scroll_attempts": attempts,
-        "max_scroll_attempts": MAX_COMPLAINT_SCROLL_ATTEMPTS,
+        "max_scroll_attempts": max_attempts,
         "stop_reason": stop_reason or "max_scroll_attempts_reached",
         "collected_unique_rows": len(rows),
         "oldest_review_date": oldest_date,
         "newest_review_date": newest_date,
+        "pages_visited": sorted(pages_visited),
+        "pagination_moves": pagination_moves,
         "attempts": attempts_log[-12:],
     }
+
+
+def get_complaints_pagination_state(page: Page) -> dict[str, Any]:
+    try:
+        return page.evaluate(
+            r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight;
+  };
+  const labelFor = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+  const disabledFor = (el) => Boolean(
+    el.disabled ||
+    el.getAttribute('aria-disabled') === 'true' ||
+    el.getAttribute('disabled') !== null ||
+    /disabled/i.test(String(el.className || ''))
+  );
+  const buttons = Array.from(document.querySelectorAll('button'))
+    .filter(visible)
+    .map((button) => {
+      const rect = button.getBoundingClientRect();
+      const text = labelFor(button);
+      const className = String(button.className || '');
+      return {
+        text,
+        className: className.slice(0, 160),
+        disabled: disabledFor(button),
+        selected: /Pagination-button--isSelected/i.test(className),
+        left: Math.round(rect.left),
+        top: Math.round(rect.top),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+        page: /^\d+$/.test(text) ? Number(text) : 0,
+        isPagination: /Pagination/i.test(className)
+      };
+    })
+    .filter((item) => item.isPagination || item.page > 0);
+  const selected = buttons.find((item) => item.selected && item.page > 0) || null;
+  const numericPages = buttons.filter((item) => item.page > 0).map((item) => item.page);
+  const currentPage = selected ? selected.page : (numericPages.length ? Math.min(...numericPages) : 0);
+  const nextNumeric = buttons
+    .filter((item) => item.page > currentPage && !item.disabled)
+    .sort((a, b) => a.page - b.page)[0] || null;
+  const arrowNext = selected
+    ? buttons
+        .filter((item) => !item.page && item.left > selected.left && !item.disabled)
+        .sort((a, b) => a.left - b.left)[0] || null
+    : null;
+  return {
+    current_page: currentPage || 0,
+    visible_pages: Array.from(new Set(numericPages)).sort((a, b) => a - b),
+    last_visible_page: numericPages.length ? Math.max(...numericPages) : 0,
+    next_page_candidate: nextNumeric ? nextNumeric.page : 0,
+    has_next: Boolean(nextNumeric || arrowNext),
+    next_target_kind: nextNumeric ? 'numeric' : (arrowNext ? 'arrow' : ''),
+  };
+}
+            """
+        )
+    except PlaywrightError as exc:
+        return {"current_page": 0, "visible_pages": [], "has_next": False, "error": _safe_text(str(exc), 260)}
+
+
+def click_next_complaints_page(page: Page) -> dict[str, Any]:
+    try:
+        before = page.evaluate(
+            r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight;
+  };
+  const textOf = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+  const labelFor = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+  const disabledFor = (el) => Boolean(
+    el.disabled ||
+    el.getAttribute('aria-disabled') === 'true' ||
+    el.getAttribute('disabled') !== null ||
+    /disabled/i.test(String(el.className || ''))
+  );
+  const rows = Array.from(document.querySelectorAll('[data-testid="Base-table-row"], tr, [role="row"], article, li'))
+    .filter(visible)
+    .map((el) => textOf(el).slice(0, 260))
+    .filter((text) => /Причина|Описание|Одобрен|Отклон|Жд[её]т ответа|\d{1,2}[./]\d{1,2}[./]\d{2,4}/i.test(text));
+  const buttons = Array.from(document.querySelectorAll('button'))
+    .filter(visible)
+    .map((button) => {
+      const rect = button.getBoundingClientRect();
+      const text = labelFor(button);
+      const className = String(button.className || '');
+      return {
+        button,
+        text,
+        className,
+        disabled: disabledFor(button),
+        selected: /Pagination-button--isSelected/i.test(className),
+        left: rect.left,
+        page: /^\d+$/.test(text) ? Number(text) : 0,
+        isPagination: /Pagination/i.test(className)
+      };
+    })
+    .filter((item) => item.isPagination || item.page > 0);
+  const selected = buttons.find((item) => item.selected && item.page > 0) || null;
+  const currentPage = selected ? selected.page : 0;
+  const nextNumeric = buttons
+    .filter((item) => item.page > currentPage && !item.disabled)
+    .sort((a, b) => a.page - b.page)[0] || null;
+  const arrowNext = selected
+    ? buttons
+        .filter((item) => !item.page && item.left > selected.left && !item.disabled)
+        .sort((a, b) => a.left - b.left)[0] || null
+    : null;
+  const target = nextNumeric || arrowNext;
+  if (!target) {
+    return {
+      ok: false,
+      reason: 'next complaint pagination control not found',
+      current_page: currentPage,
+      first_row_text_before: rows[0] || '',
+      row_count_before: rows.length
+    };
+  }
+  target.button.click();
+  return {
+    ok: true,
+    target_kind: nextNumeric ? 'numeric' : 'arrow',
+    target_page: nextNumeric ? nextNumeric.page : 0,
+    current_page_before: currentPage,
+    first_row_text_before: rows[0] || '',
+    row_count_before: rows.length
+  };
+}
+            """
+        )
+        if not before.get("ok"):
+            return {**before, "changed": False}
+        page.wait_for_timeout(700)
+        after = page.evaluate(
+            r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight;
+  };
+  const textOf = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+  const labelFor = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+  const rows = Array.from(document.querySelectorAll('[data-testid="Base-table-row"], tr, [role="row"], article, li'))
+    .filter(visible)
+    .map((el) => textOf(el).slice(0, 260))
+    .filter((text) => /Причина|Описание|Одобрен|Отклон|Жд[её]т ответа|\d{1,2}[./]\d{1,2}[./]\d{2,4}/i.test(text));
+  const selected = Array.from(document.querySelectorAll('button'))
+    .filter(visible)
+    .map((button) => ({text: labelFor(button), className: String(button.className || '')}))
+    .find((item) => /Pagination-button--isSelected/i.test(item.className) && /^\d+$/.test(item.text));
+  return {
+    current_page_after: selected ? Number(selected.text) : 0,
+    first_row_text_after: rows[0] || '',
+    row_count_after: rows.length
+  };
+}
+            """
+        )
+        changed = bool(
+            int(after.get("current_page_after") or 0) != int(before.get("current_page_before") or 0)
+            or (
+                after.get("first_row_text_after")
+                and after.get("first_row_text_after") != before.get("first_row_text_before")
+            )
+        )
+        return {**before, **after, "changed": changed}
+    except PlaywrightError as exc:
+        return {"changed": False, "error": _safe_text(str(exc), 300)}
 
 
 def scroll_complaints_list(page: Page) -> dict[str, Any]:
@@ -1843,6 +2090,23 @@ def _is_feedbacks_questions_page(page: Page) -> bool:
     return bool(has_feedback_tabs and "/feedbacks/" in url)
 
 
+def _my_complaints_status_tab_loaded(page: Page, tab_label: str) -> bool:
+    try:
+        body = page.locator("body").inner_text(timeout=4000)
+    except PlaywrightError:
+        return False
+    text = _norm_text(body)
+    url = page.url.lower()
+    return bool(
+        "/feedbacks/complaints-tab" in url
+        and "Мои жалобы" in text
+        and tab_label in text
+        and "Товар" in text
+        and "Причина" in text
+        and ("Описание" in text or "Отзыв" in text)
+    )
+
+
 def _looks_like_login(page: Page) -> bool:
     url = page.url.lower()
     if "seller-auth" in url or "passport" in url or "login" in url:
@@ -1884,6 +2148,13 @@ def _wait_settle(page: Page, timeout_ms: int = 2000) -> None:
     except PlaywrightError:
         pass
     page.wait_for_timeout(timeout_ms)
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _wait_for_text_visible(page: Page, text: str, *, timeout_ms: int) -> bool:
