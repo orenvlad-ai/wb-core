@@ -71,8 +71,8 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         context.add_init_script(
             "if (!window.sessionStorage.getItem('wb_core_feedbacks_broken_widths_seeded')) {"
             "window.localStorage.setItem('wb_core_feedbacks_column_widths_v1', '{broken-json');"
-            "window.localStorage.setItem('wb_core_feedbacks_range_v2', JSON.stringify({"
-            "version:1,date_from:'2026-04-20',date_to:'2026-04-24',default_end_date:'2026-04-24'"
+            "window.localStorage.setItem('wb_core_feedbacks_range_v3', JSON.stringify({"
+            "version:3,date_from:'2026-04-20',date_to:'2026-04-24',default_end_date:'2026-04-30',saved_at_ms:1"
             "}));"
             "window.sessionStorage.setItem('wb_core_feedbacks_broken_widths_seeded', '1');"
             "}"
@@ -284,6 +284,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                         ],
                         "submitted_feedback_ids": [],
                         "skipped": [],
+                        "attempts": [],
                         "summary": {"selected_count": len(feedback_ids), "max_submit": max_submit},
                         "poll_url": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH + "?run_id=complaints-submit-smoke-run",
                         "complaints_url": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
@@ -322,10 +323,10 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 events.extend(
                     [
                         {
-                            "event": "row_submit_confirmed_success",
+                            "event": "row_skipped_not_actionable",
                             "feedback_id": selected_id,
-                            "message": "WB accepted submit",
-                            "status": "success",
+                            "message": "exact actionable DOM row was not found",
+                            "status": "skipped",
                             "timestamp": "2026-05-06T05:00:04Z",
                         },
                         {
@@ -351,17 +352,38 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                         "finished_at": "2026-05-06T05:00:05Z" if status == "success" else "",
                         "selected_count": len(selected_ids) or 1,
                         "tested_count": 1 if status == "success" else 0,
-                        "submitted_count": 1 if status == "success" else 0,
-                        "skipped_count": 0,
+                        "submitted_count": 0,
+                        "skipped_count": 1 if status == "success" else 0,
                         "error_count": 0,
                         "events": events,
-                        "submitted_feedback_ids": [selected_id] if status == "success" else [],
-                        "skipped": [],
+                        "submitted_feedback_ids": [],
+                        "skipped": [
+                            {
+                                "feedback_id": selected_id,
+                                "code": "row_skipped_not_actionable",
+                                "reason": "exact actionable DOM row was not found",
+                            }
+                        ]
+                        if status == "success"
+                        else [],
+                        "attempts": [
+                            {
+                                "feedback_id": selected_id,
+                                "attempt_status": "skipped",
+                                "attempt_status_label": "Пропущена",
+                                "code": "row_skipped_not_actionable",
+                                "reason": "exact actionable DOM row was not found",
+                                "run_id": "complaints-submit-smoke-run",
+                                "updated_at": "2026-05-06T05:00:05Z",
+                            }
+                        ]
+                        if status == "success"
+                        else [],
                         "summary": {
                             "selected_count": len(selected_ids) or 1,
                             "tested_count": 1 if status == "success" else 0,
-                            "submitted_count": 1 if status == "success" else 0,
-                            "skipped_count": 0,
+                            "submitted_count": 0,
+                            "skipped_count": 1 if status == "success" else 0,
                             "error_count": 0,
                         },
                         "poll_url": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH + "?run_id=complaints-submit-smoke-run",
@@ -641,7 +663,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 raise AssertionError("submit-selected UI must show selected count")
             page.locator("[data-feedbacks-submit-selected]").click()
             page.wait_for_function(
-                "() => document.querySelector('[data-feedbacks-submit-log-body]')?.textContent.includes('row_submit_confirmed_success')"
+                "() => document.querySelector('[data-feedbacks-submit-log-body]')?.textContent.includes('row_skipped_not_actionable')"
             )
             submit_log_text = page.locator("[data-feedbacks-submit-log-body]").inner_text()
             if "status: success" not in submit_log_text:
@@ -652,6 +674,9 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 raise AssertionError(f"submit-selected payload must include selected id only, got {complaints_submit_requests[-1]}")
             if not complaints_submit_job_polls:
                 raise AssertionError("submit-selected UI must poll job route")
+            selected_row_text = page.locator(f'[data-feedbacks-select-row="{selected_feedback_id}"]').locator("xpath=ancestor::tr").inner_text()
+            if "Пропущена" not in selected_row_text:
+                raise AssertionError(f"selected skipped row must show attempt status instead of dash, got {selected_row_text!r}")
         finally:
             browser.close()
 

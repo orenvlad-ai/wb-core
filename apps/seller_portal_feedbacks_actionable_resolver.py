@@ -147,6 +147,12 @@ def resolve_feedback_actionability(
         if attempt.get("targeted_search"):
             result["targeted_search"] = attempt.get("targeted_search") or {}
         last_blocker = str(attempt.get("block_reason") or last_blocker)
+        if attempt.get("complaint_action_disabled"):
+            result["complaint_action_found"] = bool(attempt.get("complaint_action_found"))
+            result["complaint_action_available"] = False
+            result["complaint_action_disabled"] = True
+            result["complaint_action_disabled_reason"] = str(attempt.get("complaint_action_disabled_reason") or "")
+            result["complaint_action_disabled_category"] = str(attempt.get("complaint_action_disabled_category") or "")
         if attempt.get("actionable_row_found"):
             result.update(
                 {
@@ -155,7 +161,10 @@ def resolve_feedback_actionability(
                     "row_menu_found": bool(attempt.get("row_menu_found")),
                     "menu_found": bool(attempt.get("row_menu_found")),
                     "complaint_action_found": bool(attempt.get("complaint_action_found")),
-                    "complaint_action_available": bool(attempt.get("complaint_action_found")),
+                    "complaint_action_available": bool(attempt.get("complaint_action_available") or attempt.get("complaint_action_found")),
+                    "complaint_action_disabled": bool(attempt.get("complaint_action_disabled")),
+                    "complaint_action_disabled_reason": str(attempt.get("complaint_action_disabled_reason") or ""),
+                    "complaint_action_disabled_category": str(attempt.get("complaint_action_disabled_category") or ""),
                     "modal_opened": bool(attempt.get("modal_opened")),
                     "categories_found": attempt.get("categories_found") or [],
                     "description_field_found": bool(attempt.get("description_field_found")),
@@ -455,8 +464,18 @@ def confirm_and_maybe_draft(
     menu_state = extract_open_row_menu_state(page)
     attempt["menu_labels"] = menu_state.get("items") or []
     attempt["complaint_action_found"] = bool(menu_state.get("complaint_action_found"))
+    attempt["complaint_action_available"] = bool(menu_state.get("complaint_action_available"))
+    attempt["complaint_action_disabled"] = bool(menu_state.get("complaint_action_disabled"))
+    attempt["complaint_action_disabled_reason"] = str(menu_state.get("complaint_action_disabled_reason") or "")
+    attempt["complaint_action_disabled_category"] = str(menu_state.get("complaint_action_disabled_category") or "")
     if not menu_state.get("complaint_action_found"):
         attempt["block_reason"] = "Пожаловаться на отзыв action not found in row menu"
+        _safe_escape(page)
+        return attempt
+    if menu_state.get("complaint_action_disabled"):
+        category = str(menu_state.get("complaint_action_disabled_category") or "complaint_action_disabled")
+        reason = str(menu_state.get("complaint_action_disabled_reason") or "complaint action is disabled")
+        attempt["block_reason"] = f"{category}: {reason}"
         _safe_escape(page)
         return attempt
     attempt["actionable_row_found"] = True
@@ -609,6 +628,9 @@ def empty_actionability_result() -> dict[str, Any]:
         "menu_found": False,
         "complaint_action_found": False,
         "complaint_action_available": False,
+        "complaint_action_disabled": False,
+        "complaint_action_disabled_reason": "",
+        "complaint_action_disabled_category": "",
         "modal_opened": False,
         "categories_found": [],
         "description_field_found": False,
@@ -669,6 +691,10 @@ def empty_attempt(tab_label: str) -> dict[str, Any]:
         "row_menu_found": False,
         "menu_labels": [],
         "complaint_action_found": False,
+        "complaint_action_available": False,
+        "complaint_action_disabled": False,
+        "complaint_action_disabled_reason": "",
+        "complaint_action_disabled_category": "",
         "actionable_row_found": False,
         "modal_opened": False,
         "categories_found": [],
