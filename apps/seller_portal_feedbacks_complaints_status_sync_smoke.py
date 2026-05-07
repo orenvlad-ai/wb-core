@@ -34,6 +34,10 @@ def main() -> None:
         report = {"aggregate": {}, "updates": []}
         rows = {
             "pending": {
+                "collection_stats": {
+                    "stop_reason": "no_new_complaint_rows_after_scroll",
+                    "oldest_review_date": "2026-04-01",
+                },
                 "rows": [
                     _row("Текст pending", "Другое", decision="", status="pending"),
                     _row(
@@ -46,6 +50,10 @@ def main() -> None:
                 ]
             },
             "answered": {
+                "collection_stats": {
+                    "stop_reason": "max_complaint_rows_reached",
+                    "oldest_review_date": "2026-04-01",
+                },
                 "rows": [
                     _row("Текст approved", "Другое", decision="approved", status="answered"),
                     _row("Текст rejected", "Другое", decision="rejected", status="answered"),
@@ -89,6 +97,10 @@ def main() -> None:
             raise AssertionError(f"direct feedback_id sync matches must be counted: {report}")
         if report["aggregate"]["strong_composite_matches"] != 4:
             raise AssertionError(f"strong composite sync matches must be counted: {report}")
+        if report["aggregate"]["pending_collection_stop_reason"] != "no_new_complaint_rows_after_scroll":
+            raise AssertionError(f"deep pending collection stats must be surfaced: {report}")
+        if report["aggregate"]["answered_oldest_review_date"] != "2026-04-01":
+            raise AssertionError(f"historical answered scan date must be surfaced: {report}")
     print("seller_portal_feedbacks_complaints_status_sync_smoke: OK")
 
 

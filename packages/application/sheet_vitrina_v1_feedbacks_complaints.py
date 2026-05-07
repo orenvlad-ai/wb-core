@@ -494,6 +494,7 @@ class JsonFileFeedbacksComplaintsSubmitJobStore:
                     "error_count": 0,
                     "submitted_feedback_ids": [],
                     "skipped": [],
+                    "attempts": [],
                     "events": [_submit_event("job_started", message="Submit job queued", status="queued", at=now)],
                     "report_dir": "",
                     "report_json_path": "",
@@ -730,7 +731,7 @@ class SheetVitrinaV1FeedbacksComplaintsBlock:
         return dict(
             run_status_sync_for_runtime(
                 runtime_dir=self.runtime_dir,
-                max_complaint_rows=int(payload.get("max_complaint_rows") or 80),
+                max_complaint_rows=int(payload.get("max_complaint_rows") or 500),
                 headless=not bool(payload.get("headed")),
                 timeout_ms=max(5000, int(payload.get("timeout_ms") or 20000)),
                 output_dir=self.runtime_dir / DEFAULT_SYNC_REPORT_DIRNAME,
@@ -813,6 +814,7 @@ def _normalize_submit_job(job: Mapping[str, Any]) -> dict[str, Any]:
         status = "error"
     summary = job.get("summary") if isinstance(job.get("summary"), Mapping) else {}
     skipped = job.get("skipped") if isinstance(job.get("skipped"), list) else []
+    attempts = job.get("attempts") if isinstance(job.get("attempts"), list) else []
     events = job.get("events") if isinstance(job.get("events"), list) else []
     submitted_ids = job.get("submitted_feedback_ids") if isinstance(job.get("submitted_feedback_ids"), list) else []
     return {
@@ -830,6 +832,7 @@ def _normalize_submit_job(job: Mapping[str, Any]) -> dict[str, Any]:
         "error_count": _safe_int(job.get("error_count")),
         "submitted_feedback_ids": [_safe_text(item, 160) for item in submitted_ids if _safe_text(item, 160)],
         "skipped": [_normalize_submit_skip(item) for item in skipped if isinstance(item, Mapping)][:SUBMIT_JOB_EVENTS_LIMIT],
+        "attempts": [_normalize_submit_attempt(item) for item in attempts if isinstance(item, Mapping)][:SUBMIT_JOB_EVENTS_LIMIT],
         "events": [_normalize_submit_event(item) for item in events if isinstance(item, Mapping)][-SUBMIT_JOB_EVENTS_LIMIT:],
         "report_dir": _safe_text(job.get("report_dir"), 600),
         "report_json_path": _safe_text(job.get("report_json_path"), 600),
@@ -862,6 +865,7 @@ def _public_submit_job(job: Mapping[str, Any], *, already_running: bool) -> dict
         "error_count": normalized["error_count"],
         "submitted_feedback_ids": list(normalized["submitted_feedback_ids"]),
         "skipped": list(normalized["skipped"]),
+        "attempts": list(normalized["attempts"]),
         "events": list(normalized["events"]),
         "report_dir": normalized["report_dir"],
         "report_json_path": normalized["report_json_path"],
@@ -958,6 +962,7 @@ def _run_guarded_submit_selected_for_runtime(
         },
         "events": [_submit_event("job_started", message="Submit job started", status="running")],
         "rows": [],
+        "attempts": [],
         "status_sync": {},
         "aggregate": {
             "selected_count": len(selected_ids),
@@ -970,6 +975,7 @@ def _run_guarded_submit_selected_for_runtime(
     }
     submitted_ids: list[str] = []
     skipped: list[dict[str, Any]] = []
+    attempts: list[dict[str, Any]] = []
     current_journal_ids = [str(item.get("feedback_id") or "") for item in journal.list_records()]
     deny_ids = normalize_deny_feedback_ids([*current_journal_ids, "QhDufSkeSBzUCxaDchAn"])
 
@@ -985,6 +991,7 @@ def _run_guarded_submit_selected_for_runtime(
                 "error_count": aggregate.get("error_count", 0),
                 "submitted_feedback_ids": submitted_ids,
                 "skipped": skipped,
+                "attempts": attempts,
                 "events": report["events"],
                 "summary": aggregate,
                 "error": error,
@@ -1000,6 +1007,16 @@ def _run_guarded_submit_selected_for_runtime(
         if existing is not None:
             reason = f"complaint already exists for feedback_id with status={existing.get('complaint_status') or ''}"
             skipped.append(_submit_skip(feedback_id, "row_skipped_existing_complaint", reason))
+            attempts.append(
+                _submit_attempt(
+                    feedback_id,
+                    status="skipped",
+                    label="Обработана, не подана",
+                    code="row_skipped_existing_complaint",
+                    reason=reason,
+                    run_id=run_id,
+                )
+            )
             report["events"].append(_submit_event("row_skipped_existing_complaint", feedback_id=feedback_id, message=reason, status="skipped"))
             report["rows"].append({"feedback_id": feedback_id, "status": "skipped", "skip_reason": reason})
             report["aggregate"]["skipped_count"] += 1
@@ -1038,6 +1055,16 @@ def _run_guarded_submit_selected_for_runtime(
             report["rows"].append(row_result)
             report["errors"].append({"feedback_id": feedback_id, "stage": "submit_runner", "message": error})
             report["events"].append(_submit_event("row_error", feedback_id=feedback_id, message=error, status="error"))
+            attempts.append(
+                _submit_attempt(
+                    feedback_id,
+                    status="error",
+                    label="Ошибка",
+                    code="row_error",
+                    reason=error,
+                    run_id=run_id,
+                )
+            )
             report["aggregate"]["error_count"] += 1
             publish(status="error", error=error)
             break
@@ -1046,11 +1073,13 @@ def _run_guarded_submit_selected_for_runtime(
         report["events"].extend(_submit_events_from_submit_report(feedback_id, submit_report, row_result))
         if row_result.get("submitted"):
             submitted_ids.append(feedback_id)
+            attempts.append(_submit_attempt_from_row(row_result, run_id=run_id))
             report["aggregate"]["submitted_count"] += 1
         elif row_result.get("submit_clicked"):
             report["aggregate"]["error_count"] += 1
             error = str(row_result.get("block_reason") or row_result.get("submit_result") or "submit unconfirmed")
             report["errors"].append({"feedback_id": feedback_id, "stage": "submit", "message": error})
+            attempts.append(_submit_attempt_from_row(row_result, run_id=run_id))
             publish(status="error", error=error)
             break
         else:
@@ -1058,6 +1087,7 @@ def _run_guarded_submit_selected_for_runtime(
             event_code = _submit_skip_event_code(reason)
             skipped.append(_submit_skip(feedback_id, event_code, reason))
             report["events"].append(_submit_event(event_code, feedback_id=feedback_id, message=reason, status="skipped"))
+            attempts.append(_submit_attempt_from_row(row_result, run_id=run_id))
             report["aggregate"]["skipped_count"] += 1
         publish()
 
@@ -1068,7 +1098,7 @@ def _run_guarded_submit_selected_for_runtime(
                     {
                         "run_id": f"{run_id}_status_sync",
                         "requested_by": "submit_selected_job",
-                        "max_complaint_rows": request_payload.get("max_complaint_rows") or 80,
+                        "max_complaint_rows": request_payload.get("max_complaint_rows") or 500,
                         "timeout_ms": request_payload.get("status_sync_timeout_ms") or 20000,
                     }
                 )
@@ -1091,6 +1121,7 @@ def _run_guarded_submit_selected_for_runtime(
                 )
             )
     report["finished_at"] = _iso_now(now_factory)
+    report["attempts"] = attempts
     report["events"].append(
         _submit_event(
             "job_finished",
@@ -1117,6 +1148,10 @@ def _submit_selected_row_result(feedback_id: str, submit_report: Mapping[str, An
         "skip_reason": _safe_text(candidate.get("skip_reason"), 600),
         "block_reason": _safe_text(modal.get("blocker") or submit_report.get("final_conclusion"), 600),
         "complaint_action_found": bool(modal.get("complaint_action_found") or modal.get("modal_opened")),
+        "complaint_action_available": bool(modal.get("complaint_action_available") or modal.get("modal_opened")),
+        "complaint_action_disabled": bool(modal.get("complaint_action_disabled")),
+        "complaint_action_disabled_reason": _safe_text(modal.get("complaint_action_disabled_reason"), 600),
+        "complaint_action_disabled_category": _safe_text(modal.get("complaint_action_disabled_category"), 120),
         "description_value_match": bool(modal.get("description_value_match")),
         "selected_category": _safe_text(modal.get("selected_category"), 180),
         "submit_payload_has_description": _safe_json_value((modal.get("submit_network_capture") or {}).get("submit_payload_has_description"), 80)
@@ -1153,13 +1188,65 @@ def _submit_events_from_submit_report(feedback_id: str, submit_report: Mapping[s
 
 def _submit_skip_event_code(reason: str) -> str:
     normalized = reason.lower()
+    if "already_complained_in_wb" in normalized or "уже пожал" in normalized or "жалоба уже" in normalized:
+        return "row_skipped_already_complained_in_wb"
     if "complaint_fit=no" in normalized or "жалобу не подавать" in normalized or "ai_no_not_submit_ready" in normalized:
         return "row_skipped_ai_no_not_submit_ready"
+    if "complaint action is disabled" in normalized or "complaint_action_disabled" in normalized:
+        return "row_skipped_complaint_action_disabled"
     if "actionable dom row" in normalized or "not found" in normalized or "safe row menu not found" in normalized:
         return "row_skipped_not_actionable"
     if "complaint already exists" in normalized:
         return "row_skipped_existing_complaint"
     return "row_skipped"
+
+
+def _submit_attempt_from_row(row: Mapping[str, Any], *, run_id: str) -> dict[str, Any]:
+    feedback_id = str(row.get("feedback_id") or "")
+    if row.get("submitted"):
+        return _submit_attempt(
+            feedback_id,
+            status="submitted",
+            label="Подана",
+            code="row_submit_confirmed_success",
+            reason=str(row.get("submit_result") or "WB submit success confirmed"),
+            run_id=run_id,
+        )
+    reason = str(row.get("skip_reason") or row.get("block_reason") or row.get("error") or "not submitted")
+    if row.get("submit_clicked"):
+        return _submit_attempt(
+            feedback_id,
+            status="error",
+            label="Ошибка",
+            code="row_submit_unconfirmed",
+            reason=reason,
+            run_id=run_id,
+        )
+    code = _submit_skip_event_code(reason)
+    label = "Обработана, не подана" if code in {"row_skipped_existing_complaint", "row_skipped_already_complained_in_wb"} else "Пропущена"
+    return _submit_attempt(feedback_id, status="skipped", label=label, code=code, reason=reason, run_id=run_id)
+
+
+def _submit_attempt(
+    feedback_id: str,
+    *,
+    status: str,
+    label: str,
+    code: str,
+    reason: str,
+    run_id: str,
+) -> dict[str, Any]:
+    return _normalize_submit_attempt(
+        {
+            "feedback_id": feedback_id,
+            "attempt_status": status,
+            "attempt_status_label": label,
+            "code": code,
+            "reason": reason,
+            "run_id": run_id,
+            "updated_at": _iso_now(),
+        }
+    )
 
 
 def _submit_job_patch_from_report(report: Mapping[str, Any]) -> dict[str, Any]:
@@ -1171,6 +1258,13 @@ def _submit_job_patch_from_report(report: Mapping[str, Any]) -> dict[str, Any]:
     status_sync_artifacts = status_sync.get("artifact_paths") if isinstance(status_sync.get("artifact_paths"), Mapping) else {}
     events = report.get("events") if isinstance(report.get("events"), list) else []
     rows = report.get("rows") if isinstance(report.get("rows"), list) else []
+    attempts = report.get("attempts") if isinstance(report.get("attempts"), list) else []
+    if not attempts:
+        attempts = [
+            _submit_attempt_from_row(row, run_id=str(report.get("run_id") or ""))
+            for row in rows
+            if isinstance(row, Mapping) and str(row.get("feedback_id") or "")
+        ]
     skipped = [
         _submit_skip(
             str(row.get("feedback_id") or ""),
@@ -1196,6 +1290,7 @@ def _submit_job_patch_from_report(report: Mapping[str, Any]) -> dict[str, Any]:
         "error_count": error_count,
         "submitted_feedback_ids": submitted_ids,
         "skipped": skipped,
+        "attempts": [_normalize_submit_attempt(item) for item in attempts if isinstance(item, Mapping)][:SUBMIT_JOB_EVENTS_LIMIT],
         "events": events,
         "report_dir": str(Path(json_path).parent) if json_path else "",
         "report_json_path": json_path,
@@ -1293,6 +1388,29 @@ def _normalize_submit_skip(skip: Mapping[str, Any]) -> dict[str, Any]:
         "feedback_id": _safe_text(skip.get("feedback_id"), 160),
         "code": _safe_text(skip.get("code"), 100),
         "reason": _safe_text(skip.get("reason"), 600),
+    }
+
+
+def _normalize_submit_attempt(attempt: Mapping[str, Any]) -> dict[str, Any]:
+    status = _safe_text(attempt.get("attempt_status") or attempt.get("status") or "skipped", 40)
+    if status not in {"submitted", "skipped", "error", "processed_not_submitted"}:
+        status = "skipped"
+    label = _safe_text(attempt.get("attempt_status_label") or attempt.get("label"), 80)
+    if not label:
+        label = {
+            "submitted": "Подана",
+            "skipped": "Пропущена",
+            "error": "Ошибка",
+            "processed_not_submitted": "Обработана, не подана",
+        }.get(status, "Пропущена")
+    return {
+        "feedback_id": _safe_text(attempt.get("feedback_id"), 160),
+        "attempt_status": status,
+        "attempt_status_label": label,
+        "code": _safe_text(attempt.get("code"), 100),
+        "reason": _safe_text(attempt.get("reason"), 800),
+        "run_id": _safe_text(attempt.get("run_id"), 160),
+        "updated_at": _safe_text(attempt.get("updated_at"), 80),
     }
 
 

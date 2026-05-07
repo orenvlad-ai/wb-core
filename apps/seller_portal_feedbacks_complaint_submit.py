@@ -648,6 +648,10 @@ def submit_one_candidate(
     result["tab_used"] = str(resolver.get("tab_used") or "")
     result["locator_strategy"] = str(resolver.get("locator_strategy") or "")
     result["complaint_action_found"] = bool(resolver.get("complaint_action_found"))
+    result["complaint_action_available"] = bool(resolver.get("complaint_action_available"))
+    result["complaint_action_disabled"] = bool(resolver.get("complaint_action_disabled"))
+    result["complaint_action_disabled_reason"] = str(resolver.get("complaint_action_disabled_reason") or "")
+    result["complaint_action_disabled_category"] = str(resolver.get("complaint_action_disabled_category") or "")
     visible_row = resolver.get("resolved_row") if isinstance(resolver.get("resolved_row"), Mapping) else {}
     if not visible_row and resolver.get("actionable_row_found"):
         for attempt in resolver.get("attempts") or []:
@@ -666,6 +670,9 @@ def submit_one_candidate(
     action_click = click_open_row_menu_complaint_action(page)
     result["complaint_action_click"] = action_click
     if not action_click.get("ok"):
+        result["complaint_action_disabled"] = bool(action_click.get("action_disabled"))
+        result["complaint_action_disabled_reason"] = str(action_click.get("disabled_reason") or "")
+        result["complaint_action_disabled_category"] = str(action_click.get("category") or "")
         result["blocker"] = str(action_click.get("reason") or "complaint action could not be clicked")
         _safe_escape(page)
         return result

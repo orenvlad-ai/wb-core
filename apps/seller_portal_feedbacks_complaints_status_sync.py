@@ -47,7 +47,7 @@ def main() -> None:
     parser.add_argument("--wb-bot-python", default=str(DEFAULT_WB_BOT_PYTHON))
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
-    parser.add_argument("--max-complaint-rows", type=int, default=80)
+    parser.add_argument("--max-complaint-rows", type=int, default=500)
     parser.add_argument("--headed", action="store_true")
     parser.add_argument("--timeout-ms", type=int, default=20000)
     parser.add_argument("--no-artifacts", action="store_true")
@@ -75,7 +75,7 @@ def run_status_sync_for_runtime(
     wb_bot_python: Path = DEFAULT_WB_BOT_PYTHON,
     output_dir: Path | None = None,
     start_url: str = DEFAULT_START_URL,
-    max_complaint_rows: int = 80,
+    max_complaint_rows: int = 500,
     headless: bool = True,
     timeout_ms: int = 20000,
     write_artifacts: bool = True,
@@ -175,8 +175,14 @@ def _apply_status_updates(
     local_by_id = {str(record.get("feedback_id") or ""): record for record in records if record.get("feedback_id")}
     pending_rows = list(((my_complaints.get("pending") or {}).get("rows") or []))
     answered_rows = list(((my_complaints.get("answered") or {}).get("rows") or []))
+    pending_stats = (my_complaints.get("pending") or {}).get("collection_stats") if isinstance(my_complaints.get("pending"), Mapping) else {}
+    answered_stats = (my_complaints.get("answered") or {}).get("collection_stats") if isinstance(my_complaints.get("answered"), Mapping) else {}
     report["aggregate"]["pending_rows_read"] = len(pending_rows)
     report["aggregate"]["answered_rows_read"] = len(answered_rows)
+    report["aggregate"]["pending_collection_stop_reason"] = str((pending_stats or {}).get("stop_reason") or "")
+    report["aggregate"]["answered_collection_stop_reason"] = str((answered_stats or {}).get("stop_reason") or "")
+    report["aggregate"]["pending_oldest_review_date"] = str((pending_stats or {}).get("oldest_review_date") or "")
+    report["aggregate"]["answered_oldest_review_date"] = str((answered_stats or {}).get("oldest_review_date") or "")
     updates: list[dict[str, Any]] = []
     best_matches: dict[str, dict[str, Any]] = {}
     matched_candidate_count = 0

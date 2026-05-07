@@ -202,6 +202,8 @@ def _assert_fake_submit_selected_job() -> None:
             raise AssertionError("submit job must invoke guarded submit runner")
         if result["submitted_count"] != 1 or result["skipped_count"] != 1:
             raise AssertionError(f"submit job must expose submitted/skipped counts: {result}")
+        if not any(item.get("feedback_id") == "feedback-existing" for item in result.get("attempts") or []):
+            raise AssertionError(f"submit job must expose per-row attempts for UI overlay: {result}")
         if not any(event.get("event") == "row_submit_confirmed_success" for event in result.get("events") or []):
             raise AssertionError(f"submit job must expose bounded event log: {result}")
         try:
@@ -412,7 +414,7 @@ def _assert_http_sync_job_routes() -> None:
                 "events": [
                     {
                         "timestamp": "2026-05-06T00:00:00Z",
-                        "event": "row_error",
+                        "event": "row_skipped_not_actionable",
                         "feedback_id": "feedback-http-new",
                         "message": "fake skipped",
                         "status": "skipped",

@@ -577,6 +577,13 @@
       color: #475569;
     }
 
+    .feedbacks-complaint-status.status-skipped,
+    .feedbacks-complaint-status.status-processed_not_submitted {
+      border-color: #dbe4f0;
+      background: #f8fafc;
+      color: #475569;
+    }
+
     .feedbacks-submit-log {
       margin-top: 10px;
       border: 1px solid var(--border);
@@ -2579,8 +2586,9 @@
     const FEEDBACKS_WB_CATEGORY_LABEL_SET = new Set(Object.values(FEEDBACKS_WB_CATEGORY_LABELS));
     const FEEDBACKS_COLUMN_WIDTHS_STORAGE_KEY = "wb_core_feedbacks_column_widths_v1";
     const FEEDBACKS_COMPLAINTS_VISIBLE_COLUMNS_STORAGE_KEY = "wb_core_feedbacks_complaints_visible_columns_v1";
-    const FEEDBACKS_RANGE_STORAGE_KEY = "wb_core_feedbacks_range_v2";
-    const FEEDBACKS_RANGE_STORAGE_VERSION = 2;
+    const FEEDBACKS_RANGE_STORAGE_KEY = "wb_core_feedbacks_range_v3";
+    const FEEDBACKS_RANGE_STORAGE_VERSION = 3;
+    const FEEDBACKS_RANGE_STORAGE_TTL_MS = 12 * 60 * 60 * 1000;
     const FEEDBACKS_MIN_COLUMN_WIDTH = 72;
 	    const FEEDBACKS_DEFAULT_COLUMN_WIDTHS = {
 	      select: 54,
@@ -2767,6 +2775,7 @@
 	          status: "",
 	          events: [],
 	          skipped: [],
+	          attempts: [],
 	          submittedFeedbackIds: [],
 	          summary: null,
 	          error: "",
@@ -5202,6 +5211,10 @@
         if (normalizeIsoDate(payload.default_end_date || "") !== feedbacksDefaultEndDate()) {
           return null;
         }
+        const savedAtMs = Number(payload.saved_at_ms || 0);
+        if (!Number.isFinite(savedAtMs) || !savedAtMs || Date.now() - savedAtMs > FEEDBACKS_RANGE_STORAGE_TTL_MS) {
+          return null;
+        }
         const dateFrom = normalizeIsoDate(payload.date_from || "");
         const dateTo = normalizeIsoDate(payload.date_to || "");
         if (!feedbacksStoredRangeIsValid(dateFrom, dateTo)) {
@@ -6187,6 +6200,27 @@
 	      return record ? String(record.complaint_status || "") : "";
 	    }
 
+	    function feedbacksSubmitAttemptById() {
+	      const map = {};
+	      const job = state.feedbacks.submitJob || {};
+	      const attempts = Array.isArray(job.attempts) ? job.attempts : [];
+	      attempts.forEach(function(attempt) {
+	        const feedbackId = String((attempt && attempt.feedback_id) || "").trim();
+	        if (feedbackId) {
+	          map[feedbackId] = attempt;
+	        }
+	      });
+	      return map;
+	    }
+
+	    function feedbacksSubmitAttemptForRow(row) {
+	      const feedbackId = feedbackRowId(row);
+	      if (!feedbackId) {
+	        return null;
+	      }
+	      return feedbacksSubmitAttemptById()[feedbackId] || null;
+	    }
+
 	    function feedbacksAiCompleteForCurrentRows() {
 	      const rows = state.feedbacks.rows || [];
 	      if (!state.feedbacks.loaded || !rows.length || state.feedbacks.analyzing) {
@@ -6312,6 +6346,7 @@
 	        status: "queued",
 	        events: [{event: "job_started", message: "Запуск submit-selected из UI", status: "queued", timestamp: new Date().toISOString()}],
 	        skipped: [],
+	        attempts: [],
 	        submittedFeedbackIds: [],
 	        summary: null,
 	        error: "",
@@ -6422,6 +6457,7 @@
 	        errorCount: Number(payload.error_count || 0),
 	        events: Array.isArray(payload.events) ? payload.events : [],
 	        skipped: Array.isArray(payload.skipped) ? payload.skipped : [],
+	        attempts: Array.isArray(payload.attempts) ? payload.attempts : [],
 	        submittedFeedbackIds: Array.isArray(payload.submitted_feedback_ids) ? payload.submitted_feedback_ids : [],
 	        summary: payload.summary || null,
 	        error: String(payload.error || "")
@@ -6586,7 +6622,7 @@
             "Accept": "application/json",
             "Content-Type": "application/json; charset=utf-8"
           },
-          body: JSON.stringify({max_complaint_rows: 80})
+	          body: JSON.stringify({max_complaint_rows: 500})
         });
         const payload = await readJsonResponse(response, "non-json response from complaints status sync route");
         if (!response.ok) {
@@ -6996,12 +7032,19 @@
 
 	    function renderFeedbacksComplaintStatusCell(row) {
 	      const record = feedbacksComplaintRecordForRow(row);
-	      if (!record) {
-	        return '<td class="feedbacks-complaint-status-cell">—</td>';
+	      if (record) {
+	        const status = String(record.complaint_status || "");
+	        const label = String(record.complaint_status_label || status || "—");
+	        return '<td class="feedbacks-complaint-status-cell"><span class="feedbacks-complaint-status status-' + escapeHtml(status) + '" title="Жалоба уже есть в журнале">' + escapeHtml(label) + "</span></td>";
 	      }
-	      const status = String(record.complaint_status || "");
-	      const label = String(record.complaint_status_label || status || "—");
-	      return '<td class="feedbacks-complaint-status-cell"><span class="feedbacks-complaint-status status-' + escapeHtml(status) + '">' + escapeHtml(label) + "</span></td>";
+	      const attempt = feedbacksSubmitAttemptForRow(row);
+	      if (attempt) {
+	        const status = String(attempt.attempt_status || "skipped");
+	        const label = String(attempt.attempt_status_label || status || "Пропущена");
+	        const reason = String(attempt.reason || attempt.code || "");
+	        return '<td class="feedbacks-complaint-status-cell"><span class="feedbacks-complaint-status status-' + escapeHtml(status) + '" title="' + escapeHtml(reason) + '">' + escapeHtml(label) + "</span></td>";
+	      }
+	      return '<td class="feedbacks-complaint-status-cell">—</td>';
 	    }
 
     function normalizeFeedbackReviewTags(value) {

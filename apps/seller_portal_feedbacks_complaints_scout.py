@@ -19,7 +19,7 @@ from pathlib import Path
 import re
 import sys
 import time
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +85,11 @@ FEEDBACK_ID_RE = re.compile(r"(?:feedback|review|comment)[_-]?(?:id)?[=:_/ -]*([
 ROW_MENU_COMPLAINT_LABEL = "Пожаловаться на отзыв"
 ROW_MENU_RETURN_LABEL = "Запросить возврат"
 ROW_MENU_EXPECTED_LABELS = (ROW_MENU_RETURN_LABEL, ROW_MENU_COMPLAINT_LABEL)
+MAX_COMPLAINT_SCROLL_ATTEMPTS = 45
+ALREADY_COMPLAINED_HINT_RE = re.compile(
+    r"(уже\s+пожал|жалоб[ауы]\s+уже|вы\s+уже\s+пожал|на\s+этот\s+отзыв\s+уже)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -573,12 +578,13 @@ def scout_my_complaints(page: Page, config: ScoutConfig) -> dict[str, Any]:
     for tab_label, key in (("Ждут ответа", "pending"), ("Есть ответ", "answered")):
         clicked = _click_tab_like(page, tab_label)
         _wait_settle(page, 2000)
-        rows = extract_visible_complaint_rows(page, max_rows=config.max_complaint_rows)
+        rows, collection_stats = collect_complaint_rows_with_scroll(page, max_rows=config.max_complaint_rows)
         report[key] = {
             "tab_clicked": clicked,
             "visible_rows": len(rows),
             "rows": rows,
             "field_availability": field_availability(rows),
+            "collection_stats": collection_stats,
         }
     report["pending_count_visible"] = report["pending"]["visible_rows"]
     report["answered_count_visible"] = report["answered"]["visible_rows"]
@@ -597,6 +603,229 @@ def extract_visible_feedback_rows(page: Page, *, max_rows: int) -> list[dict[str
 def extract_visible_complaint_rows(page: Page, *, max_rows: int) -> list[dict[str, Any]]:
     raw_rows = page.evaluate(_DOM_CANDIDATE_SCRIPT, {"kind": "complaint", "limit": max_rows})
     return [parse_complaint_candidate(row) for row in raw_rows]
+
+
+def collect_complaint_rows_with_scroll(page: Page, *, max_rows: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    max_rows = max(1, int(max_rows))
+    max_visible_read = min(max(max_rows, 20), 160)
+    collected: dict[str, dict[str, Any]] = {}
+    attempts_log: list[dict[str, Any]] = []
+    idle_attempts = 0
+    stop_reason = ""
+    oldest_date = ""
+    newest_date = ""
+    attempts = 0
+    for attempts in range(1, MAX_COMPLAINT_SCROLL_ATTEMPTS + 1):
+        visible_rows = extract_visible_complaint_rows(page, max_rows=max_visible_read)
+        new_count = 0
+        for row in visible_rows:
+            if not _complaint_row_has_sync_evidence(row):
+                continue
+            key = _complaint_row_identity(row)
+            if not key or key in collected:
+                continue
+            enriched = dict(row)
+            enriched["ui_collection_index"] = len(collected)
+            collected[key] = enriched
+            new_count += 1
+        dates = [
+            _normalize_date_key(row.get("review_date") or row.get("review_datetime"))
+            for row in collected.values()
+            if _normalize_date_key(row.get("review_date") or row.get("review_datetime"))
+        ]
+        oldest_date = min(dates, default="")
+        newest_date = max(dates, default="")
+        attempts_log.append(
+            {
+                "attempt": attempts,
+                "visible_rows": len(visible_rows),
+                "new_rows": new_count,
+                "collected_unique_rows": len(collected),
+                "oldest_review_date": oldest_date,
+                "newest_review_date": newest_date,
+            }
+        )
+        if len(collected) >= max_rows:
+            stop_reason = "max_complaint_rows_reached"
+            break
+        idle_attempts = idle_attempts + 1 if new_count == 0 else 0
+        if idle_attempts >= 4:
+            stop_reason = "no_new_complaint_rows_after_scroll"
+            break
+        scroll_result = scroll_complaints_list(page)
+        attempts_log[-1]["scroll"] = scroll_result
+        _wait_settle(page, 900)
+        if not scroll_result.get("changed"):
+            idle_attempts += 1
+    rows = list(collected.values())[:max_rows]
+    for index, row in enumerate(rows):
+        row["row_index"] = index
+    return rows, {
+        "scroll_attempts": attempts,
+        "max_scroll_attempts": MAX_COMPLAINT_SCROLL_ATTEMPTS,
+        "stop_reason": stop_reason or "max_scroll_attempts_reached",
+        "collected_unique_rows": len(rows),
+        "oldest_review_date": oldest_date,
+        "newest_review_date": newest_date,
+        "attempts": attempts_log[-12:],
+    }
+
+
+def scroll_complaints_list(page: Page) -> dict[str, Any]:
+    try:
+        js_result = page.evaluate(
+            r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 240 && rect.height > 120;
+  };
+  const candidates = Array.from(document.querySelectorAll('[data-testid*="table"], [class*="Table"], [class*="table"], main, section, div'))
+    .filter(visible)
+    .filter((el) => el.scrollHeight > el.clientHeight + 40)
+    .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
+  const target = candidates[0] || document.scrollingElement || document.documentElement;
+  const before = target.scrollTop;
+  const delta = Math.max(360, Math.floor((target.clientHeight || window.innerHeight) * 0.88));
+  target.scrollBy(0, delta);
+  if (target.scrollTop === before && document.scrollingElement) {
+    const docBefore = document.scrollingElement.scrollTop;
+    window.scrollBy(0, Math.max(360, Math.floor(window.innerHeight * 0.88)));
+    return {
+      changed: document.scrollingElement.scrollTop !== docBefore,
+      target: 'window',
+      before: Math.round(docBefore),
+      after: Math.round(document.scrollingElement.scrollTop)
+    };
+  }
+  return {
+    changed: target.scrollTop !== before,
+    target: target === document.scrollingElement ? 'document' : String(target.className || target.tagName || '').slice(0, 120),
+    before: Math.round(before),
+    after: Math.round(target.scrollTop)
+  };
+}
+            """
+        )
+        if js_result.get("changed"):
+            return js_result
+        wheel_target = page.evaluate(
+            r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 160 && rect.height > 40;
+  };
+  const textOf = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+  const rows = Array.from(document.querySelectorAll('[data-testid="Base-table-row"], [role="row"], tr, [class*="row"], [class*="Row"]'))
+    .filter(visible)
+    .map((el) => {
+      const rect = el.getBoundingClientRect();
+      return {el, rect, text: textOf(el).slice(0, 220)};
+    })
+    .filter((item) => item.rect.top >= 0 && item.rect.top < window.innerHeight);
+  const row = rows.find((item) => /Причина|Описание|Одобрен|Отклон|Жд[её]т ответа|\d{1,2}[./]\d{1,2}[./]\d{2,4}/i.test(item.text)) || rows[0];
+  const list = row ? row.el.closest('[data-testid*="table"], [class*="Table"], [class*="table"], main, section') : null;
+  const rect = (list && visible(list) ? list : (row && row.el) || document.body).getBoundingClientRect();
+  const x = Math.min(Math.max(rect.left + rect.width / 2, 40), window.innerWidth - 40);
+  const y = Math.min(Math.max((row ? row.rect.top + row.rect.height / 2 : rect.top + Math.min(rect.height * 0.65, 520)), 80), window.innerHeight - 80);
+  return {
+    ok: true,
+    x,
+    y,
+    delta: Math.max(560, Math.floor(window.innerHeight * 0.86)),
+    first_row_text_before: rows.length ? rows[0].text : '',
+    row_count_before: rows.length
+  };
+}
+            """
+        )
+        if not wheel_target.get("ok"):
+            return js_result
+        page.mouse.move(float(wheel_target.get("x") or 800), float(wheel_target.get("y") or 600))
+        page.mouse.wheel(0, int(wheel_target.get("delta") or 700))
+        time.sleep(0.2)
+        after = page.evaluate(
+            r"""
+() => {
+  const visible = (el) => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 160 && rect.height > 40;
+  };
+  const rows = Array.from(document.querySelectorAll('[data-testid="Base-table-row"], [role="row"], tr, [class*="row"], [class*="Row"]'))
+    .filter(visible)
+    .map((el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 220));
+  return {first_row_text_after: rows[0] || '', row_count_after: rows.length};
+}
+            """
+        )
+        return {
+            "changed": bool(
+                (after.get("first_row_text_after") and after.get("first_row_text_after") != wheel_target.get("first_row_text_before"))
+                or int(after.get("row_count_after") or 0) > int(wheel_target.get("row_count_before") or 0)
+            ),
+            "target": "mouse_wheel_virtual_complaints_list",
+            "fallback_after": js_result,
+            "x": round(float(wheel_target.get("x") or 0)),
+            "y": round(float(wheel_target.get("y") or 0)),
+            "delta": int(wheel_target.get("delta") or 0),
+            "row_count_before": int(wheel_target.get("row_count_before") or 0),
+            "row_count_after": int(after.get("row_count_after") or 0),
+        }
+    except PlaywrightError as exc:
+        return {"changed": False, "error": _safe_text(str(exc), 300)}
+
+
+def _complaint_row_has_sync_evidence(row: Mapping[str, Any]) -> bool:
+    text = _norm_text(
+        " ".join(
+            str(row.get(key) or "")
+            for key in (
+                "product_title",
+                "supplier_article",
+                "complaint_reason",
+                "complaint_description",
+                "review_text_snippet",
+                "review_date",
+                "decision_label",
+                "displayed_status",
+            )
+        )
+    )
+    lower = text.lower()
+    if not text or "ии-ответы подключены" in lower:
+        return False
+    if lower in {"товар причина описание статус отзыв", "товар причина описание статус"}:
+        return False
+    return bool(
+        row.get("hidden_ids")
+        or row.get("review_date")
+        or row.get("review_datetime")
+        or row.get("complaint_reason")
+        or row.get("complaint_description")
+        or row.get("decision_label")
+        or row.get("displayed_status")
+    )
+
+
+def _complaint_row_identity(row: Mapping[str, Any]) -> str:
+    hidden_ids = row.get("hidden_ids") if isinstance(row.get("hidden_ids"), Mapping) else {}
+    feedback_id = str(hidden_ids.get("feedback_id") or row.get("feedback_id") or "").strip()
+    if feedback_id:
+        return f"feedback_id:{feedback_id}"
+    parts = [
+        str(row.get("review_datetime") or row.get("review_date") or ""),
+        str(row.get("product_title") or ""),
+        str(row.get("supplier_article") or row.get("nm_id") or row.get("wb_article") or ""),
+        str(row.get("complaint_reason") or ""),
+        str(row.get("complaint_description") or ""),
+        str(row.get("review_text_snippet") or ""),
+        str(row.get("decision_label") or row.get("displayed_status") or ""),
+    ]
+    return "row:" + _fingerprint(" | ".join(parts))
 
 
 def parse_feedback_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -886,25 +1115,38 @@ def extract_open_row_menu_state(page: Page) -> dict[str, Any]:
     return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight;
   };
   const labelFor = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+  const disabledFor = (el) => Boolean(
+    el.disabled ||
+    el.getAttribute('aria-disabled') === 'true' ||
+    el.getAttribute('disabled') !== null ||
+    /disabled|disable|unavailable/i.test(String(el.className || ''))
+  );
   const selector = '[role="menu"], [role="listbox"], [data-popper-placement], [class*="Dropdown"], [class*="dropdown"], [class*="Popover"], [class*="popover"], [class*="Menu"], [class*="menu"], ul';
   const roots = Array.from(document.querySelectorAll(selector))
     .filter(visible)
     .filter((root) => /Пожаловаться\s+на\s+отзыв|Запросить\s+возврат/i.test(labelFor(root)));
   return roots.slice(0, 10).map((root) => {
     const rect = root.getBoundingClientRect();
-    const items = Array.from(root.querySelectorAll('button, [role="button"], [role="menuitem"], li, div, span'))
+    const itemObjects = Array.from(root.querySelectorAll('button, [role="button"], [role="menuitem"], li, div, span'))
       .filter(visible)
-      .map((el) => labelFor(el))
-      .filter(Boolean);
+      .map((el) => ({
+        label: labelFor(el),
+        disabled: disabledFor(el),
+        ariaDisabled: el.getAttribute('aria-disabled') || '',
+        title: el.getAttribute('title') || '',
+        className: String(el.className || '').slice(0, 160)
+      }))
+      .filter((item) => item.label);
     const rootText = labelFor(root);
-    if (rootText) items.unshift(rootText);
+    if (rootText) itemObjects.unshift({label: rootText, disabled: disabledFor(root), ariaDisabled: root.getAttribute('aria-disabled') || '', title: root.getAttribute('title') || '', className: String(root.className || '').slice(0, 160)});
     return {
       tag: root.tagName.toLowerCase(),
       role: root.getAttribute('role') || '',
       className: String(root.className || '').slice(0, 160),
       rect: {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)},
       text: rootText,
-      items
+      items: itemObjects.map((item) => item.label),
+      itemObjects
     };
   });
 }
@@ -913,19 +1155,43 @@ def extract_open_row_menu_state(page: Page) -> dict[str, Any]:
     except PlaywrightError:
         payload = []
     items: list[str] = []
+    action_item_objects: list[dict[str, Any]] = []
     root_texts: list[str] = []
     for root in payload if isinstance(payload, list) else []:
         root_texts.append(_safe_text(str(root.get("text") or ""), 240))
         items.extend(_extract_row_menu_items_from_texts([str(item) for item in root.get("items") or []]))
+        for item in root.get("itemObjects") or []:
+            if not isinstance(item, dict):
+                continue
+            label = _norm_text(str(item.get("label") or ""))
+            if ROW_MENU_COMPLAINT_LABEL.lower() in label.lower():
+                action_item_objects.append(item)
     items = _unique_preserve(items)
+    complaint_action_found = any(
+        _norm_text(item).lower() == _norm_text(ROW_MENU_COMPLAINT_LABEL).lower()
+        for item in items
+    ) or bool(action_item_objects)
+    disabled_objects = [item for item in action_item_objects if bool(item.get("disabled"))]
+    enabled_objects = [item for item in action_item_objects if not bool(item.get("disabled"))]
+    disabled_reason = _safe_text(
+        " ".join(
+            str(item.get(key) or "")
+            for item in disabled_objects
+            for key in ("label", "title", "ariaDisabled", "className")
+        ),
+        300,
+    )
+    root_reason = _safe_text(" ".join(root_texts), 300)
+    already_complained = bool(ALREADY_COMPLAINED_HINT_RE.search(disabled_reason) or ALREADY_COMPLAINED_HINT_RE.search(root_reason))
     return {
         "root_count": len(payload) if isinstance(payload, list) else 0,
         "root_texts": [text for text in root_texts if text],
         "items": items,
-        "complaint_action_found": any(
-            _norm_text(item).lower() == _norm_text(ROW_MENU_COMPLAINT_LABEL).lower()
-            for item in items
-        ),
+        "complaint_action_found": complaint_action_found,
+        "complaint_action_available": bool(complaint_action_found and (enabled_objects or not action_item_objects)),
+        "complaint_action_disabled": bool(complaint_action_found and disabled_objects and not enabled_objects),
+        "complaint_action_disabled_reason": disabled_reason,
+        "complaint_action_disabled_category": "already_complained_in_wb" if already_complained else ("complaint_action_disabled" if disabled_objects and not enabled_objects else ""),
         "return_action_found": any(
             _norm_text(item).lower() == _norm_text(ROW_MENU_RETURN_LABEL).lower()
             for item in items
@@ -948,6 +1214,19 @@ def click_open_row_menu_complaint_action(page: Page) -> dict[str, Any]:
     return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight;
   };
   const labelFor = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+  const disabledFor = (el) => Boolean(
+    el.disabled ||
+    el.getAttribute('aria-disabled') === 'true' ||
+    el.getAttribute('disabled') !== null ||
+    /disabled|disable|unavailable/i.test(String(el.className || ''))
+  );
+  const disabledReasonFor = (el) => [
+    labelFor(el),
+    el.getAttribute('title') || '',
+    el.getAttribute('aria-label') || '',
+    el.getAttribute('aria-describedby') || '',
+    String(el.className || '')
+  ].join(' ').replace(/\s+/g, ' ').trim();
   const selector = '[role="menu"], [role="listbox"], [data-popper-placement], [class*="Dropdown"], [class*="dropdown"], [class*="Popover"], [class*="popover"], [class*="Menu"], [class*="menu"], ul';
   const roots = Array.from(document.querySelectorAll(selector))
     .filter(visible)
@@ -961,7 +1240,19 @@ def click_open_row_menu_complaint_action(page: Page) -> dict[str, Any]:
         const bButton = b.tagName === 'BUTTON' ? 0 : 1;
         return aButton - bButton;
       });
-    const target = candidates.find((el) => !el.disabled) || candidates[0];
+    const target = candidates.find((el) => !disabledFor(el));
+    if (!target && candidates.length) {
+      const disabledReason = disabledReasonFor(candidates[0]) || labelFor(root);
+      const already = /уже\s+пожал|жалоб[ауы]\s+уже|вы\s+уже\s+пожал|на\s+этот\s+отзыв\s+уже/i.test(disabledReason + ' ' + labelFor(root));
+      return {
+        ok: false,
+        reason: already ? 'already_complained_in_wb: complaint action is disabled' : 'complaint action is disabled',
+        category: already ? 'already_complained_in_wb' : 'complaint_action_disabled',
+        action_disabled: true,
+        disabled_reason: disabledReason.slice(0, 300),
+        label: labelFor(candidates[0])
+      };
+    }
     if (target) {
       const rect = target.getBoundingClientRect();
       target.click();
