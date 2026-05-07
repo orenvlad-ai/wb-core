@@ -33,6 +33,14 @@ from apps.seller_portal_feedbacks_complaint_submit import (  # noqa: E402
     run_submit,
     write_report_artifacts as write_submit_report_artifacts,
 )
+from apps.seller_portal_automation_guard import (  # noqa: E402
+    SellerPortalAutomationBusy,
+    SellerPortalStorageStatePolicyError,
+    busy_response_payload,
+    seller_portal_automation_lock,
+    seller_portal_storage_state_path,
+    validate_storage_state_path_for_runtime,
+)
 
 
 CONTRACT_NAME = "seller_portal_feedbacks_complaint_batch"
@@ -66,7 +74,7 @@ def main() -> None:
     parser.add_argument("--stars", default="1,2")
     parser.add_argument("--is-answered", default="all", choices=("all", "true", "false"))
     parser.add_argument("--runtime-dir", default="/opt/wb-core-runtime/state")
-    parser.add_argument("--storage-state-path", default=str(DEFAULT_STORAGE_STATE_PATH))
+    parser.add_argument("--storage-state-path", default=str(seller_portal_storage_state_path(DEFAULT_STORAGE_STATE_PATH)))
     parser.add_argument("--wb-bot-python", default=str(DEFAULT_WB_BOT_PYTHON))
     parser.add_argument("--output-root", default="")
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
@@ -127,6 +135,68 @@ def run_batch(
     submit_confirmation: bool,
     write_artifacts: bool = True,
 ) -> dict[str, Any]:
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    try:
+        storage_state_path = (
+            seller_portal_storage_state_path(DEFAULT_STORAGE_STATE_PATH)
+            if storage_state_path == DEFAULT_STORAGE_STATE_PATH
+            else storage_state_path
+        )
+        validate_storage_state_path_for_runtime(storage_state_path, runtime_dir)
+        with seller_portal_automation_lock(
+            runtime_dir=runtime_dir,
+            owner=CONTRACT_NAME,
+            purpose="complaint_batch" if not dry_run else "complaint_batch_dry_run",
+            run_id=run_id,
+            expected_max_seconds=max(600, max_runs_per_day * max(1, int(timeout_ms / 1000) + 120)),
+        ) as lock:
+            return _run_batch_locked(
+                date_from=date_from,
+                date_to=date_to,
+                stars=stars,
+                is_answered=is_answered,
+                runtime_dir=runtime_dir,
+                storage_state_path=storage_state_path,
+                wb_bot_python=wb_bot_python,
+                output_root=output_root,
+                start_url=start_url,
+                max_api_rows=max_api_rows,
+                max_submit=max_submit,
+                max_runs_per_day=max_runs_per_day,
+                timeout_ms=timeout_ms,
+                headless=headless,
+                dry_run=dry_run,
+                submit_confirmation=submit_confirmation,
+                write_artifacts=write_artifacts,
+                automation_lock=lock.public_payload(),
+            )
+    except SellerPortalAutomationBusy as exc:
+        return _batch_preflight_error_report(date_from, date_to, stars, is_answered, run_id, "automation_lock", busy_response_payload(exc.lock_payload), output_root, write_artifacts)
+    except SellerPortalStorageStatePolicyError as exc:
+        return _batch_preflight_error_report(date_from, date_to, stars, is_answered, run_id, "storage_state_policy", {"code": exc.code, "message": str(exc)}, output_root, write_artifacts)
+
+
+def _run_batch_locked(
+    *,
+    date_from: str,
+    date_to: str,
+    stars: tuple[int, ...],
+    is_answered: str,
+    runtime_dir: Path,
+    storage_state_path: Path,
+    wb_bot_python: Path,
+    output_root: Path,
+    start_url: str,
+    max_api_rows: int,
+    max_submit: int,
+    max_runs_per_day: int,
+    timeout_ms: int,
+    headless: bool,
+    dry_run: bool,
+    submit_confirmation: bool,
+    write_artifacts: bool = True,
+    automation_lock: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     started_at = _iso_now()
     report: dict[str, Any] = {
         "contract_name": CONTRACT_NAME,
@@ -151,6 +221,7 @@ def run_batch(
             "public_browser_direct_submit": False,
             "mass_submit_allowed": False,
         },
+        "automation_lock": dict(automation_lock or {}),
         "days": [],
         "runs": [],
         "candidates": {},
@@ -300,6 +371,53 @@ def _merge_candidate_state(candidate_state: dict[str, dict[str, Any]], *, day: s
             state.update({"status": "not_submitted", "reason_group": group, "reason_detail": detail, "reason": reason})
         elif candidate.get("selected_for_dry_run"):
             state.update({"status": "pending", "reason": "selected but not attempted yet"})
+
+
+def _batch_preflight_error_report(
+    date_from: str,
+    date_to: str,
+    stars: tuple[int, ...],
+    is_answered: str,
+    run_id: str,
+    stage: str,
+    error: Mapping[str, Any],
+    output_root: Path,
+    write_artifacts: bool,
+) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "contract_name": CONTRACT_NAME,
+        "contract_version": CONTRACT_VERSION,
+        "started_at": _iso_now(),
+        "finished_at": _iso_now(),
+        "run_id": run_id,
+        "parameters": {
+            "date_from": date_from,
+            "date_to": date_to,
+            "stars": list(stars),
+            "is_answered": is_answered,
+        },
+        "safety": {
+            "delegates_to_guarded_submit_runner": True,
+            "hard_max_submit_per_run": MAX_SUBMIT_HARD_CAP,
+            "non_exact_submit_allowed": False,
+            "public_browser_direct_submit": False,
+            "mass_submit_allowed": False,
+        },
+        "automation_lock": error.get("lock") or {},
+        "days": [],
+        "runs": [],
+        "candidates": {},
+        "aggregate": {"days_processed": 0, "runs_executed": 0, "ai_candidates_to_complain": 0, "submitted": 0, "not_submitted": 0},
+        "errors": [
+            {
+                "stage": stage,
+                "code": str(error.get("code") or stage),
+                "message": str(error.get("message") or ""),
+            }
+        ],
+    }
+    _maybe_write_batch_report(report, output_root, write_artifacts)
+    return report
 
 
 def _not_submitted_feedback_ids_for_day(candidate_state: Mapping[str, Mapping[str, Any]], day: str) -> tuple[str, ...]:

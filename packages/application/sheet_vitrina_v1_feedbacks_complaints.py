@@ -15,6 +15,8 @@ import threading
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
+from apps.seller_portal_automation_guard import current_lock_status, busy_response_payload
+
 
 CONTRACT_NAME = "sheet_vitrina_v1_feedbacks_complaints"
 SYNC_CONTRACT_NAME = "sheet_vitrina_v1_feedbacks_complaints_status_sync"
@@ -707,6 +709,9 @@ class SheetVitrinaV1FeedbacksComplaintsBlock:
     def sync_status(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
         requested_by = str(payload.get("requested_by") or "public_route").strip() or "public_route"
+        busy = current_lock_status(self.runtime_dir)
+        if busy.get("busy"):
+            return _public_sync_busy_job(busy, requested_by=requested_by, now_factory=self.now_factory)
         return self.status_sync_jobs.start(payload, runner=self._run_status_sync, requested_by=requested_by)
 
     def get_sync_status_job(self, run_id: str) -> dict[str, Any]:
@@ -715,6 +720,9 @@ class SheetVitrinaV1FeedbacksComplaintsBlock:
     def submit_selected(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
         requested_by = str(payload.get("requested_by") or "operator_ui").strip() or "operator_ui"
+        busy = current_lock_status(self.runtime_dir)
+        if busy.get("busy"):
+            return _public_submit_busy_job(busy, requested_by=requested_by, now_factory=self.now_factory)
         return self.submit_jobs.start(payload, runner=self._run_submit_selected, requested_by=requested_by)
 
     def get_submit_job(self, run_id: str) -> dict[str, Any]:
@@ -809,6 +817,41 @@ def _public_sync_job(job: Mapping[str, Any], *, already_running: bool) -> dict[s
     }
 
 
+def _public_sync_busy_job(
+    lock_payload: Mapping[str, Any],
+    *,
+    requested_by: str,
+    now_factory: Any,
+) -> dict[str, Any]:
+    busy = busy_response_payload(lock_payload)
+    now = _iso_now(now_factory)
+    return {
+        "contract_name": SYNC_JOB_CONTRACT_NAME,
+        "contract_version": CONTRACT_VERSION,
+        "run_id": _safe_text((lock_payload or {}).get("run_id") or "", 160),
+        "kind": SYNC_JOB_KIND,
+        "status": "error",
+        "already_running": True,
+        "created_at": now,
+        "started_at": "",
+        "finished_at": now,
+        "requested_by": _safe_text(requested_by or "public_route", 80),
+        "report_dir": "",
+        "report_json_path": "",
+        "report_markdown_path": "",
+        "summary": {"seller_portal_automation_busy": True},
+        "error": f"{busy['code']}: {busy['message']}",
+        "automation_lock": busy["lock"],
+        "journal_record_count_before": 0,
+        "journal_record_count_after": 0,
+        "matched_local_complaints": 0,
+        "statuses_updated": 0,
+        "weak_rejected": 0,
+        "direct_matches": 0,
+        "strong_composite_matches": 0,
+    }
+
+
 def _normalize_submit_job(job: Mapping[str, Any]) -> dict[str, Any]:
     status = str(job.get("status") or "queued").strip()
     if status not in {"queued", "running", "success", "error"}:
@@ -876,6 +919,53 @@ def _public_submit_job(job: Mapping[str, Any], *, already_running: bool) -> dict
         "status_sync_run_id": normalized["status_sync_run_id"],
         "status_sync_report_path": normalized["status_sync_report_path"],
         "error": normalized["error"],
+    }
+
+
+def _public_submit_busy_job(
+    lock_payload: Mapping[str, Any],
+    *,
+    requested_by: str,
+    now_factory: Any,
+) -> dict[str, Any]:
+    busy = busy_response_payload(lock_payload)
+    now = _iso_now(now_factory)
+    return {
+        "contract_name": SUBMIT_JOB_CONTRACT_NAME,
+        "contract_version": CONTRACT_VERSION,
+        "run_id": _safe_text((lock_payload or {}).get("run_id") or "", 160),
+        "kind": SUBMIT_JOB_KIND,
+        "status": "error",
+        "already_running": True,
+        "created_at": now,
+        "started_at": "",
+        "finished_at": now,
+        "requested_by": _safe_text(requested_by or "operator_ui", 80),
+        "selected_count": 0,
+        "tested_count": 0,
+        "submitted_count": 0,
+        "skipped_count": 0,
+        "error_count": 1,
+        "submitted_feedback_ids": [],
+        "skipped": [],
+        "attempts": [],
+        "events": [
+            _submit_event(
+                "seller_portal_automation_busy",
+                message="Seller Portal automation already running",
+                status="error",
+                at=now,
+            )
+        ],
+        "report_dir": "",
+        "report_json_path": "",
+        "report_markdown_path": "",
+        "summary": {"seller_portal_automation_busy": True},
+        "status_sync_pending": False,
+        "status_sync_run_id": "",
+        "status_sync_report_path": "",
+        "error": f"{busy['code']}: {busy['message']}",
+        "automation_lock": busy["lock"],
     }
 
 

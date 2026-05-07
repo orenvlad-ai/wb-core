@@ -32,6 +32,13 @@ if str(ROOT) not in sys.path:
 
 from playwright.sync_api import sync_playwright
 
+from apps.seller_portal_automation_guard import (  # noqa: E402
+    SellerPortalAutomationBusy,
+    acquire_seller_portal_automation_lock,
+    busy_response_payload,
+    seller_portal_storage_state_path,
+)
+
 from packages.adapters.web_source_current_sync import _SELLER_PORTAL_SESSION_PROBE_SCRIPT
 
 
@@ -349,7 +356,34 @@ def supervise_relogin_session(config: ReloginSessionConfig) -> int:
     _ensure_required_commands(config)
 
     processes: list[subprocess.Popen[Any]] = []
+    automation_lock = None
     try:
+        status_before_lock = _read_status(config.status_path)
+        lock_run_id = str(status_before_lock.get("run_id") or _new_recovery_run_id())
+        try:
+            automation_lock = acquire_seller_portal_automation_lock(
+                runtime_dir=DEFAULT_STATE_DIR.parent,
+                owner="seller_portal_relogin_session",
+                purpose="seller_portal_relogin_recovery",
+                run_id=lock_run_id,
+                expected_max_seconds=max(300, int(config.timeout_sec) + 120),
+            )
+        except SellerPortalAutomationBusy as exc:
+            busy = busy_response_payload(exc.lock_payload)
+            _write_status(
+                config,
+                {
+                    "status": "error",
+                    "run_failure_code": busy["code"],
+                    "message": busy["message"],
+                    "finished_at": _iso_now(),
+                    "automation_lock": busy["lock"],
+                    "storage_state_path": str(config.storage_state_path),
+                    "state_dir": str(config.state_dir),
+                    "supervisor_pid": os.getpid(),
+                },
+            )
+            return 1
         _write_status(
             config,
             {
@@ -482,6 +516,8 @@ def supervise_relogin_session(config: ReloginSessionConfig) -> int:
     finally:
         for process in reversed(processes):
             _terminate_process(process)
+        if automation_lock is not None:
+            automation_lock.release()
         if config.pid_path.exists():
             config.pid_path.unlink()
 
@@ -964,7 +1000,7 @@ def _add_common_args(
     default_config: ReloginSessionConfig,
 ) -> None:
     parser.add_argument("--state-dir", default=str(default_config.state_dir))
-    parser.add_argument("--storage-state-path", default=str(default_config.storage_state_path))
+    parser.add_argument("--storage-state-path", default=str(seller_portal_storage_state_path(default_config.storage_state_path)))
     parser.add_argument("--wb-bot-python", default=str(default_config.wb_bot_python))
     parser.add_argument("--display", default=default_config.display)
     parser.add_argument("--vnc-port", default=str(default_config.vnc_port))

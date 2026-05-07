@@ -17,6 +17,7 @@ from apps.seller_portal_feedbacks_complaints_status_sync import (  # noqa: E402
     _apply_status_updates,
     _augment_session_with_storage_supplier_context,
     _can_try_direct_complaints_routes,
+    _status_sync_capabilities,
 )
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import JsonFileFeedbacksComplaintJournal  # noqa: E402
 
@@ -128,6 +129,7 @@ def main() -> None:
         if report["aggregate"]["answered_oldest_review_date"] != "2026-04-01":
             raise AssertionError(f"historical answered scan date must be surfaced: {report}")
     _assert_direct_complaints_session_fallback()
+    _assert_status_sync_capability_summary()
     print("seller_portal_feedbacks_complaints_status_sync_smoke: OK")
 
 
@@ -185,6 +187,24 @@ def _assert_direct_complaints_session_fallback() -> None:
             os.environ.pop("SELLER_PORTAL_CANONICAL_SUPPLIER_ID", None)
         else:
             os.environ["SELLER_PORTAL_CANONICAL_SUPPLIER_ID"] = previous
+
+
+def _assert_status_sync_capability_summary() -> None:
+    capabilities = _status_sync_capabilities(
+        {
+            "canonical_supplier_configured": True,
+            "supplier_context": {"analytics_supplier_id": "canonical-supplier-id"},
+        },
+        {
+            "warm_up": {"ok": True},
+            "pending": {"navigation": {"ok": True}},
+            "answered": {"navigation": {"ok": False, "blocker": "seller portal redirected to login/auth page"}},
+        },
+    )
+    if not capabilities.get("seller_portal_base") or not capabilities.get("complaints_pending"):
+        raise AssertionError(f"base/pending capabilities must be true: {capabilities}")
+    if capabilities.get("complaints_answered"):
+        raise AssertionError(f"answered auth redirect must be a route-specific failed capability: {capabilities}")
 
 
 def _record(

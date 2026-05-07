@@ -31,6 +31,14 @@ from apps.seller_portal_relogin_session import (  # noqa: E402
     DEFAULT_WB_BOT_PYTHON,
     read_storage_state_supplier_context,
 )
+from apps.seller_portal_automation_guard import (  # noqa: E402
+    SellerPortalAutomationBusy,
+    SellerPortalStorageStatePolicyError,
+    acquire_seller_portal_automation_lock,
+    busy_response_payload,
+    seller_portal_storage_state_path,
+    validate_storage_state_path_for_runtime,
+)
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import (  # noqa: E402
     COMPLAINT_STATUS_LABELS,
     CONTRACT_NAME,
@@ -49,7 +57,7 @@ ALL_RECORD_STATUSES = tuple(COMPLAINT_STATUS_LABELS.keys())
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-dir", default=str(DEFAULT_RUNTIME_DIR if DEFAULT_RUNTIME_DIR.exists() else ".runtime"))
-    parser.add_argument("--storage-state-path", default=str(DEFAULT_STORAGE_STATE_PATH))
+    parser.add_argument("--storage-state-path", default=str(seller_portal_storage_state_path(DEFAULT_STORAGE_STATE_PATH)))
     parser.add_argument("--wb-bot-python", default=str(DEFAULT_WB_BOT_PYTHON))
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
@@ -128,7 +136,9 @@ def run_status_sync_for_runtime(
             "status_sync_only": True,
             "record_status_scope": "all" if target_statuses is None else sorted(target_statuses),
         },
+        "automation_lock": {},
         "session": {},
+        "session_capabilities": {},
         "navigation": {},
         "my_complaints": {},
         "updates": [],
@@ -160,62 +170,107 @@ def run_status_sync_for_runtime(
         _maybe_write(report, output_dir, write_artifacts)
         return report
 
-    session = check_session(scout_config)
-    session = _augment_session_with_storage_supplier_context(session, storage_state_path)
-    report["session"] = session
-    if not session.get("ok") and not _can_try_direct_complaints_routes(session):
-        report["errors"].append({"stage": "session", "code": str(session.get("status") or ""), "message": str(session.get("message") or "")})
+    lock = None
+    try:
+        storage_state_path = (
+            seller_portal_storage_state_path(DEFAULT_STORAGE_STATE_PATH)
+            if Path(storage_state_path) == DEFAULT_STORAGE_STATE_PATH
+            else Path(storage_state_path)
+        )
+        validate_storage_state_path_for_runtime(storage_state_path, runtime_dir)
+        lock = acquire_seller_portal_automation_lock(
+            runtime_dir=runtime_dir,
+            owner=SYNC_CONTRACT_NAME,
+            purpose="status_sync",
+            run_id=run_id,
+            expected_max_seconds=max(300, int(timeout_ms / 1000) + max_complaint_rows * 3),
+        )
+        report["automation_lock"] = lock.public_payload()
+        scout_config = ScoutConfig(
+            **{**scout_config.__dict__, "storage_state_path": storage_state_path}
+        )
+    except SellerPortalAutomationBusy as exc:
+        report["errors"].append({"stage": "automation_lock", **busy_response_payload(exc.lock_payload)})
         report["finished_at"] = _iso_now()
         _maybe_write(report, output_dir, write_artifacts)
         return report
-    if not session.get("ok"):
-        report["session"]["preflight_warning"] = (
-            "generic Seller Portal probe failed; continuing with direct read-only complaints status URLs"
-        )
-
+    except SellerPortalStorageStatePolicyError as exc:
+        report["errors"].append({"stage": "storage_state_policy", "code": exc.code, "message": safe_text(str(exc), 800)})
+        report["finished_at"] = _iso_now()
+        _maybe_write(report, output_dir, write_artifacts)
+        return report
     try:
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=headless)
-            context = browser.new_context(
-                storage_state=str(storage_state_path),
-                locale="ru-RU",
-                timezone_id=BUSINESS_TZ,
-                viewport={"width": 1600, "height": 1200},
-                accept_downloads=False,
+        session = check_session(scout_config)
+        session = _augment_session_with_storage_supplier_context(session, storage_state_path)
+        report["session"] = session
+        if not session.get("ok") and not _can_try_direct_complaints_routes(session):
+            report["errors"].append({"stage": "session", "code": str(session.get("status") or ""), "message": str(session.get("message") or "")})
+            report["finished_at"] = _iso_now()
+            _maybe_write(report, output_dir, write_artifacts)
+            return report
+        if not session.get("ok"):
+            report["session"]["preflight_warning"] = (
+                "generic Seller Portal probe failed; continuing with direct read-only complaints status URLs"
             )
-            page = context.new_page()
-            page.set_default_timeout(timeout_ms)
-            try:
-                my = scout_my_complaints(page, scout_config)
-                report["my_complaints"] = my
-                report["navigation"] = {
-                    "success": bool(my.get("success")),
-                    "method": "direct_complaints_status_urls",
-                    "pending_final_url": str((my.get("pending") or {}).get("navigation", {}).get("final_url") or ""),
-                    "answered_final_url": str((my.get("answered") or {}).get("navigation", {}).get("final_url") or ""),
-                    "blocker": str(my.get("blocker") or ""),
-                }
-                if not my.get("success") or my.get("blocker"):
-                    report["errors"].append(
-                        {"stage": "my_complaints_navigation", "code": "not_reached", "message": str(my.get("blocker") or "")}
-                    )
-                else:
-                    _apply_status_updates(
-                        report,
-                        journal,
-                        records_before,
-                        my,
-                        run_id=run_id,
-                        record_statuses="all" if target_statuses is None else sorted(target_statuses),
-                    )
-            finally:
-                context.close()
-                browser.close()
-    except Exception as exc:  # pragma: no cover - live fallback
-        report["errors"].append({"stage": "browser_status_sync", "code": exc.__class__.__name__, "message": safe_text(str(exc), 800)})
-    report["finished_at"] = _iso_now()
-    _maybe_write(report, output_dir, write_artifacts)
-    return report
+
+        try:
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=headless)
+                context = browser.new_context(
+                    storage_state=str(storage_state_path),
+                    locale="ru-RU",
+                    timezone_id=BUSINESS_TZ,
+                    viewport={"width": 1600, "height": 1200},
+                    accept_downloads=False,
+                )
+                page = context.new_page()
+                page.set_default_timeout(timeout_ms)
+                try:
+                    if lock:
+                        lock.heartbeat()
+                    my = scout_my_complaints(page, scout_config)
+                    report["my_complaints"] = my
+                    report["session_capabilities"] = _status_sync_capabilities(session, my)
+                    report["navigation"] = {
+                        "success": bool(my.get("success")),
+                        "method": "seller_portal_warm_up_then_direct_complaints_status_urls",
+                        "pending_final_url": str((my.get("pending") or {}).get("navigation", {}).get("final_url") or ""),
+                        "answered_final_url": str((my.get("answered") or {}).get("navigation", {}).get("final_url") or ""),
+                        "blocker": str(my.get("blocker") or ""),
+                    }
+                    if not my.get("success") or my.get("blocker"):
+                        for capability, ok in (report.get("session_capabilities") or {}).items():
+                            if capability in {"complaints_pending", "complaints_answered"} and not ok:
+                                report["errors"].append(
+                                    {
+                                        "stage": "session_capability",
+                                        "code": f"session_invalid_for_route: {capability}",
+                                        "message": f"Seller Portal session is not valid for {capability}",
+                                    }
+                                )
+                        report["errors"].append(
+                            {"stage": "my_complaints_navigation", "code": "not_reached", "message": str(my.get("blocker") or "")}
+                        )
+                    else:
+                        _apply_status_updates(
+                            report,
+                            journal,
+                            records_before,
+                            my,
+                            run_id=run_id,
+                            record_statuses="all" if target_statuses is None else sorted(target_statuses),
+                        )
+                finally:
+                    context.close()
+                    browser.close()
+        except Exception as exc:  # pragma: no cover - live fallback
+            report["errors"].append({"stage": "browser_status_sync", "code": exc.__class__.__name__, "message": safe_text(str(exc), 800)})
+        report["finished_at"] = _iso_now()
+        _maybe_write(report, output_dir, write_artifacts)
+        return report
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 def _normalize_record_statuses(raw: Any) -> set[str] | None:
@@ -237,6 +292,20 @@ def _normalize_record_statuses(raw: Any) -> set[str] | None:
     if unknown:
         raise ValueError(f"unknown complaint_status for status sync scope: {', '.join(unknown)}")
     return set(normalized)
+
+
+def _status_sync_capabilities(session: Mapping[str, Any], my_complaints: Mapping[str, Any]) -> dict[str, bool]:
+    supplier = session.get("supplier_context") if isinstance(session.get("supplier_context"), Mapping) else {}
+    warm_up = my_complaints.get("warm_up") if isinstance(my_complaints.get("warm_up"), Mapping) else {}
+    pending_nav = ((my_complaints.get("pending") or {}).get("navigation") or {}) if isinstance(my_complaints.get("pending"), Mapping) else {}
+    answered_nav = ((my_complaints.get("answered") or {}).get("navigation") or {}) if isinstance(my_complaints.get("answered"), Mapping) else {}
+    return {
+        "canonical_supplier_context": bool(session.get("canonical_supplier_configured") and supplier),
+        "analytics_supplier_context": bool(supplier.get("analytics_supplier_id")),
+        "seller_portal_base": bool(warm_up.get("ok")),
+        "complaints_pending": bool(pending_nav.get("ok")),
+        "complaints_answered": bool(answered_nav.get("ok")),
+    }
 
 
 def _filter_records_by_status(records: list[dict[str, Any]], statuses: set[str] | None) -> list[dict[str, Any]]:

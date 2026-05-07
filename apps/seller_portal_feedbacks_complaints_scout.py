@@ -40,6 +40,14 @@ from apps.seller_portal_relogin_session import (  # noqa: E402
     DEFAULT_WB_BOT_PYTHON,
     probe_storage_state,
 )
+from apps.seller_portal_automation_guard import (  # noqa: E402
+    SellerPortalAutomationBusy,
+    SellerPortalStorageStatePolicyError,
+    busy_response_payload,
+    seller_portal_automation_lock,
+    seller_portal_storage_state_path,
+    validate_storage_state_path_for_runtime,
+)
 from packages.application.feedback_review_tags import known_review_tags_from_text, normalize_review_tags  # noqa: E402
 
 
@@ -122,7 +130,7 @@ def main() -> None:
         nargs="?",
         default="full-scout",
     )
-    parser.add_argument("--storage-state-path", default=str(DEFAULT_STORAGE_STATE_PATH))
+    parser.add_argument("--storage-state-path", default=str(seller_portal_storage_state_path(DEFAULT_STORAGE_STATE_PATH)))
     parser.add_argument("--wb-bot-python", default=str(DEFAULT_WB_BOT_PYTHON))
     parser.add_argument("--output-root", default="")
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
@@ -168,7 +176,6 @@ def main() -> None:
 
 def run_scout(config: ScoutConfig) -> dict[str, Any]:
     started_at = _iso_now()
-    session = check_session(config)
     report: dict[str, Any] = {
         "contract_name": "seller_portal_feedbacks_complaints_scout",
         "contract_version": "read_only_v1",
@@ -181,7 +188,8 @@ def run_scout(config: ScoutConfig) -> dict[str, Any]:
             "seller_portal_write_actions_allowed": False,
             "open_complaint_modal_requested": config.open_complaint_modal,
         },
-        "session": session,
+        "automation_lock": {},
+        "session": {},
         "navigation": {},
         "feedbacks": _empty_feedbacks_report(),
         "complaint_modal": _empty_modal_report(),
@@ -189,45 +197,60 @@ def run_scout(config: ScoutConfig) -> dict[str, Any]:
         "matching_feasibility": {},
         "errors": [],
     }
-    if config.mode == "check-session":
-        report["finished_at"] = _iso_now()
-        report["matching_feasibility"] = build_matching_feasibility(report)
-        return report
-    if not session.get("ok"):
-        report["errors"].append(
-            {
-                "stage": "session",
-                "code": str(session.get("status") or "session_invalid"),
-                "message": str(session.get("message") or "Seller Portal session is not valid"),
-            }
-        )
-        report["finished_at"] = _iso_now()
-        report["matching_feasibility"] = build_matching_feasibility(report)
-        return report
-
     try:
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=config.headless)
-            context = browser.new_context(
-                storage_state=str(config.storage_state_path),
-                locale="ru-RU",
-                timezone_id=BUSINESS_TZ,
-                viewport={"width": 1600, "height": 1200},
-                accept_downloads=False,
-            )
-            page = context.new_page()
-            page.set_default_timeout(config.timeout_ms)
-            try:
-                report["navigation"] = navigate_to_feedbacks_questions(page, config)
-                if config.mode in {"scout-feedbacks", "scout-categories", "full-scout"}:
-                    report["feedbacks"] = scout_feedbacks_tab(page, config)
-                if config.mode in {"scout-categories", "full-scout"}:
-                    report["complaint_modal"] = scout_complaint_categories(page, config, report["feedbacks"])
-                if config.mode in {"scout-complaints", "full-scout"}:
-                    report["my_complaints"] = scout_my_complaints(page, config)
-            finally:
-                context.close()
-                browser.close()
+        runtime_dir = _runtime_dir_from_output_root(config.output_root)
+        validate_storage_state_path_for_runtime(config.storage_state_path, runtime_dir)
+        with seller_portal_automation_lock(
+            runtime_dir=runtime_dir,
+            owner="seller_portal_feedbacks_complaints_scout",
+            purpose=config.mode,
+            run_id=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+            expected_max_seconds=max(60, int(config.timeout_ms / 1000) + 120),
+        ) as lock:
+            report["automation_lock"] = lock.public_payload()
+            session = check_session(config)
+            report["session"] = session
+            if config.mode == "check-session":
+                report["finished_at"] = _iso_now()
+                report["matching_feasibility"] = build_matching_feasibility(report)
+                return report
+            if not session.get("ok"):
+                report["errors"].append(
+                    {
+                        "stage": "session",
+                        "code": str(session.get("status") or "session_invalid"),
+                        "message": str(session.get("message") or "Seller Portal session is not valid"),
+                    }
+                )
+                report["finished_at"] = _iso_now()
+                report["matching_feasibility"] = build_matching_feasibility(report)
+                return report
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=config.headless)
+                context = browser.new_context(
+                    storage_state=str(config.storage_state_path),
+                    locale="ru-RU",
+                    timezone_id=BUSINESS_TZ,
+                    viewport={"width": 1600, "height": 1200},
+                    accept_downloads=False,
+                )
+                page = context.new_page()
+                page.set_default_timeout(config.timeout_ms)
+                try:
+                    report["navigation"] = navigate_to_feedbacks_questions(page, config)
+                    if config.mode in {"scout-feedbacks", "scout-categories", "full-scout"}:
+                        report["feedbacks"] = scout_feedbacks_tab(page, config)
+                    if config.mode in {"scout-categories", "full-scout"}:
+                        report["complaint_modal"] = scout_complaint_categories(page, config, report["feedbacks"])
+                    if config.mode in {"scout-complaints", "full-scout"}:
+                        report["my_complaints"] = scout_my_complaints(page, config)
+                finally:
+                    context.close()
+                    browser.close()
+    except SellerPortalAutomationBusy as exc:
+        report["errors"].append({"stage": "automation_lock", **busy_response_payload(exc.lock_payload)})
+    except SellerPortalStorageStatePolicyError as exc:
+        report["errors"].append({"stage": "storage_state_policy", "code": exc.code, "message": _safe_text(str(exc), 800)})
     except Exception as exc:  # pragma: no cover - live scout fallback
         report["errors"].append(
             {
@@ -236,7 +259,6 @@ def run_scout(config: ScoutConfig) -> dict[str, Any]:
                 "message": _safe_text(str(exc), 800),
             }
         )
-
     report["matching_feasibility"] = build_matching_feasibility(report)
     report["finished_at"] = _iso_now()
     return report
@@ -355,6 +377,29 @@ def navigate_to_feedbacks_questions(page: Page, config: ScoutConfig) -> dict[str
     result["final_url"] = page.url
     result["blocker"] = result["blocker"] or "Отзывы и вопросы page was not reached with menu/discovered/direct navigation"
     return result
+
+
+def warm_up_seller_portal_context(page: Page, config: ScoutConfig) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "ok": False,
+        "method": "seller_portal_base",
+        "start_url": config.start_url,
+        "final_url": "",
+        "blocker": "",
+    }
+    try:
+        page.goto(config.start_url, wait_until="domcontentloaded")
+        _wait_settle(page, 2500)
+        result["final_url"] = page.url
+        if _looks_like_login(page):
+            result["blocker"] = "session_invalid_for_route: seller_portal_base"
+            return result
+        result["ok"] = True
+        return result
+    except PlaywrightError as exc:
+        result["blocker"] = f"seller_portal_base warm-up failed: {_safe_text(str(exc), 240)}"
+        result["final_url"] = page.url
+        return result
 
 
 def scout_feedbacks_tab(page: Page, config: ScoutConfig) -> dict[str, Any]:
@@ -571,6 +616,11 @@ def scout_one_complaint_modal(page: Page, row: dict[str, Any] | str) -> dict[str
 
 def scout_my_complaints(page: Page, config: ScoutConfig) -> dict[str, Any]:
     report = _empty_my_complaints_report()
+    warm_up = warm_up_seller_portal_context(page, config)
+    report["warm_up"] = warm_up
+    if not warm_up.get("ok"):
+        report["blocker"] = str(warm_up.get("blocker") or "seller_portal_base warm-up failed")
+        return report
     for tab_label, key in (("Ждут ответа", "pending"), ("Есть ответ", "answered")):
         navigation = open_my_complaints_status_tab(page, config, key, tab_label)
         if not navigation.get("ok"):
@@ -600,6 +650,14 @@ def scout_my_complaints(page: Page, config: ScoutConfig) -> dict[str, Any]:
     report["status_decision_fields_available"] = field_availability(answered_rows).get("decision_label", False)
     report["success"] = True
     return report
+
+
+def _runtime_dir_from_output_root(output_root: Path) -> Path:
+    text = str(output_root)
+    live_root = "/opt/wb-core-runtime/state"
+    if text == live_root or text.startswith(live_root + "/"):
+        return Path(live_root)
+    return output_root
 
 
 def open_my_complaints_status_tab(page: Page, config: ScoutConfig, key: str, tab_label: str) -> dict[str, Any]:

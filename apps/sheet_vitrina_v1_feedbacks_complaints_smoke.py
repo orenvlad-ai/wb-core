@@ -40,6 +40,7 @@ from packages.application.sheet_vitrina_v1_feedbacks_complaints import (  # noqa
     _submit_skip_event_code,
 )
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
+from apps.seller_portal_automation_guard import acquire_seller_portal_automation_lock  # noqa: E402
 
 
 def main() -> None:
@@ -48,6 +49,7 @@ def main() -> None:
     _assert_table_contract_and_fake_async_sync()
     _assert_fake_submit_selected_job()
     _assert_submit_selected_skip_event_shape()
+    _assert_global_seller_portal_lock_blocks_public_jobs()
     _assert_submit_job_store_keeps_fresh_active_jobs()
     _assert_duplicate_running_job_guard()
     _assert_error_job_and_missing_run_id()
@@ -296,6 +298,38 @@ def _assert_submit_job_store_keeps_fresh_active_jobs() -> None:
             raise AssertionError(f"stale running submit job must be marked interrupted: {by_id['stale']}")
         if by_id["active-with-finished"]["status"] != "error":
             raise AssertionError(f"running submit job with finished_at must not hold the active lock: {by_id['active-with-finished']}")
+
+
+def _assert_global_seller_portal_lock_blocks_public_jobs() -> None:
+    with TemporaryDirectory(prefix="feedbacks-complaints-global-lock-") as tmp:
+        runtime_dir = Path(tmp)
+        lock = acquire_seller_portal_automation_lock(
+            runtime_dir=runtime_dir,
+            owner="smoke-parser",
+            purpose="parser_export",
+            run_id="parser-run",
+            expected_max_seconds=60,
+        )
+        try:
+            journal = JsonFileFeedbacksComplaintJournal(runtime_dir)
+            journal.create_or_update(_record("feedback-lock"))
+            block = SheetVitrinaV1FeedbacksComplaintsBlock(runtime_dir=runtime_dir, journal=journal)
+            sync = block.sync_status({"max_complaint_rows": 3})
+            if sync["status"] != "error" or "seller_portal_automation_busy" not in sync["error"]:
+                raise AssertionError(f"sync-status route must return controlled busy response: {sync}")
+            submit = block.submit_selected(
+                {
+                    "feedback_ids": ["feedback-new"],
+                    "max_submit": 1,
+                    "date_from": "2026-05-06",
+                    "date_to": "2026-05-06",
+                    "stars": [1],
+                }
+            )
+            if submit["status"] != "error" or "seller_portal_automation_busy" not in submit["error"]:
+                raise AssertionError(f"submit-selected route must return controlled busy response: {submit}")
+        finally:
+            lock.release()
 
 
 def _assert_duplicate_running_job_guard() -> None:

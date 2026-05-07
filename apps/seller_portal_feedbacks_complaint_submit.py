@@ -82,6 +82,14 @@ from apps.seller_portal_feedbacks_matching_replay import (  # noqa: E402
     summarize_api_row,
 )
 from apps.seller_portal_relogin_session import DEFAULT_STORAGE_STATE_PATH, DEFAULT_WB_BOT_PYTHON  # noqa: E402
+from apps.seller_portal_automation_guard import (  # noqa: E402
+    SellerPortalAutomationBusy,
+    SellerPortalStorageStatePolicyError,
+    busy_response_payload,
+    seller_portal_automation_lock,
+    seller_portal_storage_state_path,
+    validate_storage_state_path_for_runtime,
+)
 from packages.application.feedback_review_tags import normalize_review_tags, reason_contradicts_review_tags  # noqa: E402
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import (  # noqa: E402
     JsonFileFeedbacksComplaintJournal,
@@ -175,7 +183,7 @@ def main() -> None:
     )
     parser.add_argument("--i-understand-this-submits-complaints", action="store_true")
     parser.add_argument("--runtime-dir", default=str(DEFAULT_RUNTIME_DIR if DEFAULT_RUNTIME_DIR.exists() else ".runtime"))
-    parser.add_argument("--storage-state-path", default=str(DEFAULT_STORAGE_STATE_PATH))
+    parser.add_argument("--storage-state-path", default=str(seller_portal_storage_state_path(DEFAULT_STORAGE_STATE_PATH)))
     parser.add_argument("--wb-bot-python", default=str(DEFAULT_WB_BOT_PYTHON))
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
@@ -221,6 +229,38 @@ def run_submit(config: SubmitConfig) -> dict[str, Any]:
     if config.max_submit > MAX_SUBMIT_HARD_CAP:
         raise RuntimeError(f"max_submit hard cap is {MAX_SUBMIT_HARD_CAP}")
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    try:
+        storage_state_path = (
+            seller_portal_storage_state_path(DEFAULT_STORAGE_STATE_PATH)
+            if config.storage_state_path == DEFAULT_STORAGE_STATE_PATH
+            else config.storage_state_path
+        )
+        validate_storage_state_path_for_runtime(storage_state_path, config.runtime_dir)
+        locked_config = SubmitConfig(**{**config.__dict__, "storage_state_path": storage_state_path})
+        with seller_portal_automation_lock(
+            runtime_dir=locked_config.runtime_dir,
+            owner=CONTRACT_NAME,
+            purpose="complaint_submit" if not locked_config.dry_run else "complaint_submit_dry_run",
+            run_id=run_id,
+            expected_max_seconds=max(300, int(locked_config.timeout_ms / 1000) * max(1, locked_config.max_submit) + 240),
+        ) as lock:
+            return _run_submit_locked(locked_config, run_id=run_id, automation_lock=lock.public_payload())
+    except SellerPortalAutomationBusy as exc:
+        return _submit_preflight_error_report(config, run_id=run_id, stage="automation_lock", error=busy_response_payload(exc.lock_payload))
+    except SellerPortalStorageStatePolicyError as exc:
+        return _submit_preflight_error_report(config, run_id=run_id, stage="storage_state_policy", error={"code": exc.code, "message": safe_text(str(exc), 800)})
+
+
+def _run_submit_locked(
+    config: SubmitConfig,
+    *,
+    run_id: str,
+    automation_lock: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not config.dry_run and not config.submit_confirmation:
+        raise RuntimeError("real complaint submission requires --i-understand-this-submits-complaints")
+    if config.max_submit > MAX_SUBMIT_HARD_CAP:
+        raise RuntimeError(f"max_submit hard cap is {MAX_SUBMIT_HARD_CAP}")
     journal = JsonFileFeedbacksComplaintJournal(config.runtime_dir)
     dry_config = to_dry_run_config(config)
     report: dict[str, Any] = {
@@ -258,6 +298,7 @@ def run_submit(config: SubmitConfig) -> dict[str, Any]:
         "api": {},
         "ai": {},
         "session": {},
+        "automation_lock": dict(automation_lock or {}),
         "navigation": {},
         "ui": {},
         "candidates": [],
@@ -363,6 +404,58 @@ def run_submit(config: SubmitConfig) -> dict[str, Any]:
     report["final_conclusion"] = determine_final_conclusion(candidates, report["errors"])
     report["finished_at"] = iso_now()
     return report
+
+
+def _submit_preflight_error_report(
+    config: SubmitConfig,
+    *,
+    run_id: str,
+    stage: str,
+    error: Mapping[str, Any],
+) -> dict[str, Any]:
+    code = str(error.get("code") or stage)
+    message = str(error.get("message") or "")
+    return {
+        "contract_name": CONTRACT_NAME,
+        "contract_version": CONTRACT_VERSION,
+        "started_at": iso_now(),
+        "finished_at": iso_now(),
+        "run_id": run_id,
+        "parameters": {
+            "date_from": config.date_from,
+            "date_to": config.date_to,
+            "stars": list(config.stars),
+            "is_answered": config.is_answered,
+            "max_api_rows": config.max_api_rows,
+            "max_submit": config.max_submit,
+            "include_review": config.include_review,
+            "dry_run": config.dry_run,
+            "require_exact": config.require_exact,
+            "retry_errors": config.retry_errors,
+            "explicit_submit_flag": config.submit_confirmation,
+            "deny_feedback_ids": list(config.deny_feedback_ids),
+            "target_feedback_id": config.target_feedback_id,
+        },
+        "safety": {
+            "hard_max_submit": MAX_SUBMIT_HARD_CAP,
+            "real_submit_enabled": False,
+            "exact_match_required": config.require_exact,
+            "non_exact_submit_allowed": False,
+            "complaint_submit_route_exposed": False,
+            "retry_old_submit_allowed": False,
+            "mass_submit_allowed": False,
+        },
+        "api": {},
+        "ai": {},
+        "session": {},
+        "automation_lock": error.get("lock") or {},
+        "navigation": {},
+        "ui": {},
+        "candidates": [],
+        "aggregate": build_submit_aggregate([]),
+        "errors": [{"stage": stage, "code": code, "message": safe_text(message, 1000)}],
+        "final_conclusion": code,
+    }
 
 
 def select_submit_candidate_ids(

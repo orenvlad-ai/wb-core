@@ -40,6 +40,14 @@ from apps.seller_portal_feedbacks_complaints_scout import (  # noqa: E402
     navigate_to_feedbacks_questions,
 )
 from apps.seller_portal_relogin_session import DEFAULT_STORAGE_STATE_PATH, DEFAULT_WB_BOT_PYTHON  # noqa: E402
+from apps.seller_portal_automation_guard import (  # noqa: E402
+    SellerPortalAutomationBusy,
+    SellerPortalStorageStatePolicyError,
+    acquire_seller_portal_automation_lock,
+    busy_response_payload,
+    seller_portal_storage_state_path,
+    validate_storage_state_path_for_runtime,
+)
 
 
 CONTRACT_NAME = "seller_portal_feedbacks_filter_dom_scout"
@@ -63,7 +71,7 @@ class FilterDomScoutConfig:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--storage-state-path", default=str(DEFAULT_STORAGE_STATE_PATH))
+    parser.add_argument("--storage-state-path", default=str(seller_portal_storage_state_path(DEFAULT_STORAGE_STATE_PATH)))
     parser.add_argument("--wb-bot-python", default=str(DEFAULT_WB_BOT_PYTHON))
     parser.add_argument("--output-root", default="")
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
@@ -97,7 +105,6 @@ def main() -> None:
 
 
 def run_filter_dom_scout(config: FilterDomScoutConfig) -> dict[str, Any]:
-    session = check_session(build_scout_config(config))
     report: dict[str, Any] = {
         "contract_name": CONTRACT_NAME,
         "contract_version": CONTRACT_VERSION,
@@ -111,19 +118,50 @@ def run_filter_dom_scout(config: FilterDomScoutConfig) -> dict[str, Any]:
             "journal_write_allowed": False,
             "submit_clicked_count": 0,
         },
-        "session": session,
+        "automation_lock": {},
+        "session": {},
         "navigation": {},
         "filter_dom_scout": empty_filter_dom_scout(),
         "errors": [],
     }
-    if not session.get("ok"):
-        report["errors"].append(
-            {
-                "stage": "session",
-                "code": str(session.get("status") or "session_invalid"),
-                "message": str(session.get("message") or "Seller Portal session is not valid"),
-            }
+    lock = None
+    try:
+        runtime_dir = _runtime_dir_from_output(config.output_root)
+        storage_state_path = (
+            seller_portal_storage_state_path(DEFAULT_STORAGE_STATE_PATH)
+            if config.storage_state_path == DEFAULT_STORAGE_STATE_PATH
+            else config.storage_state_path
         )
+        validate_storage_state_path_for_runtime(storage_state_path, runtime_dir)
+        lock = acquire_seller_portal_automation_lock(
+            runtime_dir=runtime_dir,
+            owner=CONTRACT_NAME,
+            purpose="filter_dom_scout",
+            run_id=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+            expected_max_seconds=max(120, int(config.timeout_ms / 1000) + 120),
+        )
+        report["automation_lock"] = lock.public_payload()
+        config = FilterDomScoutConfig(**{**config.__dict__, "storage_state_path": storage_state_path})
+        session = check_session(build_scout_config(config))
+        report["session"] = session
+        if not session.get("ok"):
+            report["errors"].append(
+                {
+                    "stage": "session",
+                    "code": str(session.get("status") or "session_invalid"),
+                    "message": str(session.get("message") or "Seller Portal session is not valid"),
+                }
+            )
+            report["finished_at"] = iso_now()
+            return report
+    except SellerPortalAutomationBusy as exc:
+        report["errors"].append({"stage": "automation_lock", **busy_response_payload(exc.lock_payload)})
+        report["filter_dom_scout"]["blocker"] = "Seller Portal automation already running"
+        report["finished_at"] = iso_now()
+        return report
+    except SellerPortalStorageStatePolicyError as exc:
+        report["errors"].append({"stage": "storage_state_policy", "code": exc.code, "message": safe_text(str(exc), 800)})
+        report["filter_dom_scout"]["blocker"] = safe_text(str(exc), 500)
         report["finished_at"] = iso_now()
         return report
 
@@ -156,8 +194,18 @@ def run_filter_dom_scout(config: FilterDomScoutConfig) -> dict[str, Any]:
         report["errors"].append({"stage": "browser_scout", "code": exc.__class__.__name__, "message": safe_text(str(exc), 800)})
         report["filter_dom_scout"]["blocker"] = safe_text(str(exc), 500)
     finally:
+        if lock is not None:
+            lock.release()
         report["finished_at"] = iso_now()
     return report
+
+
+def _runtime_dir_from_output(output_root: Path) -> Path:
+    text = str(output_root)
+    live = "/opt/wb-core-runtime/state"
+    if text == live or text.startswith(live + "/"):
+        return Path(live)
+    return output_root
 
 
 def scout_popup(page: Page, config: FilterDomScoutConfig) -> dict[str, Any]:
