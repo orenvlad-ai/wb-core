@@ -458,6 +458,17 @@
     .feedbacks-workspace {
       display: grid;
       gap: 10px;
+      min-width: 0;
+      max-width: 100%;
+    }
+
+    .feedbacks-panel,
+    .feedbacks-subpanel,
+    .feedbacks-workspace > *,
+    [data-feedbacks-result],
+    [data-feedbacks-complaints-result] {
+      min-width: 0;
+      max-width: 100%;
     }
 
     .feedbacks-filter-panel,
@@ -569,11 +580,18 @@
 
     .feedbacks-table-shell {
       margin-top: 8px;
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
     }
 
     .feedbacks-table-scroll {
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
       max-height: 720px;
-      overflow: auto;
+      overflow-x: auto;
+      overflow-y: auto;
     }
 
     .feedbacks-table-scroll thead th {

@@ -671,10 +671,42 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             page.wait_for_function("() => document.querySelectorAll('[data-feedbacks-table] tbody tr').length === 650")
             page.wait_for_selector("[data-feedbacks-table-scroll]", state="visible")
             large_scroll_metrics = page.locator("[data-feedbacks-table-scroll]").last.evaluate(
-                "node => ({scrollHeight: node.scrollHeight, clientHeight: node.clientHeight, rows: document.querySelectorAll('[data-feedbacks-table] tbody tr').length})"
+                """node => {
+                    const table = node.querySelector("[data-feedbacks-table]");
+                    const shell = node.closest("[data-feedbacks-table-shell]");
+                    const result = node.closest("[data-feedbacks-result]");
+                    const page = document.querySelector("[data-web-vitrina-page]");
+                    const doc = document.documentElement;
+                    const body = document.body;
+                    const style = getComputedStyle(node);
+                    const rectWidth = (element) => element ? element.getBoundingClientRect().width : 0;
+                    return {
+                        scrollHeight: node.scrollHeight,
+                        clientHeight: node.clientHeight,
+                        scrollWidth: node.scrollWidth,
+                        clientWidth: node.clientWidth,
+                        tableWidth: rectWidth(table),
+                        shellWidth: rectWidth(shell),
+                        resultWidth: rectWidth(result),
+                        pageWidth: rectWidth(page),
+                        documentOverflow: Math.max(doc.scrollWidth, body ? body.scrollWidth : 0) - doc.clientWidth,
+                        overflowX: style.overflowX,
+                        rows: document.querySelectorAll("[data-feedbacks-table] tbody tr").length,
+                    };
+                }"""
             )
             if large_scroll_metrics["scrollHeight"] <= large_scroll_metrics["clientHeight"]:
                 raise AssertionError(f"large feedbacks table must stay inside internal scroll container: {large_scroll_metrics}")
+            if large_scroll_metrics["scrollWidth"] <= large_scroll_metrics["clientWidth"]:
+                raise AssertionError(f"wide feedbacks table must use internal horizontal scroll: {large_scroll_metrics}")
+            if large_scroll_metrics["overflowX"] not in ("auto", "scroll"):
+                raise AssertionError(f"feedbacks table scroll must expose horizontal overflow: {large_scroll_metrics}")
+            if large_scroll_metrics["documentOverflow"] > 4:
+                raise AssertionError(f"wide feedbacks table must not widen the page: {large_scroll_metrics}")
+            if large_scroll_metrics["shellWidth"] > large_scroll_metrics["resultWidth"] + 2:
+                raise AssertionError(f"feedbacks table shell must stay bounded by its result container: {large_scroll_metrics}")
+            if large_scroll_metrics["clientWidth"] > large_scroll_metrics["resultWidth"] + 2:
+                raise AssertionError(f"feedbacks table scroll viewport must stay bounded by its result container: {large_scroll_metrics}")
             request_count_before_large_queue = len(ai_request_batches)
             page.locator("[data-feedbacks-ai-analyze]").click()
             page.wait_for_function(
