@@ -686,7 +686,7 @@ def _build_handler(
                     _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
                     return
                 except SheetVitrinaV1FeedbacksAutoComplaintsError as exc:
-                    _write_json_response(self, HTTPStatus(exc.http_status), {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus(exc.http_status), _auto_complaints_error_payload(exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"sheet vitrina feedbacks automation schedules failed: {exc}"})
@@ -702,7 +702,7 @@ def _build_handler(
                     _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
                     return
                 except SheetVitrinaV1FeedbacksAutoComplaintsError as exc:
-                    _write_json_response(self, HTTPStatus(exc.http_status), {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus(exc.http_status), _auto_complaints_error_payload(exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"sheet vitrina feedbacks automation run-now failed: {exc}"})
@@ -718,7 +718,7 @@ def _build_handler(
                     _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
                     return
                 except SheetVitrinaV1FeedbacksAutoComplaintsError as exc:
-                    _write_json_response(self, HTTPStatus(exc.http_status), {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus(exc.http_status), _auto_complaints_error_payload(exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"sheet vitrina feedbacks automation tick failed: {exc}"})
@@ -1248,7 +1248,7 @@ def _build_handler(
                 try:
                     payload = entrypoint.handle_sheet_feedbacks_auto_complaints_schedules_request()
                 except SheetVitrinaV1FeedbacksAutoComplaintsError as exc:
-                    _write_json_response(self, HTTPStatus(exc.http_status), {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus(exc.http_status), _auto_complaints_error_payload(exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"sheet vitrina feedbacks automation schedules runtime failed: {exc}"})
@@ -1273,7 +1273,7 @@ def _build_handler(
                 try:
                     payload = entrypoint.handle_sheet_feedbacks_auto_complaints_runs_request()
                 except SheetVitrinaV1FeedbacksAutoComplaintsError as exc:
-                    _write_json_response(self, HTTPStatus(exc.http_status), {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus(exc.http_status), _auto_complaints_error_payload(exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"sheet vitrina feedbacks automation runs runtime failed: {exc}"})
@@ -1291,7 +1291,7 @@ def _build_handler(
                     _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
                     return
                 except SheetVitrinaV1FeedbacksAutoComplaintsError as exc:
-                    _write_json_response(self, HTTPStatus(exc.http_status), {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus(exc.http_status), _auto_complaints_error_payload(exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"sheet vitrina feedbacks automation run runtime failed: {exc}"})
@@ -2590,6 +2590,17 @@ def _with_complaints_submit_job_urls(payload: Mapping[str, Any]) -> dict[str, An
     )
     normalized["complaints_url"] = DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH
     return normalized
+
+
+def _auto_complaints_error_payload(exc: SheetVitrinaV1FeedbacksAutoComplaintsError) -> dict[str, Any]:
+    payload = {"error": str(exc)}
+    reason = str(getattr(exc, "reason", "") or "").strip()
+    status = str(getattr(exc, "status", "") or reason).strip()
+    if status:
+        payload["status"] = status
+    if reason:
+        payload["reason"] = reason
+    return payload
 
 
 def _with_factory_order_dataset_urls(payload: Mapping[str, Any]) -> dict[str, Any]:

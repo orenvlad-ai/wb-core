@@ -23,6 +23,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH,
+    DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_NOW_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH,
     DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH,
@@ -61,6 +62,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
     complaints_submit_requests: list[dict[str, object]] = []
     complaints_submit_job_polls: list[str] = []
     automation_schedule_requests: list[dict[str, object]] = []
+    automation_run_now_requests: list[dict[str, object]] = []
     automation_run_requests: list[str] = []
     failed_once: set[str] = set()
     large_feedbacks_mode = False
@@ -402,7 +404,17 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             if route.request.method == "POST":
                 payload = json.loads(route.request.post_data or "{}")
                 automation_schedule_requests.append(payload)
-                schedules = payload.get("schedules") if isinstance(payload, dict) else []
+                incoming = payload.get("schedules") if isinstance(payload, dict) else []
+                schedules = []
+                if isinstance(incoming, list):
+                    for index, item in enumerate(incoming):
+                        if not isinstance(item, dict):
+                            continue
+                        canonical = dict(item)
+                        canonical["id"] = f"canonical-auto-{index}"
+                        canonical["timezone_label"] = "Екатеринбург"
+                        canonical.setdefault("next_run_at", "2026-05-08T07:00:00Z")
+                        schedules.append(canonical)
             else:
                 schedules = [
                     {
@@ -425,6 +437,38 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                         "contract_version": "v1",
                         "schedules": schedules,
                         "recent_runs": [],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+
+        def fulfill_automation_run_now(route: object) -> None:
+            payload = json.loads(route.request.post_data or "{}")
+            automation_run_now_requests.append(payload)
+            route.fulfill(
+                status=202,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                body=json.dumps(
+                    {
+                        "contract_name": "sheet_vitrina_v1_feedbacks_auto_complaints_run",
+                        "contract_version": "v1",
+                        "run": {
+                            "run_id": "auto-run-now-smoke",
+                            "schedule_id": payload.get("schedule_id"),
+                            "trigger_source": "manual",
+                            "status": "no_new_feedbacks",
+                            "window_base_from": "2026-05-07T13:00:00+05:00",
+                            "window_fetch_from": "2026-05-07T13:00:00+05:00",
+                            "window_to": "2026-05-08T13:00:00+05:00",
+                            "loaded_feedbacks_count": 0,
+                            "low_rating_feedbacks_count": 0,
+                            "ai_candidates_count": 0,
+                            "submitted_count": 0,
+                            "skipped_count": 0,
+                            "reason_counts": {},
+                            "attempts": [],
+                            "events": [],
+                        },
                     },
                     ensure_ascii=False,
                 ),
@@ -453,6 +497,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH, fulfill_complaints_submit)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH + "?**", fulfill_complaints_submit_job)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH, fulfill_automation_schedules)
+        context.route("**" + DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_NOW_PATH, fulfill_automation_run_now)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH, fulfill_automation_runs)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH, fulfill_ai_analyze)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH, fulfill_prompt)
@@ -473,10 +518,24 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             page.locator("[data-feedbacks-auto-add]").click()
             if page.locator("[data-feedbacks-auto-schedules-body] tr").count() < 2:
                 raise AssertionError("automation UI must add editable schedule rows")
+            if page.locator("[data-feedbacks-auto-run-now]").is_enabled():
+                raise AssertionError("automation run-now must be disabled while schedules have unsaved changes")
+            if "Сначала сохраните расписание" not in page.locator("[data-feedbacks-auto-run-now]").inner_text():
+                raise AssertionError("automation run-now must tell the operator to save dirty schedules first")
+            if "Первый запуск обработает последние 24 часа" not in page.locator("[data-feedbacks-auto-schedules-body]").inner_text():
+                raise AssertionError("automation UI must render first-run 24h policy hint")
             page.locator("[data-feedbacks-auto-save]").click()
             page.wait_for_function("() => document.querySelector('[data-feedbacks-auto-status]')?.textContent.includes('Расписаний: 2')")
             if not automation_schedule_requests:
                 raise AssertionError("automation schedule save must call backend route")
+            if not page.locator("[data-feedbacks-auto-run-now]").is_enabled():
+                raise AssertionError("automation run-now must re-enable after canonical schedule save")
+            page.locator("[data-feedbacks-auto-run-now]").click()
+            page.wait_for_function("() => document.querySelector('[data-feedbacks-auto-log-body]')?.textContent.includes('no_new_feedbacks')")
+            if not automation_run_now_requests:
+                raise AssertionError("automation run-now must call backend route")
+            if automation_run_now_requests[-1].get("schedule_id") != "canonical-auto-0":
+                raise AssertionError(f"automation run-now must use canonical saved schedule id, got {automation_run_now_requests[-1]}")
             if complaints_sync_requests:
                 raise AssertionError("complaints status sync must not auto-run on page load")
             page.locator("[data-feedbacks-subtab='complaints']").click()
@@ -848,6 +907,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "complaints_submit_requests": len(complaints_submit_requests),
         "complaints_submit_job_polls": len(complaints_submit_job_polls),
         "automation_schedule_requests": len(automation_schedule_requests),
+        "automation_run_now_requests": len(automation_run_now_requests),
         "automation_run_requests": len(automation_run_requests),
         "feedbacks_dark_toolbar": True,
         "feedbacks_action_button_heights": feedbacks_dark_layout.get("buttonHeights", []),

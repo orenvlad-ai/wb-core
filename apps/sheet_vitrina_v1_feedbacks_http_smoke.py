@@ -23,6 +23,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH,
+    DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_NOW_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH,
@@ -356,6 +357,12 @@ def main() -> None:
             tick_status, tick_payload = _post_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH}", {})
             if tick_status != 202 or tick_payload.get("status") != "no_due_schedules":
                 raise AssertionError(f"automation disabled schedule tick must be no-op: {tick_status}: {tick_payload}")
+            missing_status, missing_payload = _post_json(
+                f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_NOW_PATH}",
+                {"schedule_id": "schedule_missing"},
+            )
+            if missing_status != 404 or missing_payload.get("status") != "schedule_not_found" or missing_payload.get("reason") != "schedule_not_found":
+                raise AssertionError(f"unknown automation schedule must return structured schedule_not_found: {missing_status}: {missing_payload}")
 
             url = (
                 f"{base_url}{DEFAULT_SHEET_FEEDBACKS_PATH}?"
