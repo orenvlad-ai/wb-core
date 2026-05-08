@@ -21,7 +21,7 @@ update_triggers:
   - "изменение canonical naming"
   - "появление нового публичного термина"
   - "изменение operator-visible labels"
-built_from_commit: "2992d25d1161f1a52179c10bc5bd5cced7de265c"
+built_from_commit: "a2886343f8e5910f629ab595dbf993ac00d7ad69"
 ---
 
 # Summary
@@ -50,13 +50,15 @@ built_from_commit: "2992d25d1161f1a52179c10bc5bd5cced7de265c"
 | `STATUS` | `status sheet` | former Google Sheets freshness/source sheet; archive/migration-only |
 | `refresh -> web-vitrina read` | `current operator flow`, `current web-vitrina flow` | canonical current bounded operator/server scenario |
 | `group-refresh` | `Обновить группу`, `source group refresh` | date-scoped `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` for one source group and one selected date |
+| `web-vitrina auto schedules` | `Автообновления`, `auto-schedules` | operator-visible read-through schedule surface for the repo-owned full-refresh timer model; manual and automatic refresh use the same canonical full-refresh machinery |
 | `plan-report` | `Выполнение плана` | read-only operator report over persisted closed-day facts, H1/H2 plan values and optional server-side monthly baseline |
 | `manual_monthly_plan_report_baseline` | `Исторические данные для отчёта`, `baseline` | separate runtime SQLite source used only by plan-report for full-month operator XLSX aggregates; not a general historical backfill |
 | `feedbacks` | `Отзывы`, `sheet_vitrina_v1_feedbacks` | read-only official WB feedbacks route/tab; not accepted truth persistence and not complaint submission |
 | `feedbacks AI` | `AI анализ отзывов`, `feedbacks/ai-prompt`, `feedbacks/ai-analyze` | transient operator review aid over loaded feedback rows via server-side prompt + OpenAI call; not `AI_EXPORT`, not ЕБД and not complaint automation |
 | `feedbacks complaints` | `Жалобы`, `feedbacks/complaints`, `complaint journal` | nested `Отзывы` runtime journal/status-sync contour for complaint evidence/status plus protected selected-row submit-job surface; not accepted truth persistence and not broad/auto-submit |
+| `feedbacks auto complaints` | `Авто-жалобы`, `feedbacks/automation`, `auto-complaints` | nested `Отзывы` runtime schedule/run-now/tick contour for bounded daily complaint jobs; uses saved AI and guarded selected-submit, not browser-side broad automation |
 | `Seller Portal complaint submit` | `guarded complaint submit`, `selected complaint submit`, `complaint support runner` | guarded real submit lane with exact feedback/AI-row match, hard caps and confirmation/detail probes; protected selected-row operator job may submit chosen rows, but public unauthenticated/broad auto-submit remains forbidden |
-| `Seller Portal automation lock` | `single-flight lock`, `seller_portal_automation.lock.json` | shared runtime guard for status sync, submit/batch, scout/probe/dry-run/confirmation/detail/relogin and parser/export jobs; concurrent Playwright automation is blocked with sanitized busy metadata |
+| `Seller Portal automation lock` | `single-flight lock`, `seller_portal_automation.lock.json` | shared runtime guard for status sync, submit/batch, auto-complaints tick/run-now, scout/probe/dry-run/confirmation/detail/relogin and parser/export jobs; concurrent Playwright automation is blocked with sanitized busy metadata |
 | `canonical Seller Portal bot session` | `/opt/wb-web-bot/storage_state.json`, `SELLER_PORTAL_STORAGE_STATE_PATH` | live EU bot storage-state contour; reports may show path/status only and EU jobs must not silently fall back to local Mac session files |
 | `route-specific Seller Portal capability` | `complaints_answered`, `complaints_pending`, `feedbacks_list`, `seller_portal_base` | task-specific session readiness check; generic cabinet access is not enough for `Мои жалобы` status/parser tasks or feedback submit tasks |
 | `WebCore app auth` | `login session`, `operator auth`, `app-level auth` | simple app-level login/session boundary for public/operator WebCore routes; credentials live in runtime env, not repo |

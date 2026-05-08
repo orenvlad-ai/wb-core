@@ -25,7 +25,7 @@ update_triggers:
   - "изменение migration boundary"
   - "изменение operator/runtime invariant"
   - "изменение docs governance"
-built_from_commit: "2992d25d1161f1a52179c10bc5bd5cced7de265c"
+built_from_commit: "a2886343f8e5910f629ab595dbf993ac00d7ad69"
 ---
 
 # Summary
@@ -65,7 +65,7 @@ built_from_commit: "2992d25d1161f1a52179c10bc5bd5cced7de265c"
 | `C-22` | Готовность pack к upload определяется по `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`, а не по Finder timestamps, имени архива или памяти исполнителя. |
 | `C-23` | После explicit derived-sync или transitional pack rebuild, когда upload-ready source подготовлен, в handoff должен оставаться ровно один human-only remainder: внешний upload актуального `wb_core_docs_master`; manifest при этом не превращается в upload state machine. |
 | `C-24` | Hosted public-route publication for the current contour goes through the repo-owned nginx allowlist and deploy runner; manual broad catch-all live nginx edits are not a completion path. |
-| `C-25` | `Отзывы` and feedbacks AI stay read-only/transient for table/AI semantics: they must not persist AI labels as accepted truth/ЕБД, write Google Sheets/GAS or silently bypass `WB_API_TOKEN` feedbacks permission errors. Nested `Жалобы` may expose runtime journal/status and protected selected-row submit jobs, but must not become an unauthenticated, broad or automatic complaint submit path. |
+| `C-25` | `Отзывы` and feedbacks AI stay read-only/transient for table/AI semantics: they must not persist AI labels as accepted truth/ЕБД, write Google Sheets/GAS or silently bypass `WB_API_TOKEN` feedbacks permission errors. Nested `Жалобы` may expose runtime journal/status and protected selected-row submit jobs; nested `Авто-жалобы` may expose runtime schedules/run-now/tick over the same guarded submit path, but neither path may become unauthenticated, broad or browser-side complaint automation. |
 | `C-26` | `Исследования` / SKU group comparison is read-only over accepted truth / persisted ready snapshots, excludes financial metrics in the MVP, makes no causal/statistical claims, and must not trigger refresh/upstream fetch/backfill/reconcile. |
 | `C-27` | Promo preflight/manifest/artifact diagnostics and promo current invariant smoke are observability/guard surfaces only; expected ended/no-download non-materializable campaigns must not become fatal missing-artifact blockers, and diagnostics must not become metric truth. |
 | `C-28` | Promo historical truth must survive raw artifact retention: normalized campaign rows and manifest/fingerprint metadata are replay-critical, raw XLSX/HAR/screenshots/traces are short-lived debug artifacts, and GC may delete only guarded candidates after replay-critical persistence is proven. |
@@ -76,10 +76,12 @@ built_from_commit: "2992d25d1161f1a52179c10bc5bd5cced7de265c"
 | `C-33` | Seller-session recovery/status/launcher routes must degrade truthfully: missing `/opt/wb-web-bot/venv/bin/python` or unavailable launcher state is surfaced as status/error JSON (`200` status surface or truthful `409` for launcher), not as public 500 or hidden deploy success. |
 | `C-34` | WebCore public/operator auth is app-level session auth sourced from runtime env only; probes may create short-lived session cookies in memory, but credentials/session secrets must not be printed, committed or copied into pack metadata. |
 | `C-35` | Canonical hosted deploy probes are auth-aware and fast by default; heavy `POST /v1/sheet-vitrina-v1/refresh` verification is an explicit deep probe via `--include-refresh`, not an implicit health-check dependency. |
-| `C-36` | Seller Portal browser automation is single-flight in live EU runtime: status sync, submit/batch, scouts/probes/dry-run/confirmation/detail/relogin and parser/export jobs must acquire `/opt/wb-core-runtime/state/seller_portal_automation.lock.json`, must not run parallel Playwright sessions and must return sanitized busy/blocker metadata when the lock is held. |
+| `C-36` | Seller Portal browser automation is single-flight in live EU runtime: status sync, submit/batch, auto-complaints tick/run-now, scouts/probes/dry-run/confirmation/detail/relogin and parser/export jobs must acquire `/opt/wb-core-runtime/state/seller_portal_automation.lock.json`, must not run parallel Playwright sessions and must return sanitized busy/blocker metadata when the lock is held. |
 | `C-37` | EU live Seller Portal jobs use canonical bot storage state `/opt/wb-web-bot/storage_state.json` or explicit `SELLER_PORTAL_STORAGE_STATE_PATH`; implicit local Mac fallback is forbidden, route-specific capability checks are required, and secrets/session contents must never be printed or copied into reports/pack metadata. |
 | `C-38` | Current operator UI labels and visual identity are part of the public surface: top-level menu remains horizontal with `Витрина`, `Поставки`, `Отчёты`, `Отзывы`, `Исследования`; `Витрина 2` and old supply labels must not reappear, and primary/action accent is violet/indigo rather than green. |
 | `C-39` | Consumer-visible SPP comes from current Seller Portal `discountOnSite` evidence with exact-date accepted-current preservation/rollover; later blank/failed attempts must not overwrite accepted SPP, and legacy WB Statistics sales-average SPP cannot masquerade as fresh current-visible truth. |
+| `C-40` | `Загрузить и обновить` is the canonical full-refresh action for web-vitrina: manual and automatic triggers share the same source/status/materialize/reread semantics, `Asia/Yekaterinburg` date-slot resolution, and truthful warning/error status when expected visible source groups are stale or missing. |
+| `C-41` | Web-vitrina/feedbacks visual fixes stay UI-local: wide feedbacks tables must scroll inside bounded containers, and updated-cell feedback uses transient text-color emphasis rather than legacy light backgrounds or persisted styling truth. |
 
 # Known gaps
 
