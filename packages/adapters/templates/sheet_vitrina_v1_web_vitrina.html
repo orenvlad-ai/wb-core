@@ -3439,11 +3439,14 @@
           loading: false,
           saving: false,
           running: false,
+          logLoading: false,
           loaded: false,
           dirty: false,
+          runPollSequence: 0,
           schedules: [],
           recentRuns: [],
           lastRun: null,
+          logMessage: "",
           error: ""
         },
         error: ""
@@ -6321,6 +6324,13 @@
         loadFeedbacksAutomationRun(runId);
         return;
       }
+      const autoLogSchedule = event.target.closest("[data-feedbacks-auto-log-schedule]");
+      if (autoLogSchedule) {
+        event.preventDefault();
+        const scheduleId = String(autoLogSchedule.getAttribute("data-feedbacks-auto-log-schedule") || "");
+        openFeedbacksAutomationScheduleLog(scheduleId);
+        return;
+      }
       const toggle = event.target.closest("[data-feedbacks-range-toggle]");
       if (toggle) {
         event.preventDefault();
@@ -7504,6 +7514,117 @@
       }).join("");
     }
 
+    function isFeedbacksAutomationTerminalRun(run) {
+      const status = String((run && run.status) || "");
+      return !!status && status !== "queued" && status !== "running";
+    }
+
+    function upsertFeedbacksAutomationRun(run) {
+      if (!run || !run.run_id) {
+        return;
+      }
+      const runId = String(run.run_id || "");
+      const existing = (state.feedbacks.automation.recentRuns || []).filter(function(item) {
+        return String((item && item.run_id) || "") !== runId;
+      });
+      state.feedbacks.automation.lastRun = run;
+      state.feedbacks.automation.recentRuns = [run].concat(existing).slice(0, 10);
+    }
+
+    function applyFeedbacksAutomationRuntimePayload(payload) {
+      const automation = state.feedbacks.automation;
+      if (!payload || typeof payload !== "object") {
+        return;
+      }
+      if (Array.isArray(payload.schedules)) {
+        automation.schedules = payload.schedules;
+        automation.loaded = true;
+        automation.dirty = false;
+      }
+      if (Array.isArray(payload.recent_runs)) {
+        automation.recentRuns = payload.recent_runs;
+      }
+      if (payload.run) {
+        upsertFeedbacksAutomationRun(payload.run);
+      }
+    }
+
+    function latestFeedbacksAutomationRunForSchedule(schedule) {
+      if (!schedule) {
+        return null;
+      }
+      const scheduleId = String(schedule.id || "");
+      const lastRunId = String(schedule.last_run_id || "");
+      const runs = state.feedbacks.automation.recentRuns || [];
+      if (lastRunId) {
+        for (const run of runs) {
+          if (String((run && run.run_id) || "") === lastRunId) {
+            return run;
+          }
+        }
+        return {run_id: lastRunId, schedule_id: scheduleId, status: schedule.last_status || ""};
+      }
+      for (const run of runs) {
+        if (String((run && run.schedule_id) || "") === scheduleId) {
+          return run;
+        }
+      }
+      return null;
+    }
+
+    function openFeedbacksAutomationScheduleLog(scheduleId) {
+      const schedule = (state.feedbacks.automation.schedules || []).find(function(item) {
+        return String((item && item.id) || "") === scheduleId;
+      });
+      const run = latestFeedbacksAutomationRunForSchedule(schedule);
+      if (run && run.run_id) {
+        loadFeedbacksAutomationRun(String(run.run_id || ""));
+        return;
+      }
+      state.feedbacks.automation.lastRun = null;
+      state.feedbacks.automation.logMessage = "Лога пока нет: расписание ещё не запускалось";
+      renderFeedbacksAutomationPanel();
+    }
+
+    async function refreshFeedbacksAutomationState() {
+      const automation = state.feedbacks.automation;
+      const path = String(WEB_VITRINA_CONFIG.feedbacks_auto_complaints_schedules_path || "");
+      if (!path) {
+        return;
+      }
+      const response = await fetch(path, {method: "GET", credentials: "same-origin"});
+      const payload = await readJsonResponse(response, "non-json response from feedbacks automation schedules route");
+      if (!response.ok) {
+        throw new Error((payload && payload.error) ? payload.error : "feedbacks automation schedules returned " + response.status);
+      }
+      applyFeedbacksAutomationRuntimePayload(payload);
+      automation.loaded = true;
+    }
+
+    async function pollFeedbacksAutomationRun(runId) {
+      const automation = state.feedbacks.automation;
+      const sequence = (automation.runPollSequence || 0) + 1;
+      automation.runPollSequence = sequence;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (automation.runPollSequence !== sequence) {
+          return;
+        }
+        if (attempt > 0) {
+          await sleep(1500);
+        }
+        await loadFeedbacksAutomationRun(runId, {silent: true});
+        const current = automation.lastRun || {};
+        if (String(current.run_id || "") === String(runId || "") && isFeedbacksAutomationTerminalRun(current)) {
+          break;
+        }
+      }
+      try {
+        await refreshFeedbacksAutomationState();
+      } catch (error) {
+        automation.error = String(error && error.message ? error.message : error);
+      }
+    }
+
     async function loadFeedbacksAutomation() {
       const automation = state.feedbacks.automation;
       const path = String(WEB_VITRINA_CONFIG.feedbacks_auto_complaints_schedules_path || "");
@@ -7519,8 +7640,7 @@
         if (!response.ok) {
           throw new Error((payload && payload.error) ? payload.error : "feedbacks automation schedules returned " + response.status);
         }
-        automation.schedules = Array.isArray(payload.schedules) ? payload.schedules : [];
-        automation.recentRuns = Array.isArray(payload.recent_runs) ? payload.recent_runs : [];
+        applyFeedbacksAutomationRuntimePayload(payload);
         automation.loaded = true;
         automation.dirty = false;
       } catch (error) {
@@ -7567,8 +7687,7 @@
         if (!response.ok) {
           throw new Error((payload && payload.error) ? payload.error : "feedbacks automation save returned " + response.status);
         }
-        automation.schedules = Array.isArray(payload.schedules) ? payload.schedules : [];
-        automation.recentRuns = Array.isArray(payload.recent_runs) ? payload.recent_runs : automation.recentRuns;
+        applyFeedbacksAutomationRuntimePayload(payload);
         automation.loaded = true;
         automation.dirty = false;
       } catch (error) {
@@ -7598,6 +7717,7 @@
       }
       automation.running = true;
       automation.error = "";
+      automation.logMessage = "Создаём запуск авто-жалоб…";
       renderFeedbacksAutomationPanel();
       try {
         const response = await fetch(path, {
@@ -7610,20 +7730,36 @@
         if (!response.ok) {
           throw new Error((payload && payload.error) ? payload.error : "feedbacks automation run-now returned " + response.status);
         }
-        automation.lastRun = payload.run || null;
-        automation.recentRuns = [payload.run].concat(automation.recentRuns || []).filter(Boolean).slice(0, 10);
+        applyFeedbacksAutomationRuntimePayload(payload);
+        if (payload.run && payload.run.run_id) {
+          automation.logMessage = "Запуск создан: " + String(payload.run.status || "queued");
+          renderFeedbacksAutomationPanel();
+          await pollFeedbacksAutomationRun(String(payload.run.run_id || ""));
+        } else {
+          automation.logMessage = "Backend не вернул run_id для запуска.";
+        }
       } catch (error) {
         automation.error = String(error && error.message ? error.message : error);
+        automation.logMessage = automation.error;
       } finally {
         automation.running = false;
         renderFeedbacksAutomationPanel();
       }
     }
 
-    async function loadFeedbacksAutomationRun(runId) {
+    async function loadFeedbacksAutomationRun(runId, options) {
       const path = String(WEB_VITRINA_CONFIG.feedbacks_auto_complaints_run_path || "");
+      const silent = !!(options && options.silent);
       if (!path || !runId) {
+        state.feedbacks.automation.lastRun = null;
+        state.feedbacks.automation.logMessage = "Лога пока нет: последний запуск не создал run report";
+        renderFeedbacksAutomationPanel();
         return;
+      }
+      state.feedbacks.automation.logLoading = true;
+      if (!silent) {
+        state.feedbacks.automation.logMessage = "Загружаем лог запуска…";
+        renderFeedbacksAutomationPanel();
       }
       try {
         const response = await fetch(path + "?run_id=" + encodeURIComponent(runId), {method: "GET", credentials: "same-origin"});
@@ -7631,9 +7767,18 @@
         if (!response.ok) {
           throw new Error((payload && payload.error) ? payload.error : "feedbacks automation run returned " + response.status);
         }
-        state.feedbacks.automation.lastRun = payload.run || null;
+        if (payload.run) {
+          upsertFeedbacksAutomationRun(payload.run);
+          state.feedbacks.automation.logMessage = "";
+        } else {
+          state.feedbacks.automation.lastRun = null;
+          state.feedbacks.automation.logMessage = "Лога пока нет: последний запуск не создал run report";
+        }
       } catch (error) {
         state.feedbacks.automation.error = String(error && error.message ? error.message : error);
+        state.feedbacks.automation.logMessage = state.feedbacks.automation.error;
+      } finally {
+        state.feedbacks.automation.logLoading = false;
       }
       renderFeedbacksAutomationPanel();
     }
@@ -7647,6 +7792,8 @@
           ? "Сохраняем…"
           : automation.running
           ? "Запуск…"
+          : automation.logLoading
+          ? "Загружаем лог…"
           : automation.dirty
           ? "Есть несохранённые изменения"
           : automation.loaded
@@ -7701,7 +7848,7 @@
           "<td>" + escapeHtml(formatTimestampDisplay(schedule.next_run_at || "")) + "</td>",
           "<td>" + escapeHtml(schedule.last_status || "—") + "</td>",
           '<td><span>' + escapeHtml("AI " + (stats.ai_candidates_count || 0) + " · подано " + (stats.submitted_count || 0) + " · пропущено " + (stats.skipped_count || 0)) + '</span><br><span class="research-result-note" data-feedbacks-auto-window-hint="' + escapeHtml(id) + '">' + escapeHtml(windowHint) + "</span></td>",
-          '<td><button class="button ghost" type="button" data-feedbacks-auto-delete="' + escapeHtml(id) + '">Удалить</button></td>',
+          '<td><div class="feedbacks-action-group"><button class="button secondary" type="button" data-feedbacks-auto-log-schedule="' + escapeHtml(id) + '">Посмотреть лог</button><button class="button ghost" type="button" data-feedbacks-auto-delete="' + escapeHtml(id) + '">Удалить</button></div></td>',
           "</tr>"
         ].join("");
       }).join("");
@@ -7711,7 +7858,19 @@
       if (!feedbacksAutoLogBodyNode) {
         return;
       }
+      if (state.feedbacks.automation.logLoading) {
+        feedbacksAutoLogBodyNode.textContent = state.feedbacks.automation.logMessage || "Загружаем лог запуска…";
+        return;
+      }
+      if (state.feedbacks.automation.logMessage && state.feedbacks.automation.logMessage.indexOf("Лога пока нет") === 0) {
+        feedbacksAutoLogBodyNode.textContent = state.feedbacks.automation.logMessage;
+        return;
+      }
       const run = state.feedbacks.automation.lastRun || (state.feedbacks.automation.recentRuns || [])[0] || null;
+      if (state.feedbacks.automation.logMessage && !run) {
+        feedbacksAutoLogBodyNode.textContent = state.feedbacks.automation.logMessage;
+        return;
+      }
       if (!run) {
         feedbacksAutoLogBodyNode.textContent = "Нет запусков.";
         return;
@@ -7720,11 +7879,21 @@
       const reasonText = Object.keys(reasonCounts).map(function(key) {
         return key + ": " + reasonCounts[key];
       }).join("; ");
+      const events = Array.isArray(run.events) ? run.events.slice(-8) : [];
+      const eventText = events.map(function(event) {
+        return [formatTimestampDisplay(event.timestamp || ""), event.event || "", event.message || ""].filter(Boolean).join(" · ");
+      }).join("\n");
       feedbacksAutoLogBodyNode.innerHTML = [
-        '<div><strong>' + escapeHtml(run.status || "—") + '</strong> · ' + escapeHtml(formatTimestampDisplay(run.finished_at || run.started_at || "")) + "</div>",
+        state.feedbacks.automation.logMessage ? '<div>' + escapeHtml(state.feedbacks.automation.logMessage) + "</div>" : "",
+        '<div><strong>' + escapeHtml(run.status || "—") + '</strong> · run_id: ' + escapeHtml(run.run_id || "—") + "</div>",
+        '<div>Начало: ' + escapeHtml(formatTimestampDisplay(run.started_at || run.created_at || "")) + " · Конец: " + escapeHtml(formatTimestampDisplay(run.finished_at || "")) + "</div>",
+        '<div>Окно: ' + escapeHtml(formatTimestampDisplay(run.window_base_from || "")) + " → " + escapeHtml(formatTimestampDisplay(run.window_to || "")) + " · fetch: " + escapeHtml(formatTimestampDisplay(run.window_fetch_from || "")) + "</div>",
         '<div>Отзывов: ' + escapeHtml(run.loaded_feedbacks_count || 0) + " · 1–2★: " + escapeHtml(run.low_rating_feedbacks_count || 0) + " · AI: " + escapeHtml(run.ai_candidates_count || 0) + "</div>",
         '<div>Подано: ' + escapeHtml(run.submitted_count || 0) + " · Пропущено: " + escapeHtml(run.skipped_count || 0) + "</div>",
+        run.blocker_reason ? '<div>Blocker: ' + escapeHtml(run.blocker_reason) + "</div>" : "",
+        run.sanitized_error_message ? '<div>Ошибка: ' + escapeHtml(run.sanitized_error_message) + "</div>" : "",
         reasonText ? '<div>' + escapeHtml(reasonText) + "</div>" : "",
+        eventText ? '<pre>' + escapeHtml(eventText) + "</pre>" : "",
         run.run_id ? '<button class="button secondary" type="button" data-feedbacks-auto-log-run="' + escapeHtml(run.run_id) + '">Посмотреть лог</button>' : ""
       ].join("");
     }

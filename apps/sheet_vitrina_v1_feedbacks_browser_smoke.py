@@ -24,6 +24,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_NOW_PATH,
+    DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH,
     DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH,
@@ -63,7 +64,21 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
     complaints_submit_job_polls: list[str] = []
     automation_schedule_requests: list[dict[str, object]] = []
     automation_run_now_requests: list[dict[str, object]] = []
+    automation_run_detail_requests: list[str] = []
     automation_run_requests: list[str] = []
+    automation_schedules_state: list[dict[str, object]] = [
+        {
+            "id": "auto-noon",
+            "enabled": False,
+            "local_time_hhmm": "12:00",
+            "timezone": "Asia/Yekaterinburg",
+            "timezone_label": "Екатеринбург",
+            "last_status": "no_ai_candidates",
+            "next_run_at": "2026-05-08T07:00:00Z",
+            "last_stats": {"ai_candidates_count": 0, "submitted_count": 0, "skipped_count": 0},
+        }
+    ]
+    automation_runs_state: list[dict[str, object]] = []
     failed_once: set[str] = set()
     large_feedbacks_mode = False
     prompt_saved = False
@@ -401,6 +416,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             )
 
         def fulfill_automation_schedules(route: object) -> None:
+            nonlocal automation_schedules_state
             if route.request.method == "POST":
                 payload = json.loads(route.request.post_data or "{}")
                 automation_schedule_requests.append(payload)
@@ -415,19 +431,9 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                         canonical["timezone_label"] = "Екатеринбург"
                         canonical.setdefault("next_run_at", "2026-05-08T07:00:00Z")
                         schedules.append(canonical)
+                automation_schedules_state = schedules
             else:
-                schedules = [
-                    {
-                        "id": "auto-noon",
-                        "enabled": False,
-                        "local_time_hhmm": "12:00",
-                        "timezone": "Asia/Yekaterinburg",
-                        "timezone_label": "Екатеринбург",
-                        "last_status": "no_ai_candidates",
-                        "next_run_at": "2026-05-08T07:00:00Z",
-                        "last_stats": {"ai_candidates_count": 0, "submitted_count": 0, "skipped_count": 0},
-                    }
-                ]
+                schedules = automation_schedules_state
             route.fulfill(
                 status=200,
                 headers={"Content-Type": "application/json; charset=utf-8"},
@@ -436,15 +442,56 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                         "contract_name": "sheet_vitrina_v1_feedbacks_auto_complaints_schedules",
                         "contract_version": "v1",
                         "schedules": schedules,
-                        "recent_runs": [],
+                        "recent_runs": automation_runs_state,
                     },
                     ensure_ascii=False,
                 ),
             )
 
         def fulfill_automation_run_now(route: object) -> None:
+            nonlocal automation_schedules_state, automation_runs_state
             payload = json.loads(route.request.post_data or "{}")
             automation_run_now_requests.append(payload)
+            run = {
+                "run_id": "auto-run-now-smoke",
+                "schedule_id": payload.get("schedule_id"),
+                "trigger_source": "manual",
+                "status": "no_new_feedbacks",
+                "created_at": "2026-05-08T08:00:00Z",
+                "started_at": "2026-05-08T08:00:01Z",
+                "finished_at": "2026-05-08T08:00:02Z",
+                "window_base_from": "2026-05-07T13:00:00+05:00",
+                "window_fetch_from": "2026-05-07T13:00:00+05:00",
+                "window_to": "2026-05-08T13:00:00+05:00",
+                "loaded_feedbacks_count": 0,
+                "low_rating_feedbacks_count": 0,
+                "ai_candidates_count": 0,
+                "submitted_count": 0,
+                "skipped_count": 0,
+                "reason_counts": {},
+                "attempts": [],
+                "events": [{"timestamp": "2026-05-08T08:00:02Z", "event": "no_new_feedbacks", "message": "No feedbacks in computed window", "status": "success"}],
+            }
+            automation_runs_state = [run]
+            automation_schedules_state = [
+                {
+                    **schedule,
+                    "last_run_at": run["finished_at"],
+                    "last_success_at": run["window_to"],
+                    "last_status": run["status"],
+                    "last_run_id": run["run_id"],
+                    "last_stats": {
+                        "loaded_feedbacks_count": 0,
+                        "low_rating_feedbacks_count": 0,
+                        "ai_candidates_count": 0,
+                        "submitted_count": 0,
+                        "skipped_count": 0,
+                    },
+                }
+                if str(schedule.get("id") or "") == str(payload.get("schedule_id") or "")
+                else schedule
+                for schedule in automation_schedules_state
+            ]
             route.fulfill(
                 status=202,
                 headers={"Content-Type": "application/json; charset=utf-8"},
@@ -452,23 +499,29 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                     {
                         "contract_name": "sheet_vitrina_v1_feedbacks_auto_complaints_run",
                         "contract_version": "v1",
-                        "run": {
-                            "run_id": "auto-run-now-smoke",
-                            "schedule_id": payload.get("schedule_id"),
-                            "trigger_source": "manual",
-                            "status": "no_new_feedbacks",
-                            "window_base_from": "2026-05-07T13:00:00+05:00",
-                            "window_fetch_from": "2026-05-07T13:00:00+05:00",
-                            "window_to": "2026-05-08T13:00:00+05:00",
-                            "loaded_feedbacks_count": 0,
-                            "low_rating_feedbacks_count": 0,
-                            "ai_candidates_count": 0,
-                            "submitted_count": 0,
-                            "skipped_count": 0,
-                            "reason_counts": {},
-                            "attempts": [],
-                            "events": [],
-                        },
+                        "run_id": run["run_id"],
+                        "status": run["status"],
+                        "reason": "",
+                        "summary": {"ai_candidates_count": 0, "submitted_count": 0, "skipped_count": 0},
+                        "run": run,
+                        "schedules": automation_schedules_state,
+                        "recent_runs": automation_runs_state,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+
+        def fulfill_automation_run_detail(route: object) -> None:
+            automation_run_detail_requests.append(route.request.url)
+            run = automation_runs_state[0] if automation_runs_state else {}
+            route.fulfill(
+                status=200,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                body=json.dumps(
+                    {
+                        "contract_name": "sheet_vitrina_v1_feedbacks_auto_complaints_run",
+                        "contract_version": "v1",
+                        "run": run,
                     },
                     ensure_ascii=False,
                 ),
@@ -483,7 +536,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                     {
                         "contract_name": "sheet_vitrina_v1_feedbacks_auto_complaints_runs",
                         "contract_version": "v1",
-                        "runs": [],
+                        "runs": automation_runs_state,
                     },
                     ensure_ascii=False,
                 ),
@@ -498,6 +551,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH + "?**", fulfill_complaints_submit_job)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH, fulfill_automation_schedules)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_NOW_PATH, fulfill_automation_run_now)
+        context.route("**" + DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_PATH + "?**", fulfill_automation_run_detail)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH, fulfill_automation_runs)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH, fulfill_ai_analyze)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH, fulfill_prompt)
@@ -515,6 +569,10 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             page.wait_for_function("() => document.querySelector('[data-feedbacks-auto-status]')?.textContent.includes('Расписаний: 1')")
             if not page.locator("[data-feedbacks-auto-schedules-body]").inner_text().count("Екатеринбург"):
                 raise AssertionError("automation subtab must render schedule timezone label")
+            page.locator("[data-feedbacks-auto-log-schedule]").first.click()
+            page.wait_for_function("() => document.querySelector('[data-feedbacks-auto-log-body]')?.textContent.includes('Лога пока нет')")
+            if "Лога пока нет" not in page.locator("[data-feedbacks-auto-log-body]").inner_text():
+                raise AssertionError("automation log button must show explicit empty-state before first run")
             page.locator("[data-feedbacks-auto-add]").click()
             if page.locator("[data-feedbacks-auto-schedules-body] tr").count() < 2:
                 raise AssertionError("automation UI must add editable schedule rows")
@@ -536,6 +594,13 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 raise AssertionError("automation run-now must call backend route")
             if automation_run_now_requests[-1].get("schedule_id") != "canonical-auto-0":
                 raise AssertionError(f"automation run-now must use canonical saved schedule id, got {automation_run_now_requests[-1]}")
+            if not automation_run_detail_requests:
+                raise AssertionError("automation run-now flow must fetch run details for observable log")
+            schedule_text_after_run = page.locator("[data-feedbacks-auto-schedules-body]").inner_text()
+            if "no_new_feedbacks" not in schedule_text_after_run:
+                raise AssertionError(f"automation schedule summary must refresh after run-now, got {schedule_text_after_run!r}")
+            page.locator("[data-feedbacks-auto-log-schedule]").first.click()
+            page.wait_for_function("() => document.querySelector('[data-feedbacks-auto-log-body]')?.textContent.includes('run_id: auto-run-now-smoke')")
             if complaints_sync_requests:
                 raise AssertionError("complaints status sync must not auto-run on page load")
             page.locator("[data-feedbacks-subtab='complaints']").click()
@@ -908,6 +973,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "complaints_submit_job_polls": len(complaints_submit_job_polls),
         "automation_schedule_requests": len(automation_schedule_requests),
         "automation_run_now_requests": len(automation_run_now_requests),
+        "automation_run_detail_requests": len(automation_run_detail_requests),
         "automation_run_requests": len(automation_run_requests),
         "feedbacks_dark_toolbar": True,
         "feedbacks_action_button_heights": feedbacks_dark_layout.get("buttonHeights", []),

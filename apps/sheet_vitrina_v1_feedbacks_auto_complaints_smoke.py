@@ -108,6 +108,7 @@ def _assert_schedule_validation_and_due_window() -> None:
 
 def _assert_schedule_persistence_duplicate_and_run_now_contract() -> None:
     now = datetime(2026, 5, 8, 8, 0, tzinfo=timezone.utc)
+    current_now = [now]
     with TemporaryDirectory(prefix="auto-complaints-run-now-") as tmp:
         runtime_dir = Path(tmp)
         block = SheetVitrinaV1FeedbacksAutoComplaintsBlock(
@@ -115,7 +116,7 @@ def _assert_schedule_persistence_duplicate_and_run_now_contract() -> None:
             feedbacks_block=FakeFeedbacksBlock([]),  # type: ignore[arg-type]
             feedbacks_ai_block=FakeAiBlock({}),  # type: ignore[arg-type]
             complaints_block=SheetVitrinaV1FeedbacksComplaintsBlock(runtime_dir=runtime_dir),
-            now_factory=lambda: now,
+            now_factory=lambda: current_now[0],
         )
         saved = block.save_schedules(
             {
@@ -137,7 +138,7 @@ def _assert_schedule_persistence_duplicate_and_run_now_contract() -> None:
             feedbacks_block=FakeFeedbacksBlock([]),  # type: ignore[arg-type]
             feedbacks_ai_block=FakeAiBlock({}),  # type: ignore[arg-type]
             complaints_block=SheetVitrinaV1FeedbacksComplaintsBlock(runtime_dir=runtime_dir),
-            now_factory=lambda: now,
+            now_factory=lambda: current_now[0],
         )
         if reloaded.build_schedules()["schedules"][0]["id"] != "schedule_client_1":
             raise AssertionError("persisted schedule id must survive reload/readback")
@@ -158,12 +159,37 @@ def _assert_schedule_persistence_duplicate_and_run_now_contract() -> None:
         reloaded._run_and_persist = lambda *args, **kwargs: None  # type: ignore[method-assign]
         run_payload = reloaded.run_now({"schedule_id": "schedule_client_1"})
         run = run_payload["run"]
+        if run_payload.get("run_id") != run["run_id"] or run_payload.get("status") != run["status"]:
+            raise AssertionError(f"run-now response must expose observable run_id/status: {run_payload}")
+        if not run_payload.get("summary") or "submitted_count" not in run_payload["summary"]:
+            raise AssertionError(f"run-now response must expose stats summary: {run_payload}")
+        if not run_payload.get("schedules") or run_payload["schedules"][0].get("last_run_id") != run["run_id"]:
+            raise AssertionError(f"run-now response must refresh schedule summary with last_run_id: {run_payload}")
+        if run_payload["schedules"][0].get("last_status") != "queued":
+            raise AssertionError(f"new async run must be visible in schedule status immediately: {run_payload}")
+        if not run_payload.get("recent_runs") or run_payload["recent_runs"][0].get("run_id") != run["run_id"]:
+            raise AssertionError(f"run-now response must include recent runs: {run_payload}")
         if run["schedule_id"] != "schedule_client_1":
             raise AssertionError(f"run-now must use persisted canonical schedule id: {run}")
         if run["window_fetch_from"] != run["window_base_from"]:
             raise AssertionError(f"first run must not apply overlap to fetch window: {run}")
         if run["window_base_from"] != "2026-05-07T08:00:00Z" or run["window_to"] != "2026-05-08T08:00:00Z":
             raise AssertionError(f"first-run window must be the last 24h in schedule timezone: {run}")
+        reloaded.store.update_run(
+            run["run_id"],
+            {
+                "session": {"storage_state_path": "/opt/wb-web-bot/storage_state.json", "token": "must-not-leak"},
+                "automation_lock": {"owner": "safe", "cookie": "must-not-leak"},
+                "status_sync_result": {"status": "ok", "authorization": "must-not-leak"},
+            },
+        )
+        detailed = reloaded.get_run(run["run_id"])["run"]
+        serialized_detail = json.dumps(detailed, ensure_ascii=False)
+        for forbidden in ("must-not-leak", "token", "cookie", "authorization"):
+            if forbidden in serialized_detail:
+                raise AssertionError(f"run details must be sanitized, leaked {forbidden}: {detailed}")
+        if detailed["session"].get("storage_state_path") != "/opt/wb-web-bot/storage_state.json":
+            raise AssertionError(f"safe storage_state path reference may remain visible: {detailed}")
         reloaded.store.update_run(run["run_id"], {"status": "completed", "finished_at": "2026-05-08T08:00:01Z"})
         recurring = reloaded.save_schedules(
             {
@@ -176,6 +202,7 @@ def _assert_schedule_persistence_duplicate_and_run_now_contract() -> None:
                 ]
             }
         )["schedules"][0]
+        current_now[0] = datetime(2026, 5, 8, 9, 0, tzinfo=timezone.utc)
         reloaded._run_and_persist = lambda *args, **kwargs: None  # type: ignore[method-assign]
         recurring_run = reloaded.run_now({"schedule_id": recurring["id"]})["run"]
         if recurring_run["window_base_from"] != "2026-05-08T03:30:00Z":
