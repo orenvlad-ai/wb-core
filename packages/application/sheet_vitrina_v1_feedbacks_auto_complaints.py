@@ -661,6 +661,9 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
             latest_due = _latest_due_at(schedule, now)
             if latest_due is None:
                 continue
+            due_cutoff = _parse_iso(str(schedule.get("enabled_since_at") or schedule.get("created_at") or ""))
+            if due_cutoff is not None and latest_due < due_cutoff:
+                continue
             last_success = _parse_iso(str(schedule.get("last_success_at") or ""))
             if last_success is not None and last_success >= latest_due:
                 continue
@@ -674,9 +677,15 @@ def _normalize_schedule(schedule: Mapping[str, Any], *, now: str, now_factory: C
     local_time = _normalize_hhmm(schedule.get("local_time_hhmm") or schedule.get("time") or DEFAULT_LOCAL_TIME)
     tz_name = _normalize_timezone(schedule.get("timezone") or DEFAULT_TIMEZONE)
     created_at = _safe_text(schedule.get("created_at") or now, 80)
+    enabled = bool(schedule.get("enabled"))
+    enabled_since_at = _safe_text(schedule.get("enabled_since_at"), 80)
+    if enabled and not enabled_since_at:
+        enabled_since_at = now
+    if not enabled:
+        enabled_since_at = ""
     normalized = {
         "id": _safe_text(schedule_id, 80),
-        "enabled": bool(schedule.get("enabled")),
+        "enabled": enabled,
         "local_time_hhmm": local_time,
         "timezone": tz_name,
         "timezone_label": "Екатеринбург" if tz_name == DEFAULT_TIMEZONE else tz_name,
@@ -685,6 +694,7 @@ def _normalize_schedule(schedule: Mapping[str, Any], *, now: str, now_factory: C
         "hard_cap_per_run": _bounded_int(schedule.get("hard_cap_per_run"), 1, DEFAULT_HARD_CAP_PER_RUN, DEFAULT_HARD_CAP_PER_RUN),
         "created_at": created_at,
         "updated_at": now,
+        "enabled_since_at": enabled_since_at,
         "last_run_at": _safe_text(schedule.get("last_run_at"), 80),
         "last_success_at": _safe_text(schedule.get("last_success_at"), 80),
         "last_due_at": _safe_text(schedule.get("last_due_at"), 80),
