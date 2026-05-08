@@ -25,7 +25,7 @@ update_triggers:
   - "изменение migration boundary"
   - "изменение operator/runtime invariant"
   - "изменение docs governance"
-built_from_commit: "3faca550ee0d005b6be13635d015757c71d4bb80"
+built_from_commit: "2992d25d1161f1a52179c10bc5bd5cced7de265c"
 ---
 
 # Summary
@@ -76,6 +76,10 @@ built_from_commit: "3faca550ee0d005b6be13635d015757c71d4bb80"
 | `C-33` | Seller-session recovery/status/launcher routes must degrade truthfully: missing `/opt/wb-web-bot/venv/bin/python` or unavailable launcher state is surfaced as status/error JSON (`200` status surface or truthful `409` for launcher), not as public 500 or hidden deploy success. |
 | `C-34` | WebCore public/operator auth is app-level session auth sourced from runtime env only; probes may create short-lived session cookies in memory, but credentials/session secrets must not be printed, committed or copied into pack metadata. |
 | `C-35` | Canonical hosted deploy probes are auth-aware and fast by default; heavy `POST /v1/sheet-vitrina-v1/refresh` verification is an explicit deep probe via `--include-refresh`, not an implicit health-check dependency. |
+| `C-36` | Seller Portal browser automation is single-flight in live EU runtime: status sync, submit/batch, scouts/probes/dry-run/confirmation/detail/relogin and parser/export jobs must acquire `/opt/wb-core-runtime/state/seller_portal_automation.lock.json`, must not run parallel Playwright sessions and must return sanitized busy/blocker metadata when the lock is held. |
+| `C-37` | EU live Seller Portal jobs use canonical bot storage state `/opt/wb-web-bot/storage_state.json` or explicit `SELLER_PORTAL_STORAGE_STATE_PATH`; implicit local Mac fallback is forbidden, route-specific capability checks are required, and secrets/session contents must never be printed or copied into reports/pack metadata. |
+| `C-38` | Current operator UI labels and visual identity are part of the public surface: top-level menu remains horizontal with `Витрина`, `Поставки`, `Отчёты`, `Отзывы`, `Исследования`; `Витрина 2` and old supply labels must not reappear, and primary/action accent is violet/indigo rather than green. |
+| `C-39` | Consumer-visible SPP comes from current Seller Portal `discountOnSite` evidence with exact-date accepted-current preservation/rollover; later blank/failed attempts must not overwrite accepted SPP, and legacy WB Statistics sales-average SPP cannot masquerade as fresh current-visible truth. |
 
 # Known gaps
 

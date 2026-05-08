@@ -39,7 +39,7 @@ update_triggers:
   - "изменение current main-confirmed contour"
   - "merge нового bounded модуля"
   - "смена главного project gap"
-built_from_commit: "3faca550ee0d005b6be13635d015757c71d4bb80"
+built_from_commit: "2992d25d1161f1a52179c10bc5bd5cced7de265c"
 ---
 
 # Summary
@@ -55,9 +55,10 @@ built_from_commit: "3faca550ee0d005b6be13635d015757c71d4bb80"
 - bounded live wiring `28` уже смёржен и переводит `promo_by_price` из blocked gap в current server-owned source seam внутри existing refresh/runtime/read-side contour, с diagnostics-only promo artifact/preflight surface и live/public current invariant guard.
 - web-vitrina line `29–31` уже смёржена и является active user-facing surface: `/sheet-vitrina-v1/vitrina` + `/v1/sheet-vitrina-v1/web-vitrina`.
 - research block `32` уже смёржен как read-only MVP вкладки `Исследования` для сравнения двух групп SKU по persisted ready snapshots.
-- current operator UI unified вокруг `/sheet-vitrina-v1/vitrina`: first tab `Витрина`, sibling tabs `Поставки`, `Отчёты`, `Отзывы` и `Исследования`; `/sheet-vitrina-v1/operator` остаётся compatibility entry на тот же shell.
+- current operator UI unified вокруг `/sheet-vitrina-v1/vitrina`: first tab `Витрина`, sibling tabs `Поставки`, `Отчёты`, `Отзывы` и `Исследования`; `/sheet-vitrina-v1/operator` остаётся compatibility entry на тот же shell. Current visual system is dark dashboard-style with violet/indigo primary accent; green is reserved for semantic success/status, not the site primary action accent.
 - current `Отзывы` checkpoint includes strict server-side feedback filtering/export, official WB review tags/actionable resolver, transient AI review and nested `Жалобы`: complaint journal/status sync remain runtime evidence routes, and real Seller Portal submit is limited to protected selected-row operator jobs / guarded support runners with exact-match, hard-cap and confirmation/detail evidence checks.
 - current hosted EU checkpoint now includes repo-owned localhost owner runtime wiring (`wb-ai-api.service` on `127.0.0.1:8000`), app-level auth/session boundary for the public/operator surface, auth-aware canonical probes and explicit deep refresh probe policy; public nginx remains product route publication, not the owner API path.
+- all Seller Portal browser automation in the current contour is governed by shared single-flight lock `/opt/wb-core-runtime/state/seller_portal_automation.lock.json`, canonical EU bot storage state `/opt/wb-web-bot/storage_state.json` or explicit `SELLER_PORTAL_STORAGE_STATE_PATH`, route-specific capability checks and no implicit local Mac fallback.
 
 # Current norm
 
@@ -101,7 +102,7 @@ Confirmed contour на текущем `main`:
   - hosted refresh runs bounded `promo_refresh_light_gc_v1` only after normalized promo archive and ready snapshot persistence; current/unknown/replay-critical artifacts are protected and GC summary is surfaced in refresh diagnostics/job log.
 - unified web-vitrina/operator surface:
   - primary manual action `Загрузить и обновить` refreshes server-side ready snapshot without Google Sheets `/load`;
-  - compact table toolbar combines period/search/filter/column/sort controls; default no-query history opens the latest four server-readable business dates ending on backend-owned `today_current_date` when available;
+  - compact table toolbar combines period/search/filter/column controls; default no-query history opens the latest three server-readable business dates ending on backend-owned `today_current_date` when available;
   - bottom `Загрузка данных` is lazy: initial state shows only `not_loaded` + `Загрузить`, then explicit read-only `surface=page_composition&include_source_status=1` loads grouped source status table (`WB API`, `Seller Portal / бот`, `Прочие источники`) with date-scoped `Обновить группу`;
   - `Отзывы` tab is read-only over official WB feedbacks API through canonical `WB_API_TOKEN`, with bounded 62-day date picker independent from ready-snapshot dates, chunked `take/skip` loading, final server-side filters (`date_from/date_to/stars/is_answered`), diagnostic meta, Excel export, resizable columns, official review tags/actionable complaint resolver and transient AI-assisted review through server-side prompt+model config/OpenAI route; AI labels are not accepted truth, Seller Portal automation or Google Sheets/GAS state;
   - nested `Жалобы` under `Отзывы` exposes runtime complaint journal, read-only status sync from WB `Мои жалобы` and a protected selected-row async submit job for already loaded/analyzed feedback rows; this is not an unauthenticated public/broad/auto-submit path and still requires exact feedback/AI-row match, hard caps and read-only confirmation/detail-network probes for uncertain submit outcomes;
@@ -110,6 +111,7 @@ Confirmed contour на текущем `main`:
   - plan-report baseline routes (`baseline-template.xlsx`, `baseline-upload`, `baseline-status`) store operator monthly aggregates in separate runtime SQLite state used only by the plan report;
   - one-off `apps/sheet_vitrina_v1_ready_fact_reconcile.py` can dry-run/apply missing accepted slots from already persisted ready snapshots without overwriting existing diffs or fabricating zeros;
   - `GET /v1/sheet-vitrina-v1/stock-report` remains read-only previous-closed stock report with current active SKU selector;
+  - current SPP visible values are sourced from Seller Portal `discountOnSite` as current-only evidence; successful current fetches persist exact business-date accepted-current snapshots, later blank attempts must not overwrite them, and legacy WB Statistics sales-average SPP is only an explicit fallback mode, not fresh current-visible truth.
   - supply tab keeps server-driven factory-order and regional calculations; regional result now uses compact district rows with per-district XLSX action and district files include `nmId / SKU / Количество к поставке / Дефицит`;
   - seller-funnel materialization filters raw rows to enabled/relevant `nm_ids` before strict field validation and logs ignored invalid non-relevant rows.
 - User-facing `ЕБД` / `единая база данных` now means the shared server-side accepted truth/runtime layer behind web-vitrina, plan-report and future reports; it is not Google Sheets/GAS, browser UI/localStorage or a private report-only manual table.

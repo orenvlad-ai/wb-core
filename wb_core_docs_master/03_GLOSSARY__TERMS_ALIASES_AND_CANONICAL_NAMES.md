@@ -21,7 +21,7 @@ update_triggers:
   - "изменение canonical naming"
   - "появление нового публичного термина"
   - "изменение operator-visible labels"
-built_from_commit: "3faca550ee0d005b6be13635d015757c71d4bb80"
+built_from_commit: "2992d25d1161f1a52179c10bc5bd5cced7de265c"
 ---
 
 # Summary
@@ -56,9 +56,14 @@ built_from_commit: "3faca550ee0d005b6be13635d015757c71d4bb80"
 | `feedbacks AI` | `AI анализ отзывов`, `feedbacks/ai-prompt`, `feedbacks/ai-analyze` | transient operator review aid over loaded feedback rows via server-side prompt + OpenAI call; not `AI_EXPORT`, not ЕБД and not complaint automation |
 | `feedbacks complaints` | `Жалобы`, `feedbacks/complaints`, `complaint journal` | nested `Отзывы` runtime journal/status-sync contour for complaint evidence/status plus protected selected-row submit-job surface; not accepted truth persistence and not broad/auto-submit |
 | `Seller Portal complaint submit` | `guarded complaint submit`, `selected complaint submit`, `complaint support runner` | guarded real submit lane with exact feedback/AI-row match, hard caps and confirmation/detail probes; protected selected-row operator job may submit chosen rows, but public unauthenticated/broad auto-submit remains forbidden |
+| `Seller Portal automation lock` | `single-flight lock`, `seller_portal_automation.lock.json` | shared runtime guard for status sync, submit/batch, scout/probe/dry-run/confirmation/detail/relogin and parser/export jobs; concurrent Playwright automation is blocked with sanitized busy metadata |
+| `canonical Seller Portal bot session` | `/opt/wb-web-bot/storage_state.json`, `SELLER_PORTAL_STORAGE_STATE_PATH` | live EU bot storage-state contour; reports may show path/status only and EU jobs must not silently fall back to local Mac session files |
+| `route-specific Seller Portal capability` | `complaints_answered`, `complaints_pending`, `feedbacks_list`, `seller_portal_base` | task-specific session readiness check; generic cabinet access is not enough for `Мои жалобы` status/parser tasks or feedback submit tasks |
 | `WebCore app auth` | `login session`, `operator auth`, `app-level auth` | simple app-level login/session boundary for public/operator WebCore routes; credentials live in runtime env, not repo |
 | `owner runtime API` | `wb-ai-api.service`, `localhost owner API`, `127.0.0.1:8000` | EU host-local owner runtime for bot-backed web-source/seller-funnel handoff; not public nginx route and not `api.selleros.pro` surface |
+| `operator dark/violet theme` | `dark operator UI`, `violet primary accent` | current visual shell for `/sheet-vitrina-v1/vitrina` and `/sheet-vitrina-v1/operator`; primary/action accent is violet/indigo, while green is reserved for semantic success/status |
 | `research_sku_group_comparison` | `Исследования`, `Сравнение групп SKU` | read-only retrospective comparison of two SKU groups over persisted ready snapshots; no causal/statistical claims |
+| `SPP current source` | `discountOnSite`, `Seller Portal discounts-prices SPP` | current-visible SPP source from Seller Portal; exact current-day evidence may roll over as accepted closed-day truth, while legacy sales-row average remains explicit fallback only |
 | `promo current invariant smoke` | `promo invariant guard` | read-only live/public guard for current promo row visibility and expected ended/no-download artifact handling |
 | `normalized promo archive` | `campaign_rows.jsonl`, `campaign_rows_manifest.json` | normalized campaign-row truth for historical promo replay without permanent raw workbook dependency |
 | `promo_refresh_light_gc_v1` | `promo artifact light GC`, `refresh-integrated GC` | bounded refresh-time cleanup after normalized archive + ready snapshot persistence; protects current/unknown/replay-critical artifacts |
@@ -91,7 +96,7 @@ built_from_commit: "3faca550ee0d005b6be13635d015757c71d4bb80"
 
 - Final production naming для будущих hosted/runtime/deploy слоёв ещё не зафиксирован.
 - Текущий main-confirmed uploaded package уже фиксируется как `102` metrics rows / `95` enabled+show_in_data metric keys в current truth; operator-facing `DATA_VITRINA` при этом materialize-ит тот же server-driven row set как thin two-day `date_matrix` (`1631` source rows -> `1698` rendered rows на `yesterday_closed + today_current`) без локального subset path.
-- User-facing labels for current web-vitrina are now centralized around `Витрина`, `Поставки`, `Загрузить и обновить`, `Загрузка данных`, `Обновить группу`, `Отчёты`, `Отчёт по остаткам`, `Выполнение плана`, `Исторические данные для отчёта`, `Отзывы`, `Жалобы`, `Исследования`, `Товар в акции` and `ЕБД`.
+- User-facing labels for current web-vitrina are now centralized around `Витрина`, `Поставки`, `Загрузить и обновить`, `Загрузка данных`, `Обновить группу`, `Отчёты`, `Отчёт по остаткам`, `Выполнение плана`, `Исторические данные для отчёта`, `Отзывы`, `Жалобы`, `Исследования`, `Товар в акции` and `ЕБД`. Stale labels such as `Витрина 2` or old supply top-level names are not current UI labels.
 
 # Not in scope
 
