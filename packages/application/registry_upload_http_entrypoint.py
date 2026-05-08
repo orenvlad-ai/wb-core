@@ -85,6 +85,7 @@ SHEET_OPERATOR_JOB_ID: ContextVar[str] = ContextVar("sheet_vitrina_v1_operator_j
 SHEET_VITRINA_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/refresh"
 SHEET_VITRINA_LOAD_ROUTE = "/v1/sheet-vitrina-v1/load"
 SHEET_VITRINA_GROUP_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/group-refresh"
+SHEET_VITRINA_AUTO_SCHEDULES_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/auto-schedules"
 SHEET_VITRINA_SELLER_RECOVERY_START_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start"
 SHEET_VITRINA_DAILY_TIMER_NAME = "wb-core-sheet-vitrina-refresh.timer"
 SHEET_VITRINA_DAILY_AUTO_ACTION = "server-side refresh ready snapshot for website/operator web-vitrina"
@@ -879,6 +880,31 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_sheet_feedbacks_auto_complaints_tick_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self.feedbacks_auto_complaints_block.tick(payload)
+
+    def handle_sheet_web_vitrina_auto_schedules_request(self) -> dict[str, Any]:
+        return _build_web_vitrina_auto_schedule_payload(self.build_sheet_server_context())
+
+    def handle_sheet_web_vitrina_auto_schedules_save_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        current = _build_web_vitrina_auto_schedule_payload(self.build_sheet_server_context())
+        proposed = _normalize_web_vitrina_auto_schedule_rows(payload.get("schedules"))
+        current_signature = _web_vitrina_auto_schedule_signature(current["schedules"])
+        proposed_signature = _web_vitrina_auto_schedule_signature(proposed)
+        if proposed_signature == current_signature:
+            result = dict(current)
+            result["status"] = "unchanged"
+            result["message"] = "Расписание автообновлений уже соответствует deploy-owned systemd timer."
+            return result
+        result = dict(current)
+        result["status"] = "blocked"
+        result["message"] = (
+            "Изменение production cadence для web-vitrina выполняется через repo-owned deploy "
+            "contract/systemd timer, а не runtime UI state."
+        )
+        result["requested_schedules"] = proposed
+        result["blocker"] = (
+            "Нужен отдельный operator approval на изменение systemd timer и последующий hosted deploy."
+        )
+        return result
 
     def handle_sheet_refresh_request(
         self,
@@ -2198,6 +2224,7 @@ class RegistryUploadHttpEntrypoint:
         business_now = to_business_datetime(now).replace(microsecond=0).isoformat()
         auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()
         auto_result = _format_operator_result_payload(auto_update_state.last_run_result)
+        schedule_rows = _build_web_vitrina_systemd_schedule_rows()
         return {
             "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
             "business_now": business_now,
@@ -2210,6 +2237,13 @@ class RegistryUploadHttpEntrypoint:
             "daily_auto_description": SHEET_VITRINA_DAILY_AUTO_DESCRIPTION,
             "daily_auto_trigger_name": SHEET_VITRINA_DAILY_TIMER_NAME,
             "daily_auto_trigger_description": SHEET_VITRINA_DAILY_TRIGGER_DESCRIPTION,
+            "daily_auto_schedule_mode": "deploy_owned_systemd_timer",
+            "daily_auto_schedules": schedule_rows,
+            "daily_auto_schedule_editable": False,
+            "daily_auto_schedule_blocker": (
+                "Runtime UI показывает текущее repo-owned systemd расписание; изменение cadence требует "
+                "operator approval и hosted deploy."
+            ),
             "retry_runner_description": SHEET_VITRINA_RETRY_RUNNER_DESCRIPTION,
             "last_auto_run_status": auto_update_state.last_run_status or "never",
             "last_auto_run_status_label": (
@@ -3058,6 +3092,106 @@ def _auto_update_status_label(value: str | None) -> str:
     if normalized == "running":
         return "выполняется"
     return "ещё не выполнялся"
+
+
+def _build_web_vitrina_systemd_schedule_rows() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for hour in DAILY_REFRESH_BUSINESS_HOURS:
+        local_time = f"{hour:02d}:00"
+        rows.append(
+            {
+                "id": f"systemd_daily_{hour:02d}_00_ekt",
+                "enabled": True,
+                "local_time_hhmm": local_time,
+                "timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
+                "timezone_label": "Asia/Yekaterinburg",
+                "trigger_name": SHEET_VITRINA_DAILY_TIMER_NAME,
+                "trigger_kind": "systemd_timer",
+                "action": "canonical_full_refresh",
+                "auto_refresh": True,
+                "editable": False,
+                "status": "active",
+                "description": (
+                    f"{local_time} {CANONICAL_BUSINESS_TIMEZONE_NAME}: POST "
+                    f"{SHEET_VITRINA_REFRESH_ROUTE} с auto_refresh=true"
+                ),
+            }
+        )
+    return rows
+
+
+def _build_web_vitrina_auto_schedule_payload(server_context: Mapping[str, Any]) -> dict[str, Any]:
+    schedules = [
+        dict(item)
+        for item in (server_context.get("daily_auto_schedules") or _build_web_vitrina_systemd_schedule_rows())
+        if isinstance(item, Mapping)
+    ]
+    return {
+        "status": "ok",
+        "schedule_mode": str(server_context.get("daily_auto_schedule_mode") or "deploy_owned_systemd_timer"),
+        "timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
+        "timezone_label": "Asia/Yekaterinburg",
+        "can_edit_runtime": False,
+        "save_supported": False,
+        "schedules": schedules,
+        "trigger_name": str(server_context.get("daily_auto_trigger_name") or SHEET_VITRINA_DAILY_TIMER_NAME),
+        "trigger_description": str(server_context.get("daily_auto_trigger_description") or ""),
+        "action": str(server_context.get("daily_auto_action") or SHEET_VITRINA_DAILY_AUTO_ACTION),
+        "last_auto_run_status": str(server_context.get("last_auto_run_status") or "never"),
+        "last_auto_run_status_label": str(server_context.get("last_auto_run_status_label") or ""),
+        "last_auto_run_time": str(server_context.get("last_auto_run_time") or ""),
+        "last_successful_auto_update_at": str(server_context.get("last_successful_auto_update_at") or ""),
+        "blocker": str(server_context.get("daily_auto_schedule_blocker") or ""),
+        "message": "Текущее расписание прочитано из repo-owned systemd timer contract.",
+    }
+
+
+def _normalize_web_vitrina_auto_schedule_rows(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("schedules must be a list")
+    rows: list[dict[str, Any]] = []
+    for index, raw in enumerate(value, start=1):
+        if not isinstance(raw, Mapping):
+            raise ValueError("each schedule must be an object")
+        local_time = str(raw.get("local_time_hhmm") or raw.get("time") or "").strip()
+        if not _is_hhmm(local_time):
+            raise ValueError(f"schedule #{index} local_time_hhmm must use HH:MM")
+        rows.append(
+            {
+                "id": str(raw.get("id") or f"requested_{index}").strip(),
+                "enabled": bool(raw.get("enabled", True)),
+                "local_time_hhmm": local_time,
+                "timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
+            }
+        )
+    return rows
+
+
+def _web_vitrina_auto_schedule_signature(rows: Iterable[Mapping[str, Any]]) -> list[tuple[bool, str]]:
+    return sorted(
+        {
+            (
+                bool(row.get("enabled", True)),
+                str(row.get("local_time_hhmm") or "").strip(),
+            )
+            for row in rows
+            if str(row.get("local_time_hhmm") or "").strip()
+        },
+        key=lambda item: item[1],
+    )
+
+
+def _is_hhmm(value: str) -> bool:
+    if len(value) != 5 or value[2] != ":":
+        return False
+    hour_text, minute_text = value.split(":", 1)
+    if not hour_text.isdigit() or not minute_text.isdigit():
+        return False
+    hour = int(hour_text)
+    minute = int(minute_text)
+    return 0 <= hour <= 23 and 0 <= minute <= 59
 
 
 @dataclass

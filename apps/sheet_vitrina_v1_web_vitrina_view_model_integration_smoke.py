@@ -76,7 +76,7 @@ def main() -> None:
             raise AssertionError(f"source contract identity mismatch, got {view_model.meta}")
         if view_model.meta.snapshot_id != "web-vitrina-view-model-integration" or view_model.meta.row_count != 4:
             raise AssertionError(f"view_model meta mismatch, got {view_model.meta}")
-        if len(view_model.columns) != 11 or len(view_model.groups) != 2 or len(view_model.sections) != 2:
+        if len(view_model.columns) != 12 or len(view_model.groups) != 2 or len(view_model.sections) != 2:
             raise AssertionError(f"view_model schema counts mismatch, got {view_model}")
 
         rows = {row.row_id: row for row in view_model.rows}

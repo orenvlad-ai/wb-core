@@ -418,7 +418,7 @@ def _assert_counting_calls(counters: dict[str, CountingBlock]) -> None:
         "sales_funnel_history": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "prices_snapshot": [TODAY_CURRENT_DATE],
         "sf_period": [AS_OF_DATE, TODAY_CURRENT_DATE],
-        "spp": [AS_OF_DATE, TODAY_CURRENT_DATE],
+        "spp": [TODAY_CURRENT_DATE],
         "ads_bids": [TODAY_CURRENT_DATE],
         "stocks": [AS_OF_DATE],
         "ads_compact": [AS_OF_DATE, TODAY_CURRENT_DATE],
@@ -433,7 +433,7 @@ def _assert_counting_calls(counters: dict[str, CountingBlock]) -> None:
 
 
 def _expected_request_dates(source_key: str) -> list[str]:
-    if source_key in CURRENT_ONLY_SOURCE_KEYS:
+    if source_key in CURRENT_ONLY_SOURCE_KEYS or source_key == "spp":
         return [TODAY_CURRENT_DATE]
     if source_key == "stocks":
         return [AS_OF_DATE]
@@ -505,7 +505,7 @@ def _extract_operator_ui_config(html: str) -> dict[str, object]:
     return json.loads(match.group(1))
 
 
-def _expected_server_context() -> dict[str, str]:
+def _expected_server_context() -> dict[str, object]:
     return {
         "business_timezone": "Asia/Yekaterinburg",
         "business_now": "2026-04-13T13:00:00+05:00",
@@ -523,6 +523,42 @@ def _expected_server_context() -> dict[str, str]:
         "daily_auto_trigger_description": (
             "wb-core-sheet-vitrina-refresh.timer -> POST /v1/sheet-vitrina-v1/refresh "
             "(auto_refresh=true) в 11:00, 20:00 Asia/Yekaterinburg"
+        ),
+        "daily_auto_schedule_mode": "deploy_owned_systemd_timer",
+        "daily_auto_schedules": [
+            {
+                "id": "systemd_daily_11_00_ekt",
+                "enabled": True,
+                "local_time_hhmm": "11:00",
+                "timezone": "Asia/Yekaterinburg",
+                "timezone_label": "Asia/Yekaterinburg",
+                "trigger_name": "wb-core-sheet-vitrina-refresh.timer",
+                "trigger_kind": "systemd_timer",
+                "action": "canonical_full_refresh",
+                "auto_refresh": True,
+                "editable": False,
+                "status": "active",
+                "description": "11:00 Asia/Yekaterinburg: POST /v1/sheet-vitrina-v1/refresh с auto_refresh=true",
+            },
+            {
+                "id": "systemd_daily_20_00_ekt",
+                "enabled": True,
+                "local_time_hhmm": "20:00",
+                "timezone": "Asia/Yekaterinburg",
+                "timezone_label": "Asia/Yekaterinburg",
+                "trigger_name": "wb-core-sheet-vitrina-refresh.timer",
+                "trigger_kind": "systemd_timer",
+                "action": "canonical_full_refresh",
+                "auto_refresh": True,
+                "editable": False,
+                "status": "active",
+                "description": "20:00 Asia/Yekaterinburg: POST /v1/sheet-vitrina-v1/refresh с auto_refresh=true",
+            },
+        ],
+        "daily_auto_schedule_editable": False,
+        "daily_auto_schedule_blocker": (
+            "Runtime UI показывает текущее repo-owned systemd расписание; изменение cadence требует "
+            "operator approval и hosted deploy."
         ),
         "retry_runner_description": (
             "Persisted retry runner: дожимает due yesterday_closed для historical/date-period families "
