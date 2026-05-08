@@ -105,6 +105,7 @@ def main() -> None:
         "sku_separators": ready_result["sku_separators"],
         "filter_controls": ready_result["filter_controls"],
         "status_summary": ready_result["status_summary"],
+        "auto_schedule_block": ready_result["auto_schedule_block"],
         "activity_surface": ready_result["activity_surface"],
         "compact_widths": ready_result["compact_widths"],
         "percent_formatting": ready_result["percent_formatting"],
@@ -266,6 +267,7 @@ def run_browser_checks(
             total_rows = page.locator("[data-table-body] tr").count()
             if total_rows <= 0:
                 raise AssertionError("web-vitrina table must render at least one row")
+            auto_schedule_block = _check_auto_schedule_block(page)
             initial_summary_cards = _read_summary_cards(page)
             status_summary = initial_summary_cards.get("status", {})
             initial_unloaded_activity_surface = _read_activity_surface(
@@ -604,6 +606,7 @@ def run_browser_checks(
         "filter_controls": filter_controls,
         "table_toolbar": table_toolbar,
         "status_summary": status_summary,
+        "auto_schedule_block": auto_schedule_block,
         "summary_cards": initial_summary_cards,
         "activity_surface": initial_activity_surface,
         "compact_widths": compact_widths,
@@ -658,6 +661,8 @@ def _print_summary(result: dict[str, object]) -> None:
     print("web_vitrina_browser_table: ok ->", result["table_rendered"])
     print("web_vitrina_browser_top_panel: ok ->", result["top_panel"])
     print("web_vitrina_browser_status_summary: ok ->", result["status_summary"])
+    if "auto_schedule_block" in result:
+        print("web_vitrina_browser_auto_schedule: ok ->", result["auto_schedule_block"])
     print("web_vitrina_browser_activity_surface: ok ->", result["activity_surface"])
     print("web_vitrina_browser_compact_widths: ok ->", result["compact_widths"])
     print("web_vitrina_browser_percent_formatting: ok ->", result["percent_formatting"])
@@ -1017,6 +1022,77 @@ def _check_unified_tab_navigation(page: object) -> dict[str, object]:
         "research_range_controls": range_controls,
         "research_result_grid": result_grid,
         "restored_default_tab": True,
+    }
+
+
+def _check_auto_schedule_block(page: object) -> dict[str, object]:
+    page.wait_for_function(
+        "() => document.querySelectorAll('[data-vitrina-auto-schedules-body] tr').length > 0 && !(document.querySelector('[data-vitrina-auto-schedule-meta]').textContent || '').includes('загружается')",
+        timeout=10000,
+    )
+    payload = page.evaluate(
+        """() => {
+          const rows = Array.from(document.querySelectorAll('[data-vitrina-auto-schedules-body] tr')).map(row => {
+            const cells = Array.from(row.querySelectorAll('td')).map(cell => (cell.textContent || '').trim());
+            const timeInput = row.querySelector('[data-vitrina-auto-field="local_time_hhmm"]');
+            const enabledInput = row.querySelector('[data-vitrina-auto-field="enabled"]');
+            const deleteButton = row.querySelector('[data-vitrina-auto-delete]');
+            return {
+              text: cells.join(' '),
+              time: timeInput ? timeInput.value : '',
+              timeDisabled: timeInput ? !!timeInput.disabled : null,
+              enabled: enabledInput ? !!enabledInput.checked : null,
+              enabledDisabled: enabledInput ? !!enabledInput.disabled : null,
+              deleteDisabled: deleteButton ? !!deleteButton.disabled : null
+            };
+          });
+          return {
+            title: (document.querySelector('[data-vitrina-auto-schedule] .auto-schedule-title') || {}).textContent || '',
+            meta: (document.querySelector('[data-vitrina-auto-schedule-meta]') || {}).textContent || '',
+            status: (document.querySelector('[data-vitrina-auto-status]') || {}).textContent || '',
+            error: (document.querySelector('[data-vitrina-auto-error]') || {}).textContent || '',
+            addCount: document.querySelectorAll('[data-vitrina-auto-add]').length,
+            saveCount: document.querySelectorAll('[data-vitrina-auto-save]').length,
+            reloadCount: document.querySelectorAll('[data-vitrina-auto-reload]').length,
+            rows
+          };
+        }"""
+    )
+    times = [row["time"] for row in payload["rows"] if row.get("time")]
+    if payload["title"].strip() != "Автообновления":
+        raise AssertionError(f"auto schedule block title mismatch: {payload}")
+    if "Asia/Yekaterinburg" not in payload["meta"]:
+        raise AssertionError(f"auto schedule block must expose business timezone, got {payload}")
+    if sorted(times) != ["11:00", "20:00"]:
+        raise AssertionError(f"auto schedule block must read current systemd schedule, got {payload}")
+    if payload["addCount"] != 1 or payload["saveCount"] != 1 or payload["reloadCount"] != 1:
+        raise AssertionError(f"auto schedule block must expose add/save/reload controls, got {payload}")
+    if not all(row["enabled"] for row in payload["rows"] if row.get("time")):
+        raise AssertionError(f"current auto schedule rows must be enabled, got {payload}")
+    if not all(row["timeDisabled"] and row["enabledDisabled"] and row["deleteDisabled"] for row in payload["rows"] if row.get("time")):
+        raise AssertionError(f"systemd-owned current rows must be non-editable in runtime UI, got {payload}")
+
+    page.locator("[data-vitrina-auto-add]").click()
+    page.wait_for_function(
+        "() => Array.from(document.querySelectorAll('[data-vitrina-auto-field=\"local_time_hhmm\"]')).some(node => node.value === '12:00' && !node.disabled)",
+        timeout=5000,
+    )
+    page.locator("[data-vitrina-auto-save]").click()
+    page.wait_for_function(
+        "() => (document.querySelector('[data-vitrina-auto-error]')?.textContent || '').includes('operator approval') || (document.querySelector('[data-vitrina-auto-error]')?.textContent || '').includes('approval')",
+        timeout=5000,
+    )
+    blocker = page.locator("[data-vitrina-auto-error]").inner_text().strip()
+    page.locator("[data-vitrina-auto-reload]").click()
+    page.wait_for_function(
+        "() => Array.from(document.querySelectorAll('[data-vitrina-auto-field=\"local_time_hhmm\"]')).filter(node => node.value).length === 2",
+        timeout=5000,
+    )
+    return {
+        "times": sorted(times),
+        "timezone": "Asia/Yekaterinburg",
+        "controls": {"add": True, "save": True, "reload": True},
+        "runtime_edit_blocker": blocker,
     }
 
 

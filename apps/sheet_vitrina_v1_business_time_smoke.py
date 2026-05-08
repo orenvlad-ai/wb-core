@@ -81,6 +81,7 @@ def main() -> None:
             runtime=runtime,
             activated_at_factory=lambda: ACTIVATED_AT,
             refreshed_at_factory=lambda: REFRESHED_AT,
+            now_factory=lambda: BOUNDARY_NOW,
         )
         entrypoint.sheet_plan_block = plan_block
         server = build_registry_upload_http_server(config, entrypoint=entrypoint)
