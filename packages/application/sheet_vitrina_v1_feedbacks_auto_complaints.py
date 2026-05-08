@@ -53,8 +53,10 @@ AI_CANDIDATE_VALUES = {"yes", "да", "review", "проверить"}
 
 
 class SheetVitrinaV1FeedbacksAutoComplaintsError(RuntimeError):
-    def __init__(self, message: str, *, http_status: int = 500) -> None:
+    def __init__(self, message: str, *, http_status: int = 500, reason: str = "", status: str = "") -> None:
         self.http_status = http_status
+        self.reason = reason
+        self.status = status or reason
         super().__init__(message)
 
 
@@ -648,7 +650,12 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
         for schedule in self.store.read().get("schedules", []):
             if str(schedule.get("id") or "") == schedule_id:
                 return dict(schedule)
-        raise SheetVitrinaV1FeedbacksAutoComplaintsError(f"auto complaints schedule not found: {schedule_id}", http_status=404)
+        raise SheetVitrinaV1FeedbacksAutoComplaintsError(
+            f"auto complaints schedule not found: {schedule_id}",
+            http_status=404,
+            reason="schedule_not_found",
+            status="schedule_not_found",
+        )
 
     def _due_schedules(self, now: datetime) -> list[tuple[dict[str, Any], datetime]]:
         due: list[tuple[dict[str, Any], datetime]] = []

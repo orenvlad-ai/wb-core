@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 from packages.application.sheet_vitrina_v1_feedbacks_auto_complaints import (  # noqa: E402
     JsonFileFeedbacksAutoComplaintsStore,
     SheetVitrinaV1FeedbacksAutoComplaintsBlock,
+    SheetVitrinaV1FeedbacksAutoComplaintsError,
 )
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import (  # noqa: E402
     JsonFileFeedbacksComplaintJournal,
@@ -59,6 +60,7 @@ class FakeAiBlock:
 
 def main() -> None:
     _assert_schedule_validation_and_due_window()
+    _assert_schedule_persistence_duplicate_and_run_now_contract()
     _assert_new_future_schedule_is_not_backfilled()
     _assert_run_filters_ai_and_skips_existing_journal()
     _assert_noop_advances_last_success()
@@ -102,6 +104,91 @@ def _assert_schedule_validation_and_due_window() -> None:
             pass
         else:
             raise AssertionError("invalid HH:mm must be rejected")
+
+
+def _assert_schedule_persistence_duplicate_and_run_now_contract() -> None:
+    now = datetime(2026, 5, 8, 8, 0, tzinfo=timezone.utc)
+    with TemporaryDirectory(prefix="auto-complaints-run-now-") as tmp:
+        runtime_dir = Path(tmp)
+        block = SheetVitrinaV1FeedbacksAutoComplaintsBlock(
+            runtime_dir=runtime_dir,
+            feedbacks_block=FakeFeedbacksBlock([]),  # type: ignore[arg-type]
+            feedbacks_ai_block=FakeAiBlock({}),  # type: ignore[arg-type]
+            complaints_block=SheetVitrinaV1FeedbacksComplaintsBlock(runtime_dir=runtime_dir),
+            now_factory=lambda: now,
+        )
+        saved = block.save_schedules(
+            {
+                "schedules": [
+                    {
+                        "id": "schedule_client_1",
+                        "enabled": False,
+                        "local_time_hhmm": "12:00",
+                        "timezone": "Asia/Yekaterinburg",
+                    }
+                ]
+            }
+        )
+        schedule = saved["schedules"][0]
+        if schedule["id"] != "schedule_client_1":
+            raise AssertionError(f"backend must preserve valid client-generated schedule ids: {schedule}")
+        reloaded = SheetVitrinaV1FeedbacksAutoComplaintsBlock(
+            runtime_dir=runtime_dir,
+            feedbacks_block=FakeFeedbacksBlock([]),  # type: ignore[arg-type]
+            feedbacks_ai_block=FakeAiBlock({}),  # type: ignore[arg-type]
+            complaints_block=SheetVitrinaV1FeedbacksComplaintsBlock(runtime_dir=runtime_dir),
+            now_factory=lambda: now,
+        )
+        if reloaded.build_schedules()["schedules"][0]["id"] != "schedule_client_1":
+            raise AssertionError("persisted schedule id must survive reload/readback")
+        try:
+            reloaded.save_schedules(
+                {
+                    "schedules": [
+                        {"id": "duplicate", "enabled": False, "local_time_hhmm": "12:00"},
+                        {"id": "duplicate", "enabled": True, "local_time_hhmm": "13:00"},
+                    ]
+                }
+            )
+        except ValueError as exc:
+            if "unique" not in str(exc):
+                raise AssertionError(f"duplicate id validation must be explicit: {exc}") from exc
+        else:
+            raise AssertionError("duplicate schedule ids must be rejected")
+        reloaded._run_and_persist = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        run_payload = reloaded.run_now({"schedule_id": "schedule_client_1"})
+        run = run_payload["run"]
+        if run["schedule_id"] != "schedule_client_1":
+            raise AssertionError(f"run-now must use persisted canonical schedule id: {run}")
+        if run["window_fetch_from"] != run["window_base_from"]:
+            raise AssertionError(f"first run must not apply overlap to fetch window: {run}")
+        if run["window_base_from"] != "2026-05-07T08:00:00Z" or run["window_to"] != "2026-05-08T08:00:00Z":
+            raise AssertionError(f"first-run window must be the last 24h in schedule timezone: {run}")
+        reloaded.store.update_run(run["run_id"], {"status": "completed", "finished_at": "2026-05-08T08:00:01Z"})
+        recurring = reloaded.save_schedules(
+            {
+                "schedules": [
+                    {
+                        **schedule,
+                        "last_success_at": "2026-05-08T08:30:00+05:00",
+                        "overlap_hours": 24,
+                    }
+                ]
+            }
+        )["schedules"][0]
+        reloaded._run_and_persist = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        recurring_run = reloaded.run_now({"schedule_id": recurring["id"]})["run"]
+        if recurring_run["window_base_from"] != "2026-05-08T03:30:00Z":
+            raise AssertionError(f"recurring base window must start at last_success_at: {recurring_run}")
+        if recurring_run["window_fetch_from"] != "2026-05-07T03:30:00Z":
+            raise AssertionError(f"recurring fetch window must include 24h overlap: {recurring_run}")
+        try:
+            reloaded.run_now({"schedule_id": "schedule_missing"})
+        except SheetVitrinaV1FeedbacksAutoComplaintsError as exc:
+            if exc.http_status != 404 or exc.reason != "schedule_not_found" or exc.status != "schedule_not_found":
+                raise AssertionError(f"unknown schedule must be structured schedule_not_found: {exc.__dict__}") from exc
+        else:
+            raise AssertionError("unknown schedule id must not start a run")
 
 
 def _assert_new_future_schedule_is_not_backfilled() -> None:

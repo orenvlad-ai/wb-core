@@ -2909,7 +2909,7 @@
 	                <span class="research-result-note" data-feedbacks-auto-status>Расписания не загружены</span>
 	              </div>
 	            </div>
-	            <p class="feedbacks-source-helper">Ежедневные расписания хранятся в runtime state. Timezone: Екатеринбург.</p>
+	            <p class="feedbacks-source-helper">Ежедневные расписания хранятся в runtime state. Timezone: Екатеринбург. Первый запуск обрабатывает последние 24 часа; повторный запуск берёт период с последнего успешного запуска с 24ч overlap.</p>
 	            <p class="research-error" data-feedbacks-auto-error></p>
 	            <div class="table-shell feedbacks-table-shell">
 	              <div class="table-scroll feedbacks-table-scroll">
@@ -3440,6 +3440,7 @@
           saving: false,
           running: false,
           loaded: false,
+          dirty: false,
           schedules: [],
           recentRuns: [],
           lastRun: null,
@@ -6309,6 +6310,7 @@
         state.feedbacks.automation.schedules = (state.feedbacks.automation.schedules || []).filter(function(schedule) {
           return String(schedule.id || "") !== scheduleId;
         });
+        state.feedbacks.automation.dirty = true;
         renderFeedbacksAutomationPanel();
         return;
       }
@@ -6370,6 +6372,7 @@
 	          }
 	          return next;
 	        });
+	        state.feedbacks.automation.dirty = true;
 	        renderFeedbacksAutomationPanel();
 	        return;
 	      }
@@ -7519,6 +7522,7 @@
         automation.schedules = Array.isArray(payload.schedules) ? payload.schedules : [];
         automation.recentRuns = Array.isArray(payload.recent_runs) ? payload.recent_runs : [];
         automation.loaded = true;
+        automation.dirty = false;
       } catch (error) {
         automation.error = String(error && error.message ? error.message : error);
         automation.loaded = false;
@@ -7539,6 +7543,7 @@
         last_status: "",
         last_stats: {}
       }]);
+      state.feedbacks.automation.dirty = true;
       renderFeedbacksAutomationPanel();
     }
 
@@ -7565,6 +7570,7 @@
         automation.schedules = Array.isArray(payload.schedules) ? payload.schedules : [];
         automation.recentRuns = Array.isArray(payload.recent_runs) ? payload.recent_runs : automation.recentRuns;
         automation.loaded = true;
+        automation.dirty = false;
       } catch (error) {
         automation.error = String(error && error.message ? error.message : error);
       } finally {
@@ -7579,7 +7585,17 @@
       if (!path || automation.running) {
         return;
       }
+      if (automation.dirty) {
+        automation.error = "Сначала сохраните расписание";
+        renderFeedbacksAutomationPanel();
+        return;
+      }
       const firstSchedule = (automation.schedules || [])[0] || {};
+      if (!firstSchedule.id) {
+        automation.error = "Сначала сохраните расписание";
+        renderFeedbacksAutomationPanel();
+        return;
+      }
       automation.running = true;
       automation.error = "";
       renderFeedbacksAutomationPanel();
@@ -7631,6 +7647,8 @@
           ? "Сохраняем…"
           : automation.running
           ? "Запуск…"
+          : automation.dirty
+          ? "Есть несохранённые изменения"
           : automation.loaded
           ? "Расписаний: " + formatNumber((automation.schedules || []).length, 0, true)
           : "Расписания не загружены";
@@ -7647,8 +7665,9 @@
         feedbacksAutoSaveButton.textContent = automation.saving ? "Сохранение…" : "Сохранить";
       }
       if (feedbacksAutoRunNowButton) {
-        feedbacksAutoRunNowButton.disabled = !!automation.loading || !!automation.saving || !!automation.running || !(automation.schedules || []).length;
-        feedbacksAutoRunNowButton.textContent = automation.running ? "Запуск…" : "Запустить сейчас";
+        const canRunNow = !!automation.loaded && !automation.dirty && !!(automation.schedules || []).length;
+        feedbacksAutoRunNowButton.disabled = !!automation.loading || !!automation.saving || !!automation.running || !canRunNow;
+        feedbacksAutoRunNowButton.textContent = automation.running ? "Запуск…" : automation.dirty ? "Сначала сохраните расписание" : "Запустить сейчас";
       }
       if (feedbacksAutoReloadButton) {
         feedbacksAutoReloadButton.disabled = !!automation.loading || !!automation.saving || !!automation.running;
@@ -7669,6 +7688,9 @@
       feedbacksAutoSchedulesBodyNode.innerHTML = schedules.map(function(schedule) {
         const id = String(schedule.id || "");
         const stats = schedule.last_stats || {};
+        const windowHint = schedule.last_success_at
+          ? "Следующий запуск обработает период с последнего успешного запуска с 24ч overlap"
+          : "Первый запуск обработает последние 24 часа";
         return [
           "<tr>",
           '<td><input type="checkbox" data-feedbacks-auto-id="' + escapeHtml(id) + '" data-feedbacks-auto-field="enabled"' + (schedule.enabled ? " checked" : "") + "></td>",
@@ -7678,7 +7700,7 @@
           "<td>" + escapeHtml(formatTimestampDisplay(schedule.last_success_at || "")) + "</td>",
           "<td>" + escapeHtml(formatTimestampDisplay(schedule.next_run_at || "")) + "</td>",
           "<td>" + escapeHtml(schedule.last_status || "—") + "</td>",
-          "<td>" + escapeHtml("AI " + (stats.ai_candidates_count || 0) + " · подано " + (stats.submitted_count || 0) + " · пропущено " + (stats.skipped_count || 0)) + "</td>",
+          '<td><span>' + escapeHtml("AI " + (stats.ai_candidates_count || 0) + " · подано " + (stats.submitted_count || 0) + " · пропущено " + (stats.skipped_count || 0)) + '</span><br><span class="research-result-note" data-feedbacks-auto-window-hint="' + escapeHtml(id) + '">' + escapeHtml(windowHint) + "</span></td>",
           '<td><button class="button ghost" type="button" data-feedbacks-auto-delete="' + escapeHtml(id) + '">Удалить</button></td>',
           "</tr>"
         ].join("");
