@@ -101,7 +101,12 @@ class JsonFileFeedbacksAutoComplaintsStore:
             for index, run in enumerate(runs):
                 if str(run.get("run_id") or "") != normalized_run_id:
                     continue
-                merged = _normalize_run({**dict(run), **dict(patch)})
+                patch_payload = dict(patch)
+                if "events" in patch_payload:
+                    existing_events = run.get("events") if isinstance(run.get("events"), list) else []
+                    patch_events = patch_payload.get("events") if isinstance(patch_payload.get("events"), list) else []
+                    patch_payload["events"] = [*existing_events, *patch_events]
+                merged = _normalize_run({**dict(run), **patch_payload})
                 runs[index] = merged
                 self._write_unlocked(payload)
                 self._write_run_report(merged)
@@ -121,7 +126,7 @@ class JsonFileFeedbacksAutoComplaintsStore:
                 status = str(run.get("status") or "")
                 next_run_at = _next_run_at(schedule, self.now_factory())
                 patch = {
-                    "last_run_at": _safe_text(run.get("finished_at") or run.get("started_at"), 80),
+                    "last_run_at": _safe_text(run.get("finished_at") or run.get("started_at") or run.get("created_at"), 80),
                     "last_due_at": _safe_text(run.get("due_at"), 80),
                     "next_run_at": next_run_at,
                     "last_status": status,
@@ -325,7 +330,24 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
         if max_submit_override is not None:
             schedule = _normalize_schedule({**schedule, "hard_cap_per_run": max_submit_override}, now=_iso_now(self.now_factory), now_factory=self.now_factory)
         run = self._start_run(schedule, trigger_source="manual", due_at=self.now_factory(), async_run=True)
-        return {"contract_name": RUN_CONTRACT_NAME, "contract_version": CONTRACT_VERSION, "run": _public_run(run)}
+        try:
+            current_run = self.store.get_run(str(run.get("run_id") or ""))
+        except Exception:
+            current_run = run
+        schedules_payload = self.build_schedules()
+        public_run = _public_run(current_run)
+        return {
+            "contract_name": RUN_CONTRACT_NAME,
+            "contract_version": CONTRACT_VERSION,
+            "run_id": public_run.get("run_id") or "",
+            "status": public_run.get("status") or "",
+            "reason": public_run.get("blocker_reason") or "",
+            "blocker_reason": public_run.get("blocker_reason") or "",
+            "summary": _run_stats(public_run),
+            "run": public_run,
+            "schedules": schedules_payload.get("schedules", []),
+            "recent_runs": schedules_payload.get("recent_runs", []),
+        }
 
     def tick(self, payload: Mapping[str, Any] | None = None, *, async_run: bool = True) -> dict[str, Any]:
         del payload
@@ -395,6 +417,7 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
                 "events": [_event("run_queued", "Auto complaints run queued", status="queued", at=now)],
             }
         )
+        self.store.update_schedule_after_run(str(schedule.get("id") or ""), run)
         if async_run:
             thread = threading.Thread(
                 target=self._run_and_persist,
@@ -426,6 +449,7 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
     def _run(self, run_id: str, schedule: Mapping[str, Any]) -> dict[str, Any]:
         started_at = _iso_now(self.now_factory)
         run = self.store.update_run(run_id, {"status": "running", "started_at": started_at, "events": [_event("run_started", "Auto complaints run started", status="running", at=started_at)]})
+        self.store.update_schedule_after_run(str(schedule.get("id") or ""), run)
         hard_cap = max(1, min(DEFAULT_HARD_CAP_PER_RUN, _safe_int(schedule.get("hard_cap_per_run")) or DEFAULT_HARD_CAP_PER_RUN))
         try:
             storage_state_path = seller_portal_storage_state_path()
@@ -741,12 +765,12 @@ def _normalize_run(run: Mapping[str, Any]) -> dict[str, Any]:
         "submitted_count": _safe_int(run.get("submitted_count")),
         "skipped_count": _safe_int(run.get("skipped_count")),
         "hard_cap_reached": bool(run.get("hard_cap_reached")),
-        "status_sync_result": dict(run.get("status_sync_result") or {}) if isinstance(run.get("status_sync_result"), Mapping) else {},
+        "status_sync_result": _sanitize_report_mapping(run.get("status_sync_result")),
         "reason_counts": {str(key): _safe_int(value) for key, value in reason_counts.items()},
         "sanitized_error_message": _safe_text(run.get("sanitized_error_message"), 1000),
-        "evidence_refs": list(run.get("evidence_refs") or []) if isinstance(run.get("evidence_refs"), list) else [],
-        "automation_lock": dict(run.get("automation_lock") or {}) if isinstance(run.get("automation_lock"), Mapping) else {},
-        "session": dict(run.get("session") or {}) if isinstance(run.get("session"), Mapping) else {},
+        "evidence_refs": [_safe_text(item, 260) for item in run.get("evidence_refs", [])] if isinstance(run.get("evidence_refs"), list) else [],
+        "automation_lock": _sanitize_report_mapping(run.get("automation_lock")),
+        "session": _sanitize_report_mapping(run.get("session")),
         "attempts": [_normalize_attempt(item) for item in attempts if isinstance(item, Mapping)][-200:],
         "events": [_normalize_event(item) for item in events if isinstance(item, Mapping)][-200:],
     }
@@ -789,6 +813,32 @@ def _public_run(run: Mapping[str, Any], *, details: bool = False) -> dict[str, A
     compact["attempts"] = compact["attempts"][-20:]
     compact["events"] = compact["events"][-20:]
     return compact
+
+
+def _sanitize_report_mapping(value: Any, *, depth: int = 0) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or depth > 3:
+        return {}
+    blocked = ("token", "cookie", "secret", "password", "authorization", "header")
+    sanitized: dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = _safe_text(raw_key, 120)
+        lowered = key.lower()
+        if not key:
+            continue
+        if lowered == "storage_state" or any(marker in lowered for marker in blocked):
+            continue
+        if isinstance(raw_value, Mapping):
+            sanitized[key] = _sanitize_report_mapping(raw_value, depth=depth + 1)
+        elif isinstance(raw_value, list):
+            sanitized[key] = [
+                _sanitize_report_mapping(item, depth=depth + 1) if isinstance(item, Mapping) else _safe_text(item, 260)
+                for item in raw_value[:50]
+            ]
+        elif isinstance(raw_value, (int, float, bool)) or raw_value is None:
+            sanitized[key] = raw_value
+        else:
+            sanitized[key] = _safe_text(raw_value, 1000)
+    return sanitized
 
 
 def _compute_window(schedule: Mapping[str, Any], due_at: datetime) -> dict[str, Any]:
