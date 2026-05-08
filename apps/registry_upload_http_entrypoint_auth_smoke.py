@@ -21,6 +21,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH,
+    DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH,
+    DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
@@ -71,6 +74,12 @@ def main() -> None:
                 json_code, json_payload = _get_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH}")
                 if json_code != 401 or json_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated JSON route must return 401 JSON: {json_code} {json_payload}")
+                auto_code, auto_payload = _get_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH}")
+                if auto_code != 401 or auto_payload.get("error") != "authentication_required":
+                    raise AssertionError(f"unauthenticated automation route must return 401 JSON: {auto_code} {auto_payload}")
+                tick_code, tick_payload = _post_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH}", {})
+                if tick_code != 401 or tick_payload.get("error") != "authentication_required":
+                    raise AssertionError(f"unauthenticated automation tick must return 401 JSON: {tick_code} {tick_payload}")
                 login_code, _, login_body = _request_text(f"{base_url}/login", headers={"Accept": "text/html"})
                 if login_code != 200 or "Вход в WebCore" not in login_body:
                     raise AssertionError("login form must be rendered")
@@ -99,6 +108,24 @@ def main() -> None:
                     payload = json.loads(response.read().decode("utf-8"))
                     if response.status != 200 or payload.get("contract_name") != "sheet_vitrina_v1_feedbacks_complaints":
                         raise AssertionError(f"authenticated JSON route must work: {response.status} {payload}")
+                schedules_request = urllib_request.Request(
+                    f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH}",
+                    headers={"Accept": "application/json"},
+                    method="GET",
+                )
+                with opener.open(schedules_request, timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                    if response.status != 200 or payload.get("contract_name") != "sheet_vitrina_v1_feedbacks_auto_complaints_schedules":
+                        raise AssertionError(f"authenticated automation schedules route must work: {response.status} {payload}")
+                runs_request = urllib_request.Request(
+                    f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH}",
+                    headers={"Accept": "application/json"},
+                    method="GET",
+                )
+                with opener.open(runs_request, timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                    if response.status != 200 or payload.get("contract_name") != "sheet_vitrina_v1_feedbacks_auto_complaints_runs":
+                        raise AssertionError(f"authenticated automation runs route must work: {response.status} {payload}")
                 with opener.open(f"{base_url}/logout", timeout=5) as response:
                     if response.status != 200:
                         raise AssertionError("logout redirect target must render login form")
@@ -148,6 +175,21 @@ def _request_text(url: str, *, headers: dict[str, str] | None = None, follow_red
 
 def _get_json(url: str) -> tuple[int, dict[str, object]]:
     request = urllib_request.Request(url, headers={"Accept": "application/json"}, method="GET")
+    try:
+        with urllib_request.urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib_error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _post_json(url: str, payload: dict[str, object]) -> tuple[int, dict[str, object]]:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib_request.Request(
+        url,
+        data=body,
+        headers={"Accept": "application/json", "Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
     try:
         with urllib_request.urlopen(request, timeout=5) as response:
             return response.status, json.loads(response.read().decode("utf-8"))

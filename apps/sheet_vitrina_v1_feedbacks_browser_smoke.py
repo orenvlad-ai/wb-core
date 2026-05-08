@@ -23,6 +23,8 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH,
+    DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH,
+    DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH,
     DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH,
     DEFAULT_SHEET_FEEDBACKS_PATH,
     DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
@@ -58,6 +60,8 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
     complaints_job_polls: list[str] = []
     complaints_submit_requests: list[dict[str, object]] = []
     complaints_submit_job_polls: list[str] = []
+    automation_schedule_requests: list[dict[str, object]] = []
+    automation_run_requests: list[str] = []
     failed_once: set[str] = set()
     large_feedbacks_mode = False
     prompt_saved = False
@@ -394,6 +398,53 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 ),
             )
 
+        def fulfill_automation_schedules(route: object) -> None:
+            if route.request.method == "POST":
+                payload = json.loads(route.request.post_data or "{}")
+                automation_schedule_requests.append(payload)
+                schedules = payload.get("schedules") if isinstance(payload, dict) else []
+            else:
+                schedules = [
+                    {
+                        "id": "auto-noon",
+                        "enabled": False,
+                        "local_time_hhmm": "12:00",
+                        "timezone": "Asia/Yekaterinburg",
+                        "timezone_label": "Екатеринбург",
+                        "last_status": "no_ai_candidates",
+                        "next_run_at": "2026-05-08T07:00:00Z",
+                        "last_stats": {"ai_candidates_count": 0, "submitted_count": 0, "skipped_count": 0},
+                    }
+                ]
+            route.fulfill(
+                status=200,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                body=json.dumps(
+                    {
+                        "contract_name": "sheet_vitrina_v1_feedbacks_auto_complaints_schedules",
+                        "contract_version": "v1",
+                        "schedules": schedules,
+                        "recent_runs": [],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+
+        def fulfill_automation_runs(route: object) -> None:
+            automation_run_requests.append(route.request.url)
+            route.fulfill(
+                status=200,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                body=json.dumps(
+                    {
+                        "contract_name": "sheet_vitrina_v1_feedbacks_auto_complaints_runs",
+                        "contract_version": "v1",
+                        "runs": [],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_PATH + "?**", fulfill_feedbacks)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH, fulfill_export)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH, fulfill_complaints)
@@ -401,6 +452,8 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH + "?**", fulfill_complaints_sync_job)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH, fulfill_complaints_submit)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH + "?**", fulfill_complaints_submit_job)
+        context.route("**" + DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH, fulfill_automation_schedules)
+        context.route("**" + DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH, fulfill_automation_runs)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH, fulfill_ai_analyze)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH, fulfill_prompt)
         context.route("**" + DEFAULT_SHEET_WEB_VITRINA_READ_PATH + "?**", fulfill_web_vitrina_read)
@@ -412,6 +465,18 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             page.wait_for_selector("[data-feedbacks-subtab='reviews']")
             page.wait_for_selector("[data-feedbacks-subtab='prompt']")
             page.wait_for_selector("[data-feedbacks-subtab='complaints']")
+            page.wait_for_selector("[data-feedbacks-subtab='automation']")
+            page.locator("[data-feedbacks-subtab='automation']").click()
+            page.wait_for_function("() => document.querySelector('[data-feedbacks-auto-status]')?.textContent.includes('Расписаний: 1')")
+            if not page.locator("[data-feedbacks-auto-schedules-body]").inner_text().count("Екатеринбург"):
+                raise AssertionError("automation subtab must render schedule timezone label")
+            page.locator("[data-feedbacks-auto-add]").click()
+            if page.locator("[data-feedbacks-auto-schedules-body] tr").count() < 2:
+                raise AssertionError("automation UI must add editable schedule rows")
+            page.locator("[data-feedbacks-auto-save]").click()
+            page.wait_for_function("() => document.querySelector('[data-feedbacks-auto-status]')?.textContent.includes('Расписаний: 2')")
+            if not automation_schedule_requests:
+                raise AssertionError("automation schedule save must call backend route")
             if complaints_sync_requests:
                 raise AssertionError("complaints status sync must not auto-run on page load")
             page.locator("[data-feedbacks-subtab='complaints']").click()
@@ -782,6 +847,8 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "complaints_job_polls": len(complaints_job_polls),
         "complaints_submit_requests": len(complaints_submit_requests),
         "complaints_submit_job_polls": len(complaints_submit_job_polls),
+        "automation_schedule_requests": len(automation_schedule_requests),
+        "automation_run_requests": len(automation_run_requests),
         "feedbacks_dark_toolbar": True,
         "feedbacks_action_button_heights": feedbacks_dark_layout.get("buttonHeights", []),
     }

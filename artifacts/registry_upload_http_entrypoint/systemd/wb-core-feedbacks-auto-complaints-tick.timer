@@ -1,0 +1,11 @@
+[Unit]
+Description=WB Core Feedbacks Auto Complaints Due Tick Timer
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=10min
+AccuracySec=1m
+Unit=wb-core-feedbacks-auto-complaints-tick.service
+
+[Install]
+WantedBy=timers.target

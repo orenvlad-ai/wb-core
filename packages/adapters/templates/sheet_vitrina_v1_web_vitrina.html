@@ -2633,6 +2633,7 @@
 	          <button class="feedbacks-subtab-button is-active" type="button" data-feedbacks-subtab="reviews" role="tab" aria-selected="true">Отзывы</button>
 	          <button class="feedbacks-subtab-button" type="button" data-feedbacks-subtab="prompt" role="tab" aria-selected="false">AI-промпт разбора</button>
 	          <button class="feedbacks-subtab-button" type="button" data-feedbacks-subtab="complaints" role="tab" aria-selected="false">Жалобы</button>
+	          <button class="feedbacks-subtab-button" type="button" data-feedbacks-subtab="automation" role="tab" aria-selected="false">Авто-жалобы</button>
 	        </div>
 
 	        <section class="feedbacks-subpanel" data-feedbacks-subpanel="reviews">
@@ -2781,6 +2782,49 @@
 	          <div class="summary-grid" data-feedbacks-complaints-summary></div>
 	          <div data-feedbacks-complaints-result>
 	            <p class="research-result-note">Откройте журнал жалоб или обновите статусы.</p>
+	          </div>
+	        </section>
+	        <section class="feedbacks-subpanel" data-feedbacks-subpanel="automation" hidden>
+	          <div class="feedbacks-workspace">
+	            <div class="feedbacks-action-toolbar" aria-label="Автоматическая подача жалоб">
+	              <div class="feedbacks-action-group">
+	                <button class="button secondary" type="button" data-feedbacks-auto-add>Добавить расписание</button>
+	                <button class="button primary" type="button" data-feedbacks-auto-save>Сохранить</button>
+	                <button class="button danger" type="button" data-feedbacks-auto-run-now>Запустить сейчас</button>
+	              </div>
+	              <div class="feedbacks-action-group">
+	                <button class="button secondary" type="button" data-feedbacks-auto-reload>Обновить</button>
+	                <span class="research-result-note" data-feedbacks-auto-status>Расписания не загружены</span>
+	              </div>
+	            </div>
+	            <p class="feedbacks-source-helper">Ежедневные расписания хранятся в runtime state. Timezone: Екатеринбург.</p>
+	            <p class="research-error" data-feedbacks-auto-error></p>
+	            <div class="table-shell feedbacks-table-shell">
+	              <div class="table-scroll feedbacks-table-scroll">
+	                <table class="vitrina-table feedbacks-table" data-feedbacks-auto-table>
+	                  <thead>
+	                    <tr>
+	                      <th>Вкл</th>
+	                      <th>Время</th>
+	                      <th>Timezone</th>
+	                      <th>Последний запуск</th>
+	                      <th>Последний успех</th>
+	                      <th>Следующий запуск</th>
+	                      <th>Статус</th>
+	                      <th>Статистика</th>
+	                      <th></th>
+	                    </tr>
+	                  </thead>
+	                  <tbody data-feedbacks-auto-schedules-body>
+	                    <tr><td colspan="9">Расписания не загружены.</td></tr>
+	                  </tbody>
+	                </table>
+	              </div>
+	            </div>
+	            <section class="feedbacks-submit-log" data-feedbacks-auto-log>
+	              <div class="feedbacks-submit-log-title">Лог авто-жалоб</div>
+	              <div class="feedbacks-submit-log-body" data-feedbacks-auto-log-body>Нет выбранного запуска.</div>
+	            </section>
 	          </div>
 	        </section>
 	      </section>
@@ -3001,6 +3045,14 @@
     const feedbacksComplaintsResultNode = document.querySelector("[data-feedbacks-complaints-result]");
     const feedbacksComplaintsColumnControlsNode = document.querySelector("[data-feedbacks-complaints-column-controls]");
     const feedbacksComplaintsColumnsResetButton = document.querySelector("[data-feedbacks-complaints-columns-reset]");
+    const feedbacksAutoAddButton = document.querySelector("[data-feedbacks-auto-add]");
+    const feedbacksAutoSaveButton = document.querySelector("[data-feedbacks-auto-save]");
+    const feedbacksAutoRunNowButton = document.querySelector("[data-feedbacks-auto-run-now]");
+    const feedbacksAutoReloadButton = document.querySelector("[data-feedbacks-auto-reload]");
+    const feedbacksAutoStatusNode = document.querySelector("[data-feedbacks-auto-status]");
+    const feedbacksAutoErrorNode = document.querySelector("[data-feedbacks-auto-error]");
+    const feedbacksAutoSchedulesBodyNode = document.querySelector("[data-feedbacks-auto-schedules-body]");
+    const feedbacksAutoLogBodyNode = document.querySelector("[data-feedbacks-auto-log-body]");
 
     const ALL_VALUE = "__all__";
     const DEFAULT_UNIFIED_TAB = "vitrina";
@@ -3264,6 +3316,16 @@
           syncPollSequence: 0,
           error: ""
         },
+        automation: {
+          loading: false,
+          saving: false,
+          running: false,
+          loaded: false,
+          schedules: [],
+          recentRuns: [],
+          lastRun: null,
+          error: ""
+        },
         error: ""
       },
       sessionHighlights: {}
@@ -3353,6 +3415,20 @@
       feedbacksComplaintsSyncButton.addEventListener("click", function() {
         syncFeedbacksComplaintsStatuses();
       });
+    }
+    if (feedbacksAutoReloadButton) {
+      feedbacksAutoReloadButton.addEventListener("click", function() {
+        loadFeedbacksAutomation();
+      });
+    }
+    if (feedbacksAutoAddButton) {
+      feedbacksAutoAddButton.addEventListener("click", addFeedbacksAutomationSchedule);
+    }
+    if (feedbacksAutoSaveButton) {
+      feedbacksAutoSaveButton.addEventListener("click", saveFeedbacksAutomationSchedules);
+    }
+    if (feedbacksAutoRunNowButton) {
+      feedbacksAutoRunNowButton.addEventListener("click", runFeedbacksAutomationNow);
     }
     if (feedbacksComplaintsColumnsResetButton) {
       feedbacksComplaintsColumnsResetButton.addEventListener("click", function() {
@@ -5632,7 +5708,7 @@
     }
 
     function activateFeedbacksSubsection(value) {
-      const normalized = value === "prompt" ? "prompt" : (value === "complaints" ? "complaints" : "reviews");
+      const normalized = value === "prompt" ? "prompt" : (value === "complaints" ? "complaints" : (value === "automation" ? "automation" : "reviews"));
       state.feedbacks.activeSubsection = normalized;
       syncFeedbacksSubsections();
       if (normalized === "prompt" && !state.feedbacks.promptLoaded && !state.feedbacks.promptLoading) {
@@ -5641,11 +5717,14 @@
       if (normalized === "complaints" && !state.feedbacks.complaints.loaded && !state.feedbacks.complaints.loading) {
         loadFeedbacksComplaints();
       }
+      if (normalized === "automation" && !state.feedbacks.automation.loaded && !state.feedbacks.automation.loading) {
+        loadFeedbacksAutomation();
+      }
       renderFeedbacksPanel();
     }
 
     function syncFeedbacksSubsections() {
-      const normalized = state.feedbacks.activeSubsection === "prompt" ? "prompt" : (state.feedbacks.activeSubsection === "complaints" ? "complaints" : "reviews");
+      const normalized = state.feedbacks.activeSubsection === "prompt" ? "prompt" : (state.feedbacks.activeSubsection === "complaints" ? "complaints" : (state.feedbacks.activeSubsection === "automation" ? "automation" : "reviews"));
       feedbacksSubtabButtons.forEach(function(button) {
         const selected = button.getAttribute("data-feedbacks-subtab") === normalized;
         button.classList.toggle("is-active", selected);
@@ -5797,6 +5876,7 @@
       renderFeedbacksResult();
       renderFeedbacksPromptPanel();
       renderFeedbacksComplaintsPanel();
+      renderFeedbacksAutomationPanel();
     }
 
     function renderFeedbacksRangePicker() {
@@ -6022,6 +6102,23 @@
     }
 
     function handleFeedbacksClick(event) {
+      const autoDelete = event.target.closest("[data-feedbacks-auto-delete]");
+      if (autoDelete) {
+        event.preventDefault();
+        const scheduleId = String(autoDelete.getAttribute("data-feedbacks-auto-delete") || "");
+        state.feedbacks.automation.schedules = (state.feedbacks.automation.schedules || []).filter(function(schedule) {
+          return String(schedule.id || "") !== scheduleId;
+        });
+        renderFeedbacksAutomationPanel();
+        return;
+      }
+      const autoLog = event.target.closest("[data-feedbacks-auto-log-run]");
+      if (autoLog) {
+        event.preventDefault();
+        const runId = String(autoLog.getAttribute("data-feedbacks-auto-log-run") || "");
+        loadFeedbacksAutomationRun(runId);
+        return;
+      }
       const toggle = event.target.closest("[data-feedbacks-range-toggle]");
       if (toggle) {
         event.preventDefault();
@@ -6057,6 +6154,25 @@
     }
 
 	    function handleFeedbacksInputChange(event) {
+	      const autoInput = event.target.closest("[data-feedbacks-auto-field]");
+	      if (autoInput) {
+	        const scheduleId = String(autoInput.getAttribute("data-feedbacks-auto-id") || "");
+	        const field = String(autoInput.getAttribute("data-feedbacks-auto-field") || "");
+	        state.feedbacks.automation.schedules = (state.feedbacks.automation.schedules || []).map(function(schedule) {
+	          if (String(schedule.id || "") !== scheduleId) {
+	            return schedule;
+	          }
+	          const next = Object.assign({}, schedule);
+	          if (field === "enabled") {
+	            next.enabled = !!autoInput.checked;
+	          } else if (field === "local_time_hhmm") {
+	            next.local_time_hhmm = String(autoInput.value || "12:00");
+	          }
+	          return next;
+	        });
+	        renderFeedbacksAutomationPanel();
+	        return;
+	      }
 	      const selectAllNode = event.target.closest("[data-feedbacks-select-all]");
 	      if (selectAllNode) {
 	        const next = new Set(state.feedbacks.selectedFeedbackIds || []);
@@ -7045,6 +7161,212 @@
           feedbacksPromptStatusNode.textContent = "Сохранённого промпта нет, показан стартовый текст · модель: " + (state.feedbacks.model || "gpt-5-mini") + discoverySuffix;
         }
       }
+    }
+
+    async function loadFeedbacksAutomation() {
+      const automation = state.feedbacks.automation;
+      const path = String(WEB_VITRINA_CONFIG.feedbacks_auto_complaints_schedules_path || "");
+      if (!path || automation.loading) {
+        return;
+      }
+      automation.loading = true;
+      automation.error = "";
+      renderFeedbacksAutomationPanel();
+      try {
+        const response = await fetch(path, {method: "GET", credentials: "same-origin"});
+        const payload = await readJsonResponse(response, "non-json response from feedbacks automation schedules route");
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "feedbacks automation schedules returned " + response.status);
+        }
+        automation.schedules = Array.isArray(payload.schedules) ? payload.schedules : [];
+        automation.recentRuns = Array.isArray(payload.recent_runs) ? payload.recent_runs : [];
+        automation.loaded = true;
+      } catch (error) {
+        automation.error = String(error && error.message ? error.message : error);
+        automation.loaded = false;
+      } finally {
+        automation.loading = false;
+        renderFeedbacksAutomationPanel();
+      }
+    }
+
+    function addFeedbacksAutomationSchedule() {
+      const id = "schedule_" + Date.now().toString(36);
+      state.feedbacks.automation.schedules = (state.feedbacks.automation.schedules || []).concat([{
+        id: id,
+        enabled: false,
+        local_time_hhmm: "12:00",
+        timezone: "Asia/Yekaterinburg",
+        timezone_label: "Екатеринбург",
+        last_status: "",
+        last_stats: {}
+      }]);
+      renderFeedbacksAutomationPanel();
+    }
+
+    async function saveFeedbacksAutomationSchedules() {
+      const automation = state.feedbacks.automation;
+      const path = String(WEB_VITRINA_CONFIG.feedbacks_auto_complaints_schedules_path || "");
+      if (!path || automation.saving) {
+        return;
+      }
+      automation.saving = true;
+      automation.error = "";
+      renderFeedbacksAutomationPanel();
+      try {
+        const response = await fetch(path, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({schedules: automation.schedules || []})
+        });
+        const payload = await readJsonResponse(response, "non-json response from feedbacks automation schedules save route");
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "feedbacks automation save returned " + response.status);
+        }
+        automation.schedules = Array.isArray(payload.schedules) ? payload.schedules : [];
+        automation.recentRuns = Array.isArray(payload.recent_runs) ? payload.recent_runs : automation.recentRuns;
+        automation.loaded = true;
+      } catch (error) {
+        automation.error = String(error && error.message ? error.message : error);
+      } finally {
+        automation.saving = false;
+        renderFeedbacksAutomationPanel();
+      }
+    }
+
+    async function runFeedbacksAutomationNow() {
+      const automation = state.feedbacks.automation;
+      const path = String(WEB_VITRINA_CONFIG.feedbacks_auto_complaints_run_now_path || "");
+      if (!path || automation.running) {
+        return;
+      }
+      const firstSchedule = (automation.schedules || [])[0] || {};
+      automation.running = true;
+      automation.error = "";
+      renderFeedbacksAutomationPanel();
+      try {
+        const response = await fetch(path, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({schedule_id: firstSchedule.id || ""})
+        });
+        const payload = await readJsonResponse(response, "non-json response from feedbacks automation run-now route");
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "feedbacks automation run-now returned " + response.status);
+        }
+        automation.lastRun = payload.run || null;
+        automation.recentRuns = [payload.run].concat(automation.recentRuns || []).filter(Boolean).slice(0, 10);
+      } catch (error) {
+        automation.error = String(error && error.message ? error.message : error);
+      } finally {
+        automation.running = false;
+        renderFeedbacksAutomationPanel();
+      }
+    }
+
+    async function loadFeedbacksAutomationRun(runId) {
+      const path = String(WEB_VITRINA_CONFIG.feedbacks_auto_complaints_run_path || "");
+      if (!path || !runId) {
+        return;
+      }
+      try {
+        const response = await fetch(path + "?run_id=" + encodeURIComponent(runId), {method: "GET", credentials: "same-origin"});
+        const payload = await readJsonResponse(response, "non-json response from feedbacks automation run route");
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "feedbacks automation run returned " + response.status);
+        }
+        state.feedbacks.automation.lastRun = payload.run || null;
+      } catch (error) {
+        state.feedbacks.automation.error = String(error && error.message ? error.message : error);
+      }
+      renderFeedbacksAutomationPanel();
+    }
+
+    function renderFeedbacksAutomationPanel() {
+      const automation = state.feedbacks.automation || {};
+      if (feedbacksAutoStatusNode) {
+        feedbacksAutoStatusNode.textContent = automation.loading
+          ? "Загружаем…"
+          : automation.saving
+          ? "Сохраняем…"
+          : automation.running
+          ? "Запуск…"
+          : automation.loaded
+          ? "Расписаний: " + formatNumber((automation.schedules || []).length, 0, true)
+          : "Расписания не загружены";
+      }
+      if (feedbacksAutoErrorNode) {
+        feedbacksAutoErrorNode.textContent = automation.error || "";
+        feedbacksAutoErrorNode.classList.toggle("is-error", !!automation.error);
+      }
+      if (feedbacksAutoAddButton) {
+        feedbacksAutoAddButton.disabled = !!automation.loading || !!automation.saving || !!automation.running;
+      }
+      if (feedbacksAutoSaveButton) {
+        feedbacksAutoSaveButton.disabled = !!automation.loading || !!automation.saving || !!automation.running;
+        feedbacksAutoSaveButton.textContent = automation.saving ? "Сохранение…" : "Сохранить";
+      }
+      if (feedbacksAutoRunNowButton) {
+        feedbacksAutoRunNowButton.disabled = !!automation.loading || !!automation.saving || !!automation.running || !(automation.schedules || []).length;
+        feedbacksAutoRunNowButton.textContent = automation.running ? "Запуск…" : "Запустить сейчас";
+      }
+      if (feedbacksAutoReloadButton) {
+        feedbacksAutoReloadButton.disabled = !!automation.loading || !!automation.saving || !!automation.running;
+      }
+      renderFeedbacksAutomationSchedules();
+      renderFeedbacksAutomationLog();
+    }
+
+    function renderFeedbacksAutomationSchedules() {
+      if (!feedbacksAutoSchedulesBodyNode) {
+        return;
+      }
+      const schedules = state.feedbacks.automation.schedules || [];
+      if (!schedules.length) {
+        feedbacksAutoSchedulesBodyNode.innerHTML = '<tr><td colspan="9">Добавьте расписание для ежедневной проверки.</td></tr>';
+        return;
+      }
+      feedbacksAutoSchedulesBodyNode.innerHTML = schedules.map(function(schedule) {
+        const id = String(schedule.id || "");
+        const stats = schedule.last_stats || {};
+        return [
+          "<tr>",
+          '<td><input type="checkbox" data-feedbacks-auto-id="' + escapeHtml(id) + '" data-feedbacks-auto-field="enabled"' + (schedule.enabled ? " checked" : "") + "></td>",
+          '<td><input class="input" type="time" value="' + escapeHtml(schedule.local_time_hhmm || "12:00") + '" data-feedbacks-auto-id="' + escapeHtml(id) + '" data-feedbacks-auto-field="local_time_hhmm"></td>',
+          "<td>" + escapeHtml(schedule.timezone_label || schedule.timezone || "Екатеринбург") + "</td>",
+          "<td>" + escapeHtml(formatTimestampDisplay(schedule.last_run_at || "")) + "</td>",
+          "<td>" + escapeHtml(formatTimestampDisplay(schedule.last_success_at || "")) + "</td>",
+          "<td>" + escapeHtml(formatTimestampDisplay(schedule.next_run_at || "")) + "</td>",
+          "<td>" + escapeHtml(schedule.last_status || "—") + "</td>",
+          "<td>" + escapeHtml("AI " + (stats.ai_candidates_count || 0) + " · подано " + (stats.submitted_count || 0) + " · пропущено " + (stats.skipped_count || 0)) + "</td>",
+          '<td><button class="button ghost" type="button" data-feedbacks-auto-delete="' + escapeHtml(id) + '">Удалить</button></td>',
+          "</tr>"
+        ].join("");
+      }).join("");
+    }
+
+    function renderFeedbacksAutomationLog() {
+      if (!feedbacksAutoLogBodyNode) {
+        return;
+      }
+      const run = state.feedbacks.automation.lastRun || (state.feedbacks.automation.recentRuns || [])[0] || null;
+      if (!run) {
+        feedbacksAutoLogBodyNode.textContent = "Нет запусков.";
+        return;
+      }
+      const reasonCounts = run.reason_counts || {};
+      const reasonText = Object.keys(reasonCounts).map(function(key) {
+        return key + ": " + reasonCounts[key];
+      }).join("; ");
+      feedbacksAutoLogBodyNode.innerHTML = [
+        '<div><strong>' + escapeHtml(run.status || "—") + '</strong> · ' + escapeHtml(formatTimestampDisplay(run.finished_at || run.started_at || "")) + "</div>",
+        '<div>Отзывов: ' + escapeHtml(run.loaded_feedbacks_count || 0) + " · 1–2★: " + escapeHtml(run.low_rating_feedbacks_count || 0) + " · AI: " + escapeHtml(run.ai_candidates_count || 0) + "</div>",
+        '<div>Подано: ' + escapeHtml(run.submitted_count || 0) + " · Пропущено: " + escapeHtml(run.skipped_count || 0) + "</div>",
+        reasonText ? '<div>' + escapeHtml(reasonText) + "</div>" : "",
+        run.run_id ? '<button class="button secondary" type="button" data-feedbacks-auto-log-run="' + escapeHtml(run.run_id) + '">Посмотреть лог</button>' : ""
+      ].join("");
     }
 
     async function loadFeedbacksComplaints() {

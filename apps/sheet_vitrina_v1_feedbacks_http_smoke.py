@@ -23,6 +23,9 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_PATH,
+    DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH,
+    DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH,
+    DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH,
     DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH,
     DEFAULT_SHEET_FEEDBACKS_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
@@ -319,7 +322,9 @@ def main() -> None:
                 '["review_tags", "Теги"]',
                 'data-feedbacks-subtab="prompt"',
                 'data-feedbacks-subtab="complaints"',
+                'data-feedbacks-subtab="automation"',
                 'data-feedbacks-complaints-sync',
+                'data-feedbacks-auto-save',
                 'data-feedbacks-range-toggle',
                 '"feedbacks_path": "/v1/sheet-vitrina-v1/feedbacks"',
                 f'"feedbacks_ai_prompt_path": "{DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH}"',
@@ -330,9 +335,27 @@ def main() -> None:
                 f'"feedbacks_complaints_sync_status_job_path": "{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH}"',
                 f'"feedbacks_complaints_submit_selected_path": "{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH}"',
                 f'"feedbacks_complaints_submit_job_path": "{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH}"',
+                f'"feedbacks_auto_complaints_schedules_path": "{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH}"',
+                f'"feedbacks_auto_complaints_tick_path": "{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH}"',
             ):
                 if expected not in ui_html:
                     raise AssertionError(f"feedbacks UI must contain {expected!r}")
+
+            automation_status, automation_payload = _get_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH}")
+            if automation_status != 200 or automation_payload.get("contract_name") != "sheet_vitrina_v1_feedbacks_auto_complaints_schedules":
+                raise AssertionError(f"automation schedules route mismatch: {automation_status}: {automation_payload}")
+            save_status, save_payload = _post_json(
+                f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH}",
+                {"schedules": [{"id": "disabled-noop", "enabled": False, "local_time_hhmm": "12:00"}]},
+            )
+            if save_status != 200 or len(save_payload.get("schedules") or []) != 1:
+                raise AssertionError(f"automation schedule save route mismatch: {save_status}: {save_payload}")
+            runs_status, runs_payload = _get_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH}")
+            if runs_status != 200 or runs_payload.get("contract_name") != "sheet_vitrina_v1_feedbacks_auto_complaints_runs":
+                raise AssertionError(f"automation runs route mismatch: {runs_status}: {runs_payload}")
+            tick_status, tick_payload = _post_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH}", {})
+            if tick_status != 202 or tick_payload.get("status") != "no_due_schedules":
+                raise AssertionError(f"automation disabled schedule tick must be no-op: {tick_status}: {tick_payload}")
 
             url = (
                 f"{base_url}{DEFAULT_SHEET_FEEDBACKS_PATH}?"
@@ -429,6 +452,26 @@ def _post_binary(url: str, payload: dict[str, object]) -> tuple[int, dict[str, s
             return int(response.status), dict(response.headers.items()), response.read()
     except error.HTTPError as exc:
         return int(exc.code), dict(exc.headers.items()), exc.read()
+
+
+def _post_json(url: str, payload: dict[str, object]) -> tuple[int, dict[str, object]]:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib_request.Request(
+        url,
+        method="POST",
+        headers={"Accept": "application/json", "Content-Type": "application/json; charset=utf-8"},
+        data=body,
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=10) as response:
+            return int(response.status), json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        body_text = exc.read().decode("utf-8")
+        try:
+            payload = json.loads(body_text)
+        except json.JSONDecodeError:
+            payload = {"error": body_text}
+        return int(exc.code), payload
 
 
 if __name__ == "__main__":
