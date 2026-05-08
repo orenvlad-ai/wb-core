@@ -59,6 +59,7 @@ class FakeAiBlock:
 
 def main() -> None:
     _assert_schedule_validation_and_due_window()
+    _assert_new_future_schedule_is_not_backfilled()
     _assert_run_filters_ai_and_skips_existing_journal()
     _assert_noop_advances_last_success()
     _assert_busy_lock_is_controlled()
@@ -101,6 +102,34 @@ def _assert_schedule_validation_and_due_window() -> None:
             pass
         else:
             raise AssertionError("invalid HH:mm must be rejected")
+
+
+def _assert_new_future_schedule_is_not_backfilled() -> None:
+    now = datetime(2026, 5, 8, 8, 0, tzinfo=timezone.utc)  # 13:00 Asia/Yekaterinburg
+    with TemporaryDirectory(prefix="auto-complaints-future-") as tmp:
+        runtime_dir = Path(tmp)
+        block = SheetVitrinaV1FeedbacksAutoComplaintsBlock(
+            runtime_dir=runtime_dir,
+            feedbacks_block=FakeFeedbacksBlock([_row("future-row", "2026-05-08T06:00:00Z", 1)]),  # type: ignore[arg-type]
+            feedbacks_ai_block=FakeAiBlock({"future-row": "yes"}),  # type: ignore[arg-type]
+            complaints_block=SheetVitrinaV1FeedbacksComplaintsBlock(runtime_dir=runtime_dir),
+            now_factory=lambda: now,
+        )
+        block.save_schedules(
+            {
+                "schedules": [
+                    {
+                        "id": "future-today",
+                        "enabled": True,
+                        "local_time_hhmm": "14:30",
+                        "timezone": "Asia/Yekaterinburg",
+                    }
+                ]
+            }
+        )
+        tick = block.run_due_schedules_sync()
+        if tick["status"] != "no_due_schedules":
+            raise AssertionError(f"new future schedule must not backfill yesterday's due time: {tick}")
 
 
 def _assert_run_filters_ai_and_skips_existing_journal() -> None:
@@ -147,6 +176,7 @@ def _assert_run_filters_ai_and_skips_existing_journal() -> None:
                         "enabled": True,
                         "local_time_hhmm": "12:00",
                         "timezone": "Asia/Yekaterinburg",
+                        "enabled_since_at": "2026-05-08T06:00:00Z",
                         "hard_cap_per_run": 2,
                     }
                 ]
@@ -189,6 +219,9 @@ def _assert_noop_advances_last_success() -> None:
             now_factory=lambda: now,
         )
         block.save_schedules({"schedules": [{"id": "daily-noon", "enabled": True, "local_time_hhmm": "12:00"}]})
+        schedule = block.build_schedules()["schedules"][0]
+        schedule["enabled_since_at"] = "2026-05-08T06:00:00Z"
+        block.save_schedules({"schedules": [schedule]})
         block.run_due_schedules_sync()
         schedule = block.build_schedules()["schedules"][0]
         if schedule["last_status"] != "no_new_feedbacks" or not schedule["last_success_at"]:
@@ -207,7 +240,18 @@ def _assert_busy_lock_is_controlled() -> None:
             complaints_block=complaints,
             now_factory=lambda: now,
         )
-        block.save_schedules({"schedules": [{"id": "daily-noon", "enabled": True, "local_time_hhmm": "12:00"}]})
+        block.save_schedules(
+            {
+                "schedules": [
+                    {
+                        "id": "daily-noon",
+                        "enabled": True,
+                        "local_time_hhmm": "12:00",
+                        "enabled_since_at": "2026-05-08T06:00:00Z",
+                    }
+                ]
+            }
+        )
         (runtime_dir / "seller_portal_automation.lock.json").write_text(
             json.dumps(
                 {
