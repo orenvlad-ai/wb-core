@@ -32,6 +32,7 @@ source_basis:
   - "apps/sheet_vitrina_v1_feedbacks_ai_smoke.py"
   - "apps/sheet_vitrina_v1_feedbacks_browser_smoke.py"
   - "apps/sheet_vitrina_v1_feedbacks_complaints_smoke.py"
+  - "apps/sheet_vitrina_v1_feedbacks_auto_complaints_smoke.py"
   - "apps/seller_portal_automation_guard_smoke.py"
   - "apps/seller_portal_feedbacks_complaints_status_sync_smoke.py"
   - "apps/seller_portal_feedbacks_complaint_submit_smoke.py"
@@ -60,7 +61,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "2992d25d1161f1a52179c10bc5bd5cced7de265c"
+built_from_commit: "a2886343f8e5910f629ab595dbf993ac00d7ad69"
 ---
 
 # Summary
@@ -182,10 +183,11 @@ Current web-vitrina phase-4 smoke intent:
 - `apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py` proves the real sibling page on `/sheet-vitrina-v1/vitrina`: table render, compact toolbar/history selector, lazy source-status details flow, empty state, reset recovery and truthful error state all run through the same HTTP contour.
 - `apps/sheet_vitrina_v1_web_vitrina_source_status_smoke.py` proves source-aware loading-table reduction for accepted-current rollover, runtime-cache/latest-confirmed fallback, non-required slots and promo fallback.
 - `apps/sheet_vitrina_v1_web_vitrina_group_coverage_smoke.py`, `apps/sheet_vitrina_v1_web_vitrina_group_refresh_smoke.py` and `apps/sheet_vitrina_v1_web_vitrina_group_action_ui_smoke.py` prove grouped loading-table coverage, lazy details empty/error behavior, date-scoped `group-refresh` payload semantics and visible launch failure handling.
-- `apps/sheet_vitrina_v1_web_vitrina_highlight_ui_smoke.py` keeps `updated_cells` highlighting browser-session-only across full refresh and group refresh.
+- `apps/sheet_vitrina_v1_web_vitrina_highlight_ui_smoke.py` keeps `updated_cells` highlighting browser-session-only across full refresh and group refresh and confirms text-color emphasis instead of legacy light backgrounds.
 - `apps/sheet_vitrina_v1_popup_outside_click_browser_smoke.py` keeps custom floating controls closeable by outside-click/`Escape` without breaking checkbox/date-range first-click behavior.
-- `apps/sheet_vitrina_v1_feedbacks_http_smoke.py`, `apps/sheet_vitrina_v1_feedbacks_ai_smoke.py` and `apps/sheet_vitrina_v1_feedbacks_browser_smoke.py` cover the read-only `Отзывы` route/table, strict server-side feedback filters, Excel export and transient server-side prompt/analyze flow.
+- `apps/sheet_vitrina_v1_feedbacks_http_smoke.py`, `apps/sheet_vitrina_v1_feedbacks_ai_smoke.py` and `apps/sheet_vitrina_v1_feedbacks_browser_smoke.py` cover the read-only `Отзывы` route/table, strict server-side feedback filters, Excel export, bounded internal table scroll for wide columns and transient server-side prompt/analyze flow.
 - `apps/sheet_vitrina_v1_feedbacks_complaints_smoke.py` covers nested `Жалобы` runtime journal/status-sync API shape and keeps complaint state separate from feedback AI labels.
+- `apps/sheet_vitrina_v1_feedbacks_auto_complaints_smoke.py` covers nested `Авто-жалобы` schedules/run-now/runtime-log shape, stale schedule errors, dirty-row run-now blocking, bounded AI/select/submit delegation and runtime-owned lifecycle fields.
 - `apps/seller_portal_feedbacks_complaints_scout_smoke.py`, `apps/seller_portal_feedbacks_matching_replay_smoke.py`, `apps/seller_portal_feedbacks_complaint_dry_run_plan_smoke.py`, `apps/seller_portal_feedbacks_complaint_submit_smoke.py`, `apps/seller_portal_feedbacks_complaints_status_sync_smoke.py`, `apps/seller_portal_feedbacks_complaint_confirmation_smoke.py` and `apps/seller_portal_feedbacks_complaints_detail_probe_smoke.py` cover the guarded Seller Portal complaint lane: scout/matching/dry-run/submit/status sync/confirmation/detail probes without turning web UI into a submit route.
 - `apps/sheet_vitrina_v1_research_sku_group_comparison_smoke.py` covers read-only research options/calculate semantics, non-financial metric filtering, promo candidate chip metadata and no zero-fill coverage behavior.
 - `apps/web_source_owner_runtime_base_url_smoke.py` covers localhost owner runtime API defaults and env override behavior for bot-backed web-source/seller-funnel adapters.
@@ -571,7 +573,7 @@ Operational rule:
 
 Use this section for current website/operator/public verification. Legacy Google Sheets sections are archived and not a completion checklist.
 
-- `POST /v1/sheet-vitrina-v1/refresh` builds server-side ready snapshots without `auto_load`;
+- `POST /v1/sheet-vitrina-v1/refresh` is the canonical full-refresh route: it resolves `today_current`/`yesterday_closed` in `Asia/Yekaterinburg`, uses the same source/status coverage as group refresh, materializes the ready snapshot, rereads the web-vitrina payload, builds server-side ready snapshots without `auto_load`, and must not report semantic success while expected visible source groups are stale/missing without an allowed skip reason;
 - `POST /v1/sheet-vitrina-v1/refresh` with `auto_load=true` is rejected as archived legacy Google Sheets target;
 - `POST /v1/sheet-vitrina-v1/load` returns archived/blocked and does not write Google Sheets;
 - `GET /sheet-vitrina-v1/operator` does not expose Google Sheets send as an active action;
@@ -590,7 +592,7 @@ Use this section for current website/operator/public verification. Legacy Google
 - compact toolbar above the table owns `Диапазон`, `Поиск`, `Секции`, `Группа`, `Тип строк`, `Метрики`, `Столбцы`, `Сброс`; the old always-expanded `История`, visible sort selector and separate `Фильтры и настройки` card are not default page sections.
 - no-query page-composition opens latest three server-readable business dates inclusive, ending on backend-owned `today_current_date` when available; explicit `as_of_date` and `date_from/date_to` remain read-only ready-snapshot reads.
 - `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` must reach app-level validation. A request without `source_group_id` returns app-level `400 {"error":"source_group_id is required"}`, not proxy `404`.
-- valid group-refresh payload `{async: true, source_group_id, as_of_date}` creates a group/date-scoped job and must not clear, overwrite or timestamp unrelated groups/date cells; `updated_cells` metadata drives only transient browser-session highlighting.
+- valid group-refresh payload `{async: true, source_group_id, as_of_date}` creates a group/date-scoped job and must not clear, overwrite or timestamp unrelated groups/date cells; `updated_cells` metadata drives only transient browser-session text-color highlighting.
 - `GET /v1/sheet-vitrina-v1/daily-report` остаётся cheap read-only JSON path: route сравнивает только два последних closed business day через persisted ready snapshots `default_business_as_of_date(now)` и `default_business_as_of_date(now)-1 day` и не имеет права trigger-ить refresh/upstream fetch;
 - `GET /v1/sheet-vitrina-v1/stock-report` остаётся cheap read-only JSON path: route по умолчанию читает previous closed business day only from persisted ready snapshot `DATA_VITRINA[yesterday_closed]`, принимает optional explicit `as_of_date` override на том же read path, не trigger-ит refresh/upstream fetch и включает только SKU с district stock `< 50`;
 - subsection `Отчёт по остаткам` now adds a compact SKU selector: full active SKU list comes from current authoritative `config_v2` truth on the operator page itself, defaults to all selected, applies only after `Рассчитать`, rejects empty selection with `Выберите хотя бы один SKU` and must show an empty result instead of stale rows when the selected subset has no breaches;
@@ -602,6 +604,7 @@ Use this section for current website/operator/public verification. Legacy Google
 - `POST /v1/sheet-vitrina-v1/feedbacks/export.xlsx` exports the currently filtered/loaded feedback table as operator XLSX, not accepted truth or a new source layer;
 - `GET /v1/sheet-vitrina-v1/feedbacks/complaints` and `POST /v1/sheet-vitrina-v1/feedbacks/complaints/sync-status` are runtime complaint journal/status surfaces; they may read status evidence from WB `Мои жалобы`;
 - `POST /v1/sheet-vitrina-v1/feedbacks/complaints/submit-selected` and `GET /v1/sheet-vitrina-v1/feedbacks/complaints/submit-job` are auth-protected selected-row submit job surfaces; completion for such tasks must prove exact matching, hard caps, selected non-journaled rows and confirmation/detail read-only probe behavior instead of broad UI automation;
+- `GET/POST /v1/sheet-vitrina-v1/feedbacks/automation/schedules`, `POST /v1/sheet-vitrina-v1/feedbacks/automation/run-now`, `GET /v1/sheet-vitrina-v1/feedbacks/automation/runs`, `GET /v1/sheet-vitrina-v1/feedbacks/automation/run?run_id=...` and `POST /v1/sheet-vitrina-v1/feedbacks/automation/tick` are auth-protected auto-complaints surfaces. Schedules live in runtime JSON, use `Asia/Yekaterinburg`, accept only persisted schedule ids for run-now, return structured `schedule_not_found` for stale ids, and reuse the same Seller Portal lock/storage-state/guarded submit path as manual complaint submission.
 - Seller Portal automation launchers must honor the shared single-flight lock and route-specific session capability checks; a conflicting status/submit/parser/probe run should produce sanitized busy metadata, not parallel browser automation.
 - `GET /v1/sheet-vitrina-v1/research/sku-group-comparison/options` and `POST .../calculate` are read-only over active SKU/config, non-financial metric options and persisted ready snapshots; missing dates/values surface partial/unavailable coverage and are not zero-filled;
 - one-off `apps/sheet_vitrina_v1_ready_fact_reconcile.py dry-run|apply` can repair missing accepted report facts from persisted ready snapshots, but must not overwrite existing accepted diffs or fabricate blank ready values as zero;

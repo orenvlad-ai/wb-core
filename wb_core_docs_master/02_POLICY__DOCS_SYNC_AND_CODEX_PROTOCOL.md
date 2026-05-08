@@ -22,7 +22,7 @@ update_triggers:
   - "изменение docs governance"
   - "изменение Codex execution rule"
   - "изменение project-pack support rule"
-built_from_commit: "2992d25d1161f1a52179c10bc5bd5cced7de265c"
+built_from_commit: "a2886343f8e5910f629ab595dbf993ac00d7ad69"
 ---
 
 # Summary
