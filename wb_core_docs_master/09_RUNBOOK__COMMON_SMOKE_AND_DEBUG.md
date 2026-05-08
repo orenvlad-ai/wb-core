@@ -32,8 +32,10 @@ source_basis:
   - "apps/sheet_vitrina_v1_feedbacks_ai_smoke.py"
   - "apps/sheet_vitrina_v1_feedbacks_browser_smoke.py"
   - "apps/sheet_vitrina_v1_feedbacks_complaints_smoke.py"
+  - "apps/seller_portal_automation_guard_smoke.py"
   - "apps/seller_portal_feedbacks_complaints_status_sync_smoke.py"
   - "apps/seller_portal_feedbacks_complaint_submit_smoke.py"
+  - "apps/seller_portal_feedbacks_complaint_batch_smoke.py"
   - "apps/seller_portal_feedbacks_complaint_confirmation_smoke.py"
   - "apps/seller_portal_feedbacks_complaints_detail_probe_smoke.py"
   - "apps/web_source_owner_runtime_base_url_smoke.py"
@@ -58,7 +60,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "3faca550ee0d005b6be13635d015757c71d4bb80"
+built_from_commit: "2992d25d1161f1a52179c10bc5bd5cced7de265c"
 ---
 
 # Summary
@@ -82,6 +84,8 @@ python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py
 python3 apps/registry_upload_http_entrypoint_public_routes_smoke.py
 python3 apps/cost_price_upload_http_entrypoint_smoke.py
 python3 apps/official_api_token_path_smoke.py
+python3 apps/spp_source_correctness_smoke.py
+python3 apps/spp_metric_recompute_smoke.py
 python3 apps/sales_funnel_history_block_batching_smoke.py
 python3 apps/factory_order_sales_history_smoke.py
 python3 apps/sheet_vitrina_v1_business_time_smoke.py
@@ -121,7 +125,9 @@ python3 apps/seller_portal_feedbacks_complaints_scout_smoke.py
 python3 apps/seller_portal_feedbacks_matching_replay_smoke.py
 python3 apps/seller_portal_feedbacks_complaint_dry_run_plan_smoke.py
 python3 apps/seller_portal_feedbacks_complaint_submit_smoke.py
+python3 apps/seller_portal_feedbacks_complaint_batch_smoke.py
 python3 apps/seller_portal_feedbacks_complaints_status_sync_smoke.py
+python3 apps/seller_portal_automation_guard_smoke.py
 python3 apps/seller_portal_feedbacks_complaint_confirmation_smoke.py
 python3 apps/seller_portal_feedbacks_complaints_detail_probe_smoke.py
 python3 apps/sheet_vitrina_v1_research_sku_group_comparison_smoke.py
@@ -192,6 +198,15 @@ Current reports smoke intent:
 
 Targeted expectation for `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`:
 - same-day incoming blank cell in server-owned `DATA_VITRINA` plan must clear the live-sheet cell instead of preserving a stale historical value or stale zero.
+
+Current SPP smoke intent:
+- `apps/spp_source_correctness_smoke.py` covers Seller Portal `discountOnSite` as the primary current-visible SPP source and keeps legacy `statistics_sales_avg` as explicit fallback only.
+- `apps/sheet_vitrina_v1_current_snapshot_acceptance_smoke.py` covers exact-date accepted-current rollover and blank/failed attempt preservation for current-snapshot sources including SPP.
+- `apps/spp_metric_recompute_smoke.py` covers guarded evidence-based SPP recompute/repair behavior without fabricating historical SPP when exact evidence is absent.
+
+Current Seller Portal automation guard smoke intent:
+- `apps/seller_portal_automation_guard_smoke.py` covers lock acquire/release, busy conflict, stale handling, canonical storage-state path policy and sanitized reports for Seller Portal browser automation.
+- Status sync, submit/batch, scout/probe/dry-run/confirmation/detail/relogin and parser/export runners must not run parallel Playwright sessions; route launchers should report `seller_portal_automation_busy` instead of timing out or starting a second browser.
 
 ## Factory-order historical reconcile helpers
 
@@ -332,9 +347,11 @@ Current WebCore app auth env path:
 - `WB_CORE_WEB_AUTH_SESSION_SECRET`
 - these values live in runtime env only; probes/status may report configured/not-configured but must not print values.
 
-Current promo runtime env override when hosted runtime needs explicit seller session path:
+Current Seller Portal runtime env override when hosted runtime needs explicit bot session path:
 - `PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH`
-- canonical selleros value = `/opt/wb-web-bot/storage_state.json`
+- `SELLER_PORTAL_STORAGE_STATE_PATH`
+- canonical live value = `/opt/wb-web-bot/storage_state.json`
+- EU jobs must not silently fall back to local Mac storage-state paths; route-specific session checks should return precise blockers such as `session_invalid_for_route: complaints_answered`.
 
 Current promo archive/runtime norm:
 - promo collector is archive-first: unchanged campaigns reuse archived workbook artifacts instead of redownloading every Excel
@@ -413,12 +430,12 @@ python3 apps/sheet_vitrina_v1_temporal_closure_retry_live.py --date 2026-04-17 -
 ```
 
 Norm:
-- use the retry runner for due `yesterday_closed` states across the full historical/date-period matrix (`seller_funnel_snapshot`, `web_source_snapshot`, `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`) and for same-day current-only capture retries only within the current business day;
+- use the retry runner for due `yesterday_closed` states across the historical/date-period matrix (`seller_funnel_snapshot`, `web_source_snapshot`, `sales_funnel_history`, `sf_period`, `stocks`, `ads_compact`, `fin_report_daily`) and for same-day current-only/accepted-current capture retries only within the current business day;
 - `today_current` may remain incomplete and blank, but `yesterday_closed` must not silently inherit provisional same-day values;
 - group A bot/web-source families accept closed truth only after exact-date sync + source freshness validation (`source_fetched_at` / `fetched_at` after next business-day start in `Asia/Yekaterinburg`);
-- group C current-snapshot-only sources (`prices_snapshot`, `ads_bids`) still capture upstream truth only as current snapshot, but an already accepted snapshot for closed business day D must materialize as `yesterday_closed=D` on D+1; later invalid/blank/zero auto or manual attempts must preserve both prior-day accepted truth and any already accepted same-day truth;
+- group C current-snapshot/accepted-rollover sources (`prices_snapshot`, `ads_bids`, `spp`) still capture upstream truth as current-visible snapshots, but an already accepted snapshot for closed business day D must materialize as `yesterday_closed=D` on D+1; later invalid/blank/zero auto or manual attempts must preserve both prior-day accepted truth and any already accepted same-day truth;
 - `stocks` is now `yesterday_closed_only` inside `sheet_vitrina_v1`: required slot = `yesterday_closed` from exact-date runtime cache `temporal_source_snapshots[source_key=stocks]`, while `today_current` may truthfully stay `not_available`/blank and must not degrade source/aggregate status by itself;
-- `spp` and `fin_report_daily` stay requestable on `today_current`, but intraday empty/zero/invalid/no-result/429/timeout/runtime-cache current fallback is tolerated when `yesterday_closed` is confirmed;
+- `fin_report_daily` stays requestable on `today_current`, but intraday empty/zero/invalid/no-result/429/timeout/runtime-cache current fallback is tolerated when `yesterday_closed` is confirmed; SPP visible truth uses Seller Portal `discountOnSite` current evidence and accepted-current rollover/preservation rather than legacy sales-average history.
 - manual operator refresh keeps short retries inside the run, but must not leak persisted due retry states into this runner path.
 
 One-off stocks backfill runner:
@@ -564,13 +581,14 @@ Use this section for current website/operator/public verification. Legacy Google
 - operator-facing derived rows используют canonical keys `total_proxy_profit_rub` и `proxy_margin_pct_total`;
 - `GET /sheet-vitrina-v1/vitrina` поднимает primary unified web/operator page без SPA/build pipeline: first/default tab `Витрина`, sibling tabs `Поставки`, `Отчёты`, `Отзывы` and `Исследования`;
 - `GET /sheet-vitrina-v1/operator` остаётся compatibility entry и рендерит тот же unified shell, а не отдельный truth owner;
+- operator visual smoke should confirm dark surfaces for `Поставки` and `Отчёты`, horizontal top-level menu, violet/indigo primary tokens (`#8B5CF6` family) and absence of stale `Витрина 2` / green primary-action accent;
 - `GET /v1/sheet-vitrina-v1/web-vitrina` остаётся cheap read-only JSON path: default v1 shape = `contract_name / contract_version / page_route / read_route / meta / status_summary / schema / rows / capabilities`, optional `as_of_date` stays on том же route и не имеет права trigger-ить refresh/upstream fetch;
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition` now adds the page-only payload for `/sheet-vitrina-v1/vitrina`: `composition_name / composition_version / meta / summary_cards / filter_surface / table_surface / status_summary / capabilities`; default page-composition keeps source-status details unloaded, route still stays read-only and must not trigger refresh/upstream fetch;
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition&include_source_status=1` returns the detailed grouped `Загрузка данных` payload for an explicit details request; it must use server-owned `snapshot_as_of_date`, expose `source_status_state`, and must not infer date from browser-local today or the rightmost `today_current` column;
 - vitrina page shows primary action `Загрузить и обновить`; old top-panel `Обновить`, `JSON Connect` and permanent top status badge are not active current UI.
 - bottom `Действия и состояния` contains server-driven lazy `Загрузка данных`: initial `not_loaded` + `Загрузить`, then grouped table (`WB API`, `Seller Portal / бот`, `Прочие источники`) after explicit details load, plus secondary `Лог`; former sibling block `Обновление данных` is not active page-composition UI.
-- compact toolbar above the table owns `Диапазон`, `Поиск`, `Секции`, `Группа`, `Scope`, `Метрики`, `Столбцы`, `Сортировка`; the old always-expanded `История` and separate `Фильтры и настройки` card are not default page sections.
-- no-query page-composition opens latest four server-readable business dates inclusive, ending on backend-owned `today_current_date` when available; explicit `as_of_date` and `date_from/date_to` remain read-only ready-snapshot reads.
+- compact toolbar above the table owns `Диапазон`, `Поиск`, `Секции`, `Группа`, `Тип строк`, `Метрики`, `Столбцы`, `Сброс`; the old always-expanded `История`, visible sort selector and separate `Фильтры и настройки` card are not default page sections.
+- no-query page-composition opens latest three server-readable business dates inclusive, ending on backend-owned `today_current_date` when available; explicit `as_of_date` and `date_from/date_to` remain read-only ready-snapshot reads.
 - `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` must reach app-level validation. A request without `source_group_id` returns app-level `400 {"error":"source_group_id is required"}`, not proxy `404`.
 - valid group-refresh payload `{async: true, source_group_id, as_of_date}` creates a group/date-scoped job and must not clear, overwrite or timestamp unrelated groups/date cells; `updated_cells` metadata drives only transient browser-session highlighting.
 - `GET /v1/sheet-vitrina-v1/daily-report` остаётся cheap read-only JSON path: route сравнивает только два последних closed business day через persisted ready snapshots `default_business_as_of_date(now)` и `default_business_as_of_date(now)-1 day` и не имеет права trigger-ить refresh/upstream fetch;
@@ -584,6 +602,7 @@ Use this section for current website/operator/public verification. Legacy Google
 - `POST /v1/sheet-vitrina-v1/feedbacks/export.xlsx` exports the currently filtered/loaded feedback table as operator XLSX, not accepted truth or a new source layer;
 - `GET /v1/sheet-vitrina-v1/feedbacks/complaints` and `POST /v1/sheet-vitrina-v1/feedbacks/complaints/sync-status` are runtime complaint journal/status surfaces; they may read status evidence from WB `Мои жалобы`;
 - `POST /v1/sheet-vitrina-v1/feedbacks/complaints/submit-selected` and `GET /v1/sheet-vitrina-v1/feedbacks/complaints/submit-job` are auth-protected selected-row submit job surfaces; completion for such tasks must prove exact matching, hard caps, selected non-journaled rows and confirmation/detail read-only probe behavior instead of broad UI automation;
+- Seller Portal automation launchers must honor the shared single-flight lock and route-specific session capability checks; a conflicting status/submit/parser/probe run should produce sanitized busy metadata, not parallel browser automation.
 - `GET /v1/sheet-vitrina-v1/research/sku-group-comparison/options` and `POST .../calculate` are read-only over active SKU/config, non-financial metric options and persisted ready snapshots; missing dates/values surface partial/unavailable coverage and are not zero-filled;
 - one-off `apps/sheet_vitrina_v1_ready_fact_reconcile.py dry-run|apply` can repair missing accepted report facts from persisted ready snapshots, but must not overwrite existing accepted diffs or fabricate blank ready values as zero;
 - operator page state is browser-owned only: current top-level tab, active subsection under `Отчёты` / `Поставки` and stock-report SKU selection persist in namespaced `localStorage`; reload must restore the last valid state, while empty/broken storage or obsolete `nmId` values must fall back safely to current defaults/current active SKU truth;
@@ -601,7 +620,7 @@ Use this section for current website/operator/public verification. Legacy Google
 - current truth / ready snapshot keep `95` enabled+show_in_data metrics;
 - `DATA_VITRINA` keeps the same server-driven truth as operator-facing two-day `date_matrix`: `1631` source rows, `34` blocks, `33` separators, `1698` rendered rows и `95` unique metric keys при `yesterday_closed + today_current`;
 - `STATUS` names live sources per temporal slot, such as `seller_funnel_snapshot[yesterday_closed]`, `seller_funnel_snapshot[today_current]`, `stocks[yesterday_closed]`, `stocks[today_current]`, `cost_price[yesterday_closed]`, `cost_price[today_current]`, `promo_by_price[yesterday_closed]`, `promo_by_price[today_current]`;
-- current-snapshot-only sources (`prices_snapshot`, `ads_bids`) are expected to read `yesterday_closed` from the already accepted current snapshot of the previous business day instead of historical refetching or blanking the closed-day column;
+- current-snapshot/accepted-rollover sources (`prices_snapshot`, `ads_bids`, `spp`) are expected to read `yesterday_closed` from the already accepted current snapshot of the previous business day instead of historical refetching or blanking the closed-day column; SPP's fresh visible source is Seller Portal `discountOnSite`, not WB Statistics sales-average fallback.
 - `stocks[yesterday_closed]` is expected to materialize as success from exact-date runtime cache / historical CSV; `stocks[today_current]` is expected to stay truthful `not_available`/blank under the current `yesterday_closed_only` policy;
 - `seller_funnel_snapshot` and `web_source_snapshot` use bounded `explicit-date -> latest-if-date-matches` only for current-day read resolution; `yesterday_closed` accepts only an explicit accepted closed-day snapshot and must not silently reuse provisional same-day values;
 - if exact-date `today_current` snapshot is still missing for `seller_funnel_snapshot` / `web_source_snapshot`, refresh may bounded-trigger server-local `/opt/wb-web-bot` same-day runners plus `/opt/wb-ai/run_web_source_handoff.py` before final read-side fetch;

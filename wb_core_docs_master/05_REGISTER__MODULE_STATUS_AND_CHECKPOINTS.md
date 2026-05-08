@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "3faca550ee0d005b6be13635d015757c71d4bb80"
+built_from_commit: "2992d25d1161f1a52179c10bc5bd5cced7de265c"
 ---
 
 # Summary
@@ -132,6 +132,7 @@ Current repo-owned unified web/operator surface:
 - phase-2 web-vitrina materializes repo-owned `web_vitrina_view_model` over that stable contract: current schema = `columns + rows + groups + sections + formatters + filters + sorts + state_model`
 - phase-3 web-vitrina materializes repo-owned `web_vitrina_gravity_table_adapter` over that `view_model`: current Gravity-specific surface = `columns + rows + renderers + groupings + filters + sorts + use_table_options + table_props + state_surface`
 - phase-4 web-vitrina materializes repo-owned `web_vitrina_page_composition` via optional `surface=page_composition`; the page shell renders summary, compact toolbar/history controls, main table and then bottom `Действия и состояния`
+- visual system is dark across `Витрина`, embedded `Поставки` / `Отчёты`, `Отзывы` and `Исследования`; primary/action accent is violet/indigo, while green is kept only for semantic success/status signals
 - the same unified shell exposes `Отзывы` as a manual read-only WB feedbacks table with strict server-side date/star/answered filters, 62-day feedback date picker, chunked WB pagination, diagnostic meta, Excel export for the current table, resizable columns, official review tags/actionable resolver, optional transient AI review columns and nested `Жалобы` over runtime complaint journal/status sync plus protected selected-row submit jobs; prompt storage and AI output are operational/transient, not ЕБД/accepted truth
 - the same unified shell exposes `Исследования` as read-only SKU group comparison; options/calculate use active SKU truth, selectable non-financial metrics and persisted ready snapshots only
 - current live vitrina action/status semantics:
@@ -146,10 +147,10 @@ Current repo-owned unified web/operator surface:
   - raw STATUS/job note, JSON fragments, traceback text, request ids and similar diagnostics stay only in existing log/download surfaces
 - `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` accepts `{async: true, source_group_id, as_of_date}` for one source group and one selected date; it must not clear, overwrite or timestamp unrelated groups/date cells
 - group-refresh job results may include `updated_cells`/latest-confirmed metadata for transient browser-session highlighting only; no permanent styling truth is persisted
-- the sibling page keeps bounded history controls: no-query default opens latest four server-readable business dates, explicit `as_of_date`, and `date_from/date_to` period mode over existing ready snapshots; old always-expanded `История` / `Фильтры и настройки` blocks are replaced by a compact toolbar
+- the sibling page keeps bounded history controls: no-query default opens latest three server-readable business dates, explicit `as_of_date`, and `date_from/date_to` period mode over existing ready snapshots; old always-expanded `История` / `Фильтры и настройки` blocks are replaced by a compact toolbar
 - `web_vitrina_view_model` remains canonical and library-agnostic, the Gravity adapter stays isolated repo-side, and the page layer stays a page-only consumer instead of a second truth owner
 - current phase-1/2/3/4 scope remains narrow: route fixation, stable read contract, library-agnostic presentation seam, concrete grid adapter and server-driven page composition only; export layer, legacy Google Sheets/export migration and broad feature parity stay later
-- `Отчеты` uses one sibling subsection selector: `Ежедневные отчёты`, `Отчёт по остаткам`, `Выполнение плана`; only one report body is visible at a time
+- `Отчёты` uses one sibling subsection selector: `Ежедневные отчёты`, `Отчёт по остаткам`, `Выполнение плана`; only one report body is visible at a time
 - daily-report compares only the two latest closed business days in `Asia/Yekaterinburg`: `yesterday_closed(default_business_as_of_date(now))` vs `yesterday_closed(default_business_as_of_date(now)-1 day)`, never `today_current`
 - daily-report ranked totals stay on the current canonical pool only (`total_view_count`, `total_views_current`, `avg_ctr_current`, `avg_addToCartConversion`, `avg_cartToOrderConversion`, `avg_spp`, `avg_ads_bid_search`, `total_ads_views`, `total_ads_sum`, `avg_localizationPercent`)
 - stock-report defaults to previous closed business day stocks from persisted ready snapshot `DATA_VITRINA[yesterday_closed]`, keeps threshold `<50`, accepts optional explicit `as_of_date`, uses five district keys and deliberately excludes merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь`
@@ -169,15 +170,17 @@ Current repo-owned unified web/operator surface:
 - source matrix is explicit: group A bot/web-source historical, group B WB API historical/date-period capable, group C WB API current-snapshot-only, group D other/manual/browser-collector overlays
 - `seller_funnel_snapshot` materialization can receive enabled/relevant `nm_ids`; strict validation is applied after relevant-row filtering, so invalid non-relevant rows are logged as `ignored_non_relevant_invalid_rows` instead of poisoning the snapshot
 - bot-backed current-day sync probes `/opt/wb-web-bot/storage_state.json` before seller portal capture; invalidated browser state surfaces as `seller_portal_session_invalid` / human `сессия seller portal больше не действует; требуется повторный вход`
+- all Seller Portal browser runners use shared single-flight lock `/opt/wb-core-runtime/state/seller_portal_automation.lock.json`; status sync, submit/batch, scouts/probes/dry-run/confirmation/detail/relogin and parser/export must not run in parallel, and route launches return controlled `seller_portal_automation_busy` metadata when lock is held
+- route-specific Seller Portal capabilities are checked per task (`feedbacks_list`, `complaints_pending`, `complaints_answered`, supplier context). `Мои жалобы` jobs warm up the base/UI context before direct status URLs and stop on auth redirects with precise blockers.
 - seller-portal auth recovery on selleros uses repo-owned localhost-only noVNC/Xvfb path via `apps/seller_portal_relogin_session.py`; unified UI exposes session-check/start/status/stop/launcher controls with per-run `run_id`, safe stop and canonical supplier confirmation
 - steady-state bot-backed source materialization on EU uses localhost owner runtime API `http://127.0.0.1:8000` owned by `wb-ai-api.service` after `/opt/wb-web-bot/bot` capture and `/opt/wb-ai/run_web_source_handoff.py`; env overrides for web-source/seller-funnel base URLs are exceptional owner-runtime relocation knobs, not public nginx routes
 - real complaint submit for `Отзывы/Жалобы` is intentionally guarded: protected selected-row operator jobs and support runners may submit only after exact feedback/AI-row match and hard caps, while confirmation/detail probes are read-only evidence for uncertain attempts; broad/unauthenticated/automatic submit remains forbidden
-- historical/date-period families (`seller_funnel_snapshot`, `web_source_snapshot`, `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`) now use persisted accepted closed-day semantics for `yesterday_closed`
-- current-snapshot-only families (`prices_snapshot`, `ads_bids`) capture upstream truth only as current snapshot, but an already accepted snapshot for business day D must materialize as `yesterday_closed=D` on D+1; later invalid auto/manual attempts must not blank prior-day accepted truth or already accepted same-day truth
+- historical/date-period families (`seller_funnel_snapshot`, `web_source_snapshot`, `sales_funnel_history`, `sf_period`, `stocks`, `ads_compact`, `fin_report_daily`) use persisted accepted closed-day semantics for `yesterday_closed`
+- current-snapshot/accepted-rollover families (`prices_snapshot`, `ads_bids`, `spp`) capture upstream truth as current-visible snapshots, but an already accepted snapshot for business day D must materialize as `yesterday_closed=D` on D+1; later invalid auto/manual attempts must not blank prior-day accepted truth or already accepted same-day truth
 - semantic reduction is now source-aware instead of naive two-slot worst-case:
   - `stocks` uses `yesterday_closed_only`: required slot = `yesterday_closed`, `today_current` stays truthful `not_available`/blank and does not degrade source or aggregate semantic status by itself;
-  - `spp` and `fin_report_daily` use `dual_day_intraday_tolerant`: intraday current-day non-yield is tolerated when `yesterday_closed` is confirmed;
-  - `prices_snapshot` and `ads_bids` remain OK for accepted-current rollover / latest-confirmed filled values;
+  - `fin_report_daily` uses `dual_day_intraday_tolerant`: intraday current-day non-yield is tolerated when `yesterday_closed` is confirmed;
+  - `prices_snapshot`, `ads_bids` and `spp` remain OK for accepted-current rollover / latest-confirmed filled values; SPP visible source is Seller Portal `discountOnSite`, and legacy sales-row average is only an explicit fallback mode, not fresh current-visible truth;
   - `promo_by_price` remains OK for accepted/runtime-cached latest confirmed filled values and degrades only when a required visible value lacks fallback;
   - `seller_funnel_snapshot` and `web_source_snapshot` remain strict two-slot sources.
 - manual operator refresh keeps short retries inside the run but does not create persisted long-retry tails and does not overwrite accepted truth on invalid candidates

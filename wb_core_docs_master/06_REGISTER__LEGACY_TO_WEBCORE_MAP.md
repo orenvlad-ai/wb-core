@@ -28,7 +28,7 @@ update_triggers:
   - "перенос новой legacy capability"
   - "изменение migration boundary"
   - "закрытие крупного compatibility gap"
-built_from_commit: "3faca550ee0d005b6be13635d015757c71d4bb80"
+built_from_commit: "2992d25d1161f1a52179c10bc5bd5cced7de265c"
 ---
 
 # Summary

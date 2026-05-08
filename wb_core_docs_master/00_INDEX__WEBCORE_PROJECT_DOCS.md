@@ -22,7 +22,7 @@ update_triggers:
   - "изменение состава pack"
   - "изменение роли `wb_core_docs_master`"
   - "изменение policy двухслойной схемы docs"
-built_from_commit: "3faca550ee0d005b6be13635d015757c71d4bb80"
+built_from_commit: "2992d25d1161f1a52179c10bc5bd5cced7de265c"
 ---
 
 # Summary
@@ -65,7 +65,7 @@ Authoritative canonical docs остаются в:
 - Pack не включает полный legacy-корпус.
 - Upload в внешний ChatGPT Project остаётся отдельным human-only шагом после merge только для explicit derived-sync flow или transitional pack rebuild.
 - Этот index даёт только navigation pointer и не должен сам становиться carrier operational upload rules.
-- Hosted runtime deploy/probe contract теперь materialized в authoritative docs и отражается в pack как compact navigation/runbook knowledge, включая active EU target `wb-core-eu-root` / `89.191.226.88`, production endpoint `https://api.selleros.pro`, app-level auth/session boundary, auth-aware fast canonical probes, explicit deep refresh через `--include-refresh`, hard nginx invariant `server_name 89.191.226.88 api.selleros.pro` + `listen 443 ssl`, rollback-only old selleros guard, managed nginx public-route allowlist, unified web-vitrina UI, `Поставки`, strict `Отзывы` table/filter/export/AI flow, nested `Жалобы` runtime journal/status-sync and protected selected-row submit job, research SKU-group comparison tab, compact toolbar/latest-four-days history, lazy source-status details, grouped source refresh, localhost owner runtime API `wb-ai-api.service`, normalized promo archive + artifact GC, promo current invariant guard, plan/stock reports, plan-report baseline routes, one-off ready-fact reconcile, seller-session session-check/recovery, safe stop semantics, per-run completion markers и hardened noVNC/launcher path, а не как hidden operational memory.
+- Hosted runtime deploy/probe contract теперь materialized в authoritative docs и отражается в pack как compact navigation/runbook knowledge, включая active EU target `wb-core-eu-root` / `89.191.226.88`, production endpoint `https://api.selleros.pro`, app-level auth/session boundary, auth-aware fast canonical probes, explicit deep refresh через `--include-refresh`, hard nginx invariant `server_name 89.191.226.88 api.selleros.pro` + `listen 443 ssl`, rollback-only old selleros guard, managed nginx public-route allowlist, unified web-vitrina UI, dark/violet operator visual system, `Поставки`, strict `Отзывы` table/filter/export/AI flow, nested `Жалобы` runtime journal/status-sync and protected selected-row submit job, shared Seller Portal single-flight automation lock, canonical EU bot storage-state/no-local-fallback policy, route-specific Seller Portal capability checks, research SKU-group comparison tab, compact toolbar/latest-three-dates history, lazy source-status details, grouped source refresh, localhost owner runtime API `wb-ai-api.service`, normalized promo archive + artifact GC, promo current invariant guard, current-only Seller Portal SPP `discountOnSite` with accepted-current rollover evidence, plan/stock reports, plan-report baseline routes, one-off ready-fact reconcile, seller-session session-check/recovery, safe stop semantics, per-run completion markers и hardened noVNC/launcher path, а не как hidden operational memory.
 
 # Not in scope
 
