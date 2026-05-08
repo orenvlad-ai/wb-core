@@ -126,6 +126,8 @@ def _assert_schedule_persistence_duplicate_and_run_now_contract() -> None:
                         "enabled": False,
                         "local_time_hhmm": "12:00",
                         "timezone": "Asia/Yekaterinburg",
+                        "last_success_at": "2026-05-08T07:59:00Z",
+                        "last_status": "completed",
                     }
                 ]
             }
@@ -133,6 +135,8 @@ def _assert_schedule_persistence_duplicate_and_run_now_contract() -> None:
         schedule = saved["schedules"][0]
         if schedule["id"] != "schedule_client_1":
             raise AssertionError(f"backend must preserve valid client-generated schedule ids: {schedule}")
+        if schedule.get("last_success_at") or schedule.get("last_status"):
+            raise AssertionError(f"new schedule must ignore client-owned lifecycle fields: {schedule}")
         reloaded = SheetVitrinaV1FeedbacksAutoComplaintsBlock(
             runtime_dir=runtime_dir,
             feedbacks_block=FakeFeedbacksBlock([]),  # type: ignore[arg-type]
@@ -190,24 +194,31 @@ def _assert_schedule_persistence_duplicate_and_run_now_contract() -> None:
                 raise AssertionError(f"run details must be sanitized, leaked {forbidden}: {detailed}")
         if detailed["session"].get("storage_state_path") != "/opt/wb-web-bot/storage_state.json":
             raise AssertionError(f"safe storage_state path reference may remain visible: {detailed}")
-        reloaded.store.update_run(run["run_id"], {"status": "completed", "finished_at": "2026-05-08T08:00:01Z"})
+        completed = reloaded.store.update_run(run["run_id"], {"status": "completed", "finished_at": "2026-05-08T08:00:01Z"})
+        reloaded.store.update_schedule_after_run("schedule_client_1", completed)
+        completed_schedule = reloaded.build_schedules()["schedules"][0]
+        if completed_schedule.get("last_success_at") != "2026-05-08T08:00:00Z":
+            raise AssertionError(f"successful run must set schedule last_success_at from run window_to: {completed_schedule}")
         recurring = reloaded.save_schedules(
             {
                 "schedules": [
                     {
-                        **schedule,
-                        "last_success_at": "2026-05-08T08:30:00+05:00",
+                        **completed_schedule,
+                        "last_success_at": "2030-01-01T00:00:00Z",
+                        "last_status": "client-stale-status",
                         "overlap_hours": 24,
                     }
                 ]
             }
         )["schedules"][0]
+        if recurring.get("last_success_at") != "2026-05-08T08:00:00Z" or recurring.get("last_status") != "completed":
+            raise AssertionError(f"save must preserve server-owned lifecycle fields, not client stale values: {recurring}")
         current_now[0] = datetime(2026, 5, 8, 9, 0, tzinfo=timezone.utc)
         reloaded._run_and_persist = lambda *args, **kwargs: None  # type: ignore[method-assign]
         recurring_run = reloaded.run_now({"schedule_id": recurring["id"]})["run"]
-        if recurring_run["window_base_from"] != "2026-05-08T03:30:00Z":
+        if recurring_run["window_base_from"] != "2026-05-08T08:00:00Z":
             raise AssertionError(f"recurring base window must start at last_success_at: {recurring_run}")
-        if recurring_run["window_fetch_from"] != "2026-05-07T03:30:00Z":
+        if recurring_run["window_fetch_from"] != "2026-05-07T08:00:00Z":
             raise AssertionError(f"recurring fetch window must include 24h overlap: {recurring_run}")
         try:
             reloaded.run_now({"schedule_id": "schedule_missing"})
@@ -248,6 +259,7 @@ def _assert_new_future_schedule_is_not_backfilled() -> None:
 
 def _assert_run_filters_ai_and_skips_existing_journal() -> None:
     now = datetime(2026, 5, 8, 8, 0, tzinfo=timezone.utc)
+    current_now = [datetime(2026, 5, 8, 6, 0, tzinfo=timezone.utc)]
     rows = [
         _row("new-yes", "2026-05-08T06:00:00Z", 1),
         _row("new-review", "2026-05-08T06:01:00Z", 2),
@@ -280,7 +292,7 @@ def _assert_run_filters_ai_and_skips_existing_journal() -> None:
             feedbacks_block=FakeFeedbacksBlock(rows),  # type: ignore[arg-type]
             feedbacks_ai_block=FakeAiBlock({"new-yes": "yes", "new-review": "review", "new-no": "no", "existing": "yes", "cap-skip": "yes"}),  # type: ignore[arg-type]
             complaints_block=complaints,
-            now_factory=lambda: now,
+            now_factory=lambda: current_now[0],
         )
         block.save_schedules(
             {
@@ -290,12 +302,12 @@ def _assert_run_filters_ai_and_skips_existing_journal() -> None:
                         "enabled": True,
                         "local_time_hhmm": "12:00",
                         "timezone": "Asia/Yekaterinburg",
-                        "enabled_since_at": "2026-05-08T06:00:00Z",
                         "hard_cap_per_run": 2,
                     }
                 ]
             }
         )
+        current_now[0] = now
         tick = block.run_due_schedules_sync()
         if tick["status"] != "started":
             raise AssertionError(f"due tick must start one run: {tick}")
@@ -322,6 +334,7 @@ def _assert_run_filters_ai_and_skips_existing_journal() -> None:
 
 def _assert_noop_advances_last_success() -> None:
     now = datetime(2026, 5, 8, 8, 0, tzinfo=timezone.utc)
+    current_now = [datetime(2026, 5, 8, 6, 0, tzinfo=timezone.utc)]
     with TemporaryDirectory(prefix="auto-complaints-noop-") as tmp:
         runtime_dir = Path(tmp)
         complaints = SheetVitrinaV1FeedbacksComplaintsBlock(runtime_dir=runtime_dir)
@@ -330,12 +343,10 @@ def _assert_noop_advances_last_success() -> None:
             feedbacks_block=FakeFeedbacksBlock([]),  # type: ignore[arg-type]
             feedbacks_ai_block=FakeAiBlock({}),  # type: ignore[arg-type]
             complaints_block=complaints,
-            now_factory=lambda: now,
+            now_factory=lambda: current_now[0],
         )
         block.save_schedules({"schedules": [{"id": "daily-noon", "enabled": True, "local_time_hhmm": "12:00"}]})
-        schedule = block.build_schedules()["schedules"][0]
-        schedule["enabled_since_at"] = "2026-05-08T06:00:00Z"
-        block.save_schedules({"schedules": [schedule]})
+        current_now[0] = now
         block.run_due_schedules_sync()
         schedule = block.build_schedules()["schedules"][0]
         if schedule["last_status"] != "no_new_feedbacks" or not schedule["last_success_at"]:
@@ -344,6 +355,7 @@ def _assert_noop_advances_last_success() -> None:
 
 def _assert_busy_lock_is_controlled() -> None:
     now = datetime(2026, 5, 8, 8, 0, tzinfo=timezone.utc)
+    current_now = [datetime(2026, 5, 8, 6, 0, tzinfo=timezone.utc)]
     with TemporaryDirectory(prefix="auto-complaints-busy-") as tmp:
         runtime_dir = Path(tmp)
         complaints = SheetVitrinaV1FeedbacksComplaintsBlock(runtime_dir=runtime_dir)
@@ -352,7 +364,7 @@ def _assert_busy_lock_is_controlled() -> None:
             feedbacks_block=FakeFeedbacksBlock([_row("busy-row", "2026-05-08T06:00:00Z", 1)]),  # type: ignore[arg-type]
             feedbacks_ai_block=FakeAiBlock({"busy-row": "yes"}),  # type: ignore[arg-type]
             complaints_block=complaints,
-            now_factory=lambda: now,
+            now_factory=lambda: current_now[0],
         )
         block.save_schedules(
             {
@@ -361,11 +373,11 @@ def _assert_busy_lock_is_controlled() -> None:
                         "id": "daily-noon",
                         "enabled": True,
                         "local_time_hhmm": "12:00",
-                        "enabled_since_at": "2026-05-08T06:00:00Z",
                     }
                 ]
             }
         )
+        current_now[0] = now
         (runtime_dir / "seller_portal_automation.lock.json").write_text(
             json.dumps(
                 {

@@ -7605,18 +7605,22 @@
       const automation = state.feedbacks.automation;
       const sequence = (automation.runPollSequence || 0) + 1;
       automation.runPollSequence = sequence;
-      for (let attempt = 0; attempt < 20; attempt += 1) {
+      for (let attempt = 0; attempt < 90; attempt += 1) {
         if (automation.runPollSequence !== sequence) {
           return;
         }
         if (attempt > 0) {
-          await sleep(1500);
+          await sleep(2000);
         }
         await loadFeedbacksAutomationRun(runId, {silent: true});
         const current = automation.lastRun || {};
         if (String(current.run_id || "") === String(runId || "") && isFeedbacksAutomationTerminalRun(current)) {
           break;
         }
+      }
+      const current = automation.lastRun || {};
+      if (String(current.run_id || "") === String(runId || "") && !isFeedbacksAutomationTerminalRun(current)) {
+        automation.logMessage = "Запуск ещё выполняется. Нажмите «Посмотреть лог» или «Обновить», чтобы обновить статус.";
       }
       try {
         await refreshFeedbacksAutomationState();

@@ -50,6 +50,16 @@ TERMINAL_ATTEMPT_ACTIONS = {
     "error",
 }
 AI_CANDIDATE_VALUES = {"yes", "да", "review", "проверить"}
+SCHEDULE_RUNTIME_FIELDS = {
+    "created_at",
+    "enabled_since_at",
+    "last_run_at",
+    "last_success_at",
+    "last_due_at",
+    "last_status",
+    "last_run_id",
+    "last_stats",
+}
 
 
 class SheetVitrinaV1FeedbacksAutoComplaintsError(RuntimeError):
@@ -75,12 +85,24 @@ class JsonFileFeedbacksAutoComplaintsStore:
 
     def save_schedules(self, schedules: list[Mapping[str, Any]]) -> dict[str, Any]:
         now = _iso_now(self.now_factory)
-        normalized = [_normalize_schedule(item, now=now, now_factory=self.now_factory) for item in schedules]
-        ids = [str(item["id"]) for item in normalized]
-        if len(ids) != len(set(ids)):
-            raise ValueError("schedule ids must be unique")
         with self._lock:
             payload = self._read_unlocked()
+            existing_by_id = {
+                str(item.get("id") or ""): item
+                for item in payload.get("schedules", [])
+                if isinstance(item, Mapping) and str(item.get("id") or "")
+            }
+            normalized = [
+                _normalize_schedule(
+                    _merge_schedule_for_save(item, existing_by_id.get(str(item.get("id") or "").strip()), now=now),
+                    now=now,
+                    now_factory=self.now_factory,
+                )
+                for item in schedules
+            ]
+            ids = [str(item["id"]) for item in normalized]
+            if len(ids) != len(set(ids)):
+                raise ValueError("schedule ids must be unique")
             payload["schedules"] = normalized
             self._write_unlocked(payload)
             return self._read_unlocked()
@@ -736,6 +758,29 @@ def _normalize_schedule(schedule: Mapping[str, Any], *, now: str, now_factory: C
     }
     normalized["next_run_at"] = _next_run_at(normalized, now_factory())
     return normalized
+
+
+def _merge_schedule_for_save(schedule: Mapping[str, Any], existing: Mapping[str, Any] | None, *, now: str) -> dict[str, Any]:
+    """Treat run lifecycle fields as server-owned runtime state, not browser payload."""
+
+    incoming = dict(schedule)
+    for field in SCHEDULE_RUNTIME_FIELDS:
+        incoming.pop(field, None)
+    if not isinstance(existing, Mapping):
+        return incoming
+
+    previous = _normalize_schedule(existing, now=_safe_text(existing.get("updated_at") or now, 80), now_factory=lambda: _parse_iso(now) or datetime.now(timezone.utc))
+    merged = dict(incoming)
+    merged["created_at"] = previous.get("created_at") or now
+    was_enabled = bool(previous.get("enabled"))
+    will_be_enabled = bool(incoming.get("enabled"))
+    if will_be_enabled:
+        merged["enabled_since_at"] = previous.get("enabled_since_at") if was_enabled else now
+    else:
+        merged["enabled_since_at"] = ""
+    for field in ("last_run_at", "last_success_at", "last_due_at", "last_status", "last_run_id", "last_stats"):
+        merged[field] = previous.get(field)
+    return merged
 
 
 def _normalize_run(run: Mapping[str, Any]) -> dict[str, Any]:
