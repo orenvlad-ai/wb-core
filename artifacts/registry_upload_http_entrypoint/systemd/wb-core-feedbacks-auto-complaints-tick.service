@@ -1,0 +1,12 @@
+[Unit]
+Description=WB Core Feedbacks Auto Complaints Due Tick
+After=network.target wb-core-registry-http.service
+Wants=network.target wb-core-registry-http.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/wb-core-runtime/app
+Environment=PYTHONUNBUFFERED=1
+Environment=REGISTRY_UPLOAD_RUNTIME_DIR=/opt/wb-core-runtime/state
+EnvironmentFile=/opt/wb-ai/.env
+ExecStart=/usr/bin/python3 /opt/wb-core-runtime/app/apps/sheet_vitrina_v1_feedbacks_auto_complaints_tick.py --runtime-dir /opt/wb-core-runtime/state

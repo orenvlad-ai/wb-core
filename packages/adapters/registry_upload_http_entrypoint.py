@@ -21,6 +21,9 @@ from typing import Any, Mapping
 from urllib import parse as urllib_parse
 
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.application.sheet_vitrina_v1_feedbacks_auto_complaints import (
+    SheetVitrinaV1FeedbacksAutoComplaintsError,
+)
 from packages.application.sheet_vitrina_v1_feedbacks_ai import SheetVitrinaV1FeedbacksAiError
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import (
     SheetVitrinaV1FeedbacksComplaintsError,
@@ -74,6 +77,11 @@ DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH = (
     "/v1/sheet-vitrina-v1/feedbacks/complaints/submit-selected"
 )
 DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH = "/v1/sheet-vitrina-v1/feedbacks/complaints/submit-job"
+DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH = "/v1/sheet-vitrina-v1/feedbacks/automation/schedules"
+DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_NOW_PATH = "/v1/sheet-vitrina-v1/feedbacks/automation/run-now"
+DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH = "/v1/sheet-vitrina-v1/feedbacks/automation/runs"
+DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_PATH = "/v1/sheet-vitrina-v1/feedbacks/automation/run"
+DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH = "/v1/sheet-vitrina-v1/feedbacks/automation/tick"
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_SHEET_LOAD_PATH = "/v1/sheet-vitrina-v1/load"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
@@ -643,6 +651,54 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, _with_complaints_submit_job_urls(result))
                 return
 
+            if parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_sheet_feedbacks_auto_complaints_schedules_save_request(payload)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except SheetVitrinaV1FeedbacksAutoComplaintsError as exc:
+                    _write_json_response(self, HTTPStatus(exc.http_status), {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"sheet vitrina feedbacks automation schedules failed: {exc}"})
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_NOW_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_sheet_feedbacks_auto_complaints_run_now_request(payload)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except SheetVitrinaV1FeedbacksAutoComplaintsError as exc:
+                    _write_json_response(self, HTTPStatus(exc.http_status), {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"sheet vitrina feedbacks automation run-now failed: {exc}"})
+                    return
+                _write_json_response(self, HTTPStatus.ACCEPTED, result)
+                return
+
+            if parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_sheet_feedbacks_auto_complaints_tick_request(payload)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except SheetVitrinaV1FeedbacksAutoComplaintsError as exc:
+                    _write_json_response(self, HTTPStatus(exc.http_status), {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"sheet vitrina feedbacks automation tick failed: {exc}"})
+                    return
+                _write_json_response(self, HTTPStatus.ACCEPTED, result)
+                return
+
             if parsed.path == DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH:
                 try:
                     job_payload = entrypoint.start_seller_portal_session_check_job(
@@ -1158,6 +1214,48 @@ def _build_handler(
                     )
                     return
 
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH:
+                try:
+                    payload = entrypoint.handle_sheet_feedbacks_auto_complaints_schedules_request()
+                except SheetVitrinaV1FeedbacksAutoComplaintsError as exc:
+                    _write_json_response(self, HTTPStatus(exc.http_status), {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"sheet vitrina feedbacks automation schedules runtime failed: {exc}"})
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH:
+                try:
+                    payload = entrypoint.handle_sheet_feedbacks_auto_complaints_runs_request()
+                except SheetVitrinaV1FeedbacksAutoComplaintsError as exc:
+                    _write_json_response(self, HTTPStatus(exc.http_status), {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"sheet vitrina feedbacks automation runs runtime failed: {exc}"})
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_PATH:
+                try:
+                    run_id = _resolve_single_query_param(parsed.query, "run_id")
+                    if not run_id:
+                        raise ValueError("run_id query parameter is required")
+                    payload = entrypoint.handle_sheet_feedbacks_auto_complaints_run_request(run_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except SheetVitrinaV1FeedbacksAutoComplaintsError as exc:
+                    _write_json_response(self, HTTPStatus(exc.http_status), {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"sheet vitrina feedbacks automation run runtime failed: {exc}"})
+                    return
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
@@ -2623,6 +2721,11 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "feedbacks_complaints_sync_status_job_path": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SYNC_STATUS_JOB_PATH,
         "feedbacks_complaints_submit_selected_path": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH,
         "feedbacks_complaints_submit_job_path": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH,
+        "feedbacks_auto_complaints_schedules_path": DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH,
+        "feedbacks_auto_complaints_run_now_path": DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_NOW_PATH,
+        "feedbacks_auto_complaints_runs_path": DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH,
+        "feedbacks_auto_complaints_run_path": DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_PATH,
+        "feedbacks_auto_complaints_tick_path": DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH,
         "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
         "job_path": job_path,
         "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,

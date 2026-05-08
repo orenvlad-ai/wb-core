@@ -22,6 +22,7 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.sheet_vitrina_v1_daily_report import SheetVitrinaV1DailyReportBlock
 from packages.application.sheet_vitrina_v1_feedbacks import SheetVitrinaV1FeedbacksBlock
 from packages.application.sheet_vitrina_v1_feedbacks_ai import SheetVitrinaV1FeedbacksAiBlock
+from packages.application.sheet_vitrina_v1_feedbacks_auto_complaints import SheetVitrinaV1FeedbacksAutoComplaintsBlock
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import SheetVitrinaV1FeedbacksComplaintsBlock
 from packages.application.sheet_vitrina_v1_load_bridge import (
     LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE,
@@ -494,6 +495,7 @@ class RegistryUploadHttpEntrypoint:
         feedbacks_block: SheetVitrinaV1FeedbacksBlock | None = None,
         feedbacks_ai_block: SheetVitrinaV1FeedbacksAiBlock | None = None,
         feedbacks_complaints_block: SheetVitrinaV1FeedbacksComplaintsBlock | None = None,
+        feedbacks_auto_complaints_block: SheetVitrinaV1FeedbacksAutoComplaintsBlock | None = None,
         promo_artifact_gc_runner: PromoArtifactGcRunner | None = None,
     ) -> None:
         self.runtime = runtime or RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
@@ -534,6 +536,13 @@ class RegistryUploadHttpEntrypoint:
         )
         self.feedbacks_complaints_block = feedbacks_complaints_block or SheetVitrinaV1FeedbacksComplaintsBlock(
             runtime_dir=self.runtime.runtime_dir,
+            now_factory=self.now_factory,
+        )
+        self.feedbacks_auto_complaints_block = feedbacks_auto_complaints_block or SheetVitrinaV1FeedbacksAutoComplaintsBlock(
+            runtime_dir=self.runtime.runtime_dir,
+            feedbacks_block=self.feedbacks_block,
+            feedbacks_ai_block=self.feedbacks_ai_block,
+            complaints_block=self.feedbacks_complaints_block,
             now_factory=self.now_factory,
         )
         self.sheet_load_runner = sheet_load_runner or load_sheet_vitrina_ready_snapshot_via_clasp
@@ -852,6 +861,24 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_sheet_feedbacks_complaints_submit_job_request(self, run_id: str) -> dict[str, Any]:
         return self.feedbacks_complaints_block.get_submit_job(run_id)
+
+    def handle_sheet_feedbacks_auto_complaints_schedules_request(self) -> dict[str, Any]:
+        return self.feedbacks_auto_complaints_block.build_schedules()
+
+    def handle_sheet_feedbacks_auto_complaints_schedules_save_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.feedbacks_auto_complaints_block.save_schedules(payload)
+
+    def handle_sheet_feedbacks_auto_complaints_run_now_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.feedbacks_auto_complaints_block.run_now(payload)
+
+    def handle_sheet_feedbacks_auto_complaints_runs_request(self) -> dict[str, Any]:
+        return self.feedbacks_auto_complaints_block.list_runs()
+
+    def handle_sheet_feedbacks_auto_complaints_run_request(self, run_id: str) -> dict[str, Any]:
+        return self.feedbacks_auto_complaints_block.get_run(run_id)
+
+    def handle_sheet_feedbacks_auto_complaints_tick_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.feedbacks_auto_complaints_block.tick(payload)
 
     def handle_sheet_refresh_request(
         self,

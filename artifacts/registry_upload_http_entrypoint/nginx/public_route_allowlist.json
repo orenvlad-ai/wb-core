@@ -126,6 +126,36 @@
       "methods": ["GET"]
     },
     {
+      "name": "sheet_vitrina_feedbacks_auto_complaints_schedules",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/automation/schedules",
+      "methods": ["GET", "POST"]
+    },
+    {
+      "name": "sheet_vitrina_feedbacks_auto_complaints_run_now",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/automation/run-now",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_feedbacks_auto_complaints_runs",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/automation/runs",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_feedbacks_auto_complaints_run",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/automation/run",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_feedbacks_auto_complaints_tick",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/automation/tick",
+      "methods": ["POST"]
+    },
+    {
       "name": "sheet_vitrina_web_vitrina",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/web-vitrina",

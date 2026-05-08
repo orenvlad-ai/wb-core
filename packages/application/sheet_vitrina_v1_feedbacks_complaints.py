@@ -725,6 +725,10 @@ class SheetVitrinaV1FeedbacksComplaintsBlock:
             return _public_submit_busy_job(busy, requested_by=requested_by, now_factory=self.now_factory)
         return self.submit_jobs.start(payload, runner=self._run_submit_selected, requested_by=requested_by)
 
+    def run_submit_selected_inline(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Run the same guarded selected-submit implementation inside an outer orchestration lock."""
+        return self._run_submit_selected(payload or {})
+
     def get_submit_job(self, run_id: str) -> dict[str, Any]:
         return self.submit_jobs.get(run_id)
 
