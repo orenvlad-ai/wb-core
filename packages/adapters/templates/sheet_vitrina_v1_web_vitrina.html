@@ -1423,6 +1423,80 @@
       line-height: 1.2;
     }
 
+    .table-heading-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .table-freshness-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-height: 18px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 7px;
+      background: var(--panel-subtle);
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .table-freshness-indicator[hidden] {
+      display: none;
+    }
+
+    .table-freshness-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--muted);
+    }
+
+    .table-freshness-indicator.is-stale-loading {
+      border-color: rgba(245, 158, 11, 0.44);
+      background: var(--warning-bg);
+      color: var(--warning-text);
+    }
+
+    .table-freshness-indicator.is-stale-loading .table-freshness-dot {
+      background: #fbbf24;
+      animation: table-snapshot-blink 950ms ease-in-out infinite;
+    }
+
+    .table-freshness-indicator.is-fresh {
+      border-color: rgba(34, 197, 94, 0.38);
+      background: var(--success-bg);
+      color: var(--success-text);
+    }
+
+    .table-freshness-indicator.is-fresh .table-freshness-dot {
+      background: #22c55e;
+    }
+
+    .table-freshness-indicator.is-stale-error {
+      border-color: rgba(245, 158, 11, 0.44);
+      background: var(--warning-bg);
+      color: var(--warning-text);
+    }
+
+    .table-freshness-indicator.is-stale-error .table-freshness-dot {
+      background: #fbbf24;
+    }
+
+    @keyframes table-snapshot-blink {
+      0%, 100% {
+        opacity: 1;
+      }
+      50% {
+        opacity: 0.32;
+      }
+    }
+
     .panel-note {
       margin: 4px 0 0;
       max-width: 860px;
@@ -2738,7 +2812,13 @@
     <section class="panel">
       <div class="panel-top">
         <div>
-          <h2>Таблица</h2>
+          <div class="table-heading-row">
+            <h2>Таблица</h2>
+            <span class="table-freshness-indicator" data-table-freshness-indicator hidden>
+              <span class="table-freshness-dot" aria-hidden="true"></span>
+              <span data-table-freshness-label>актуально</span>
+            </span>
+          </div>
           <p class="panel-note">
             Основная web-витрина поверх persisted ready snapshot.
           </p>
@@ -3190,6 +3270,8 @@
     const tableScrollNode = document.querySelector("[data-table-scroll]");
     const tableHeadNode = document.querySelector("[data-table-head]");
     const tableBodyNode = document.querySelector("[data-table-body]");
+    const tableFreshnessIndicatorNode = document.querySelector("[data-table-freshness-indicator]");
+    const tableFreshnessLabelNode = document.querySelector("[data-table-freshness-label]");
     const columnManagerNoteNode = document.querySelector("[data-column-manager-note]");
     const columnVisibilityControlsNode = document.querySelector("[data-column-visibility-controls]");
     const columnVisibilityResetButton = document.querySelector("[data-columns-reset]");
@@ -3291,6 +3373,8 @@
     const FEEDBACKS_RANGE_STORAGE_VERSION = 3;
     const FEEDBACKS_RANGE_STORAGE_TTL_MS = 12 * 60 * 60 * 1000;
     const FEEDBACKS_MIN_COLUMN_WIDTH = 72;
+    const TABLE_SNAPSHOT_STORAGE_KEY = "wb_core_web_vitrina_table_snapshot_v1";
+    const TABLE_SNAPSHOT_STORAGE_VERSION = 1;
 	    const FEEDBACKS_DEFAULT_COLUMN_WIDTHS = {
 	      select: 54,
 	      complaint_status: 120,
@@ -3381,6 +3465,13 @@
       actionSequence: 0,
       page: {
         lastRenderedAt: null
+      },
+      tableSnapshot: {
+        displayedRequestKey: "",
+        displayedSnapshotId: "",
+        displayedSavedAt: "",
+        showingCached: false,
+        freshLoading: false
       },
       history: {
         availableDates: [],
@@ -3898,6 +3989,133 @@
     function visibleSnapshotAsOfDate() {
       const meta = ((state.composition || {}).meta || {});
       return normalizeIsoDate(meta.snapshot_as_of_date || meta.as_of_date || "");
+    }
+
+    function tableSnapshotRequestKey() {
+      const url = buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface);
+      url.searchParams.delete("include_table_data");
+      url.searchParams.delete("include_source_status");
+      return url.pathname + "?" + url.searchParams.toString();
+    }
+
+    function hasDisplayedCachedTableForRequest(requestKey) {
+      return Boolean(
+        state.tableSnapshot.showingCached &&
+        state.tableSnapshot.displayedRequestKey &&
+        state.tableSnapshot.displayedRequestKey === requestKey
+      );
+    }
+
+    function isSuccessfulTableSnapshotPayload(payload) {
+      const tableSurface = (payload && payload.table_surface) || {};
+      return Boolean(
+        payload &&
+        payload.composition_name === "web_vitrina_page_composition" &&
+        String(((payload.meta || {}).current_state) || "") !== "error" &&
+        String(tableSurface.table_data_state || "included") === "included" &&
+        Array.isArray(tableSurface.columns) &&
+        Array.isArray(tableSurface.rows) &&
+        Array.isArray(tableSurface.groupings)
+      );
+    }
+
+    function readCachedTableSnapshotForCurrentRequest() {
+      if (!window || !window.localStorage) {
+        return null;
+      }
+      try {
+        const raw = window.localStorage.getItem(TABLE_SNAPSHOT_STORAGE_KEY);
+        if (!raw) {
+          return null;
+        }
+        const cached = JSON.parse(raw);
+        if (!cached || Number(cached.version) !== TABLE_SNAPSHOT_STORAGE_VERSION) {
+          return null;
+        }
+        if (String(cached.request_key || "") !== tableSnapshotRequestKey()) {
+          return null;
+        }
+        if (!isSuccessfulTableSnapshotPayload(cached.payload)) {
+          return null;
+        }
+        return cached;
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function persistSuccessfulTableSnapshot(payload) {
+      if (!window || !window.localStorage || !isSuccessfulTableSnapshotPayload(payload)) {
+        return;
+      }
+      try {
+        window.localStorage.setItem(TABLE_SNAPSHOT_STORAGE_KEY, JSON.stringify({
+          version: TABLE_SNAPSHOT_STORAGE_VERSION,
+          request_key: tableSnapshotRequestKey(),
+          saved_at: new Date().toISOString(),
+          snapshot_id: String((payload.meta && payload.meta.snapshot_id) || ""),
+          as_of_date: String((payload.meta && (payload.meta.snapshot_as_of_date || payload.meta.as_of_date)) || ""),
+          payload: payload
+        }));
+      } catch (error) {
+        // Storage quota or privacy mode must not block the live table.
+      }
+    }
+
+    function renderCachedTableSnapshotForCurrentRequest() {
+      const cached = readCachedTableSnapshotForCurrentRequest();
+      if (!cached) {
+        return false;
+      }
+      const payload = cached.payload;
+      state.tableSnapshot.displayedRequestKey = String(cached.request_key || "");
+      state.tableSnapshot.displayedSnapshotId = String(cached.snapshot_id || ((payload.meta || {}).snapshot_id) || "");
+      state.tableSnapshot.displayedSavedAt = String(cached.saved_at || "");
+      state.tableSnapshot.showingCached = true;
+      state.tableSnapshot.freshLoading = true;
+      resetFilterState(payload);
+      renderPage(payload, {tableFreshness: "stale_loading"});
+      return true;
+    }
+
+    function markFreshTableDisplayed(payload) {
+      state.tableSnapshot.displayedRequestKey = tableSnapshotRequestKey();
+      state.tableSnapshot.displayedSnapshotId = String((payload && payload.meta && payload.meta.snapshot_id) || "");
+      state.tableSnapshot.displayedSavedAt = "";
+      state.tableSnapshot.showingCached = false;
+      state.tableSnapshot.freshLoading = false;
+      setTableFreshnessIndicator("fresh", payload);
+    }
+
+    function setTableFreshnessIndicator(mode, payload) {
+      if (!tableFreshnessIndicatorNode || !tableFreshnessLabelNode) {
+        return;
+      }
+      const normalizedMode = String(mode || "");
+      tableFreshnessIndicatorNode.hidden = normalizedMode === "" || normalizedMode === "hidden";
+      tableFreshnessIndicatorNode.classList.remove("is-stale-loading", "is-stale-error", "is-fresh");
+      if (tableFreshnessIndicatorNode.hidden) {
+        tableFreshnessLabelNode.textContent = "";
+        tableFreshnessIndicatorNode.removeAttribute("title");
+        return;
+      }
+      if (normalizedMode === "stale_loading") {
+        tableFreshnessIndicatorNode.classList.add("is-stale-loading");
+        tableFreshnessLabelNode.textContent = "старый снимок";
+        const savedAt = state.tableSnapshot.displayedSavedAt ? formatTimestampDisplay(state.tableSnapshot.displayedSavedAt) : "";
+        tableFreshnessIndicatorNode.title = "Показан последний успешный снимок" + (savedAt ? " от " + savedAt : "") + "; свежая таблица загружается.";
+        return;
+      }
+      if (normalizedMode === "stale_error") {
+        tableFreshnessIndicatorNode.classList.add("is-stale-error");
+        tableFreshnessLabelNode.textContent = "старый снимок";
+        tableFreshnessIndicatorNode.title = "Показан последний успешный снимок; свежую таблицу не удалось загрузить.";
+        return;
+      }
+      tableFreshnessIndicatorNode.classList.add("is-fresh");
+      tableFreshnessLabelNode.textContent = "актуально";
+      const meta = (payload && payload.meta) || {};
+      tableFreshnessIndicatorNode.title = "Показана свежая таблица" + (meta.snapshot_id ? ": " + meta.snapshot_id : "") + ".";
     }
 
     function normalizeIsoDate(value) {
@@ -5539,7 +5757,8 @@
       });
     }
 
-    function renderPage(payload) {
+    function renderPage(payload, options) {
+      const normalizedOptions = options || {};
       state.composition = payload;
       state.page.lastRenderedAt = new Date();
       registerTableSurfaceAssets(payload);
@@ -5566,6 +5785,11 @@
         " · server persistence: " +
         valueOrDash(payload.meta && payload.meta.browser_state_persistence);
       renderTable();
+      const tableSurface = payload.table_surface || {};
+      const tableFreshness = normalizedOptions.tableFreshness || (
+        String(tableSurface.table_data_state || "included") === "included" ? "fresh" : "hidden"
+      );
+      setTableFreshnessIndicator(tableFreshness, payload);
     }
 
     function renderTable() {
@@ -10258,7 +10482,20 @@
       }
     }
 
-    async function loadDeferredTableData(requestId) {
+    function mergeDeferredShellWithFreshTable(shellPayload, tablePayload) {
+      if (!shellPayload) {
+        return tablePayload;
+      }
+      const merged = Object.assign({}, shellPayload, tablePayload);
+      merged.meta = Object.assign({}, (shellPayload.meta || {}), (tablePayload.meta || {}));
+      merged.table_surface = tablePayload.table_surface || {};
+      if (shellPayload.activity_surface) {
+        merged.activity_surface = shellPayload.activity_surface;
+      }
+      return merged;
+    }
+
+    async function loadDeferredTableData(requestId, shellPayload) {
       try {
         const response = await fetch(
           buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {
@@ -10283,20 +10520,11 @@
         if (String(tableSurface.table_data_state || "included") !== "included") {
           throw new Error("table data payload did not include rows");
         }
-        if (state.composition) {
-          state.composition.table_surface = tableSurface;
-          state.composition.filter_surface = payload.filter_surface || state.composition.filter_surface;
-          state.composition.status_summary = payload.status_summary || state.composition.status_summary;
-          state.composition.capabilities = payload.capabilities || state.composition.capabilities;
-          state.composition.meta = Object.assign({}, state.composition.meta || {}, payload.meta || {});
-          registerTableSurfaceAssets(state.composition);
-          renderFilterControls(state.composition);
-          initializeColumnVisibility(state.composition);
-          if (!state.filters.sort) {
-            state.filters.sort = (state.composition.filter_surface && state.composition.filter_surface.default_sort_value) || "";
-          }
-          renderTable();
-        }
+        const renderPayload = mergeDeferredShellWithFreshTable(shellPayload, payload);
+        resetFilterState(renderPayload);
+        renderPage(renderPayload, {tableFreshness: "fresh"});
+        persistSuccessfulTableSnapshot(renderPayload);
+        markFreshTableDisplayed(renderPayload);
       } catch (error) {
         if (requestId !== state.requestSequence) {
           return;
@@ -10306,23 +10534,38 @@
           "Не удалось загрузить строки таблицы: " + message,
           {statusLabel: "Ошибка", tone: "error", detail: message}
         );
-        setStateBox("error", "Не удалось загрузить строки таблицы", escapeHtml(message));
+        if (hasDisplayedCachedTableForRequest(tableSnapshotRequestKey())) {
+          state.tableSnapshot.freshLoading = false;
+          setTableFreshnessIndicator("stale_error", state.composition);
+          filterSummaryNode.textContent = "Показан старый снимок; свежие строки не загрузились";
+        } else {
+          setStateBox("error", "Не удалось загрузить строки таблицы", escapeHtml(message));
+        }
       }
     }
 
     async function loadPageComposition(options) {
       const normalizedOptions = options || {};
       const requestId = state.requestSequence + 1;
+      const requestKey = tableSnapshotRequestKey();
+      const showingCachedTable = hasDisplayedCachedTableForRequest(requestKey);
       state.requestSequence = requestId;
       setActionButtonsDisabled(true);
       setStatusBadge({label: "Загрузка", tone: "warning", detail: "загрузка page composition"});
-      setStateBox(
-        "warning",
-        "Загрузка витрины…",
-        'Страница читает server-driven page composition через existing route <code>' +
-          escapeHtml(buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface).pathname) +
-          "</code>."
-      );
+      if (showingCachedTable) {
+        state.tableSnapshot.freshLoading = true;
+        setTableFreshnessIndicator("stale_loading", state.composition);
+        filterSummaryNode.textContent = "Показан старый снимок; свежие строки загружаются";
+      } else {
+        setStateBox(
+          "warning",
+          "Загрузка витрины…",
+          'Страница читает server-driven page composition через existing route <code>' +
+            escapeHtml(buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface).pathname) +
+            "</code>."
+        );
+        setTableFreshnessIndicator("hidden");
+      }
       try {
         const response = await fetch(
           buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {
@@ -10342,11 +10585,21 @@
         if (!payload || payload.composition_name !== "web_vitrina_page_composition") {
           throw new Error("unexpected page composition payload");
         }
-        resetFilterState(payload);
-        renderPage(payload);
         const tableSurface = payload.table_surface || {};
         if (String(tableSurface.table_data_state || "included") === "deferred") {
-          loadDeferredTableData(requestId);
+          if (!showingCachedTable) {
+            resetFilterState(payload);
+            renderPage(payload);
+          } else {
+            state.tableSnapshot.freshLoading = true;
+            setTableFreshnessIndicator("stale_loading", state.composition);
+          }
+          loadDeferredTableData(requestId, payload);
+        } else {
+          resetFilterState(payload);
+          renderPage(payload, {tableFreshness: "fresh"});
+          persistSuccessfulTableSnapshot(payload);
+          markFreshTableDisplayed(payload);
         }
         refreshSellerRecoveryStatus();
       } catch (error) {
@@ -10354,6 +10607,16 @@
           return;
         }
         const message = String(error && error.message ? error.message : error);
+        if (hasDisplayedCachedTableForRequest(requestKey)) {
+          state.tableSnapshot.freshLoading = false;
+          setTableFreshnessIndicator("stale_error", state.composition);
+          appendVisibleActionLogLine(
+            "Не удалось загрузить свежую витрину: " + message,
+            {statusLabel: "Ошибка", tone: "error", detail: message}
+          );
+          filterSummaryNode.textContent = "Показан старый снимок; свежая витрина не загрузилась";
+          return;
+        }
         renderSummaryCards([
           {
             label: "Статус",
@@ -10392,6 +10655,7 @@
 
     activateUnifiedTab(initialUnifiedTab(), {persist: false});
     loadVitrinaAutoSchedules();
+    renderCachedTableSnapshotForCurrentRequest();
     loadPageComposition();
   </script>
 </body>
