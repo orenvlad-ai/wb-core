@@ -883,18 +883,19 @@
       font-weight: 600;
       text-decoration: none;
       cursor: pointer;
-      transition: background-color 140ms ease, border-color 140ms ease, transform 140ms ease;
+      transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease;
     }
 
     .button.primary {
-      border-color: var(--accent);
-      background: var(--accent);
-      color: #ffffff;
+      border-color: var(--accent-border);
+      background: var(--control-bg);
+      color: var(--text);
     }
 
     .button.primary:hover {
-      background: var(--accent-hover);
       border-color: var(--accent-hover);
+      background: var(--accent-soft);
+      color: var(--text);
       transform: translateY(-1px);
     }
 
@@ -2178,16 +2179,16 @@
     }
 
     .button.primary {
-      border-color: var(--accent);
-      background: var(--accent);
-      color: #ffffff;
+      border-color: var(--accent-border);
+      background: var(--control-bg);
+      color: var(--text);
       font-weight: 800;
     }
 
     .button.primary:hover:not(:disabled) {
       border-color: var(--accent-hover);
-      background: var(--accent-hover);
-      color: #ffffff;
+      background: var(--accent-soft);
+      color: var(--text);
       transform: none;
     }
 
@@ -2591,7 +2592,7 @@
         </div>
         <div class="auto-schedule-actions">
           <button class="button secondary" type="button" data-vitrina-auto-add>Добавить строку</button>
-          <button class="button primary" type="button" data-vitrina-auto-save>Сохранить</button>
+          <button class="button secondary" type="button" data-vitrina-auto-save>Сохранить</button>
           <button class="button secondary" type="button" data-vitrina-auto-reload>Обновить</button>
         </div>
       </div>
@@ -2665,7 +2666,7 @@
               <p class="filter-summary" data-history-summary>Загрузка…</p>
               <div class="history-actions">
                 <button class="button secondary" type="button" data-history-reset>Сбросить</button>
-                <button class="button primary" type="button" data-history-save>Сохранить</button>
+                <button class="button secondary" type="button" data-history-save>Сохранить</button>
               </div>
             </div>
           </div>
@@ -2838,7 +2839,7 @@
 	                        <p class="filter-summary" data-feedbacks-range-summary>Период не выбран</p>
 	                        <div class="history-actions">
 	                          <button class="button secondary" type="button" data-feedbacks-range-reset>Сбросить</button>
-	                          <button class="button primary" type="button" data-feedbacks-range-save>Сохранить</button>
+	                          <button class="button secondary" type="button" data-feedbacks-range-save>Сохранить</button>
 	                        </div>
 	                      </div>
 	                    </div>
@@ -2921,7 +2922,7 @@
 	              <textarea class="input feedbacks-prompt-textarea" data-feedbacks-prompt-textarea spellcheck="true"></textarea>
 	            </label>
 	            <div class="feedbacks-prompt-actions">
-	              <button class="button primary" type="button" data-feedbacks-prompt-save>Сохранить промпт</button>
+	              <button class="button secondary" type="button" data-feedbacks-prompt-save>Сохранить промпт</button>
 	              <button class="button secondary" type="button" data-feedbacks-back-to-reviews>Вернуться к отзывам</button>
 	              <span class="research-result-note" data-feedbacks-prompt-status>Промпт не загружен</span>
 	            </div>
@@ -2956,7 +2957,7 @@
 	            <div class="feedbacks-action-toolbar" aria-label="Автоматическая подача жалоб">
 	              <div class="feedbacks-action-group">
 	                <button class="button secondary" type="button" data-feedbacks-auto-add>Добавить расписание</button>
-	                <button class="button primary" type="button" data-feedbacks-auto-save>Сохранить</button>
+	                <button class="button secondary" type="button" data-feedbacks-auto-save>Сохранить</button>
 	                <button class="button danger" type="button" data-feedbacks-auto-run-now>Запустить сейчас</button>
 	              </div>
 	              <div class="feedbacks-action-group">
