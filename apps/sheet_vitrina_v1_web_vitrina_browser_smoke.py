@@ -1443,30 +1443,51 @@ def _check_load_refresh_action(
 
 
 def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
-    cards = page.locator("[data-summary-card]").evaluate_all(
-        """nodes => Object.fromEntries(
-          nodes
-            .map(node => {
-              const cardId = node.getAttribute('data-summary-card') || '';
-              if (!cardId) {
-                return null;
-              }
-              const labelNode = node.querySelector('[data-summary-card-label]');
-              const valueNode = node.querySelector('[data-summary-card-value]');
-              const detailNode = node.querySelector('[data-summary-card-detail]');
-              return [
-                cardId,
-                {
-                  label: (labelNode ? labelNode.textContent : '').trim(),
-                  value: (valueNode ? valueNode.textContent : '').trim(),
-                  detail: (detailNode ? detailNode.textContent : '').trim(),
-                  updated_at: (node.getAttribute('data-summary-card-updated-at') || '').trim()
-                }
-              ];
-            })
-            .filter(Boolean)
-        )"""
+    legacy_card_count = page.locator(
+        "[data-summary-card='page_refresh'], [data-summary-card='status']"
+    ).count()
+    if legacy_card_count:
+        raise AssertionError("updated/status summary must live in the table header, not separate summary cards")
+    payload = page.locator("[data-table-summary-line]").evaluate(
+        """node => {
+          const updatedNode = node.querySelector('[data-table-summary-updated]');
+          const statusNode = node.querySelector('[data-table-summary-status]');
+          const detailNode = node.querySelector('[data-table-summary-status-detail]');
+          const trimPrefix = (value, prefix) => {
+            const text = String(value || '').trim();
+            return text.startsWith(prefix) ? text.slice(prefix.length).trim() : text;
+          };
+          return {
+            hidden: !!node.hidden,
+            text: String(node.textContent || '').trim(),
+            updated: trimPrefix(updatedNode ? updatedNode.textContent : '', 'Обновлено:'),
+            updated_at: updatedNode ? String(updatedNode.getAttribute('data-table-summary-updated-at') || '').trim() : '',
+            status: trimPrefix(statusNode ? statusNode.textContent : '', 'Статус:'),
+            status_detail: detailNode ? String(detailNode.textContent || '').trim() : ''
+          };
+        }"""
     )
+    if payload.get("hidden"):
+        raise AssertionError(f"table header summary line must be visible, got {payload}")
+    text = str(payload.get("text") or "")
+    if "Обновлено:" not in text or "Статус:" not in text:
+        raise AssertionError(f"table header summary must include updated and status labels, got {payload}")
+    if text.count("Asia/Yekaterinburg") > 1:
+        raise AssertionError(f"table header summary must show timezone once at most, got {text!r}")
+    cards = {
+        "page_refresh": {
+            "label": "Обновлено",
+            "value": str(payload.get("updated") or ""),
+            "detail": "",
+            "updated_at": str(payload.get("updated_at") or ""),
+        },
+        "status": {
+            "label": "Статус",
+            "value": str(payload.get("status") or ""),
+            "detail": str(payload.get("status_detail") or ""),
+            "updated_at": "",
+        },
+    }
     for required_card_id, required_label in {
         "page_refresh": "Обновлено",
         "status": "Статус",

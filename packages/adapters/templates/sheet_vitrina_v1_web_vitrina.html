@@ -1172,6 +1172,10 @@
       margin-bottom: 6px;
     }
 
+    .summary-grid[hidden] {
+      display: none;
+    }
+
     .summary-card {
       background: var(--panel-bg);
       border: 1px solid var(--border);
@@ -1482,6 +1486,45 @@
       align-items: center;
       gap: 8px;
       flex-wrap: wrap;
+    }
+
+    .table-summary-line {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      margin: 0;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .table-summary-line[hidden] {
+      display: none;
+    }
+
+    .table-summary-token {
+      white-space: nowrap;
+    }
+
+    .table-summary-status {
+      display: inline-flex;
+      align-items: center;
+      min-height: 18px;
+      border-radius: 999px;
+      padding: 2px 7px;
+      font-size: 10px;
+      font-weight: 800;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .table-summary-detail {
+      min-width: 0;
+      max-width: min(520px, 100%);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .table-freshness-indicator {
@@ -2656,6 +2699,10 @@
         text-align: left;
       }
 
+      .table-summary-detail {
+        white-space: normal;
+      }
+
       .column-manager-panel {
         left: 0;
         width: min(320px, calc(100vw - 24px));
@@ -2878,6 +2925,7 @@
               <span class="table-freshness-dot" aria-hidden="true"></span>
               <span data-table-freshness-label>актуально</span>
             </span>
+            <p class="table-summary-line" data-table-summary-line hidden></p>
           </div>
           <p class="panel-note">
             Основная web-витрина поверх persisted ready snapshot.
@@ -3323,6 +3371,7 @@
     const filterMetaNode = document.querySelector("[data-filter-meta]");
     const filterSummaryNode = document.querySelector("[data-filter-summary]");
     const tableMetaNode = document.querySelector("[data-table-meta]");
+    const tableSummaryLineNode = document.querySelector("[data-table-summary-line]");
     const tableStateNode = document.querySelector("[data-table-state]");
     const stateTitleNode = document.querySelector("[data-state-title]");
     const stateBodyNode = document.querySelector("[data-state-body]");
@@ -4725,7 +4774,13 @@
         summaryGridNode.removeAttribute("data-summary-period-detail");
       }
       const renderedCards = composeSummaryCards(cards);
-      summaryGridNode.innerHTML = renderedCards.map(function(card) {
+      renderTableSummaryLine(renderedCards);
+      const standaloneCards = renderedCards.filter(function(card) {
+        const cardId = String((card && card.card_id) || "");
+        return cardId !== "page_refresh" && cardId !== "status";
+      });
+      summaryGridNode.hidden = standaloneCards.length === 0;
+      summaryGridNode.innerHTML = standaloneCards.map(function(card) {
         const valueText = formatSummaryCardValue(card);
         return [
           '<article class="summary-card tone-' + escapeHtml(normalizeTone(card.tone)) + '" data-summary-card="' + escapeHtml(card.card_id || "") + '"' +
@@ -4737,6 +4792,46 @@
           "</article>"
         ].join("");
       }).join("");
+    }
+
+    function renderTableSummaryLine(cards) {
+      const sourceCards = Array.isArray(cards) ? cards : [];
+      const pageRefreshCard = sourceCards.find(function(card) {
+        return String((card && card.card_id) || "") === "page_refresh";
+      });
+      const statusCard = sourceCards.find(function(card) {
+        return String((card && card.card_id) || "") === "status";
+      });
+      const parts = [];
+      if (pageRefreshCard) {
+        const updatedText = formatSummaryCardValue(pageRefreshCard);
+        if (updatedText) {
+          parts.push(
+            '<span class="table-summary-token" data-table-summary-updated' +
+              (pageRefreshCard.updated_at ? ' data-table-summary-updated-at="' + escapeHtml(pageRefreshCard.updated_at) + '"' : "") +
+              '>Обновлено: ' + escapeHtml(updatedText) + '</span>'
+          );
+        }
+      }
+      if (statusCard) {
+        const statusText = formatSummaryCardValue(statusCard);
+        if (statusText) {
+          parts.push(
+            '<span class="table-summary-status tone-' + escapeHtml(normalizeTone(statusCard.tone)) + '" data-table-summary-status>' +
+              'Статус: ' + escapeHtml(statusText) +
+              '</span>'
+          );
+        }
+        if (statusCard.detail) {
+          parts.push(
+            '<span class="table-summary-detail" data-table-summary-status-detail>' +
+              escapeHtml(statusCard.detail) +
+              '</span>'
+          );
+        }
+      }
+      tableSummaryLineNode.hidden = parts.length === 0;
+      tableSummaryLineNode.innerHTML = parts.join('<span class="table-summary-separator" aria-hidden="true">·</span>');
     }
 
     function composeSummaryCards(cards) {
