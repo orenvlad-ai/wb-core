@@ -52,6 +52,7 @@ class _PeriodDateBinding:
     requested_date: str
     snapshot_as_of_date: str
     column_date: str
+    missing: bool = False
 
 
 class SheetVitrinaV1WebVitrinaBlock:
@@ -87,6 +88,34 @@ class SheetVitrinaV1WebVitrinaBlock:
         return _merge_readable_dates(
             exact_ready_dates=exact_ready_dates,
             default_visible_snapshot=default_visible_snapshot,
+            business_week_dates=_default_business_week_dates(self.now_factory()),
+            date_from=date_from,
+            date_to=date_to,
+            descending=descending,
+        )
+
+    def list_materialized_readable_dates(
+        self,
+        *,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        descending: bool = False,
+    ) -> list[str]:
+        try:
+            exact_ready_dates = self.runtime.list_sheet_vitrina_ready_snapshot_dates(
+                date_from=date_from,
+                date_to=date_to,
+            )
+        except ValueError:
+            return []
+        default_visible_snapshot = _load_default_visible_snapshot(
+            runtime=self.runtime,
+            default_as_of_date=default_business_as_of_date(self.now_factory()),
+        )
+        return _merge_readable_dates(
+            exact_ready_dates=exact_ready_dates,
+            default_visible_snapshot=default_visible_snapshot,
+            business_week_dates=[],
             date_from=date_from,
             date_to=date_to,
             descending=descending,
@@ -125,7 +154,7 @@ class SheetVitrinaV1WebVitrinaBlock:
                 runtime=self.runtime,
                 period_date_bindings=period_date_bindings,
             )
-            source_status_snapshot_as_of_date = period_date_bindings[-1].snapshot_as_of_date
+            source_status_snapshot_as_of_date = _last_materialized_snapshot_as_of_date(period_date_bindings)
             data_sheet_row_count = len(snapshot.sheets[0].rows) if snapshot.sheets else 0
             read_model = WEB_VITRINA_PERIOD_READ_MODEL
         else:
@@ -266,12 +295,17 @@ def _build_period_snapshot(
     if default_visible_snapshot is not None:
         snapshots_by_as_of_date[default_visible_snapshot.as_of_date] = default_visible_snapshot
     for binding in period_date_bindings:
+        if binding.missing:
+            continue
         snapshots_by_as_of_date.setdefault(
             binding.snapshot_as_of_date,
             runtime.load_sheet_vitrina_ready_snapshot(as_of_date=binding.snapshot_as_of_date),
         )
+    materialized_bindings = [binding for binding in period_date_bindings if not binding.missing]
+    if not materialized_bindings:
+        raise ValueError("web_vitrina period window has no materialized row template")
     template_sheet = _require_data_sheet(
-        snapshots_by_as_of_date[period_date_bindings[0].snapshot_as_of_date]
+        snapshots_by_as_of_date[materialized_bindings[0].snapshot_as_of_date]
     )
     template_rows = list(template_sheet.rows)
     value_maps = {
@@ -280,6 +314,7 @@ def _build_period_snapshot(
             expected_date=binding.column_date,
         )
         for binding in period_date_bindings
+        if not binding.missing
     }
 
     combined_rows: list[list[Any]] = []
@@ -289,7 +324,10 @@ def _build_period_snapshot(
             continue
         combined_row = [row[0], row_id]
         for snapshot_date in selected_dates:
-            values_by_row_id = value_maps[snapshot_date]
+            values_by_row_id = value_maps.get(snapshot_date)
+            if values_by_row_id is None:
+                combined_row.append(None)
+                continue
             if row_id not in values_by_row_id:
                 raise ValueError(
                     f"period window row universe mismatch for {row_id!r} on {snapshot_date}"
@@ -349,20 +387,11 @@ def _resolve_period_date_bindings(
             _merge_readable_dates(
                 exact_ready_dates=[],
                 default_visible_snapshot=default_visible_snapshot,
+                business_week_dates=[],
                 date_from=date_from,
                 date_to=date_to,
                 descending=False,
             )
-        )
-    missing_dates = [snapshot_date for snapshot_date in expected_dates if snapshot_date not in readable_dates]
-    if missing_dates:
-        if len(missing_dates) == 1:
-            detail = missing_dates[0]
-        else:
-            detail = f"{missing_dates[0]}..{missing_dates[-1]} ({len(missing_dates)} days)"
-        raise ValueError(
-            "web_vitrina period window missing ready snapshots: "
-            f"{detail}"
         )
     period_date_bindings: list[_PeriodDateBinding] = []
     default_visible_date_set = (
@@ -389,7 +418,14 @@ def _resolve_period_date_bindings(
                 )
             )
             continue
-        raise ValueError(f"web_vitrina period binding missing for {requested_date}")
+        period_date_bindings.append(
+            _PeriodDateBinding(
+                requested_date=requested_date,
+                snapshot_as_of_date="",
+                column_date=requested_date,
+                missing=True,
+            )
+        )
     return period_date_bindings
 
 
@@ -424,9 +460,12 @@ def _resolve_period_refreshed_at(
             {
                 binding.snapshot_as_of_date
                 for binding in period_date_bindings
+                if not binding.missing and binding.snapshot_as_of_date
             }
         )
     ]
+    if not refreshed_values:
+        return ""
     return max(refreshed_values)
 
 
@@ -441,6 +480,7 @@ def _resolve_period_refresh_summary(
             {
                 binding.snapshot_as_of_date
                 for binding in period_date_bindings
+                if not binding.missing and binding.snapshot_as_of_date
             }
         )
     ]
@@ -448,15 +488,16 @@ def _resolve_period_refresh_summary(
     for item in statuses:
         if item.semantic_status in counts:
             counts[item.semantic_status] += 1
+    missing_count = sum(1 for binding in period_date_bindings if binding.missing)
     if any(item.semantic_status == "error" for item in statuses):
         status = "error"
         reason = (
             f"В выбранном периоде {counts['error']} snapshot с ошибками; "
             f"ещё {counts['warning']} требуют внимания."
         )
-    elif any(item.semantic_status == "warning" for item in statuses):
+    elif any(item.semantic_status == "warning" for item in statuses) or missing_count:
         status = "warning"
-        reason = f"В выбранном периоде {counts['warning']} snapshot требуют внимания."
+        reason = f"В выбранном периоде {counts['warning']} snapshot требуют внимания; {missing_count} дат пока без ready snapshot."
     else:
         status = "success"
         reason = f"Все {len(statuses)} snapshot в выбранном периоде подтверждены без warning/error."
@@ -466,7 +507,7 @@ def _resolve_period_refresh_summary(
         "label": label,
         "tone": status,
         "reason": reason,
-        "counts": counts,
+        "counts": {**counts, "missing": missing_count},
     }
 
 
@@ -488,6 +529,7 @@ def _merge_readable_dates(
     *,
     exact_ready_dates: list[str],
     default_visible_snapshot: SheetVitrinaV1Envelope | None,
+    business_week_dates: list[str],
     date_from: str | None,
     date_to: str | None,
     descending: bool,
@@ -495,6 +537,7 @@ def _merge_readable_dates(
     readable_dates = {str(item) for item in exact_ready_dates if item}
     if default_visible_snapshot is not None:
         readable_dates.update(str(item) for item in default_visible_snapshot.date_columns if item)
+    readable_dates.update(str(item) for item in business_week_dates if item)
     filtered_dates = sorted(
         snapshot_date
         for snapshot_date in readable_dates
@@ -504,6 +547,20 @@ def _merge_readable_dates(
     if descending:
         filtered_dates.reverse()
     return filtered_dates
+
+
+def _default_business_week_dates(now: datetime) -> list[str]:
+    today = date.fromisoformat(current_business_date_iso(now))
+    return [(today - timedelta(days=offset)).isoformat() for offset in range(6, -1, -1)]
+
+
+def _last_materialized_snapshot_as_of_date(bindings: list[_PeriodDateBinding]) -> str:
+    values = [
+        binding.snapshot_as_of_date
+        for binding in bindings
+        if not binding.missing and binding.snapshot_as_of_date
+    ]
+    return values[-1] if values else ""
 
 
 def _build_period_temporal_slot(snapshot_date: str):

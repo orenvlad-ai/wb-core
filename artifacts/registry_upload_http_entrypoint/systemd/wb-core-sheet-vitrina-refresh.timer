@@ -1,10 +1,8 @@
 [Unit]
-Description=WB Core Sheet Vitrina Daily Refresh Timer
+Description=WB Core Sheet Vitrina Auto Refresh Schedule Tick Timer
 
 [Timer]
-OnCalendar=*-*-* 06:00:00 UTC
-OnCalendar=*-*-* 15:00:00 UTC
-Persistent=true
+OnCalendar=*-*-* *:00,10,20,30,40,50:00
 AccuracySec=1m
 Unit=wb-core-sheet-vitrina-refresh.service
 

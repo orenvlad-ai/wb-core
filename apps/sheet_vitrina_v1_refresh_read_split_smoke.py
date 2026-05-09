@@ -201,8 +201,7 @@ def main() -> None:
             pre_refresh_status, pre_refresh_payload = _get_json(status_url)
             if pre_refresh_status != 422 or "ready snapshot missing" not in str(pre_refresh_payload.get("error", "")):
                 raise AssertionError("cheap status endpoint must report missing ready snapshot before refresh")
-            if pre_refresh_payload.get("server_context") != _expected_server_context():
-                raise AssertionError("cheap status endpoint must expose server_context even before refresh")
+            _assert_server_context(pre_refresh_payload.get("server_context") or {})
             if pre_refresh_payload.get("manual_context") != _expected_manual_context():
                 raise AssertionError("cheap status endpoint must expose empty manual timestamps before refresh")
 
@@ -241,8 +240,7 @@ def main() -> None:
             }
             if not required_phases.issubset(actual_phases):
                 raise AssertionError(f"refresh diagnostics missing required phases: {required_phases - actual_phases}")
-            if refresh_payload["server_context"] != _expected_server_context():
-                raise AssertionError("refresh_result must expose the same server_context block")
+            _assert_server_context(refresh_payload["server_context"])
             refresh_manual_context = refresh_payload.get("manual_context") or {}
             if refresh_manual_context.get("last_successful_manual_refresh_at") != "2026-04-13T17:05:00+05:00":
                 raise AssertionError("refresh_result must expose the updated manual refresh timestamp")
@@ -275,8 +273,7 @@ def main() -> None:
                 raise AssertionError(f"status endpoint must separate semantic warning from technical success, got {status_payload}")
             if status_payload["date_columns"] != [AS_OF_DATE, TODAY_CURRENT_DATE]:
                 raise AssertionError("status endpoint must expose both materialized dates")
-            if status_payload["server_context"] != refresh_payload["server_context"]:
-                raise AssertionError("status endpoint must expose the same server_context metadata")
+            _assert_server_context(status_payload["server_context"])
             if status_payload.get("manual_context") != refresh_payload.get("manual_context"):
                 raise AssertionError("status endpoint must expose the same manual refresh timestamp after refresh")
 
@@ -505,75 +502,41 @@ def _extract_operator_ui_config(html: str) -> dict[str, object]:
     return json.loads(match.group(1))
 
 
-def _expected_server_context() -> dict[str, object]:
-    return {
-        "business_timezone": "Asia/Yekaterinburg",
-        "business_now": "2026-04-13T13:00:00+05:00",
-        "default_as_of_date": AS_OF_DATE,
-        "today_current_date": TODAY_CURRENT_DATE,
-        "daily_refresh_business_time": "11:00, 20:00 Asia/Yekaterinburg",
-        "daily_refresh_systemd_time": "06:00:00 UTC, 15:00:00 UTC",
-        "daily_refresh_systemd_oncalendar": "*-*-* 06:00:00 UTC; *-*-* 15:00:00 UTC",
-        "daily_auto_action": "server-side refresh ready snapshot for website/operator web-vitrina",
-        "daily_auto_description": (
-            "Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: "
-            "server-side refresh ready snapshot for website/operator web-vitrina"
-        ),
-        "daily_auto_trigger_name": "wb-core-sheet-vitrina-refresh.timer",
-        "daily_auto_trigger_description": (
-            "wb-core-sheet-vitrina-refresh.timer -> POST /v1/sheet-vitrina-v1/refresh "
-            "(auto_refresh=true) в 11:00, 20:00 Asia/Yekaterinburg"
-        ),
-        "daily_auto_schedule_mode": "deploy_owned_systemd_timer",
-        "daily_auto_schedules": [
-            {
-                "id": "systemd_daily_11_00_ekt",
-                "enabled": True,
-                "local_time_hhmm": "11:00",
-                "timezone": "Asia/Yekaterinburg",
-                "timezone_label": "Asia/Yekaterinburg",
-                "trigger_name": "wb-core-sheet-vitrina-refresh.timer",
-                "trigger_kind": "systemd_timer",
-                "action": "canonical_full_refresh",
-                "auto_refresh": True,
-                "editable": False,
-                "status": "active",
-                "description": "11:00 Asia/Yekaterinburg: POST /v1/sheet-vitrina-v1/refresh с auto_refresh=true",
-            },
-            {
-                "id": "systemd_daily_20_00_ekt",
-                "enabled": True,
-                "local_time_hhmm": "20:00",
-                "timezone": "Asia/Yekaterinburg",
-                "timezone_label": "Asia/Yekaterinburg",
-                "trigger_name": "wb-core-sheet-vitrina-refresh.timer",
-                "trigger_kind": "systemd_timer",
-                "action": "canonical_full_refresh",
-                "auto_refresh": True,
-                "editable": False,
-                "status": "active",
-                "description": "20:00 Asia/Yekaterinburg: POST /v1/sheet-vitrina-v1/refresh с auto_refresh=true",
-            },
-        ],
-        "daily_auto_schedule_editable": False,
-        "daily_auto_schedule_blocker": (
-            "Runtime UI показывает текущее repo-owned systemd расписание; изменение cadence требует "
-            "operator approval и hosted deploy."
-        ),
-        "retry_runner_description": (
-            "Persisted retry runner: дожимает due yesterday_closed для historical/date-period families "
-            "и same-day today_current только для WB API current-snapshot-only families; manual refresh такие хвосты не создаёт."
-        ),
-        "last_auto_run_status": "never",
-        "last_auto_run_status_label": "ещё не выполнялся",
-        "last_auto_run_status_reason": "",
-        "last_auto_run_technical_status_label": "ещё не выполнялся",
-        "last_auto_run_time": "",
-        "last_auto_run_finished_at": "",
-        "last_successful_auto_update_at": "",
-        "last_auto_run_error": "",
-        "last_auto_run_result": None,
-    }
+def _assert_server_context(server_context: dict[str, object]) -> None:
+    if server_context.get("business_timezone") != "Asia/Yekaterinburg":
+        raise AssertionError(f"server_context business timezone mismatch: {server_context}")
+    if server_context.get("business_now") != "2026-04-13T13:00:00+05:00":
+        raise AssertionError(f"server_context business_now mismatch: {server_context}")
+    if server_context.get("default_as_of_date") != AS_OF_DATE or server_context.get("today_current_date") != TODAY_CURRENT_DATE:
+        raise AssertionError(f"server_context business dates mismatch: {server_context}")
+    if server_context.get("daily_refresh_business_time") != "11:00, 20:00 Asia/Yekaterinburg":
+        raise AssertionError(f"server_context runtime business schedule mismatch: {server_context}")
+    if server_context.get("daily_refresh_systemd_oncalendar") != "*-*-* *:00,10,20,30,40,50:00":
+        raise AssertionError(f"server_context systemd tick mismatch: {server_context}")
+    if server_context.get("daily_auto_schedule_mode") != "runtime_managed_json_schedule":
+        raise AssertionError(f"server_context schedule mode mismatch: {server_context}")
+    if server_context.get("daily_auto_schedule_source") != "runtime_json":
+        raise AssertionError(f"server_context schedule source mismatch: {server_context}")
+    if server_context.get("daily_auto_schedule_editable") is not True or server_context.get("daily_auto_schedule_blocker") != "":
+        raise AssertionError(f"server_context schedule mutability mismatch: {server_context}")
+    schedules = server_context.get("daily_auto_schedules")
+    if not isinstance(schedules, list) or [item.get("local_time_hhmm") for item in schedules] != ["11:00", "20:00"]:
+        raise AssertionError(f"server_context schedules mismatch: {server_context}")
+    if any(item.get("trigger_kind") != "runtime_json_schedule" or item.get("editable") is not True for item in schedules):
+        raise AssertionError(f"server_context schedule row mutability mismatch: {server_context}")
+    if not server_context.get("next_auto_run_at"):
+        raise AssertionError(f"server_context must expose next_auto_run_at: {server_context}")
+    for required in (
+        "last_auto_run_status",
+        "last_auto_run_time",
+        "last_auto_run_at",
+        "last_auto_success_at",
+        "last_auto_error_at",
+        "last_auto_error_summary",
+        "last_auto_job_id",
+    ):
+        if required not in server_context:
+            raise AssertionError(f"server_context missing {required}: {server_context}")
 
 
 def _expected_manual_context(

@@ -172,16 +172,14 @@ def main() -> None:
         summary_cards = {item["card_id"]: item for item in composition["summary_cards"]}
         if summary_cards["status"]["value"] != "Успешно":
             raise AssertionError(f"status summary card mismatch, got {summary_cards}")
-        if summary_cards["freshness"]["label"] != "Свежесть данных":
-            raise AssertionError(f"freshness summary card label mismatch, got {summary_cards}")
-        if summary_cards["freshness"]["value_kind"] != "timestamp":
-            raise AssertionError(f"freshness summary card must expose timestamp formatting kind, got {summary_cards['freshness']}")
-        if summary_cards["freshness"]["updated_at"] != "2026-04-20T12:05:00Z":
-            raise AssertionError(f"freshness summary card updated_at mismatch, got {summary_cards['freshness']}")
-        if "snapshot " not in summary_cards["freshness"]["detail"] or "as_of_date 2026-04-20" not in summary_cards["freshness"]["detail"]:
-            raise AssertionError(f"freshness summary card detail mismatch, got {summary_cards['freshness']}")
-        if "snapshot" in summary_cards:
-            raise AssertionError(f"snapshot summary card must be folded into freshness, got {summary_cards}")
+        if summary_cards["period"]["label"] != "Период":
+            raise AssertionError(f"period summary card label mismatch, got {summary_cards}")
+        if summary_cards["period"]["value_kind"] != "period":
+            raise AssertionError(f"period summary card value kind mismatch, got {summary_cards['period']}")
+        if summary_cards["period"]["detail"] != "2026-04-20T12:05:00Z":
+            raise AssertionError(f"period summary card detail mismatch, got {summary_cards['period']}")
+        if "freshness" in summary_cards or "rows" in summary_cards or "snapshot" in summary_cards:
+            raise AssertionError(f"freshness/rows/snapshot summary cards must be folded into compact strip, got {summary_cards}")
         activity_surface = composition["activity_surface"]
         if activity_surface["log_block"]["title"] != "Лог" or not activity_surface["log_block"]["download_path"]:
             raise AssertionError(f"activity log block mismatch, got {activity_surface['log_block']}")
@@ -339,10 +337,10 @@ def main() -> None:
         if error_payload["status_badge"]["label"] != "Ошибка":
             raise AssertionError(f"error composition status label mismatch, got {error_payload['status_badge']}")
         error_summary_cards = {item["card_id"]: item for item in error_payload["summary_cards"]}
-        if error_summary_cards["freshness"]["label"] != "Свежесть данных":
-            raise AssertionError(f"error freshness card label mismatch, got {error_summary_cards}")
-        if "snapshot unavailable" not in error_summary_cards["freshness"]["detail"]:
-            raise AssertionError(f"error freshness card detail mismatch, got {error_summary_cards}")
+        if error_summary_cards["period"]["label"] != "Период":
+            raise AssertionError(f"error period card label mismatch, got {error_summary_cards}")
+        if "table payload is unavailable" not in error_summary_cards["period"]["detail"]:
+            raise AssertionError(f"error period card detail mismatch, got {error_summary_cards}")
         if error_payload["activity_surface"]["log_block"]["title"] != "Лог":
             raise AssertionError(f"error composition activity surface mismatch, got {error_payload['activity_surface']}")
 

@@ -59,6 +59,7 @@ DEFAULT_SHEET_WEB_VITRINA_READ_PATH = "/v1/sheet-vitrina-v1/web-vitrina"
 DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE = "page_composition"
 DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH = "/v1/sheet-vitrina-v1/web-vitrina/group-refresh"
 DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_PATH = "/v1/sheet-vitrina-v1/web-vitrina/auto-schedules"
+DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_RUN_NOW_PATH = "/v1/sheet-vitrina-v1/web-vitrina/auto-schedules/run-now"
 DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH = (
     "/v1/sheet-vitrina-v1/research/sku-group-comparison/options"
 )
@@ -504,6 +505,32 @@ def _build_handler(
                     self,
                     HTTPStatus.OK,
                     result,
+                )
+                return
+
+            if parsed.path == DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_RUN_NOW_PATH:
+                try:
+                    payload = _load_optional_request_payload(self)
+                    job_payload = entrypoint.handle_sheet_web_vitrina_auto_schedules_run_now_request(payload)
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina auto schedule run-now failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(
+                    self,
+                    HTTPStatus.ACCEPTED,
+                    _with_sheet_job_urls(job_payload, sheet_job_path),
                 )
                 return
 
@@ -2765,6 +2792,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "refresh_path": refresh_path,
         "group_refresh_path": DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH,
         "auto_schedules_path": DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_PATH,
+        "auto_schedules_run_now_path": DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_RUN_NOW_PATH,
         "research_options_path": DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH,
         "research_calculate_path": DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_CALCULATE_PATH,
         "feedbacks_path": DEFAULT_SHEET_FEEDBACKS_PATH,

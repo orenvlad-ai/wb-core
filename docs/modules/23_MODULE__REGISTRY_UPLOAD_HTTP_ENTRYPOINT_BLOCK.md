@@ -81,6 +81,8 @@ related_endpoints:
   - "GET /logout"
   - "POST /logout"
   - "GET /v1/sheet-vitrina-v1/web-vitrina"
+  - "GET/POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules"
+  - "POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules/run-now"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/status"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/template/inbound-factory.xlsx"
@@ -115,6 +117,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py"
+  - "apps/sheet_vitrina_v1_web_vitrina_auto_schedules_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_reason_sanitization_smoke.py"
   - "apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py"
   - "apps/sheet_vitrina_v1_feedbacks_http_smoke.py"
@@ -255,7 +258,7 @@ update_note: "Обновлён под simple WebCore auth, strict feedbacks за
   - read route remains server-owned and read-only:
     - default path builds `web_vitrina_contract` v1 only from existing ready snapshot + current registry truth, stays truthful `422` on missing ready snapshot and must not trigger refresh/upstream fetch
     - optional `as_of_date=<YYYY-MM-DD>` keeps bounded one-day historical read on the same route
-    - optional `date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>` now materializes a bounded server-side ready-snapshot window on the same route; browser does not aggregate multi-day truth itself
+    - optional `date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>` now materializes a bounded server-side period window on the same route; browser does not aggregate multi-day truth itself. Backend-owned current-week dates can be visible with blank cells when a ready snapshot is not materialized yet, and that condition is surfaced as warning rather than hiding the date.
     - optional `surface=page_composition` on the same route builds bounded server-driven page payload over `contract -> view_model -> gravity_table_adapter` for the live sibling page, defers heavy table rows unless `include_table_data=1` is explicit, and still must not trigger refresh/upstream fetch
   - `web_vitrina_contract` v1 is library-agnostic and currently materializes only:
     - `meta` = `snapshot_id`, `bundle_version`, `as_of_date`, `business_timezone`, `date_columns`, `temporal_slots`, `generated_at`, `refreshed_at`, `row_count`
@@ -272,18 +275,18 @@ update_note: "Обновлён под simple WebCore auth, strict feedbacks за
     - `web_vitrina_gravity_table_adapter` = current phase-3 concrete grid-adapter layer over `view_model`, still repo-side and still outside canonical route contract
     - `web_vitrina_page_composition` = current phase-4 server-driven page layer and thin HTML/client-shell boundary for `/sheet-vitrina-v1/vitrina`
   - current bounded live UX on `/sheet-vitrina-v1/vitrina` now includes:
-    - default/no-query cheap daily mode
+    - default/no-query week mode `D-6..D`, ending on backend-owned `today_current_date` in `Asia/Yekaterinburg`
     - one-day historical mode via existing `as_of_date`
     - period mode via existing route `date_from/date_to`
     - repo-owned inline calendar/preset panel with buttons `Сбросить` / `Сохранить`
-    - operator-style layout: compact top panel, summary cards, main vitrina table first, then filters/settings, historical controls and bottom `Действия и состояния`
+    - operator-style layout: compact top panel, runtime `Автообновления`, compact summary/status strip, main vitrina table first, then filters/settings, historical controls and bottom `Действия и состояния`
     - main table display headers are Russian and include `Обновлено`; this field is a per-row last successful update timestamp in the vitrina snapshot metadata, not the business data date
     - server-driven activity surface renders `Загрузка данных` as a grouped compact table over the same truthful source outcomes: groups `WB API`, `Seller Portal / бот`, `Прочие источники`, each with one compact date control, one `Обновить группу` action and group-level last update timestamp; rows keep server/business today/yesterday status columns, reason columns, Russian metric labels and secondary technical endpoint text. The group map covers every visible main-table metric exactly once; residual calculated/formula metrics, including proxy profit and proxy margin, belong to `Прочие источники`.
     - `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` is the date-scoped web-vitrina group action seam; payload includes `{async: true, source_group_id, as_of_date}`. The client surfaces launch/loading/error state per group and writes a visible launch-failure line when the POST returns non-2xx before job creation; once the route reaches the app, it starts a job/log-backed partial refresh/load for one source group and one selected date, and must not clear, overwrite or timestamp unrelated groups or unrelated date cells. Group/global job results expose `updated_cells` metadata for transient UI highlighting: `updated` cells are green, `latest_confirmed`/fallback cells are yellow, and the styling is browser-session-only.
     - successful group-refresh writes through the shared server-side accepted/runtime contour (`ЕБД` / `единая база данных`) and selected ready snapshot, not through Google Sheets/GAS, browser UI state or localStorage; web-vitrina and reports must consume that same server-side truth layer.
     - `Seller Portal / бот` group reuses the existing seller session/recovery mechanisms for `Проверить сессию`, `Восстановить сессию` and `Скачать лаунчер`; `Лог` renders below the loading table and keeps the existing job/log download contour; the former `Обновление данных` activity block is not an active page-composition surface
-    - raw STATUS/job note, JSON fragments, traceback text, request ids and similar technical payload stay in existing log/download contour and must not leak into the main summary-card reason
-    - `Свежесть данных` remains server-owned, but its user-facing value now uses the same readable timestamp formatter as browser-owned `Последнее обновление страницы` instead of raw ISO `T/Z`
+    - raw STATUS/job note, JSON fragments, traceback text, request ids and similar technical payload stay in existing log/download contour and must not leak into the main summary/status reason
+    - the former bulky `Свежесть данных` and `Строки` cards are merged away from the top summary; automatic freshness is surfaced in `Автообновления` through last run/success/error/next run, while the top strip keeps browser reread timestamp, semantic status and selected period
     - `export_layer`
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/status` = cheap JSON status surface для bounded factory-order flow
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/*.xlsx` = operator template downloads с русскими headers
@@ -518,16 +521,11 @@ update_note: "Обновлён под simple WebCore auth, strict feedbacks за
   - failed manual attempts must not erase the previously known successful manual time
   - reload/page-open state for this block stays truthful to persisted manual-success facts; technical prepared-snapshot details stay only in the job/log surface
 - Operator page keeps one compact server-driven auto block `Автообновления`:
-  - `Часовой пояс`
-  - `Текущее время сервера`
-  - `Автоцепочка`
-  - `Последний автозапуск`
-  - `Статус последнего автозапуска`
-  - `Последнее успешное автообновление`
-- Этот auto block не hardcode-ится в UI: page читает его только из existing `GET /v1/sheet-vitrina-v1/status` / `POST /v1/sheet-vitrina-v1/refresh` response field `server_context`, а manual-success fields page читает только из sibling field `manual_context`.
-- `Автоцепочка` в этом block обязана быть truthful server-driven описанием полного daily auto path, а не только временем:
-  - canonical current wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: server-side refresh ready snapshot for website/operator web-vitrina`
-  - manual operator semantics теперь явно отличаются от auto path: explicit UI buttons всё ещё разделяют `refresh` и `load`, short retries остаются внутри одного run, но persisted long-retry state после manual refresh не создаётся
+  - `GET/POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules` is the managed schedule surface for web-vitrina refresh cadence. Rows are runtime JSON under the server runtime dir, not browser-local state and not deploy-hardcoded business times.
+  - Rows expose stable `id`, `enabled`, editable local `HH:mm`, timezone, trigger/action, `next_run_at`, `last_run_at`, `last_success_at`, `last_status`, `last_error_summary` and run-now capability.
+  - `POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules/run-now` launches the existing async full-refresh job with auto-schedule trigger metadata. It does not call the archived Google Sheets load path.
+  - The systemd unit `wb-core-sheet-vitrina-refresh.timer` is now a non-persistent due-check ticker (`*-*-* *:00,10,20,30,40,50:00`) that runs `apps/sheet_vitrina_v1_auto_refresh_tick.py`; business times and catch-up are evaluated from the runtime schedule file and the tick uses WebCore session auth before calling the protected refresh API.
+  - Manual operator refresh and automatic refresh share canonical full-refresh semantics; only trigger metadata differs. Technical job success is separated from semantic warning/error, and stale/missing/preserved closed-day data must not render as false green success.
 - Operator log surface обязан показывать построчный start / key steps / finish / error для обеих operator actions:
   - `refresh` = build/persist ready snapshot only
   - `load` = write already prepared snapshot only
@@ -706,10 +704,12 @@ update_note: "Обновлён под simple WebCore auth, strict feedbacks за
 - Repo-owned operator page для explicit refresh теперь живёт на том же thin HTTP entrypoint и убирает ручной `curl` из нормального operator path.
 - Existing operator page/status surface теперь server-driven показывает текущую EKT business-time truth и current timer trigger metadata без отдельного meta route и без hardcoded UI copy.
 - Live service остаётся тонкой loopback HTTP boundary (`wb-core-registry-http.service` -> `127.0.0.1:8765`) и не переносит heavy truth в Apps Script.
-- Existing live daily refresh scheduler materialize-ится как external systemd timer `wb-core-sheet-vitrina-refresh.timer`, который вызывает тот же existing `POST /v1/sheet-vitrina-v1/refresh` ежедневно в `11:00` и `20:00 Asia/Yekaterinburg` (`06:00 UTC` и `15:00 UTC` на current host), но теперь делает только server-side refresh ready snapshot for website/operator web-vitrina:
+- Existing live daily refresh scheduler materialize-ится как repo-owned systemd due-check timer `wb-core-sheet-vitrina-refresh.timer`: timer cadence is every 10 minutes, service runs `apps/sheet_vitrina_v1_auto_refresh_tick.py`, and the runner reads runtime JSON schedules before starting due full-refresh jobs.
+  - default runtime business schedules are `11:00` and `20:00 Asia/Yekaterinburg`, but add/edit/delete/disable is owned by `GET/POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules`;
+  - the runner calls the same protected refresh API with a WebCore session cookie and `auto_refresh=true`, so app-level auth must not break unattended refresh;
   - server contour materialize-ит ready snapshot тем же heavy refresh path;
   - former `auto_load=true` / load bridge / live Google Sheets write step is archived and rejected;
-  - runtime/status surface не должна маскировать refresh-only под sheet-complete.
+  - runtime/status surface не должна маскировать refresh-only или semantic warning/error под sheet-complete/green success.
 - Existing live contour также допускает отдельный bounded retry timer `wb-core-sheet-vitrina-closure-retry.timer`, который вызывает repo-owned runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py`:
   - timer не делает tight loop и может запускаться чаще, чем real retry cadence, потому что due/backoff decision already lives in persisted runtime state;
   - retry runner дожимает due `yesterday_closed` для всей historical/date-period matrix и same-day `today_current` only for current-snapshot-only group;

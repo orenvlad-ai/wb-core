@@ -32,6 +32,12 @@ from packages.application.sheet_vitrina_v1_load_bridge import (
 )
 from packages.application.sheet_vitrina_v1_plan_report import SheetVitrinaV1PlanReportBlock
 from packages.application.sheet_vitrina_v1_research import SheetVitrinaV1ResearchBlock
+from packages.application.sheet_vitrina_v1_auto_refresh import (
+    DEFAULT_SCHEDULE_MODE as SHEET_AUTO_REFRESH_SCHEDULE_MODE,
+    DEFAULT_SCHEDULE_SOURCE as SHEET_AUTO_REFRESH_SCHEDULE_SOURCE,
+    DEFAULT_SYSTEMD_ONCALENDAR as SHEET_AUTO_REFRESH_TICK_ONCALENDAR,
+    SheetVitrinaV1AutoRefreshSchedulesBlock,
+)
 from packages.application.sheet_vitrina_v1_stock_report import SheetVitrinaV1StockReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import list_active_sku_options
 from packages.application.sheet_vitrina_v1_temporal_policy import (
@@ -54,8 +60,6 @@ from apps.promo_campaign_archive_gc import run_promo_campaign_archive_light_gc
 from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE_NAME,
     DAILY_REFRESH_BUSINESS_HOURS,
-    DAILY_REFRESH_SYSTEMD_UTC_ONCALENDAR,
-    DAILY_REFRESH_SYSTEMD_UTC_TIME,
     current_business_date_iso,
     default_business_as_of_date,
     to_business_datetime,
@@ -86,6 +90,7 @@ SHEET_VITRINA_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/refresh"
 SHEET_VITRINA_LOAD_ROUTE = "/v1/sheet-vitrina-v1/load"
 SHEET_VITRINA_GROUP_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/group-refresh"
 SHEET_VITRINA_AUTO_SCHEDULES_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/auto-schedules"
+SHEET_VITRINA_AUTO_SCHEDULES_RUN_NOW_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/auto-schedules/run-now"
 SHEET_VITRINA_SELLER_RECOVERY_START_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start"
 SHEET_VITRINA_DAILY_TIMER_NAME = "wb-core-sheet-vitrina-refresh.timer"
 SHEET_VITRINA_DAILY_AUTO_ACTION = "server-side refresh ready snapshot for website/operator web-vitrina"
@@ -97,8 +102,8 @@ SHEET_VITRINA_DAILY_AUTO_DESCRIPTION = (
     f"{SHEET_VITRINA_DAILY_AUTO_ACTION}"
 )
 SHEET_VITRINA_DAILY_TRIGGER_DESCRIPTION = (
-    f"{SHEET_VITRINA_DAILY_TIMER_NAME} -> POST {SHEET_VITRINA_REFRESH_ROUTE} "
-    f"(auto_refresh=true) в {SHEET_VITRINA_DAILY_BUSINESS_TIMES} {CANONICAL_BUSINESS_TIMEZONE_NAME}"
+    f"{SHEET_VITRINA_DAILY_TIMER_NAME} -> apps/sheet_vitrina_v1_auto_refresh_tick.py -> "
+    f"POST {SHEET_VITRINA_REFRESH_ROUTE} (auto_refresh=true) for due runtime schedules"
 )
 SHEET_VITRINA_RETRY_RUNNER_DESCRIPTION = (
     "Persisted retry runner: дожимает due yesterday_closed для historical/date-period families "
@@ -525,6 +530,10 @@ class RegistryUploadHttpEntrypoint:
             runtime=self.runtime,
             now_factory=self.now_factory,
         )
+        self.sheet_auto_refresh_schedules_block = SheetVitrinaV1AutoRefreshSchedulesBlock(
+            runtime_dir=self.runtime.runtime_dir,
+            now_factory=self.now_factory,
+        )
         self.research_block = SheetVitrinaV1ResearchBlock(
             runtime=self.runtime,
             web_vitrina_block=self.web_vitrina_block,
@@ -884,29 +893,52 @@ class RegistryUploadHttpEntrypoint:
         return self.feedbacks_auto_complaints_block.tick(payload)
 
     def handle_sheet_web_vitrina_auto_schedules_request(self) -> dict[str, Any]:
-        return _build_web_vitrina_auto_schedule_payload(self.build_sheet_server_context())
+        auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()
+        return self.sheet_auto_refresh_schedules_block.build_payload(
+            auto_context={
+                "last_auto_run_status": auto_update_state.last_run_status or "never",
+                "last_auto_run_time": _format_optional_business_timestamp(auto_update_state.last_run_started_at),
+                "last_auto_run_finished_at": _format_optional_business_timestamp(auto_update_state.last_run_finished_at),
+                "last_successful_auto_update_at": _format_optional_business_timestamp(auto_update_state.last_successful_auto_update_at),
+                "last_auto_run_error": auto_update_state.last_run_error or "",
+            }
+        )
 
     def handle_sheet_web_vitrina_auto_schedules_save_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        current = _build_web_vitrina_auto_schedule_payload(self.build_sheet_server_context())
-        proposed = _normalize_web_vitrina_auto_schedule_rows(payload.get("schedules"))
-        current_signature = _web_vitrina_auto_schedule_signature(current["schedules"])
-        proposed_signature = _web_vitrina_auto_schedule_signature(proposed)
-        if proposed_signature == current_signature:
-            result = dict(current)
-            result["status"] = "unchanged"
-            result["message"] = "Расписание автообновлений уже соответствует deploy-owned systemd timer."
-            return result
-        result = dict(current)
-        result["status"] = "blocked"
-        result["message"] = (
-            "Изменение production cadence для web-vitrina выполняется через repo-owned deploy "
-            "contract/systemd timer, а не runtime UI state."
+        auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()
+        return self.sheet_auto_refresh_schedules_block.save_schedules(
+            payload,
+            auto_context={
+                "last_auto_run_status": auto_update_state.last_run_status or "never",
+                "last_auto_run_time": _format_optional_business_timestamp(auto_update_state.last_run_started_at),
+                "last_auto_run_finished_at": _format_optional_business_timestamp(auto_update_state.last_run_finished_at),
+                "last_successful_auto_update_at": _format_optional_business_timestamp(auto_update_state.last_successful_auto_update_at),
+                "last_auto_run_error": auto_update_state.last_run_error or "",
+            },
         )
-        result["requested_schedules"] = proposed
-        result["blocker"] = (
-            "Нужен отдельный operator approval на изменение systemd timer и последующий hosted deploy."
+
+    def handle_sheet_web_vitrina_auto_schedules_run_now_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        schedule_id = str(payload.get("schedule_id") or "").strip()
+        if not schedule_id:
+            schedules_payload = self.sheet_auto_refresh_schedules_block.build_payload()
+            enabled = [
+                item
+                for item in schedules_payload.get("schedules", [])
+                if isinstance(item, Mapping) and bool(item.get("enabled", True))
+            ]
+            if not enabled:
+                raise ValueError("no enabled auto refresh schedules")
+            schedule_id = str(enabled[0].get("id") or "")
+        self.sheet_auto_refresh_schedules_block.get_schedule(schedule_id)
+        return self.operator_jobs.start(
+            operation="auto_update",
+            runner=lambda log: self._run_sheet_scheduled_auto_update(
+                schedule_id=schedule_id,
+                due_at="",
+                trigger_source="manual_run_now_from_auto_schedule",
+                log=log,
+            ),
         )
-        return result
 
     def handle_sheet_refresh_request(
         self,
@@ -950,7 +982,7 @@ class RegistryUploadHttpEntrypoint:
         normalized_group_id = _normalize_source_group_id(source_group_id)
         now = self.now_factory()
         selected_as_of_date = _resolve_group_refresh_selected_date(as_of_date, now=now)
-        available_dates = self.web_vitrina_block.list_readable_dates(descending=False)
+        available_dates = self.web_vitrina_block.list_materialized_readable_dates(descending=False)
         if selected_as_of_date not in set(available_dates):
             available_text = (
                 f"{available_dates[0]}..{available_dates[-1]}"
@@ -1091,7 +1123,7 @@ class RegistryUploadHttpEntrypoint:
         update_source_keys = _ordered_activity_source_keys(shared_source_keys, update_records)
         current_business_date = current_business_date_iso(self.now_factory())
         previous_business_date = default_business_as_of_date(self.now_factory())
-        group_refresh_available_dates = self.web_vitrina_block.list_readable_dates(descending=False)
+        group_refresh_available_dates = self.web_vitrina_block.list_materialized_readable_dates(descending=False)
         group_refresh_default_date = _default_group_refresh_date(
             group_refresh_available_dates,
             preferred_date=current_business_date,
@@ -1404,21 +1436,22 @@ class RegistryUploadHttpEntrypoint:
                 finished_at=finished_at,
                 error=None,
             )
+            auto_status = str(auto_result.get("semantic_status") or "warning")
             self.runtime.save_sheet_vitrina_auto_update_result(
                 started_at=started_at,
                 finished_at=finished_at,
-                status="success",
+                status=auto_status,
                 as_of_date=str(refresh_payload["as_of_date"]),
                 snapshot_id=str(refresh_payload["snapshot_id"]),
                 refreshed_at=str(refresh_payload["refreshed_at"]),
-                error=None,
+                error=None if auto_status == "success" else str(auto_result.get("semantic_reason") or ""),
                 result_payload=auto_result,
             )
             emit(
                 _format_log_event(
                     "cycle_finish",
                     cycle="auto_update",
-                    status="success",
+                    status=auto_status,
                     semantic_status=auto_result.get("semantic_status"),
                     semantic_reason=auto_result.get("semantic_reason"),
                     route=SHEET_VITRINA_REFRESH_ROUTE,
@@ -1442,6 +1475,53 @@ class RegistryUploadHttpEntrypoint:
             payload["manual_context"] = self.build_sheet_manual_context()
             payload["load_context"] = self.build_sheet_load_context()
             return payload
+
+    def _run_sheet_scheduled_auto_update(
+        self,
+        *,
+        schedule_id: str,
+        due_at: str,
+        trigger_source: str,
+        log: OperatorLogEmitter | None,
+    ) -> dict[str, Any]:
+        emit = log or _noop_log
+        started_at = self.activated_at_factory()
+        run_id = SHEET_OPERATOR_JOB_ID.get()
+        self.sheet_auto_refresh_schedules_block.mark_run_started(
+            schedule_id,
+            started_at=started_at,
+            due_at=due_at,
+            run_id=run_id,
+            trigger_source=trigger_source,
+        )
+        emit(
+            _format_log_event(
+                "auto_schedule_start",
+                schedule_id=schedule_id,
+                due_at=due_at,
+                trigger_source=trigger_source,
+                run_id=run_id,
+            )
+        )
+        try:
+            result = self._run_sheet_auto_update(as_of_date=None, log=emit)
+        except Exception as exc:
+            finished_at = self.activated_at_factory()
+            self.sheet_auto_refresh_schedules_block.mark_run_finished(
+                schedule_id,
+                finished_at=finished_at,
+                error=str(exc),
+            )
+            raise
+        finished_at = self.activated_at_factory()
+        self.sheet_auto_refresh_schedules_block.mark_run_finished(
+            schedule_id,
+            finished_at=finished_at,
+            result_payload=result,
+        )
+        result["auto_schedule"] = self.sheet_auto_refresh_schedules_block.get_schedule(schedule_id)
+        result["auto_schedule_trigger_source"] = trigger_source
+        return result
 
     def _run_sheet_refresh(
         self,
@@ -2225,46 +2305,86 @@ class RegistryUploadHttpEntrypoint:
         now = self.now_factory()
         business_now = to_business_datetime(now).replace(microsecond=0).isoformat()
         auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()
-        auto_result = _format_operator_result_payload(auto_update_state.last_run_result)
-        schedule_rows = _build_web_vitrina_systemd_schedule_rows()
-        return {
-            "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
-            "business_now": business_now,
-            "default_as_of_date": default_business_as_of_date(now),
-            "today_current_date": current_business_date_iso(now),
-            "daily_refresh_business_time": f"{SHEET_VITRINA_DAILY_BUSINESS_TIMES} {CANONICAL_BUSINESS_TIMEZONE_NAME}",
-            "daily_refresh_systemd_time": DAILY_REFRESH_SYSTEMD_UTC_TIME,
-            "daily_refresh_systemd_oncalendar": DAILY_REFRESH_SYSTEMD_UTC_ONCALENDAR,
-            "daily_auto_action": SHEET_VITRINA_DAILY_AUTO_ACTION,
-            "daily_auto_description": SHEET_VITRINA_DAILY_AUTO_DESCRIPTION,
-            "daily_auto_trigger_name": SHEET_VITRINA_DAILY_TIMER_NAME,
-            "daily_auto_trigger_description": SHEET_VITRINA_DAILY_TRIGGER_DESCRIPTION,
-            "daily_auto_schedule_mode": "deploy_owned_systemd_timer",
-            "daily_auto_schedules": schedule_rows,
-            "daily_auto_schedule_editable": False,
-            "daily_auto_schedule_blocker": (
-                "Runtime UI показывает текущее repo-owned systemd расписание; изменение cadence требует "
-                "operator approval и hosted deploy."
-            ),
-            "retry_runner_description": SHEET_VITRINA_RETRY_RUNNER_DESCRIPTION,
+        auto_result = _format_operator_result_payload(auto_update_state.last_run_result) or {}
+        auto_context = {
             "last_auto_run_status": auto_update_state.last_run_status or "never",
-            "last_auto_run_status_label": (
-                str(auto_result.get("semantic_label") or "")
-                if auto_result
-                else _auto_update_status_label(auto_update_state.last_run_status)
-            ),
-            "last_auto_run_status_reason": (
-                str(auto_result.get("semantic_reason") or "")
-                if auto_result
-                else (auto_update_state.last_run_error or "")
-            ),
-            "last_auto_run_technical_status_label": _auto_update_status_label(auto_update_state.last_run_status),
+            "last_auto_run_technical_status": str(auto_result.get("technical_status") or auto_update_state.last_run_status or "never"),
             "last_auto_run_time": _format_optional_business_timestamp(auto_update_state.last_run_started_at),
             "last_auto_run_finished_at": _format_optional_business_timestamp(auto_update_state.last_run_finished_at),
             "last_successful_auto_update_at": _format_optional_business_timestamp(
                 auto_update_state.last_successful_auto_update_at
             ),
             "last_auto_run_error": auto_update_state.last_run_error or "",
+            "last_auto_run_status_reason": (
+                str(auto_result.get("semantic_reason") or "")
+                if auto_result
+                else (auto_update_state.last_run_error or "")
+            ),
+        }
+        auto_schedules_payload = self.sheet_auto_refresh_schedules_block.build_payload(auto_context=auto_context)
+        schedule_rows = [
+            dict(item)
+            for item in auto_schedules_payload.get("schedules", [])
+            if isinstance(item, Mapping)
+        ]
+        enabled_times = [
+            str(item.get("local_time_hhmm") or "")
+            for item in schedule_rows
+            if bool(item.get("enabled", True)) and str(item.get("local_time_hhmm") or "")
+        ]
+        business_times = ", ".join(enabled_times) or "disabled"
+        last_auto_run_status = str(auto_schedules_payload.get("last_auto_run_status") or auto_update_state.last_run_status or "never")
+        last_auto_run_technical_status = str(
+            auto_schedules_payload.get("last_auto_run_technical_status")
+            or auto_result.get("technical_status")
+            or last_auto_run_status
+        )
+        return {
+            "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
+            "business_now": business_now,
+            "default_as_of_date": default_business_as_of_date(now),
+            "today_current_date": current_business_date_iso(now),
+            "daily_refresh_business_time": f"{business_times} {CANONICAL_BUSINESS_TIMEZONE_NAME}",
+            "daily_refresh_systemd_time": "every 10 minutes UTC due-check",
+            "daily_refresh_systemd_oncalendar": SHEET_AUTO_REFRESH_TICK_ONCALENDAR,
+            "daily_auto_action": SHEET_VITRINA_DAILY_AUTO_ACTION,
+            "daily_auto_description": (
+                f"Runtime-managed schedules ({business_times} {CANONICAL_BUSINESS_TIMEZONE_NAME}) "
+                f"trigger {SHEET_VITRINA_DAILY_AUTO_ACTION}."
+            ),
+            "daily_auto_trigger_name": SHEET_VITRINA_DAILY_TIMER_NAME,
+            "daily_auto_trigger_description": SHEET_VITRINA_DAILY_TRIGGER_DESCRIPTION,
+            "daily_auto_schedule_mode": SHEET_AUTO_REFRESH_SCHEDULE_MODE,
+            "daily_auto_schedule_source": SHEET_AUTO_REFRESH_SCHEDULE_SOURCE,
+            "daily_auto_schedules": schedule_rows,
+            "daily_auto_schedule_editable": True,
+            "daily_auto_schedule_blocker": "",
+            "next_auto_run_at": str(auto_schedules_payload.get("next_auto_run_at") or ""),
+            "auto_schedule_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
+            "auto_schedule_source": SHEET_AUTO_REFRESH_SCHEDULE_SOURCE,
+            "retry_runner_description": SHEET_VITRINA_RETRY_RUNNER_DESCRIPTION,
+            "last_auto_run_status": last_auto_run_status,
+            "last_auto_run_technical_status": last_auto_run_technical_status,
+            "last_auto_run_status_label": (
+                str(auto_schedules_payload.get("last_auto_run_status_label") or "")
+                or (str(auto_result.get("semantic_label") or "") if auto_result else "")
+                or _auto_update_status_label(last_auto_run_status)
+            ),
+            "last_auto_run_status_reason": (
+                str(auto_schedules_payload.get("last_auto_run_status_reason") or "")
+                or (str(auto_result.get("semantic_reason") or "") if auto_result else "")
+                or (auto_update_state.last_run_error or "")
+            ),
+            "last_auto_run_technical_status_label": _auto_update_status_label(last_auto_run_technical_status),
+            "last_auto_run_time": str(auto_schedules_payload.get("last_auto_run_time") or ""),
+            "last_auto_run_at": str(auto_schedules_payload.get("last_auto_run_at") or ""),
+            "last_auto_run_finished_at": str(auto_schedules_payload.get("last_auto_run_finished_at") or ""),
+            "last_successful_auto_update_at": str(auto_schedules_payload.get("last_successful_auto_update_at") or ""),
+            "last_auto_success_at": str(auto_schedules_payload.get("last_auto_success_at") or ""),
+            "last_auto_error_at": str(auto_schedules_payload.get("last_auto_error_at") or ""),
+            "last_auto_error_summary": str(auto_schedules_payload.get("last_auto_error_summary") or ""),
+            "last_auto_job_id": str(auto_schedules_payload.get("last_auto_job_id") or ""),
+            "last_auto_run_error": str(auto_schedules_payload.get("last_auto_run_error") or ""),
             "last_auto_run_result": auto_result,
         }
 
@@ -3096,106 +3216,6 @@ def _auto_update_status_label(value: str | None) -> str:
     return "ещё не выполнялся"
 
 
-def _build_web_vitrina_systemd_schedule_rows() -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for hour in DAILY_REFRESH_BUSINESS_HOURS:
-        local_time = f"{hour:02d}:00"
-        rows.append(
-            {
-                "id": f"systemd_daily_{hour:02d}_00_ekt",
-                "enabled": True,
-                "local_time_hhmm": local_time,
-                "timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
-                "timezone_label": "Asia/Yekaterinburg",
-                "trigger_name": SHEET_VITRINA_DAILY_TIMER_NAME,
-                "trigger_kind": "systemd_timer",
-                "action": "canonical_full_refresh",
-                "auto_refresh": True,
-                "editable": False,
-                "status": "active",
-                "description": (
-                    f"{local_time} {CANONICAL_BUSINESS_TIMEZONE_NAME}: POST "
-                    f"{SHEET_VITRINA_REFRESH_ROUTE} с auto_refresh=true"
-                ),
-            }
-        )
-    return rows
-
-
-def _build_web_vitrina_auto_schedule_payload(server_context: Mapping[str, Any]) -> dict[str, Any]:
-    schedules = [
-        dict(item)
-        for item in (server_context.get("daily_auto_schedules") or _build_web_vitrina_systemd_schedule_rows())
-        if isinstance(item, Mapping)
-    ]
-    return {
-        "status": "ok",
-        "schedule_mode": str(server_context.get("daily_auto_schedule_mode") or "deploy_owned_systemd_timer"),
-        "timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
-        "timezone_label": "Asia/Yekaterinburg",
-        "can_edit_runtime": False,
-        "save_supported": False,
-        "schedules": schedules,
-        "trigger_name": str(server_context.get("daily_auto_trigger_name") or SHEET_VITRINA_DAILY_TIMER_NAME),
-        "trigger_description": str(server_context.get("daily_auto_trigger_description") or ""),
-        "action": str(server_context.get("daily_auto_action") or SHEET_VITRINA_DAILY_AUTO_ACTION),
-        "last_auto_run_status": str(server_context.get("last_auto_run_status") or "never"),
-        "last_auto_run_status_label": str(server_context.get("last_auto_run_status_label") or ""),
-        "last_auto_run_time": str(server_context.get("last_auto_run_time") or ""),
-        "last_successful_auto_update_at": str(server_context.get("last_successful_auto_update_at") or ""),
-        "blocker": str(server_context.get("daily_auto_schedule_blocker") or ""),
-        "message": "Текущее расписание прочитано из repo-owned systemd timer contract.",
-    }
-
-
-def _normalize_web_vitrina_auto_schedule_rows(value: Any) -> list[dict[str, Any]]:
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ValueError("schedules must be a list")
-    rows: list[dict[str, Any]] = []
-    for index, raw in enumerate(value, start=1):
-        if not isinstance(raw, Mapping):
-            raise ValueError("each schedule must be an object")
-        local_time = str(raw.get("local_time_hhmm") or raw.get("time") or "").strip()
-        if not _is_hhmm(local_time):
-            raise ValueError(f"schedule #{index} local_time_hhmm must use HH:MM")
-        rows.append(
-            {
-                "id": str(raw.get("id") or f"requested_{index}").strip(),
-                "enabled": bool(raw.get("enabled", True)),
-                "local_time_hhmm": local_time,
-                "timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
-            }
-        )
-    return rows
-
-
-def _web_vitrina_auto_schedule_signature(rows: Iterable[Mapping[str, Any]]) -> list[tuple[bool, str]]:
-    return sorted(
-        {
-            (
-                bool(row.get("enabled", True)),
-                str(row.get("local_time_hhmm") or "").strip(),
-            )
-            for row in rows
-            if str(row.get("local_time_hhmm") or "").strip()
-        },
-        key=lambda item: item[1],
-    )
-
-
-def _is_hhmm(value: str) -> bool:
-    if len(value) != 5 or value[2] != ":":
-        return False
-    hour_text, minute_text = value.split(":", 1)
-    if not hour_text.isdigit() or not minute_text.isdigit():
-        return False
-    hour = int(hour_text)
-    minute = int(minute_text)
-    return 0 <= hour <= 23 and 0 <= minute <= 59
-
-
 @dataclass
 class SheetVitrinaV1OperatorJob:
     job_id: str
@@ -3486,32 +3506,19 @@ def _default_web_vitrina_page_period(
     *,
     available_snapshot_dates: Iterable[str],
 ) -> tuple[str, str] | None:
-    """Default UI period: latest three server-readable business dates, inclusive."""
+    """Default UI period: seven calendar dates ending on backend-owned business today."""
 
-    date_columns = [str(item) for item in getattr(contract.meta, "date_columns", []) if str(item)]
-    readable_dates = {str(item) for item in available_snapshot_dates if str(item)}
-    if not date_columns or not readable_dates:
-        return None
+    del available_snapshot_dates
     status_summary = contract.status_summary
     current_business_date = str(getattr(status_summary, "current_business_date", "") or "")
-    default_as_of_date = str(getattr(status_summary, "default_as_of_date", "") or "")
-    if current_business_date in readable_dates:
-        period_end = current_business_date
-    elif default_as_of_date in readable_dates:
-        period_end = default_as_of_date
-    else:
-        period_end = sorted(readable_dates)[-1]
+    if not current_business_date:
+        current_business_date = str(getattr(contract.meta, "as_of_date", "") or "")
+    period_end = current_business_date
     try:
         end_date = date.fromisoformat(period_end)
     except ValueError:
         return None
-    period_start = (end_date - timedelta(days=2)).isoformat()
-    expected_dates = [
-        (date.fromisoformat(period_start) + timedelta(days=offset)).isoformat()
-        for offset in range(3)
-    ]
-    if any(item not in readable_dates for item in expected_dates):
-        return None
+    period_start = (end_date - timedelta(days=6)).isoformat()
     return period_start, period_end
 
 
@@ -5808,6 +5815,14 @@ def _note_requires_warning(note: str) -> bool:
     normalized = str(note or "").strip()
     if not normalized:
         return False
+    preserved_closed_day_markers = {
+        "accepted_closed_from_prior_current_snapshot",
+        "accepted_closed_preserved_after_invalid_attempt",
+        "accepted_current_preserved_after_invalid_attempt",
+        "exact_date_provisional_runtime_cache",
+    }
+    if any(marker in normalized for marker in preserved_closed_day_markers):
+        return True
     if _status_note_is_latest_confirmed(normalized):
         return False
     success_markers = {
