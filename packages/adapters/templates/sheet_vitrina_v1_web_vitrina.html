@@ -1039,6 +1039,47 @@
       width: 104px;
     }
 
+    .auto-schedule-warning {
+      margin: 0;
+      border: 1px solid rgba(245, 158, 11, 0.42);
+      border-radius: 6px;
+      background: var(--warning-bg);
+      color: var(--warning-text);
+      overflow: hidden;
+    }
+
+    .auto-schedule-warning[hidden] {
+      display: none;
+    }
+
+    .auto-schedule-warning.is-error {
+      border-color: rgba(248, 113, 113, 0.38);
+      background: var(--error-bg);
+      color: var(--error-text);
+    }
+
+    .auto-schedule-warning-summary {
+      padding: 7px 9px;
+      font-size: 11px;
+      line-height: 1.4;
+      font-weight: 750;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .auto-schedule-warning-summary::-webkit-details-marker {
+      color: currentColor;
+    }
+
+    .auto-schedule-warning-text {
+      margin: 0;
+      padding: 0 9px 8px 24px;
+      font-size: 11px;
+      line-height: 1.45;
+      color: currentColor;
+      word-break: break-word;
+    }
+
     .tone-success {
       background: var(--success-bg);
       color: var(--success-text);
@@ -2562,7 +2603,10 @@
         </table>
       </div>
       <p class="auto-schedule-status" data-vitrina-auto-status>Автообновление использует тот же canonical full refresh, что и кнопка.</p>
-      <p class="research-error" data-vitrina-auto-error></p>
+      <details class="auto-schedule-warning" data-vitrina-auto-error hidden>
+        <summary class="auto-schedule-warning-summary" data-vitrina-auto-warning-summary>Предупреждение о runtime расписании</summary>
+        <p class="auto-schedule-warning-text" data-vitrina-auto-warning-text></p>
+      </details>
     </section>
 
     <section class="summary-grid" data-summary-grid></section>
@@ -3171,6 +3215,8 @@
     const vitrinaAutoMetaNode = document.querySelector("[data-vitrina-auto-schedule-meta]");
     const vitrinaAutoStatusNode = document.querySelector("[data-vitrina-auto-status]");
     const vitrinaAutoErrorNode = document.querySelector("[data-vitrina-auto-error]");
+    const vitrinaAutoWarningSummaryNode = document.querySelector("[data-vitrina-auto-warning-summary]");
+    const vitrinaAutoWarningTextNode = document.querySelector("[data-vitrina-auto-warning-text]");
     const vitrinaAutoSchedulesBodyNode = document.querySelector("[data-vitrina-auto-schedules-body]");
 
     const ALL_VALUE = "__all__";
@@ -7412,7 +7458,8 @@
       model.triggerDescription = String((payload && payload.trigger_description) || "");
       model.loaded = true;
       if (payload && payload.status === "blocked") {
-        model.error = String(payload.blocker || payload.message || "Изменение расписания заблокировано.");
+        model.blocker = String(payload.blocker || payload.message || model.blocker || "Изменение расписания заблокировано.");
+        model.error = "";
       } else {
         model.error = "";
       }
@@ -7477,8 +7524,21 @@
           : (model.message || model.triggerDescription || "Автообновление использует canonical full refresh.");
       }
       if (vitrinaAutoErrorNode) {
-        vitrinaAutoErrorNode.textContent = model.error || model.blocker || "";
-        vitrinaAutoErrorNode.classList.toggle("is-error", !!(model.error || model.blocker));
+        const hasError = !!model.error;
+        const noticeText = hasError ? String(model.error || "") : String(model.blocker || "");
+        vitrinaAutoErrorNode.hidden = !noticeText;
+        vitrinaAutoErrorNode.classList.toggle("is-error", hasError);
+        if (!noticeText) {
+          vitrinaAutoErrorNode.open = false;
+        }
+        if (vitrinaAutoWarningSummaryNode) {
+          vitrinaAutoWarningSummaryNode.textContent = hasError
+            ? "Ошибка расписания автообновлений"
+            : "Предупреждение о runtime расписании";
+        }
+        if (vitrinaAutoWarningTextNode) {
+          vitrinaAutoWarningTextNode.textContent = noticeText;
+        }
       }
       if (vitrinaAutoAddButton) {
         vitrinaAutoAddButton.disabled = !!model.loading || !!model.saving;
