@@ -1211,6 +1211,7 @@ def _check_load_refresh_action(
     button = page.locator("[data-load-refresh-button]")
     if button.count() != 1:
         raise AssertionError("load+refresh button must be rendered exactly once")
+    previous_freshness_marker = _read_summary_period_marker(page)
     with page.expect_response("**/v1/sheet-vitrina-v1/refresh") as load_response_info:
         button.click()
     load_response = load_response_info.value
@@ -1239,10 +1240,11 @@ def _check_load_refresh_action(
             )
     next_activity_surface = _read_activity_surface(page)
     _assert_page_refresh_card_changed(previous_summary_cards, next_summary_cards, action_name="source refresh")
-    freshness_changed = not _freshness_card_matches(previous_summary_cards, next_summary_cards)
+    next_freshness_marker = _read_summary_period_marker(page)
+    freshness_changed = previous_freshness_marker != next_freshness_marker
     if expect_freshness_change is True and not freshness_changed:
         raise AssertionError(
-            f"source refresh must advance data freshness in the local fixture, got {previous_summary_cards} -> {next_summary_cards}"
+            f"source refresh must advance data freshness in the local fixture, got {previous_freshness_marker} -> {next_freshness_marker}"
         )
     if expect_freshness_change is False and freshness_changed:
         raise AssertionError("source refresh was expected to keep data freshness unchanged")
@@ -1256,8 +1258,8 @@ def _check_load_refresh_action(
         "method": load_response.request.method,
         "page_refresh_before": previous_summary_cards["page_refresh"]["updated_at"],
         "page_refresh_after": next_summary_cards["page_refresh"]["updated_at"],
-        "freshness_before": previous_summary_cards["period"]["detail"],
-        "freshness_after": next_summary_cards["period"]["detail"],
+        "freshness_before": previous_freshness_marker,
+        "freshness_after": next_freshness_marker,
         "freshness_changed": freshness_changed,
         "progress_hidden_after": progress_hidden,
         "status_summary": next_summary_cards.get("status", {}),
@@ -1292,7 +1294,7 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
     )
     for required_card_id, required_label in {
         "page_refresh": "Обновлено",
-        "period": "Период",
+        "status": "Статус",
     }.items():
         card = cards.get(required_card_id)
         if card is None:
@@ -1301,8 +1303,8 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
             raise AssertionError(f"summary card {required_card_id!r} label mismatch, got {cards}")
     if "freshness" in cards or "rows" in cards:
         raise AssertionError(f"freshness/rows cards must be merged into compact summary strip, got {cards}")
-    if "T" in cards["period"]["value"] or "Z" in cards["period"]["value"]:
-        raise AssertionError(f"period card must not show raw timestamp as value, got {cards['period']}")
+    if "period" in cards:
+        raise AssertionError(f"period summary card must not be visible, got {cards}")
     if not cards["page_refresh"]["updated_at"]:
         raise AssertionError(f"page refresh card must expose an exact browser timestamp marker, got {cards['page_refresh']}")
     return cards
@@ -1322,13 +1324,13 @@ def _assert_page_refresh_card_changed(
         )
 
 
-def _freshness_card_matches(
-    previous_summary_cards: dict[str, dict[str, str]],
-    next_summary_cards: dict[str, dict[str, str]],
-) -> bool:
-    before = previous_summary_cards["period"]
-    after = next_summary_cards["period"]
-    return before["value"] == after["value"] and before["detail"] == after["detail"]
+def _read_summary_period_marker(page: object) -> str:
+    marker = page.locator("[data-summary-grid]").evaluate(
+        "node => node.getAttribute('data-summary-period-detail') || ''"
+    )
+    if not marker:
+        raise AssertionError("summary grid must keep the non-visible period freshness marker")
+    return marker
 
 
 def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> dict[str, object]:
