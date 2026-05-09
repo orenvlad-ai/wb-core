@@ -112,6 +112,7 @@ def main() -> None:
         "operator_screen_layout": ready_result["operator_screen_layout"],
         "unified_tab_navigation": ready_result["unified_tab_navigation"],
         "load_refresh_action": ready_result["load_refresh_action"],
+        "table_snapshot_cache": ready_result["table_snapshot_cache"],
         "right_edge_spacer": ready_result["right_edge_spacer"],
         "sticky_group_labels": ready_result["sticky_group_labels"],
         "column_visibility": ready_result["column_visibility"],
@@ -475,6 +476,11 @@ def run_browser_checks(
                 if run_actions
                 else {"skipped": "read-only public base-url mode"}
             )
+            table_snapshot_cache = (
+                _check_table_snapshot_cache(page)
+                if run_actions
+                else {"skipped": "read-only public base-url mode"}
+            )
 
             metric_select = page.locator("[data-filter-control='metric']")
             metric_options = metric_select.locator("option").evaluate_all(
@@ -617,6 +623,7 @@ def run_browser_checks(
         "operator_screen_layout": operator_screen_layout,
         "unified_tab_navigation": unified_tab_navigation,
         "load_refresh_action": load_refresh_action,
+        "table_snapshot_cache": table_snapshot_cache,
         "column_visibility": column_visibility,
         "horizontal_overscroll_guard": horizontal_overscroll_guard,
         "operator_link": operator_link,
@@ -673,6 +680,8 @@ def _print_summary(result: dict[str, object]) -> None:
     if "unified_tab_navigation" in result:
         print("web_vitrina_browser_unified_tabs: ok ->", result["unified_tab_navigation"])
     print("web_vitrina_browser_load_refresh_action: ok ->", result["load_refresh_action"])
+    if "table_snapshot_cache" in result:
+        print("web_vitrina_browser_table_snapshot_cache: ok ->", result["table_snapshot_cache"])
     print("web_vitrina_browser_right_edge_spacer: ok ->", result["right_edge_spacer"])
     print("web_vitrina_browser_sticky_group_labels: ok ->", result["sticky_group_labels"])
     print("web_vitrina_browser_sku_separators: ok ->", result["sku_separators"])
@@ -761,6 +770,112 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
         "metric_checkbox_checked_after_reset": metric_checkbox_checked,
         "scope_checkbox_checked_after_reset": scope_checkbox_checked,
     }
+
+
+def _check_table_snapshot_cache(page: object) -> dict[str, object]:
+    marker = "OLD-CACHE-TABLE-SNAPSHOT"
+    page.wait_for_function(
+        """() => {
+          const indicator = document.querySelector('[data-table-freshness-indicator]');
+          return !!indicator &&
+            indicator.classList.contains('is-fresh') &&
+            !!window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1');
+        }""",
+        timeout=20000,
+    )
+    cache_state = page.evaluate(
+        """(marker) => {
+          const key = 'wb_core_web_vitrina_table_snapshot_v1';
+          const raw = window.localStorage.getItem(key);
+          if (!raw) {
+            return {ok: false, reason: 'missing cache'};
+          }
+          const cached = JSON.parse(raw);
+          const payload = cached.payload || {};
+          const table = payload.table_surface || {};
+          const rows = Array.isArray(table.rows) ? table.rows : [];
+          if (!rows.length) {
+            return {ok: false, reason: 'empty cached rows'};
+          }
+          const row = rows[0];
+          const values = row.values || {};
+          const cell = values.metric_label || values.scope_label || Object.values(values)[0];
+          if (!cell) {
+            return {ok: false, reason: 'no editable cached cell'};
+          }
+          cell.display_text = marker;
+          cell.value = marker;
+          row.search_text = String(row.search_text || '') + ' ' + marker;
+          window.localStorage.setItem(key, JSON.stringify(cached));
+          return {
+            ok: true,
+            request_key: cached.request_key || '',
+            snapshot_id: cached.snapshot_id || '',
+            row_count: rows.length
+          };
+        }""",
+        arg=marker,
+    )
+    if not cache_state.get("ok"):
+        raise AssertionError(f"table snapshot cache must contain a successful table payload, got {cache_state}")
+
+    page.reload(wait_until="domcontentloaded")
+    page.wait_for_function(
+        """(marker) => {
+          const indicator = document.querySelector('[data-table-freshness-indicator]');
+          const bodyText = document.body ? (document.body.innerText || '') : '';
+          return !!indicator &&
+            indicator.classList.contains('is-stale-loading') &&
+            bodyText.includes(marker) &&
+            document.querySelectorAll('[data-table-body] tr').length > 0;
+        }""",
+        arg=marker,
+        timeout=3000,
+    )
+    stale_state = page.evaluate(
+        """(marker) => {
+          const indicator = document.querySelector('[data-table-freshness-indicator]');
+          return {
+            indicator_class: indicator ? (indicator.getAttribute('class') || '') : '',
+            indicator_text: indicator ? ((indicator.textContent || '').trim()) : '',
+            marker_visible: (document.body.innerText || '').includes(marker),
+            row_count: document.querySelectorAll('[data-table-body] tr').length
+          };
+        }""",
+        arg=marker,
+    )
+    page.wait_for_function(
+        """(marker) => {
+          const indicator = document.querySelector('[data-table-freshness-indicator]');
+          const bodyText = document.body ? (document.body.innerText || '') : '';
+          return !!indicator &&
+            indicator.classList.contains('is-fresh') &&
+            !bodyText.includes(marker) &&
+            document.querySelectorAll('[data-table-body] tr').length > 0;
+        }""",
+        arg=marker,
+        timeout=20000,
+    )
+    fresh_state = page.evaluate(
+        """(marker) => {
+          const indicator = document.querySelector('[data-table-freshness-indicator]');
+          return {
+            indicator_class: indicator ? (indicator.getAttribute('class') || '') : '',
+            indicator_text: indicator ? ((indicator.textContent || '').trim()) : '',
+            marker_visible: (document.body.innerText || '').includes(marker),
+            row_count: document.querySelectorAll('[data-table-body] tr').length
+          };
+        }""",
+        arg=marker,
+    )
+    return {
+        "cached_row_count": cache_state["row_count"],
+        "stale_indicator": stale_state["indicator_text"],
+        "stale_marker_visible": stale_state["marker_visible"],
+        "fresh_indicator": fresh_state["indicator_text"],
+        "fresh_marker_visible": fresh_state["marker_visible"],
+    }
+
 
 def _check_operator_screen_layout(page: object) -> dict[str, object]:
     payload = page.evaluate(
