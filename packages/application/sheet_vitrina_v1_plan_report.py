@@ -84,6 +84,17 @@ class PeriodWindow:
     contract_start_note: str | None = None
 
 
+@dataclass(frozen=True)
+class BuyoutPlanCalculation:
+    mode: str
+    half_year_plans: Mapping[int, float]
+    annual_plan_evenly_distributed: bool
+    annual_buyout_plan_rub: float
+    annual_denominator_date_from: str | None = None
+    annual_denominator_date_to: str | None = None
+    annual_denominator_day_count: int | None = None
+
+
 class SheetVitrinaV1PlanReportBlock:
     """Build a compact operator-facing plan-execution report from exact-date accepted snapshots."""
 
@@ -159,6 +170,7 @@ class SheetVitrinaV1PlanReportBlock:
         as_of_date: str | None = None,
         use_contract_start_date: bool = False,
         contract_start_date: str | None = None,
+        annual_plan_evenly_distributed: bool = False,
     ) -> dict[str, Any]:
         normalized_period = str(period or "").strip()
         if normalized_period not in PERIOD_LABELS:
@@ -181,6 +193,12 @@ class SheetVitrinaV1PlanReportBlock:
         normalized_contract_start_date = _resolve_contract_start_date(
             use_contract_start_date=use_contract_start_date,
             contract_start_date=contract_start_date,
+        )
+        plan_calculation = _build_buyout_plan_calculation(
+            half_year_plans=half_year_plans,
+            reference_date=reference_date,
+            contract_start_date=normalized_contract_start_date,
+            annual_plan_evenly_distributed=annual_plan_evenly_distributed,
         )
         selected_window = _build_selected_window(reference_date=reference_date, period_key=normalized_period)
         fixed_windows = [
@@ -215,14 +233,19 @@ class SheetVitrinaV1PlanReportBlock:
             "requested_as_of_date": str(as_of_date or "").strip() or None,
             "selected_period_key": selected_window.key,
             "selected_period_label": selected_window.label,
-            "notes": list(REPORT_NOTES),
+            "notes": _report_notes_for_plan_mode(plan_calculation.mode),
             "inputs": {
-                "plan_model": "half_year",
+                "plan_model": plan_calculation.mode,
                 "input_model": plan_inputs["input_model"],
                 "h1_buyout_plan_rub": half_year_plans[1],
                 "h2_buyout_plan_rub": half_year_plans[2],
                 "legacy_quarter_inputs": plan_inputs.get("legacy_quarter_inputs"),
                 "plan_drr_pct": normalized_plan_drr_pct,
+                "annual_plan_evenly_distributed": plan_calculation.annual_plan_evenly_distributed,
+                "annual_buyout_plan_rub": plan_calculation.annual_buyout_plan_rub,
+                "annual_plan_denominator_date_from": plan_calculation.annual_denominator_date_from,
+                "annual_plan_denominator_date_to": plan_calculation.annual_denominator_date_to,
+                "annual_plan_denominator_day_count": plan_calculation.annual_denominator_day_count,
                 "use_contract_start_date": normalized_contract_start_date is not None,
                 "contract_start_date": (
                     normalized_contract_start_date.isoformat()
@@ -237,6 +260,7 @@ class SheetVitrinaV1PlanReportBlock:
                 "manual_monthly_source": MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
                 "sources": [FIN_SOURCE_KEY, ADS_SOURCE_KEY, MANUAL_MONTHLY_BASELINE_SOURCE_KIND],
                 "active_sku_source": "current_registry_config_v2",
+                "plan_calculation_mode": plan_calculation.mode,
                 "date_from": date_from,
                 "date_to": date_to,
             },
@@ -317,7 +341,7 @@ class SheetVitrinaV1PlanReportBlock:
                 baseline_by_month=baseline_by_month,
                 missing_dates_by_source=missing_dates_by_source,
                 invalid_dates_by_source=invalid_dates_by_source,
-                half_year_plans=half_year_plans,
+                plan_calculation=plan_calculation,
                 plan_drr_pct=normalized_plan_drr_pct,
             ),
         }
@@ -329,7 +353,7 @@ class SheetVitrinaV1PlanReportBlock:
                 baseline_by_month=baseline_by_month,
                 missing_dates_by_source=missing_dates_by_source,
                 invalid_dates_by_source=invalid_dates_by_source,
-                half_year_plans=half_year_plans,
+                plan_calculation=plan_calculation,
                 plan_drr_pct=normalized_plan_drr_pct,
             )
 
@@ -510,6 +534,48 @@ def _resolve_contract_start_date(*, use_contract_start_date: bool, contract_star
         return date.fromisoformat(normalized)
     except ValueError as exc:
         raise ValueError("contract_start_date query parameter must use YYYY-MM-DD format") from exc
+
+
+def _build_buyout_plan_calculation(
+    *,
+    half_year_plans: Mapping[int, float],
+    reference_date: date,
+    contract_start_date: date | None,
+    annual_plan_evenly_distributed: bool,
+) -> BuyoutPlanCalculation:
+    annual_buyout_plan_rub = float(half_year_plans[1]) + float(half_year_plans[2])
+    if not annual_plan_evenly_distributed:
+        return BuyoutPlanCalculation(
+            mode="half_year",
+            half_year_plans=half_year_plans,
+            annual_plan_evenly_distributed=False,
+            annual_buyout_plan_rub=annual_buyout_plan_rub,
+        )
+
+    denominator_start = reference_date.replace(month=1, day=1)
+    denominator_end = reference_date.replace(month=12, day=31)
+    if contract_start_date is not None:
+        denominator_start = max(denominator_start, contract_start_date)
+    denominator_day_count = max(0, (denominator_end - denominator_start).days + 1)
+    return BuyoutPlanCalculation(
+        mode="annual_evenly_distributed",
+        half_year_plans=half_year_plans,
+        annual_plan_evenly_distributed=True,
+        annual_buyout_plan_rub=annual_buyout_plan_rub,
+        annual_denominator_date_from=denominator_start.isoformat(),
+        annual_denominator_date_to=denominator_end.isoformat(),
+        annual_denominator_day_count=denominator_day_count,
+    )
+
+
+def _report_notes_for_plan_mode(plan_mode: str) -> list[str]:
+    notes = list(REPORT_NOTES)
+    if plan_mode == "annual_evenly_distributed":
+        notes[2] = (
+            "План по выкупу считается посуточно: общий годовой план H1+H2 распределяется "
+            "равномерно по календарным дням года или contract-start расчётного окна."
+        )
+    return notes
 
 
 def _build_selected_window(*, reference_date: date, period_key: str) -> PeriodWindow:
@@ -719,7 +785,7 @@ def _build_period_block(
     baseline_by_month: Mapping[str, Mapping[str, Any]],
     missing_dates_by_source: Mapping[str, list[str]],
     invalid_dates_by_source: Mapping[str, Mapping[str, str]],
-    half_year_plans: Mapping[int, float],
+    plan_calculation: BuyoutPlanCalculation,
     plan_drr_pct: float,
 ) -> dict[str, Any]:
     if window.period_state == "not_started":
@@ -767,9 +833,9 @@ def _build_period_block(
         else None
     )
     fact_drr_pct = _compute_drr_pct(ads_sum_rub=fact_ads_sum_rub, buyout_rub=fact_buyout_rub)
-    full_plan_buyout_rub = sum(_daily_buyout_plan_for_date(date.fromisoformat(item), half_year_plans) for item in dates)
+    full_plan_buyout_rub = sum(_daily_buyout_plan_for_date(date.fromisoformat(item), plan_calculation) for item in dates)
     covered_plan_buyout_rub = (
-        sum(_daily_buyout_plan_for_date(date.fromisoformat(item), half_year_plans) for item in covered_dates)
+        sum(_daily_buyout_plan_for_date(date.fromisoformat(item), plan_calculation) for item in covered_dates)
         if covered_dates
         else None
     )
@@ -816,6 +882,7 @@ def _build_period_block(
             "daily_sources": [FIN_SOURCE_KEY, ADS_SOURCE_KEY],
             "daily_snapshot_role": TEMPORAL_ROLE_ACCEPTED_CLOSED,
             "manual_monthly_source": MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
+            "plan_calculation_mode": plan_calculation.mode,
         },
         "source_mix": {
             "daily_accepted_snapshots": {
@@ -1169,9 +1236,16 @@ def _compute_drr_pct(*, ads_sum_rub: float | None, buyout_rub: float | None) -> 
     return (float(ads_sum_rub) / float(buyout_rub)) * 100.0
 
 
-def _daily_buyout_plan_for_date(value: date, half_year_plans: Mapping[int, float]) -> float:
+def _daily_buyout_plan_for_date(value: date, plan_source: BuyoutPlanCalculation | Mapping[int, float]) -> float:
+    if isinstance(plan_source, BuyoutPlanCalculation):
+        if plan_source.mode == "annual_evenly_distributed":
+            denominator_day_count = int(plan_source.annual_denominator_day_count or 0)
+            if denominator_day_count <= 0:
+                return 0.0
+            return float(plan_source.annual_buyout_plan_rub) / float(denominator_day_count)
+        plan_source = plan_source.half_year_plans
     half_year = _half_year_of_date(value)
-    half_year_plan = float(half_year_plans[half_year])
+    half_year_plan = float(plan_source[half_year])
     half_year_days = _days_in_half_year(value)
     return half_year_plan / half_year_days
 

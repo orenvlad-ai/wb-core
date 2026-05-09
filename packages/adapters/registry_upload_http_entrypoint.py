@@ -1387,6 +1387,9 @@ def _build_handler(
                         as_of_date=_resolve_as_of_date_from_query(parsed.query) or None,
                         use_contract_start_date=_resolve_optional_query_bool(parsed.query, "use_contract_start_date"),
                         contract_start_date=_resolve_single_query_param(parsed.query, "contract_start_date") or None,
+                        annual_plan_evenly_distributed=_resolve_optional_query_bool(
+                            parsed.query, "annual_plan_evenly_distributed"
+                        ),
                     )
                 except ValueError as exc:
                     _write_json_response(
