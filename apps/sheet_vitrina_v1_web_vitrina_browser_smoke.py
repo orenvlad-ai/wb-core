@@ -113,6 +113,7 @@ def main() -> None:
         "unified_tab_navigation": ready_result["unified_tab_navigation"],
         "load_refresh_action": ready_result["load_refresh_action"],
         "right_edge_spacer": ready_result["right_edge_spacer"],
+        "sticky_group_labels": ready_result["sticky_group_labels"],
         "column_visibility": ready_result["column_visibility"],
         "horizontal_overscroll_guard": ready_result["horizontal_overscroll_guard"],
         "operator_link": ready_result["operator_link"],
@@ -380,6 +381,7 @@ def run_browser_checks(
                 raise AssertionError(f"default order must switch to sku->metrics clustering, got {initial_order[:8]}")
             sku_separators = _check_sku_separators(page)
             right_edge_spacer = _check_right_edge_spacer(page)
+            sticky_group_labels = _check_sticky_group_labels(page)
 
             filter_controls = {
                 "search": page.locator("[data-filter-control='search']").count() == 1,
@@ -603,6 +605,7 @@ def run_browser_checks(
         "default_sku_metric_cluster": sku_cluster_ok,
         "sku_separators": sku_separators,
         "right_edge_spacer": right_edge_spacer,
+        "sticky_group_labels": sticky_group_labels,
         "filter_controls": filter_controls,
         "table_toolbar": table_toolbar,
         "status_summary": status_summary,
@@ -671,6 +674,7 @@ def _print_summary(result: dict[str, object]) -> None:
         print("web_vitrina_browser_unified_tabs: ok ->", result["unified_tab_navigation"])
     print("web_vitrina_browser_load_refresh_action: ok ->", result["load_refresh_action"])
     print("web_vitrina_browser_right_edge_spacer: ok ->", result["right_edge_spacer"])
+    print("web_vitrina_browser_sticky_group_labels: ok ->", result["sticky_group_labels"])
     print("web_vitrina_browser_sku_separators: ok ->", result["sku_separators"])
     print("web_vitrina_browser_column_visibility: ok ->", result["column_visibility"])
     print("web_vitrina_browser_horizontal_overscroll_guard: ok ->", result["horizontal_overscroll_guard"])
@@ -1576,6 +1580,108 @@ def _check_right_edge_spacer(page: object) -> dict[str, object]:
     if not str(spacer["previousHeaderId"]).startswith("date:"):
         raise AssertionError(f"last useful column before the spacer must stay a real date column, got {spacer}")
     return spacer
+
+
+def _check_sticky_group_labels(page: object) -> dict[str, object]:
+    setup = page.evaluate(
+        """() => {
+          const scroll = document.querySelector('[data-table-scroll]');
+          const rows = Array.from(document.querySelectorAll('[data-table-body] tr.group-row'));
+          const labels = rows.map(row => ((row.querySelector('.group-row-label') || {}).textContent || '').trim());
+          if (!scroll || rows.length < 2) {
+            return {ready: false, labels, reason: 'missing scroll or group rows'};
+          }
+          const previousHeight = scroll.style.height || '';
+          const previousMaxHeight = scroll.style.maxHeight || '';
+          scroll.style.height = '120px';
+          scroll.style.maxHeight = '120px';
+          const targetIndex = Math.min(1, rows.length - 1);
+          const target = rows[targetIndex];
+          const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+          scroll.scrollTop = Math.min(maxScrollTop, Math.max(0, target.offsetTop + 20));
+          scroll.dispatchEvent(new Event('scroll', {bubbles: true}));
+          return {
+            ready: true,
+            labels,
+            targetIndex,
+            scrollTop: scroll.scrollTop,
+            maxScrollTop,
+            previousHeight,
+            previousMaxHeight
+          };
+        }"""
+    )
+    page.wait_for_timeout(150)
+    payload = page.evaluate(
+        """(setup) => {
+          const scroll = document.querySelector('[data-table-scroll]');
+          const rows = Array.from(document.querySelectorAll('[data-table-body] tr.group-row'));
+          const target = rows[setup.targetIndex || 0];
+          const cell = target ? target.querySelector('td') : null;
+          const label = target ? target.querySelector('.group-row-label') : null;
+          const header = document.querySelector('[data-table-head] th');
+          const sectionHeader = document.querySelector('[data-table-head] th[data-col-id="section"]');
+          const dateHeader = document.querySelector('[data-table-head] th[data-col-id^="date:"]');
+          const labelRect = label ? label.getBoundingClientRect() : {top: 0, bottom: 0, left: 0, width: 0};
+          const cellRect = cell ? cell.getBoundingClientRect() : {width: 0};
+          const headerRect = header ? header.getBoundingClientRect() : {bottom: 0};
+          const y = Math.round(labelRect.top + Math.max(1, (labelRect.bottom - labelRect.top) / 2));
+          const groupAtPoint = rect => {
+            if (!rect || rect.width <= 0 || y < 0 || y >= window.innerHeight) {
+              return false;
+            }
+            const x = Math.round(rect.left + Math.min(Math.max(4, rect.width / 2), Math.max(4, rect.width - 4)));
+            if (x < 0 || x >= window.innerWidth) {
+              return false;
+            }
+            const node = document.elementFromPoint(x, y);
+            return !!(node && node.closest && node.closest('.group-row'));
+          };
+          const cellStyle = cell ? getComputedStyle(cell) : {backgroundColor: '', pointerEvents: ''};
+          const labelStyle = label ? getComputedStyle(label) : {backgroundColor: ''};
+          return {
+            ...setup,
+            targetLabel: label ? (label.textContent || '').trim() : '',
+            labelTop: Math.round(labelRect.top),
+            labelBottom: Math.round(labelRect.bottom),
+            headerBottom: Math.round(headerRect.bottom),
+            labelWidth: Math.round(labelRect.width),
+            cellWidth: Math.round(cellRect.width),
+            cellBackground: cellStyle.backgroundColor,
+            labelBackground: labelStyle.backgroundColor,
+            pointerEvents: cellStyle.pointerEvents,
+            sectionCoveredByGroupRow: groupAtPoint(sectionHeader ? sectionHeader.getBoundingClientRect() : null),
+            dateCoveredByGroupRow: groupAtPoint(dateHeader ? dateHeader.getBoundingClientRect() : null)
+          };
+        }""",
+        setup,
+    )
+    page.evaluate(
+        """(setup) => {
+          const scroll = document.querySelector('[data-table-scroll]');
+          if (!scroll) {
+            return;
+          }
+          scroll.scrollTop = 0;
+          scroll.style.height = setup.previousHeight || '';
+          scroll.style.maxHeight = setup.previousMaxHeight || '';
+        }""",
+        setup,
+    )
+    if not payload.get("ready"):
+        raise AssertionError(f"sticky group labels smoke could not find table groups, got {payload}")
+    labels = [str(item) for item in payload.get("labels") or []]
+    if "ИТОГО" not in labels or len([item for item in labels if item and item != "ИТОГО"]) < 1:
+        raise AssertionError(f"table must render total and product group labels, got {payload}")
+    if payload["labelTop"] < payload["headerBottom"] - 2 or payload["labelTop"] > payload["headerBottom"] + 18:
+        raise AssertionError(f"group label must stick just below the table header, got {payload}")
+    if payload["pointerEvents"] != "none" or payload["cellBackground"] != "rgba(0, 0, 0, 0)":
+        raise AssertionError(f"sticky group row cell must stay transparent and non-interactive, got {payload}")
+    if payload["labelBackground"] == "rgba(0, 0, 0, 0)" or int(payload["labelWidth"]) <= 0:
+        raise AssertionError(f"sticky group label must keep its own visible badge background, got {payload}")
+    if payload["sectionCoveredByGroupRow"] or payload["dateCoveredByGroupRow"]:
+        raise AssertionError(f"sticky group row must not overlay section/date columns, got {payload}")
+    return payload
 
 
 def _check_sku_separators(page: object) -> dict[str, int]:
