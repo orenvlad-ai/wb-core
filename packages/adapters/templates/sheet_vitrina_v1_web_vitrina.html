@@ -2081,14 +2081,36 @@
     }
 
     .group-row td {
-      background: #f3f5f8;
+      background: transparent;
       font-size: var(--table-font-size);
       font-weight: 700;
       letter-spacing: 0;
       color: #4f6072;
       position: sticky;
       top: 28px;
-      z-index: 1;
+      z-index: 3;
+      padding: 0;
+      border-color: transparent;
+      pointer-events: none;
+    }
+
+    .vitrina-table tbody tr.group-row:hover td {
+      background: transparent;
+    }
+
+    .group-row-label {
+      display: inline-flex;
+      align-items: center;
+      max-width: min(320px, calc(100vw - 48px));
+      min-height: 22px;
+      margin: 3px 0;
+      padding: 4px 9px;
+      border-radius: 4px;
+      background: #f3f5f8;
+      box-shadow: 0 0 0 1px rgba(203, 213, 225, 0.86);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .sku-separator-row td {
@@ -2316,11 +2338,25 @@
     }
 
     .table-spacer-cell,
-    .group-row td,
     .sku-separator-row td,
     .activity-group-row td {
       background: #191d24;
       color: var(--muted-strong);
+    }
+
+    .group-row td {
+      background: transparent;
+      color: var(--muted-strong);
+    }
+
+    .vitrina-table tbody tr.group-row:hover td {
+      background: transparent;
+    }
+
+    .group-row-label {
+      background: #191d24;
+      color: var(--muted-strong);
+      box-shadow: 0 0 0 1px var(--border);
     }
 
     .cell-badge,
@@ -5672,7 +5708,9 @@
           '<tr class="group-row"><td colspan="' +
           tableColumnCount +
           '">' +
+          '<span class="group-row-label">' +
           escapeHtml(grouping.title) +
+          "</span>" +
           "</td></tr>"
         );
         groupedRows.forEach(function(row, index) {
