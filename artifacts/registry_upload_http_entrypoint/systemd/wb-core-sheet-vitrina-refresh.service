@@ -1,8 +1,10 @@
 [Unit]
-Description=WB Core Sheet Vitrina Daily Refresh
+Description=WB Core Sheet Vitrina Auto Refresh Tick
 After=network.target wb-core-registry-http.service
 Wants=network.target wb-core-registry-http.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/curl --fail --silent --show-error --max-time 900 --header 'Content-Type: application/json' --data '{"auto_refresh":true}' http://127.0.0.1:8765/v1/sheet-vitrina-v1/refresh
+WorkingDirectory=/opt/wb-core-runtime/app
+ExecStart=/usr/bin/python3 apps/sheet_vitrina_v1_auto_refresh_tick.py --env-file /opt/wb-ai/.env
+TimeoutStartSec=1800

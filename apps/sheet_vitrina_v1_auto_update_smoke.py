@@ -213,8 +213,12 @@ def main() -> None:
                 raise AssertionError(f"daily description must not route operators to Google Sheets, got {server_context}")
             if "auto_load=true" in str(server_context.get("daily_auto_trigger_description", "")):
                 raise AssertionError(f"daily trigger description must not keep auto_load=true, got {server_context}")
-            if server_context.get("last_auto_run_status") != "success":
+            if server_context.get("last_auto_run_technical_status") != "success":
                 raise AssertionError("auto_refresh must persist the technical auto-run state")
+            if server_context.get("last_auto_run_status") != refresh_payload.get("semantic_status"):
+                raise AssertionError(
+                    f"auto_refresh must persist the semantic auto-run state, got {server_context}"
+                )
             if (server_context.get("last_auto_run_result") or {}).get("snapshot_id") != refresh_payload.get("snapshot_id"):
                 raise AssertionError(f"auto_refresh must persist the refresh-only auto result, got {server_context}")
             if status_payload.get("manual_context") != _expected_manual_context():

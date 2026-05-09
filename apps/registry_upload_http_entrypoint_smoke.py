@@ -334,15 +334,16 @@ def main() -> None:
                 raise AssertionError("status read before refresh must expose the canonical business timezone")
             if server_context.get("daily_refresh_business_time") != "11:00, 20:00 Asia/Yekaterinburg":
                 raise AssertionError("status read before refresh must expose the daily business refresh time")
-            if server_context.get("daily_refresh_systemd_time") != "06:00:00 UTC, 15:00:00 UTC":
-                raise AssertionError("status read before refresh must expose the current host UTC trigger time")
-            if server_context.get("daily_refresh_systemd_oncalendar") != "*-*-* 06:00:00 UTC; *-*-* 15:00:00 UTC":
-                raise AssertionError("status read before refresh must expose the configured OnCalendar trigger")
-            if server_context.get("daily_auto_description") != (
-                "Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: "
-                "server-side refresh ready snapshot for website/operator web-vitrina"
-            ):
-                raise AssertionError("status read before refresh must expose the truthful auto-update description")
+            if server_context.get("daily_refresh_systemd_time") != "every 10 minutes UTC due-check":
+                raise AssertionError("status read before refresh must expose the current host due-check cadence")
+            if server_context.get("daily_refresh_systemd_oncalendar") != "*-*-* *:00,10,20,30,40,50:00":
+                raise AssertionError("status read before refresh must expose the configured OnCalendar tick")
+            if server_context.get("daily_auto_schedule_mode") != "runtime_managed_json_schedule":
+                raise AssertionError("status read before refresh must expose runtime-managed auto schedules")
+            if server_context.get("daily_auto_schedule_editable") is not True:
+                raise AssertionError("status read before refresh must expose editable auto schedules")
+            if not server_context.get("next_auto_run_at"):
+                raise AssertionError("status read before refresh must expose next auto run")
             if "same-day today_current" not in str(server_context.get("retry_runner_description", "")):
                 raise AssertionError("status read before refresh must expose retry-runner semantics")
             if server_context.get("last_auto_run_status") != "never":

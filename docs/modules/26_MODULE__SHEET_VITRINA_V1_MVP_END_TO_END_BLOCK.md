@@ -193,10 +193,10 @@ update_note: "Обновлён под Google Sheets decommission and current pla
     - phase 2 now additionally materializes repo-owned `web_vitrina_view_model` as a separate presentation-domain seam over that contract: `columns + rows + groups + sections + formatters + filters + sorts + state_model`
     - phase 3 now additionally materializes repo-owned `web_vitrina_gravity_table_adapter` as the first concrete adapter over that `view_model`: isolated Gravity-specific `columns + rows + renderers + groupings + filters + sorts + use_table_options + table_props + state_surface`
     - phase 4 now additionally materializes repo-owned `web_vitrina_page_composition` over the same seams: `/sheet-vitrina-v1/vitrina` fetches optional `surface=page_composition` on the existing read route and renders a real summary/filter/table page without turning browser state into canonical truth
-    - history/date-range UX is compact by default: no-query page composition opens the latest three server-readable business dates inclusive, ending on backend-owned `today_current_date` when that date is available in the visible/readable context; the operator sees a narrow `DD.MM.YYYY - DD.MM.YYYY` control in the toolbar above the table, and the existing calendar/presets/manual fields live inside a compact one-month popover with month navigation arrows and no user-facing technical mode/query explanations
+    - history/date-range UX is compact by default: no-query page composition opens the current backend-owned business week `D-6..D` inclusive, ending on `today_current_date` in `Asia/Yekaterinburg`; `today_current_date` remains visible/selectable even before a ready snapshot exists, with blank/partial cells and warning status instead of hidden dates; the operator sees a narrow `DD.MM.YYYY - DD.MM.YYYY` control in the toolbar above the table, and the existing calendar/presets/manual fields live inside a compact one-month popover with month navigation arrows and no user-facing technical mode/query explanations
     - unified shell now includes tab `Отзывы`, backed by read-only route `GET /v1/sheet-vitrina-v1/feedbacks`; it manually loads official WB feedbacks for a bounded selected date range, star filter and answered/unanswered mode, surfaces a normalized table/summary, and does not write accepted truth, ready snapshots, Google Sheets/GAS or browser-local truth
     - table controls are compact by default: the former separate `Фильтры и настройки` card is not rendered, while `Диапазон`, `Поиск`, `Секции`, `Группа`, `Тип строк`, `Метрики`, `Столбцы` and `Сброс` live in one toolbar above the table and continue to use only browser-local filter/search/internal stable order/column-visibility state over the already loaded server payload; the visible `Сортировка` selector and row-count `Итог` block are not rendered
-    - activity/reporting inside that sibling page stays server-owned: `Загрузка данных` is lazy. Initial page-open renders only a `not_loaded` state and button `Загрузить`; source groups, group refresh controls and Seller Portal session controls appear only after an explicit read-only details request (`surface=page_composition&include_source_status=1`) succeeds. That details request uses the current page payload `snapshot_as_of_date`, not browser-local today and not the rightmost `today_current` column. The loaded table renders over existing source outcomes with today/yesterday server-business dates, OK/not-OK status cells, reason columns, Russian metric labels and secondary technical endpoints; empty/incomplete details payload is shown as explicit empty/error state rather than a normal table with fake group shells, and missing ready snapshots surface as `source_status_state=missing_snapshot` with the action to run `Загрузить и обновить`. `Лог` stays below it with the existing download contour; the former `Обновление данных` activity block is no longer active page surface, while raw technical note/traceback payload stays in the existing log path and `Свежесть данных` keeps server-owned semantics but uses the same readable timestamp style as `Последнее обновление страницы`
+    - activity/reporting inside that sibling page stays server-owned: `Загрузка данных` is lazy. Initial page-open renders only a `not_loaded` state and button `Загрузить`; source groups, group refresh controls and Seller Portal session controls appear only after an explicit read-only details request (`surface=page_composition&include_source_status=1`) succeeds. That details request uses the current page payload `snapshot_as_of_date`, not browser-local today and not the rightmost `today_current` column. The loaded table renders over existing source outcomes with today/yesterday server-business dates, OK/not-OK status cells, reason columns, Russian metric labels and secondary technical endpoints; empty/incomplete details payload is shown as explicit empty/error state rather than a normal table with fake group shells, and missing ready snapshots surface as `source_status_state=missing_snapshot` with the action to run `Загрузить и обновить`. `Лог` stays below it with the existing download contour; the former `Обновление данных` activity block is no longer active page surface, while raw technical note/traceback payload stays in the existing log path. Top summary is a compact `Обновлено` / `Статус` / `Период` strip; separate bulky `Свежесть данных` and `Строки` cards are not active operator blocks.
     - the `view_model` layer stays library-agnostic, the Gravity-specific seam stays repo-side, and page composition remains a page-only layer above them
     - export layer, cutover away from Google Sheets and broad feature parity remain later layers
   - `Отчёты` uses the same sibling subsection selector pattern as the supply tab: default section = `Ежедневные отчёты`, additional sections = `Отчёт по остаткам` and `Выполнение плана`, only one report body is visible at a time
@@ -248,9 +248,9 @@ update_note: "Обновлён под Google Sheets decommission and current pla
     - host-side VNC contour is additionally hardened with `x11vnc -noxdamage`, because user-facing truth here is the noVNC canvas rather than host-side local screenshots
   - эти два manual fields заполняются только из `manual_context`: successful manual `refresh` обновляет только `Последняя удачная загрузка`; current Google Sheets `load` archived, so `Последняя удачная отправка` is historical state and must not be used as completion proof
   - reload/page-open state этого manual block truthfully показывает только persisted manual-success facts и не является доказательством Google Sheets write
-  - page дополнительно показывает compact block `Автообновления`, который заполняется только из server-driven `server_context`
-  - `Автоцепочка` в этом block должна описывать current daily cycle, а не legacy sheet write: current truthful wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: server-side refresh ready snapshot for website/operator web-vitrina`
-  - тот же auto block additionally показывает `Последний автозапуск`, `Статус последнего автозапуска`, `Последнее успешное автообновление` из backend/status surface
+  - page дополнительно показывает compact block `Автообновления`, который заполняется из server-driven auto-schedules/status surface
+  - `Автообновления` is runtime-managed: schedule rows live in server runtime JSON, expose editable `HH:mm`, enabled flag, next run, last run, last success, status/error and run-now action; the systemd timer is only a due-check ticker
+  - тот же auto block additionally показывает `Последний запуск`, `Последний успех`, `Следующий запуск`, `Статус/ошибка` из backend/status surface
   - log block остаётся fixed-height scrollable viewport с title `Лог` и одной bounded action `Скачать лог`
 - Канонический operator-facing supply surface в том же repo-owned page:
   - top-level tab `Расчёт поставок`
@@ -453,11 +453,15 @@ update_note: "Обновлён под Google Sheets decommission and current pla
 
 ## 3.1.2 Daily live refresh scheduling
 
-- Daily auto-refresh materialize-ится поверх existing heavy route, а не через новый scheduler contour:
-  - timer target = `POST /v1/sheet-vitrina-v1/refresh` with payload `{"auto_refresh": true}`
-  - schedule = `11:00, 20:00 Asia/Yekaterinburg`
-  - current live host keeps `Etc/UTC`, поэтому systemd timer stores `OnCalendar=*-*-* 06:00:00 UTC; *-*-* 15:00:00 UTC`
-- Schedule storage is repo-owned and deploys into live systemd units:
+- Daily auto-refresh materialize-ится поверх existing heavy route through runtime-managed schedules:
+  - default business rows = `11:00, 20:00 Asia/Yekaterinburg`
+  - editable schedule storage = runtime JSON under the hosted runtime dir via `GET/POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules`
+  - run-now route = `POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules/run-now`
+  - systemd timer target = repo-owned due-check runner `apps/sheet_vitrina_v1_auto_refresh_tick.py`
+  - systemd cadence = `OnCalendar=*-*-* *:00,10,20,30,40,50:00`
+  - systemd timer is non-persistent; missed business-time catch-up is evaluated by the runner/runtime schedule state, not by an immediate stale systemd fire during deploy restart
+  - the runner authenticates with WebCore session cookie before calling `POST /v1/sheet-vitrina-v1/refresh` with `{"async": true, "auto_refresh": true}`
+- Schedule runner/systemd wiring is repo-owned and deploys into live systemd units:
   - source artifacts = `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.service`
   - source artifacts = `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`
   - live install path = `/etc/systemd/system/wb-core-sheet-vitrina-refresh.service`
@@ -478,7 +482,7 @@ update_note: "Обновлён под Google Sheets decommission and current pla
 - Repo-owned truth при этом остаётся в current code:
   - default `as_of_date` / `today_current` semantics live in `packages/business_time.py`
   - heavy refresh logic stays in existing `POST /v1/sheet-vitrina-v1/refresh`
-  - auto path сначала делает refresh/persist ready snapshot, затем в том же server-owned cycle вызывает existing load bridge и доводит обновление до live sheet
+  - auto path делает refresh/persist ready snapshot only; legacy Google Sheets/GAS load bridge is archived and not an active completion target
   - refresh/load cycle защищён bounded mutual exclusion lock и не должен destructively смешивать parallel auto/manual/retry writes
   - runtime/status surface хранит last auto run status / timestamps separately from manual operator jobs plus latest semantic auto result payload, чтобы block `Автообновления` truthfully показывал именно результат daily auto chain
   - Apps Script remains thin shell and does not own scheduling or date math

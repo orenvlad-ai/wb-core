@@ -346,12 +346,12 @@ def run_browser_checks(
                   dateTo: (document.querySelector('[data-history-date-to]') || {}).value || ''
                 })"""
             )
-            if initial_history_state["label"].strip() != "18.04.2026 - 20.04.2026":
+            if initial_history_state["label"].strip() != "15.04.2026 - 21.04.2026":
                 raise AssertionError(f"default compact history label mismatch, got {initial_history_state}")
             if not initial_history_state["popoverHidden"]:
                 raise AssertionError(f"history picker popover must be closed by default, got {initial_history_state}")
-            if initial_history_state["dateFrom"] != "2026-04-18" or initial_history_state["dateTo"] != "2026-04-20":
-                raise AssertionError(f"default history range must be latest three dates, got {initial_history_state}")
+            if initial_history_state["dateFrom"] != "2026-04-15" or initial_history_state["dateTo"] != "2026-04-21":
+                raise AssertionError(f"default history range must be week ending business today, got {initial_history_state}")
             visible_body_text = page.locator("body").inner_text()
             for forbidden_history_text in (
                 "История",
@@ -551,13 +551,13 @@ def run_browser_checks(
                     raise AssertionError(f"history picker must expose month navigation and calendar grid, got {compact_popover_state}")
                 page.locator("[data-history-preset='week']").click()
                 page.wait_for_function(
-                    "() => document.querySelector('[data-history-date-from]').value === '2026-04-14' && document.querySelector('[data-history-date-to]').value === '2026-04-20'",
+                    "() => document.querySelector('[data-history-date-from]').value === '2026-04-15' && document.querySelector('[data-history-date-to]').value === '2026-04-21'",
                     timeout=5000,
                 )
                 preset_calendar_sync = _check_preset_calendar_sync(page)
                 page.locator("[data-history-save]").click()
                 page.wait_for_function(
-                    "() => new URL(window.location.href).searchParams.get('date_from') === '2026-04-14' && new URL(window.location.href).searchParams.get('date_to') === '2026-04-20'",
+                    "() => new URL(window.location.href).searchParams.get('date_from') === '2026-04-15' && new URL(window.location.href).searchParams.get('date_to') === '2026-04-21'",
                     timeout=5000,
                 )
                 page.wait_for_function("() => document.querySelector('[data-history-popover]').hidden", timeout=5000)
@@ -578,7 +578,7 @@ def run_browser_checks(
                 )
                 page.wait_for_function("() => document.querySelector('[data-history-popover]').hidden", timeout=5000)
                 page.wait_for_function(
-                    "() => (document.querySelector('[data-history-label]').textContent || '').trim() === '18.04.2026 - 20.04.2026'",
+                    "() => (document.querySelector('[data-history-label]').textContent || '').trim() === '15.04.2026 - 21.04.2026'",
                     timeout=5000,
                 )
                 page.wait_for_function(
@@ -1037,13 +1037,15 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
             const timeInput = row.querySelector('[data-vitrina-auto-field="local_time_hhmm"]');
             const enabledInput = row.querySelector('[data-vitrina-auto-field="enabled"]');
             const deleteButton = row.querySelector('[data-vitrina-auto-delete]');
+            const runNowButton = row.querySelector('[data-vitrina-auto-run-now]');
             return {
               text: cells.join(' '),
               time: timeInput ? timeInput.value : '',
               timeDisabled: timeInput ? !!timeInput.disabled : null,
               enabled: enabledInput ? !!enabledInput.checked : null,
               enabledDisabled: enabledInput ? !!enabledInput.disabled : null,
-              deleteDisabled: deleteButton ? !!deleteButton.disabled : null
+              deleteDisabled: deleteButton ? !!deleteButton.disabled : null,
+              runNowDisabled: runNowButton ? !!runNowButton.disabled : null
             };
           });
           const warningNode = document.querySelector('[data-vitrina-auto-error]');
@@ -1076,30 +1078,18 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
     if "Asia/Yekaterinburg" not in payload["meta"]:
         raise AssertionError(f"auto schedule block must expose business timezone, got {payload}")
     if sorted(times) != ["11:00", "20:00"]:
-        raise AssertionError(f"auto schedule block must read current systemd schedule, got {payload}")
+        raise AssertionError(f"auto schedule block must read current runtime schedule, got {payload}")
     if payload["addCount"] != 1 or payload["saveCount"] != 1 or payload["reloadCount"] != 1:
         raise AssertionError(f"auto schedule block must expose add/save/reload controls, got {payload}")
     if not all(row["enabled"] for row in payload["rows"] if row.get("time")):
         raise AssertionError(f"current auto schedule rows must be enabled, got {payload}")
-    if not all(row["timeDisabled"] and row["enabledDisabled"] and row["deleteDisabled"] for row in payload["rows"] if row.get("time")):
-        raise AssertionError(f"systemd-owned current rows must be non-editable in runtime UI, got {payload}")
-    warning_text = (
-        "Runtime UI показывает текущее repo-owned systemd расписание; изменение cadence требует "
-        "operator approval и hosted deploy."
-    )
+    if not all(not row["timeDisabled"] and not row["enabledDisabled"] and not row["deleteDisabled"] for row in payload["rows"] if row.get("time")):
+        raise AssertionError(f"runtime-managed current rows must be editable in runtime UI, got {payload}")
+    if not all(row["runNowDisabled"] is False for row in payload["rows"] if row.get("time")):
+        raise AssertionError(f"runtime-managed current rows must expose run-now, got {payload}")
     warning = payload.get("warning") or {}
-    if warning.get("hidden") or warning.get("open"):
-        raise AssertionError(f"runtime schedule warning must render collapsed by default, got {payload}")
-    if warning.get("summary") != "Предупреждение о runtime расписании":
-        raise AssertionError(f"runtime schedule warning summary mismatch, got {payload}")
-    if warning.get("text") != warning_text:
-        raise AssertionError(f"runtime schedule warning text must stay exact, got {payload}")
-    if "is-error" in str(warning.get("className") or ""):
-        raise AssertionError(f"runtime schedule warning must not use error tone, got {payload}")
-    if "245, 158, 11" not in str(warning.get("backgroundColor") or ""):
-        raise AssertionError(f"runtime schedule warning must use amber background, got {payload}")
-    if "251, 191, 36" not in str(warning.get("summaryColor") or ""):
-        raise AssertionError(f"runtime schedule warning summary must use amber text, got {payload}")
+    if not warning.get("hidden"):
+        raise AssertionError(f"runtime schedule warning must stay hidden when schedule is editable, got {payload}")
 
     page.locator("[data-vitrina-auto-add]").click()
     page.wait_for_function(
@@ -1108,20 +1098,25 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
     )
     page.locator("[data-vitrina-auto-save]").click()
     page.wait_for_function(
-        "() => (document.querySelector('[data-vitrina-auto-status]')?.textContent || '').includes('production cadence')",
+        "() => Array.from(document.querySelectorAll('[data-vitrina-auto-field=\"local_time_hhmm\"]')).filter(node => node.value).length === 3",
         timeout=5000,
     )
-    blocker = (page.locator("[data-vitrina-auto-warning-text]").text_content() or "").strip()
+    page.locator("[data-vitrina-auto-field=\"local_time_hhmm\"]").last.fill("12:30")
+    page.locator("[data-vitrina-auto-save]").click()
+    page.wait_for_function(
+        "() => Array.from(document.querySelectorAll('[data-vitrina-auto-field=\"local_time_hhmm\"]')).some(node => node.value === '12:30')",
+        timeout=5000,
+    )
     page.locator("[data-vitrina-auto-reload]").click()
     page.wait_for_function(
-        "() => Array.from(document.querySelectorAll('[data-vitrina-auto-field=\"local_time_hhmm\"]')).filter(node => node.value).length === 2",
+        "() => Array.from(document.querySelectorAll('[data-vitrina-auto-field=\"local_time_hhmm\"]')).some(node => node.value === '12:30')",
         timeout=5000,
     )
     return {
         "times": sorted(times),
         "timezone": "Asia/Yekaterinburg",
         "controls": {"add": True, "save": True, "reload": True},
-        "runtime_edit_blocker": blocker,
+        "runtime_editable": True,
     }
 
 
@@ -1261,8 +1256,8 @@ def _check_load_refresh_action(
         "method": load_response.request.method,
         "page_refresh_before": previous_summary_cards["page_refresh"]["updated_at"],
         "page_refresh_after": next_summary_cards["page_refresh"]["updated_at"],
-        "freshness_before": previous_summary_cards["freshness"]["value"],
-        "freshness_after": next_summary_cards["freshness"]["value"],
+        "freshness_before": previous_summary_cards["period"]["detail"],
+        "freshness_after": next_summary_cards["period"]["detail"],
         "freshness_changed": freshness_changed,
         "progress_hidden_after": progress_hidden,
         "status_summary": next_summary_cards.get("status", {}),
@@ -1296,18 +1291,18 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
         )"""
     )
     for required_card_id, required_label in {
-        "page_refresh": "Последнее обновление страницы",
-        "freshness": "Свежесть данных",
+        "page_refresh": "Обновлено",
+        "period": "Период",
     }.items():
         card = cards.get(required_card_id)
         if card is None:
             raise AssertionError(f"summary cards must expose {required_card_id!r}, got {cards}")
         if card["label"] != required_label:
             raise AssertionError(f"summary card {required_card_id!r} label mismatch, got {cards}")
-    if "snapshot " not in cards["freshness"]["detail"] or "as_of_date " not in cards["freshness"]["detail"]:
-        raise AssertionError(f"freshness card must expose truthful snapshot markers, got {cards['freshness']}")
-    if "T" in cards["freshness"]["value"] or "Z" in cards["freshness"]["value"]:
-        raise AssertionError(f"freshness card must render a user-facing timestamp without raw ISO artefacts, got {cards['freshness']}")
+    if "freshness" in cards or "rows" in cards:
+        raise AssertionError(f"freshness/rows cards must be merged into compact summary strip, got {cards}")
+    if "T" in cards["period"]["value"] or "Z" in cards["period"]["value"]:
+        raise AssertionError(f"period card must not show raw timestamp as value, got {cards['period']}")
     if not cards["page_refresh"]["updated_at"]:
         raise AssertionError(f"page refresh card must expose an exact browser timestamp marker, got {cards['page_refresh']}")
     return cards
@@ -1331,8 +1326,8 @@ def _freshness_card_matches(
     previous_summary_cards: dict[str, dict[str, str]],
     next_summary_cards: dict[str, dict[str, str]],
 ) -> bool:
-    before = previous_summary_cards["freshness"]
-    after = next_summary_cards["freshness"]
+    before = previous_summary_cards["period"]
+    after = next_summary_cards["period"]
     return before["value"] == after["value"] and before["detail"] == after["detail"]
 
 
@@ -1560,9 +1555,9 @@ def _check_sku_separators(page: object) -> dict[str, int]:
 def _check_preset_calendar_sync(page: object) -> bool:
     state = page.evaluate(
         """() => {
-          const start = document.querySelector('[data-history-day="2026-04-14"]');
-          const middle = document.querySelector('[data-history-day="2026-04-17"]');
-          const end = document.querySelector('[data-history-day="2026-04-20"]');
+          const start = document.querySelector('[data-history-day="2026-04-15"]');
+          const middle = document.querySelector('[data-history-day="2026-04-18"]');
+          const end = document.querySelector('[data-history-day="2026-04-21"]');
           return {
             startEdge: !!start && start.classList.contains('range-edge'),
             middleInRange: !!middle && middle.classList.contains('in-range'),

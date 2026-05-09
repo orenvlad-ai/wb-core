@@ -1039,6 +1039,15 @@
       width: 104px;
     }
 
+    .auto-schedule-row-error {
+      margin-top: 2px;
+      max-width: 260px;
+      color: var(--warning-text);
+      font-size: 10px;
+      line-height: 1.35;
+      white-space: normal;
+    }
+
     .auto-schedule-warning {
       margin: 0;
       border: 1px solid rgba(245, 158, 11, 0.42);
@@ -2591,14 +2600,15 @@
             <tr>
               <th>Включено</th>
               <th>Время</th>
-              <th>Timezone</th>
-              <th>Trigger</th>
+              <th>Следующий</th>
+              <th>Последний запуск</th>
+              <th>Последний успех</th>
               <th>Статус</th>
-              <th>Действие</th>
+              <th>Действия</th>
             </tr>
           </thead>
           <tbody data-vitrina-auto-schedules-body>
-            <tr><td colspan="6">Расписание загружается…</td></tr>
+            <tr><td colspan="7">Расписание загружается…</td></tr>
           </tbody>
         </table>
       </div>
@@ -3343,6 +3353,7 @@
         visibleMonths: [],
         visibleMonthStart: "",
         defaultAsOfDate: "",
+        todayCurrentDate: "",
         currentMode: "default"
       },
       filters: {
@@ -3505,6 +3516,11 @@
         scheduleMode: "",
         timezone: "Asia/Yekaterinburg",
         canEditRuntime: false,
+        runNowSupported: false,
+        nextAutoRunAt: "",
+        lastAutoRunAt: "",
+        lastAutoSuccessAt: "",
+        lastAutoStatus: "",
         blocker: "",
         message: "",
         triggerDescription: "",
@@ -3623,6 +3639,11 @@
     }
     if (vitrinaAutoSchedulesBodyNode) {
       vitrinaAutoSchedulesBodyNode.addEventListener("click", function(event) {
+        const runNowButton = event.target.closest("[data-vitrina-auto-run-now]");
+        if (runNowButton) {
+          runVitrinaAutoScheduleNow(String(runNowButton.getAttribute("data-vitrina-auto-run-now") || ""));
+          return;
+        }
         const deleteButton = event.target.closest("[data-vitrina-auto-delete]");
         if (!deleteButton) {
           return;
@@ -3633,7 +3654,7 @@
         });
         renderVitrinaAutoSchedules();
       });
-      vitrinaAutoSchedulesBodyNode.addEventListener("change", function(event) {
+      const handleVitrinaAutoScheduleInput = function(event) {
         const input = event.target.closest("[data-vitrina-auto-field]");
         if (!input) {
           return;
@@ -3648,12 +3669,16 @@
           if (field === "enabled") {
             next.enabled = !!input.checked;
           } else if (field === "local_time_hhmm") {
-            next.local_time_hhmm = String(input.value || "12:00");
+            next.local_time_hhmm = String(input.value || next.local_time_hhmm || "12:00");
           }
           return next;
         });
-        renderVitrinaAutoSchedules();
-      });
+        if (event.type !== "input") {
+          renderVitrinaAutoSchedules();
+        }
+      };
+      vitrinaAutoSchedulesBodyNode.addEventListener("input", handleVitrinaAutoScheduleInput);
+      vitrinaAutoSchedulesBodyNode.addEventListener("change", handleVitrinaAutoScheduleInput);
     }
     if (feedbacksComplaintsColumnsResetButton) {
       feedbacksComplaintsColumnsResetButton.addEventListener("click", function() {
@@ -4721,10 +4746,10 @@
       }
       return {
         card_id: "page_refresh",
-        label: "Последнее обновление страницы",
+        label: "Обновлено",
         value: state.page.lastRenderedAt.toISOString(),
         value_kind: "timestamp",
-        detail: "последний успешный reread page composition в этом браузере · Ваше локальное время: " + valueOrDash(browserTimezoneLabel()),
+        detail: valueOrDash(browserTimezoneLabel()),
         updated_at: state.page.lastRenderedAt.toISOString(),
         tone: "neutral"
       };
@@ -4852,6 +4877,7 @@
       state.history.availableDates = options.map(function(option) { return String(option.value || ""); }).filter(Boolean);
       state.history.availableDateSet = new Set(state.history.availableDates);
       state.history.defaultAsOfDate = String(historical.default_as_of_date || "").trim();
+      state.history.todayCurrentDate = normalizeIsoDate((payload.meta && payload.meta.today_current_date) || "");
       state.history.currentMode = String(historical.current_mode || "default");
       if (historical.selected_date_from || historical.selected_date_to || historical.selected_as_of_date) {
         state.history.draftDateFrom = String(historical.selected_date_from || historical.selected_as_of_date || "").trim();
@@ -5016,7 +5042,7 @@
       if (!endCandidate) {
         return null;
       }
-      const dateFrom = shiftIsoDate(endCandidate, -2);
+      const dateFrom = shiftIsoDate(endCandidate, -6);
       const dateTo = endCandidate;
       if (!state.history.availableDateSet.has(dateFrom) || !state.history.availableDateSet.has(dateTo)) {
         return null;
@@ -5074,10 +5100,10 @@
         return "Начало периода должно быть не позже конца.";
       }
       if (!state.history.availableDateSet.has(state.history.draftDateFrom) || !state.history.availableDateSet.has(state.history.draftDateTo)) {
-        return "Выбранная дата пока недоступна как ready snapshot.";
+        return "Выбранная дата вне доступного серверного периода.";
       }
       if (!isContinuousAvailableRange(state.history.draftDateFrom, state.history.draftDateTo)) {
-        return "Выбранный диапазон пока не materialized целиком.";
+        return "Выбранный диапазон должен быть непрерывным.";
       }
       return "";
     }
@@ -5240,12 +5266,12 @@
         if (isRangeEdge) {
           classes.push("range-edge");
         }
-        if (isoDate === state.history.defaultAsOfDate) {
+        if (isoDate === (state.history.todayCurrentDate || state.history.defaultAsOfDate)) {
           classes.push("today-anchor");
         }
         const titleParts = [isoDate];
         if (!isAvailable) {
-          titleParts.push("ready snapshot недоступен");
+          titleParts.push("дата вне доступного серверного периода");
         } else if (isRangeEdge) {
           titleParts.push("граница периода");
         } else if (isInRange) {
@@ -7453,6 +7479,11 @@
       model.scheduleMode = String((payload && payload.schedule_mode) || "");
       model.timezone = String((payload && payload.timezone) || "Asia/Yekaterinburg");
       model.canEditRuntime = !!(payload && payload.can_edit_runtime);
+      model.runNowSupported = !!(payload && payload.run_now_supported);
+      model.nextAutoRunAt = String((payload && payload.next_auto_run_at) || "");
+      model.lastAutoRunAt = String((payload && (payload.last_auto_run_at || payload.last_auto_run_time)) || "");
+      model.lastAutoSuccessAt = String((payload && (payload.last_auto_success_at || payload.last_successful_auto_update_at)) || "");
+      model.lastAutoStatus = String((payload && payload.last_auto_run_status_label) || (payload && payload.last_auto_run_status) || "");
       model.blocker = String((payload && payload.blocker) || "");
       model.message = String((payload && (payload.message || payload.trigger_description)) || "");
       model.triggerDescription = String((payload && payload.trigger_description) || "");
@@ -7475,9 +7506,37 @@
         trigger_name: "staged_ui_change",
         status: "staged",
         editable: true,
-        description: "Новая строка будет сохранена только после deploy-owned cadence change."
+        description: "Новая строка будет сохранена в runtime расписание."
       }]);
       renderVitrinaAutoSchedules();
+    }
+
+    function syncVitrinaAutoSchedulesFromDom() {
+      if (!vitrinaAutoSchedulesBodyNode) {
+        return;
+      }
+      const valuesById = new Map();
+      Array.from(vitrinaAutoSchedulesBodyNode.querySelectorAll("[data-vitrina-auto-field]")).forEach(function(input) {
+        const scheduleId = String(input.getAttribute("data-vitrina-auto-id") || "");
+        const field = String(input.getAttribute("data-vitrina-auto-field") || "");
+        if (!scheduleId || !field) {
+          return;
+        }
+        const current = valuesById.get(scheduleId) || {};
+        if (field === "enabled") {
+          current.enabled = !!input.checked;
+        } else if (field === "local_time_hhmm") {
+          current.local_time_hhmm = String(input.value || "");
+        }
+        valuesById.set(scheduleId, current);
+      });
+      if (!valuesById.size) {
+        return;
+      }
+      state.vitrinaAuto.schedules = (state.vitrinaAuto.schedules || []).map(function(schedule) {
+        const patch = valuesById.get(String(schedule.id || ""));
+        return patch ? Object.assign({}, schedule, patch) : schedule;
+      });
     }
 
     async function saveVitrinaAutoSchedules() {
@@ -7486,6 +7545,7 @@
       if (!path || model.saving) {
         return;
       }
+      syncVitrinaAutoSchedulesFromDom();
       model.saving = true;
       model.error = "";
       renderVitrinaAutoSchedules();
@@ -7509,19 +7569,84 @@
       }
     }
 
+    async function runVitrinaAutoScheduleNow(scheduleId) {
+      const path = String(WEB_VITRINA_CONFIG.auto_schedules_run_now_path || "");
+      if (!path || state.vitrinaAuto.loading || state.vitrinaAuto.saving) {
+        return;
+      }
+      const actionId = state.actionSequence + 1;
+      state.actionSequence = actionId;
+      state.vitrinaAuto.saving = true;
+      state.vitrinaAuto.error = "";
+      showGlobalProgress(10, "Запуск автообновления");
+      renderVitrinaAutoSchedules();
+      try {
+        const response = await fetch(path, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {"Accept": "application/json", "Content-Type": "application/json; charset=utf-8"},
+          body: JSON.stringify({schedule_id: scheduleId})
+        });
+        const payload = await readJsonResponse(response, "non-json response from web-vitrina auto schedule run-now route");
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "auto schedule run-now returned " + response.status);
+        }
+        const resolvedJobPath = String(
+          (payload && payload.job_path) ||
+          ((payload && payload.job_id) ? (WEB_VITRINA_CONFIG.job_path + "?job_id=" + encodeURIComponent(payload.job_id)) : "")
+        );
+        const finalJob = await pollSheetJob(resolvedJobPath, actionId, function(progress) {
+          showGlobalProgress(progress.percent, progress.label);
+        });
+        if (actionId !== state.actionSequence) {
+          return;
+        }
+        if (!finalJob || finalJob.status !== "success") {
+          throw new Error((finalJob && (finalJob.error || finalJob.status)) || "auto refresh job failed");
+        }
+        setSessionHighlightsFromJob(finalJob);
+        const semanticTone = jobSemanticTone(finalJob);
+        const semanticLabel = jobSemanticLabel(finalJob);
+        const semanticReason = jobCompletionPhrase(finalJob, "автообновление выполнено");
+        setStatusBadge({label: semanticLabel, tone: semanticTone, detail: semanticReason});
+        showGlobalProgress(100, "Готово");
+        await loadVitrinaAutoSchedules();
+        await loadPageComposition({includeSourceStatus: state.sourceStatus.loaded});
+      } catch (error) {
+        if (actionId !== state.actionSequence) {
+          return;
+        }
+        const message = String(error && error.message ? error.message : error);
+        state.vitrinaAuto.error = message;
+        setStatusBadge({label: "Ошибка", tone: "error", detail: message});
+      } finally {
+        if (actionId === state.actionSequence) {
+          state.vitrinaAuto.saving = false;
+          hideGlobalProgress();
+          renderVitrinaAutoSchedules();
+        }
+      }
+    }
+
     function renderVitrinaAutoSchedules() {
       const model = state.vitrinaAuto || {};
       if (vitrinaAutoMetaNode) {
         const parts = [
-          "Timezone: " + (model.timezone || "Asia/Yekaterinburg"),
-          model.scheduleMode || "deploy_owned_systemd_timer"
+          "Часовой пояс: " + (model.timezone || "Asia/Yekaterinburg"),
+          model.nextAutoRunAt ? ("следующий запуск " + formatTimestampDisplay(model.nextAutoRunAt)) : "",
+          model.scheduleMode || "runtime_managed_json_schedule"
         ];
-        vitrinaAutoMetaNode.textContent = model.loading ? "Расписание загружается…" : parts.join(" · ");
+        vitrinaAutoMetaNode.textContent = model.loading ? "Расписание загружается…" : parts.filter(Boolean).join(" · ");
       }
       if (vitrinaAutoStatusNode) {
+        const statusParts = [
+          model.lastAutoStatus ? ("последний статус: " + model.lastAutoStatus) : "",
+          model.lastAutoRunAt ? ("последний запуск: " + formatTimestampDisplay(model.lastAutoRunAt)) : "",
+          model.lastAutoSuccessAt ? ("последний успех: " + formatTimestampDisplay(model.lastAutoSuccessAt)) : ""
+        ].filter(Boolean);
         vitrinaAutoStatusNode.textContent = model.saving
           ? "Сохраняем…"
-          : (model.message || model.triggerDescription || "Автообновление использует canonical full refresh.");
+          : (statusParts.length ? statusParts.join(" · ") : (model.message || model.triggerDescription || "Автообновление использует canonical full refresh."));
       }
       if (vitrinaAutoErrorNode) {
         const hasError = !!model.error;
@@ -7541,10 +7666,10 @@
         }
       }
       if (vitrinaAutoAddButton) {
-        vitrinaAutoAddButton.disabled = !!model.loading || !!model.saving;
+        vitrinaAutoAddButton.disabled = !!model.loading || !!model.saving || !model.canEditRuntime;
       }
       if (vitrinaAutoSaveButton) {
-        vitrinaAutoSaveButton.disabled = !!model.loading || !!model.saving;
+        vitrinaAutoSaveButton.disabled = !!model.loading || !!model.saving || !model.canEditRuntime;
         vitrinaAutoSaveButton.textContent = model.saving ? "Сохранение…" : "Сохранить";
       }
       if (vitrinaAutoReloadButton) {
@@ -7555,20 +7680,24 @@
       }
       const schedules = model.schedules || [];
       if (!schedules.length) {
-        vitrinaAutoSchedulesBodyNode.innerHTML = '<tr><td colspan="6">Расписание не загружено.</td></tr>';
+        vitrinaAutoSchedulesBodyNode.innerHTML = '<tr><td colspan="7">Расписание не загружено.</td></tr>';
         return;
       }
       vitrinaAutoSchedulesBodyNode.innerHTML = schedules.map(function(schedule) {
         const id = String(schedule.id || "");
         const editable = !!schedule.editable || !!model.canEditRuntime;
+        const statusText = schedule.last_status_label || schedule.last_status || schedule.status || (schedule.enabled ? "active" : "disabled");
+        const errorText = schedule.last_error_summary || schedule.last_error || "";
         return [
           "<tr>",
           '<td><input type="checkbox" data-vitrina-auto-id="' + escapeHtml(id) + '" data-vitrina-auto-field="enabled"' + (schedule.enabled ? " checked" : "") + (editable ? "" : " disabled") + "></td>",
           '<td><input class="input" type="time" value="' + escapeHtml(schedule.local_time_hhmm || "12:00") + '" data-vitrina-auto-id="' + escapeHtml(id) + '" data-vitrina-auto-field="local_time_hhmm"' + (editable ? "" : " disabled") + "></td>",
-          "<td>" + escapeHtml(schedule.timezone_label || schedule.timezone || model.timezone || "Asia/Yekaterinburg") + "</td>",
-          "<td>" + escapeHtml(schedule.trigger_name || schedule.trigger_kind || "systemd_timer") + "</td>",
-          "<td>" + escapeHtml(schedule.status || (schedule.enabled ? "active" : "disabled")) + "</td>",
-          '<td><button class="button ghost" type="button" data-vitrina-auto-delete="' + escapeHtml(id) + '"' + (editable ? "" : " disabled") + ">Удалить</button></td>",
+          "<td>" + escapeHtml(schedule.next_run_at ? formatTimestampDisplay(schedule.next_run_at) : "—") + "</td>",
+          "<td>" + escapeHtml(schedule.last_run_at ? formatTimestampDisplay(schedule.last_run_at) : "—") + "</td>",
+          "<td>" + escapeHtml(schedule.last_success_at ? formatTimestampDisplay(schedule.last_success_at) : "—") + "</td>",
+          "<td>" + escapeHtml(statusText) + (errorText ? '<div class="auto-schedule-row-error">' + escapeHtml(errorText) + "</div>" : "") + "</td>",
+          '<td><button class="button ghost" type="button" data-vitrina-auto-run-now="' + escapeHtml(id) + '"' + (model.runNowSupported ? "" : " disabled") + '>Запустить</button> ' +
+            '<button class="button ghost" type="button" data-vitrina-auto-delete="' + escapeHtml(id) + '"' + (editable ? "" : " disabled") + '>Удалить</button></td>',
           "</tr>"
         ].join("");
       }).join("");

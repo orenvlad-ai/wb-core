@@ -108,19 +108,11 @@ def build_web_vitrina_page_composition(
                 "tone": status_badge["tone"],
             },
             {
-                "card_id": "rows",
-                "label": "Строки",
-                "value": str(contract_payload["meta"]["row_count"]),
-                "detail": f"date columns: {len(contract_payload['meta']['date_columns'])}",
-                "tone": "neutral",
-            },
-            {
-                "card_id": "freshness",
-                "label": "Свежесть данных",
-                "value": str(contract_payload["meta"]["refreshed_at"]),
-                "value_kind": "timestamp",
-                "detail": _freshness_detail(contract_payload),
-                "updated_at": str(contract_payload["meta"]["refreshed_at"]),
+                "card_id": "period",
+                "label": "Период",
+                "value": _period_label(contract_payload["meta"]["date_columns"]),
+                "detail": str(contract_payload["meta"]["refreshed_at"]),
+                "value_kind": "period",
                 "tone": "neutral",
             },
         ],
@@ -272,17 +264,10 @@ def build_web_vitrina_page_error_composition(
                 "tone": "error",
             },
             {
-                "card_id": "rows",
-                "label": "Строки",
-                "value": "0",
+                "card_id": "period",
+                "label": "Период",
+                "value": as_of_date,
                 "detail": "table payload is unavailable",
-                "tone": "neutral",
-            },
-            {
-                "card_id": "freshness",
-                "label": "Свежесть данных",
-                "value": "—",
-                "detail": f"snapshot unavailable · as_of_date {as_of_date}",
                 "tone": "neutral",
             },
         ],
@@ -819,14 +804,13 @@ def _resolve_ready_state_message(adapter_payload: Mapping[str, Any]) -> str:
     return str(state_surface["error_message"])
 
 
-def _freshness_detail(contract_payload: Mapping[str, Any]) -> str:
-    meta = contract_payload["meta"]
-    status_summary = contract_payload["status_summary"]
-    return (
-        f"snapshot {meta['snapshot_id']} · "
-        f"as_of_date {meta['as_of_date']} · "
-        f"{status_summary['read_model']}"
-    )
+def _period_label(date_columns: Any) -> str:
+    values = [str(item) for item in (date_columns or []) if str(item)]
+    if not values:
+        return "—"
+    if len(values) == 1:
+        return values[0]
+    return f"{values[0]}..{values[-1]}"
 
 
 def _build_status_badge(*, current_state: str, status_summary: Mapping[str, Any]) -> dict[str, str]:
@@ -836,7 +820,6 @@ def _build_status_badge(*, current_state: str, status_summary: Mapping[str, Any]
         label = str(status_summary.get("refresh_status_label") or "").strip() or _semantic_label(tone)
         detail_parts = [
             str(status_summary.get("refresh_status_reason") or "").strip(),
-            f"{status_summary['read_model']} / {status_summary['source_sheet_name']}",
         ]
         return {
             "label": label,
