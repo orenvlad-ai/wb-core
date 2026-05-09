@@ -1046,11 +1046,23 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
               deleteDisabled: deleteButton ? !!deleteButton.disabled : null
             };
           });
+          const warningNode = document.querySelector('[data-vitrina-auto-error]');
+          const warningSummary = warningNode ? warningNode.querySelector('[data-vitrina-auto-warning-summary]') : null;
+          const warningText = warningNode ? warningNode.querySelector('[data-vitrina-auto-warning-text]') : null;
           return {
             title: (document.querySelector('[data-vitrina-auto-schedule] .auto-schedule-title') || {}).textContent || '',
             meta: (document.querySelector('[data-vitrina-auto-schedule-meta]') || {}).textContent || '',
             status: (document.querySelector('[data-vitrina-auto-status]') || {}).textContent || '',
             error: (document.querySelector('[data-vitrina-auto-error]') || {}).textContent || '',
+            warning: warningNode ? {
+              hidden: !!warningNode.hidden,
+              open: !!warningNode.open,
+              className: warningNode.getAttribute('class') || '',
+              backgroundColor: window.getComputedStyle(warningNode).backgroundColor,
+              summaryColor: warningSummary ? window.getComputedStyle(warningSummary).color : '',
+              summary: warningSummary ? (warningSummary.textContent || '').trim() : '',
+              text: warningText ? (warningText.textContent || '').trim() : ''
+            } : null,
             addCount: document.querySelectorAll('[data-vitrina-auto-add]').length,
             saveCount: document.querySelectorAll('[data-vitrina-auto-save]').length,
             reloadCount: document.querySelectorAll('[data-vitrina-auto-reload]').length,
@@ -1071,6 +1083,23 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
         raise AssertionError(f"current auto schedule rows must be enabled, got {payload}")
     if not all(row["timeDisabled"] and row["enabledDisabled"] and row["deleteDisabled"] for row in payload["rows"] if row.get("time")):
         raise AssertionError(f"systemd-owned current rows must be non-editable in runtime UI, got {payload}")
+    warning_text = (
+        "Runtime UI показывает текущее repo-owned systemd расписание; изменение cadence требует "
+        "operator approval и hosted deploy."
+    )
+    warning = payload.get("warning") or {}
+    if warning.get("hidden") or warning.get("open"):
+        raise AssertionError(f"runtime schedule warning must render collapsed by default, got {payload}")
+    if warning.get("summary") != "Предупреждение о runtime расписании":
+        raise AssertionError(f"runtime schedule warning summary mismatch, got {payload}")
+    if warning.get("text") != warning_text:
+        raise AssertionError(f"runtime schedule warning text must stay exact, got {payload}")
+    if "is-error" in str(warning.get("className") or ""):
+        raise AssertionError(f"runtime schedule warning must not use error tone, got {payload}")
+    if "245, 158, 11" not in str(warning.get("backgroundColor") or ""):
+        raise AssertionError(f"runtime schedule warning must use amber background, got {payload}")
+    if "251, 191, 36" not in str(warning.get("summaryColor") or ""):
+        raise AssertionError(f"runtime schedule warning summary must use amber text, got {payload}")
 
     page.locator("[data-vitrina-auto-add]").click()
     page.wait_for_function(
@@ -1079,10 +1108,10 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
     )
     page.locator("[data-vitrina-auto-save]").click()
     page.wait_for_function(
-        "() => (document.querySelector('[data-vitrina-auto-error]')?.textContent || '').includes('operator approval') || (document.querySelector('[data-vitrina-auto-error]')?.textContent || '').includes('approval')",
+        "() => (document.querySelector('[data-vitrina-auto-status]')?.textContent || '').includes('production cadence')",
         timeout=5000,
     )
-    blocker = page.locator("[data-vitrina-auto-error]").inner_text().strip()
+    blocker = (page.locator("[data-vitrina-auto-warning-text]").text_content() or "").strip()
     page.locator("[data-vitrina-auto-reload]").click()
     page.wait_for_function(
         "() => Array.from(document.querySelectorAll('[data-vitrina-auto-field=\"local_time_hhmm\"]')).filter(node => node.value).length === 2",
