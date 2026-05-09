@@ -1173,6 +1173,28 @@ def _check_unified_tab_navigation(page: object) -> dict[str, object]:
 
 
 def _check_auto_schedule_block(page: object) -> dict[str, object]:
+    page.wait_for_selector("[data-vitrina-auto-schedule]", timeout=10000)
+    collapsed_state = page.evaluate(
+        """() => {
+          const panel = document.querySelector('[data-vitrina-auto-schedule]');
+          const summary = document.querySelector('[data-vitrina-auto-summary]');
+          const disclosure = document.querySelector('.auto-schedule-disclosure');
+          return {
+            open: !!(panel && panel.open),
+            summaryText: summary ? (summary.textContent || '').trim() : '',
+            disclosureVisible: !!(disclosure && disclosure.getBoundingClientRect().width > 0)
+          };
+        }"""
+    )
+    if collapsed_state["open"]:
+        raise AssertionError(f"auto schedule block must be collapsed on page load, got {collapsed_state}")
+    if "Автообновления" not in collapsed_state["summaryText"] or not collapsed_state["disclosureVisible"]:
+        raise AssertionError(f"auto schedule collapsed header must expose title and disclosure arrow, got {collapsed_state}")
+    page.locator("[data-vitrina-auto-summary]").click()
+    page.wait_for_function(
+        "() => !!(document.querySelector('[data-vitrina-auto-schedule]') || {}).open",
+        timeout=5000,
+    )
     page.wait_for_function(
         "() => document.querySelectorAll('[data-vitrina-auto-schedules-body] tr').length > 0 && !(document.querySelector('[data-vitrina-auto-schedule-meta]').textContent || '').includes('загружается')",
         timeout=10000,
@@ -1262,6 +1284,7 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
     return {
         "times": sorted(times),
         "timezone": "Asia/Yekaterinburg",
+        "collapsed_by_default": True,
         "controls": {"add": True, "save": True, "reload": True},
         "runtime_editable": True,
     }
