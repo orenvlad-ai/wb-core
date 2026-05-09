@@ -965,21 +965,75 @@
     }
 
     .auto-schedule-panel {
-      display: grid;
-      gap: 8px;
       margin: 0 0 8px;
       border: 1px solid var(--border);
       border-radius: 8px;
       background: var(--panel-bg);
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .auto-schedule-summary {
+      display: flex;
+      align-items: center;
+      gap: 8px;
       padding: 10px;
+      min-width: 0;
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+    }
+
+    .auto-schedule-summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .auto-schedule-disclosure {
+      display: grid;
+      flex: 0 0 22px;
+      width: 22px;
+      height: 22px;
+      place-items: center;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--muted-strong);
+      background: var(--panel-subtle);
+    }
+
+    .auto-schedule-disclosure::before {
+      content: ">";
+      font-size: 12px;
+      line-height: 1;
+      transform: translateX(1px);
+      transition: transform 150ms ease;
+    }
+
+    .auto-schedule-panel[open] .auto-schedule-disclosure::before {
+      transform: rotate(90deg) translateX(1px);
+    }
+
+    .auto-schedule-summary:hover .auto-schedule-disclosure {
+      border-color: rgba(37, 99, 235, 0.32);
+      color: var(--accent);
+    }
+
+    .auto-schedule-summary-text {
+      display: grid;
+      gap: 2px;
       min-width: 0;
     }
 
-    .auto-schedule-head,
+    .auto-schedule-body {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border-top: 1px solid var(--border);
+    }
+
     .auto-schedule-actions {
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      justify-content: flex-end;
       gap: 8px;
       flex-wrap: wrap;
       min-width: 0;
@@ -2694,42 +2748,45 @@
       </div>
     </section>
 
-    <section class="auto-schedule-panel" data-vitrina-auto-schedule>
-      <div class="auto-schedule-head">
-        <div>
-          <h2 class="auto-schedule-title">Автообновления</h2>
-          <p class="auto-schedule-meta" data-vitrina-auto-schedule-meta>Расписание загружается…</p>
-        </div>
+    <details class="auto-schedule-panel" data-vitrina-auto-schedule>
+      <summary class="auto-schedule-summary" data-vitrina-auto-summary>
+        <span class="auto-schedule-disclosure" aria-hidden="true"></span>
+        <span class="auto-schedule-summary-text">
+          <span class="auto-schedule-title" role="heading" aria-level="2">Автообновления</span>
+          <span class="auto-schedule-meta" data-vitrina-auto-schedule-meta>Расписание загружается…</span>
+        </span>
+      </summary>
+      <div class="auto-schedule-body">
         <div class="auto-schedule-actions">
           <button class="button secondary" type="button" data-vitrina-auto-add>Добавить строку</button>
           <button class="button secondary" type="button" data-vitrina-auto-save>Сохранить</button>
           <button class="button secondary" type="button" data-vitrina-auto-reload>Обновить</button>
         </div>
+        <div class="auto-schedule-table-wrap">
+          <table class="auto-schedule-table">
+            <thead>
+              <tr>
+                <th>Включено</th>
+                <th>Время</th>
+                <th>Следующий</th>
+                <th>Последний запуск</th>
+                <th>Последний успех</th>
+                <th>Статус</th>
+                <th>Действия</th>
+              </tr>
+            </thead>
+            <tbody data-vitrina-auto-schedules-body>
+              <tr><td colspan="7">Расписание загружается…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="auto-schedule-status" data-vitrina-auto-status>Автообновление использует тот же canonical full refresh, что и кнопка.</p>
+        <details class="auto-schedule-warning" data-vitrina-auto-error hidden>
+          <summary class="auto-schedule-warning-summary" data-vitrina-auto-warning-summary>Предупреждение о runtime расписании</summary>
+          <p class="auto-schedule-warning-text" data-vitrina-auto-warning-text></p>
+        </details>
       </div>
-      <div class="auto-schedule-table-wrap">
-        <table class="auto-schedule-table">
-          <thead>
-            <tr>
-              <th>Включено</th>
-              <th>Время</th>
-              <th>Следующий</th>
-              <th>Последний запуск</th>
-              <th>Последний успех</th>
-              <th>Статус</th>
-              <th>Действия</th>
-            </tr>
-          </thead>
-          <tbody data-vitrina-auto-schedules-body>
-            <tr><td colspan="7">Расписание загружается…</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <p class="auto-schedule-status" data-vitrina-auto-status>Автообновление использует тот же canonical full refresh, что и кнопка.</p>
-      <details class="auto-schedule-warning" data-vitrina-auto-error hidden>
-        <summary class="auto-schedule-warning-summary" data-vitrina-auto-warning-summary>Предупреждение о runtime расписании</summary>
-        <p class="auto-schedule-warning-text" data-vitrina-auto-warning-text></p>
-      </details>
-    </section>
+    </details>
 
     <section class="summary-grid" data-summary-grid></section>
 
@@ -3348,6 +3405,7 @@
     const vitrinaAutoWarningSummaryNode = document.querySelector("[data-vitrina-auto-warning-summary]");
     const vitrinaAutoWarningTextNode = document.querySelector("[data-vitrina-auto-warning-text]");
     const vitrinaAutoSchedulesBodyNode = document.querySelector("[data-vitrina-auto-schedules-body]");
+    const vitrinaAutoPanelNode = document.querySelector("[data-vitrina-auto-schedule]");
 
     const ALL_VALUE = "__all__";
     const DEFAULT_UNIFIED_TAB = "vitrina";
@@ -3666,6 +3724,9 @@
     }
     if (openContractLink) {
       openContractLink.href = buildReadUrl("contract").toString();
+    }
+    if (vitrinaAutoPanelNode) {
+      vitrinaAutoPanelNode.open = false;
     }
 
     loadRefreshButton.addEventListener("click", function() {
