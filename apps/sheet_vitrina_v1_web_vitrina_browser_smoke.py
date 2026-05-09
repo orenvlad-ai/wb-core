@@ -761,6 +761,15 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
 def _check_operator_screen_layout(page: object) -> dict[str, object]:
     payload = page.evaluate(
         """() => {
+          const numbers = value => (value.match(/\\d+(?:\\.\\d+)?/g) || []).map(Number);
+          const isDark = value => {
+            const rgb = numbers(value);
+            return rgb.length >= 3 && rgb[0] < 45 && rgb[1] < 50 && rgb[2] < 60;
+          };
+          const hasAccentBorder = value => {
+            const rgb = numbers(value);
+            return rgb.length >= 3 && rgb[0] === 139 && rgb[1] === 92 && rgb[2] === 246;
+          };
           const root = document.querySelector('[data-unified-tab-panel="vitrina"]');
           const nodeIndex = selector => {
             const node = root ? root.querySelector(selector) : null;
@@ -774,18 +783,31 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
             return current ? Array.from(root.children).indexOf(current) : -1;
           };
           const loadButton = document.querySelector('[data-load-refresh-button]');
-            const headers = Array.from(document.querySelectorAll('[data-table-head] th')).map(node => (node.textContent || '').trim());
-            return {
-              unified_tabs: Array.from(document.querySelectorAll('[data-unified-tab-button]')).map(node => (node.textContent || '').trim()),
-              active_unified_tab: ((document.querySelector('[data-unified-tab-button].is-active') || {}).textContent || '').trim(),
-              update_tab_count: Array.from(document.querySelectorAll('[data-unified-tab-button]')).filter(node => (node.textContent || '').trim() === 'Обновление данных').length,
-              retry_button_count: document.querySelectorAll('[data-retry-button]').length,
-              top_status_badge_count: document.querySelectorAll('[data-status-badge]').length,
-              json_connect_count: document.querySelectorAll('[data-open-contract]').length,
-              progress_count: document.querySelectorAll('[data-global-progress]').length,
-              load_button_text: loadButton ? (loadButton.textContent || '').trim() : '',
-              load_button_class: loadButton ? (loadButton.getAttribute('class') || '') : '',
-              headers,
+          const loadButtonStyles = loadButton ? getComputedStyle(loadButton) : null;
+          const saveButtons = Array.from(document.querySelectorAll([
+            '[data-vitrina-auto-save]',
+            '[data-history-save]',
+            '[data-feedbacks-range-save]',
+            '[data-feedbacks-prompt-save]',
+            '[data-feedbacks-auto-save]',
+          ].join(',')));
+          const headers = Array.from(document.querySelectorAll('[data-table-head] th')).map(node => (node.textContent || '').trim());
+          return {
+            unified_tabs: Array.from(document.querySelectorAll('[data-unified-tab-button]')).map(node => (node.textContent || '').trim()),
+            active_unified_tab: ((document.querySelector('[data-unified-tab-button].is-active') || {}).textContent || '').trim(),
+            update_tab_count: Array.from(document.querySelectorAll('[data-unified-tab-button]')).filter(node => (node.textContent || '').trim() === 'Обновление данных').length,
+            retry_button_count: document.querySelectorAll('[data-retry-button]').length,
+            top_status_badge_count: document.querySelectorAll('[data-status-badge]').length,
+            json_connect_count: document.querySelectorAll('[data-open-contract]').length,
+            progress_count: document.querySelectorAll('[data-global-progress]').length,
+            load_button_text: loadButton ? (loadButton.textContent || '').trim() : '',
+            load_button_class: loadButton ? (loadButton.getAttribute('class') || '') : '',
+            load_button_bg: loadButtonStyles ? loadButtonStyles.backgroundColor : '',
+            load_button_border: loadButtonStyles ? loadButtonStyles.borderTopColor : '',
+            load_button_is_dark: loadButtonStyles ? isDark(loadButtonStyles.backgroundColor) : false,
+            load_button_has_accent_border: loadButtonStyles ? hasAccentBorder(loadButtonStyles.borderTopColor) : false,
+            save_button_classes: saveButtons.map(node => node.getAttribute('class') || ''),
+            headers,
             order: {
               top: nodeIndex('[data-top-panel]'),
               summary: nodeIndex('[data-summary-grid]'),
@@ -810,6 +832,12 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
         raise AssertionError(f"top panel must expose one global progress component, got {payload}")
     if payload["load_button_text"] != "Загрузить и обновить" or "primary" not in payload["load_button_class"]:
         raise AssertionError(f"load+refresh button must be the single primary action, got {payload}")
+    if not payload["load_button_is_dark"] or not payload["load_button_has_accent_border"]:
+        raise AssertionError(f"load+refresh button must use dark accent-outline styling, got {payload}")
+    if not payload["save_button_classes"] or any(
+        "primary" in class_name or "secondary" not in class_name for class_name in payload["save_button_classes"]
+    ):
+        raise AssertionError(f"save buttons must remain neutral secondary actions, got {payload}")
     for forbidden in ("Metric Label", "Sections", "Score Label"):
         if forbidden in payload["headers"]:
             raise AssertionError(f"main table headers must be Russian-only, got {payload['headers']}")
@@ -1148,6 +1176,7 @@ def _check_embedded_operator_dark_layout(page: object, embedded_tab: str) -> dic
           const card = activePanel ? activePanel.querySelector(".dataset-card, .report-card, .plan-report-card, .stock-report-item") : null;
           const tableSurface = activePanel ? activePanel.querySelector(".district-table-wrap, .plan-report-table-wrap, .log-viewport") : null;
           const primaryRgb = primary ? numbers(getComputedStyle(primary).backgroundColor) : [];
+          const primaryBorderRgb = primary ? numbers(getComputedStyle(primary).borderTopColor) : [];
           const activeSubsectionRgb = activeSubsection ? numbers(getComputedStyle(activeSubsection).backgroundColor) : [];
           const buttonHeights = Array.from(activePanel ? activePanel.querySelectorAll(".action-button") : [])
             .map(node => Math.round(node.getBoundingClientRect().height))
@@ -1167,12 +1196,14 @@ def _check_embedded_operator_dark_layout(page: object, embedded_tab: str) -> dic
             subsectionBg: subsectionStrip ? getComputedStyle(subsectionStrip).backgroundColor : "",
             activeSubsectionBg: activeSubsection ? getComputedStyle(activeSubsection).backgroundColor : "",
             primaryBg: primary ? getComputedStyle(primary).backgroundColor : "",
+            primaryBorder: primary ? getComputedStyle(primary).borderTopColor : "",
             secondaryBg: secondary ? getComputedStyle(secondary).backgroundColor : "",
             tableSurfaceBg: tableSurface ? getComputedStyle(tableSurface).backgroundColor : "",
             blockIsDark: block ? isDark(getComputedStyle(block).backgroundColor) : false,
             cardIsDark: card ? isDark(getComputedStyle(card).backgroundColor) : false,
             controlIsDark: control ? isDark(getComputedStyle(control).backgroundColor) : false,
-            primaryIsViolet: primaryRgb.length >= 3 && primaryRgb[0] === 139 && primaryRgb[1] === 92 && primaryRgb[2] === 246,
+            primaryIsDark: primaryRgb.length >= 3 && primaryRgb[0] < 45 && primaryRgb[1] < 50 && primaryRgb[2] < 60,
+            primaryHasAccentBorder: primaryBorderRgb.length >= 3 && primaryBorderRgb[0] === 139 && primaryBorderRgb[1] === 92 && primaryBorderRgb[2] === 246,
             primaryLooksGreen: primaryRgb.length >= 3 && primaryRgb[1] > primaryRgb[0] && primaryRgb[1] > primaryRgb[2],
             activeSubsectionUsesAccent: activeSubsectionRgb.length >= 3 && activeSubsectionRgb[0] === 139 && activeSubsectionRgb[1] === 92 && activeSubsectionRgb[2] === 246,
             equalActionButtonHeights: buttonHeights.length === 0 || Math.max(...buttonHeights) - Math.min(...buttonHeights) <= 2,
@@ -1185,8 +1216,10 @@ def _check_embedded_operator_dark_layout(page: object, embedded_tab: str) -> dic
     for key in ("blockIsDark", "controlIsDark", "equalActionButtonHeights"):
         if not payload.get(key):
             raise AssertionError(f"{embedded_tab} embedded operator dark invariant failed for {key}: {payload}")
-    if embedded_tab == "factory-order" and not payload.get("primaryIsViolet"):
-        raise AssertionError(f"factory-order primary action must use violet accent, got {payload}")
+    if embedded_tab == "factory-order" and (
+        not payload.get("primaryIsDark") or not payload.get("primaryHasAccentBorder")
+    ):
+        raise AssertionError(f"factory-order primary action must use dark accent-outline styling, got {payload}")
     if embedded_tab == "reports" and not payload.get("cardIsDark"):
         raise AssertionError(f"reports cards must render dark, got {payload}")
     if embedded_tab == "reports" and not payload.get("activeSubsectionUsesAccent"):
