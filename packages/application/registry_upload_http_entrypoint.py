@@ -606,6 +606,7 @@ class RegistryUploadHttpEntrypoint:
         as_of_date: str | None = None,
         use_contract_start_date: bool = False,
         contract_start_date: str | None = None,
+        annual_plan_evenly_distributed: bool = False,
     ) -> dict[str, Any]:
         return self.plan_report_block.build(
             period=period,
@@ -619,6 +620,7 @@ class RegistryUploadHttpEntrypoint:
             as_of_date=as_of_date,
             use_contract_start_date=use_contract_start_date,
             contract_start_date=contract_start_date,
+            annual_plan_evenly_distributed=annual_plan_evenly_distributed,
         )
 
     def handle_sheet_plan_report_baseline_template_request(self) -> tuple[bytes, str]:

@@ -1925,6 +1925,12 @@
                       <span>С учётом даты подписания</span>
                     </label>
                   </div>
+                  <div class="field plan-report-checkbox-field">
+                    <label class="plan-report-checkbox-label" for="planReportAnnualEvenCheckbox">
+                      <input id="planReportAnnualEvenCheckbox" type="checkbox">
+                      <span>Равномерный годовой план</span>
+                    </label>
+                  </div>
                   <div class="field plan-report-field">
                     <label for="planReportContractStartDateInput">Дата подписания</label>
                     <input id="planReportContractStartDateInput" type="date" disabled>
@@ -2350,6 +2356,7 @@
       const planReportH2Input = document.getElementById("planReportH2Input");
       const planReportDrrInput = document.getElementById("planReportDrrInput");
       const planReportContractStartCheckbox = document.getElementById("planReportContractStartCheckbox");
+      const planReportAnnualEvenCheckbox = document.getElementById("planReportAnnualEvenCheckbox");
       const planReportContractStartDateInput = document.getElementById("planReportContractStartDateInput");
       const planReportApplyButton = document.getElementById("planReportApplyButton");
       const planReportValidation = document.getElementById("planReportValidation");
@@ -2634,6 +2641,7 @@
         if (contractStartDate) {
           planReportContractStartDateInput.value = contractStartDate;
         }
+        planReportAnnualEvenCheckbox.checked = inputs.annual_plan_evenly_distributed === true;
         setContractStartInputEnabled(planReportContractStartCheckbox.checked);
       }
 
@@ -2647,6 +2655,7 @@
           h2_buyout_plan_rub: String(planReportH2Input.value || "").trim(),
           plan_drr_pct: String(planReportDrrInput.value || "").trim(),
           use_contract_start_date: Boolean(planReportContractStartCheckbox.checked),
+          annual_plan_evenly_distributed: Boolean(planReportAnnualEvenCheckbox.checked),
           contract_start_date: sanitizePersistedPlanDateValue(planReportContractStartDateInput.value)
         };
         if (!VALID_PLAN_REPORT_PERIODS.has(inputs.period)) {
@@ -3460,7 +3469,7 @@
       function renderPlanReportUnavailable(payload, fallbackMessage) {
         planReportPayload = payload || null;
         planReportPeriod.textContent = "Выберите период и задайте планы H1/H2.";
-        planReportLead.textContent = "Факт считается server-side из accepted closed-day snapshots fin_buyout_rub и ads_sum; план распределяется по всем календарным дням H1/H2.";
+        planReportLead.textContent = "Факт считается server-side из accepted closed-day snapshots fin_buyout_rub и ads_sum; план распределяется по выбранному режиму расчёта.";
         planReportStatus.textContent = valueOrDash((payload && payload.reason) || fallbackMessage || "Отчёт выполнения плана пока недоступен.");
         planReportStatus.className = "section-message is-error";
         planReportContent.hidden = true;
@@ -3492,8 +3501,11 @@
         const contractNote = inputs.use_contract_start_date && inputs.contract_start_date
           ? " Периоды обрезаны по дате подписания: " + formatHumanDate(inputs.contract_start_date) + "."
           : "";
+        const planModeNote = inputs.annual_plan_evenly_distributed
+          ? " План распределяется равномерно по годовому плану H1+H2."
+          : " План распределяется по календарным дням H1/H2.";
         planReportPeriod.textContent = "Последний закрытый день: " + formatHumanDate(effectiveAsOfDate) + ". Основной период: " + valueOrDash(payload.selected_period_label) + ".";
-        planReportLead.textContent = "Active SKU в current config: " + valueOrDash(payload.active_sku_count) + ". Текущий незакрытый день не входит в расчёт; план распределяется по календарным дням H1/H2." + contractNote;
+        planReportLead.textContent = "Active SKU в current config: " + valueOrDash(payload.active_sku_count) + ". Текущий незакрытый день не входит в расчёт." + planModeNote + contractNote;
         if (payload.status === "available") {
           planReportStatus.textContent = "Source of truth: accepted closed-day runtime snapshots fin_report_daily + ads_compact.";
           planReportStatus.className = "section-message";
@@ -3522,10 +3534,11 @@
           h2_buyout_plan_rub: String(planReportH2Input.value || "").trim(),
           plan_drr_pct: String(planReportDrrInput.value || "").trim(),
           use_contract_start_date: Boolean(planReportContractStartCheckbox.checked),
+          annual_plan_evenly_distributed: Boolean(planReportAnnualEvenCheckbox.checked),
           contract_start_date: String(planReportContractStartDateInput.value || "").trim(),
         };
         const missing = Object.entries(request).find(([key, value]) => (
-          !["period", "use_contract_start_date", "contract_start_date"].includes(key) && !value
+          !["period", "use_contract_start_date", "annual_plan_evenly_distributed", "contract_start_date"].includes(key) && !value
         ));
         if (!request.period || missing) {
           return { error: "Заполните планы H1/H2 и плановый DRR." };
@@ -3537,6 +3550,7 @@
         ];
         const params = new URLSearchParams();
         params.set("period", request.period);
+        params.set("annual_plan_evenly_distributed", request.annual_plan_evenly_distributed ? "true" : "false");
         for (const key of numericKeys) {
           const numericValue = Number(request[key]);
           if (!Number.isFinite(numericValue) || numericValue < 0) {
@@ -4800,6 +4814,15 @@
       });
       planReportContractStartCheckbox.addEventListener("change", () => {
         setContractStartInputEnabled(planReportContractStartCheckbox.checked);
+        if (planReportValidation.hidden) {
+          return;
+        }
+        const request = readPlanReportRequest();
+        if (!request.error) {
+          setPlanReportValidation("");
+        }
+      });
+      planReportAnnualEvenCheckbox.addEventListener("change", () => {
         if (planReportValidation.hidden) {
           return;
         }

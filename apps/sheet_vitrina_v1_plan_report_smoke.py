@@ -392,6 +392,121 @@ def main() -> None:
         _assert_close(wb_mtd["metrics"]["buyout_rub"]["plan"], expected_mtd_qtd_plan, "2026-04-24 mtd h1/h2 plan")
         _assert_close(wb_qtd["metrics"]["buyout_rub"]["plan"], expected_mtd_qtd_plan, "2026-04-24 qtd h1/h2 plan")
 
+        explicit_false_payload = block.build(
+            period="current_year",
+            h1_buyout_plan_rub=155379879.0,
+            h2_buyout_plan_rub=294620120.0,
+            plan_drr_pct=6.0,
+            as_of_date="2026-04-24",
+            annual_plan_evenly_distributed=False,
+        )
+        if explicit_false_payload["inputs"].get("plan_model") != "half_year":
+            raise AssertionError(f"explicit annual-even false must keep half-year plan mode, got {explicit_false_payload}")
+        _assert_close(
+            explicit_false_payload["periods"]["year_to_date"]["metrics"]["buyout_rub"]["plan"],
+            wb_ytd["metrics"]["buyout_rub"]["plan"],
+            "explicit annual-even false must keep old ytd plan",
+        )
+
+        annual_payload = block.build(
+            period="current_year",
+            h1_buyout_plan_rub=155379879.0,
+            h2_buyout_plan_rub=294620120.0,
+            plan_drr_pct=6.0,
+            as_of_date="2026-04-24",
+            annual_plan_evenly_distributed=True,
+        )
+        annual_inputs = annual_payload["inputs"]
+        if annual_inputs.get("plan_model") != "annual_evenly_distributed":
+            raise AssertionError(f"annual-even mode must be disclosed in inputs, got {annual_inputs}")
+        _assert_close(annual_inputs.get("annual_buyout_plan_rub"), 449999999.0, "annual H1+H2 plan")
+        if annual_inputs.get("annual_plan_denominator_day_count") != 365:
+            raise AssertionError(f"annual-even default denominator must be full year, got {annual_inputs}")
+        annual_ytd = annual_payload["periods"]["year_to_date"]
+        annual_mtd = annual_payload["periods"]["month_to_date"]
+        annual_qtd = annual_payload["periods"]["quarter_to_date"]
+        expected_annual_ytd_plan = 449999999.0 / 365.0 * 114.0
+        expected_annual_mtd_qtd_plan = 449999999.0 / 365.0 * 24.0
+        _assert_close(annual_ytd["metrics"]["buyout_rub"]["plan"], expected_annual_ytd_plan, "annual-even ytd plan")
+        _assert_close(annual_mtd["metrics"]["buyout_rub"]["plan"], expected_annual_mtd_qtd_plan, "annual-even mtd plan")
+        _assert_close(annual_qtd["metrics"]["buyout_rub"]["plan"], expected_annual_mtd_qtd_plan, "annual-even qtd plan")
+        _assert_close(annual_ytd["metrics"]["buyout_rub"]["fact"], wb_ytd["metrics"]["buyout_rub"]["fact"], "annual-even keeps buyout fact")
+        _assert_close(annual_ytd["metrics"]["ads_sum_rub"]["fact"], wb_ytd["metrics"]["ads_sum_rub"]["fact"], "annual-even keeps ads fact")
+        _assert_close(annual_ytd["metrics"]["drr_pct"]["fact"], wb_ytd["metrics"]["drr_pct"]["fact"], "annual-even keeps drr fact")
+        if annual_ytd["metrics"]["buyout_rub"]["plan"] == wb_ytd["metrics"]["buyout_rub"]["plan"]:
+            raise AssertionError("annual-even mode must change buyout plan while keeping facts unchanged")
+
+        h1_old_payload = block.build(
+            period="first_quarter",
+            h1_buyout_plan_rub=155379879.0,
+            h2_buyout_plan_rub=294620120.0,
+            plan_drr_pct=6.0,
+            as_of_date="2026-04-24",
+        )
+        h1_annual_payload = block.build(
+            period="first_quarter",
+            h1_buyout_plan_rub=155379879.0,
+            h2_buyout_plan_rub=294620120.0,
+            plan_drr_pct=6.0,
+            as_of_date="2026-04-24",
+            annual_plan_evenly_distributed=True,
+        )
+        h1_old_selected = h1_old_payload["periods"]["selected_period"]
+        h1_annual_selected = h1_annual_payload["periods"]["selected_period"]
+        if (
+            h1_annual_selected["metrics"]["buyout_rub"]["plan"] / h1_annual_selected["day_count"]
+            <= h1_old_selected["metrics"]["buyout_rub"]["plan"] / h1_old_selected["day_count"]
+        ):
+            raise AssertionError("annual-even daily plan must be higher than H1-only daily load in H1")
+
+        h2_old_payload = block.build(
+            period="second_half",
+            h1_buyout_plan_rub=155379879.0,
+            h2_buyout_plan_rub=294620120.0,
+            plan_drr_pct=6.0,
+            as_of_date="2026-07-10",
+        )
+        h2_annual_payload = block.build(
+            period="second_half",
+            h1_buyout_plan_rub=155379879.0,
+            h2_buyout_plan_rub=294620120.0,
+            plan_drr_pct=6.0,
+            as_of_date="2026-07-10",
+            annual_plan_evenly_distributed=True,
+        )
+        h2_old_selected = h2_old_payload["periods"]["selected_period"]
+        h2_annual_selected = h2_annual_payload["periods"]["selected_period"]
+        if (
+            h2_annual_selected["metrics"]["buyout_rub"]["plan"] / h2_annual_selected["day_count"]
+            >= h2_old_selected["metrics"]["buyout_rub"]["plan"] / h2_old_selected["day_count"]
+        ):
+            raise AssertionError("annual-even daily plan must be lower than H2-only daily load in H2")
+
+        annual_contract_payload = block.build(
+            period="first_quarter",
+            h1_buyout_plan_rub=155379879.0,
+            h2_buyout_plan_rub=294620120.0,
+            plan_drr_pct=6.0,
+            as_of_date="2026-04-24",
+            use_contract_start_date=True,
+            contract_start_date="2026-02-01",
+            annual_plan_evenly_distributed=True,
+        )
+        annual_contract_inputs = annual_contract_payload["inputs"]
+        annual_contract_selected = annual_contract_payload["periods"]["selected_period"]
+        if annual_contract_inputs.get("annual_plan_denominator_day_count") != 334:
+            raise AssertionError(f"annual-even contract denominator must use the contract-start window, got {annual_contract_inputs}")
+        _assert_close(
+            annual_contract_selected["metrics"]["buyout_rub"]["plan"],
+            449999999.0 / 334.0 * 59.0,
+            "annual-even contract-trimmed q1 buyout plan",
+        )
+        _assert_close(
+            annual_contract_selected["metrics"]["buyout_rub"]["fact"],
+            contract_selected["metrics"]["buyout_rub"]["fact"],
+            "annual-even contract mode keeps contract-trimmed facts",
+        )
+
         split_payload = block.build(
             period="last_30_days",
             h1_buyout_plan_rub=181000.0,
@@ -613,6 +728,7 @@ def main() -> None:
         print("plan_report_partial_overlap_baseline: ok ->", partial_overlap_source["baseline_months"])
         print("plan_report_reconciliation_controls: ok ->", q1_ytd["metrics"]["buyout_rub"]["fact"], april_mtd["metrics"]["buyout_rub"]["fact"])
         print("plan_report_contract_start: ok ->", contract_selected["date_from"], contract_selected["date_to"])
+        print("plan_report_annual_even_mode: ok ->", annual_inputs["annual_buyout_plan_rub"], annual_ytd["metrics"]["buyout_rub"]["plan"])
         print("plan_report_baseline_xlsx: ok ->", upload_payload["accepted_months"])
 
 

@@ -108,8 +108,10 @@ def main() -> None:
                 'id="planReportH2Input"',
                 'id="planReportDrrInput"',
                 'id="planReportContractStartCheckbox"',
+                'id="planReportAnnualEvenCheckbox"',
                 'id="planReportContractStartDateInput"',
                 "С учётом даты подписания",
+                "Равномерный годовой план",
                 "Дата подписания",
                 'id="planReportApplyButton"',
                 'id="planReportBaselineTemplateButton"',
@@ -252,6 +254,72 @@ def main() -> None:
                 raise AssertionError(
                     f"contract start route must keep H1 denominator for plan, got {actual_contract_plan}"
                 )
+            old_for_annual_query = urllib_parse.urlencode(
+                {
+                    "period": "current_year",
+                    "h1_buyout_plan_rub": "155379879",
+                    "h2_buyout_plan_rub": "294620120",
+                    "plan_drr_pct": "6",
+                    "as_of_date": "2026-04-24",
+                }
+            )
+            old_for_annual_status, old_for_annual_payload = _get_json(
+                f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_PATH}?{old_for_annual_query}"
+            )
+            old_for_annual_ytd_buyout = (
+                ((old_for_annual_payload.get("periods") or {}).get("year_to_date") or {}).get("metrics") or {}
+            ).get("buyout_rub") or {}
+            annual_query = urllib_parse.urlencode(
+                {
+                    "period": "current_year",
+                    "h1_buyout_plan_rub": "155379879",
+                    "h2_buyout_plan_rub": "294620120",
+                    "plan_drr_pct": "6",
+                    "as_of_date": "2026-04-24",
+                    "annual_plan_evenly_distributed": "true",
+                }
+            )
+            annual_status, annual_payload = _get_json(f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_PATH}?{annual_query}")
+            annual_inputs = annual_payload.get("inputs") or {}
+            annual_ytd = (annual_payload.get("periods") or {}).get("year_to_date") or {}
+            annual_ytd_buyout = (annual_ytd.get("metrics") or {}).get("buyout_rub") or {}
+            expected_annual_ytd_plan = 449999999.0 / 365.0 * 114.0
+            if (
+                annual_status != 200
+                or old_for_annual_status != 200
+                or annual_inputs.get("plan_model") != "annual_evenly_distributed"
+                or annual_inputs.get("annual_buyout_plan_rub") != 449999999.0
+                or annual_ytd_buyout.get("fact") != old_for_annual_ytd_buyout.get("fact")
+                or annual_ytd_buyout.get("plan") is None
+                or abs(float(annual_ytd_buyout.get("plan")) - expected_annual_ytd_plan) > 1e-3
+            ):
+                raise AssertionError(f"annual-even route must change only plan math and disclose mode, got {annual_status} {annual_payload}")
+            annual_contract_query = urllib_parse.urlencode(
+                {
+                    "period": "first_quarter",
+                    "h1_buyout_plan_rub": "155379879",
+                    "h2_buyout_plan_rub": "294620120",
+                    "plan_drr_pct": "6",
+                    "as_of_date": "2026-04-24",
+                    "use_contract_start_date": "true",
+                    "contract_start_date": "2026-02-01",
+                    "annual_plan_evenly_distributed": "true",
+                }
+            )
+            annual_contract_status, annual_contract_payload = _get_json(
+                f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_PATH}?{annual_contract_query}"
+            )
+            annual_contract_selected = (annual_contract_payload.get("periods") or {}).get("selected_period") or {}
+            annual_contract_plan = (annual_contract_selected.get("metrics") or {}).get("buyout_rub", {}).get("plan")
+            expected_annual_contract_plan = 449999999.0 / 334.0 * 59.0
+            if (
+                annual_contract_status != 200
+                or annual_contract_plan is None
+                or abs(float(annual_contract_plan) - expected_annual_contract_plan) > 1e-3
+            ):
+                raise AssertionError(
+                    f"annual-even contract-start route must use the clipped annual denominator, got {annual_contract_status} {annual_contract_payload}"
+                )
             invalid_contract_query = urllib_parse.urlencode(
                 {
                     "period": "first_quarter",
@@ -345,6 +413,7 @@ def main() -> None:
             print("plan_report_source: ok ->", source_of_truth["read_model"], source_of_truth["snapshot_role"])
             print("plan_report_blocks: ok ->", ", ".join(sorted(report_payload["periods"].keys())))
             print("plan_report_contract_start: ok ->", contract_selected.get("date_from"), contract_selected.get("date_to"))
+            print("plan_report_annual_even_route: ok ->", annual_inputs["annual_buyout_plan_rub"], annual_ytd_buyout["plan"])
             print("plan_report_baseline_routes: ok ->", template_status, baseline_upload_payload["accepted_months"])
             print("plan_report_ytd_after_baseline: ok ->", ytd_block["status"])
             print("plan_report_partial_route: ok ->", partial_payload["status"], partial_coverage["missing_dates_by_source"])

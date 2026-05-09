@@ -81,8 +81,10 @@ def main() -> None:
         'id="planReportH2Input"',
         'id="planReportDrrInput"',
         'id="planReportContractStartCheckbox"',
+        'id="planReportAnnualEvenCheckbox"',
         'id="planReportContractStartDateInput"',
         "С учётом даты подписания",
+        "Равномерный годовой план",
         "Дата подписания",
         'id="planReportApplyButton"',
         'id="planReportBaselineTemplateButton"',
@@ -125,6 +127,10 @@ def main() -> None:
         raise AssertionError("plan-report H1/H2/DRR inputs must restore from namespaced browser storage")
     if "writePersistedOperatorUiState({ plan_report_inputs: inputs });" not in html:
         raise AssertionError("plan-report H1/H2/DRR inputs must persist into namespaced browser storage")
+    if "annual_plan_evenly_distributed: Boolean(planReportAnnualEvenCheckbox.checked)" not in html:
+        raise AssertionError("plan-report annual-even checkbox state must persist into namespaced browser storage")
+    if 'params.set("annual_plan_evenly_distributed", request.annual_plan_evenly_distributed ? "true" : "false");' not in html:
+        raise AssertionError("plan-report annual-even mode must be sent through an explicit query param")
     if 'params.set("use_contract_start_date", "true");' not in html or 'params.set("contract_start_date", request.contract_start_date);' not in html:
         raise AssertionError("plan-report contract start mode must be sent through explicit query params")
     if "setContractStartInputEnabled(planReportContractStartCheckbox.checked);" not in html:
