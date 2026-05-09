@@ -90,15 +90,16 @@
     }
 
     .unified-tab-button:hover {
-      background: var(--control-bg-hover);
+      background: var(--accent-soft);
+      border-color: var(--accent-border);
       color: var(--text);
     }
 
     .unified-tab-button.is-active {
-      background: var(--panel-subtle);
+      background: transparent;
       color: var(--text);
-      border-color: var(--border-strong);
-      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+      border-color: var(--accent-border);
+      box-shadow: none;
     }
 
     .shell-logout-link {
@@ -4395,6 +4396,15 @@
     }
 
     function renderSummaryCards(cards) {
+      const sourceCards = Array.isArray(cards) ? cards : [];
+      const periodCard = sourceCards.find(function(card) {
+        return String((card && card.card_id) || "") === "period";
+      });
+      if (periodCard && periodCard.detail) {
+        summaryGridNode.setAttribute("data-summary-period-detail", String(periodCard.detail));
+      } else {
+        summaryGridNode.removeAttribute("data-summary-period-detail");
+      }
       const renderedCards = composeSummaryCards(cards);
       summaryGridNode.innerHTML = renderedCards.map(function(card) {
         const valueText = formatSummaryCardValue(card);
@@ -4411,7 +4421,11 @@
     }
 
     function composeSummaryCards(cards) {
-      const normalizedCards = Array.isArray(cards) ? cards.slice() : [];
+      const normalizedCards = Array.isArray(cards)
+        ? cards.filter(function(card) {
+            return String((card && card.card_id) || "") !== "period";
+          })
+        : [];
       const pageRefreshCard = buildPageRefreshCard();
       if (!pageRefreshCard) {
         return normalizedCards;
