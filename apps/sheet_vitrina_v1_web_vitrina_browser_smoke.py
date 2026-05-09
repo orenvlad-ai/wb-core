@@ -1758,38 +1758,44 @@ def _check_sticky_group_labels(page: object) -> dict[str, object]:
           const cell = target ? target.querySelector('td') : null;
           const label = target ? target.querySelector('.group-row-label') : null;
           const header = document.querySelector('[data-table-head] th');
-          const sectionHeader = document.querySelector('[data-table-head] th[data-col-id="section"]');
-          const dateHeader = document.querySelector('[data-table-head] th[data-col-id^="date:"]');
+          const table = scroll ? scroll.querySelector('table') : null;
+          const scrollRect = scroll ? scroll.getBoundingClientRect() : {left: 0, right: 0, width: 0};
           const labelRect = label ? label.getBoundingClientRect() : {top: 0, bottom: 0, left: 0, width: 0};
-          const cellRect = cell ? cell.getBoundingClientRect() : {width: 0};
+          const cellRect = cell ? cell.getBoundingClientRect() : {left: 0, right: 0, width: 0};
+          const tableRect = table ? table.getBoundingClientRect() : {width: 0};
           const headerRect = header ? header.getBoundingClientRect() : {bottom: 0};
-          const y = Math.round(labelRect.top + Math.max(1, (labelRect.bottom - labelRect.top) / 2));
-          const groupAtPoint = rect => {
-            if (!rect || rect.width <= 0 || y < 0 || y >= window.innerHeight) {
-              return false;
-            }
-            const x = Math.round(rect.left + Math.min(Math.max(4, rect.width / 2), Math.max(4, rect.width - 4)));
-            if (x < 0 || x >= window.innerWidth) {
-              return false;
-            }
-            const node = document.elementFromPoint(x, y);
-            return !!(node && node.closest && node.closest('.group-row'));
+          const scrollClientWidth = scroll ? scroll.clientWidth : 0;
+          const visibleBandLeft = Math.max(cellRect.left, scrollRect.left);
+          const visibleBandRight = Math.min(cellRect.right, scrollRect.right);
+          const cellStyle = cell ? getComputedStyle(cell) : {
+            backgroundColor: '',
+            pointerEvents: '',
+            position: '',
+            top: ''
           };
-          const cellStyle = cell ? getComputedStyle(cell) : {backgroundColor: '', pointerEvents: ''};
           const labelStyle = label ? getComputedStyle(label) : {backgroundColor: ''};
           return {
             ...setup,
             targetLabel: label ? (label.textContent || '').trim() : '',
             labelTop: Math.round(labelRect.top),
             labelBottom: Math.round(labelRect.bottom),
+            labelLeft: Math.round(labelRect.left),
             headerBottom: Math.round(headerRect.bottom),
             labelWidth: Math.round(labelRect.width),
             cellWidth: Math.round(cellRect.width),
+            cellLeft: Math.round(cellRect.left),
+            cellRight: Math.round(cellRect.right),
+            tableWidth: Math.round(tableRect.width),
+            scrollClientWidth: Math.round(scrollClientWidth),
+            scrollLeftEdge: Math.round(scrollRect.left),
+            visibleBandWidth: Math.max(0, Math.round(visibleBandRight - visibleBandLeft)),
             cellBackground: cellStyle.backgroundColor,
             labelBackground: labelStyle.backgroundColor,
+            cellPosition: cellStyle.position,
+            cellTop: cellStyle.top,
             pointerEvents: cellStyle.pointerEvents,
-            sectionCoveredByGroupRow: groupAtPoint(sectionHeader ? sectionHeader.getBoundingClientRect() : null),
-            dateCoveredByGroupRow: groupAtPoint(dateHeader ? dateHeader.getBoundingClientRect() : null)
+            coversVisibleScrollWidth: Math.max(0, visibleBandRight - visibleBandLeft) >= Math.max(0, scrollClientWidth - 2),
+            coversTableWidth: cellRect.width >= Math.max(0, tableRect.width - 2)
           };
         }""",
         setup,
@@ -1811,14 +1817,21 @@ def _check_sticky_group_labels(page: object) -> dict[str, object]:
     labels = [str(item) for item in payload.get("labels") or []]
     if "ИТОГО" not in labels or len([item for item in labels if item and item != "ИТОГО"]) < 1:
         raise AssertionError(f"table must render total and product group labels, got {payload}")
+    expected_handoff_label = labels[int(payload["targetIndex"])]
+    if payload["targetLabel"] != expected_handoff_label or payload["targetLabel"] == labels[0]:
+        raise AssertionError(f"sticky group band must hand off to the next group while scrolling, got {payload}")
     if payload["labelTop"] < payload["headerBottom"] - 2 or payload["labelTop"] > payload["headerBottom"] + 18:
         raise AssertionError(f"group label must stick just below the table header, got {payload}")
-    if payload["pointerEvents"] != "none" or payload["cellBackground"] != "rgba(0, 0, 0, 0)":
-        raise AssertionError(f"sticky group row cell must stay transparent and non-interactive, got {payload}")
-    if payload["labelBackground"] == "rgba(0, 0, 0, 0)" or int(payload["labelWidth"]) <= 0:
-        raise AssertionError(f"sticky group label must keep its own visible badge background, got {payload}")
-    if payload["sectionCoveredByGroupRow"] or payload["dateCoveredByGroupRow"]:
-        raise AssertionError(f"sticky group row must not overlay section/date columns, got {payload}")
+    if payload["cellPosition"] != "sticky" or payload["pointerEvents"] != "none":
+        raise AssertionError(f"sticky group band must stay sticky and non-interactive, got {payload}")
+    if payload["cellBackground"] == "rgba(0, 0, 0, 0)":
+        raise AssertionError(f"sticky group band must have its own full-width gray background, got {payload}")
+    if payload["labelBackground"] != "rgba(0, 0, 0, 0)" or int(payload["labelWidth"]) <= 0:
+        raise AssertionError(f"sticky group label must be left text on the band, got {payload}")
+    if not payload["coversVisibleScrollWidth"] or not payload["coversTableWidth"]:
+        raise AssertionError(f"sticky group band must cover the visible scroll area and table width, got {payload}")
+    if payload["labelLeft"] < payload["scrollLeftEdge"] - 2 or payload["labelLeft"] > payload["scrollLeftEdge"] + 24:
+        raise AssertionError(f"sticky group label must stay aligned to the left edge of the band, got {payload}")
     return payload
 
 

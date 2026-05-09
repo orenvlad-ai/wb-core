@@ -2209,33 +2209,34 @@
     }
 
     .group-row td {
-      background: transparent;
+      background: #e6e9ee;
       font-size: var(--table-font-size);
       font-weight: 700;
       letter-spacing: 0;
-      color: #4f6072;
+      color: #435064;
       position: sticky;
       top: 28px;
       z-index: 3;
-      padding: 0;
-      border-color: transparent;
+      padding: 5px 9px;
+      border-color: #cbd5e1;
+      box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.62);
       pointer-events: none;
     }
 
     .vitrina-table tbody tr.group-row:hover td {
-      background: transparent;
+      background: #e6e9ee;
     }
 
     .group-row-label {
       display: inline-flex;
       align-items: center;
       max-width: min(320px, calc(100vw - 48px));
-      min-height: 22px;
-      margin: 3px 0;
-      padding: 4px 9px;
-      border-radius: 4px;
-      background: #f3f5f8;
-      box-shadow: 0 0 0 1px rgba(203, 213, 225, 0.86);
+      min-height: 18px;
+      margin: 0;
+      padding: 0;
+      border-radius: 0;
+      background: transparent;
+      box-shadow: none;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -2473,18 +2474,20 @@
     }
 
     .group-row td {
-      background: transparent;
+      background: #252b34;
       color: var(--muted-strong);
+      border-color: var(--border-strong);
+      box-shadow: inset 0 -1px 0 var(--border);
     }
 
     .vitrina-table tbody tr.group-row:hover td {
-      background: transparent;
+      background: #252b34;
     }
 
     .group-row-label {
-      background: #191d24;
+      background: transparent;
       color: var(--muted-strong);
-      box-shadow: 0 0 0 1px var(--border);
+      box-shadow: none;
     }
 
     .cell-badge,
