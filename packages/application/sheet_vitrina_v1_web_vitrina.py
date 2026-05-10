@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
+import math
 from typing import Any, Callable, Mapping
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
@@ -36,6 +37,15 @@ WEB_VITRINA_READ_MODEL = "persisted_ready_snapshot"
 WEB_VITRINA_PERIOD_READ_MODEL = "persisted_ready_snapshot_window"
 WEB_VITRINA_SOURCE_SHEET_NAME = "DATA_VITRINA"
 WEB_VITRINA_PERIOD_PLAN_VERSION = "delivery_contract_v1__web_vitrina_period_window_v1"
+FUNNEL_SECTION_LABEL = "Воронка"
+FUNNEL_VIEW_METRIC_KEY = "view_count"
+FUNNEL_TOTAL_VIEW_METRIC_KEY = "total_view_count"
+FUNNEL_OPEN_CARD_METRIC_KEY = "open_card_count"
+FUNNEL_TOTAL_OPEN_CARD_METRIC_KEY = "total_open_card_count"
+FUNNEL_CTR_METRIC_KEY = "ctr"
+FUNNEL_CTR_LABEL = "CTR в воронке"
+FUNNEL_OPEN_CARD_LABEL = "Открытия карточки в воронке"
+FUNNEL_DUPLICATE_VIEW_METRIC_KEYS = {"openCount", "total_openCount"}
 
 
 @dataclass(frozen=True)
@@ -200,6 +210,7 @@ class SheetVitrinaV1WebVitrinaBlock:
                 fallback_updated_at=refreshed_at,
             ),
         )
+        rows = _apply_funnel_operator_presentation(rows, date_columns=snapshot.date_columns)
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
 
         return WebVitrinaContractV1(
@@ -620,6 +631,160 @@ def _normalize_rows(
             )
         )
     return normalized
+
+
+def _apply_funnel_operator_presentation(
+    rows: list[WebVitrinaContractRow],
+    *,
+    date_columns: list[str],
+) -> list[WebVitrinaContractRow]:
+    rows_by_scope_metric: dict[tuple[str, str], WebVitrinaContractRow] = {
+        (row.scope_key, row.metric_key): row
+        for row in rows
+    }
+    inserted_ctr_row_ids: set[str] = set()
+    presented: list[WebVitrinaContractRow] = []
+
+    for row in rows:
+        if _is_funnel_duplicate_view_row(row):
+            continue
+        if row.row_id in inserted_ctr_row_ids:
+            continue
+
+        if _is_funnel_view_row(row):
+            presented.append(row)
+            ctr_row = _build_funnel_ctr_row(
+                row,
+                rows_by_scope_metric=rows_by_scope_metric,
+                date_columns=date_columns,
+            )
+            if ctr_row is not None:
+                presented.append(ctr_row)
+                inserted_ctr_row_ids.add(ctr_row.row_id)
+            continue
+
+        if _is_funnel_ctr_row(row):
+            ctr_row = _build_funnel_ctr_row(
+                row,
+                rows_by_scope_metric=rows_by_scope_metric,
+                date_columns=date_columns,
+            )
+            if ctr_row is not None:
+                presented.append(ctr_row)
+                inserted_ctr_row_ids.add(ctr_row.row_id)
+            continue
+
+        if _is_funnel_open_card_row(row):
+            presented.append(replace(row, metric_label=FUNNEL_OPEN_CARD_LABEL))
+            continue
+
+        presented.append(row)
+
+    return [
+        replace(row, row_order=index)
+        for index, row in enumerate(presented, start=1)
+    ]
+
+
+def _is_funnel_row(row: WebVitrinaContractRow) -> bool:
+    return row.section == FUNNEL_SECTION_LABEL
+
+
+def _is_funnel_duplicate_view_row(row: WebVitrinaContractRow) -> bool:
+    return _is_funnel_row(row) and row.metric_key in FUNNEL_DUPLICATE_VIEW_METRIC_KEYS
+
+
+def _is_funnel_view_row(row: WebVitrinaContractRow) -> bool:
+    if not _is_funnel_row(row):
+        return False
+    if row.scope_kind == "TOTAL":
+        return row.metric_key == FUNNEL_TOTAL_VIEW_METRIC_KEY
+    return row.metric_key == FUNNEL_VIEW_METRIC_KEY
+
+
+def _is_funnel_open_card_row(row: WebVitrinaContractRow) -> bool:
+    if not _is_funnel_row(row):
+        return False
+    if row.scope_kind == "TOTAL":
+        return row.metric_key == FUNNEL_TOTAL_OPEN_CARD_METRIC_KEY
+    return row.metric_key == FUNNEL_OPEN_CARD_METRIC_KEY
+
+
+def _is_funnel_ctr_row(row: WebVitrinaContractRow) -> bool:
+    if not _is_funnel_row(row):
+        return False
+    if row.scope_kind == "TOTAL":
+        return row.metric_key == FUNNEL_CTR_METRIC_KEY
+    return row.metric_key == FUNNEL_CTR_METRIC_KEY
+
+
+def _build_funnel_ctr_row(
+    template_row: WebVitrinaContractRow,
+    *,
+    rows_by_scope_metric: Mapping[tuple[str, str], WebVitrinaContractRow],
+    date_columns: list[str],
+) -> WebVitrinaContractRow | None:
+    if template_row.scope_kind == "TOTAL":
+        numerator_key = FUNNEL_TOTAL_OPEN_CARD_METRIC_KEY
+        denominator_key = FUNNEL_TOTAL_VIEW_METRIC_KEY
+        metric_key = FUNNEL_CTR_METRIC_KEY
+    else:
+        numerator_key = FUNNEL_OPEN_CARD_METRIC_KEY
+        denominator_key = FUNNEL_VIEW_METRIC_KEY
+        metric_key = FUNNEL_CTR_METRIC_KEY
+
+    numerator_row = rows_by_scope_metric.get((template_row.scope_key, numerator_key))
+    denominator_row = rows_by_scope_metric.get((template_row.scope_key, denominator_key))
+    if numerator_row is None or denominator_row is None:
+        return None
+
+    values_by_date = {
+        column_date: _funnel_ctr_value(
+            numerator=numerator_row.values_by_date.get(column_date),
+            denominator=denominator_row.values_by_date.get(column_date),
+        )
+        for column_date in date_columns
+    }
+
+    return WebVitrinaContractRow(
+        row_id=f"{template_row.scope_key}|{metric_key}",
+        row_order=template_row.row_order,
+        scope_kind=template_row.scope_kind,
+        scope_key=template_row.scope_key,
+        scope_label=template_row.scope_label,
+        metric_key=metric_key,
+        metric_label=FUNNEL_CTR_LABEL,
+        row_last_updated_at=numerator_row.row_last_updated_at or denominator_row.row_last_updated_at,
+        section=FUNNEL_SECTION_LABEL,
+        group=template_row.group,
+        nm_id=template_row.nm_id,
+        format="percent",
+        values_by_date=values_by_date,
+    )
+
+
+def _funnel_ctr_value(*, numerator: Any, denominator: Any) -> Any:
+    numerator_value = _numeric_value(numerator)
+    denominator_value = _numeric_value(denominator)
+    if numerator_value is None or denominator_value in (None, 0):
+        return ""
+    return round(float(numerator_value) / float(denominator_value), 6)
+
+
+def _numeric_value(value: Any) -> float | None:
+    if value in ("", None):
+        return None
+    if isinstance(value, bool):
+        return None
+    number: float
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    try:
+        number = float(str(value).strip().replace(",", "."))
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_scope(
