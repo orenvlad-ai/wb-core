@@ -1762,32 +1762,61 @@
       text-align: left;
     }
 
-    .column-checkbox-list {
+    .column-checkbox-list,
+    .metric-checkbox-list {
       display: grid;
-      gap: 8px;
+      gap: 0;
+      max-height: min(360px, calc(100vh - 260px));
+      overflow: auto;
     }
 
-    .column-checkbox {
+    .column-checkbox,
+    .metric-checkbox {
       display: grid;
       grid-template-columns: auto minmax(0, 1fr);
-      gap: 8px 10px;
-      align-items: start;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 8px 10px;
-      background: var(--panel-subtle);
+      gap: 7px;
+      align-items: center;
+      border: 0;
+      border-top: 1px solid rgba(139, 92, 246, 0.14);
+      border-radius: 0;
+      padding: 6px 2px;
+      background: transparent;
       cursor: pointer;
     }
 
-    .column-checkbox input {
-      margin: 2px 0 0;
+    .column-checkbox:first-child,
+    .metric-checkbox:first-child {
+      border-top: 0;
     }
 
-    .column-checkbox-text {
+    .column-checkbox:hover,
+    .metric-checkbox:hover {
+      background: rgba(139, 92, 246, 0.08);
+    }
+
+    .metric-checkbox.is-all {
+      font-weight: 700;
+    }
+
+    .column-checkbox input,
+    .metric-checkbox input {
+      margin: 0;
+      accent-color: var(--accent);
+    }
+
+    .column-checkbox-text,
+    .metric-checkbox-text {
       display: block;
       font-size: 12px;
       font-weight: 600;
       color: var(--text);
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .metric-checkbox-count {
+      color: var(--muted);
+      font-weight: 500;
     }
 
     .column-checkbox-meta {
@@ -1796,6 +1825,7 @@
       font-size: 10px;
       line-height: 1.4;
       color: var(--muted);
+      overflow-wrap: anywhere;
     }
 
     .column-manager-actions {
@@ -2366,11 +2396,17 @@
     .research-range-control,
     .research-option,
     .column-checkbox,
+    .metric-checkbox,
     .state-box,
     .feedbacks-submit-log {
       background: var(--panel-bg);
       border-color: var(--border);
       color: var(--text);
+    }
+
+    .column-checkbox,
+    .metric-checkbox {
+      background: transparent;
     }
 
     .panel,
@@ -3582,7 +3618,7 @@
     const RESEARCH_UNIFIED_TAB = "research";
     const EMBEDDED_UNIFIED_TABS = new Set(["factory-order", "reports"]);
     const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", FEEDBACKS_UNIFIED_TAB, RESEARCH_UNIFIED_TAB]);
-    const FLOATING_DETAILS_SELECTOR = "details[data-column-manager], details[data-research-picker], details[data-feedbacks-complaints-column-manager]";
+    const FLOATING_DETAILS_SELECTOR = "details[data-column-manager], details[data-metric-manager], details[data-research-picker], details[data-feedbacks-complaints-column-manager]";
     const SELLER_RECOVERY_ACTIVE_STATUSES = new Set([
       "starting",
       "awaiting_login",
@@ -3626,6 +3662,9 @@
         group: ALL_VALUE,
         scope_kind: ALL_VALUE,
         metric: ALL_VALUE,
+        metricStorageKey: "",
+        metricKeys: [],
+        selectedMetricKeys: new Set(),
         sort: ""
       },
       columns: {
@@ -4072,6 +4111,7 @@
 
     resetFiltersButton.addEventListener("click", function() {
       resetFilterState(state.composition);
+      resetMetricSelectionToAll(state.composition);
       syncControlValues();
       renderTable();
     });
@@ -4622,6 +4662,153 @@
     function buildColumnVisibilityStorageKey(payload) {
       const namespace = String((payload && payload.meta && payload.meta.state_namespace) || "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1");
       return namespace + ":visible-columns:v1";
+    }
+
+    function buildMetricSelectionStorageKey(payload) {
+      const namespace = String((payload && payload.meta && payload.meta.state_namespace) || "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1");
+      return namespace + ":selected-metrics:v1";
+    }
+
+    function legacyMetricSelectionStorageKeys(payload) {
+      const namespace = String((payload && payload.meta && payload.meta.state_namespace) || "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1");
+      return [
+        namespace + ":selected-metric:v1",
+        namespace + ":metric:v1"
+      ];
+    }
+
+    function metricFilterControl(payload) {
+      const controls = (((payload || {}).filter_surface || {}).controls || []);
+      return controls.find(function(control) {
+        return String((control && control.control_id) || "") === "metric";
+      }) || null;
+    }
+
+    function metricFilterOptions(payload) {
+      const control = metricFilterControl(payload);
+      return ((control && control.options) || []).filter(function(option) {
+        return String((option && option.value) || "") && String(option.value) !== ALL_VALUE;
+      });
+    }
+
+    function metricFilterKeys(payload) {
+      return metricFilterOptions(payload).map(function(option) {
+        return String(option.value || "");
+      }).filter(Boolean);
+    }
+
+    function parseStoredMetricSelection(raw) {
+      if (!raw) {
+        return null;
+      }
+      let parsed = raw;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (error) {
+        parsed = raw;
+      }
+      if (Array.isArray(parsed)) {
+        return parsed.map(function(metricKey) { return String(metricKey || ""); });
+      }
+      if (parsed && typeof parsed === "object" && parsed.all_metric_keys === true) {
+        return [ALL_VALUE];
+      }
+      if (parsed && typeof parsed === "object" && Array.isArray(parsed.selected_metric_keys)) {
+        return parsed.selected_metric_keys.map(function(metricKey) { return String(metricKey || ""); });
+      }
+      if (typeof parsed === "string") {
+        const normalized = parsed.trim();
+        if (!normalized) {
+          return null;
+        }
+        return [normalized];
+      }
+      return null;
+    }
+
+    function sanitizeMetricSelection(candidateKeys, allowedKeys) {
+      if (!Array.isArray(candidateKeys)) {
+        return null;
+      }
+      const allowedSet = new Set(allowedKeys || []);
+      const selected = [];
+      const seen = new Set();
+      for (let index = 0; index < candidateKeys.length; index += 1) {
+        const metricKey = String(candidateKeys[index] || "");
+        if (!metricKey) {
+          continue;
+        }
+        if (metricKey === ALL_VALUE) {
+          return (allowedKeys || []).slice();
+        }
+        if (!allowedSet.has(metricKey)) {
+          return null;
+        }
+        if (!seen.has(metricKey)) {
+          selected.push(metricKey);
+          seen.add(metricKey);
+        }
+      }
+      return selected;
+    }
+
+    function readPersistedMetricSelection(payload, allowedKeys) {
+      if (!window || !window.localStorage) {
+        return null;
+      }
+      const storageKey = buildMetricSelectionStorageKey(payload);
+      const keys = [storageKey].concat(legacyMetricSelectionStorageKeys(payload));
+      for (let index = 0; index < keys.length; index += 1) {
+        const key = keys[index];
+        let raw = "";
+        try {
+          raw = window.localStorage.getItem(key) || "";
+        } catch (error) {
+          raw = "";
+        }
+        if (!raw) {
+          continue;
+        }
+        const selected = sanitizeMetricSelection(parseStoredMetricSelection(raw), allowedKeys);
+        if (selected === null) {
+          return null;
+        }
+        return selected;
+      }
+      return null;
+    }
+
+    function persistMetricSelection() {
+      if (!state.filters.metricStorageKey || !window || !window.localStorage) {
+        return;
+      }
+      try {
+        window.localStorage.setItem(state.filters.metricStorageKey, JSON.stringify({
+          version: 1,
+          all_metric_keys: (state.filters.selectedMetricKeys || new Set()).size === (state.filters.metricKeys || []).length,
+          selected_metric_keys: Array.from(state.filters.selectedMetricKeys || [])
+        }));
+      } catch (error) {
+        // Browser-local metric persistence must not block filtering.
+      }
+    }
+
+    function initializeMetricSelection(payload) {
+      const metricKeys = metricFilterKeys(payload);
+      const restored = readPersistedMetricSelection(payload, metricKeys);
+      state.filters.metricStorageKey = buildMetricSelectionStorageKey(payload);
+      state.filters.metricKeys = metricKeys;
+      state.filters.selectedMetricKeys = new Set(restored === null ? metricKeys : restored);
+      state.filters.metric = ALL_VALUE;
+      persistMetricSelection();
+    }
+
+    function resetMetricSelectionToAll(payload) {
+      const metricKeys = metricFilterKeys(payload);
+      state.filters.metricKeys = metricKeys;
+      state.filters.selectedMetricKeys = new Set(metricKeys);
+      state.filters.metric = ALL_VALUE;
+      persistMetricSelection();
     }
 
     function isColumnMandatory(column) {
@@ -5296,6 +5483,15 @@
         if (control.kind === "search") {
           classes.push("filter-card-wide", "toolbar-field-search");
         }
+        if (String(control.control_id || "") === "metric") {
+          classes.push("toolbar-field-metrics");
+          return [
+            '<div class="' + classes.join(" ") + '" data-filter-card="' + escapeHtml(control.control_id) + '">',
+            '<span class="filter-label">' + escapeHtml(toolbarControlLabel(control)) + "</span>",
+            buildControlHtml(control),
+            "</div>"
+          ].join("");
+        }
         return [
           '<label class="' + classes.join(" ") + '" data-filter-card="' + escapeHtml(control.control_id) + '">',
           '<span class="filter-label">' + escapeHtml(toolbarControlLabel(control)) + "</span>",
@@ -5308,6 +5504,7 @@
         node.addEventListener("input", handleFilterInput);
         node.addEventListener("change", handleFilterInput);
       });
+      attachMetricFilterListeners();
       syncControlValues();
     }
 
@@ -5895,6 +6092,40 @@
           '">'
         );
       }
+      if (String(control.control_id || "") === "metric") {
+        const metricOptions = (control.options || []).filter(function(option) {
+          return String((option && option.value) || "") !== ALL_VALUE;
+        });
+        const optionRows = metricOptions.length
+          ? metricOptions.map(function(option) {
+            const metricKey = String(option.value || "");
+            const suffix = typeof option.count === "number"
+              ? '<span class="metric-checkbox-count"> (' + escapeHtml(String(option.count)) + ')</span>'
+              : "";
+            return [
+              '<label class="metric-checkbox">',
+              '<input type="checkbox" data-metric-filter-option value="' + escapeHtml(metricKey) + '">',
+              '<span class="metric-checkbox-text">' + escapeHtml(option.label || metricKey) + suffix + "</span>",
+              "</label>"
+            ].join("");
+          }).join("")
+          : '<p class="filter-summary">Метрики недоступны.</p>';
+        return [
+          '<input type="hidden" data-filter-control="metric" value="' + escapeHtml(ALL_VALUE) + '">',
+          '<details class="column-manager metric-manager" data-metric-manager>',
+          '<summary class="column-manager-toggle" data-metric-summary><span data-metric-summary-label>Все метрики</span></summary>',
+          '<div class="column-manager-panel metric-manager-panel">',
+          '<div class="metric-checkbox-list">',
+          '<label class="metric-checkbox is-all">',
+          '<input type="checkbox" data-metric-filter-all>',
+          '<span class="metric-checkbox-text">Все метрики</span>',
+          "</label>",
+          optionRows,
+          "</div>",
+          "</div>",
+          "</details>"
+        ].join("");
+      }
       return [
         '<select class="select" data-filter-control="' + escapeHtml(control.control_id) + '">',
         (control.options || []).map(function(option) {
@@ -5907,6 +6138,78 @@
         }).join(""),
         "</select>"
       ].join("");
+    }
+
+    function attachMetricFilterListeners() {
+      const allNode = filterControlsNode.querySelector("[data-metric-filter-all]");
+      if (allNode) {
+        allNode.addEventListener("change", function() {
+          updateAllMetricSelection(!!allNode.checked);
+        });
+      }
+      filterControlsNode.querySelectorAll("[data-metric-filter-option]").forEach(function(node) {
+        node.addEventListener("change", function() {
+          updateMetricSelection(String(node.value || ""), !!node.checked);
+        });
+      });
+    }
+
+    function updateAllMetricSelection(checked) {
+      state.filters.selectedMetricKeys = checked
+        ? new Set(state.filters.metricKeys || [])
+        : new Set();
+      state.filters.metric = ALL_VALUE;
+      persistMetricSelection();
+      syncMetricControlValues();
+      renderTable();
+    }
+
+    function updateMetricSelection(metricKey, checked) {
+      if (!metricKey || (state.filters.metricKeys || []).indexOf(metricKey) === -1) {
+        return;
+      }
+      const selected = new Set(state.filters.selectedMetricKeys || []);
+      if (checked) {
+        selected.add(metricKey);
+      } else {
+        selected.delete(metricKey);
+      }
+      state.filters.selectedMetricKeys = selected;
+      state.filters.metric = ALL_VALUE;
+      persistMetricSelection();
+      syncMetricControlValues();
+      renderTable();
+    }
+
+    function metricSummaryLabel() {
+      const totalCount = (state.filters.metricKeys || []).length;
+      const selectedCount = (state.filters.selectedMetricKeys || new Set()).size;
+      if (selectedCount === totalCount) {
+        return "Все метрики";
+      }
+      return "Метрики: " + selectedCount;
+    }
+
+    function syncMetricControlValues() {
+      const selected = state.filters.selectedMetricKeys || new Set();
+      const totalCount = (state.filters.metricKeys || []).length;
+      const selectedCount = selected.size;
+      const summaryLabelNode = filterControlsNode.querySelector("[data-metric-summary-label]");
+      if (summaryLabelNode) {
+        summaryLabelNode.textContent = metricSummaryLabel();
+      }
+      const hiddenNode = filterControlsNode.querySelector('[data-filter-control="metric"]');
+      if (hiddenNode) {
+        hiddenNode.value = selectedCount === totalCount ? ALL_VALUE : Array.from(selected).join(",");
+      }
+      const allNode = filterControlsNode.querySelector("[data-metric-filter-all]");
+      if (allNode) {
+        allNode.checked = selectedCount === totalCount;
+        allNode.indeterminate = selectedCount > 0 && selectedCount < totalCount;
+      }
+      filterControlsNode.querySelectorAll("[data-metric-filter-option]").forEach(function(node) {
+        node.checked = selected.has(String(node.value || ""));
+      });
     }
 
     function handleFilterInput(event) {
@@ -5926,6 +6229,7 @@
         }
         node.value = state.filters[control];
       });
+      syncMetricControlValues();
     }
 
     function resetFilterState(payload) {
@@ -5970,6 +6274,7 @@
       renderSummaryCards(payload.summary_cards || []);
       renderActivitySurface(payload.activity_surface || {});
       renderHistoricalAccess(payload);
+      initializeMetricSelection(payload);
       renderFilterControls(payload);
       initializeColumnVisibility(payload);
       if (!state.filters.sort) {
@@ -6061,7 +6366,8 @@
         if (state.filters.scope_kind !== ALL_VALUE && String(row.row_kind || "") !== state.filters.scope_kind) {
           return false;
         }
-        if (state.filters.metric !== ALL_VALUE && String(cellValue(row, "metric_key") || "") !== state.filters.metric) {
+        const metricKeys = state.filters.metricKeys || [];
+        if (metricKeys.length && !(state.filters.selectedMetricKeys || new Set()).has(String(cellValue(row, "metric_key") || ""))) {
           return false;
         }
         return true;
