@@ -8,6 +8,7 @@ from statistics import median
 from typing import Any, Callable
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.sheet_vitrina_v1_report_snapshot_selection import select_latest_ready_snapshot_dates
 from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE_NAME,
     current_business_date_iso,
@@ -90,19 +91,22 @@ class SheetVitrinaV1DailyReportBlock:
 
     def build(self) -> dict[str, Any]:
         business_date = date.fromisoformat(current_business_date_iso(self.now_factory()))
-        newer_closed_date = (business_date - timedelta(days=1)).isoformat()
-        older_closed_date = (business_date - timedelta(days=2)).isoformat()
-        current_as_of_date = default_business_as_of_date(self.now_factory())
-        previous_as_of_date = (date.fromisoformat(current_as_of_date) - timedelta(days=1)).isoformat()
+        requested_as_of_date = default_business_as_of_date(self.now_factory())
+        current_as_of_date = requested_as_of_date
+        previous_as_of_date = (date.fromisoformat(requested_as_of_date) - timedelta(days=1)).isoformat()
+        newer_closed_date = current_as_of_date
+        older_closed_date = previous_as_of_date
         base_payload = {
             "status": "unavailable",
             "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
             "current_business_date": business_date.isoformat(),
             "comparison_basis": "two_latest_closed_business_days",
+            "requested_as_of_date": requested_as_of_date,
             "current_as_of_date": current_as_of_date,
             "previous_as_of_date": previous_as_of_date,
             "newer_closed_date": newer_closed_date,
             "older_closed_date": older_closed_date,
+            "available_as_of_dates": [],
             "notes": list(REPORT_NOTES),
         }
 
@@ -113,6 +117,40 @@ class SheetVitrinaV1DailyReportBlock:
                 **base_payload,
                 "reason": f"Ежедневный отчёт пока недоступен: {exc}",
             }
+
+        try:
+            selection = select_latest_ready_snapshot_dates(
+                self.runtime,
+                requested_as_of_date=requested_as_of_date,
+                limit=2,
+            )
+        except ValueError as exc:
+            return {
+                **base_payload,
+                "reason": f"Ежедневный отчёт пока недоступен: {exc}",
+            }
+
+        if len(selection.selected_as_of_dates) < 2:
+            return {
+                **base_payload,
+                "available_as_of_dates": list(selection.available_as_of_dates),
+                "reason": (
+                    "Ежедневный отчёт пока недоступен: нужно два persisted ready snapshot "
+                    f"не позднее {requested_as_of_date}, найдено {len(selection.selected_as_of_dates)}"
+                ),
+            }
+
+        current_as_of_date, previous_as_of_date = selection.selected_as_of_dates
+        newer_closed_date = current_as_of_date
+        older_closed_date = previous_as_of_date
+        base_payload = {
+            **base_payload,
+            "current_as_of_date": current_as_of_date,
+            "previous_as_of_date": previous_as_of_date,
+            "newer_closed_date": newer_closed_date,
+            "older_closed_date": older_closed_date,
+            "available_as_of_dates": list(selection.available_as_of_dates),
+        }
 
         try:
             newer_snapshot = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=current_as_of_date)
