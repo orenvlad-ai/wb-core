@@ -27,6 +27,8 @@ source_basis:
   - "apps/sheet_vitrina_v1_popup_outside_click_browser_smoke.py"
   - "apps/sheet_vitrina_v1_plan_report_smoke.py"
   - "apps/sheet_vitrina_v1_plan_report_http_smoke.py"
+  - "apps/sheet_vitrina_v1_reports_ready_snapshot_boundary_smoke.py"
+  - "apps/sheet_vitrina_v1_reports_ready_snapshot_browser_smoke.py"
   - "apps/sheet_vitrina_v1_ready_fact_reconcile_smoke.py"
   - "apps/sheet_vitrina_v1_feedbacks_http_smoke.py"
   - "apps/sheet_vitrina_v1_feedbacks_ai_smoke.py"
@@ -61,7 +63,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "a2886343f8e5910f629ab595dbf993ac00d7ad69"
+built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
 ---
 
 # Summary
@@ -117,6 +119,8 @@ python3 apps/sheet_vitrina_v1_stock_report_smoke.py
 python3 apps/sheet_vitrina_v1_plan_report_smoke.py
 python3 apps/sheet_vitrina_v1_plan_report_http_smoke.py
 python3 apps/sheet_vitrina_v1_reports_ui_smoke.py
+python3 apps/sheet_vitrina_v1_reports_ready_snapshot_boundary_smoke.py
+python3 apps/sheet_vitrina_v1_reports_ready_snapshot_browser_smoke.py
 python3 apps/sheet_vitrina_v1_ready_fact_reconcile_smoke.py
 python3 apps/sheet_vitrina_v1_feedbacks_http_smoke.py
 python3 apps/sheet_vitrina_v1_feedbacks_ai_smoke.py
@@ -196,6 +200,7 @@ Current reports smoke intent:
 - `apps/sheet_vitrina_v1_stock_report_smoke.py` checks previous-closed stock report semantics and active SKU filtering.
 - `apps/sheet_vitrina_v1_plan_report_smoke.py` and `apps/sheet_vitrina_v1_plan_report_http_smoke.py` check read-only plan execution calculations, H1/H2 plan params, per-block coverage, contract-start clipping, manual monthly baseline and public route wiring.
 - `apps/sheet_vitrina_v1_reports_ui_smoke.py` checks the reports tab, stock selector persistence, baseline controls and plan-report controls.
+- `apps/sheet_vitrina_v1_reports_ready_snapshot_boundary_smoke.py` and `apps/sheet_vitrina_v1_reports_ready_snapshot_browser_smoke.py` cover the night-boundary Reports bug: default daily/stock reads choose already persisted ready snapshots `<= default_business_as_of_date(now)`, while explicit stock `as_of_date` stays strict exact-read.
 - `apps/sheet_vitrina_v1_ready_fact_reconcile_smoke.py` checks bounded one-off report fact reconcile from persisted ready snapshots into missing accepted temporal slots without overwrites or fake zeros.
 
 Targeted expectation for `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`:
@@ -528,8 +533,8 @@ Operational rule:
   - current live `sheet_vitrina_v1` contour:
   - service = `wb-core-registry-http.service`
   - timer = `wb-core-sheet-vitrina-refresh.timer`
-  - schedule = `11:00, 20:00 Asia/Yekaterinburg` = `06:00 UTC, 15:00 UTC` in current systemd host timezone
-  - daily timer target = `POST /v1/sheet-vitrina-v1/refresh` with `{"auto_refresh": true}`; it builds server-side ready snapshots only and never auto-loads Google Sheets
+  - timer cadence = every 10 minutes; business schedules are runtime JSON rows, defaulting to `11:00` and `20:00 Asia/Yekaterinburg`
+  - due-check target = `apps/sheet_vitrina_v1_auto_refresh_tick.py`, which obtains WebCore session auth and calls protected `POST /v1/sheet-vitrina-v1/refresh` with `{"auto_refresh": true}`; it builds server-side ready snapshots only and never auto-loads Google Sheets
 - current bounded `factory-order` supply contour is server/operator-only:
   - live closure still requires deploy + loopback/public probe + one controlled download/upload/calculate/download scenario if those routes changed;
   - the same closure rule now covers the sibling regional block under `Поставки`: shared `stock_ff` upload lifecycle, regional calculate, summary table and per-district XLSX routes are part of the same operator/public contour;
@@ -593,8 +598,8 @@ Use this section for current website/operator/public verification. Legacy Google
 - no-query page-composition opens latest three server-readable business dates inclusive, ending on backend-owned `today_current_date` when available; explicit `as_of_date` and `date_from/date_to` remain read-only ready-snapshot reads.
 - `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` must reach app-level validation. A request without `source_group_id` returns app-level `400 {"error":"source_group_id is required"}`, not proxy `404`.
 - valid group-refresh payload `{async: true, source_group_id, as_of_date}` creates a group/date-scoped job and must not clear, overwrite or timestamp unrelated groups/date cells; `updated_cells` metadata drives only transient browser-session text-color highlighting.
-- `GET /v1/sheet-vitrina-v1/daily-report` остаётся cheap read-only JSON path: route сравнивает только два последних closed business day через persisted ready snapshots `default_business_as_of_date(now)` и `default_business_as_of_date(now)-1 day` и не имеет права trigger-ить refresh/upstream fetch;
-- `GET /v1/sheet-vitrina-v1/stock-report` остаётся cheap read-only JSON path: route по умолчанию читает previous closed business day only from persisted ready snapshot `DATA_VITRINA[yesterday_closed]`, принимает optional explicit `as_of_date` override на том же read path, не trigger-ит refresh/upstream fetch и включает только SKU с district stock `< 50`;
+- `GET /v1/sheet-vitrina-v1/daily-report` остаётся cheap read-only JSON path: default route выбирает две последние persisted ready snapshot даты `<= default_business_as_of_date(now)`, читает их `yesterday_closed` slots, не использует `today_current` как comparison baseline и не trigger-ит refresh/upstream fetch;
+- `GET /v1/sheet-vitrina-v1/stock-report` остаётся cheap read-only JSON path: default route выбирает latest persisted ready snapshot `<= default_business_as_of_date(now)` и читает `DATA_VITRINA[yesterday_closed]`; optional explicit `as_of_date` override остаётся strict exact-read без fallback/upstream fetch и включает только SKU с district stock `< 50`;
 - subsection `Отчёт по остаткам` now adds a compact SKU selector: full active SKU list comes from current authoritative `config_v2` truth on the operator page itself, defaults to all selected, applies only after `Рассчитать`, rejects empty selection with `Выберите хотя бы один SKU` and must show an empty result instead of stale rows when the selected subset has no breaches;
 - `GET /v1/sheet-vitrina-v1/plan-report` остаётся cheap read-only JSON path: primary valid query includes `period`, `h1_buyout_plan_rub`, `h2_buyout_plan_rub`, planned DRR percent and optional `as_of_date` / contract-start params; complete Q1-Q4 params are transitional fallback only;
 - plan-report response contains independent selected/MTD/QTD/YTD blocks with `available / partial / unavailable`, source mix and per-source missing dates; an unavailable YTD block must not hide an available selected period;
@@ -611,7 +616,7 @@ Use this section for current website/operator/public verification. Legacy Google
 - operator page state is browser-owned only: current top-level tab, active subsection under `Отчёты` / `Поставки` and stock-report SKU selection persist in namespaced `localStorage`; reload must restore the last valid state, while empty/broken storage or obsolete `nmId` values must fall back safely to current defaults/current active SKU truth;
 - daily-report factor lists are now full valid sets sorted by `matched_sku_count desc` and aggregate strength; factor rows surface label + arrow + `N SKU` + truthful aggregate summary instead of plain `вверх/вниз` text;
 - daily-report response now includes `metric_ranking_diagnostics`, so a short decline list can be diagnosed from the payload itself instead of being treated as a UI cap bug;
-- в block `Автообновления` `Автоцепочка` должна быть backend-driven description current daily chain, а не legacy sheet write; current truthful wording = `Ежедневно в 11:00, 20:00 Asia/Yekaterinburg: server-side refresh ready snapshot for website/operator web-vitrina`;
+- в block `Автообновления` `Автоцепочка` должна быть backend-driven description current daily chain, а не legacy sheet write; current truthful wording describes runtime JSON schedule rows (default `11:00`, `20:00 Asia/Yekaterinburg`) executed by the 10-minute due-check timer as server-side refresh ready snapshot for website/operator web-vitrina;
 - тот же block должен surface-ить `Последний автозапуск`, `Статус последнего автозапуска` и `Последнее успешное автообновление` из backend/status contract;
 - `POST /v1/sheet-vitrina-v1/refresh` обновляет date-aware ready snapshot в repo-owned SQLite runtime contour;
 - `POST /v1/sheet-vitrina-v1/load` is archived/blocked in current default runtime and must not be used as success proof for web-vitrina completion;
@@ -644,10 +649,10 @@ Use this section for current website/operator/public verification. Legacy Google
 | `sheet_vitrina_v1 ready snapshot missing` после upload | load path is cheap-read only; explicit refresh has not materialized snapshot for the current bundle / date yet |
 | `Снимок пока не подготовлен.` на `/sheet-vitrina-v1/operator` | operator page честно сообщает, что explicit refresh ещё не запускался для current bundle / date |
 | на `/sheet-vitrina-v1/operator` пустой/неактуальный block `Автообновления` | stale deploy, stale operator template или `GET /v1/sheet-vitrina-v1/status` не несёт expected `server_context` |
-| `Ежедневный отчёт пока недоступен` при ожидаемо готовых closed-day snapshots | missing/stale deploy, broken `GET /v1/sheet-vitrina-v1/daily-report` route, либо один из required ready snapshots (`default_business_as_of_date(now)` / `minus 1 day`) не materialized |
+| `Ежедневный отчёт пока недоступен` при ожидаемо готовых closed-day snapshots | missing/stale deploy, broken `GET /v1/sheet-vitrina-v1/daily-report` route, fewer than two persisted ready snapshots `<= default_business_as_of_date(now)`, or structurally unusable selected `yesterday_closed` slots |
 | daily-report block сравнивает `today_current` вместо двух closed days | broken server-side comparison rule или stale operator JS/template |
 | в ranked decline list daily-report показывается только `3` позиции | truthful data shape for the current comparable pair; repo-owned diagnostic smoke currently keeps `raw_candidate_count=10`, `present_after_none_filter_count=9`, `negative_count=3`, `positive_count=6`, with `avg_ads_bid_search` excluded because both closed-day values are missing |
-| `Отчёт по остаткам пока недоступен` при ожидаемо готовом closed-day snapshot | missing/stale deploy, broken `GET /v1/sheet-vitrina-v1/stock-report` route, либо ready snapshot `default_business_as_of_date(now)` не materialized или его `yesterday_closed` slot не совпадает с requested/default closed business day |
+| `Отчёт по остаткам пока недоступен` при ожидаемо готовом closed-day snapshot | missing/stale deploy, broken `GET /v1/sheet-vitrina-v1/stock-report` route, no persisted ready snapshot `<= default_business_as_of_date(now)`, structurally unusable selected `yesterday_closed` slot, or explicit `as_of_date` strict exact-read requested a missing snapshot |
 | `sheet vitrina endpoint returned non-JSON response` | wrong publish/upstream route or HTML error surface instead of expected JSON |
 | `today_current` values оказались под yesterday date column | live runtime stale; current contour всё ещё использует single-date surrogate вместо two-slot ready snapshot. GAS publish относится только к legacy sheet/export scope |
 | default refresh without `as_of_date` materialize-ит `UTC yesterday` / `UTC today` вместо EKT dates | stale deploy or stale business-time helper; current runtime still uses UTC-bound default-date semantics instead of `Asia/Yekaterinburg` |

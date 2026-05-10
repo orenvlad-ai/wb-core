@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "a2886343f8e5910f629ab595dbf993ac00d7ad69"
+built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
 ---
 
 # Summary
@@ -151,9 +151,9 @@ Current repo-owned unified web/operator surface:
 - `web_vitrina_view_model` remains canonical and library-agnostic, the Gravity adapter stays isolated repo-side, and the page layer stays a page-only consumer instead of a second truth owner
 - current phase-1/2/3/4 scope remains narrow: route fixation, stable read contract, library-agnostic presentation seam, concrete grid adapter and server-driven page composition only; export layer, legacy Google Sheets/export migration and broad feature parity stay later
 - `Отчёты` uses one sibling subsection selector: `Ежедневные отчёты`, `Отчёт по остаткам`, `Выполнение плана`; only one report body is visible at a time
-- daily-report compares only the two latest closed business days in `Asia/Yekaterinburg`: `yesterday_closed(default_business_as_of_date(now))` vs `yesterday_closed(default_business_as_of_date(now)-1 day)`, never `today_current`
+- daily-report compares only the two latest persisted ready snapshot dates `<= default_business_as_of_date(now)` in `Asia/Yekaterinburg`; it reads their `yesterday_closed` slots, never `today_current`, and does not require a ready snapshot for a not-yet-materialized default closed day during night-boundary reads
 - daily-report ranked totals stay on the current canonical pool only (`total_view_count`, `total_views_current`, `avg_ctr_current`, `avg_addToCartConversion`, `avg_cartToOrderConversion`, `avg_spp`, `avg_ads_bid_search`, `total_ads_views`, `total_ads_sum`, `avg_localizationPercent`)
-- stock-report defaults to previous closed business day stocks from persisted ready snapshot `DATA_VITRINA[yesterday_closed]`, keeps threshold `<50`, accepts optional explicit `as_of_date`, uses five district keys and deliberately excludes merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь`
+- stock-report defaults to the latest persisted ready snapshot `<= default_business_as_of_date(now)` and reads `DATA_VITRINA[yesterday_closed]`; explicit `as_of_date` remains strict exact-read without fallback/upstream fetch, threshold stays `<50`, five district keys are used, and merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь` is deliberately excluded
 - stock-report exposes a compact SKU selector sourced from full active `config_v2` truth, not breached rows only; selector applies only after `Рассчитать`, rejects zero selected SKU and handles empty selected-subset results truthfully
 - plan-report `Выполнение плана` is read-only on `GET /v1/sheet-vitrina-v1/plan-report`; primary query uses `period`, `h1_buyout_plan_rub`, `h2_buyout_plan_rub`, planned DRR percent and optional `as_of_date` / contract-start params; legacy Q1-Q4 params are transitional fallback only
 - plan-report response is per-block (`selected_period`, `month_to_date`, `quarter_to_date`, `year_to_date`): available selected period must render even when another block is partial/unavailable
@@ -165,7 +165,7 @@ Current repo-owned unified web/operator surface:
 - `GET /v1/sheet-vitrina-v1/status` exposes semantic root status for the visible snapshot and keeps technical completion separate, so preserved/unchanged/stale/not_verified results stay yellow or red instead of false green
 - job/log surface is detailed and machine-useful: source/module/adapter/endpoint steps, source result kinds/counts, metric batch summaries and write results stay server-driven and can be exported per completed run through `GET /v1/sheet-vitrina-v1/job?job_id=...&format=text&download=1`
 - server-side business timezone = `Asia/Yekaterinburg` for default `as_of_date`, `today_current` and operator-facing freshness dates
-- live daily web-vitrina auto-refresh = repo-owned artifacts `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.{service,timer}` -> installed on host as `wb-core-sheet-vitrina-refresh.timer` -> existing `POST /v1/sheet-vitrina-v1/refresh` at `11:00, 20:00 Asia/Yekaterinburg` (`06:00 UTC` and `15:00 UTC` on current host) with `{"auto_refresh": true}`; daily path builds server-side ready snapshot only and never loads Google Sheets; page/API exposes current schedule read-through and returns a controlled blocker for unsupported cadence writes outside deploy-owned timer updates
+- live daily web-vitrina auto-refresh = repo-owned due-check timer `wb-core-sheet-vitrina-refresh.timer` every 10 minutes -> `apps/sheet_vitrina_v1_auto_refresh_tick.py` -> runtime JSON schedule rows (default `11:00`, `20:00 Asia/Yekaterinburg`) -> protected `POST /v1/sheet-vitrina-v1/refresh` with session auth and `auto_refresh=true`; daily path builds server-side ready snapshot only, never loads Google Sheets, and page/API owns read/write/run-now schedule state
 - active hosted target = `wb-core-eu-root` / `89.191.226.88` / `/opt/wb-core-runtime/state`; production public endpoint is `https://api.selleros.pro`; app-level auth protects the public/operator surface; canonical probes are auth-aware and fast by default, with heavy refresh only under explicit `--include-refresh`; current-live nginx must keep `server_name 89.191.226.88 api.selleros.pro;` plus `listen 443 ssl`; old `selleros-root` / `178.72.152.177` is rollback-only and routine writes are blocked before SSH/rsync/nginx/systemd
 - source matrix is explicit: group A bot/web-source historical, group B WB API historical/date-period capable, group C WB API current-snapshot-only, group D other/manual/browser-collector overlays
 - `seller_funnel_snapshot` materialization can receive enabled/relevant `nm_ids`; strict validation is applied after relevant-row filtering, so invalid non-relevant rows are logged as `ignored_non_relevant_invalid_rows` instead of poisoning the snapshot

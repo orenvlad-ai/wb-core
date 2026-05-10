@@ -28,7 +28,7 @@ update_triggers:
   - "перенос новой legacy capability"
   - "изменение migration boundary"
   - "закрытие крупного compatibility gap"
-built_from_commit: "a2886343f8e5910f629ab595dbf993ac00d7ad69"
+built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
 ---
 
 # Summary
@@ -45,7 +45,7 @@ built_from_commit: "a2886343f8e5910f629ab595dbf993ac00d7ad69"
 | legacy `METRICS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `sheet_vitrina_v1_mvp_end_to_end_block` | uploaded compact package перенесён | historical sheet/upload dictionary materialized `102` rows; current truth / server plan держат `95` enabled+show_in_data metrics, а website/operator web-vitrina reads the same server-driven ready snapshot |
 | legacy `FORMULAS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `registry_upload_bundle_v1_block` | current uploaded set перенесён | historical sheet-side seed and upload bundle держат `7` formulas rows, нужных authoritative `metrics_v2`; Google Sheets seed is archived |
 | legacy `DATA`/vitrina readback | `sheet_vitrina_v1_mvp_end_to_end_block` + `promo_live_source_wiring_block` | bounded replacement есть | rows materialize-ятся по uploaded package; `COST_PRICE` overlay и promo-backed `promo_by_price` rows уже server-side integrated в current refresh/runtime/read-side contour |
-| legacy report historical fact gaps | accepted temporal slots + `manual_monthly_plan_report_baseline` + one-off ready-fact reconcile | bounded server-side replacement есть | plan-report may use controlled monthly XLSX baseline only for full-month aggregates; ready snapshots may be one-off reconcile input for missing accepted `fin_report_daily` / `ads_compact` slots; neither path revives Google Sheets/GAS as report truth |
+| legacy report historical fact gaps | accepted temporal slots + `manual_monthly_plan_report_baseline` + one-off ready-fact reconcile + Reports ready-snapshot selector | bounded server-side replacement есть | daily/stock default reads use persisted ready snapshots already materialized in server runtime; plan-report may use controlled monthly XLSX baseline only for full-month aggregates; ready snapshots may be one-off reconcile input for missing accepted `fin_report_daily` / `ads_compact` slots; neither path revives Google Sheets/GAS as report truth |
 | feedback complaints / Seller Portal complaint handling | `Отзывы` nested `Жалобы` runtime journal/status sync + protected selected-row submit job + nested `Авто-жалобы` schedules/run-now/tick + guarded support/probe runners | bounded replacement есть for status/evidence, selected-row submit and runtime-scheduled auto-complaints; broad public/browser-side submit deliberately absent | current auth-protected web UI can submit only selected/analyzed rows through bounded jobs; auto-complaints use runtime schedules, saved AI and the same guarded submit path; real submit still requires exact match/hard caps, and uncertain results require read-only confirmation/detail probes |
 | legacy `AI_EXPORT` | отдельного полного replacement пока нет | open gap | compatibility boundary ещё не закрыт |
 | `wb-ai-research` ingest/runtime вокруг registry | `registry_upload_file_backed_service_block`, `registry_upload_db_backed_runtime_block`, `registry_upload_http_entrypoint_block` | перенесено bounded chain-ом | repo-owned deploy/probe contract, app-level auth, auth-aware canonical probes, EU current-live target metadata, managed public-route allowlist, production HTTPS/domain/TLS invariant and rollback-only selleros write guard есть; broader storage/failover hardening остаётся отдельно |
@@ -62,7 +62,7 @@ built_from_commit: "a2886343f8e5910f629ab595dbf993ac00d7ad69"
 
 - full parity beyond current uploaded compact package и long-tail registry rows;
 - repo-owned promo collector output уже wire-ится в current live metric/read-side line for `promo_by_price`; open tail остаётся только beyond the current wired promo-backed metric subset and beyond current `COST_PRICE` overlay;
-- current reports are website/server-owned: `daily-report`, `stock-report` and `plan-report` are not a revived sheet-side reporting truth layer; user-facing `ЕБД` means the shared server-side accepted truth/runtime layer, not Google Sheets/GAS or browser-local state;
+- current reports are website/server-owned: `daily-report`, `stock-report` and `plan-report` are not a revived sheet-side reporting truth layer; default daily/stock reads fall back only to already persisted ready snapshots not newer than the requested closed day, while explicit stock `as_of_date` is strict exact-read; user-facing `ЕБД` means the shared server-side accepted truth/runtime layer, not Google Sheets/GAS or browser-local state;
 - окончательная судьба `AI_EXPORT`; bounded feedbacks AI review is a separate transient operator aid and does not close this compatibility gap;
 - remaining production-grade storage/failover hardening around the already repo-owned hosted deploy/auth/probe contract.
 

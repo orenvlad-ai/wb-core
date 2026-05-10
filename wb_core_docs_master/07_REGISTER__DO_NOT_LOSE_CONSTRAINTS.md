@@ -25,7 +25,7 @@ update_triggers:
   - "изменение migration boundary"
   - "изменение operator/runtime invariant"
   - "изменение docs governance"
-built_from_commit: "a2886343f8e5910f629ab595dbf993ac00d7ad69"
+built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
 ---
 
 # Summary
@@ -82,6 +82,7 @@ built_from_commit: "a2886343f8e5910f629ab595dbf993ac00d7ad69"
 | `C-39` | Consumer-visible SPP comes from current Seller Portal `discountOnSite` evidence with exact-date accepted-current preservation/rollover; later blank/failed attempts must not overwrite accepted SPP, and legacy WB Statistics sales-average SPP cannot masquerade as fresh current-visible truth. |
 | `C-40` | `Загрузить и обновить` is the canonical full-refresh action for web-vitrina: manual and automatic triggers share the same source/status/materialize/reread semantics, `Asia/Yekaterinburg` date-slot resolution, and truthful warning/error status when expected visible source groups are stale or missing. |
 | `C-41` | Web-vitrina/feedbacks visual fixes stay UI-local: wide feedbacks tables must scroll inside bounded containers, and updated-cell feedback uses transient text-color emphasis rather than legacy light backgrounds or persisted styling truth. |
+| `C-42` | Reports default-read must not request a not-yet-ready business day: daily-report selects the two latest persisted ready snapshots `<= default_business_as_of_date(now)`, stock-report default selects the latest one, and explicit stock `as_of_date` remains strict exact-read with no fallback/upstream fetch. |
 
 # Known gaps
 
