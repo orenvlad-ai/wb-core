@@ -111,3 +111,5 @@ Reference inputs и target сравниваются по:
 - новый live-source path;
 - server-side deploy;
 - новый registry/read-model layer.
+
+<!-- devcontrol-manual-parallel-e2e-b-20260510 -->
