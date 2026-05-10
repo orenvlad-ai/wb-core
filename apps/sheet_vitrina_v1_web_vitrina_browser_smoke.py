@@ -115,7 +115,7 @@ def main() -> None:
         "load_refresh_action": ready_result["load_refresh_action"],
         "table_snapshot_cache": ready_result["table_snapshot_cache"],
         "right_edge_spacer": ready_result["right_edge_spacer"],
-        "sticky_group_labels": ready_result["sticky_group_labels"],
+        "static_group_labels": ready_result["static_group_labels"],
         "column_visibility": ready_result["column_visibility"],
         "horizontal_overscroll_guard": ready_result["horizontal_overscroll_guard"],
         "operator_link": ready_result["operator_link"],
@@ -404,7 +404,7 @@ def run_browser_checks(
                 raise AssertionError(f"default order must switch to sku->metrics clustering, got {initial_order[:8]}")
             sku_separators = _check_sku_separators(page)
             right_edge_spacer = _check_right_edge_spacer(page)
-            sticky_group_labels = _check_sticky_group_labels(page)
+            static_group_labels = _check_static_group_labels(page)
 
             filter_controls = {
                 "search": page.locator("[data-filter-control='search']").count() == 1,
@@ -634,7 +634,7 @@ def run_browser_checks(
         "default_sku_metric_cluster": sku_cluster_ok,
         "sku_separators": sku_separators,
         "right_edge_spacer": right_edge_spacer,
-        "sticky_group_labels": sticky_group_labels,
+        "static_group_labels": static_group_labels,
         "filter_controls": filter_controls,
         "table_toolbar": table_toolbar,
         "status_summary": status_summary,
@@ -708,7 +708,7 @@ def _print_summary(result: dict[str, object]) -> None:
     if "table_snapshot_cache" in result:
         print("web_vitrina_browser_table_snapshot_cache: ok ->", result["table_snapshot_cache"])
     print("web_vitrina_browser_right_edge_spacer: ok ->", result["right_edge_spacer"])
-    print("web_vitrina_browser_sticky_group_labels: ok ->", result["sticky_group_labels"])
+    print("web_vitrina_browser_static_group_labels: ok ->", result["static_group_labels"])
     print("web_vitrina_browser_sku_separators: ok ->", result["sku_separators"])
     print("web_vitrina_browser_column_visibility: ok ->", result["column_visibility"])
     print("web_vitrina_browser_horizontal_overscroll_guard: ok ->", result["horizontal_overscroll_guard"])
@@ -1830,7 +1830,7 @@ def _check_right_edge_spacer(page: object) -> dict[str, object]:
     return spacer
 
 
-def _check_sticky_group_labels(page: object) -> dict[str, object]:
+def _check_static_group_labels(page: object) -> dict[str, object]:
     setup = page.evaluate(
         """() => {
           const scroll = document.querySelector('[data-table-scroll]');
@@ -1867,6 +1867,12 @@ def _check_sticky_group_labels(page: object) -> dict[str, object]:
           const target = rows[setup.targetIndex || 0];
           const cell = target ? target.querySelector('td') : null;
           const label = target ? target.querySelector('.group-row-label') : null;
+          const totalGroup = rows.find(row => ((row.querySelector('.group-row-label') || {}).textContent || '').trim() === 'ИТОГО');
+          const productGroup = rows.find(row => ((row.querySelector('.group-row-label') || {}).textContent || '').trim() && ((row.querySelector('.group-row-label') || {}).textContent || '').trim() !== 'ИТОГО');
+          const totalDataRow = totalGroup ? totalGroup.nextElementSibling : null;
+          const productDataRow = productGroup ? productGroup.nextElementSibling : null;
+          const totalFirstCell = totalDataRow ? totalDataRow.querySelector('td') : null;
+          const productFirstCell = productDataRow ? productDataRow.querySelector('td') : null;
           const header = document.querySelector('[data-table-head] th');
           const table = scroll ? scroll.querySelector('table') : null;
           const scrollRect = scroll ? scroll.getBoundingClientRect() : {left: 0, right: 0, width: 0};
@@ -1874,9 +1880,15 @@ def _check_sticky_group_labels(page: object) -> dict[str, object]:
           const cellRect = cell ? cell.getBoundingClientRect() : {left: 0, right: 0, width: 0};
           const tableRect = table ? table.getBoundingClientRect() : {width: 0};
           const headerRect = header ? header.getBoundingClientRect() : {bottom: 0};
+          const totalRowRect = totalDataRow ? totalDataRow.getBoundingClientRect() : {height: 0};
+          const productRowRect = productDataRow ? productDataRow.getBoundingClientRect() : {height: 0};
           const scrollClientWidth = scroll ? scroll.clientWidth : 0;
           const visibleBandLeft = Math.max(cellRect.left, scrollRect.left);
           const visibleBandRight = Math.min(cellRect.right, scrollRect.right);
+          const rowClassNames = rows.map(row => row.className || '');
+          const rowInlineStyles = rows.map(row => row.getAttribute('style') || '');
+          const cellClassNames = rows.map(row => ((row.querySelector('td') || {}).className || ''));
+          const cellInlineStyles = rows.map(row => ((row.querySelector('td') || {}).getAttribute ? (row.querySelector('td').getAttribute('style') || '') : ''));
           const cellStyle = cell ? getComputedStyle(cell) : {
             backgroundColor: '',
             pointerEvents: '',
@@ -1884,6 +1896,8 @@ def _check_sticky_group_labels(page: object) -> dict[str, object]:
             top: ''
           };
           const labelStyle = label ? getComputedStyle(label) : {backgroundColor: ''};
+          const totalCellStyle = totalFirstCell ? getComputedStyle(totalFirstCell) : {paddingTop: '', paddingBottom: '', lineHeight: ''};
+          const productCellStyle = productFirstCell ? getComputedStyle(productFirstCell) : {paddingTop: '', paddingBottom: '', lineHeight: ''};
           return {
             ...setup,
             targetLabel: label ? (label.textContent || '').trim() : '',
@@ -1905,7 +1919,21 @@ def _check_sticky_group_labels(page: object) -> dict[str, object]:
             cellTop: cellStyle.top,
             pointerEvents: cellStyle.pointerEvents,
             coversVisibleScrollWidth: Math.max(0, visibleBandRight - visibleBandLeft) >= Math.max(0, scrollClientWidth - 2),
-            coversTableWidth: cellRect.width >= Math.max(0, tableRect.width - 2)
+            coversTableWidth: cellRect.width >= Math.max(0, tableRect.width - 2),
+            forbiddenRowClass: rowClassNames.some(value => /sticky|fixed/i.test(value)),
+            forbiddenCellClass: cellClassNames.some(value => /sticky|fixed/i.test(value)),
+            forbiddenRowInlineStyle: rowInlineStyles.some(value => /position\\s*:\\s*(sticky|fixed)/i.test(value)),
+            forbiddenCellInlineStyle: cellInlineStyles.some(value => /position\\s*:\\s*(sticky|fixed)/i.test(value)),
+            totalDataRowClass: totalDataRow ? (totalDataRow.className || '') : '',
+            productDataRowClass: productDataRow ? (productDataRow.className || '') : '',
+            totalDataRowHeight: Math.round(totalRowRect.height),
+            productDataRowHeight: Math.round(productRowRect.height),
+            totalDataRowPaddingTop: totalCellStyle.paddingTop,
+            totalDataRowPaddingBottom: totalCellStyle.paddingBottom,
+            totalDataRowLineHeight: totalCellStyle.lineHeight,
+            productDataRowPaddingTop: productCellStyle.paddingTop,
+            productDataRowPaddingBottom: productCellStyle.paddingBottom,
+            productDataRowLineHeight: productCellStyle.lineHeight
           };
         }""",
         setup,
@@ -1923,25 +1951,39 @@ def _check_sticky_group_labels(page: object) -> dict[str, object]:
         setup,
     )
     if not payload.get("ready"):
-        raise AssertionError(f"sticky group labels smoke could not find table groups, got {payload}")
+        raise AssertionError(f"static group labels smoke could not find table groups, got {payload}")
     labels = [str(item) for item in payload.get("labels") or []]
     if "ИТОГО" not in labels or len([item for item in labels if item and item != "ИТОГО"]) < 1:
         raise AssertionError(f"table must render total and product group labels, got {payload}")
     expected_handoff_label = labels[int(payload["targetIndex"])]
     if payload["targetLabel"] != expected_handoff_label or payload["targetLabel"] == labels[0]:
-        raise AssertionError(f"sticky group band must hand off to the next group while scrolling, got {payload}")
-    if payload["labelTop"] < payload["headerBottom"] - 2 or payload["labelTop"] > payload["headerBottom"] + 18:
-        raise AssertionError(f"group label must stick just below the table header, got {payload}")
-    if payload["cellPosition"] != "sticky" or payload["pointerEvents"] != "none":
-        raise AssertionError(f"sticky group band must stay sticky and non-interactive, got {payload}")
+        raise AssertionError(f"group band target mismatch while scrolling, got {payload}")
+    if payload["cellPosition"] in {"sticky", "fixed"}:
+        raise AssertionError(f"group rows must scroll as normal rows, got {payload}")
+    if payload["forbiddenRowClass"] or payload["forbiddenCellClass"]:
+        raise AssertionError(f"group rows must not expose sticky/fixed classes, got {payload}")
+    if payload["forbiddenRowInlineStyle"] or payload["forbiddenCellInlineStyle"]:
+        raise AssertionError(f"group rows must not expose sticky/fixed inline styles, got {payload}")
+    if payload["labelTop"] >= payload["headerBottom"] - 4:
+        raise AssertionError(f"group label must scroll away instead of sticking below the table header, got {payload}")
     if payload["cellBackground"] == "rgba(0, 0, 0, 0)":
-        raise AssertionError(f"sticky group band must have its own full-width gray background, got {payload}")
+        raise AssertionError(f"group band must keep its own full-width gray background, got {payload}")
     if payload["labelBackground"] != "rgba(0, 0, 0, 0)" or int(payload["labelWidth"]) <= 0:
-        raise AssertionError(f"sticky group label must be left text on the band, got {payload}")
+        raise AssertionError(f"group label must remain left text on the band, got {payload}")
     if not payload["coversVisibleScrollWidth"] or not payload["coversTableWidth"]:
-        raise AssertionError(f"sticky group band must cover the visible scroll area and table width, got {payload}")
+        raise AssertionError(f"group band must cover the visible scroll area and table width, got {payload}")
     if payload["labelLeft"] < payload["scrollLeftEdge"] - 2 or payload["labelLeft"] > payload["scrollLeftEdge"] + 24:
-        raise AssertionError(f"sticky group label must stay aligned to the left edge of the band, got {payload}")
+        raise AssertionError(f"group label must stay aligned to the left edge of the band, got {payload}")
+    if payload["totalDataRowClass"] != payload["productDataRowClass"]:
+        raise AssertionError(f"TOTAL first data row must use the same row class contract as regular data rows, got {payload}")
+    if payload["totalDataRowPaddingTop"] != payload["productDataRowPaddingTop"]:
+        raise AssertionError(f"TOTAL first data row must keep normal top padding, got {payload}")
+    if payload["totalDataRowPaddingBottom"] != payload["productDataRowPaddingBottom"]:
+        raise AssertionError(f"TOTAL first data row must keep normal bottom padding, got {payload}")
+    if payload["totalDataRowLineHeight"] != payload["productDataRowLineHeight"]:
+        raise AssertionError(f"TOTAL first data row must keep normal line-height, got {payload}")
+    if int(payload["totalDataRowHeight"]) < int(payload["productDataRowHeight"]) - 1:
+        raise AssertionError(f"TOTAL first data row must not be visually compressed, got {payload}")
     return payload
 
 
