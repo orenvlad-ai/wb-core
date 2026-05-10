@@ -21,7 +21,7 @@ update_triggers:
   - "изменение canonical naming"
   - "появление нового публичного термина"
   - "изменение operator-visible labels"
-built_from_commit: "a2886343f8e5910f629ab595dbf993ac00d7ad69"
+built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
 ---
 
 # Summary
@@ -81,6 +81,7 @@ built_from_commit: "a2886343f8e5910f629ab595dbf993ac00d7ad69"
 | `public-probe system CA fallback` | `secure public probe fallback` | hosted public probe first uses secure system CA fallback before the legacy insecure diagnostic fallback |
 | `ЕБД` | `единая база данных` | user-facing alias for shared server-side accepted truth/runtime layer `wb-core`; not Google Sheets/GAS, browser UI, localStorage or report-private manual state |
 | `stock-report` | `Отчёт по остаткам` | read-only previous-closed stock report with active SKU selector |
+| `report ready snapshot selection` | `latest persisted ready snapshot fallback`, `Reports default-read fallback` | server-side Reports default-read selector: daily uses the two latest persisted ready dates `<= default_business_as_of_date(now)`, stock default uses the latest one, and explicit stock `as_of_date` remains strict exact-read |
 | `prepare -> upload -> refresh -> load` | `MVP flow`, `end-to-end flow` | historical bounded Google Sheets scenario; archived / do not use |
 | `ready snapshot` | `materialized snapshot`, `persisted sheet plan` | persisted server-side read-model for `DATA_VITRINA` / `STATUS` |
 | `ready-fact reconcile` | `historical report reconcile` | one-off repo-owned dry-run/apply helper that inserts missing accepted `fin_report_daily` / `ads_compact` slots from already persisted ready snapshots without overwrites or fake zeros |

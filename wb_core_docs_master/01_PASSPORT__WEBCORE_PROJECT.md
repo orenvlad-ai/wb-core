@@ -39,7 +39,7 @@ update_triggers:
   - "изменение current main-confirmed contour"
   - "merge нового bounded модуля"
   - "смена главного project gap"
-built_from_commit: "a2886343f8e5910f629ab595dbf993ac00d7ad69"
+built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
 ---
 
 # Summary
@@ -111,7 +111,8 @@ Confirmed contour на текущем `main`:
   - `GET /v1/sheet-vitrina-v1/plan-report` adds read-only `Выполнение плана` over accepted closed-day `fin_report_daily.fin_buyout_rub` + `ads_compact.ads_sum`, H1/H2 plan params, per-block coverage and optional server-side monthly baseline;
   - plan-report baseline routes (`baseline-template.xlsx`, `baseline-upload`, `baseline-status`) store operator monthly aggregates in separate runtime SQLite state used only by the plan report;
   - one-off `apps/sheet_vitrina_v1_ready_fact_reconcile.py` can dry-run/apply missing accepted slots from already persisted ready snapshots without overwriting existing diffs or fabricating zeros;
-  - `GET /v1/sheet-vitrina-v1/stock-report` remains read-only previous-closed stock report with current active SKU selector;
+  - `GET /v1/sheet-vitrina-v1/daily-report` default-read compares the two latest persisted ready snapshots not newer than `default_business_as_of_date(now)`, so night-boundary gaps in the not-yet-materialized default closed day do not turn into false failures;
+  - `GET /v1/sheet-vitrina-v1/stock-report` remains read-only previous-closed stock report with current active SKU selector: default-read uses the latest persisted ready snapshot not newer than the requested default closed day, while explicit `?as_of_date=YYYY-MM-DD` stays strict exact-read with no fallback/upstream fetch;
   - current SPP visible values are sourced from Seller Portal `discountOnSite` as current-only evidence; successful current fetches persist exact business-date accepted-current snapshots, later blank attempts must not overwrite them, and legacy WB Statistics sales-average SPP is only an explicit fallback mode, not fresh current-visible truth.
   - supply tab keeps server-driven factory-order and regional calculations; regional result now uses compact district rows with per-district XLSX action and district files include `nmId / SKU / Количество к поставке / Дефицит`;
   - seller-funnel materialization filters raw rows to enabled/relevant `nm_ids` before strict field validation and logs ignored invalid non-relevant rows.
@@ -121,7 +122,7 @@ Confirmed contour на текущем `main`:
   - current production endpoint = `https://api.selleros.pro`; current-live EU nginx must publish both `server_name 89.191.226.88 api.selleros.pro;` and `listen 443 ssl` with LetsEncrypt cert/key paths for `api.selleros.pro`;
   - IP-only or HTTP-only EU publication is production outage drift; `deploy`, `deploy-and-verify` and `apply-nginx-routes` fail locally before mutation when current-live hostname/TLS invariants are broken;
   - old selleros identity = `selleros-root` / `178.72.152.177`; its target JSON is rollback-only/deprecated and mutating deploy/apply-nginx/restart/update paths fail fast unless the explicit emergency rollback override is set.
-  - current EU target deploy owns the localhost owner runtime dependencies for SellerPortalBot/web-source handoff and the app-level public/operator auth contour: host OS deps, `/opt/wb-web-bot/venv`, `/opt/wb-ai/venv`, `wb-ai-api.service`, pinned Playwright/psycopg2/FastAPI/Uvicorn/requests versions, auth-aware probe login cookies in memory only, and status/launcher behavior that degrades as truthful JSON instead of public 500.
+  - current EU target deploy owns the localhost owner runtime dependencies for SellerPortalBot/web-source handoff and the app-level public/operator auth contour: host OS deps, `/opt/wb-web-bot/venv`, `/opt/wb-ai/venv`, `wb-ai-api.service`, pinned Playwright/psycopg2/FastAPI/Uvicorn/requests versions, auth-aware probe login cookies in memory only, runtime-managed refresh schedules, and status/launcher behavior that degrades as truthful JSON instead of public 500.
 
 ## Authoritative source of truth
 

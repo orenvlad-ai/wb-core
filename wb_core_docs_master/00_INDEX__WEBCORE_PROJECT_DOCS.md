@@ -22,7 +22,7 @@ update_triggers:
   - "изменение состава pack"
   - "изменение роли `wb_core_docs_master`"
   - "изменение policy двухслойной схемы docs"
-built_from_commit: "a2886343f8e5910f629ab595dbf993ac00d7ad69"
+built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
 ---
 
 # Summary
