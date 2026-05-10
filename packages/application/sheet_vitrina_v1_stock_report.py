@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.sheet_vitrina_v1_report_snapshot_selection import select_latest_ready_snapshot_dates
 from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE_NAME,
     current_business_date_iso,
@@ -55,16 +56,21 @@ class SheetVitrinaV1StockReportBlock:
     def build(self, *, as_of_date: str | None = None) -> dict[str, Any]:
         business_date = date.fromisoformat(current_business_date_iso(self.now_factory()))
         current_business_date = business_date.isoformat()
-        requested_as_of_date = as_of_date or default_business_as_of_date(self.now_factory())
+        explicit_as_of_date = str(as_of_date or "").strip() or None
+        requested_as_of_date = explicit_as_of_date or default_business_as_of_date(self.now_factory())
         date.fromisoformat(requested_as_of_date)
+        effective_as_of_date = requested_as_of_date
         base_payload = {
             "status": "unavailable",
             "reason": "",
             "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
             "current_business_date": current_business_date,
-            "report_date": requested_as_of_date,
+            "requested_as_of_date": requested_as_of_date,
+            "explicit_as_of_date": explicit_as_of_date,
+            "report_date": effective_as_of_date,
             "threshold_lt": int(STOCK_ALERT_THRESHOLD),
             "notes": list(REPORT_NOTES),
+            "available_as_of_dates": [],
             "districts": [
                 {
                     "metric_key": metric_key,
@@ -75,9 +81,9 @@ class SheetVitrinaV1StockReportBlock:
             "source_of_truth": {
                 "read_model": "persisted_ready_snapshot",
                 "sheet_name": "DATA_VITRINA",
-                "snapshot_as_of_date": requested_as_of_date,
+                "snapshot_as_of_date": effective_as_of_date,
                 "temporal_slot": TEMPORAL_SLOT_YESTERDAY_CLOSED,
-                "slot_date": requested_as_of_date,
+                "slot_date": effective_as_of_date,
             },
         }
 
@@ -89,16 +95,49 @@ class SheetVitrinaV1StockReportBlock:
                 "reason": f"Отчёт по остаткам пока недоступен: {exc}",
             }
 
-        try:
-            snapshot = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=requested_as_of_date)
-        except ValueError as exc:
-            return {
+        if explicit_as_of_date is None:
+            try:
+                selection = select_latest_ready_snapshot_dates(
+                    self.runtime,
+                    requested_as_of_date=requested_as_of_date,
+                    limit=1,
+                )
+            except ValueError as exc:
+                return {
+                    **base_payload,
+                    "reason": f"Отчёт по остаткам пока недоступен: {exc}",
+                }
+            if selection.latest_as_of_date is None:
+                return {
+                    **base_payload,
+                    "available_as_of_dates": list(selection.available_as_of_dates),
+                    "reason": (
+                        "Отчёт по остаткам пока недоступен: нет persisted ready snapshot "
+                        f"не позднее {requested_as_of_date}"
+                    ),
+                }
+            effective_as_of_date = selection.latest_as_of_date
+            base_payload = {
                 **base_payload,
-                "reason": f"Отчёт по остаткам пока недоступен: отсутствует ready snapshot для {requested_as_of_date} ({exc})",
+                "report_date": effective_as_of_date,
+                "available_as_of_dates": list(selection.available_as_of_dates),
+                "source_of_truth": {
+                    **base_payload["source_of_truth"],
+                    "snapshot_as_of_date": effective_as_of_date,
+                    "slot_date": effective_as_of_date,
+                },
             }
 
         try:
-            closed_view = _extract_closed_slot_view(snapshot, expected_closed_date=requested_as_of_date)
+            snapshot = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=effective_as_of_date)
+        except ValueError as exc:
+            return {
+                **base_payload,
+                "reason": f"Отчёт по остаткам пока недоступен: отсутствует ready snapshot для {effective_as_of_date} ({exc})",
+            }
+
+        try:
+            closed_view = _extract_closed_slot_view(snapshot, expected_closed_date=effective_as_of_date)
         except ValueError as exc:
             return {
                 **base_payload,

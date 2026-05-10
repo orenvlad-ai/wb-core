@@ -202,7 +202,7 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - `Отчёты` uses the same sibling subsection selector pattern as the supply tab: default section = `Ежедневные отчёты`, additional sections = `Отчёт по остаткам` and `Выполнение плана`, only one report body is visible at a time
   - daily-report block остаётся read-only и server-owned:
     - compare target = два последних closed business day в `Asia/Yekaterinburg`
-    - current rule = `yesterday_closed` из ready snapshot `as_of_date=default_business_as_of_date(now)` versus `yesterday_closed` из ready snapshot `as_of_date=default_business_as_of_date(now)-1 day`
+    - current rule = `yesterday_closed` из двух последних persisted ready snapshots `<= default_business_as_of_date(now)`
     - `today_current` не используется как comparison baseline
     - block читает только persisted ready snapshots и current registry labels, без новых upstream fetch и без browser-side ranking logic
     - ranked total metric pool intentionally остаётся узким и canonical: `total_view_count`, `total_views_current`, `avg_ctr_current`, `avg_addToCartConversion`, `avg_cartToOrderConversion`, `avg_spp`, `avg_ads_bid_search`, `total_ads_views`, `total_ads_sum`, `avg_localizationPercent`
@@ -218,9 +218,9 @@ update_note: "Обновлён под Google Sheets decommission and current pla
     - route now surfaces `metric_ranking_diagnostics` so operator/debug tooling can explain why a ranked metric list contains fewer than five items
     - `SPP`, `ads_bid_search` и `localizationPercent` не входят в ranked explanation factors, потому что current repo norm не фиксирует для них однозначный good/bad sign
   - stock-report block остаётся read-only и server-owned:
-    - default source seam = persisted ready snapshot `as_of_date=default_business_as_of_date(now)` -> `DATA_VITRINA` -> slot `yesterday_closed`
-    - default report date = previous closed business day in `Asia/Yekaterinburg`
-    - optional explicit `as_of_date` keeps the same persisted closed-day seam and does not trigger refresh/upstream fetch
+    - default source seam = latest persisted ready snapshot `<= default_business_as_of_date(now)` -> `DATA_VITRINA` -> slot `yesterday_closed`
+    - default report date = latest persisted closed business day not newer than the requested default in `Asia/Yekaterinburg`
+    - optional explicit `as_of_date` keeps strict exact-read on the same persisted closed-day seam and does not fallback or trigger refresh/upstream fetch
     - include rule = only SKU with at least one district stock `< 50`
     - sort = min breached district stock ascending, then breached district breadth descending, then total stock ascending
     - compact district labels remain truthful to current repo buckets: `Центральный ФО`, `Северо-Западный ФО`, `Приволжский ФО`, `Уральский ФО`, `Юг и СКФО`

@@ -300,8 +300,8 @@ update_note: "Обновлён под simple WebCore auth, strict feedbacks за
   - `GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx` = отдельный operator-facing XLSX download по федеральному округу
 - Для compact daily-report compare basis current live rule остаётся fully server-side:
   - `current_business_date` = now in `Asia/Yekaterinburg`
-  - `newer_closed_day` читается как `yesterday_closed` из ready snapshot `as_of_date=default_business_as_of_date(now)`
-  - `older_closed_day` читается как `yesterday_closed` из ready snapshot `as_of_date=default_business_as_of_date(now)-1 day`
+  - `newer_closed_day` читается как `yesterday_closed` из latest persisted ready snapshot `<= default_business_as_of_date(now)`
+  - `older_closed_day` читается как `yesterday_closed` из second latest persisted ready snapshot `<= default_business_as_of_date(now)`
   - route не требует отдельный ready snapshot на текущую business date и не использует `today_current` как comparison baseline
 - Внутри existing `POST /v1/sheet-vitrina-v1/refresh` live contour теперь допускает bounded server-local sync для `seller_funnel_snapshot` и `web_source_snapshot`:
   - сначала refresh проверяет, materialized ли exact-date `today_current` snapshot в local `wb-ai` read-side;
@@ -410,7 +410,7 @@ update_note: "Обновлён под simple WebCore auth, strict feedbacks за
   - по умолчанию открыт `Ежедневные отчёты`, одновременно показывается только один report body, browser persistence хранит только выбранный tab/subsection и SKU-фильтр отчёта по остаткам;
 - `Ежедневные отчёты`:
   - block сравнивает только два последних closed business day в `Asia/Yekaterinburg`;
-  - current rule = `current business date -> compare yesterday_closed(default_business_as_of_date(now)) vs yesterday_closed(default_business_as_of_date(now)-1 day)`;
+  - current rule = `current business date -> compare yesterday_closed` from the two latest persisted ready snapshots `<= default_business_as_of_date(now)`;
   - block не использует `today_current` как baseline и не trigger-ит новых upstream fetch;
   - source seam = только persisted ready snapshots плюс current registry config/metrics labels;
   - current checkpoint surface:
@@ -459,9 +459,9 @@ update_note: "Обновлён под simple WebCore auth, strict feedbacks за
   - `SPP`, `ads_bid_search` и `localizationPercent` не входят в ranked explanation factors, because current repo norm does not fix one unambiguous good/bad sign for them.
 - `Отчёт по остаткам`:
   - route = `GET /v1/sheet-vitrina-v1/stock-report`
-  - default source seam = persisted ready snapshot `as_of_date=default_business_as_of_date(now)` -> sheet `DATA_VITRINA` -> slot `yesterday_closed`
-  - default report date = previous closed business day in `Asia/Yekaterinburg`
-  - optional manual override keeps the same read path via query `?as_of_date=YYYY-MM-DD`, without upstream fetch or browser-side date math
+  - default source seam = latest persisted ready snapshot `<= default_business_as_of_date(now)` -> sheet `DATA_VITRINA` -> slot `yesterday_closed`
+  - default report date = latest persisted closed business day not newer than the requested default in `Asia/Yekaterinburg`
+  - optional manual override keeps strict exact-read via query `?as_of_date=YYYY-MM-DD`: missing exact ready snapshot remains a truthful unavailable result, without fallback, upstream fetch or browser-side date math
   - operator block adds a compact SKU selector plus `Рассчитать`; selector source = full active SKU catalog from current authoritative registry state `config_v2`, not the breached-row subset from `stock-report`
   - selector labels stay operator-readable and truthful: `display_name · nmId <id>`
   - first page load defaults to all active SKU selected; no persistent server-side preference is stored for this filter state

@@ -1787,7 +1787,7 @@
         <a class="eyebrow eyebrow-link" href="__SHEET_VITRINA_V1_WEB_VITRINA_URL__" target="_blank" rel="noreferrer">sheet_vitrina_v1</a>
         <p class="section-lead">
           Reports tab остаётся полностью server-driven: daily-report читает два последних closed business day, а stock-report
-          по умолчанию читает previous closed business day через persisted ready snapshot, а «Выполнение плана» считает
+          по умолчанию читает последний persisted ready snapshot не новее requested default closed day, а «Выполнение плана» считает
           факт только из accepted closed-day snapshots <code>fin_buyout_rub</code> + <code>ads_sum</code>.
         </p>
 
@@ -1876,7 +1876,7 @@
               <div id="stockReportContent" class="daily-report" hidden>
                 <section class="report-card">
                   <h3>SKU с низким остатком по округам</h3>
-                  <p>Source seam остаётся server-owned: previous closed business day и slot <code>yesterday_closed</code> читаются только из persisted ready snapshot.</p>
+                  <p>Source seam остаётся server-owned: latest persisted ready snapshot не новее default closed day и slot <code>yesterday_closed</code> читаются только из persisted ready snapshot.</p>
                   <div id="stockReportRows"></div>
                 </section>
               </div>

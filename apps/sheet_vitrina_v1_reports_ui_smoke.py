@@ -109,8 +109,8 @@ def main() -> None:
         raise AssertionError("misleading single-day daily-report wording must not remain in the template")
     if "current business day и slot <code>today_current</code>" in html:
         raise AssertionError("stock-report UI must no longer describe current-day today_current seam as the default")
-    if "previous closed business day и slot <code>yesterday_closed</code>" not in html:
-        raise AssertionError("stock-report UI must disclose previous-closed yesterday_closed seam")
+    if "latest persisted ready snapshot не новее default closed day и slot <code>yesterday_closed</code>" not in html:
+        raise AssertionError("stock-report UI must disclose latest persisted ready snapshot yesterday_closed seam")
     if len(re.findall(r"<h1>", html)) != 0:
         raise AssertionError("duplicated top-level headings must be removed from panel bodies")
     if "let stockReportSelectedSkuIds = resolveRestoredStockReportDraftSkuIds(persistedOperatorUiState);" not in html:
