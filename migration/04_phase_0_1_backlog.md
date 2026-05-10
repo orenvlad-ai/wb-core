@@ -1,8 +1,6 @@
 # Phase 0/1 Backlog
 
 ## Backlog
-<!-- devcontrol-parallel-e2e-a-20260510-cb555ce -->
-
 | ID | Задача | Ожидаемый результат | Зависимости | Рекомендуемый порядок |
 | --- | --- | --- | --- | --- |
 | F-01 | Зафиксировать migration charter | Sidecar migration model описана явно и не подлежит пересмотру в текущей фазе | Review reference-репозиториев | 1 |

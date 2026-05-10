@@ -1,6 +1,4 @@
 # Evidence Checklist Для Sku Display Bundle
-<!-- devcontrol-parallel-e2e-r3-a-9ec7eda -->
-
 - [x] Legacy-source зафиксирован как `CONFIG` и не расширен до полного registry-переноса.
 - [x] Минимально нужные поля для первой витрины перечислены явно: `nmId`, `comment`, `group`, `active`.
 - [x] Поля вне минимального display bundle перечислены как out-of-scope.

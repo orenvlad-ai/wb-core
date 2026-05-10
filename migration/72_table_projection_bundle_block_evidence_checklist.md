@@ -11,5 +11,3 @@
 - [x] Подтверждён artifact-backed smoke.
 - [x] Подтверждён bundle-composition smoke.
 - [x] Выполнен doc-sync через `docs/modules/14_MODULE__TABLE_PROJECTION_BUNDLE_BLOCK.md` и индекс.
-
-<!-- devcontrol-manual-parallel-e2e-r2-b-20260510 -->
