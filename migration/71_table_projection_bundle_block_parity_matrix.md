@@ -1,4 +1,5 @@
 # Parity Matrix Для Table Projection Bundle
+<!-- devcontrol-manual-parallel-e2e-r2-c-conflict-20260510 -->
 <!-- devcontrol-manual-parallel-e2e-r2-a-20260510 -->
 
 | Upstream/reference source | Target field | Status |
