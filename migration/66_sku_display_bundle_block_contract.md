@@ -1,4 +1,5 @@
 # Контракт Блока Sku Display Bundle
+<!-- devcontrol-parallel-e2e-r2-a-5fe75d8 -->
 
 ## Что Это За Блок
 
