@@ -100,6 +100,7 @@ def main() -> None:
         "base_url": ready_result["base_url"],
         "table_rendered": ready_result["table_rendered"],
         "top_panel": ready_result["top_panel"],
+        "table_header": ready_result["table_header"],
         "default_total_first": ready_result["default_total_first"],
         "default_sku_metric_cluster": ready_result["default_sku_metric_cluster"],
         "sku_separators": ready_result["sku_separators"],
@@ -257,15 +258,36 @@ def run_browser_checks(
         try:
             page.goto(page_url, wait_until="commit")
             page.wait_for_load_state("domcontentloaded")
-            top_panel_state = {
-                "status_badge_count": page.locator("[data-status-badge]").count(),
-                "json_connect_count": page.locator("[data-open-contract]").count(),
-                "progress_count": page.locator("[data-global-progress]").count(),
-                "progress_hidden": page.locator("[data-global-progress]").evaluate("node => node.hidden"),
-            }
-            if top_panel_state["status_badge_count"] != 0 or top_panel_state["json_connect_count"] != 0:
-                raise AssertionError(f"top panel must not render JSON Connect or a permanent status badge, got {top_panel_state}")
+            top_panel_state = page.evaluate(
+                """() => {
+                  const header = document.querySelector('[data-table-header]');
+                  const progress = document.querySelector('[data-global-progress]');
+                  return {
+                    top_panel_count: document.querySelectorAll('[data-top-panel]').length,
+                    table_header_count: document.querySelectorAll('[data-table-header]').length,
+                    status_badge_count: document.querySelectorAll('[data-status-badge]').length,
+                    json_connect_count: document.querySelectorAll('[data-open-contract]').length,
+                    progress_count: document.querySelectorAll('[data-global-progress]').length,
+                    progress_hidden: progress ? !!progress.hidden : null,
+                    progress_inside_table_header: !!(header && header.querySelector('[data-global-progress]')),
+                    load_button_inside_table_header: !!(header && header.querySelector('[data-load-refresh-button]')),
+                    page_meta_inside_table_header: !!(header && header.querySelector('[data-page-meta]'))
+                  };
+                }"""
+            )
+            if (
+                top_panel_state["top_panel_count"] != 0
+                or top_panel_state["table_header_count"] != 1
+                or top_panel_state["status_badge_count"] != 0
+                or top_panel_state["json_connect_count"] != 0
+                or top_panel_state["progress_count"] != 1
+                or not top_panel_state["progress_inside_table_header"]
+                or not top_panel_state["load_button_inside_table_header"]
+                or not top_panel_state["page_meta_inside_table_header"]
+            ):
+                raise AssertionError(f"source strip controls must live in the table header only, got {top_panel_state}")
             page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+            table_header_layout = _check_table_header_layout(page)
             total_rows = page.locator("[data-table-body] tr").count()
             if total_rows <= 0:
                 raise AssertionError("web-vitrina table must render at least one row")
@@ -607,6 +629,7 @@ def run_browser_checks(
         "as_of_date": as_of_date,
         "table_rendered": total_rows > 0,
         "top_panel": top_panel_state,
+        "table_header": table_header_layout,
         "default_total_first": initial_order[0]["scope_label"] == "ИТОГО",
         "default_sku_metric_cluster": sku_cluster_ok,
         "sku_separators": sku_separators,
@@ -670,6 +693,8 @@ def _print_summary(result: dict[str, object]) -> None:
         print("web_vitrina_browser_as_of_date: ok ->", result["as_of_date"])
     print("web_vitrina_browser_table: ok ->", result["table_rendered"])
     print("web_vitrina_browser_top_panel: ok ->", result["top_panel"])
+    if "table_header" in result:
+        print("web_vitrina_browser_table_header: ok ->", result["table_header"])
     print("web_vitrina_browser_status_summary: ok ->", result["status_summary"])
     if "auto_schedule_block" in result:
         print("web_vitrina_browser_auto_schedule: ok ->", result["auto_schedule_block"])
@@ -877,6 +902,58 @@ def _check_table_snapshot_cache(page: object) -> dict[str, object]:
     }
 
 
+def _check_table_header_layout(page: object) -> dict[str, object]:
+    payload = page.evaluate(
+        """() => {
+          const header = document.querySelector('[data-table-header]');
+          const pageMeta = header ? header.querySelector('[data-page-meta]') : null;
+          const tableMeta = header ? header.querySelector('[data-table-meta]') : null;
+          const progress = header ? header.querySelector('[data-global-progress]') : null;
+          const loadButton = header ? header.querySelector('[data-load-refresh-button]') : null;
+          const source = header ? header.querySelector('.table-source-kicker') : null;
+          const text = header ? (header.innerText || '') : '';
+          const metaText = pageMeta ? ((pageMeta.textContent || '').trim()) : '';
+          return {
+            top_panel_count: document.querySelectorAll('[data-top-panel]').length,
+            table_header_count: document.querySelectorAll('[data-table-header]').length,
+            page_meta_outside_header_count: Array.from(document.querySelectorAll('[data-page-meta]'))
+              .filter(node => !node.closest('[data-table-header]')).length,
+            table_meta_outside_header_count: Array.from(document.querySelectorAll('[data-table-meta]'))
+              .filter(node => !node.closest('[data-table-header]')).length,
+            progress_inside_header: !!progress,
+            load_button_inside_header: !!loadButton,
+            source_text: source ? ((source.textContent || '').trim()) : '',
+            page_meta: metaText,
+            table_meta: tableMeta ? ((tableMeta.textContent || '').trim()) : '',
+            load_button_text: loadButton ? ((loadButton.textContent || '').trim()) : '',
+            asia_yekaterinburg_in_meta: (metaText.match(/Asia\\/Yekaterinburg/g) || []).length,
+            header_text: text
+          };
+        }"""
+    )
+    if payload["top_panel_count"] != 0 or payload["table_header_count"] != 1:
+        raise AssertionError(f"source strip must be removed and table header must be unique, got {payload}")
+    if payload["page_meta_outside_header_count"] or payload["table_meta_outside_header_count"]:
+        raise AssertionError(f"table header meta must not be duplicated outside the header, got {payload}")
+    if (
+        not payload["progress_inside_header"]
+        or not payload["load_button_inside_header"]
+        or payload["source_text"] != "sheet_vitrina_v1"
+        or payload["load_button_text"] != "Загрузить и обновить"
+    ):
+        raise AssertionError(f"source/header controls must be compactly inside the table header, got {payload}")
+    for expected in ("Снимок:", "Вчера:", "Сегодня:"):
+        if expected not in payload["page_meta"]:
+            raise AssertionError(f"table header meta must expose {expected!r}, got {payload}")
+    if "Бизнес TZ:" not in payload["page_meta"] and "TZ:" not in payload["page_meta"]:
+        raise AssertionError(f"table header meta must expose timezone, got {payload}")
+    if "Ваше локальное время" in payload["page_meta"] or payload["asia_yekaterinburg_in_meta"] > 1:
+        raise AssertionError(f"table header meta must avoid duplicate Asia/Yekaterinburg text, got {payload}")
+    if "rows:" not in payload["table_meta"] or "columns:" not in payload["table_meta"]:
+        raise AssertionError(f"table header must retain grid rows/columns meta, got {payload}")
+    return payload
+
+
 def _check_operator_screen_layout(page: object) -> dict[str, object]:
     payload = page.evaluate(
         """() => {
@@ -902,6 +979,7 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
             return current ? Array.from(root.children).indexOf(current) : -1;
           };
           const loadButton = document.querySelector('[data-load-refresh-button]');
+          const tableHeader = document.querySelector('[data-table-header]');
           const loadButtonStyles = loadButton ? getComputedStyle(loadButton) : null;
           const saveButtons = Array.from(document.querySelectorAll([
             '[data-vitrina-auto-save]',
@@ -917,8 +995,13 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
             update_tab_count: Array.from(document.querySelectorAll('[data-unified-tab-button]')).filter(node => (node.textContent || '').trim() === 'Обновление данных').length,
             retry_button_count: document.querySelectorAll('[data-retry-button]').length,
             top_status_badge_count: document.querySelectorAll('[data-status-badge]').length,
+            top_panel_count: document.querySelectorAll('[data-top-panel]').length,
+            table_header_count: document.querySelectorAll('[data-table-header]').length,
             json_connect_count: document.querySelectorAll('[data-open-contract]').length,
             progress_count: document.querySelectorAll('[data-global-progress]').length,
+            progress_inside_table_header: !!(tableHeader && tableHeader.querySelector('[data-global-progress]')),
+            load_button_inside_table_header: !!(tableHeader && tableHeader.querySelector('[data-load-refresh-button]')),
+            page_meta_inside_table_header: !!(tableHeader && tableHeader.querySelector('[data-page-meta]')),
             load_button_text: loadButton ? (loadButton.textContent || '').trim() : '',
             load_button_class: loadButton ? (loadButton.getAttribute('class') || '') : '',
             load_button_bg: loadButtonStyles ? loadButtonStyles.backgroundColor : '',
@@ -928,7 +1011,6 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
             save_button_classes: saveButtons.map(node => node.getAttribute('class') || ''),
             headers,
             order: {
-              top: nodeIndex('[data-top-panel]'),
               summary: nodeIndex('[data-summary-grid]'),
               toolbar: nodeIndex('[data-table-toolbar]'),
               history: nodeIndex('[data-history-panel]'),
@@ -946,9 +1028,16 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
     if payload["retry_button_count"] != 0:
         raise AssertionError(f"removed refresh button must not be rendered, got {payload}")
     if payload["top_status_badge_count"] != 0 or payload["json_connect_count"] != 0:
-        raise AssertionError(f"top panel must not render JSON Connect or a permanent status badge, got {payload}")
-    if payload["progress_count"] != 1:
-        raise AssertionError(f"top panel must expose one global progress component, got {payload}")
+        raise AssertionError(f"table header must not render JSON Connect or a permanent status badge, got {payload}")
+    if (
+        payload["top_panel_count"] != 0
+        or payload["table_header_count"] != 1
+        or payload["progress_count"] != 1
+        or not payload["progress_inside_table_header"]
+        or not payload["load_button_inside_table_header"]
+        or not payload["page_meta_inside_table_header"]
+    ):
+        raise AssertionError(f"source/header controls must live in the table header, got {payload}")
     if payload["load_button_text"] != "Загрузить и обновить" or "primary" not in payload["load_button_class"]:
         raise AssertionError(f"load+refresh button must be the single primary action, got {payload}")
     if not payload["load_button_is_dark"] or not payload["load_button_has_accent_border"]:
@@ -964,7 +1053,7 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
         if expected not in payload["headers"]:
             raise AssertionError(f"main table must expose header {expected!r}, got {payload['headers']}")
     order_values = payload["order"]
-    expected_order = [order_values[key] for key in ("top", "summary", "toolbar", "table", "actions")]
+    expected_order = [order_values[key] for key in ("summary", "toolbar", "table", "actions")]
     if any(value < 0 for value in expected_order) or expected_order != sorted(expected_order):
         raise AssertionError(f"web-vitrina blocks must follow the operator screen order, got {payload}")
     if order_values["history"] != order_values["toolbar"] or order_values["filters"] != order_values["toolbar"]:

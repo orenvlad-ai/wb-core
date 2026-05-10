@@ -813,30 +813,11 @@
       align-items: center;
     }
 
-    .top-panel,
     .panel {
       background: var(--panel-bg);
       border: 1px solid var(--border);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
-    }
-
-    .top-panel {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 14px;
-      flex-wrap: wrap;
-      padding: 10px 14px;
-      margin-bottom: 8px;
-    }
-
-    .top-panel-left,
-    .top-panel-actions {
-      display: flex;
-      gap: 16px;
-      align-items: center;
-      flex-wrap: wrap;
     }
 
     .site-kicker {
@@ -859,14 +840,6 @@
       line-height: 1.45;
       color: var(--muted);
       word-break: break-word;
-    }
-
-    .top-panel-actions {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      justify-content: flex-end;
-      gap: 8px;
     }
 
     .button {
@@ -1475,6 +1448,41 @@
       margin-bottom: 10px;
     }
 
+    .table-panel-top {
+      align-items: center;
+      gap: 10px 14px;
+    }
+
+    .table-header-main {
+      min-width: min(100%, 360px);
+    }
+
+    .table-header-meta {
+      display: flex;
+      flex: 1 1 520px;
+      min-width: min(100%, 360px);
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px 12px;
+      flex-wrap: wrap;
+    }
+
+    .table-header-text {
+      display: grid;
+      flex: 1 1 300px;
+      min-width: min(100%, 260px);
+      gap: 3px;
+      justify-items: end;
+    }
+
+    .table-header-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
     .panel h2 {
       margin: 0;
       font-size: 18px;
@@ -1486,6 +1494,19 @@
       align-items: center;
       gap: 8px;
       flex-wrap: wrap;
+    }
+
+    .table-source-kicker {
+      display: inline-flex;
+      align-items: center;
+      min-height: 20px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 8px;
+      background: var(--panel-subtle);
+      color: var(--muted-strong);
+      line-height: 1;
+      white-space: nowrap;
     }
 
     .table-summary-line {
@@ -1607,6 +1628,11 @@
       font-size: 11px;
       color: var(--muted);
       line-height: 1.45;
+      text-align: right;
+    }
+
+    .table-page-meta,
+    .table-grid-meta {
       text-align: right;
     }
 
@@ -2330,7 +2356,6 @@
     }
 
     .shell-logout-link,
-    .top-panel,
     .panel,
     .operator-embed-panel,
     .summary-card,
@@ -2340,6 +2365,7 @@
     .table-control-toolbar,
     .column-manager-toggle,
     .history-compact-control,
+    .table-source-kicker,
     .research-picker-summary,
     .research-range-control,
     .research-option,
@@ -2351,7 +2377,6 @@
       color: var(--text);
     }
 
-    .top-panel,
     .panel,
     .operator-embed-panel {
       box-shadow: none;
@@ -2639,18 +2664,18 @@
         padding: 0;
       }
 
-      .top-panel,
       .panel {
         padding: 12px;
       }
 
-      .top-panel,
-      .top-panel-actions {
-        align-items: stretch;
+      .table-header-meta,
+      .table-header-text,
+      .table-header-actions {
+        justify-items: stretch;
         justify-content: stretch;
       }
 
-      .top-panel-actions .button {
+      .table-header-actions .button {
         flex: 1 1 100%;
       }
 
@@ -2696,6 +2721,11 @@
       }
 
       .panel-meta {
+        text-align: left;
+      }
+
+      .table-page-meta,
+      .table-grid-meta {
         text-align: left;
       }
 
@@ -2782,22 +2812,6 @@
     </header>
 
     <section class="unified-tab-panel" data-unified-tab-panel="vitrina">
-    <section class="top-panel" data-top-panel>
-      <div class="top-panel-left">
-        <span class="site-kicker">sheet_vitrina_v1</span>
-        <p class="meta-line" data-page-meta>Загрузка page composition…</p>
-      </div>
-      <div class="top-panel-actions">
-        <div class="top-progress" data-global-progress hidden>
-          <div class="top-progress-track" aria-hidden="true">
-            <div class="top-progress-bar" data-global-progress-bar></div>
-          </div>
-          <span class="top-progress-label" data-global-progress-label>Запуск…</span>
-        </div>
-        <button class="button primary" type="button" data-load-refresh-button>Загрузить и обновить</button>
-      </div>
-    </section>
-
     <details class="auto-schedule-panel" data-vitrina-auto-schedule>
       <summary class="auto-schedule-summary" data-vitrina-auto-summary>
         <span class="auto-schedule-disclosure" aria-hidden="true"></span>
@@ -2917,10 +2931,11 @@
     </section>
 
     <section class="panel">
-      <div class="panel-top">
-        <div>
+      <div class="panel-top table-panel-top" data-table-header>
+        <div class="table-header-main">
           <div class="table-heading-row">
             <h2>Таблица</h2>
+            <span class="site-kicker table-source-kicker">sheet_vitrina_v1</span>
             <span class="table-freshness-indicator" data-table-freshness-indicator hidden>
               <span class="table-freshness-dot" aria-hidden="true"></span>
               <span data-table-freshness-label>актуально</span>
@@ -2931,9 +2946,23 @@
             Основная web-витрина поверх persisted ready snapshot.
           </p>
         </div>
-        <p class="panel-meta" data-table-meta>
-          ожидание server payload…
-        </p>
+        <div class="table-header-meta">
+          <div class="table-header-text">
+            <p class="meta-line table-page-meta" data-page-meta>Загрузка page composition…</p>
+            <p class="panel-meta table-grid-meta" data-table-meta>
+              ожидание server payload…
+            </p>
+          </div>
+          <div class="table-header-actions">
+            <div class="top-progress" data-global-progress hidden>
+              <div class="top-progress-track" aria-hidden="true">
+                <div class="top-progress-bar" data-global-progress-bar></div>
+              </div>
+              <span class="top-progress-label" data-global-progress-label>Запуск…</span>
+            </div>
+            <button class="button primary" type="button" data-load-refresh-button>Загрузить и обновить</button>
+          </div>
+        </div>
       </div>
 
       <div class="state-box" data-table-state>
@@ -5231,6 +5260,26 @@
       return parts[2] + "." + parts[1] + "." + parts[0];
     }
 
+    function buildPageHeaderMeta(meta) {
+      const normalizedMeta = meta || {};
+      const businessTimezone = String(normalizedMeta.business_timezone || "").trim();
+      const localTimezone = browserTimezoneLabel();
+      const timezoneParts = [];
+      if (businessTimezone && localTimezone && businessTimezone === localTimezone) {
+        timezoneParts.push("TZ: " + businessTimezone);
+      } else {
+        timezoneParts.push("Бизнес TZ: " + valueOrDash(businessTimezone));
+        if (localTimezone) {
+          timezoneParts.push("Локальная TZ: " + localTimezone);
+        }
+      }
+      return [
+        "Снимок: " + valueOrDash(formatBusinessDateDisplay(normalizedMeta.snapshot_as_of_date || normalizedMeta.as_of_date)),
+        "Вчера: " + valueOrDash(formatBusinessDateDisplay(normalizedMeta.yesterday_closed_date)),
+        "Сегодня: " + valueOrDash(formatBusinessDateDisplay(normalizedMeta.today_current_date))
+      ].concat(timezoneParts).join(" · ");
+    }
+
     function formatVisibleTimestampText(value) {
       return String(value || "").replace(
         /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g,
@@ -5931,13 +5980,7 @@
         state.filters.sort = (payload.filter_surface && payload.filter_surface.default_sort_value) || "";
       }
       const meta = payload.meta || {};
-      pageMetaNode.textContent = [
-        "Снимок: " + valueOrDash(formatBusinessDateDisplay(meta.snapshot_as_of_date || meta.as_of_date)),
-        "Вчера закрытый день: " + valueOrDash(formatBusinessDateDisplay(meta.yesterday_closed_date)),
-        "Сегодня текущий день: " + valueOrDash(formatBusinessDateDisplay(meta.today_current_date)),
-        "Бизнес TZ: " + valueOrDash(meta.business_timezone),
-        "Ваше локальное время: " + valueOrDash(browserTimezoneLabel())
-      ].join(" · ");
+      pageMetaNode.textContent = buildPageHeaderMeta(meta);
       filterMetaNode.textContent =
         "state namespace: " +
         valueOrDash(payload.meta && payload.meta.state_namespace) +
