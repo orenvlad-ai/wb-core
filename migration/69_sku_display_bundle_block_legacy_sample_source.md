@@ -1,4 +1,5 @@
 # Legacy Source Для Sku Display Bundle
+<!-- devcontrol-manual-parallel-e2e-a-20260510 -->
 
 ## Что Считается Legacy-Source
 
