@@ -37,6 +37,13 @@ _DIMENSION_VALUE_KEYS = {
     "row_last_updated_at": "row_last_updated_at",
     "section": "section",
 }
+_FUNNEL_METRIC_ORDER_ALIASES = {
+    "total_view_count": "funnel_view_count",
+    "view_count": "funnel_view_count",
+    "ctr": "funnel_ctr",
+    "total_open_card_count": "funnel_open_card_count",
+    "open_card_count": "funnel_open_card_count",
+}
 
 _FORMATTER_LIBRARY: dict[str, WebVitrinaViewModelFormatter] = {
     "text_default": WebVitrinaViewModelFormatter(
@@ -373,7 +380,7 @@ def _build_presentation_row_order(rows_payload: list[Mapping[str, Any]]) -> dict
     sku_order_by_group: dict[str, dict[str, int]] = {}
 
     for row in rows_payload:
-        metric_key = str(row.get("metric_key") or "")
+        metric_key = _metric_order_key(row)
         if metric_key and metric_key not in metric_order:
             metric_order[metric_key] = len(metric_order) + 1
 
@@ -393,7 +400,7 @@ def _build_presentation_row_order(rows_payload: list[Mapping[str, Any]]) -> dict
 
     def presentation_key(row: Mapping[str, Any]) -> tuple[int, int, int, int, int]:
         scope_kind = str(row.get("scope_kind") or "OTHER")
-        metric_rank = metric_order.get(str(row.get("metric_key") or ""), len(metric_order) + 1)
+        metric_rank = metric_order.get(_metric_order_key(row), len(metric_order) + 1)
         raw_row_order = int(row.get("row_order") or 0)
         group_label = _group_label(row)
         group_rank = group_order.get(group_label, len(group_order) + 1)
@@ -412,6 +419,13 @@ def _build_presentation_row_order(rows_payload: list[Mapping[str, Any]]) -> dict
         str(row["row_id"]): index
         for index, row in enumerate(ordered_rows, start=1)
     }
+
+
+def _metric_order_key(row: Mapping[str, Any]) -> str:
+    metric_key = str(row.get("metric_key") or "")
+    if _section_label(row) == "Воронка":
+        return _FUNNEL_METRIC_ORDER_ALIASES.get(metric_key, metric_key)
+    return metric_key
 
 
 def _build_cell(column: WebVitrinaViewModelColumn, row: Mapping[str, Any]) -> WebVitrinaViewModelCell:
