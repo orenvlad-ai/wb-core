@@ -152,6 +152,50 @@ def main() -> None:
         for required in ("search", "section", "group", "scope_kind", "metric"):
             if required not in controls:
                 raise AssertionError(f"missing filter control {required!r}: {controls}")
+        metric_control = controls["metric"]
+        metric_options_by_value = {
+            str(item["value"]): item
+            for item in metric_control["options"]
+            if str(item["value"]) != "__all__"
+        }
+        metric_meta_by_key: dict[str, dict[str, str]] = {}
+        for row in composition["table_surface"]["rows"]:
+            metric_key = str(row["values"]["metric_key"]["value"])
+            metric_meta_by_key.setdefault(
+                metric_key,
+                {
+                    "scope_group_label": "Итого" if str(row["row_kind"]) == "total" else "SKU",
+                    "section_label": str(row["values"]["section"]["display_text"]),
+                },
+            )
+        metric_groups = metric_control.get("option_groups") or []
+        metric_group_labels = [str(item["label"]) for item in metric_groups]
+        if metric_group_labels != ["Итого", "SKU"]:
+            raise AssertionError(f"metric dropdown must expose top groups Итого/SKU, got {metric_groups}")
+        grouped_metric_values: list[str] = []
+        for group in metric_groups:
+            if not group.get("sections"):
+                raise AssertionError(f"metric group must contain section subgroups, got {group}")
+            for section in group["sections"]:
+                section_values = [str(item) for item in section["option_values"]]
+                if not section_values:
+                    raise AssertionError(f"metric section must contain option values, got {section}")
+                grouped_metric_values.extend(section_values)
+                for metric_key in section_values:
+                    option = metric_options_by_value.get(metric_key)
+                    meta = metric_meta_by_key.get(metric_key)
+                    if option is None or meta is None:
+                        raise AssertionError(f"grouped metric key must exist in flat options/table rows, got {metric_key}")
+                    if option["value"] != metric_key:
+                        raise AssertionError(f"metric option value must stay stable, got {option}")
+                    if str(option.get("scope_group_label")) != str(group["label"]) or str(group["label"]) != meta["scope_group_label"]:
+                        raise AssertionError(f"metric top group mismatch for {metric_key}, got option={option}, group={group}, meta={meta}")
+                    if str(option.get("section_label")) != str(section["label"]) or str(section["label"]) != meta["section_label"]:
+                        raise AssertionError(f"metric section mismatch for {metric_key}, got option={option}, section={section}, meta={meta}")
+        if set(grouped_metric_values) != set(metric_options_by_value):
+            raise AssertionError(
+                f"grouped metric values must match flat metric options, got grouped={grouped_metric_values}, flat={metric_options_by_value}"
+            )
         if composition["filter_surface"]["default_sort_value"] != "row_order::asc":
             raise AssertionError(f"default sort mismatch, got {composition['filter_surface']}")
         if not composition["table_surface"]["columns"] or not composition["table_surface"]["rows"]:
