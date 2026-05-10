@@ -1,6 +1,4 @@
 # Контракт Блока Sku Display Bundle
-<!-- devcontrol-parallel-e2e-r2-a-5fe75d8 -->
-
 ## Что Это За Блок
 
 `sku_display_bundle_block` — bounded migration unit для тонкого table-facing bundle поверх legacy `CONFIG`.
