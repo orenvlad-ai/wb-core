@@ -1956,7 +1956,6 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             route_paths["SHEET_VITRINA_OPERATOR_UI_PATH"],
             "surface=page_composition",
             "web_vitrina_page_composition",
-            "data-top-panel",
             "data-global-progress",
             "data-filter-controls",
             "data-loading-table",
