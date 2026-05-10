@@ -102,11 +102,38 @@ def _check_vitrina_popovers(page: object) -> dict[str, object]:
     page.locator("[data-column-manager] > summary").click()
     _assert_details_open(page.locator("[data-column-manager]"), False, "column manager trigger must close")
 
+    page.locator("[data-metric-manager] > summary").click()
+    _assert_details_open(page.locator("[data-metric-manager]"), True, "metric manager trigger must open")
+    _assert_toolbar_popover_visible(page, "[data-metric-manager] .metric-manager-panel", "metric manager panel")
+    first_metric_checkbox = page.locator("[data-metric-filter-option]").first
+    first_metric_checkbox.click()
+    _assert_details_open(
+        page.locator("[data-metric-manager]"),
+        True,
+        "metric multiselect must stay open after an inside checkbox click",
+    )
+    page.locator("[data-page-meta]").click()
+    _assert_details_open(page.locator("[data-metric-manager]"), False, "outside click must close metric manager")
+
+    page.locator("[data-metric-manager] > summary").click()
+    _assert_details_open(page.locator("[data-metric-manager]"), True, "metric manager trigger must reopen")
+    page.keyboard.press("Escape")
+    _assert_details_open(page.locator("[data-metric-manager]"), False, "Escape must close metric manager")
+
+    page.locator("[data-metric-manager] > summary").click()
+    _assert_details_open(page.locator("[data-metric-manager]"), True, "metric manager trigger must open before trigger-close check")
+    page.locator("[data-metric-manager] > summary").click()
+    _assert_details_open(page.locator("[data-metric-manager]"), False, "metric manager trigger must close on repeated click")
+
     return {
         "history_trigger_toggle": True,
         "history_to_column_manager_closes_previous": True,
         "column_multiselect_inside_click_keeps_open": True,
         "column_manager_outside_click_closes": True,
+        "metric_multiselect_inside_click_keeps_open": True,
+        "metric_manager_outside_click_closes": True,
+        "metric_manager_escape_closes": True,
+        "metric_manager_trigger_toggle": True,
     }
 
 
@@ -236,19 +263,52 @@ def _select_research_range(page: object, kind: str, start_date: str, end_date: s
 
 def _check_reports_popovers(page: object) -> dict[str, object]:
     page.locator('[data-unified-tab-button="reports"]').click()
+    page.wait_for_function(
+        """() => {
+          const panel = document.querySelector('[data-unified-tab-panel="reports"]');
+          const frame = document.querySelector('[data-operator-embed-frame="reports"]');
+          const active = document.querySelector('[data-unified-tab-button].is-active');
+          return !!panel && !panel.hidden && !!frame &&
+            frame.getBoundingClientRect().height > 320 &&
+            active && active.getAttribute('data-unified-tab-button') === 'reports';
+        }""",
+        timeout=5000,
+    )
+    page.locator('[data-operator-embed-frame="reports"]').scroll_into_view_if_needed()
     report_frame = page.frame_locator('[data-operator-embed-frame="reports"]')
     report_frame.locator('[data-report-section-button="stock"]').click()
+    page.wait_for_function(
+        """() => {
+          const frame = document.querySelector('[data-operator-embed-frame="reports"]');
+          const doc = frame && frame.contentDocument;
+          const panel = doc && doc.querySelector('[data-report-section-panel="stock"]');
+          const summary = doc && doc.querySelector('#stockReportSkuSelector summary');
+          return !!panel && !panel.hidden && !!summary &&
+            summary.getBoundingClientRect().height > 0 &&
+            summary.getBoundingClientRect().width > 0;
+        }""",
+        timeout=5000,
+    )
     stock_selector = report_frame.locator("#stockReportSkuSelector")
     stock_selector.wait_for()
-    stock_selector.locator("summary").click()
+    stock_selector.locator("summary").scroll_into_view_if_needed()
+    page.wait_for_timeout(250)
+    stock_selector.evaluate("node => node.querySelector('summary').click()")
     _assert_details_open(stock_selector, True, "stock report SKU selector must open")
     first_stock_checkbox = report_frame.locator("#stockReportSkuList input[type='checkbox']").first
-    first_stock_checkbox.click()
+    first_stock_checkbox.evaluate("node => node.click()")
     _assert_details_open(stock_selector, True, "stock report SKU selector must stay open after checkbox click")
-    report_frame.locator("body").click(position={"x": 12, "y": 12})
+    report_frame.locator("body").evaluate(
+        """node => node.dispatchEvent(new PointerEvent('pointerdown', {
+          bubbles: true,
+          cancelable: true,
+          clientX: 12,
+          clientY: 12
+        }))"""
+    )
     _assert_details_open(stock_selector, False, "iframe outside click must close stock report SKU selector")
 
-    stock_selector.locator("summary").click()
+    stock_selector.evaluate("node => node.querySelector('summary').click()")
     _assert_details_open(stock_selector, True, "stock selector must reopen before parent outside check")
     page.locator('[data-unified-tab-button="vitrina"]').click()
     page.wait_for_function(

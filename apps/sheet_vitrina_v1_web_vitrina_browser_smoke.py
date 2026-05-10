@@ -411,7 +411,8 @@ def run_browser_checks(
                 "section": page.locator("[data-filter-control='section']").count() == 1,
                 "group": page.locator("[data-filter-control='group']").count() == 1,
                 "scope_kind": page.locator("[data-filter-control='scope_kind']").count() == 1,
-                "metric": page.locator("[data-filter-control='metric']").count() == 1,
+                "metric": page.locator("[data-metric-manager]").count() == 1
+                and page.locator("[data-metric-filter-option]").count() >= 2,
                 "sort_absent": page.locator("[data-filter-control='sort']").count() == 0,
             }
             if not all(filter_controls.values()):
@@ -504,16 +505,7 @@ def run_browser_checks(
                 else {"skipped": "read-only public base-url mode"}
             )
 
-            metric_select = page.locator("[data-filter-control='metric']")
-            metric_options = metric_select.locator("option").evaluate_all(
-                "nodes => nodes.map(node => ({value: node.value, text: node.textContent || ''}))"
-            )
-            metric_option = next((item for item in metric_options if item["value"] != "__all__"), None)
-            metric_filter_applied = False
-            if metric_option is not None:
-                metric_select.select_option(metric_option["value"])
-                page.wait_for_timeout(150)
-                metric_filter_applied = page.locator("[data-filter-summary]").inner_text().strip() != ""
+            metric_filter_applied = _check_metric_multiselect_controls(page)
 
             page.locator("[data-filter-control='search']").fill("zzzz-no-matches")
             page.wait_for_selector("[data-table-state]:not(.is-hidden)", timeout=5000)
@@ -755,11 +747,141 @@ def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
     }
 
 
+def _check_metric_multiselect_controls(page: object) -> dict[str, object]:
+    storage_key = "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1:selected-metrics:v1"
+    manager = page.locator("[data-metric-manager]")
+    if manager.count() != 1:
+        raise AssertionError("metric manager must be rendered once")
+
+    manager.locator("summary").click()
+    _assert_details_open(manager, True, "metric manager must open")
+    option_count = page.locator("[data-metric-filter-option]").count()
+    if option_count < 2:
+        raise AssertionError(f"metric manager must expose at least two checkbox rows, got {option_count}")
+    metric_rows = page.evaluate(
+        """() => Array.from(document.querySelectorAll('[data-metric-filter-option]')).slice(0, 2).map((node) => ({
+          value: node.value || '',
+          label: ((node.closest('label') || {}).innerText || '').trim()
+        }))"""
+    )
+    selected_keys = [str(item["value"]) for item in metric_rows if item.get("value")]
+    if len(selected_keys) != 2 or selected_keys[0] == selected_keys[1]:
+        raise AssertionError(f"metric manager must expose distinct metric keys, got {metric_rows}")
+    initial_summary = page.locator("[data-metric-summary-label]").inner_text().strip()
+    if initial_summary != "Все метрики":
+        raise AssertionError(f"default metric summary must show all metrics, got {initial_summary!r}")
+    if not page.locator("[data-metric-filter-all]").is_checked():
+        raise AssertionError("all-metrics checkbox must be checked by default")
+
+    page.locator("[data-metric-filter-all]").click()
+    _assert_details_open(manager, True, "all-metrics checkbox click must keep dropdown open")
+    zero_summary = page.locator("[data-metric-summary-label]").inner_text().strip()
+    if zero_summary != "Метрики: 0":
+        raise AssertionError(f"empty metric selection summary mismatch, got {zero_summary!r}")
+
+    page.locator("[data-metric-filter-option]").nth(0).check()
+    _assert_details_open(manager, True, "metric checkbox click must keep dropdown open")
+    page.locator("[data-metric-filter-option]").nth(1).check()
+    _assert_details_open(manager, True, "second metric checkbox click must keep dropdown open")
+    page.wait_for_timeout(150)
+    selected_summary = page.locator("[data-metric-summary-label]").inner_text().strip()
+    if selected_summary != "Метрики: 2":
+        raise AssertionError(f"selected metric summary mismatch, got {selected_summary!r}")
+    visible_keys = _visible_metric_keys(page)
+    if set(visible_keys) != set(selected_keys):
+        raise AssertionError(f"table must show rows for exactly the two selected metrics, got {visible_keys}, expected {selected_keys}")
+
+    page.reload(wait_until="commit")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    restored_summary = page.locator("[data-metric-summary-label]").inner_text().strip()
+    restored_visible_keys = _visible_metric_keys(page)
+    if restored_summary != "Метрики: 2" or set(restored_visible_keys) != set(selected_keys):
+        raise AssertionError(
+            f"metric selection must survive reload, got summary={restored_summary!r}, keys={restored_visible_keys}"
+        )
+
+    page.evaluate("(key) => window.localStorage.setItem(key, '{broken-json')", storage_key)
+    page.reload(wait_until="commit")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    corrupted_summary = page.locator("[data-metric-summary-label]").inner_text().strip()
+    if corrupted_summary != "Все метрики":
+        raise AssertionError(f"corrupted metric localStorage must fall back to all metrics, got {corrupted_summary!r}")
+
+    page.evaluate(
+        """(key) => window.localStorage.setItem(key, JSON.stringify({
+          version: 1,
+          selected_metric_keys: ['obsolete_metric_key']
+        }))""",
+        storage_key,
+    )
+    page.reload(wait_until="commit")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    obsolete_summary = page.locator("[data-metric-summary-label]").inner_text().strip()
+    all_visible_keys = _visible_metric_keys(page)
+    if obsolete_summary != "Все метрики" or len(set(all_visible_keys)) < option_count:
+        raise AssertionError(
+            f"obsolete metric localStorage must fall back to all metrics, got summary={obsolete_summary!r}, keys={all_visible_keys}"
+        )
+    return {
+        "checkbox_rows": option_count,
+        "selected_keys": selected_keys,
+        "restored_after_reload": True,
+        "corrupted_storage_fallback": True,
+        "obsolete_storage_fallback": True,
+    }
+
+
+def _visible_metric_keys(page: object) -> list[str]:
+    return page.evaluate(
+        """() => Array.from(new Set(Array.from(document.querySelectorAll('[data-table-body] [data-metric-key]'))
+          .map((node) => node.getAttribute('data-metric-key') || '')
+          .filter(Boolean)))"""
+    )
+
+
+def _assert_details_open(locator: object, expected: bool, label: str) -> None:
+    actual = locator.evaluate("node => !!node.open")
+    if actual is not expected:
+        raise AssertionError(f"{label}, expected open={expected}, got {actual}")
+
+
 def _check_column_visibility_controls(page: object) -> dict[str, object]:
     manager = page.locator("[data-column-manager]")
     if manager.count() != 1:
         raise AssertionError("column visibility manager must be rendered once")
     page.evaluate("() => { const node = document.querySelector('[data-column-manager]'); if (node) { node.open = true; } }")
+    visual_state = page.evaluate(
+        """() => {
+          const rows = Array.from(document.querySelectorAll('[data-column-visibility-controls] .column-checkbox'));
+          const rects = rows.map((node) => Math.round(node.getBoundingClientRect().height));
+          const styles = rows.map((node) => {
+            const style = getComputedStyle(node);
+            return {
+              borderLeft: style.borderLeftWidth,
+              borderRight: style.borderRightWidth,
+              borderRadius: style.borderRadius,
+              background: style.backgroundColor
+            };
+          });
+          return {
+            rowCount: rows.length,
+            maxHeight: rects.length ? Math.max(...rects) : 0,
+            cardLikeRows: styles.filter((style) => style.borderLeft !== '0px' || style.borderRight !== '0px').length,
+            missingMetricLabelToggle: document.querySelectorAll('[data-column-visibility-id="metric_label"]').length === 0,
+            missingScopeLabelToggle: document.querySelectorAll('[data-column-visibility-id="scope_label"]').length === 0,
+            dateToggleCount: document.querySelectorAll('[data-column-visibility-id^="date:"]').length
+          };
+        }"""
+    )
+    if (
+        visual_state["rowCount"] <= 0
+        or visual_state["maxHeight"] > 48
+        or visual_state["cardLikeRows"] != 0
+        or not visual_state["missingMetricLabelToggle"]
+        or not visual_state["missingScopeLabelToggle"]
+        or visual_state["dateToggleCount"] != 0
+    ):
+        raise AssertionError(f"column manager must render a compact checklist without mandatory/date toggles, got {visual_state}")
     page.locator('[data-column-visibility-id="metric_key"]').uncheck()
     page.locator('[data-column-visibility-id="scope_kind"]').uncheck()
     page.wait_for_function(
@@ -794,6 +916,7 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
         "scope_kind_hidden_after_reload": scope_kind_hidden_after_reload,
         "metric_checkbox_checked_after_reset": metric_checkbox_checked,
         "scope_checkbox_checked_after_reset": scope_checkbox_checked,
+        "compact_checklist": visual_state,
     }
 
 
