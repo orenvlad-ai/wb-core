@@ -767,6 +767,24 @@ def _check_metric_multiselect_controls(page: object) -> dict[str, object]:
     selected_keys = [str(item["value"]) for item in metric_rows if item.get("value")]
     if len(selected_keys) != 2 or selected_keys[0] == selected_keys[1]:
         raise AssertionError(f"metric manager must expose distinct metric keys, got {metric_rows}")
+    grouped_state = page.evaluate(
+        """() => ({
+          scopeLabels: Array.from(document.querySelectorAll('[data-metric-scope-title]')).map((node) => (node.textContent || '').trim()),
+          sectionLabels: Array.from(document.querySelectorAll('[data-metric-section-title]')).map((node) => (node.textContent || '').trim()),
+          groups: Array.from(document.querySelectorAll('[data-metric-scope-group]')).map((group) => ({
+            id: group.getAttribute('data-metric-scope-group') || '',
+            label: ((group.querySelector('[data-metric-scope-title]') || {}).textContent || '').trim(),
+            optionCount: group.querySelectorAll('[data-metric-filter-option]').length,
+            sectionCount: group.querySelectorAll('[data-metric-section-group]').length
+          }))
+        })"""
+    )
+    if grouped_state["scopeLabels"] != ["Итого", "SKU"]:
+        raise AssertionError(f"metric manager must group options by Итого/SKU, got {grouped_state}")
+    if not grouped_state["sectionLabels"] or any(not label for label in grouped_state["sectionLabels"]):
+        raise AssertionError(f"metric manager must expose existing section headings, got {grouped_state}")
+    if any(int(item["optionCount"]) <= 0 or int(item["sectionCount"]) <= 0 for item in grouped_state["groups"]):
+        raise AssertionError(f"metric manager grouped sections must contain checkbox rows, got {grouped_state}")
     initial_summary = page.locator("[data-metric-summary-label]").inner_text().strip()
     if initial_summary != "Все метрики":
         raise AssertionError(f"default metric summary must show all metrics, got {initial_summary!r}")
@@ -825,6 +843,8 @@ def _check_metric_multiselect_controls(page: object) -> dict[str, object]:
     return {
         "checkbox_rows": option_count,
         "selected_keys": selected_keys,
+        "groups": grouped_state["scopeLabels"],
+        "sections": grouped_state["sectionLabels"],
         "restored_after_reload": True,
         "corrupted_storage_fallback": True,
         "obsolete_storage_fallback": True,

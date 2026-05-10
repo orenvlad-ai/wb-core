@@ -49,6 +49,10 @@ def build_web_vitrina_page_composition(
     group_counts = _count_rows(rows, key="group_id")
     row_kind_counts = _count_rows(rows, key="row_kind")
     metric_counts = _count_metric_rows(rows)
+    metric_options = _build_metric_options(
+        metric_counts,
+        sections=view_model_payload["sections"],
+    )
     time_model = _build_time_model(contract_payload)
     column_labels = {
         str(column["id"]): str(column["header"])
@@ -165,7 +169,11 @@ def build_web_vitrina_page_composition(
                     "kind": "select",
                     "label": "Метрика",
                     "default_value": _ALL_OPTION_VALUE,
-                    "options": _build_metric_options(metric_counts),
+                    "options": metric_options,
+                    "option_groups": _build_metric_option_groups(
+                        metric_options,
+                        sections=view_model_payload["sections"],
+                    ),
                 },
             ],
             "sort_options": _build_sort_options(adapter_payload, column_labels=column_labels),
@@ -611,14 +619,26 @@ def _count_metric_rows(rows: list[Mapping[str, Any]]) -> dict[str, dict[str, Any
         metric_key = str(_cell_value(row, "metric_key") or "")
         if not metric_key:
             continue
+        section_id = str(row.get("section_id") or "")
+        section_label = str(_cell_display(row, "section") or "").strip()
+        row_kind = str(row.get("row_kind") or "").strip().lower()
         bucket = counts.setdefault(
             metric_key,
             {
                 "label": str(_cell_display(row, "metric_label") or metric_key),
                 "count": 0,
+                "section_id": section_id,
+                "section_label": section_label,
+                "row_kinds": set(),
             },
         )
         bucket["count"] = int(bucket["count"]) + 1
+        if not bucket.get("section_id") and section_id:
+            bucket["section_id"] = section_id
+        if not bucket.get("section_label") and section_label:
+            bucket["section_label"] = section_label
+        if row_kind:
+            bucket["row_kinds"].add(row_kind)
     return counts
 
 
@@ -668,7 +688,15 @@ def _build_scope_kind_options(row_kind_counts: Mapping[str, int]) -> list[dict[s
     return options
 
 
-def _build_metric_options(metric_counts: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _build_metric_options(
+    metric_counts: Mapping[str, Mapping[str, Any]],
+    *,
+    sections: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    section_labels_by_id = {
+        str(item["section_id"]): str(item["label"])
+        for item in sections
+    }
     options = [
         {
             "value": _ALL_OPTION_VALUE,
@@ -677,14 +705,107 @@ def _build_metric_options(metric_counts: Mapping[str, Mapping[str, Any]]) -> lis
         }
     ]
     for metric_key, item in sorted(metric_counts.items(), key=lambda pair: str(pair[1]["label"])):
+        row_kinds = {str(value).lower() for value in (item.get("row_kinds") or [])}
+        scope_group_id = _metric_scope_group_id(row_kinds)
+        section_id = str(item.get("section_id") or "section:unsectioned")
         options.append(
             {
                 "value": metric_key,
                 "label": str(item["label"]),
                 "count": int(item["count"]),
+                "scope_group_id": scope_group_id,
+                "scope_group_label": _metric_scope_group_label(scope_group_id),
+                "section_id": section_id,
+                "section_label": str(
+                    item.get("section_label")
+                    or section_labels_by_id.get(section_id)
+                    or "Без секции"
+                ),
             }
         )
     return options
+
+
+def _build_metric_option_groups(
+    metric_options: list[Mapping[str, Any]],
+    *,
+    sections: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    section_order = {
+        str(item["section_id"]): int(item.get("order") or index + 1)
+        for index, item in enumerate(sections)
+    }
+    groups_by_id: dict[str, dict[str, Any]] = {}
+    for option in metric_options:
+        value = str(option.get("value") or "")
+        if not value or value == _ALL_OPTION_VALUE:
+            continue
+        scope_group_id = str(option.get("scope_group_id") or "sku")
+        section_id = str(option.get("section_id") or "section:unsectioned")
+        group = groups_by_id.setdefault(
+            scope_group_id,
+            {
+                "group_id": scope_group_id,
+                "label": str(option.get("scope_group_label") or _metric_scope_group_label(scope_group_id)),
+                "metric_count": 0,
+                "row_count": 0,
+                "sections": {},
+            },
+        )
+        group["metric_count"] = int(group["metric_count"]) + 1
+        group["row_count"] = int(group["row_count"]) + int(option.get("count") or 0)
+        sections_by_id = group["sections"]
+        section = sections_by_id.setdefault(
+            section_id,
+            {
+                "section_id": section_id,
+                "label": str(option.get("section_label") or "Без секции"),
+                "order": int(section_order.get(section_id, len(section_order) + 1)),
+                "metric_count": 0,
+                "row_count": 0,
+                "option_values": [],
+            },
+        )
+        section["metric_count"] = int(section["metric_count"]) + 1
+        section["row_count"] = int(section["row_count"]) + int(option.get("count") or 0)
+        section["option_values"].append(value)
+
+    groups: list[dict[str, Any]] = []
+    for group_id, group in groups_by_id.items():
+        sections_payload = sorted(
+            group["sections"].values(),
+            key=lambda item: (int(item["order"]), str(item["label"])),
+        )
+        groups.append(
+            {
+                "group_id": group_id,
+                "label": str(group["label"]),
+                "metric_count": int(group["metric_count"]),
+                "row_count": int(group["row_count"]),
+                "sections": sections_payload,
+            }
+        )
+    return sorted(groups, key=lambda item: (_metric_scope_group_order(str(item["group_id"])), str(item["label"])))
+
+
+def _metric_scope_group_id(row_kinds: set[str]) -> str:
+    if row_kinds and row_kinds.issubset({"total"}):
+        return "total"
+    return "sku"
+
+
+def _metric_scope_group_label(group_id: str) -> str:
+    if group_id == "total":
+        return _scope_kind_label("total")
+    return _scope_kind_label("sku")
+
+
+def _metric_scope_group_order(group_id: str) -> int:
+    if group_id == "total":
+        return 0
+    if group_id == "sku":
+        return 1
+    return 2
 
 
 def _build_sort_options(

@@ -331,7 +331,7 @@ def main() -> None:
                 DEFAULT_SHEET_OPERATOR_UI_PATH,
                 "surface=page_composition",
                 "web_vitrina_page_composition",
-                "data-top-panel",
+                "data-table-header",
                 "Загрузить и обновить",
                 "data-table-toolbar",
                 "data-filter-controls",

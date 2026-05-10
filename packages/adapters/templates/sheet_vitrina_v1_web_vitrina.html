@@ -1770,6 +1770,40 @@
       overflow: auto;
     }
 
+    .metric-option-groups {
+      display: grid;
+      gap: 10px;
+      padding-top: 6px;
+    }
+
+    .metric-scope-group {
+      display: grid;
+      gap: 4px;
+      border-top: 1px solid rgba(139, 92, 246, 0.2);
+      padding-top: 8px;
+    }
+
+    .metric-scope-heading {
+      padding: 0 2px;
+      font-size: 11px;
+      line-height: 1.35;
+      font-weight: 800;
+      color: var(--text);
+    }
+
+    .metric-section-group {
+      display: grid;
+      gap: 0;
+    }
+
+    .metric-section-heading {
+      padding: 5px 2px 3px;
+      font-size: 10px;
+      line-height: 1.35;
+      font-weight: 700;
+      color: var(--muted);
+    }
+
     .column-checkbox,
     .metric-checkbox {
       display: grid;
@@ -6082,6 +6116,74 @@
       return normalized ? normalized.charAt(0).toUpperCase() + normalized.slice(1) : "";
     }
 
+    function buildMetricCheckboxHtml(option) {
+      const metricKey = String((option && option.value) || "");
+      const suffix = typeof option.count === "number"
+        ? '<span class="metric-checkbox-count"> (' + escapeHtml(String(option.count)) + ')</span>'
+        : "";
+      return [
+        '<label class="metric-checkbox">',
+        '<input type="checkbox" data-metric-filter-option value="' + escapeHtml(metricKey) + '">',
+        '<span class="metric-checkbox-text">' + escapeHtml((option && option.label) || metricKey) + suffix + "</span>",
+        "</label>"
+      ].join("");
+    }
+
+    function buildMetricGroupedOptionsHtml(control, metricOptions) {
+      if (!metricOptions.length) {
+        return '<p class="filter-summary">Метрики недоступны.</p>';
+      }
+      const optionByValue = new Map();
+      metricOptions.forEach(function(option) {
+        const metricKey = String((option && option.value) || "");
+        if (metricKey) {
+          optionByValue.set(metricKey, option);
+        }
+      });
+      const rendered = new Set();
+      const groups = Array.isArray((control || {}).option_groups) ? control.option_groups : [];
+      const groupParts = groups.map(function(group) {
+        const sections = Array.isArray((group || {}).sections) ? group.sections : [];
+        const sectionParts = sections.map(function(section) {
+          const optionValues = Array.isArray((section || {}).option_values) ? section.option_values : [];
+          const optionRows = optionValues.map(function(value) {
+            const metricKey = String(value || "");
+            const option = optionByValue.get(metricKey);
+            if (!option) {
+              return "";
+            }
+            rendered.add(metricKey);
+            return buildMetricCheckboxHtml(option);
+          }).filter(Boolean).join("");
+          if (!optionRows) {
+            return "";
+          }
+          return [
+            '<div class="metric-section-group" data-metric-section-group="' + escapeHtml(String((section && section.section_id) || "")) + '">',
+            '<div class="metric-section-heading" data-metric-section-title>' + escapeHtml(String((section && section.label) || "Без секции")) + "</div>",
+            optionRows,
+            "</div>"
+          ].join("");
+        }).filter(Boolean).join("");
+        if (!sectionParts) {
+          return "";
+        }
+        return [
+          '<div class="metric-scope-group" data-metric-scope-group="' + escapeHtml(String((group && group.group_id) || "")) + '">',
+          '<div class="metric-scope-heading" data-metric-scope-title>' + escapeHtml(String((group && group.label) || "")) + "</div>",
+          sectionParts,
+          "</div>"
+        ].join("");
+      }).filter(Boolean);
+      const ungroupedRows = metricOptions.filter(function(option) {
+        return !rendered.has(String((option && option.value) || ""));
+      }).map(buildMetricCheckboxHtml).join("");
+      if (groupParts.length) {
+        return '<div class="metric-option-groups">' + groupParts.join("") + ungroupedRows + "</div>";
+      }
+      return metricOptions.map(buildMetricCheckboxHtml).join("");
+    }
+
     function buildControlHtml(control) {
       if (control.kind === "search") {
         return (
@@ -6096,20 +6198,7 @@
         const metricOptions = (control.options || []).filter(function(option) {
           return String((option && option.value) || "") !== ALL_VALUE;
         });
-        const optionRows = metricOptions.length
-          ? metricOptions.map(function(option) {
-            const metricKey = String(option.value || "");
-            const suffix = typeof option.count === "number"
-              ? '<span class="metric-checkbox-count"> (' + escapeHtml(String(option.count)) + ')</span>'
-              : "";
-            return [
-              '<label class="metric-checkbox">',
-              '<input type="checkbox" data-metric-filter-option value="' + escapeHtml(metricKey) + '">',
-              '<span class="metric-checkbox-text">' + escapeHtml(option.label || metricKey) + suffix + "</span>",
-              "</label>"
-            ].join("");
-          }).join("")
-          : '<p class="filter-summary">Метрики недоступны.</p>';
+        const optionRows = buildMetricGroupedOptionsHtml(control, metricOptions);
         return [
           '<input type="hidden" data-filter-control="metric" value="' + escapeHtml(ALL_VALUE) + '">',
           '<details class="column-manager metric-manager" data-metric-manager>',
