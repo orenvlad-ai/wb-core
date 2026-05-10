@@ -203,7 +203,7 @@ update_note: "Phase 4 live page composition остаётся server-driven; вк
   - no duplication of business-truth assembly in browser
 - Gravity-specific logic stays isolated:
   - adapter semantics still live in `packages/application/web_vitrina_gravity_table_adapter.py`
-  - page shell only consumes adapter payload and renders sticky/basic table behavior above it
+  - page shell only consumes adapter payload and renders sticky table headers/pinned columns plus ordinary scrolling group rows above it
 
 ## 3.2 Browser-state boundary
 
