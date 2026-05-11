@@ -929,15 +929,25 @@ class RegistryUploadHttpEntrypoint:
             if not enabled:
                 raise ValueError("no enabled auto refresh schedules")
             schedule_id = str(enabled[0].get("id") or "")
+        return self.start_sheet_scheduled_auto_update_job(
+            schedule_id=schedule_id,
+            due_at="",
+            trigger_source="manual_run_now_from_auto_schedule",
+        )
+
+    def handle_sheet_scheduled_auto_update_request(
+        self,
+        *,
+        schedule_id: str,
+        due_at: str = "",
+        trigger_source: str = "scheduled",
+    ) -> dict[str, Any]:
         self.sheet_auto_refresh_schedules_block.get_schedule(schedule_id)
-        return self.operator_jobs.start(
-            operation="auto_update",
-            runner=lambda log: self._run_sheet_scheduled_auto_update(
-                schedule_id=schedule_id,
-                due_at="",
-                trigger_source="manual_run_now_from_auto_schedule",
-                log=log,
-            ),
+        return self._run_sheet_scheduled_auto_update(
+            schedule_id=schedule_id,
+            due_at=due_at,
+            trigger_source=trigger_source or "scheduled",
+            log=None,
         )
 
     def handle_sheet_refresh_request(
@@ -966,6 +976,24 @@ class RegistryUploadHttpEntrypoint:
                 (lambda log: self._run_sheet_auto_update(as_of_date=as_of_date, log=log))
                 if auto_load
                 else (lambda log: self._run_sheet_refresh(as_of_date=as_of_date, log=log))
+            ),
+        )
+
+    def start_sheet_scheduled_auto_update_job(
+        self,
+        *,
+        schedule_id: str,
+        due_at: str = "",
+        trigger_source: str = "scheduled",
+    ) -> dict[str, Any]:
+        self.sheet_auto_refresh_schedules_block.get_schedule(schedule_id)
+        return self.operator_jobs.start(
+            operation="auto_update",
+            runner=lambda log: self._run_sheet_scheduled_auto_update(
+                schedule_id=schedule_id,
+                due_at=due_at,
+                trigger_source=trigger_source or "scheduled",
+                log=log,
             ),
         )
 
@@ -4789,7 +4817,7 @@ def _web_vitrina_source_status_missing_snapshot_activity_surface(
     display_date = _format_ru_date(snapshot_date or requested)
     message = (
         f"Снимок за {display_date} не подготовлен. "
-        "Нажмите «Загрузить и обновить», чтобы подготовить данные."
+        "Нажмите «Загрузить», чтобы подготовить данные."
     )
     technical = str(technical_detail or "").strip()
     detail = (

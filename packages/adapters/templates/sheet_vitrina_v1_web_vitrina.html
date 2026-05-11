@@ -1454,7 +1454,9 @@
     }
 
     .table-header-main {
-      min-width: min(100%, 360px);
+      display: grid;
+      gap: 4px;
+      min-width: min(100%, 420px);
     }
 
     .table-header-meta {
@@ -1469,9 +1471,9 @@
 
     .table-header-text {
       display: grid;
-      flex: 1 1 300px;
+      flex: 1 1 360px;
       min-width: min(100%, 260px);
-      gap: 3px;
+      gap: 2px;
       justify-items: end;
     }
 
@@ -1525,6 +1527,12 @@
     }
 
     .table-summary-token {
+      white-space: nowrap;
+    }
+
+    .table-summary-freshness {
+      color: var(--muted-strong);
+      font-weight: 700;
       white-space: nowrap;
     }
 
@@ -2288,11 +2296,16 @@
       left: var(--sticky-left, 0px);
       z-index: 2;
       box-shadow: var(--sticky-shadow);
-      background: inherit;
+      background: #ffffff;
     }
 
-    .table-head-sticky {
-      z-index: 4;
+    .vitrina-table thead th.table-head-sticky {
+      z-index: 5;
+      background: var(--panel-subtle);
+    }
+
+    .vitrina-table tbody tr:hover .table-cell-sticky {
+      background: #f7faff;
     }
 
     .align-start {
@@ -3026,7 +3039,7 @@
               </div>
               <span class="top-progress-label" data-global-progress-label>Запуск…</span>
             </div>
-            <button class="button primary" type="button" data-load-refresh-button>Загрузить и обновить</button>
+            <button class="button primary" type="button" data-load-refresh-button>Загрузить</button>
           </div>
         </div>
       </div>
@@ -4847,7 +4860,7 @@
 
     function isColumnMandatory(column) {
       const columnId = String((column && column.id) || "");
-      return columnId === "scope_label" || columnId === "metric_label" || columnId.indexOf("date:") === 0;
+      return columnId === "scope_label" || columnId === "metric_label" || columnId === "section" || columnId.indexOf("date:") === 0;
     }
 
     function sanitizeVisibleColumnIds(candidateIds, defaultIds, mandatoryIds) {
@@ -5019,11 +5032,19 @@
       } else {
         summaryGridNode.removeAttribute("data-summary-period-detail");
       }
+      const dataFreshnessCard = sourceCards.find(function(card) {
+        return String((card && card.card_id) || "") === "data_freshness";
+      });
+      if (dataFreshnessCard) {
+        summaryGridNode.setAttribute("data-summary-data-freshness", String(dataFreshnessCard.updated_at || dataFreshnessCard.value || ""));
+      } else {
+        summaryGridNode.removeAttribute("data-summary-data-freshness");
+      }
       const renderedCards = composeSummaryCards(cards);
       renderTableSummaryLine(renderedCards);
       const standaloneCards = renderedCards.filter(function(card) {
         const cardId = String((card && card.card_id) || "");
-        return cardId !== "page_refresh" && cardId !== "status";
+        return cardId !== "page_refresh" && cardId !== "status" && cardId !== "data_freshness";
       });
       summaryGridNode.hidden = standaloneCards.length === 0;
       summaryGridNode.innerHTML = standaloneCards.map(function(card) {
@@ -5048,6 +5069,9 @@
       const statusCard = sourceCards.find(function(card) {
         return String((card && card.card_id) || "") === "status";
       });
+      const dataFreshnessCard = sourceCards.find(function(card) {
+        return String((card && card.card_id) || "") === "data_freshness";
+      });
       const parts = [];
       if (pageRefreshCard) {
         const updatedText = formatSummaryCardValue(pageRefreshCard);
@@ -5058,6 +5082,15 @@
               '>Обновлено: ' + escapeHtml(updatedText) + '</span>'
           );
         }
+      }
+      if (dataFreshnessCard) {
+        const freshnessText = formatSummaryCardValue(dataFreshnessCard) || "нет данных";
+        parts.push(
+          '<span class="table-summary-token table-summary-freshness" data-table-summary-freshness' +
+            (dataFreshnessCard.updated_at ? ' data-table-summary-freshness-at="' + escapeHtml(dataFreshnessCard.updated_at) + '"' : "") +
+            (dataFreshnessCard.source ? ' data-table-summary-freshness-source="' + escapeHtml(dataFreshnessCard.source) + '"' : "") +
+            '>Свежесть данных: ' + escapeHtml(freshnessText) + '</span>'
+        );
       }
       if (statusCard) {
         const statusText = formatSummaryCardValue(statusCard);
@@ -5198,7 +5231,7 @@
         return "Status payload не содержит source rows. Повторите загрузку или смотрите лог.";
       }
       if (value === "missing_snapshot") {
-        return "Снимок не подготовлен. Нажмите «Загрузить и обновить», чтобы подготовить данные.";
+        return "Снимок не подготовлен. Нажмите «Загрузить», чтобы подготовить данные.";
       }
       return "Статусы источников не загружены. Нажмите «Загрузить», чтобы посмотреть детали.";
     }

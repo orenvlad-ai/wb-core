@@ -487,6 +487,7 @@ def run_browser_checks(
             if table_toolbar["height"] > 78:
                 raise AssertionError(f"table toolbar must stay compact, got {table_toolbar}")
             compact_widths = _measure_compact_widths(page, strict=expected_percent_rows is not None)
+            sticky_section_offsets = _check_sticky_section_offsets(page)
             percent_formatting = _check_percent_formatting(page, expected_rows=expected_percent_rows)
             load_refresh_action = (
                 _check_load_refresh_action(
@@ -634,6 +635,7 @@ def run_browser_checks(
         "summary_cards": initial_summary_cards,
         "activity_surface": initial_activity_surface,
         "compact_widths": compact_widths,
+        "sticky_section_offsets": sticky_section_offsets,
         "percent_formatting": percent_formatting,
         "operator_screen_layout": operator_screen_layout,
         "unified_tab_navigation": unified_tab_navigation,
@@ -692,6 +694,8 @@ def _print_summary(result: dict[str, object]) -> None:
         print("web_vitrina_browser_auto_schedule: ok ->", result["auto_schedule_block"])
     print("web_vitrina_browser_activity_surface: ok ->", result["activity_surface"])
     print("web_vitrina_browser_compact_widths: ok ->", result["compact_widths"])
+    if "sticky_section_offsets" in result:
+        print("web_vitrina_browser_sticky_section: ok ->", result["sticky_section_offsets"])
     print("web_vitrina_browser_percent_formatting: ok ->", result["percent_formatting"])
     print("web_vitrina_browser_operator_screen_layout: ok ->", result["operator_screen_layout"])
     if "unified_tab_navigation" in result:
@@ -889,6 +893,7 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
             cardLikeRows: styles.filter((style) => style.borderLeft !== '0px' || style.borderRight !== '0px').length,
             missingMetricLabelToggle: document.querySelectorAll('[data-column-visibility-id="metric_label"]').length === 0,
             missingScopeLabelToggle: document.querySelectorAll('[data-column-visibility-id="scope_label"]').length === 0,
+            missingSectionToggle: document.querySelectorAll('[data-column-visibility-id="section"]').length === 0,
             dateToggleCount: document.querySelectorAll('[data-column-visibility-id^="date:"]').length
           };
         }"""
@@ -899,6 +904,7 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
         or visual_state["cardLikeRows"] != 0
         or not visual_state["missingMetricLabelToggle"]
         or not visual_state["missingScopeLabelToggle"]
+        or not visual_state["missingSectionToggle"]
         or visual_state["dateToggleCount"] != 0
     ):
         raise AssertionError(f"column manager must render a compact checklist without mandatory/date toggles, got {visual_state}")
@@ -1082,7 +1088,7 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         not payload["progress_inside_header"]
         or not payload["load_button_inside_header"]
         or payload["source_text"] != "sheet_vitrina_v1"
-        or payload["load_button_text"] != "Загрузить и обновить"
+        or payload["load_button_text"] != "Загрузить"
     ):
         raise AssertionError(f"source/header controls must be compactly inside the table header, got {payload}")
     for expected in ("Снимок:", "Вчера:", "Сегодня:"):
@@ -1181,8 +1187,8 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
         or not payload["page_meta_inside_table_header"]
     ):
         raise AssertionError(f"source/header controls must live in the table header, got {payload}")
-    if payload["load_button_text"] != "Загрузить и обновить" or "primary" not in payload["load_button_class"]:
-        raise AssertionError(f"load+refresh button must be the single primary action, got {payload}")
+    if payload["load_button_text"] != "Загрузить" or "primary" not in payload["load_button_class"]:
+        raise AssertionError(f"load button must be the single primary action, got {payload}")
     if not payload["load_button_is_dark"] or not payload["load_button_has_accent_border"]:
         raise AssertionError(f"load+refresh button must use dark accent-outline styling, got {payload}")
     if not payload["save_button_classes"] or any(
@@ -1683,6 +1689,7 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
     payload = page.locator("[data-table-summary-line]").evaluate(
         """node => {
           const updatedNode = node.querySelector('[data-table-summary-updated]');
+          const freshnessNode = node.querySelector('[data-table-summary-freshness]');
           const statusNode = node.querySelector('[data-table-summary-status]');
           const detailNode = node.querySelector('[data-table-summary-status-detail]');
           const trimPrefix = (value, prefix) => {
@@ -1694,6 +1701,9 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
             text: String(node.textContent || '').trim(),
             updated: trimPrefix(updatedNode ? updatedNode.textContent : '', 'Обновлено:'),
             updated_at: updatedNode ? String(updatedNode.getAttribute('data-table-summary-updated-at') || '').trim() : '',
+            freshness: trimPrefix(freshnessNode ? freshnessNode.textContent : '', 'Свежесть данных:'),
+            freshness_at: freshnessNode ? String(freshnessNode.getAttribute('data-table-summary-freshness-at') || '').trim() : '',
+            freshness_source: freshnessNode ? String(freshnessNode.getAttribute('data-table-summary-freshness-source') || '').trim() : '',
             status: trimPrefix(statusNode ? statusNode.textContent : '', 'Статус:'),
             status_detail: detailNode ? String(detailNode.textContent || '').trim() : ''
           };
@@ -1702,7 +1712,7 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
     if payload.get("hidden"):
         raise AssertionError(f"table header summary line must be visible, got {payload}")
     text = str(payload.get("text") or "")
-    if "Обновлено:" not in text or "Статус:" not in text:
+    if "Обновлено:" not in text or "Свежесть данных:" not in text or "Статус:" not in text:
         raise AssertionError(f"table header summary must include updated and status labels, got {payload}")
     if text.count("Asia/Yekaterinburg") > 1:
         raise AssertionError(f"table header summary must show timezone once at most, got {text!r}")
@@ -1713,6 +1723,12 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
             "detail": "",
             "updated_at": str(payload.get("updated_at") or ""),
         },
+        "data_freshness": {
+            "label": "Свежесть данных",
+            "value": str(payload.get("freshness") or ""),
+            "detail": str(payload.get("freshness_source") or ""),
+            "updated_at": str(payload.get("freshness_at") or ""),
+        },
         "status": {
             "label": "Статус",
             "value": str(payload.get("status") or ""),
@@ -1722,6 +1738,7 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
     }
     for required_card_id, required_label in {
         "page_refresh": "Обновлено",
+        "data_freshness": "Свежесть данных",
         "status": "Статус",
     }.items():
         card = cards.get(required_card_id)
@@ -1730,11 +1747,13 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
         if card["label"] != required_label:
             raise AssertionError(f"summary card {required_card_id!r} label mismatch, got {cards}")
     if "freshness" in cards or "rows" in cards:
-        raise AssertionError(f"freshness/rows cards must be merged into compact summary strip, got {cards}")
+        raise AssertionError(f"legacy freshness/rows cards must be merged into compact summary strip, got {cards}")
     if "period" in cards:
         raise AssertionError(f"period summary card must not be visible, got {cards}")
     if not cards["page_refresh"]["updated_at"]:
         raise AssertionError(f"page refresh card must expose an exact browser timestamp marker, got {cards['page_refresh']}")
+    if not cards["data_freshness"]["value"]:
+        raise AssertionError(f"data freshness line must expose a value or unknown state, got {cards['data_freshness']}")
     return cards
 
 
@@ -1754,10 +1773,10 @@ def _assert_page_refresh_card_changed(
 
 def _read_summary_period_marker(page: object) -> str:
     marker = page.locator("[data-summary-grid]").evaluate(
-        "node => node.getAttribute('data-summary-period-detail') || ''"
+        "node => node.getAttribute('data-summary-data-freshness') || node.getAttribute('data-summary-period-detail') || 'unknown'"
     )
     if not marker:
-        raise AssertionError("summary grid must keep the non-visible period freshness marker")
+        raise AssertionError("summary grid must keep the non-visible data freshness marker")
     return marker
 
 
@@ -1904,6 +1923,7 @@ def _measure_compact_widths(page: object, *, strict: bool) -> dict[str, int]:
         "scope_label": 145,
         "metric_key": 160,
         "metric_label": 156,
+        "section": 98,
     }
     for column_id, max_width in required.items():
         if int(widths.get(column_id, 0)) <= 0:
@@ -1918,8 +1938,58 @@ def _measure_compact_widths(page: object, *, strict: bool) -> dict[str, int]:
         "scope_label": int(widths["scope_label"]),
         "metric_key": int(widths["metric_key"]),
         "metric_label": int(widths["metric_label"]),
+        "section": int(widths["section"]),
         "date": int(next(widths[key] for key in widths if key.startswith("date:"))),
     }
+
+
+def _check_sticky_section_offsets(page: object) -> dict[str, object]:
+    payload = page.evaluate(
+        """() => {
+          const ids = ['row_order', 'scope_label', 'metric_label', 'section'];
+          const headers = Object.fromEntries(ids.map((id) => {
+            const node = document.querySelector('[data-table-head] th[data-col-id="' + id + '"]');
+            const style = node ? getComputedStyle(node) : null;
+            return [id, {
+              exists: !!node,
+              position: style ? style.position : '',
+              left: style ? Math.round(parseFloat(style.left || '0')) : -1,
+              zIndex: style ? Number(style.zIndex || 0) : 0,
+              background: style ? style.backgroundColor : ''
+            }];
+          }));
+          const firstRow = document.querySelector('[data-table-body] tr:not(.group-row):not(.sku-separator-row)');
+          const sectionCell = firstRow ? firstRow.querySelector('td[data-col-id="section"]') : null;
+          const sectionCellStyle = sectionCell ? getComputedStyle(sectionCell) : null;
+          const dateHeader = document.querySelector('[data-table-head] th[data-col-id^="date:"]');
+          const dateHeaderStyle = dateHeader ? getComputedStyle(dateHeader) : null;
+          return {
+            headers,
+            sectionCell: {
+              exists: !!sectionCell,
+              position: sectionCellStyle ? sectionCellStyle.position : '',
+              left: sectionCellStyle ? Math.round(parseFloat(sectionCellStyle.left || '0')) : -1,
+              zIndex: sectionCellStyle ? Number(sectionCellStyle.zIndex || 0) : 0,
+              background: sectionCellStyle ? sectionCellStyle.backgroundColor : ''
+            },
+            dateHeaderZIndex: dateHeaderStyle ? Number(dateHeaderStyle.zIndex || 0) : 0
+          };
+        }"""
+    )
+    headers = payload["headers"]
+    for column_id in ("scope_label", "metric_label", "section"):
+        header = headers[column_id]
+        if not header["exists"] or header["position"] != "sticky":
+            raise AssertionError(f"{column_id} header must be sticky, got {payload}")
+    if not payload["sectionCell"]["exists"] or payload["sectionCell"]["position"] != "sticky":
+        raise AssertionError(f"section body cells must be sticky, got {payload}")
+    if not (int(headers["scope_label"]["left"]) < int(headers["metric_label"]["left"]) < int(headers["section"]["left"])):
+        raise AssertionError(f"sticky left offsets must increase through object/metric/section, got {payload}")
+    if int(headers["section"]["zIndex"]) <= int(payload["dateHeaderZIndex"]):
+        raise AssertionError(f"section sticky header must render above date headers, got {payload}")
+    if payload["sectionCell"]["background"] == "rgba(0, 0, 0, 0)":
+        raise AssertionError(f"section sticky cell must have opaque background, got {payload}")
+    return payload
 
 
 def _check_percent_formatting(page: object, *, expected_rows: dict[str, str] | None) -> dict[str, str]:

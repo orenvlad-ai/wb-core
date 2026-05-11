@@ -119,6 +119,7 @@ def build_web_vitrina_page_composition(
                 "value_kind": "period",
                 "tone": "neutral",
             },
+            _build_data_freshness_card(contract_payload["status_summary"]),
         ],
         "activity_surface": _normalize_activity_surface(activity_surface),
         "filter_surface": {
@@ -278,6 +279,7 @@ def build_web_vitrina_page_error_composition(
                 "detail": "table payload is unavailable",
                 "tone": "neutral",
             },
+            _build_data_freshness_card({}),
         ],
         "activity_surface": _normalize_activity_surface(activity_surface),
         "filter_surface": {
@@ -932,6 +934,53 @@ def _period_label(date_columns: Any) -> str:
     if len(values) == 1:
         return values[0]
     return f"{values[0]}..{values[-1]}"
+
+
+def _build_data_freshness_card(status_summary: Mapping[str, Any]) -> dict[str, Any]:
+    candidates = [
+        (
+            str(status_summary.get("last_successful_auto_update_at") or ""),
+            "последнее успешное автообновление",
+            "auto",
+        ),
+        (
+            str(status_summary.get("last_successful_manual_refresh_at") or ""),
+            "последняя ручная загрузка",
+            "manual_refresh",
+        ),
+        (
+            str(status_summary.get("last_successful_manual_load_at") or ""),
+            "последняя ручная загрузка",
+            "manual_load",
+        ),
+    ]
+    known = [
+        (timestamp, detail, source)
+        for timestamp, detail, source in candidates
+        if timestamp.strip()
+    ]
+    if not known:
+        return {
+            "card_id": "data_freshness",
+            "label": "Свежесть данных",
+            "value": "нет данных",
+            "value_kind": "text",
+            "detail": "успешной загрузки ещё не было",
+            "updated_at": "",
+            "source": "unknown",
+            "tone": "neutral",
+        }
+    timestamp, detail, source = max(known, key=lambda item: item[0])
+    return {
+        "card_id": "data_freshness",
+        "label": "Свежесть данных",
+        "value": timestamp,
+        "value_kind": "timestamp",
+        "detail": detail,
+        "updated_at": timestamp,
+        "source": source,
+        "tone": "success",
+    }
 
 
 def _build_status_badge(*, current_state: str, status_summary: Mapping[str, Any]) -> dict[str, str]:

@@ -24,6 +24,7 @@ DEFAULT_SCHEDULE_MODE = "runtime_managed_json_schedule"
 DEFAULT_SYSTEMD_ONCALENDAR = "*-*-* *:00,10,20,30,40,50:00"
 SUCCESS_STATUSES = {"success"}
 WARNING_STATUSES = {"warning", "no_due", "skipped"}
+EDITABLE_SCHEDULE_FIELDS = {"enabled", "local_time_hhmm", "time", "timezone"}
 
 
 class SheetVitrinaV1AutoRefreshSchedulesError(RuntimeError):
@@ -84,7 +85,7 @@ class SheetVitrinaV1AutoRefreshSchedulesBlock:
                     raise ValueError("each schedule must be an object")
                 schedule_id = _safe_text(raw.get("id"), 120) or f"custom_{uuid4().hex[:12]}"
                 existing = existing_by_id.get(schedule_id)
-                merged = {**dict(existing or {}), **dict(raw), "id": schedule_id}
+                merged = _merge_editable_schedule(existing, raw, schedule_id=schedule_id)
                 normalized.append(_normalize_schedule(merged, index=index, now=now, now_factory=self.now_factory))
             _validate_schedule_set(normalized)
             current["schedules"] = normalized
@@ -124,9 +125,11 @@ class SheetVitrinaV1AutoRefreshSchedulesBlock:
         patch = {
             "last_run_at": started_at,
             "last_status": "running",
+            "last_status_label": "Выполняется",
             "last_technical_status": "running",
             "last_error": "",
             "last_error_summary": "",
+            "last_result_summary": "",
             "last_run_id": run_id,
             "last_trigger_source": trigger_source,
         }
@@ -292,6 +295,21 @@ def _normalize_schedule(
     }
     normalized["next_run_at"] = _next_run_at(normalized, now_factory())
     return normalized
+
+
+def _merge_editable_schedule(
+    existing: Mapping[str, Any] | None,
+    raw: Mapping[str, Any],
+    *,
+    schedule_id: str,
+) -> dict[str, Any]:
+    # Browser save payloads include rendered rows; lifecycle fields stay server-owned.
+    editable_patch = {
+        field: raw[field]
+        for field in EDITABLE_SCHEDULE_FIELDS
+        if field in raw
+    }
+    return {**dict(existing or {}), **editable_patch, "id": schedule_id}
 
 
 def _validate_schedule_set(schedules: list[Mapping[str, Any]]) -> None:

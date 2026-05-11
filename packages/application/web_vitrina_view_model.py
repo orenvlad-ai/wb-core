@@ -499,7 +499,7 @@ def _column_align(value_type: str, *, column_id: str) -> str:
 
 
 def _column_sticky(column_id: str) -> str:
-    if column_id in {"row_order", "scope_label", "metric_label"}:
+    if column_id in {"row_order", "scope_label", "metric_label", "section"}:
         return "left"
     return "none"
 
