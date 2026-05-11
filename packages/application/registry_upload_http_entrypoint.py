@@ -832,6 +832,19 @@ class RegistryUploadHttpEntrypoint:
             read_route=read_route,
         )
 
+    def handle_sheet_research_promotions_calculate_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        page_route: str,
+        read_route: str,
+    ) -> dict[str, Any]:
+        return self.research_block.calculate_promotions(
+            payload,
+            page_route=page_route,
+            read_route=read_route,
+        )
+
     def handle_sheet_feedbacks_request(
         self,
         *,

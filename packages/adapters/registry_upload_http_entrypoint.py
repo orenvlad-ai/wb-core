@@ -66,6 +66,7 @@ DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH = (
 DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_CALCULATE_PATH = (
     "/v1/sheet-vitrina-v1/research/sku-group-comparison/calculate"
 )
+DEFAULT_SHEET_RESEARCH_PROMOTIONS_CALCULATE_PATH = "/v1/sheet-vitrina-v1/research/promotions/calculate"
 DEFAULT_SHEET_FEEDBACKS_PATH = "/v1/sheet-vitrina-v1/feedbacks"
 DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH = "/v1/sheet-vitrina-v1/feedbacks/export.xlsx"
 DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH = "/v1/sheet-vitrina-v1/feedbacks/ai-prompt"
@@ -571,6 +572,32 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"sheet vitrina research calculation failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if parsed.path == DEFAULT_SHEET_RESEARCH_PROMOTIONS_CALCULATE_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_sheet_research_promotions_calculate_request(
+                        payload,
+                        page_route=DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
+                        read_route=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+                    )
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina research promotions calculation failed: {exc}"},
                     )
                     return
 
@@ -2845,6 +2872,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "auto_schedules_run_now_path": DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_RUN_NOW_PATH,
         "research_options_path": DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH,
         "research_calculate_path": DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_CALCULATE_PATH,
+        "research_promotions_calculate_path": DEFAULT_SHEET_RESEARCH_PROMOTIONS_CALCULATE_PATH,
         "feedbacks_path": DEFAULT_SHEET_FEEDBACKS_PATH,
         "feedbacks_export_path": DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH,
         "feedbacks_ai_prompt_path": DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH,

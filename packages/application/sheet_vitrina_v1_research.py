@@ -13,6 +13,7 @@ from packages.contracts.web_vitrina_contract import WebVitrinaContractV1
 
 RESEARCH_OPTIONS_CONTRACT_NAME = "sheet_vitrina_v1_research_sku_group_comparison_options"
 RESEARCH_CALCULATION_CONTRACT_NAME = "sheet_vitrina_v1_research_sku_group_comparison_result"
+RESEARCH_PROMOTIONS_CONTRACT_NAME = "sheet_vitrina_v1_research_promotions_result"
 RESEARCH_CONTRACT_VERSION = "v1"
 RESEARCH_SOURCE_TRUTH = "server_side_accepted_truth_ready_snapshots"
 RESEARCH_BUSINESS_TIMEZONE_NAME = "Asia/Yekaterinburg"
@@ -20,6 +21,7 @@ RESEARCH_BUSINESS_TIMEZONE = ZoneInfo(RESEARCH_BUSINESS_TIMEZONE_NAME)
 PROMO_FILTER_SOURCE = "ready_snapshot_promo_metrics_latest_closed_day"
 PROMO_FILTER_PRIMARY_METRICS = ("promo_participation", "promo_count_by_price")
 PROMO_FILTER_FALLBACK_METRIC = "promo_entry_price_best"
+DISCOUNTED_PRICE_METRIC_KEYS = ("price_seller_discounted", "avg_price_seller_discounted")
 
 _FINANCIAL_SECTIONS = ("финанс", "эконом")
 _FINANCIAL_TOKENS = (
@@ -253,6 +255,93 @@ class SheetVitrinaV1ResearchBlock:
             },
             "rows": rows,
             "warnings": _result_warnings(rows),
+        }
+
+    def calculate_promotions(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        page_route: str,
+        read_route: str,
+    ) -> dict[str, Any]:
+        current_state = self.runtime.load_current_state()
+        sku_options = _active_sku_options(current_state.config_v2)
+        period = _require_period(payload.get("period"), label="Период акций")
+        dates = _date_range(period["date_from"], period["date_to"])
+        sku_ids = [int(item["nm_id"]) for item in sku_options]
+        values_by_date = self._load_values_by_date(
+            page_route=page_route,
+            read_route=read_route,
+            date_from=period["date_from"],
+            date_to=period["date_to"],
+            metric_keys=list(DISCOUNTED_PRICE_METRIC_KEYS),
+            sku_ids=sku_ids,
+        )
+
+        rows: list[dict[str, Any]] = []
+        total_observed_points = 0
+        for sku in sku_options:
+            nm_id = int(sku["nm_id"])
+            observed_values: list[float] = []
+            for snapshot_date in dates:
+                values_for_date = values_by_date.get(snapshot_date) or {}
+                value = _first_number(
+                    values_for_date.get((nm_id, metric_key))
+                    for metric_key in DISCOUNTED_PRICE_METRIC_KEYS
+                )
+                if value is not None:
+                    observed_values.append(value)
+            total_observed_points += len(observed_values)
+            rows.append(
+                {
+                    "nm_id": nm_id,
+                    "sku": str(sku["label"] or nm_id),
+                    "sku_label": str(sku["label"] or nm_id),
+                    "group": str(sku.get("group") or ""),
+                    "average_discounted_price": (
+                        sum(observed_values) / len(observed_values)
+                        if observed_values
+                        else None
+                    ),
+                    "median_discounted_price": _median(observed_values),
+                    "observed_points": len(observed_values),
+                    "expected_points": len(dates),
+                    "coverage_status": _coverage_status(
+                        expected_points=len(dates),
+                        observed_points=len(observed_values),
+                    ),
+                }
+            )
+
+        if total_observed_points <= 0:
+            rows = []
+
+        return {
+            "contract_name": RESEARCH_PROMOTIONS_CONTRACT_NAME,
+            "contract_version": RESEARCH_CONTRACT_VERSION,
+            "source_truth": RESEARCH_SOURCE_TRUTH,
+            "read_only": True,
+            "causal_claim": False,
+            "price_metric_keys": list(DISCOUNTED_PRICE_METRIC_KEYS),
+            "inputs": {
+                "period": {
+                    "date_from": period["date_from"],
+                    "date_to": period["date_to"],
+                },
+            },
+            "summary": {
+                "sku_count": len(sku_options),
+                "row_count": len(rows),
+                "period_days": len(dates),
+                "total_expected_points": len(sku_options) * len(dates),
+                "total_observed_points": total_observed_points,
+            },
+            "rows": rows,
+            "empty_state": (
+                "За выбранный период данные по цене со скидкой не найдены."
+                if total_observed_points <= 0
+                else ""
+            ),
         }
 
     def _current_sku_metric_keys(self, *, page_route: str, read_route: str) -> set[str]:
@@ -667,6 +756,24 @@ def _to_number(value: Any) -> float | None:
         return float(normalized)
     except ValueError:
         return None
+
+
+def _first_number(values: Iterable[Any]) -> float | None:
+    for value in values:
+        parsed = _to_number(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _median(values: Iterable[float]) -> float | None:
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return None
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
 
 
 def _normalize_int_list(value: Any) -> list[int]:

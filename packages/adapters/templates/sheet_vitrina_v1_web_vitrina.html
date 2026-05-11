@@ -156,6 +156,43 @@
       min-width: 0;
     }
 
+    .research-section-tabs {
+      display: inline-flex;
+      gap: 4px;
+      align-items: center;
+      width: max-content;
+      max-width: 100%;
+      margin: 0;
+      padding: 3px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel-subtle);
+      overflow-x: auto;
+    }
+
+    .research-section-tab {
+      min-height: 30px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      padding: 6px 10px;
+      color: var(--muted);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+
+    .research-section-tab.is-active {
+      background: var(--control-bg);
+      color: var(--text);
+    }
+
+    .research-section-panel[hidden] {
+      display: none;
+    }
+
     .research-form-grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(180px, 1fr));
@@ -420,6 +457,11 @@
 
     .research-result-table td[data-kind="coverage"] {
       min-width: 150px;
+    }
+
+    .research-promotions-table {
+      width: 760px;
+      min-width: 760px;
     }
 
     .feedbacks-subtabs {
@@ -3342,96 +3384,137 @@
           <p class="panel-meta" data-research-meta>Исследования: read-only</p>
         </div>
 
-        <div class="research-form-grid">
-          <div class="research-field research-field-wide">
-            <div class="research-field-head">
-              <span class="filter-label">Исследуемая группа</span>
-              <button class="research-filter-chip" type="button" data-research-promo-filter="research">Товар в акции</button>
-            </div>
-            <details class="research-picker" data-research-picker="research">
-              <summary class="research-picker-summary" data-research-sku-summary="research">Загрузка SKU…</summary>
-              <div class="research-picker-panel">
-                <div class="research-option-list" data-research-sku-options="research">Загрузка SKU…</div>
-              </div>
-            </details>
-            <p class="research-validation" data-research-validation="research_skus"></p>
-          </div>
-
-          <div class="research-field research-field-wide">
-            <div class="research-field-head">
-              <span class="filter-label">Контрольная группа</span>
-              <button class="research-filter-chip" type="button" data-research-promo-filter="control">Товар в акции</button>
-            </div>
-            <details class="research-picker" data-research-picker="control">
-              <summary class="research-picker-summary" data-research-sku-summary="control">Загрузка SKU…</summary>
-              <div class="research-picker-panel">
-                <div class="research-option-list" data-research-sku-options="control">Загрузка SKU…</div>
-              </div>
-            </details>
-            <p class="research-validation" data-research-validation="control_skus"></p>
-          </div>
-
-          <div class="research-field research-field-wide" data-research-range-field="baseline">
-            <span class="filter-label">Базовый период</span>
-            <div class="research-range-picker">
-              <button class="research-range-control" type="button" data-research-range-toggle="baseline" aria-expanded="false">
-                <span class="research-range-label" data-research-range-label="baseline">Период не выбран</span>
-                <span aria-hidden="true">📅</span>
-              </button>
-              <div class="research-range-popover" data-research-range-popover="baseline" hidden>
-                <div class="history-picker-head">
-                  <button class="history-month-nav" type="button" data-research-range-prev="baseline" aria-label="Предыдущий месяц">‹</button>
-                  <p class="history-month-label" data-research-range-month-label="baseline">месяц</p>
-                  <button class="history-month-nav" type="button" data-research-range-next="baseline" aria-label="Следующий месяц">›</button>
-                </div>
-                <div class="research-range-calendar" data-research-range-calendar="baseline"></div>
-                <p class="research-validation" data-research-range-error="baseline"></p>
-              </div>
-            </div>
-            <p class="research-validation" data-research-validation="periods_baseline"></p>
-          </div>
-
-          <div class="research-field research-field-wide" data-research-range-field="analysis">
-            <span class="filter-label">Период анализа</span>
-            <div class="research-range-picker">
-              <button class="research-range-control" type="button" data-research-range-toggle="analysis" aria-expanded="false">
-                <span class="research-range-label" data-research-range-label="analysis">Период не выбран</span>
-                <span aria-hidden="true">📅</span>
-              </button>
-              <div class="research-range-popover" data-research-range-popover="analysis" hidden>
-                <div class="history-picker-head">
-                  <button class="history-month-nav" type="button" data-research-range-prev="analysis" aria-label="Предыдущий месяц">‹</button>
-                  <p class="history-month-label" data-research-range-month-label="analysis">месяц</p>
-                  <button class="history-month-nav" type="button" data-research-range-next="analysis" aria-label="Следующий месяц">›</button>
-                </div>
-                <div class="research-range-calendar" data-research-range-calendar="analysis"></div>
-                <p class="research-validation" data-research-range-error="analysis"></p>
-              </div>
-            </div>
-            <p class="research-validation" data-research-validation="periods_analysis"></p>
-          </div>
-
-          <div class="research-field research-field-wide">
-            <span class="filter-label">Метрики</span>
-            <details class="research-picker" data-research-picker="metrics">
-              <summary class="research-picker-summary" data-research-metric-summary>Загрузка метрик…</summary>
-              <div class="research-picker-panel">
-                <div class="research-option-list" data-research-metric-options>Загрузка метрик…</div>
-              </div>
-            </details>
-            <p class="research-validation" data-research-validation="metrics"></p>
-          </div>
-
-          <div class="research-field research-actions">
-            <button class="button primary" type="button" data-research-calculate disabled>Рассчитать</button>
-            <span class="research-result-note" data-research-source-note>server-side ready snapshots</span>
-          </div>
+        <div class="research-section-tabs" role="tablist" aria-label="Разделы исследования">
+          <button class="research-section-tab is-active" type="button" data-research-section-tab="comparison" role="tab" aria-selected="true">Сравнение групп SKU</button>
+          <button class="research-section-tab" type="button" data-research-section-tab="promotions" role="tab" aria-selected="false">Акции</button>
         </div>
 
-        <p class="research-error" data-research-error></p>
-        <div data-research-result>
-          <p class="research-result-note">Заполните группы, периоды и метрики, затем нажмите «Рассчитать».</p>
-        </div>
+        <section class="research-section-panel" data-research-section-panel="comparison">
+          <div class="research-form-grid">
+            <div class="research-field research-field-wide">
+              <div class="research-field-head">
+                <span class="filter-label">Исследуемая группа</span>
+                <button class="research-filter-chip" type="button" data-research-promo-filter="research">Товар в акции</button>
+              </div>
+              <details class="research-picker" data-research-picker="research">
+                <summary class="research-picker-summary" data-research-sku-summary="research">Загрузка SKU…</summary>
+                <div class="research-picker-panel">
+                  <div class="research-option-list" data-research-sku-options="research">Загрузка SKU…</div>
+                </div>
+              </details>
+              <p class="research-validation" data-research-validation="research_skus"></p>
+            </div>
+
+            <div class="research-field research-field-wide">
+              <div class="research-field-head">
+                <span class="filter-label">Контрольная группа</span>
+                <button class="research-filter-chip" type="button" data-research-promo-filter="control">Товар в акции</button>
+              </div>
+              <details class="research-picker" data-research-picker="control">
+                <summary class="research-picker-summary" data-research-sku-summary="control">Загрузка SKU…</summary>
+                <div class="research-picker-panel">
+                  <div class="research-option-list" data-research-sku-options="control">Загрузка SKU…</div>
+                </div>
+              </details>
+              <p class="research-validation" data-research-validation="control_skus"></p>
+            </div>
+
+            <div class="research-field research-field-wide" data-research-range-field="baseline">
+              <span class="filter-label">Базовый период</span>
+              <div class="research-range-picker">
+                <button class="research-range-control" type="button" data-research-range-toggle="baseline" aria-expanded="false">
+                  <span class="research-range-label" data-research-range-label="baseline">Период не выбран</span>
+                  <span aria-hidden="true">📅</span>
+                </button>
+                <div class="research-range-popover" data-research-range-popover="baseline" hidden>
+                  <div class="history-picker-head">
+                    <button class="history-month-nav" type="button" data-research-range-prev="baseline" aria-label="Предыдущий месяц">‹</button>
+                    <p class="history-month-label" data-research-range-month-label="baseline">месяц</p>
+                    <button class="history-month-nav" type="button" data-research-range-next="baseline" aria-label="Следующий месяц">›</button>
+                  </div>
+                  <div class="research-range-calendar" data-research-range-calendar="baseline"></div>
+                  <p class="research-validation" data-research-range-error="baseline"></p>
+                </div>
+              </div>
+              <p class="research-validation" data-research-validation="periods_baseline"></p>
+            </div>
+
+            <div class="research-field research-field-wide" data-research-range-field="analysis">
+              <span class="filter-label">Период анализа</span>
+              <div class="research-range-picker">
+                <button class="research-range-control" type="button" data-research-range-toggle="analysis" aria-expanded="false">
+                  <span class="research-range-label" data-research-range-label="analysis">Период не выбран</span>
+                  <span aria-hidden="true">📅</span>
+                </button>
+                <div class="research-range-popover" data-research-range-popover="analysis" hidden>
+                  <div class="history-picker-head">
+                    <button class="history-month-nav" type="button" data-research-range-prev="analysis" aria-label="Предыдущий месяц">‹</button>
+                    <p class="history-month-label" data-research-range-month-label="analysis">месяц</p>
+                    <button class="history-month-nav" type="button" data-research-range-next="analysis" aria-label="Следующий месяц">›</button>
+                  </div>
+                  <div class="research-range-calendar" data-research-range-calendar="analysis"></div>
+                  <p class="research-validation" data-research-range-error="analysis"></p>
+                </div>
+              </div>
+              <p class="research-validation" data-research-validation="periods_analysis"></p>
+            </div>
+
+            <div class="research-field research-field-wide">
+              <span class="filter-label">Метрики</span>
+              <details class="research-picker" data-research-picker="metrics">
+                <summary class="research-picker-summary" data-research-metric-summary>Загрузка метрик…</summary>
+                <div class="research-picker-panel">
+                  <div class="research-option-list" data-research-metric-options>Загрузка метрик…</div>
+                </div>
+              </details>
+              <p class="research-validation" data-research-validation="metrics"></p>
+            </div>
+
+            <div class="research-field research-actions">
+              <button class="button primary" type="button" data-research-calculate disabled>Рассчитать</button>
+              <span class="research-result-note" data-research-source-note>server-side ready snapshots</span>
+            </div>
+          </div>
+
+          <p class="research-error" data-research-error></p>
+          <div data-research-result>
+            <p class="research-result-note">Заполните группы, периоды и метрики, затем нажмите «Рассчитать».</p>
+          </div>
+        </section>
+
+        <section class="research-section-panel" data-research-section-panel="promotions" hidden>
+          <div class="research-form-grid">
+            <div class="research-field research-field-wide" data-research-range-field="promotions">
+              <span class="filter-label">Период акций</span>
+              <div class="research-range-picker">
+                <button class="research-range-control" type="button" data-research-range-toggle="promotions" aria-expanded="false">
+                  <span class="research-range-label" data-research-range-label="promotions">Период не выбран</span>
+                  <span aria-hidden="true">📅</span>
+                </button>
+                <div class="research-range-popover" data-research-range-popover="promotions" hidden>
+                  <div class="history-picker-head">
+                    <button class="history-month-nav" type="button" data-research-range-prev="promotions" aria-label="Предыдущий месяц">‹</button>
+                    <p class="history-month-label" data-research-range-month-label="promotions">месяц</p>
+                    <button class="history-month-nav" type="button" data-research-range-next="promotions" aria-label="Следующий месяц">›</button>
+                  </div>
+                  <div class="research-range-calendar" data-research-range-calendar="promotions"></div>
+                  <p class="research-validation" data-research-range-error="promotions"></p>
+                </div>
+              </div>
+              <p class="research-validation" data-research-promotions-validation></p>
+            </div>
+
+            <div class="research-field research-actions">
+              <button class="button primary" type="button" data-research-promotions-load disabled>Загрузить</button>
+              <span class="research-result-note">price_seller_discounted · ready snapshots</span>
+            </div>
+          </div>
+
+          <p class="research-error" data-research-promotions-error></p>
+          <div data-research-promotions-result>
+            <p class="research-result-note">Выберите период и нажмите «Загрузить».</p>
+          </div>
+        </section>
       </section>
     </section>
   </main>
@@ -3499,10 +3582,13 @@
     const resetFiltersButton = document.querySelector("[data-reset-filters]");
     const researchPanelNode = document.querySelector("[data-research-panel]");
     const researchCalculateButton = document.querySelector("[data-research-calculate]");
+    const researchPromotionsLoadButton = document.querySelector("[data-research-promotions-load]");
     const researchMetaNode = document.querySelector("[data-research-meta]");
     const researchErrorNode = document.querySelector("[data-research-error]");
     const researchResultNode = document.querySelector("[data-research-result]");
     const researchSourceNoteNode = document.querySelector("[data-research-source-note]");
+    const researchPromotionsErrorNode = document.querySelector("[data-research-promotions-error]");
+    const researchPromotionsResultNode = document.querySelector("[data-research-promotions-result]");
     const feedbacksPanelNode = document.querySelector("[data-feedbacks-panel]");
     const feedbacksSubtabButtons = Array.from(document.querySelectorAll("[data-feedbacks-subtab]"));
     const feedbacksSubpanels = Array.from(document.querySelectorAll("[data-feedbacks-subpanel]"));
@@ -3749,9 +3835,11 @@
         requestSequence: 0
       },
       research: {
+        activeSection: "comparison",
         loaded: false,
         loading: false,
         calculating: false,
+        promotionsLoading: false,
         requestSequence: 0,
         options: null,
         selectedResearchSkus: new Set(),
@@ -3761,17 +3849,23 @@
         baselineTo: "",
         analysisFrom: "",
         analysisTo: "",
+        promotionsFrom: "",
+        promotionsTo: "",
         promoFilterResearch: false,
         promoFilterControl: false,
         activeRangePicker: "",
         rangeAwaitingEnd: {
           baseline: false,
-          analysis: false
+          analysis: false,
+          promotions: false
         },
         rangeVisibleMonthStart: {
           baseline: "",
-          analysis: ""
+          analysis: "",
+          promotions: ""
         },
+        promotionsResult: null,
+        promotionsError: "",
         error: ""
       },
       feedbacks: {
@@ -3922,6 +4016,9 @@
     }
     if (researchCalculateButton) {
       researchCalculateButton.addEventListener("click", calculateResearchComparison);
+    }
+    if (researchPromotionsLoadButton) {
+      researchPromotionsLoadButton.addEventListener("click", loadResearchPromotions);
     }
     if (feedbacksPanelNode) {
       feedbacksPanelNode.addEventListener("click", handleFeedbacksClick);
@@ -9653,11 +9750,16 @@
       state.research.baselineTo = state.research.baselineTo || String(baseline.date_to || "");
       state.research.analysisFrom = state.research.analysisFrom || String(analysis.date_from || "");
       state.research.analysisTo = state.research.analysisTo || String(analysis.date_to || "");
+      state.research.promotionsFrom = state.research.promotionsFrom || String(analysis.date_from || baseline.date_from || "");
+      state.research.promotionsTo = state.research.promotionsTo || String(analysis.date_to || baseline.date_to || "");
       if (!state.research.rangeVisibleMonthStart.baseline && (state.research.baselineTo || state.research.baselineFrom)) {
         state.research.rangeVisibleMonthStart.baseline = startOfMonthIso(state.research.baselineTo || state.research.baselineFrom);
       }
       if (!state.research.rangeVisibleMonthStart.analysis && (state.research.analysisTo || state.research.analysisFrom)) {
         state.research.rangeVisibleMonthStart.analysis = startOfMonthIso(state.research.analysisTo || state.research.analysisFrom);
+      }
+      if (!state.research.rangeVisibleMonthStart.promotions && (state.research.promotionsTo || state.research.promotionsFrom)) {
+        state.research.rangeVisibleMonthStart.promotions = startOfMonthIso(state.research.promotionsTo || state.research.promotionsFrom);
       }
     }
 
@@ -9676,15 +9778,33 @@
       if (researchSourceNoteNode) {
         researchSourceNoteNode.textContent = "read-only over accepted truth / ready snapshots";
       }
+      renderResearchSectionTabs();
       renderResearchSkuPicker("research", skuOptions);
       renderResearchSkuPicker("control", skuOptions);
       renderResearchMetricPicker(metricOptions);
       renderResearchRangePickers();
       syncResearchValidation();
+      syncResearchPromotionsValidation();
       if (researchErrorNode) {
         researchErrorNode.textContent = state.research.error || "";
         researchErrorNode.classList.toggle("is-error", !!state.research.error);
       }
+      if (researchPromotionsErrorNode) {
+        researchPromotionsErrorNode.textContent = state.research.promotionsError || "";
+        researchPromotionsErrorNode.classList.toggle("is-error", !!state.research.promotionsError);
+      }
+    }
+
+    function renderResearchSectionTabs() {
+      const activeSection = state.research.activeSection || "comparison";
+      document.querySelectorAll("[data-research-section-tab]").forEach(function(button) {
+        const selected = String(button.getAttribute("data-research-section-tab") || "") === activeSection;
+        button.classList.toggle("is-active", selected);
+        button.setAttribute("aria-selected", selected ? "true" : "false");
+      });
+      document.querySelectorAll("[data-research-section-panel]").forEach(function(panel) {
+        panel.hidden = String(panel.getAttribute("data-research-section-panel") || "") !== activeSection;
+      });
     }
 
     function renderResearchSkuPicker(kind, skuOptions) {
@@ -9801,6 +9921,7 @@
     function renderResearchRangePickers() {
       renderResearchRangePicker("baseline");
       renderResearchRangePicker("analysis");
+      renderResearchRangePicker("promotions");
     }
 
     function renderResearchRangePicker(kind) {
@@ -9863,6 +9984,9 @@
     }
 
     function researchRangeFields(kind) {
+      if (kind === "promotions") {
+        return {from: "promotionsFrom", to: "promotionsTo", label: "Период акций"};
+      }
       return kind === "analysis"
         ? {from: "analysisFrom", to: "analysisTo", label: "Период анализа"}
         : {from: "baselineFrom", to: "baselineTo", label: "Базовый период"};
@@ -9974,7 +10098,11 @@
       if (state.research[fields.from] && state.research[fields.to] && !state.research.rangeAwaitingEnd[kind]) {
         state.research.activeRangePicker = "";
       }
-      clearResearchResult();
+      if (kind === "promotions") {
+        clearResearchPromotionsResult();
+      } else {
+        clearResearchResult();
+      }
       renderResearchPanel();
     }
 
@@ -10014,6 +10142,13 @@
     }
 
     function handleResearchClick(event) {
+      const sectionTab = event.target.closest("[data-research-section-tab]");
+      if (sectionTab) {
+        event.preventDefault();
+        state.research.activeSection = String(sectionTab.getAttribute("data-research-section-tab") || "comparison");
+        renderResearchPanel();
+        return;
+      }
       const promoChip = event.target.closest("[data-research-promo-filter]");
       if (promoChip) {
         event.preventDefault();
@@ -10122,6 +10257,20 @@
       return validation;
     }
 
+    function syncResearchPromotionsValidation() {
+      const validation = validateResearchPromotionsInputs();
+      const node = document.querySelector("[data-research-promotions-validation]");
+      if (node) {
+        node.textContent = validation.period || "";
+        node.classList.toggle("is-error", !!validation.period);
+      }
+      if (researchPromotionsLoadButton) {
+        researchPromotionsLoadButton.disabled = state.research.loading || state.research.promotionsLoading || !!validation.firstError;
+        researchPromotionsLoadButton.textContent = state.research.promotionsLoading ? "Загрузка…" : "Загрузить";
+      }
+      return validation;
+    }
+
     function setResearchValidationText(key, text) {
       const node = document.querySelector('[data-research-validation="' + key + '"]');
       if (!node) {
@@ -10160,6 +10309,21 @@
       return errors;
     }
 
+    function validateResearchPromotionsInputs() {
+      const errors = {};
+      if (!state.research.loaded) {
+        errors.firstError = state.research.loading ? "Options загружаются" : "Options не загружены";
+        return errors;
+      }
+      if (!state.research.promotionsFrom || !state.research.promotionsTo || state.research.rangeAwaitingEnd.promotions) {
+        errors.period = "Выберите период акций";
+      } else if (state.research.promotionsFrom > state.research.promotionsTo) {
+        errors.period = "Период акций: начало должно быть не позже конца";
+      }
+      errors.firstError = errors.period || "";
+      return errors;
+    }
+
     function clearResearchResult() {
       if (researchResultNode) {
         researchResultNode.innerHTML = '<p class="research-result-note">Изменены inputs. Нажмите «Рассчитать», чтобы получить свежий результат.</p>';
@@ -10168,6 +10332,18 @@
       if (researchErrorNode) {
         researchErrorNode.textContent = "";
         researchErrorNode.classList.remove("is-error");
+      }
+    }
+
+    function clearResearchPromotionsResult() {
+      state.research.promotionsResult = null;
+      state.research.promotionsError = "";
+      if (researchPromotionsResultNode) {
+        researchPromotionsResultNode.innerHTML = '<p class="research-result-note">Изменён период. Нажмите «Загрузить», чтобы получить свежий результат.</p>';
+      }
+      if (researchPromotionsErrorNode) {
+        researchPromotionsErrorNode.textContent = "";
+        researchPromotionsErrorNode.classList.remove("is-error");
       }
     }
 
@@ -10228,6 +10404,57 @@
       };
     }
 
+    async function loadResearchPromotions() {
+      const validation = syncResearchPromotionsValidation();
+      if (validation.firstError) {
+        clearResearchPromotionsResult();
+        if (researchPromotionsErrorNode) {
+          researchPromotionsErrorNode.textContent = validation.firstError;
+          researchPromotionsErrorNode.classList.add("is-error");
+        }
+        return;
+      }
+      state.research.promotionsLoading = true;
+      state.research.promotionsError = "";
+      syncResearchPromotionsValidation();
+      if (researchPromotionsResultNode) {
+        researchPromotionsResultNode.innerHTML = '<p class="research-result-note">Загружаем цены со скидкой…</p>';
+      }
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.research_promotions_calculate_path, {
+          method: "POST",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json; charset=utf-8"
+          },
+          body: JSON.stringify(buildResearchPromotionsPayload())
+        });
+        const payload = await readJsonResponse(response, "non-json response from research promotions route");
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "research promotions route returned " + response.status);
+        }
+        state.research.promotionsResult = payload;
+        renderResearchPromotionsResult(payload);
+      } catch (error) {
+        state.research.promotionsError = String(error && error.message ? error.message : error);
+        if (researchPromotionsResultNode) {
+          researchPromotionsResultNode.innerHTML = '<p class="research-result-note">Данные не загружены.</p>';
+        }
+      } finally {
+        state.research.promotionsLoading = false;
+        renderResearchPanel();
+      }
+    }
+
+    function buildResearchPromotionsPayload() {
+      return {
+        period: {
+          date_from: state.research.promotionsFrom,
+          date_to: state.research.promotionsTo
+        }
+      };
+    }
+
     function renderResearchResult(payload) {
       const rows = Array.isArray(payload && payload.rows) ? payload.rows : [];
       if (!researchResultNode) {
@@ -10264,6 +10491,46 @@
         "<tbody>",
         rows.map(renderResearchResultRow).join(""),
         "</tbody></table></div></div>"
+      ].join("");
+    }
+
+    function renderResearchPromotionsResult(payload) {
+      const rows = Array.isArray(payload && payload.rows) ? payload.rows : [];
+      const summary = (payload && payload.summary) || {};
+      if (!researchPromotionsResultNode) {
+        return;
+      }
+      if (!rows.length || Number(summary.total_observed_points || 0) <= 0) {
+        researchPromotionsResultNode.innerHTML = '<p class="research-result-note" data-research-promotions-empty>' +
+          escapeHtml((payload && payload.empty_state) || "За выбранный период данные по цене со скидкой не найдены.") +
+          "</p>";
+        return;
+      }
+      researchPromotionsResultNode.innerHTML = [
+        '<p class="research-result-note">SKU: ' + escapeHtml(String(summary.sku_count || rows.length)) +
+          ' · observed points: ' + escapeHtml(String(summary.total_observed_points || 0)) + '</p>',
+        '<div class="table-shell research-result-table-shell" data-research-promotions-grid data-grid-library="@gravity-ui/table">',
+        '<div class="table-scroll research-result-table-scroll" data-research-promotions-scroll>',
+        '<table class="vitrina-table research-result-table research-promotions-table" data-research-promotions-table>',
+        '<thead><tr>',
+        ["SKU", "Средняя цена со скидкой", "Медианная цена со скидкой"].map(function(label) {
+          return "<th>" + escapeHtml(label) + "</th>";
+        }).join(""),
+        "</tr></thead><tbody>",
+        rows.map(renderResearchPromotionsRow).join(""),
+        "</tbody></table></div></div>"
+      ].join("");
+    }
+
+    function renderResearchPromotionsRow(row) {
+      const skuText = String(row.sku_label || row.sku || row.nm_id || "—") +
+        (row.nm_id ? " · " + String(row.nm_id) : "");
+      return [
+        "<tr>",
+        "<td>" + escapeHtml(skuText) + "</td>",
+        researchNumberCell(row.average_discounted_price, {metric_format: "rub"}),
+        researchNumberCell(row.median_discounted_price, {metric_format: "rub"}),
+        "</tr>"
       ].join("");
     }
 
