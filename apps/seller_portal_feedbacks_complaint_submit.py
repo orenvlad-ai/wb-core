@@ -1764,6 +1764,7 @@ def to_dry_run_config(config: SubmitConfig) -> DryRunConfig:
         timeout_ms=config.timeout_ms,
         write_artifacts=False,
         deny_feedback_ids=config.deny_feedback_ids,
+        target_feedback_id=config.target_feedback_id,
     )
 
 
