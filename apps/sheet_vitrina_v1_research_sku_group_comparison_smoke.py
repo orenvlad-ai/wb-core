@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
+    DEFAULT_SHEET_RESEARCH_PROMOTIONS_CALCULATE_PATH,
     DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_CALCULATE_PATH,
     DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH,
     DEFAULT_SHEET_STATUS_PATH,
@@ -114,6 +115,34 @@ def main() -> None:
             raise AssertionError(f"missing dates must surface partial coverage, got {partial_result}")
         if partial_result["rows"][0]["research_baseline_value"] == 0:
             raise AssertionError(f"missing values must not be zero-filled, got {partial_result}")
+
+        promotions_payload = {
+            "period": {"date_from": "2026-04-14", "date_to": "2026-04-17"},
+        }
+        promotions_result = _post_json(base_url + DEFAULT_SHEET_RESEARCH_PROMOTIONS_CALCULATE_PATH, promotions_payload)
+        if promotions_result["contract_name"] != "sheet_vitrina_v1_research_promotions_result":
+            raise AssertionError(f"research promotions contract mismatch, got {promotions_result}")
+        if promotions_result.get("read_only") is not True or promotions_result.get("causal_claim") is not False:
+            raise AssertionError(f"research promotions must stay read-only/non-causal, got {promotions_result}")
+        if promotions_result.get("price_metric_keys") != ["price_seller_discounted", "avg_price_seller_discounted"]:
+            raise AssertionError(f"research promotions must use discounted price metric candidates, got {promotions_result}")
+        if promotions_result.get("summary", {}).get("total_observed_points") != 8:
+            raise AssertionError(f"research promotions observed point count mismatch, got {promotions_result}")
+        first_promo_row = next(row for row in promotions_result["rows"] if int(row["nm_id"]) == first_sku)
+        second_promo_row = next(row for row in promotions_result["rows"] if int(row["nm_id"]) == second_sku)
+        if first_promo_row["average_discounted_price"] != 915 or first_promo_row["median_discounted_price"] != 915:
+            raise AssertionError(f"first SKU average/median discounted price mismatch, got {first_promo_row}")
+        if second_promo_row["average_discounted_price"] != 1107.5 or second_promo_row["median_discounted_price"] != 1107.5:
+            raise AssertionError(f"second SKU average/median discounted price mismatch, got {second_promo_row}")
+
+        empty_promotions = _post_json(
+            base_url + DEFAULT_SHEET_RESEARCH_PROMOTIONS_CALCULATE_PATH,
+            {"period": {"date_from": "2026-04-01", "date_to": "2026-04-02"}},
+        )
+        if empty_promotions.get("rows") != [] or empty_promotions.get("summary", {}).get("total_observed_points") != 0:
+            raise AssertionError(f"research promotions empty state mismatch, got {empty_promotions}")
+        if "данные по цене со скидкой не найдены" not in str(empty_promotions.get("empty_state") or ""):
+            raise AssertionError(f"research promotions empty state text mismatch, got {empty_promotions}")
 
         _assert_error(
             base_url,

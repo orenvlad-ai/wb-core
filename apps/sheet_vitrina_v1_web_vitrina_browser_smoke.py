@@ -1260,12 +1260,13 @@ def _check_unified_tab_navigation(page: object) -> dict[str, object]:
           rangeToggleCount: document.querySelectorAll('[data-research-range-toggle]').length,
           legacyDateInputs: document.querySelectorAll('[data-research-date]').length,
           baselineLabel: (document.querySelector('[data-research-range-label="baseline"]') || {}).textContent || '',
-          analysisLabel: (document.querySelector('[data-research-range-label="analysis"]') || {}).textContent || ''
+          analysisLabel: (document.querySelector('[data-research-range-label="analysis"]') || {}).textContent || '',
+          promotionsLabel: (document.querySelector('[data-research-range-label="promotions"]') || {}).textContent || ''
         })"""
     )
     if (
         range_controls["researchChipCount"] != 2
-        or range_controls["rangeToggleCount"] != 2
+        or range_controls["rangeToggleCount"] != 3
         or range_controls["legacyDateInputs"] != 0
         or " - " in range_controls["baselineLabel"]
     ):
@@ -1387,6 +1388,44 @@ def _check_unified_tab_navigation(page: object) -> dict[str, object]:
         or expected_research_headers.difference(set(result_grid["headers"]))
     ):
         raise AssertionError(f"research result must use scrollable table/grid pattern, got {result_grid}")
+    page.locator('[data-research-section-tab="promotions"]').click()
+    page.wait_for_function(
+        """() => {
+          const panel = document.querySelector('[data-research-section-panel="promotions"]');
+          const active = document.querySelector('[data-research-section-tab].is-active');
+          return !!panel && !panel.hidden && active && (active.textContent || '').trim() === 'Акции';
+        }""",
+        timeout=5000,
+    )
+    page.locator('[data-research-range-toggle="promotions"]').click()
+    page.wait_for_selector('[data-research-range-popover="promotions"]:not([hidden])', timeout=5000)
+    page.locator('[data-research-range-day="promotions"][data-date="2026-04-14"]').click()
+    page.locator('[data-research-range-day="promotions"][data-date="2026-04-17"]').click()
+    page.locator("[data-research-promotions-load]").click()
+    page.wait_for_selector("[data-research-promotions-table] tbody tr", timeout=10000)
+    promotions_grid = page.evaluate(
+        """() => {
+          const shell = document.querySelector('[data-research-promotions-grid]');
+          const headers = Array.from(document.querySelectorAll('[data-research-promotions-table] th')).map(node => (node.textContent || '').trim());
+          const firstRow = Array.from(document.querySelectorAll('[data-research-promotions-table] tbody tr:first-child td')).map(node => (node.textContent || '').trim());
+          return {
+            shell: !!shell,
+            gridLibrary: shell ? shell.getAttribute('data-grid-library') : '',
+            headers,
+            rowCount: document.querySelectorAll('[data-research-promotions-table] tbody tr').length,
+            firstRow
+          };
+        }"""
+    )
+    expected_promotions_headers = {"SKU", "Средняя цена со скидкой", "Медианная цена со скидкой"}
+    if (
+        not promotions_grid["shell"]
+        or promotions_grid["gridLibrary"] != "@gravity-ui/table"
+        or expected_promotions_headers.difference(set(promotions_grid["headers"]))
+        or promotions_grid["rowCount"] < 2
+        or "₽" not in " ".join(promotions_grid["firstRow"])
+    ):
+        raise AssertionError(f"research promotions table mismatch, got {promotions_grid}")
     page.locator('[data-unified-tab-button="vitrina"]').click()
     page.wait_for_function(
         """() => {
@@ -1406,6 +1445,7 @@ def _check_unified_tab_navigation(page: object) -> dict[str, object]:
         "research_promo_filter": research_flow,
         "research_range_controls": range_controls,
         "research_result_grid": result_grid,
+        "research_promotions_grid": promotions_grid,
         "restored_default_tab": True,
     }
 

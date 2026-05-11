@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
+    DEFAULT_SHEET_RESEARCH_PROMOTIONS_CALCULATE_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
     DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
@@ -326,7 +327,10 @@ def main() -> None:
                 'data-operator-embed-frame="factory-order"',
                 'data-operator-embed-frame="reports"',
                 "Сравнение групп SKU",
+                "Акции",
                 "data-research-calculate",
+                "data-research-promotions-load",
+                DEFAULT_SHEET_RESEARCH_PROMOTIONS_CALCULATE_PATH,
                 DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
                 DEFAULT_SHEET_OPERATOR_UI_PATH,
                 "surface=page_composition",
