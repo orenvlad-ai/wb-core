@@ -122,6 +122,7 @@ class DryRunConfig:
     timeout_ms: int
     write_artifacts: bool
     deny_feedback_ids: tuple[str, ...]
+    target_feedback_id: str = ""
 
 
 def main() -> None:
@@ -342,6 +343,7 @@ def _dry_run_preflight_error_report(config: DryRunConfig, stage: str, error: Map
 
 
 def load_api_feedback_rows(config: DryRunConfig) -> dict[str, Any]:
+    target_feedback_id = str(getattr(config, "target_feedback_id", "") or "").strip()
     report: dict[str, Any] = {
         "success": False,
         "requested": {
@@ -350,11 +352,14 @@ def load_api_feedback_rows(config: DryRunConfig) -> dict[str, Any]:
             "stars": list(config.stars),
             "is_answered": config.is_answered,
             "max_api_rows": config.max_api_rows,
+            "target_feedback_id": target_feedback_id,
         },
         "row_count": 0,
         "total_available_rows": 0,
         "limited": False,
         "feedback_id_available": False,
+        "target_feedback_id_loaded": False,
+        "target_included_beyond_limit": False,
         "rows": [],
         "meta": {},
         "blocker": "",
@@ -373,6 +378,13 @@ def load_api_feedback_rows(config: DryRunConfig) -> dict[str, Any]:
 
     all_rows = [row for row in payload.get("rows") or [] if isinstance(row, dict)]
     rows = all_rows[: config.max_api_rows]
+    target_included_beyond_limit = False
+    if target_feedback_id and target_feedback_id not in {str(row.get("feedback_id") or "") for row in rows}:
+        target_row = next((row for row in all_rows if str(row.get("feedback_id") or "") == target_feedback_id), None)
+        if target_row is not None:
+            rows = [*rows[: max(0, config.max_api_rows - 1)], target_row]
+            target_included_beyond_limit = True
+    target_loaded = bool(target_feedback_id and any(str(row.get("feedback_id") or "") == target_feedback_id for row in rows))
     report.update(
         {
             "success": True,
@@ -380,6 +392,8 @@ def load_api_feedback_rows(config: DryRunConfig) -> dict[str, Any]:
             "total_available_rows": len(all_rows),
             "limited": len(all_rows) > len(rows),
             "feedback_id_available": any(bool(row.get("feedback_id")) for row in rows),
+            "target_feedback_id_loaded": target_loaded,
+            "target_included_beyond_limit": target_included_beyond_limit,
             "rows": rows,
             "meta": payload.get("meta") or {},
             "summary": payload.get("summary") or {},

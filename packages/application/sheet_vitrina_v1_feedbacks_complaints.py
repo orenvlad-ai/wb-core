@@ -1234,6 +1234,7 @@ def _submit_selected_row_result(feedback_id: str, submit_report: Mapping[str, An
     candidate = next((item for item in candidates if isinstance(item, Mapping) and str(item.get("feedback_id") or "") == feedback_id), {})
     modal = candidate.get("modal") if isinstance(candidate.get("modal"), Mapping) else {}
     aggregate = submit_report.get("aggregate") if isinstance(submit_report.get("aggregate"), Mapping) else {}
+    runner_error = _submit_report_row_error_text(feedback_id, submit_report)
     return {
         "feedback_id": feedback_id,
         "status": "submitted" if modal.get("submit_success") else "skipped",
@@ -1241,7 +1242,7 @@ def _submit_selected_row_result(feedback_id: str, submit_report: Mapping[str, An
         "submit_clicked": bool(modal.get("submit_clicked")),
         "submit_result": _safe_text(modal.get("submit_result"), 120),
         "skip_reason": _safe_text(candidate.get("skip_reason"), 600),
-        "block_reason": _safe_text(modal.get("blocker") or submit_report.get("final_conclusion"), 600),
+        "block_reason": _safe_text(modal.get("blocker") or runner_error or submit_report.get("final_conclusion"), 600),
         "complaint_action_found": bool(modal.get("complaint_action_found") or modal.get("modal_opened")),
         "complaint_action_available": bool(modal.get("complaint_action_available") or modal.get("modal_opened")),
         "complaint_action_disabled": bool(modal.get("complaint_action_disabled")),
@@ -1260,6 +1261,26 @@ def _submit_selected_row_result(feedback_id: str, submit_report: Mapping[str, An
         "runner_artifacts": dict(submit_report.get("artifact_paths") or {}) if isinstance(submit_report.get("artifact_paths"), Mapping) else {},
         "runner_aggregate": dict(aggregate),
     }
+
+
+def _submit_report_row_error_text(feedback_id: str, submit_report: Mapping[str, Any]) -> str:
+    errors = submit_report.get("errors") if isinstance(submit_report.get("errors"), list) else []
+    first_error: Mapping[str, Any] | None = None
+    for item in errors:
+        if not isinstance(item, Mapping):
+            continue
+        error_feedback_id = str(item.get("feedback_id") or "").strip()
+        if error_feedback_id and error_feedback_id != feedback_id:
+            continue
+        first_error = item
+        break
+    if first_error is None:
+        return ""
+    stage = _safe_text(first_error.get("stage"), 120)
+    code = _safe_text(first_error.get("code"), 120)
+    message = _safe_text(first_error.get("message"), 600)
+    parts = [part for part in (stage, code, message) if part]
+    return ": ".join(parts)
 
 
 def _submit_events_from_submit_report(feedback_id: str, submit_report: Mapping[str, Any], row_result: Mapping[str, Any]) -> list[dict[str, Any]]:

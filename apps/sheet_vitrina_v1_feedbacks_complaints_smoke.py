@@ -37,6 +37,7 @@ from packages.application.sheet_vitrina_v1_feedbacks_complaints import (  # noqa
     SheetVitrinaV1FeedbacksComplaintsError,
     SheetVitrinaV1FeedbacksComplaintsBlock,
     _submit_events_from_submit_report,
+    _submit_selected_row_result,
     _submit_skip_event_code,
 )
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
@@ -49,6 +50,7 @@ def main() -> None:
     _assert_table_contract_and_fake_async_sync()
     _assert_fake_submit_selected_job()
     _assert_submit_selected_skip_event_shape()
+    _assert_submit_selected_row_preserves_runner_error_reason()
     _assert_global_seller_portal_lock_blocks_public_jobs()
     _assert_submit_job_store_keeps_fresh_active_jobs()
     _assert_duplicate_running_job_guard()
@@ -238,6 +240,26 @@ def _assert_submit_selected_skip_event_shape() -> None:
         raise AssertionError(f"candidate-level not-actionable skip must not emit duplicate row_error: {events}")
     if _submit_skip_event_code(str(row["block_reason"])) != "row_skipped_not_actionable":
         raise AssertionError("not-actionable blocker must be classified as a controlled skip")
+
+
+def _assert_submit_selected_row_preserves_runner_error_reason() -> None:
+    report = {
+        "run_id": "submit-run",
+        "final_conclusion": "no_safe_candidate",
+        "aggregate": {"submitted_count": 0, "skipped_count": 0, "error_count": 0},
+        "candidates": [],
+        "errors": [
+            {
+                "stage": "target_feedback_id",
+                "code": "target_not_in_api_rows",
+                "message": "target feedback_id feedback-late was not loaded by requested API filters",
+            }
+        ],
+    }
+    row = _submit_selected_row_result("feedback-late", report)
+    expected = "target_feedback_id: target_not_in_api_rows: target feedback_id feedback-late was not loaded by requested API filters"
+    if row["block_reason"] != expected:
+        raise AssertionError(f"runner row error must be preserved before generic final conclusion: {row}")
 
 
 def _assert_submit_job_store_keeps_fresh_active_jobs() -> None:

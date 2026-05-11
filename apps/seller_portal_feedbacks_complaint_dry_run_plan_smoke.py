@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import apps.seller_portal_feedbacks_complaint_dry_run_plan as dry_run_plan  # noqa: E402
 from apps.seller_portal_feedbacks_complaint_dry_run_plan import (  # noqa: E402
     FEEDBACKS_ANSWERED_TAB_LABEL,
     FEEDBACKS_TAB_LABEL,
@@ -51,6 +52,7 @@ from playwright.sync_api import sync_playwright  # noqa: E402
 
 def main() -> None:
     _assert_candidate_selection()
+    _assert_target_feedback_id_survives_api_row_limit()
     _assert_exact_only_guard()
     _assert_visible_row_cursor_guard()
     _assert_actionability_tab_plan()
@@ -90,6 +92,53 @@ def _assert_candidate_selection() -> None:
     denied_records = build_candidate_records([_api("GPe9vrq0kctlSfobrgq2")], {"GPe9vrq0kctlSfobrgq2": _ai("GPe9vrq0kctlSfobrgq2", "yes")}, [], deny_feedback_ids=deny)
     if "hard-denylisted" not in denied_records[0].get("skip_reason", ""):
         raise AssertionError(f"default historical denylist must block dry-run candidate: {denied_records}")
+
+
+def _assert_target_feedback_id_survives_api_row_limit() -> None:
+    class FakeFeedbacksBlock:
+        def build(self, **_kwargs: object) -> dict[str, object]:
+            return {
+                "rows": [
+                    _api("newer-1"),
+                    _api("newer-2"),
+                    _api("target-late"),
+                ],
+                "meta": {},
+                "summary": {},
+            }
+
+    original_block = dry_run_plan.SheetVitrinaV1FeedbacksBlock
+    dry_run_plan.SheetVitrinaV1FeedbacksBlock = FakeFeedbacksBlock  # type: ignore[assignment]
+    try:
+        report = dry_run_plan.load_api_feedback_rows(
+            DryRunConfig(
+                date_from="2026-05-01",
+                date_to="2026-05-01",
+                stars=(1,),
+                is_answered="all",
+                max_api_rows=2,
+                max_ai_candidates=1,
+                force_category_other=False,
+                mode=NO_SUBMIT_MODE,
+                runtime_dir=Path(".runtime"),
+                storage_state_path=Path(".runtime/storage_state.json"),
+                wb_bot_python=Path("wb_bot.py"),
+                output_dir=Path(".runtime/reports"),
+                start_url="https://seller.wildberries.ru",
+                headless=True,
+                timeout_ms=5000,
+                write_artifacts=False,
+                deny_feedback_ids=normalize_deny_feedback_ids([]),
+                target_feedback_id="target-late",
+            )
+        )
+    finally:
+        dry_run_plan.SheetVitrinaV1FeedbacksBlock = original_block  # type: ignore[assignment]
+    loaded_ids = [str(row.get("feedback_id") or "") for row in report.get("rows", []) if isinstance(row, dict)]
+    if loaded_ids != ["newer-1", "target-late"]:
+        raise AssertionError(f"target feedback_id must replace the capped tail row: {report}")
+    if not report.get("target_feedback_id_loaded") or not report.get("target_included_beyond_limit"):
+        raise AssertionError(f"target inclusion beyond max_api_rows must be explicit: {report}")
 
 
 def _assert_exact_only_guard() -> None:
