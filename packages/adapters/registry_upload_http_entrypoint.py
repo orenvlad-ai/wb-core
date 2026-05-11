@@ -307,6 +307,9 @@ def _build_handler(
                     async_requested = _resolve_async_requested(payload)
                     auto_load_requested = _resolve_auto_load_requested(payload)
                     auto_refresh_requested = _resolve_auto_refresh_requested(payload)
+                    auto_schedule_id = _resolve_auto_schedule_id(payload)
+                    auto_schedule_due_at = _resolve_auto_schedule_due_at(payload)
+                    auto_trigger_source = _resolve_auto_trigger_source(payload)
                 except ValueError as exc:
                     _write_json_response(
                         self,
@@ -317,10 +320,17 @@ def _build_handler(
 
                 if async_requested:
                     try:
-                        job_payload = entrypoint.start_sheet_refresh_job(
-                            as_of_date=as_of_date or None,
-                            auto_load=auto_refresh_requested,
-                        )
+                        if auto_refresh_requested and auto_schedule_id:
+                            job_payload = entrypoint.start_sheet_scheduled_auto_update_job(
+                                schedule_id=auto_schedule_id,
+                                due_at=auto_schedule_due_at,
+                                trigger_source=auto_trigger_source or "scheduled",
+                            )
+                        else:
+                            job_payload = entrypoint.start_sheet_refresh_job(
+                                as_of_date=as_of_date or None,
+                                auto_load=auto_refresh_requested,
+                            )
                     except Exception as exc:  # pragma: no cover - bounded fallback
                         _write_json_response(
                             self,
@@ -337,10 +347,17 @@ def _build_handler(
                     return
 
                 try:
-                    refresh_result = entrypoint.handle_sheet_refresh_request(
-                        as_of_date=as_of_date or None,
-                        auto_load=auto_refresh_requested,
-                    )
+                    if auto_refresh_requested and auto_schedule_id:
+                        refresh_result = entrypoint.handle_sheet_scheduled_auto_update_request(
+                            schedule_id=auto_schedule_id,
+                            due_at=auto_schedule_due_at,
+                            trigger_source=auto_trigger_source or "scheduled",
+                        )
+                    else:
+                        refresh_result = entrypoint.handle_sheet_refresh_request(
+                            as_of_date=as_of_date or None,
+                            auto_load=auto_refresh_requested,
+                        )
                 except ValueError as exc:
                     _write_json_response(
                         self,
@@ -2024,6 +2041,39 @@ def _resolve_auto_refresh_requested(payload: Mapping[str, Any]) -> bool:
     if not isinstance(raw, bool):
         raise ValueError("auto_refresh must be boolean when provided")
     return raw
+
+
+def _resolve_auto_schedule_id(payload: Mapping[str, Any]) -> str:
+    if "schedule_id" not in payload:
+        return ""
+    raw = payload["schedule_id"]
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        raise ValueError("schedule_id must be a string when provided")
+    return raw.strip()
+
+
+def _resolve_auto_schedule_due_at(payload: Mapping[str, Any]) -> str:
+    if "due_at" not in payload:
+        return ""
+    raw = payload["due_at"]
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        raise ValueError("due_at must be a string when provided")
+    return raw.strip()
+
+
+def _resolve_auto_trigger_source(payload: Mapping[str, Any]) -> str:
+    if "trigger_source" not in payload:
+        return ""
+    raw = payload["trigger_source"]
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        raise ValueError("trigger_source must be a string when provided")
+    return raw.strip()[:80]
 
 
 def _resolve_replace_requested(payload: Mapping[str, Any]) -> bool:

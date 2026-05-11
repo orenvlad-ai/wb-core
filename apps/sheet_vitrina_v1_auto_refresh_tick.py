@@ -83,7 +83,13 @@ def main(argv: list[str] | None = None) -> int:
         try:
             refresh_result = _post_json(
                 base_url + refresh_path,
-                {"async": True, "auto_refresh": True, "trigger_source": "runtime_auto_refresh_schedule", "schedule_id": schedule_id},
+                {
+                    "async": True,
+                    "auto_refresh": True,
+                    "trigger_source": "scheduled",
+                    "schedule_id": schedule_id,
+                    "due_at": due_at,
+                },
                 cookie=cookie,
                 timeout=min(args.timeout_seconds, 60),
             )
@@ -108,12 +114,13 @@ def main(argv: list[str] | None = None) -> int:
                 terminal = refresh_result
             status = str(terminal.get("status") or "").lower()
             error = str(terminal.get("error") or "")
-            block.mark_run_finished(
-                schedule_id,
-                finished_at=_utc_now(),
-                result_payload=terminal,
-                error=error if status == "error" else "",
-            )
+            if not _terminal_contains_server_schedule_update(terminal):
+                block.mark_run_finished(
+                    schedule_id,
+                    finished_at=_utc_now(),
+                    result_payload=terminal,
+                    error=error if status == "error" else "",
+                )
             if status == "error":
                 exit_code = 1
             results.append({"schedule_id": schedule_id, "due_at": due_at, "job_id": job_id, "status": status or terminal.get("semantic_status") or "success"})
@@ -133,7 +140,11 @@ def _read_env_file(path: Path) -> dict[str, str]:
     if not path.exists():
         return {}
     values: dict[str, str] = {}
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    for raw in lines:
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -238,6 +249,11 @@ def _utc_now() -> str:
 def _public_due(item: tuple[Mapping[str, Any], str]) -> dict[str, Any]:
     schedule, due_at = item
     return {"schedule_id": schedule.get("id") or "", "local_time_hhmm": schedule.get("local_time_hhmm") or "", "due_at": due_at}
+
+
+def _terminal_contains_server_schedule_update(payload: Mapping[str, Any]) -> bool:
+    result = payload.get("result") if isinstance(payload.get("result"), Mapping) else {}
+    return isinstance(result.get("auto_schedule"), Mapping) or isinstance(payload.get("auto_schedule"), Mapping)
 
 
 def _print(payload: Mapping[str, Any]) -> None:

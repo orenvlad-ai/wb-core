@@ -74,6 +74,20 @@ def main() -> None:
                     first_group=first_group,
                 ),
             )
+        runtime.save_sheet_vitrina_manual_refresh_result(
+            result_payload={"status": "success"},
+            refreshed_at="2026-04-20T12:06:00Z",
+        )
+        runtime.save_sheet_vitrina_auto_update_result(
+            started_at="2026-04-20T13:00:00Z",
+            finished_at="2026-04-20T13:10:00Z",
+            status="success",
+            as_of_date="2026-04-20",
+            snapshot_id="web-vitrina-page-composition-fixture-2026-04-20",
+            refreshed_at="2026-04-20T13:09:00Z",
+            error=None,
+            result_payload={"status": "success", "semantic_status": "success"},
+        )
 
         contract = SheetVitrinaV1WebVitrinaBlock(
             runtime=runtime,
@@ -222,8 +236,12 @@ def main() -> None:
             raise AssertionError(f"period summary card value kind mismatch, got {summary_cards['period']}")
         if summary_cards["period"]["detail"] != "2026-04-20T12:05:00Z":
             raise AssertionError(f"period summary card detail mismatch, got {summary_cards['period']}")
-        if "freshness" in summary_cards or "rows" in summary_cards or "snapshot" in summary_cards:
-            raise AssertionError(f"freshness/rows/snapshot summary cards must be folded into compact strip, got {summary_cards}")
+        if summary_cards["data_freshness"]["label"] != "Свежесть данных":
+            raise AssertionError(f"data freshness label mismatch, got {summary_cards['data_freshness']}")
+        if summary_cards["data_freshness"]["value"] != "2026-04-20T13:10:00Z":
+            raise AssertionError(f"data freshness must use latest successful auto/manual trigger, got {summary_cards['data_freshness']}")
+        if "rows" in summary_cards or "snapshot" in summary_cards:
+            raise AssertionError(f"rows/snapshot summary cards must be folded into compact strip, got {summary_cards}")
         activity_surface = composition["activity_surface"]
         if activity_surface["log_block"]["title"] != "Лог" or not activity_surface["log_block"]["download_path"]:
             raise AssertionError(f"activity log block mismatch, got {activity_surface['log_block']}")
@@ -385,6 +403,8 @@ def main() -> None:
             raise AssertionError(f"error period card label mismatch, got {error_summary_cards}")
         if "table payload is unavailable" not in error_summary_cards["period"]["detail"]:
             raise AssertionError(f"error period card detail mismatch, got {error_summary_cards}")
+        if error_summary_cards["data_freshness"]["value"] != "нет данных":
+            raise AssertionError(f"error data freshness must expose unknown state, got {error_summary_cards}")
         if error_payload["activity_surface"]["log_block"]["title"] != "Лог":
             raise AssertionError(f"error composition activity surface mismatch, got {error_payload['activity_surface']}")
 
