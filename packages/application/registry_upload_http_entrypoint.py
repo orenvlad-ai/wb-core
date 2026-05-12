@@ -992,6 +992,26 @@ class RegistryUploadHttpEntrypoint:
             ),
         )
 
+    def start_sheet_auto_refresh_job(
+        self,
+        as_of_date: str | None = None,
+        *,
+        schedule_id: str = "",
+        due_at: str = "",
+        trigger_source: str = "scheduled",
+    ) -> dict[str, Any]:
+        resolved_schedule_id, resolved_due_at = self._resolve_auto_refresh_schedule_context(
+            schedule_id=schedule_id,
+            due_at=due_at,
+        )
+        if resolved_schedule_id:
+            return self.start_sheet_scheduled_auto_update_job(
+                schedule_id=resolved_schedule_id,
+                due_at=resolved_due_at,
+                trigger_source=trigger_source or "scheduled",
+            )
+        return self.start_sheet_refresh_job(as_of_date=as_of_date, auto_load=True)
+
     def start_sheet_scheduled_auto_update_job(
         self,
         *,
@@ -1009,6 +1029,55 @@ class RegistryUploadHttpEntrypoint:
                 log=log,
             ),
         )
+
+    def handle_sheet_auto_refresh_request(
+        self,
+        as_of_date: str | None = None,
+        *,
+        schedule_id: str = "",
+        due_at: str = "",
+        trigger_source: str = "scheduled",
+    ) -> dict[str, Any]:
+        resolved_schedule_id, resolved_due_at = self._resolve_auto_refresh_schedule_context(
+            schedule_id=schedule_id,
+            due_at=due_at,
+        )
+        if resolved_schedule_id:
+            return self.handle_sheet_scheduled_auto_update_request(
+                schedule_id=resolved_schedule_id,
+                due_at=resolved_due_at,
+                trigger_source=trigger_source or "scheduled",
+            )
+        return self.handle_sheet_refresh_request(as_of_date=as_of_date, auto_load=True)
+
+    def _resolve_auto_refresh_schedule_context(
+        self,
+        *,
+        schedule_id: str,
+        due_at: str,
+    ) -> tuple[str, str]:
+        normalized_schedule_id = str(schedule_id or "").strip()
+        if normalized_schedule_id:
+            self.sheet_auto_refresh_schedules_block.get_schedule(normalized_schedule_id)
+            return normalized_schedule_id, str(due_at or "").strip()
+        due = sorted(
+            self.sheet_auto_refresh_schedules_block.due_schedules(now=self.now_factory()),
+            key=lambda item: str(item[1] or ""),
+        )
+        if not due:
+            return "", ""
+        if len(due) > 1:
+            for missed_schedule, missed_due_at in due[:-1]:
+                missed_schedule_id = str(missed_schedule.get("id") or "")
+                if missed_schedule_id:
+                    self.sheet_auto_refresh_schedules_block.mark_due_skipped(
+                        missed_schedule_id,
+                        due_at=str(missed_due_at or ""),
+                        reason="missed because a later auto-refresh due slot was selected for this raw auto_refresh call",
+                        trigger_source="raw_auto_refresh_missed_due",
+                    )
+        schedule, resolved_due_at = due[-1]
+        return str(schedule.get("id") or ""), str(resolved_due_at or "")
 
     def start_sheet_load_job(self, as_of_date: str | None = None) -> dict[str, Any]:
         del as_of_date

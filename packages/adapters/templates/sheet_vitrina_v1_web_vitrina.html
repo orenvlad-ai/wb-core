@@ -2325,6 +2325,11 @@
       text-align: center;
     }
 
+    .vitrina-table th[data-col-id="section"],
+    .vitrina-table td[data-col-id="section"] {
+      border-left: 1px solid var(--border-strong);
+    }
+
     .vitrina-table td[data-col-id="scope_label"],
     .vitrina-table td[data-col-id="metric_label"],
     .vitrina-table td[data-col-id="scope_key"],
@@ -2652,6 +2657,10 @@
     }
 
     .vitrina-table tbody tr:hover td {
+      background: #181c23;
+    }
+
+    .vitrina-table tbody tr:hover .table-cell-sticky {
       background: #181c23;
     }
 
@@ -5566,9 +5575,10 @@
       return String((card && card.value) || "");
     }
 
-    function formatTimestampDisplay(value) {
+    function formatTimestampDisplay(value, options) {
+      const timezone = options && options.timezone ? String(options.timezone) : "";
       if (value instanceof Date && !Number.isNaN(value.getTime())) {
-        return formatClientTimestamp(value);
+        return formatClientTimestamp(value, timezone);
       }
       const text = String(value || "").trim();
       if (!text) {
@@ -5578,16 +5588,25 @@
       if (Number.isNaN(parsed.getTime())) {
         return text;
       }
-      return formatClientTimestamp(parsed);
+      return formatClientTimestamp(parsed, timezone);
     }
 
-    function formatClientTimestamp(dateValue) {
-      const formatted = new Intl.DateTimeFormat("ru-RU", {
+    function formatClientTimestamp(dateValue, timezoneOverride) {
+      const timezone = String(timezoneOverride || "").trim();
+      const formatOptions = {
         dateStyle: "short",
         timeStyle: "medium"
-      }).format(dateValue);
-      const timezone = browserTimezoneLabel();
-      return timezone ? formatted + " (" + timezone + ")" : formatted;
+      };
+      if (timezone) {
+        formatOptions.timeZone = timezone;
+      }
+      const formatted = new Intl.DateTimeFormat("ru-RU", formatOptions).format(dateValue);
+      const label = timezone || browserTimezoneLabel();
+      return label ? formatted + " (" + label + ")" : formatted;
+    }
+
+    function formatScheduleTimestampDisplay(value, timezone) {
+      return formatTimestampDisplay(value, {timezone: timezone || "Asia/Yekaterinburg"});
     }
 
     function browserTimezoneLabel() {
@@ -8630,10 +8649,11 @@
 
     function renderVitrinaAutoSchedules() {
       const model = state.vitrinaAuto || {};
+      const scheduleTimezone = model.timezone || "Asia/Yekaterinburg";
       if (vitrinaAutoMetaNode) {
         const parts = [
-          "Часовой пояс: " + (model.timezone || "Asia/Yekaterinburg"),
-          model.nextAutoRunAt ? ("следующий запуск " + formatTimestampDisplay(model.nextAutoRunAt)) : "",
+          "Часовой пояс: " + scheduleTimezone,
+          model.nextAutoRunAt ? ("следующий запуск " + formatScheduleTimestampDisplay(model.nextAutoRunAt, scheduleTimezone)) : "",
           model.scheduleMode || "runtime_managed_json_schedule"
         ];
         vitrinaAutoMetaNode.textContent = model.loading ? "Расписание загружается…" : parts.filter(Boolean).join(" · ");
@@ -8641,8 +8661,8 @@
       if (vitrinaAutoStatusNode) {
         const statusParts = [
           model.lastAutoStatus ? ("последний статус: " + model.lastAutoStatus) : "",
-          model.lastAutoRunAt ? ("последний запуск: " + formatTimestampDisplay(model.lastAutoRunAt)) : "",
-          model.lastAutoSuccessAt ? ("последний успех: " + formatTimestampDisplay(model.lastAutoSuccessAt)) : ""
+          model.lastAutoRunAt ? ("последний запуск: " + formatScheduleTimestampDisplay(model.lastAutoRunAt, scheduleTimezone)) : "",
+          model.lastAutoSuccessAt ? ("последний успех: " + formatScheduleTimestampDisplay(model.lastAutoSuccessAt, scheduleTimezone)) : ""
         ].filter(Boolean);
         vitrinaAutoStatusNode.textContent = model.saving
           ? "Сохраняем…"
@@ -8686,15 +8706,16 @@
       vitrinaAutoSchedulesBodyNode.innerHTML = schedules.map(function(schedule) {
         const id = String(schedule.id || "");
         const editable = !!schedule.editable || !!model.canEditRuntime;
+        const rowTimezone = schedule.timezone || scheduleTimezone;
         const statusText = schedule.last_status_label || schedule.last_status || schedule.status || (schedule.enabled ? "active" : "disabled");
         const errorText = schedule.last_error_summary || schedule.last_error || "";
         return [
           "<tr>",
           '<td><input type="checkbox" data-vitrina-auto-id="' + escapeHtml(id) + '" data-vitrina-auto-field="enabled"' + (schedule.enabled ? " checked" : "") + (editable ? "" : " disabled") + "></td>",
           '<td><input class="input" type="time" value="' + escapeHtml(schedule.local_time_hhmm || "12:00") + '" data-vitrina-auto-id="' + escapeHtml(id) + '" data-vitrina-auto-field="local_time_hhmm"' + (editable ? "" : " disabled") + "></td>",
-          "<td>" + escapeHtml(schedule.next_run_at ? formatTimestampDisplay(schedule.next_run_at) : "—") + "</td>",
-          "<td>" + escapeHtml(schedule.last_run_at ? formatTimestampDisplay(schedule.last_run_at) : "—") + "</td>",
-          "<td>" + escapeHtml(schedule.last_success_at ? formatTimestampDisplay(schedule.last_success_at) : "—") + "</td>",
+          "<td>" + escapeHtml(schedule.next_run_at ? formatScheduleTimestampDisplay(schedule.next_run_at, rowTimezone) : "—") + "</td>",
+          "<td>" + escapeHtml(schedule.last_run_at ? formatScheduleTimestampDisplay(schedule.last_run_at, rowTimezone) : "—") + "</td>",
+          "<td>" + escapeHtml(schedule.last_success_at ? formatScheduleTimestampDisplay(schedule.last_success_at, rowTimezone) : "—") + "</td>",
           "<td>" + escapeHtml(statusText) + (errorText ? '<div class="auto-schedule-row-error">' + escapeHtml(errorText) + "</div>" : "") + "</td>",
           '<td><button class="button ghost" type="button" data-vitrina-auto-run-now="' + escapeHtml(id) + '"' + (model.runNowSupported ? "" : " disabled") + '>Запустить</button> ' +
             '<button class="button ghost" type="button" data-vitrina-auto-delete="' + escapeHtml(id) + '"' + (editable ? "" : " disabled") + '>Удалить</button></td>',

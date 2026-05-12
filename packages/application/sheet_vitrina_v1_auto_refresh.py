@@ -163,6 +163,28 @@ class SheetVitrinaV1AutoRefreshSchedulesBlock:
             patch["last_error_at"] = finished_at
         self._patch_schedule(schedule_id, patch)
 
+    def mark_due_skipped(
+        self,
+        schedule_id: str,
+        *,
+        due_at: str,
+        reason: str,
+        trigger_source: str = "scheduled",
+    ) -> None:
+        self._patch_schedule(
+            schedule_id,
+            {
+                "last_due_at": due_at,
+                "last_status": "skipped",
+                "last_status_label": "Пропущено",
+                "last_technical_status": "skipped",
+                "last_error": "",
+                "last_error_summary": reason,
+                "last_result_summary": reason,
+                "last_trigger_source": trigger_source,
+            },
+        )
+
     def _patch_schedule(self, schedule_id: str, patch: Mapping[str, Any]) -> None:
         normalized_id = str(schedule_id or "").strip()
         now = _iso_now(self.now_factory)
@@ -342,28 +364,46 @@ def _summarize(
     latest_error = _max_by_timestamp(schedules, "last_error_at")
     next_run = _min_by_timestamp([item for item in schedules if bool(item.get("enabled", True))], "next_run_at")
     auto_context = auto_context or {}
-    last_status = (
-        str(latest_run.get("last_status") or "").strip()
-        if latest_run
-        else str(auto_context.get("last_auto_run_status") or "never")
+    context_last_run_at = str(auto_context.get("last_auto_run_time") or "")
+    schedule_last_run_at = str(latest_run.get("last_run_at") or "")
+    context_has_newer_run = _timestamp_is_newer(context_last_run_at, schedule_last_run_at)
+    last_run = {} if context_has_newer_run else latest_run
+    last_status = str(
+        (auto_context.get("last_auto_run_status") if context_has_newer_run else last_run.get("last_status"))
+        or auto_context.get("last_auto_run_status")
+        or "never"
+    ).strip()
+    last_success_at = _latest_timestamp(
+        str((latest_success or {}).get("last_success_at") or ""),
+        str(auto_context.get("last_successful_auto_update_at") or ""),
+    )
+    last_run_at = (
+        context_last_run_at
+        if context_has_newer_run
+        else str((latest_run or {}).get("last_run_at") or auto_context.get("last_auto_run_time") or "")
+    )
+    last_run_finished_at = (
+        str(auto_context.get("last_auto_run_finished_at") or "")
+        if context_has_newer_run
+        else str((latest_run or {}).get("last_finished_at") or auto_context.get("last_auto_run_finished_at") or "")
     )
     return {
         "next_auto_run_at": str((next_run or {}).get("next_run_at") or ""),
-        "last_auto_run_at": str((latest_run or {}).get("last_run_at") or auto_context.get("last_auto_run_time") or ""),
-        "last_auto_run_time": str((latest_run or {}).get("last_run_at") or auto_context.get("last_auto_run_time") or ""),
-        "last_auto_run_finished_at": str((latest_run or {}).get("last_finished_at") or auto_context.get("last_auto_run_finished_at") or ""),
+        "last_auto_run_at": last_run_at,
+        "last_auto_run_time": last_run_at,
+        "last_auto_run_finished_at": last_run_finished_at,
         "last_auto_run_status": last_status,
         "last_auto_run_technical_status": str(
-            (latest_run or {}).get("last_technical_status") or auto_context.get("last_auto_run_technical_status") or ""
+            (last_run or {}).get("last_technical_status") or auto_context.get("last_auto_run_technical_status") or ""
         ),
         "last_auto_run_status_label": _status_label(last_status),
-        "last_auto_run_status_reason": str((latest_run or {}).get("last_result_summary") or auto_context.get("last_auto_run_status_reason") or ""),
-        "last_auto_job_id": str((latest_run or {}).get("last_run_id") or auto_context.get("last_auto_job_id") or ""),
-        "last_successful_auto_update_at": str((latest_success or {}).get("last_success_at") or auto_context.get("last_successful_auto_update_at") or ""),
-        "last_auto_success_at": str((latest_success or {}).get("last_success_at") or auto_context.get("last_successful_auto_update_at") or ""),
+        "last_auto_run_status_reason": str((last_run or {}).get("last_result_summary") or auto_context.get("last_auto_run_status_reason") or ""),
+        "last_auto_job_id": str((last_run or {}).get("last_run_id") or auto_context.get("last_auto_job_id") or ""),
+        "last_successful_auto_update_at": last_success_at,
+        "last_auto_success_at": last_success_at,
         "last_auto_error_at": str((latest_error or {}).get("last_error_at") or ""),
         "last_auto_error_summary": str((latest_error or {}).get("last_error_summary") or ""),
-        "last_auto_run_error": str((latest_run or {}).get("last_error") or auto_context.get("last_auto_run_error") or ""),
+        "last_auto_run_error": str((last_run or {}).get("last_error") or auto_context.get("last_auto_run_error") or ""),
     }
 
 
@@ -425,14 +465,52 @@ def _max_by_timestamp(items: list[Mapping[str, Any]], key: str) -> Mapping[str, 
     candidates = [item for item in items if str(item.get(key) or "").strip()]
     if not candidates:
         return {}
-    return max(candidates, key=lambda item: str(item.get(key) or ""))
+    return max(candidates, key=lambda item: _timestamp_sort_key(str(item.get(key) or "")))
 
 
 def _min_by_timestamp(items: list[Mapping[str, Any]], key: str) -> Mapping[str, Any]:
     candidates = [item for item in items if str(item.get(key) or "").strip()]
     if not candidates:
         return {}
-    return min(candidates, key=lambda item: str(item.get(key) or ""))
+    return min(candidates, key=lambda item: _timestamp_sort_key(str(item.get(key) or "")))
+
+
+def _latest_timestamp(left: str, right: str) -> str:
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    if not left_text:
+        return right_text
+    if not right_text:
+        return left_text
+    return right_text if _timestamp_is_newer(right_text, left_text) else left_text
+
+
+def _timestamp_is_newer(candidate: str, current: str) -> bool:
+    candidate_text = str(candidate or "").strip()
+    current_text = str(current or "").strip()
+    if not candidate_text:
+        return False
+    if not current_text:
+        return True
+    return _timestamp_sort_key(candidate_text) > _timestamp_sort_key(current_text)
+
+
+def _timestamp_sort_key(value: str) -> tuple[int, str]:
+    parsed = _parse_timestamp(value)
+    if parsed is None:
+        return (0, str(value or ""))
+    return (1, parsed.astimezone(timezone.utc).isoformat())
+
+
+def _parse_timestamp(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return _aware_utc(parsed)
 
 
 def _last_due_at(schedule: Mapping[str, Any], now: datetime) -> datetime | None:
@@ -514,4 +592,6 @@ def _status_label(value: str) -> str:
         return "Выполняется"
     if normalized == "pending":
         return "Ожидает"
+    if normalized == "skipped":
+        return "Пропущено"
     return "Ещё не выполнялось"
