@@ -36,6 +36,7 @@ def main() -> None:
             raise AssertionError(f"default schedules mismatch: {initial}")
         if initial["next_auto_run_at"] != "2026-04-20T15:00:00Z":
             raise AssertionError(f"next run must use nearest enabled runtime schedule, got {initial}")
+        _assert_default_timezone_schedule(runtime_dir)
 
         saved = block.save_schedules(
             {
@@ -88,6 +89,20 @@ def main() -> None:
             raise AssertionError(f"successful run metadata mismatch: {final}")
         if final["last_auto_job_id"] != "job-1" or final["last_auto_run_status"] != "success":
             raise AssertionError(f"global run summary mismatch: {final}")
+
+        context_newer = block.build_payload(
+            auto_context={
+                "last_auto_run_status": "success",
+                "last_auto_run_time": "2026-04-21T20:01:00+05:00",
+                "last_auto_run_finished_at": "2026-04-21T20:03:00+05:00",
+                "last_successful_auto_update_at": "2026-04-21T20:03:00+05:00",
+                "last_auto_run_technical_status": "success",
+            }
+        )
+        if context_newer["last_auto_run_at"] != "2026-04-21T20:01:00+05:00":
+            raise AssertionError(f"newer canonical auto-update state must win over stale schedule rows: {context_newer}")
+        if context_newer["last_auto_success_at"] != "2026-04-21T20:03:00+05:00":
+            raise AssertionError(f"newer canonical success must win over stale schedule rows: {context_newer}")
 
         stale_save = block.save_schedules(
             {
@@ -159,6 +174,55 @@ def main() -> None:
             "times": [item["local_time_hhmm"] for item in failed["schedules"]],
             "last_auto_job_id": server_schedule["last_run_id"],
         }, ensure_ascii=False))
+
+
+def _assert_default_timezone_schedule(runtime_dir: Path) -> None:
+    before_11 = SheetVitrinaV1AutoRefreshSchedulesBlock(
+        runtime_dir=runtime_dir / "tz-before-11",
+        now_factory=lambda: datetime(2026, 5, 12, 5, 59, tzinfo=timezone.utc),
+    )
+    if before_11.build_payload()["next_auto_run_at"] != "2026-05-12T06:00:00Z":
+        raise AssertionError("11:00 Asia/Yekaterinburg must map to 06:00Z before the morning run")
+    due_11 = before_11.due_schedules(now=datetime(2026, 5, 12, 6, 1, tzinfo=timezone.utc))
+    if [item[0]["local_time_hhmm"] for item in due_11] != ["11:00"]:
+        raise AssertionError(f"only the 11:00 EKT schedule should be due at 06:01Z, got {due_11}")
+    before_11.mark_run_started(
+        "daily_11_00_ekt",
+        started_at="2026-05-12T06:01:00Z",
+        due_at="2026-05-12T06:00:00Z",
+        run_id="job-morning",
+        trigger_source="scheduled",
+    )
+    if before_11.due_schedules(now=datetime(2026, 5, 12, 6, 2, tzinfo=timezone.utc)):
+        raise AssertionError("a recorded due attempt must not be launched twice in the same due slot")
+
+    before_20 = SheetVitrinaV1AutoRefreshSchedulesBlock(
+        runtime_dir=runtime_dir / "tz-before-20",
+        now_factory=lambda: datetime(2026, 5, 12, 14, 59, tzinfo=timezone.utc),
+    )
+    if before_20.build_payload()["next_auto_run_at"] != "2026-05-12T15:00:00Z":
+        raise AssertionError("20:00 Asia/Yekaterinburg must map to 15:00Z before the evening run")
+    due_20 = before_20.due_schedules(now=datetime(2026, 5, 12, 15, 1, tzinfo=timezone.utc))
+    if [item[0]["local_time_hhmm"] for item in due_20] != ["11:00", "20:00"]:
+        raise AssertionError(f"missed morning plus current evening schedules should be due after 20:00 EKT, got {due_20}")
+    before_20.mark_due_skipped(
+        "daily_11_00_ekt",
+        due_at="2026-05-12T06:00:00Z",
+        reason="fixture missed by later due slot",
+        trigger_source="raw_auto_refresh_missed_due",
+    )
+    due_after_skip = before_20.due_schedules(now=datetime(2026, 5, 12, 15, 2, tzinfo=timezone.utc))
+    if [item[0]["local_time_hhmm"] for item in due_after_skip] != ["20:00"]:
+        raise AssertionError(f"skipped missed schedule must not stay due in the same slot, got {due_after_skip}")
+    skipped = before_20.get_schedule("daily_11_00_ekt")
+    if skipped["last_status"] != "skipped" or skipped["last_run_at"]:
+        raise AssertionError(f"missed schedule skip must not masquerade as a run attempt, got {skipped}")
+    after_20_payload = SheetVitrinaV1AutoRefreshSchedulesBlock(
+        runtime_dir=runtime_dir / "tz-after-20",
+        now_factory=lambda: datetime(2026, 5, 12, 15, 1, tzinfo=timezone.utc),
+    ).build_payload()
+    if after_20_payload["next_auto_run_at"] != "2026-05-13T06:00:00Z":
+        raise AssertionError(f"after 20:00 EKT next run must be next-day 11:00 EKT, got {after_20_payload}")
 
 
 def _assert_payload_identity(payload: dict[str, object]) -> None:

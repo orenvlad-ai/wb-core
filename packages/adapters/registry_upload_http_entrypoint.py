@@ -321,8 +321,9 @@ def _build_handler(
 
                 if async_requested:
                     try:
-                        if auto_refresh_requested and auto_schedule_id:
-                            job_payload = entrypoint.start_sheet_scheduled_auto_update_job(
+                        if auto_refresh_requested:
+                            job_payload = entrypoint.start_sheet_auto_refresh_job(
+                                as_of_date=as_of_date or None,
                                 schedule_id=auto_schedule_id,
                                 due_at=auto_schedule_due_at,
                                 trigger_source=auto_trigger_source or "scheduled",
@@ -348,8 +349,9 @@ def _build_handler(
                     return
 
                 try:
-                    if auto_refresh_requested and auto_schedule_id:
-                        refresh_result = entrypoint.handle_sheet_scheduled_auto_update_request(
+                    if auto_refresh_requested:
+                        refresh_result = entrypoint.handle_sheet_auto_refresh_request(
+                            as_of_date=as_of_date or None,
                             schedule_id=auto_schedule_id,
                             due_at=auto_schedule_due_at,
                             trigger_source=auto_trigger_source or "scheduled",

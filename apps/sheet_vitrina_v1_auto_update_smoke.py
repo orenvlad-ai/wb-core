@@ -124,7 +124,14 @@ def main() -> None:
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=runtime_dir,
             runtime=runtime,
-            activated_at_factory=SequenceTimestampFactory([AUTO_STARTED_AT, AUTO_FINISHED_AT]),
+            activated_at_factory=SequenceTimestampFactory(
+                [
+                    AUTO_STARTED_AT,
+                    "2026-04-13T12:06:01Z",
+                    AUTO_FINISHED_AT,
+                    "2026-04-13T12:07:11Z",
+                ]
+            ),
             refreshed_at_factory=lambda: REFRESHED_AT,
             now_factory=lambda: SERVER_NOW,
             sheet_load_runner=load_runner,
@@ -223,6 +230,18 @@ def main() -> None:
                 raise AssertionError(f"auto_refresh must persist the refresh-only auto result, got {server_context}")
             if status_payload.get("manual_context") != _expected_manual_context():
                 raise AssertionError("status must keep manual timestamps empty after refresh-only daily path")
+            schedules_by_id = {
+                str(item.get("id") or ""): item
+                for item in server_context.get("daily_auto_schedules", [])
+                if isinstance(item, dict)
+            }
+            morning_schedule = schedules_by_id.get("daily_11_00_ekt") or {}
+            if morning_schedule.get("last_due_at") != "2026-04-13T06:00:00Z":
+                raise AssertionError(f"raw auto_refresh must bind the due 11:00 EKT schedule attempt, got {morning_schedule}")
+            if morning_schedule.get("last_status") != refresh_payload.get("semantic_status"):
+                raise AssertionError(f"raw auto_refresh must copy semantic status to due schedule row, got {morning_schedule}")
+            if not morning_schedule.get("last_run_at") or not morning_schedule.get("last_finished_at"):
+                raise AssertionError(f"raw auto_refresh must record due schedule attempt timestamps, got {morning_schedule}")
 
             print(f"auto_load_archived: ok -> {archived_auto_status}")
             print(f"refresh_only: ok -> {refresh_payload['snapshot_id']}")

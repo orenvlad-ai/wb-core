@@ -99,6 +99,34 @@ def main() -> None:
                 wait_until="domcontentloaded",
             )
             page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+            page.locator('tbody td[data-col-id="metric_label"]').first.hover()
+            hover_state = page.evaluate(
+                """() => {
+                  const metric = document.querySelector('tbody td[data-col-id="metric_label"]');
+                  const row = metric ? metric.closest('tr') : null;
+                  const scope = row ? row.querySelector('td[data-col-id="scope_label"]') : null;
+                  const section = row ? row.querySelector('td[data-col-id="section"]') : null;
+                  const date = row ? row.querySelector('td[data-col-id^="date:"]') : null;
+                  const style = node => node ? window.getComputedStyle(node) : null;
+                  return {
+                    scopeBackground: style(scope)?.backgroundColor || '',
+                    metricBackground: style(metric)?.backgroundColor || '',
+                    sectionBackground: style(section)?.backgroundColor || '',
+                    dateBackground: style(date)?.backgroundColor || '',
+                    sectionBorderLeftWidth: style(section)?.borderLeftWidth || '',
+                    sectionBorderLeftColor: style(section)?.borderLeftColor || ''
+                  };
+                }"""
+            )
+            if (
+                hover_state["metricBackground"] != hover_state["dateBackground"]
+                or hover_state["scopeBackground"] != hover_state["dateBackground"]
+                or hover_state["sectionBackground"] != hover_state["dateBackground"]
+                or hover_state["metricBackground"] == "rgb(255, 255, 255)"
+                or hover_state["sectionBorderLeftWidth"] == "0px"
+                or not hover_state["sectionBorderLeftColor"]
+            ):
+                raise AssertionError(f"sticky hover/divider state mismatch: {hover_state}")
             page.locator("[data-load-refresh-button]").click()
             if refresh_requests != [{"async": True}]:
                 raise AssertionError(
