@@ -165,9 +165,13 @@ def main() -> None:
                 "Кратность штук в коробке",
                 "Скачать загруженный файл",
                 "Рассчитать заказ на фабрике",
+                "Сводка поставок",
+                "Общее количество товаров",
             ):
                 if expected not in operator_html:
                     raise AssertionError(f"operator page must expose {expected!r}")
+            if "window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30000)" not in operator_html:
+                raise AssertionError("operator XLSX downloads must keep blob URLs alive long enough for browser save")
             if "https://docs.google.com/spreadsheets/d/" in operator_html:
                 raise AssertionError("factory-order operator surface must not expose legacy Google Sheets as an active link")
             if (
@@ -201,6 +205,9 @@ def main() -> None:
             stock_rows = read_first_sheet_rows(stock_template_bytes)
             if len(stock_rows) - 1 != len(active_nm_ids):
                 raise AssertionError("stock_ff template must be prefilled with active SKU rows")
+            inbound_factory_template_rows = read_first_sheet_rows(inbound_factory_bytes)
+            if inbound_factory_template_rows[0][-1] != "Поставка":
+                raise AssertionError("inbound_factory template must include a shipment column for summary grouping")
 
             stock_upload_rows = [list(row) for row in stock_rows]
             for row in stock_upload_rows[1:]:
@@ -263,6 +270,8 @@ def main() -> None:
                 or inbound_factory_zero_upload_payload.get("ignored_row_count") != 2
             ):
                 raise AssertionError("zero-only inbound_factory upload must be accepted as an empty dataset")
+            if inbound_factory_zero_upload_payload.get("shipment_summary"):
+                raise AssertionError("zero-only inbound_factory upload must expose an empty shipment summary")
 
             inbound_ff_to_wb_zero_rows = read_first_sheet_rows(inbound_ff_to_wb_bytes)
             inbound_ff_to_wb_zero_rows = [
@@ -289,6 +298,8 @@ def main() -> None:
             zero_only_inbound_ff_to_wb_state = zero_only_status_payload.get("datasets", {}).get("inbound_ff_to_wb", {})
             if zero_only_inbound_factory_state.get("row_count") != 0 or zero_only_inbound_ff_to_wb_state.get("row_count") != 0:
                 raise AssertionError("zero-only inbound uploads must persist as uploaded datasets with row_count=0")
+            if zero_only_inbound_factory_state.get("shipment_summary"):
+                raise AssertionError("zero-only inbound_factory status must expose an empty shipment summary")
 
             calc_zero_only_status, calc_zero_only_payload = _post_json(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
@@ -313,9 +324,10 @@ def main() -> None:
             inbound_factory_rows = read_first_sheet_rows(inbound_factory_bytes)
             inbound_factory_rows = [
                 inbound_factory_rows[0],
-                [210183919, "SKU 1", 40, "2026-04-25", ""],
-                [210184534, "SKU 2", 0, "", ""],
-                [210183919, "SKU 1", 12, "2026-05-05", ""],
+                [210183919, "SKU 1", 40, "2026-04-25", "", "Поставка A"],
+                [210184534, "SKU 2", 15, "2026-04-25", "", "Поставка A"],
+                [210184534, "SKU 2", 0, "", "", ""],
+                [210183919, "SKU 1", 12, "2026-05-05", "", ""],
             ]
             inbound_factory_upload_status, inbound_factory_upload_payload = _post_multipart(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FACTORY_PATH}",
@@ -324,10 +336,22 @@ def main() -> None:
             )
             if (
                 inbound_factory_upload_status != 200
-                or inbound_factory_upload_payload.get("accepted_row_count") != 2
+                or inbound_factory_upload_payload.get("accepted_row_count") != 3
                 or inbound_factory_upload_payload.get("ignored_row_count") != 1
             ):
-                raise AssertionError("inbound_factory upload must ignore zero rows and keep multiple positive rows per SKU")
+                raise AssertionError("inbound_factory upload must ignore zero rows and aggregate positive rows by shipment")
+            upload_summary = inbound_factory_upload_payload.get("shipment_summary")
+            if (
+                not isinstance(upload_summary, list)
+                or len(upload_summary) != 2
+                or upload_summary[0].get("shipment") != "Поставка A"
+                or upload_summary[0].get("total_quantity") != 55.0
+                or upload_summary[0].get("acceptance_date") != "2026-04-25"
+                or upload_summary[1].get("shipment") != "Поставка №1"
+                or upload_summary[1].get("total_quantity") != 12.0
+                or upload_summary[1].get("acceptance_date") != "2026-05-05"
+            ):
+                raise AssertionError(f"inbound_factory upload must return sanitized shipment summary, got {upload_summary}")
 
             inbound_ff_to_wb_rows = read_first_sheet_rows(inbound_ff_to_wb_bytes)
             inbound_ff_to_wb_rows = [
@@ -361,6 +385,12 @@ def main() -> None:
                 raise AssertionError("status must expose the current uploaded file download path")
             if inbound_factory_state.get("delete_path") != DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FACTORY_PATH:
                 raise AssertionError("status must expose the delete path")
+            status_summary = inbound_factory_state.get("shipment_summary")
+            if (
+                not isinstance(status_summary, list)
+                or [item.get("total_quantity") for item in status_summary] != [55.0, 12.0]
+            ):
+                raise AssertionError(f"status must expose the persisted inbound_factory shipment summary, got {status_summary}")
 
             current_inbound_status, _, current_inbound_headers = _get_bytes(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_UPLOADED_INBOUND_FACTORY_PATH}"
@@ -398,6 +428,9 @@ def main() -> None:
             )
             if recommendation_status != 200 or "spreadsheetml.sheet" not in str(recommendation_headers.get("Content-Type", "")):
                 raise AssertionError("recommendation route must return XLSX after calculation")
+            recommendation_disposition = str(recommendation_headers.get("Content-Disposition", ""))
+            if "attachment" not in recommendation_disposition or "factory-order-recommendation-2026-04-18.xlsx" not in recommendation_disposition:
+                raise AssertionError("recommendation route must return an attachment filename matching the calculated result")
             recommendation_rows = read_first_sheet_rows(recommendation_bytes)
             if recommendation_rows[-3][0] != "Общее количество":
                 raise AssertionError("recommendation workbook summary must stay aligned with UI summary")

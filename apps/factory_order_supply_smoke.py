@@ -131,8 +131,9 @@ def main() -> None:
             "Количество в пути",
             "Планируемая дата прихода на ФФ",
             "Комментарий",
+            "Поставка",
         ]:
-            raise AssertionError("factory inbound template must use Russian headers")
+            raise AssertionError("factory inbound template must expose shipment summary headers")
 
         invalid_headers_blob = build_single_sheet_workbook_bytes("Bad", [["sku", "qty"], ["210183919", "10"]])
         try:
@@ -240,7 +241,7 @@ def main() -> None:
             build_single_sheet_workbook_bytes(
                 "В пути от фабрики",
                 [
-                    inbound_rows[0],
+                    inbound_rows[0][:-1],
                     [210183919, "SKU 1", 0, "", ""],
                     [210184534, "SKU 2", 0, "", ""],
                 ],
@@ -249,6 +250,8 @@ def main() -> None:
         )
         if inbound_factory_zero_upload.accepted_row_count != 0 or inbound_factory_zero_upload.ignored_row_count != 2:
             raise AssertionError("zero-only factory inbound upload must be accepted as an empty dataset")
+        if inbound_factory_zero_upload.shipment_summary:
+            raise AssertionError("zero-only factory inbound upload must expose an empty shipment summary")
 
         inbound_ff_to_wb_zero_upload = block.upload_dataset(
             DATASET_INBOUND_FF_TO_WB,
@@ -295,15 +298,34 @@ def main() -> None:
                 "В пути от фабрики",
                 [
                     inbound_rows[0],
-                    [210183919, "SKU 1", 40, "2026-04-25", ""],
-                    [210184534, "SKU 2", 0, "", ""],
-                    [210183919, "SKU 1", 12, "2026-05-05", ""],
+                    [210183919, "SKU 1", 40, "2026-04-25", "", "Поставка A"],
+                    [210184534, "SKU 2", 15, "2026-04-25", "", "Поставка A"],
+                    [210184534, "SKU 2", 0, "", "", ""],
+                    [210183919, "SKU 1", 12, "2026-05-05", "", ""],
                 ],
             ),
             uploaded_filename="factory-inbound.xlsx",
         )
-        if inbound_factory_upload.accepted_row_count != 2 or inbound_factory_upload.ignored_row_count != 1:
-            raise AssertionError("factory inbound upload must ignore zero rows and keep positive rows for one SKU")
+        if inbound_factory_upload.accepted_row_count != 3 or inbound_factory_upload.ignored_row_count != 1:
+            raise AssertionError("factory inbound upload must ignore zero rows and keep positive rows grouped by shipment")
+        shipment_summary = list(inbound_factory_upload.shipment_summary)
+        if len(shipment_summary) != 2:
+            raise AssertionError("factory inbound upload must expose two shipment summary rows")
+        if (
+            shipment_summary[0].shipment != "Поставка A"
+            or shipment_summary[0].total_quantity != 55.0
+            or shipment_summary[0].acceptance_date != "2026-04-25"
+        ):
+            raise AssertionError("explicit factory shipment summary must aggregate quantities by shipment/date")
+        if (
+            shipment_summary[1].shipment != "Поставка №1"
+            or shipment_summary[1].total_quantity != 12.0
+            or shipment_summary[1].acceptance_date != "2026-05-05"
+        ):
+            raise AssertionError("factory shipment summary must label missing shipment ids by row group order")
+        persisted_summary = list(block.build_status().datasets[DATASET_INBOUND_FACTORY_TO_FF].shipment_summary)
+        if [item.total_quantity for item in persisted_summary] != [55.0, 12.0]:
+            raise AssertionError("factory status must expose persisted shipment summary totals")
 
         inbound_ff_to_wb_upload = block.upload_dataset(
             DATASET_INBOUND_FF_TO_WB,
