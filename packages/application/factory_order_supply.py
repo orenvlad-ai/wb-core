@@ -24,6 +24,7 @@ from packages.contracts.factory_order_supply import (
     FactoryOrderDatasetDeleteResult,
     FactoryOrderDatasetState,
     FactoryOrderInboundRow,
+    FactoryOrderInboundShipmentSummary,
     FactoryOrderRecommendationRow,
     FactoryOrderSettings,
     FactoryOrderStatus,
@@ -62,6 +63,7 @@ _TEMPLATE_HEADERS = {
         "Количество в пути",
         "Планируемая дата прихода на ФФ",
         "Комментарий",
+        "Поставка",
     ],
     DATASET_INBOUND_FF_TO_WB: [
         "nmId",
@@ -71,6 +73,7 @@ _TEMPLATE_HEADERS = {
         "Комментарий",
     ],
 }
+_LEGACY_INBOUND_FACTORY_HEADERS = _TEMPLATE_HEADERS[DATASET_INBOUND_FACTORY_TO_FF][:-1]
 _RESULT_HEADERS = ["nmId", "Комментарий SKU", "Рекомендовано к заказу"]
 _WEIGHT_COEFFICIENT = 0.08593
 _VOLUME_DIVISOR = 204.38
@@ -132,7 +135,12 @@ class FactoryOrderSupplyBlock:
                 [[nm_id, sku_comment, 0, snapshot_date, ""] for nm_id, sku_comment in active_skus]
             )
         else:
-            rows.extend([[nm_id, sku_comment, "", "", ""] for nm_id, sku_comment in active_skus])
+            rows.extend(
+                [
+                    [nm_id, sku_comment] + [""] * (len(_TEMPLATE_HEADERS[dataset_type]) - 2)
+                    for nm_id, sku_comment in active_skus
+                ]
+            )
         return (
             build_single_sheet_workbook_bytes(_DATASET_SHEET_NAMES[dataset_type], rows),
             _DATASET_FILENAMES[dataset_type],
@@ -152,6 +160,13 @@ class FactoryOrderSupplyBlock:
             dataset_type=dataset_type,
             workbook_rows=workbook_rows,
             active_skus=active_skus,
+        )
+        shipment_summary = (
+            _build_inbound_shipment_summary(
+                [row for row in parsed_rows if isinstance(row, FactoryOrderInboundRow)]
+            )
+            if dataset_type == DATASET_INBOUND_FACTORY_TO_FF
+            else ()
         )
         uploaded_at = self.timestamp_factory()
         normalized_filename = _normalize_uploaded_filename(uploaded_filename, dataset_type=dataset_type)
@@ -176,6 +191,7 @@ class FactoryOrderSupplyBlock:
             required=_DATASET_REQUIRED[dataset_type],
             uploaded_filename=normalized_filename,
             file_available=True,
+            shipment_summary=shipment_summary,
         )
         return FactoryOrderUploadResult(
             status="accepted",
@@ -183,6 +199,7 @@ class FactoryOrderSupplyBlock:
             accepted_row_count=len(parsed_rows),
             ignored_row_count=ignored_row_count,
             message=f"Файл принят: {_DATASET_LABELS[dataset_type].lower()}",
+            shipment_summary=shipment_summary,
         )
 
     def delete_dataset(self, dataset_type: str) -> FactoryOrderDatasetDeleteResult:
@@ -386,6 +403,11 @@ class FactoryOrderSupplyBlock:
                 row_count=0,
                 required=_DATASET_REQUIRED[dataset_type],
             )
+        shipment_summary = (
+            _build_inbound_shipment_summary(self._load_inbound_rows(DATASET_INBOUND_FACTORY_TO_FF))
+            if dataset_type == DATASET_INBOUND_FACTORY_TO_FF
+            else ()
+        )
         return FactoryOrderDatasetState(
             dataset_type=dataset_type,
             label_ru=_DATASET_LABELS[dataset_type],
@@ -395,6 +417,7 @@ class FactoryOrderSupplyBlock:
             required=_DATASET_REQUIRED[dataset_type],
             uploaded_filename=str(payload.get("uploaded_filename") or "") or None,
             file_available=bool(payload.get("file_available")),
+            shipment_summary=shipment_summary,
         )
 
     def _load_stock_ff_rows(self) -> list[FactoryOrderStockFfRow]:
@@ -423,6 +446,7 @@ class FactoryOrderSupplyBlock:
                 quantity=float(item["quantity"]),
                 planned_arrival_date=str(item["planned_arrival_date"]),
                 comment=str(item.get("comment", "") or ""),
+                shipment_name=str(item.get("shipment_name", "") or ""),
             )
             for item in payload["rows"]
         ]
@@ -467,6 +491,7 @@ class FactoryOrderSupplyBlock:
                     required=bool(value.get("required", _DATASET_REQUIRED.get(key, True))),
                     uploaded_filename=str(value.get("uploaded_filename")) if value.get("uploaded_filename") else None,
                     file_available=bool(value.get("file_available", False)),
+                    shipment_summary=_parse_shipment_summary_payload(value.get("shipment_summary")),
                 )
                 for key, value in datasets_payload.items()
                 if isinstance(value, Mapping)
@@ -506,7 +531,10 @@ class FactoryOrderSupplyBlock:
             raise ValueError("XLSX-файл пустой")
         actual_headers = [str(value or "").strip() for value in workbook_rows[0]]
         expected_headers = _TEMPLATE_HEADERS[dataset_type]
-        if actual_headers != expected_headers:
+        has_shipment_column = dataset_type == DATASET_INBOUND_FACTORY_TO_FF and actual_headers == expected_headers
+        if dataset_type == DATASET_INBOUND_FACTORY_TO_FF and actual_headers == _LEGACY_INBOUND_FACTORY_HEADERS:
+            has_shipment_column = False
+        elif actual_headers != expected_headers:
             raise ValueError(
                 "Неверные заголовки в XLSX. "
                 f"Ожидались: {', '.join(expected_headers)}. "
@@ -514,7 +542,12 @@ class FactoryOrderSupplyBlock:
             )
         if dataset_type == DATASET_STOCK_FF:
             return self._parse_stock_ff_rows(workbook_rows[1:], active_skus), 0
-        return self._parse_inbound_rows(dataset_type, workbook_rows[1:], active_skus)
+        return self._parse_inbound_rows(
+            dataset_type,
+            workbook_rows[1:],
+            active_skus,
+            has_shipment_column=has_shipment_column,
+        )
 
     def _parse_stock_ff_rows(
         self,
@@ -554,11 +587,14 @@ class FactoryOrderSupplyBlock:
         dataset_type: str,
         workbook_rows: list[list[Any]],
         active_skus: dict[int, str],
+        *,
+        has_shipment_column: bool,
     ) -> tuple[list[FactoryOrderInboundRow], int]:
         parsed_rows: list[FactoryOrderInboundRow] = []
         ignored_row_count = 0
+        column_count = 6 if has_shipment_column else 5
         for row_index, row in enumerate(workbook_rows, start=2):
-            padded = list(row[:5]) + [None] * max(0, 5 - len(row))
+            padded = list(row[:column_count]) + [None] * max(0, column_count - len(row))
             if _row_is_empty(padded):
                 continue
             nm_id = _parse_nm_id(padded[0], row_index=row_index, active_skus=active_skus)
@@ -592,6 +628,7 @@ class FactoryOrderSupplyBlock:
                     quantity=quantity,
                     planned_arrival_date=planned_arrival_date,
                     comment=comment,
+                    shipment_name=_normalize_optional_text(padded[5]) if has_shipment_column else "",
                 )
             )
         return parsed_rows, ignored_row_count
@@ -773,6 +810,56 @@ def _normalize_uploaded_filename(value: str | None, *, dataset_type: str) -> str
         return _DATASET_FILENAMES[dataset_type]
     normalized = raw.replace("\\", "/").rsplit("/", 1)[-1].strip()
     return normalized or _DATASET_FILENAMES[dataset_type]
+
+
+def _build_inbound_shipment_summary(
+    rows: list[FactoryOrderInboundRow],
+) -> tuple[FactoryOrderInboundShipmentSummary, ...]:
+    totals: dict[tuple[str, str], float] = {}
+    ordered_keys: list[tuple[str, str]] = []
+    for row in rows:
+        shipment_name = _normalize_optional_text(row.shipment_name)
+        acceptance_date = str(row.planned_arrival_date or "").strip()
+        if not acceptance_date:
+            continue
+        key = (shipment_name, acceptance_date)
+        if key not in totals:
+            ordered_keys.append(key)
+            totals[key] = 0.0
+        totals[key] += float(row.quantity)
+
+    fallback_index = 1
+    summary: list[FactoryOrderInboundShipmentSummary] = []
+    for shipment_name, acceptance_date in ordered_keys:
+        shipment_label = shipment_name
+        if not shipment_label:
+            shipment_label = f"Поставка №{fallback_index}"
+            fallback_index += 1
+        summary.append(
+            FactoryOrderInboundShipmentSummary(
+                shipment=shipment_label,
+                total_quantity=round(totals[(shipment_name, acceptance_date)], 2),
+                acceptance_date=acceptance_date,
+            )
+        )
+    return tuple(summary)
+
+
+def _parse_shipment_summary_payload(value: Any) -> tuple[FactoryOrderInboundShipmentSummary, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    summary: list[FactoryOrderInboundShipmentSummary] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        summary.append(
+            FactoryOrderInboundShipmentSummary(
+                shipment=str(item.get("shipment", "") or ""),
+                total_quantity=float(item.get("total_quantity", 0.0)),
+                acceptance_date=str(item.get("acceptance_date", "") or ""),
+            )
+        )
+    return tuple(summary)
 
 
 def _sum_inbound_rows_within_horizon(

@@ -39,6 +39,14 @@ class FactoryOrderInboundRow:
     quantity: float
     planned_arrival_date: str
     comment: str
+    shipment_name: str = ""
+
+
+@dataclass(frozen=True)
+class FactoryOrderInboundShipmentSummary:
+    shipment: str
+    total_quantity: float
+    acceptance_date: str
 
 
 @dataclass(frozen=True)
@@ -51,6 +59,7 @@ class FactoryOrderDatasetState:
     required: bool
     uploaded_filename: str | None = None
     file_available: bool = False
+    shipment_summary: tuple[FactoryOrderInboundShipmentSummary, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -60,6 +69,7 @@ class FactoryOrderUploadResult:
     accepted_row_count: int
     ignored_row_count: int
     message: str
+    shipment_summary: tuple[FactoryOrderInboundShipmentSummary, ...] = ()
 
 
 @dataclass(frozen=True)
