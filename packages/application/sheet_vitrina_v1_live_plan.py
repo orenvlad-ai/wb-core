@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -45,6 +45,7 @@ from packages.application.spp_block import SppBlock
 from packages.application.stocks_block import StocksBlock
 from packages.application.web_source_snapshot_block import WebSourceSnapshotBlock
 from packages.business_time import (
+    CANONICAL_BUSINESS_TIMEZONE,
     business_date_from_timestamp,
     business_datetime_for_override,
     current_business_date_iso,
@@ -1577,6 +1578,7 @@ class SheetVitrinaV1LivePlanBlock:
             column_date=column_date,
             requested_nm_ids=requested_nm_ids,
             snapshot_role=TEMPORAL_ROLE_ACCEPTED_CLOSED,
+            require_closed_day_fresh=True,
         )
         if accepted_snapshot is not None:
             accepted_status, accepted_payload, accepted_at = accepted_snapshot
@@ -1592,6 +1594,7 @@ class SheetVitrinaV1LivePlanBlock:
             column_date=column_date,
             requested_nm_ids=requested_nm_ids,
             runtime_cache_note="resolution_rule=accepted_prior_current_runtime_cache",
+            require_closed_day_fresh=True,
         )
         if cached_snapshot is not None:
             cached_status, cached_payload = cached_snapshot
@@ -1688,6 +1691,10 @@ class SheetVitrinaV1LivePlanBlock:
             column_date=column_date,
             requested_nm_ids=requested_nm_ids,
             snapshot_role=accepted_role,
+            require_closed_day_fresh=(
+                temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED
+                and accepted_role == TEMPORAL_ROLE_ACCEPTED_CLOSED
+            ),
         )
         if accepted_snapshot is None and source_key in STRICT_CLOSED_DAY_SOURCE_KEYS and temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT:
             accepted_snapshot = self._load_slot_snapshot_status(
@@ -1706,6 +1713,7 @@ class SheetVitrinaV1LivePlanBlock:
                 column_date=column_date,
                 requested_nm_ids=requested_nm_ids,
                 runtime_cache_note=_runtime_cache_note(source_key),
+                require_closed_day_fresh=True,
             )
             if cached_snapshot is not None:
                 cached_status, cached_payload = cached_snapshot
@@ -1877,6 +1885,10 @@ class SheetVitrinaV1LivePlanBlock:
             column_date=column_date,
             requested_nm_ids=requested_nm_ids,
             runtime_cache_note=_runtime_cache_note(source_key),
+            require_closed_day_fresh=(
+                temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED
+                and source_key in EXACT_DATE_RUNTIME_CACHE_SOURCE_KEYS
+            ),
         )
         if accepted_snapshot is None and cached_snapshot is not None:
             accepted_snapshot = (cached_snapshot[0], cached_snapshot[1], None)
@@ -1963,6 +1975,7 @@ class SheetVitrinaV1LivePlanBlock:
         column_date: str,
         requested_nm_ids: list[int],
         snapshot_role: str,
+        require_closed_day_fresh: bool = False,
     ) -> tuple[LiveSourceStatus, Any, str | None] | None:
         cached_payload, cached_at = self.runtime.load_temporal_source_slot_snapshot(
             source_key=source_key,
@@ -1970,6 +1983,11 @@ class SheetVitrinaV1LivePlanBlock:
             snapshot_role=snapshot_role,
         )
         if cached_payload is None or not _is_exact_snapshot_payload(cached_payload, column_date):
+            return None
+        if require_closed_day_fresh and not _closed_day_capture_is_fresh(
+            captured_at=cached_at,
+            snapshot_date=column_date,
+        ):
             return None
         cached_status, _ = _capture_live_source(
             source_key=source_key,
@@ -1993,6 +2011,7 @@ class SheetVitrinaV1LivePlanBlock:
         runtime_cache_note: str = "resolution_rule=exact_date_runtime_cache",
         live_fetch_note: str | None = None,
         prefer_cached_first: bool = False,
+        require_closed_day_fresh: bool = False,
     ) -> tuple[LiveSourceStatus, Any | None]:
         if prefer_cached_first:
             cached_result = self._load_cached_temporal_source(
@@ -2002,6 +2021,7 @@ class SheetVitrinaV1LivePlanBlock:
                 column_date=column_date,
                 requested_nm_ids=requested_nm_ids,
                 runtime_cache_note=runtime_cache_note,
+                require_closed_day_fresh=require_closed_day_fresh,
             )
             if cached_result is not None:
                 return cached_result
@@ -2034,6 +2054,7 @@ class SheetVitrinaV1LivePlanBlock:
             column_date=column_date,
             requested_nm_ids=requested_nm_ids,
             runtime_cache_note=runtime_cache_note,
+            require_closed_day_fresh=require_closed_day_fresh,
         )
         if cached_result is not None:
             return cached_result
@@ -2048,12 +2069,18 @@ class SheetVitrinaV1LivePlanBlock:
         column_date: str,
         requested_nm_ids: list[int],
         runtime_cache_note: str,
+        require_closed_day_fresh: bool = False,
     ) -> tuple[LiveSourceStatus, Any | None] | None:
         cached_payload, cached_at = self.runtime.load_temporal_source_snapshot(
             source_key=source_key,
             snapshot_date=column_date,
         )
         if cached_payload is None or not _is_exact_snapshot_payload(cached_payload, column_date):
+            return None
+        if require_closed_day_fresh and not _closed_day_capture_is_fresh(
+            captured_at=cached_at,
+            snapshot_date=column_date,
+        ):
             return None
         cached_status, _ = _capture_live_source(
             source_key=source_key,
@@ -2163,7 +2190,11 @@ class SheetVitrinaV1LivePlanBlock:
             snapshot_date=column_date,
             snapshot_role=TEMPORAL_ROLE_ACCEPTED_CLOSED,
         )
-        if accepted_payload is not None and _is_exact_snapshot_payload(accepted_payload, column_date):
+        if (
+            accepted_payload is not None
+            and _is_exact_snapshot_payload(accepted_payload, column_date)
+            and _closed_day_capture_is_fresh(captured_at=accepted_at, snapshot_date=column_date)
+        ):
             accepted_status, _ = _capture_live_source(
                 source_key=source_key,
                 temporal_slot=temporal_slot,
@@ -3323,6 +3354,27 @@ def _parse_runtime_timestamp(value: str) -> datetime:
     if normalized.endswith("Z"):
         normalized = normalized[:-1] + "+00:00"
     return datetime.fromisoformat(normalized).astimezone(timezone.utc)
+
+
+def _closed_day_capture_is_fresh(*, captured_at: str | None, snapshot_date: str) -> bool:
+    if not captured_at:
+        return False
+    try:
+        captured = _parse_runtime_timestamp(captured_at)
+        required_after = _closed_day_required_capture_after(snapshot_date)
+    except (TypeError, ValueError):
+        return False
+    return captured >= required_after
+
+
+def _closed_day_required_capture_after(snapshot_date: str) -> datetime:
+    snapshot_day = date.fromisoformat(snapshot_date)
+    next_business_day_start = datetime.combine(
+        snapshot_day + timedelta(days=1),
+        datetime_time(0, 0),
+        tzinfo=CANONICAL_BUSINESS_TIMEZONE,
+    )
+    return next_business_day_start.astimezone(timezone.utc)
 
 
 def _numeric_payload_value(value: Any) -> float:

@@ -4414,6 +4414,8 @@ def _updated_cell_status_for_status_row(row: list[Any]) -> str:
     note = str(row[10] if len(row) > 10 else "").strip().lower()
     if kind in {"error", "missing", "not_found", "blocked", "not_available"}:
         return ""
+    if _status_note_is_unverified_closed_day_fallback(note):
+        return ""
     if _status_note_is_latest_confirmed(note):
         return "latest_confirmed"
     if kind == "warning":
@@ -5525,6 +5527,8 @@ def _loading_slot_has_confirmed_success(slot: Mapping[str, Any]) -> bool:
     status = str(slot.get("status") or slot.get("tone") or "").strip()
     kind = str(slot.get("kind") or "").strip().lower()
     note = str(slot.get("note") or "").strip()
+    if _status_note_is_unverified_closed_day_fallback(note):
+        return False
     if status == "success":
         return True
     return kind == "success" and _status_note_is_latest_confirmed(note)
@@ -5925,6 +5929,8 @@ def _note_requires_warning(note: str) -> bool:
     normalized = str(note or "").strip()
     if not normalized:
         return False
+    if _status_note_is_unverified_closed_day_fallback(normalized):
+        return True
     preserved_closed_day_markers = {
         "accepted_closed_from_prior_current_snapshot",
         "accepted_closed_preserved_after_invalid_attempt",
@@ -5956,6 +5962,8 @@ def _status_note_is_latest_confirmed(note: str) -> bool:
     normalized = str(note or "").strip().lower()
     if not normalized:
         return False
+    if _status_note_is_unverified_closed_day_fallback(normalized):
+        return False
     latest_confirmed_tokens = (
         "latest_confirmed",
         "fallback",
@@ -5975,6 +5983,11 @@ def _status_note_is_latest_confirmed(note: str) -> bool:
         "exact_date_runtime_cache",
     )
     return any(token in normalized for token in latest_confirmed_tokens)
+
+
+def _status_note_is_unverified_closed_day_fallback(note: str) -> bool:
+    normalized = str(note or "").strip().lower()
+    return "accepted_current_from_prior_closed_day_latest_confirmed" in normalized
 
 
 def _worst_tone(statuses: Iterable[str]) -> str:
