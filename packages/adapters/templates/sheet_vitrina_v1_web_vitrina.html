@@ -193,6 +193,24 @@
       display: none;
     }
 
+    .research-section-intro {
+      display: grid;
+      gap: 4px;
+      margin: 0 0 10px;
+    }
+
+    .research-hypothesis {
+      margin: 8px 0 0;
+      max-width: 980px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: rgba(148, 163, 184, 0.09);
+      color: var(--muted-strong);
+      padding: 8px 10px;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
     .research-form-grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(180px, 1fr));
@@ -3383,22 +3401,19 @@
 
     <section class="unified-tab-panel" data-unified-tab-panel="research" hidden>
       <section class="panel research-panel" data-research-panel>
-        <div class="panel-top">
-          <div>
-            <h2>Сравнение групп SKU</h2>
-            <p class="panel-note">
-              Ретроспективное сравнение исследуемой и контрольной группы по выбранным метрикам за базовый период и период анализа.
-            </p>
-          </div>
-          <p class="panel-meta" data-research-meta>Исследования: read-only</p>
-        </div>
-
         <div class="research-section-tabs" role="tablist" aria-label="Разделы исследования">
           <button class="research-section-tab is-active" type="button" data-research-section-tab="comparison" role="tab" aria-selected="true">Сравнение групп SKU</button>
           <button class="research-section-tab" type="button" data-research-section-tab="promotions" role="tab" aria-selected="false">Акции</button>
         </div>
 
         <section class="research-section-panel" data-research-section-panel="comparison">
+          <div class="research-section-intro">
+            <h2>Сравнение групп SKU</h2>
+            <p class="panel-note">
+              Ретроспективное сравнение исследуемой и контрольной группы по выбранным метрикам за базовый период и период анализа.
+            </p>
+          </div>
+
           <div class="research-form-grid">
             <div class="research-field research-field-wide">
               <div class="research-field-head">
@@ -3519,6 +3534,9 @@
             </div>
           </div>
 
+          <p class="research-hypothesis" data-research-promotions-hypothesis>
+            Гипотеза: WB рассчитывает цену входа в акцию от стабильной цены SKU около даты фиксации акции, отсекая резкие ценовые всплески и применяя небольшой коэффициент конкретной акции с округлением до рублей.
+          </p>
           <p class="research-error" data-research-promotions-error></p>
           <div data-research-promotions-result>
             <p class="research-result-note">Выберите период и нажмите «Загрузить».</p>

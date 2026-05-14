@@ -328,6 +328,7 @@ def main() -> None:
                 'data-operator-embed-frame="reports"',
                 "Сравнение групп SKU",
                 "Акции",
+                "Гипотеза: WB рассчитывает цену входа в акцию",
                 "data-research-calculate",
                 "data-research-promotions-load",
                 DEFAULT_SHEET_RESEARCH_PROMOTIONS_CALCULATE_PATH,
