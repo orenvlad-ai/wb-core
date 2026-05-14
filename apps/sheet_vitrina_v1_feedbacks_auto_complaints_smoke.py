@@ -63,6 +63,8 @@ def main() -> None:
     _assert_schedule_persistence_duplicate_and_run_now_contract()
     _assert_new_future_schedule_is_not_backfilled()
     _assert_run_filters_ai_and_skips_existing_journal()
+    _assert_retryable_prior_attempt_is_submitted()
+    _assert_confirmed_prior_attempt_is_not_resubmitted()
     _assert_noop_advances_last_success()
     _assert_busy_lock_is_controlled()
     print("sheet_vitrina_v1_feedbacks_auto_complaints_smoke: OK")
@@ -330,6 +332,120 @@ def _assert_run_filters_ai_and_skips_existing_journal() -> None:
         second = block.run_due_schedules_sync()
         if second["status"] != "no_due_schedules":
             raise AssertionError(f"repeated tick must not duplicate completed due run: {second}")
+
+
+def _assert_retryable_prior_attempt_is_submitted() -> None:
+    now = datetime(2026, 5, 8, 8, 0, tzinfo=timezone.utc)
+    current_now = [datetime(2026, 5, 8, 6, 0, tzinfo=timezone.utc)]
+    with TemporaryDirectory(prefix="auto-complaints-retryable-prior-") as tmp:
+        runtime_dir = Path(tmp)
+        store = JsonFileFeedbacksAutoComplaintsStore(runtime_dir, now_factory=lambda: current_now[0])
+        submitted_payloads: list[dict[str, object]] = []
+
+        def fake_submit(payload: object) -> dict[str, object]:
+            data = dict(payload or {})
+            submitted_payloads.append(data)
+            return {
+                "contract_name": "sheet_vitrina_v1_feedbacks_complaints_submit_job",
+                "aggregate": {"submitted_count": 1, "skipped_count": 0, "error_count": 0},
+                "rows": [{"feedback_id": "retryable", "submitted": True, "submit_clicked": True}],
+                "status_sync": {"aggregate": {"statuses_updated": 0}},
+            }
+
+        complaints = SheetVitrinaV1FeedbacksComplaintsBlock(runtime_dir=runtime_dir, submit_runner=fake_submit)
+        block = SheetVitrinaV1FeedbacksAutoComplaintsBlock(
+            runtime_dir=runtime_dir,
+            feedbacks_block=FakeFeedbacksBlock([_row("retryable", "2026-05-08T06:30:00Z", 1)]),  # type: ignore[arg-type]
+            feedbacks_ai_block=FakeAiBlock({"retryable": "review"}),  # type: ignore[arg-type]
+            complaints_block=complaints,
+            store=store,
+            now_factory=lambda: current_now[0],
+        )
+        block.save_schedules({"schedules": [{"id": "daily-noon", "enabled": True, "local_time_hhmm": "12:00"}]})
+        store.add_run(
+            {
+                "run_id": "previous_retryable",
+                "status": "completed",
+                "created_at": "2026-05-07T07:00:00Z",
+                "finished_at": "2026-05-07T07:05:00Z",
+                "attempts": [
+                    {
+                        "run_id": "previous_retryable",
+                        "feedback_id": "retryable",
+                        "rating": 1,
+                        "ai_status": "review",
+                        "candidate": True,
+                        "action": "safety_rejected",
+                        "reason": "exact actionable DOM row was not found after target-probe filter/materialization path",
+                        "created_at": "2026-05-07T07:05:00Z",
+                        "updated_at": "2026-05-07T07:05:00Z",
+                        "evidence_refs": [],
+                    }
+                ],
+            }
+        )
+        current_now[0] = now
+        block.run_due_schedules_sync()
+        run = block.list_runs()["runs"][0]
+        if run["submitted_count"] != 1 or run["skipped_count"] != 0:
+            raise AssertionError(f"retryable prior safety rejection must be submitted again: {run}")
+        if run["reason_counts"].get("already_attempted_feedback_id"):
+            raise AssertionError(f"retryable prior attempt must not become already_attempted skip: {run}")
+        if not submitted_payloads or submitted_payloads[0].get("feedback_ids") != ["retryable"]:
+            raise AssertionError(f"retryable prior attempt must reach guarded submit: {submitted_payloads}")
+
+
+def _assert_confirmed_prior_attempt_is_not_resubmitted() -> None:
+    now = datetime(2026, 5, 8, 8, 0, tzinfo=timezone.utc)
+    current_now = [datetime(2026, 5, 8, 6, 0, tzinfo=timezone.utc)]
+    with TemporaryDirectory(prefix="auto-complaints-confirmed-prior-") as tmp:
+        runtime_dir = Path(tmp)
+        store = JsonFileFeedbacksAutoComplaintsStore(runtime_dir, now_factory=lambda: current_now[0])
+        submitted_payloads: list[dict[str, object]] = []
+        complaints = SheetVitrinaV1FeedbacksComplaintsBlock(
+            runtime_dir=runtime_dir,
+            submit_runner=lambda payload: submitted_payloads.append(dict(payload or {})) or {},
+        )
+        block = SheetVitrinaV1FeedbacksAutoComplaintsBlock(
+            runtime_dir=runtime_dir,
+            feedbacks_block=FakeFeedbacksBlock([_row("confirmed", "2026-05-08T06:30:00Z", 1)]),  # type: ignore[arg-type]
+            feedbacks_ai_block=FakeAiBlock({"confirmed": "review"}),  # type: ignore[arg-type]
+            complaints_block=complaints,
+            store=store,
+            now_factory=lambda: current_now[0],
+        )
+        block.save_schedules({"schedules": [{"id": "daily-noon", "enabled": True, "local_time_hhmm": "12:00"}]})
+        store.add_run(
+            {
+                "run_id": "previous_confirmed",
+                "status": "completed",
+                "created_at": "2026-05-07T07:00:00Z",
+                "finished_at": "2026-05-07T07:05:00Z",
+                "attempts": [
+                    {
+                        "run_id": "previous_confirmed",
+                        "feedback_id": "confirmed",
+                        "rating": 1,
+                        "ai_status": "review",
+                        "candidate": True,
+                        "action": "submitted_confirmed",
+                        "reason": "submitted_confirmed",
+                        "created_at": "2026-05-07T07:05:00Z",
+                        "updated_at": "2026-05-07T07:05:00Z",
+                        "evidence_refs": [],
+                    }
+                ],
+            }
+        )
+        current_now[0] = now
+        block.run_due_schedules_sync()
+        run = block.list_runs()["runs"][0]
+        if run["submitted_count"] != 0 or run["skipped_count"] != 1:
+            raise AssertionError(f"confirmed prior submit must remain idempotent: {run}")
+        if run["reason_counts"].get("already_attempted_feedback_id") != 1:
+            raise AssertionError(f"confirmed prior submit must be counted as already_attempted skip: {run}")
+        if submitted_payloads:
+            raise AssertionError(f"confirmed prior submit must not reach guarded submit again: {submitted_payloads}")
 
 
 def _assert_noop_advances_last_success() -> None:

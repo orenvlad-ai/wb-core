@@ -43,12 +43,8 @@ DEFAULT_OVERLAP_HOURS = 24
 DEFAULT_HARD_CAP_PER_RUN = min(SUBMIT_JOB_MAX_SUBMIT_HARD_CAP, 10)
 ACTIVE_RUN_STATUSES = {"queued", "running"}
 SUCCESS_RUN_STATUSES = {"completed", "no_new_feedbacks", "no_low_rating_feedbacks", "no_ai_candidates", "hard_cap_reached"}
-TERMINAL_ATTEMPT_ACTIONS = {
-    "submitted_confirmed",
-    "submit_unconfirmed",
-    "safety_rejected",
-    "error",
-}
+NON_RETRYABLE_ATTEMPT_ACTIONS = {"submitted_confirmed"}
+RETRYABLE_ATTEMPT_ACTIONS = {"submit_unconfirmed", "safety_rejected", "error"}
 AI_CANDIDATE_VALUES = {"yes", "да", "review", "проверить"}
 SCHEDULE_RUNTIME_FIELDS = {
     "created_at",
@@ -182,7 +178,13 @@ class JsonFileFeedbacksAutoComplaintsStore:
             return None
         return max(active, key=lambda item: (str(item.get("started_at") or ""), str(item.get("created_at") or "")))
 
-    def terminal_attempt_feedback_ids(self) -> set[str]:
+    def non_retryable_attempt_feedback_ids(self) -> set[str]:
+        return self._attempt_feedback_ids(NON_RETRYABLE_ATTEMPT_ACTIONS)
+
+    def retryable_attempt_feedback_ids(self) -> set[str]:
+        return self._attempt_feedback_ids(RETRYABLE_ATTEMPT_ACTIONS)
+
+    def _attempt_feedback_ids(self, actions: set[str]) -> set[str]:
         payload = self.read()
         ids: set[str] = set()
         for run in payload.get("runs", []):
@@ -194,7 +196,7 @@ class JsonFileFeedbacksAutoComplaintsStore:
                     continue
                 action = str(attempt.get("action") or "")
                 feedback_id = str(attempt.get("feedback_id") or "").strip()
-                if feedback_id and action in TERMINAL_ATTEMPT_ACTIONS:
+                if feedback_id and action in actions:
                     ids.add(feedback_id)
         return ids
 
@@ -593,21 +595,29 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
         reason_counts: Counter[str] = Counter()
         attempts: list[dict[str, Any]] = []
         journal_ids = {str(record.get("feedback_id") or "") for record in self.complaints_block.journal.list_records()}
-        prior_attempt_ids = self.store.terminal_attempt_feedback_ids()
+        prior_non_retryable_ids = self.store.non_retryable_attempt_feedback_ids()
+        prior_retryable_ids = self.store.retryable_attempt_feedback_ids()
+        diagnostic_events: list[dict[str, Any]] = []
         selected_ids: list[str] = []
         for feedback_id in candidate_ids:
             if not feedback_id:
                 continue
             if feedback_id in journal_ids:
                 attempts.append(_attempt(run_id, feedback_id, action="already_journaled", reason="existing_journal_feedback_id", ai=ai_by_id.get(feedback_id)))
+                diagnostic_events.append(_event("candidate_skipped", f"Skipped feedback_id={feedback_id} reason=existing_journal_feedback_id", status="skipped"))
                 continue
-            if feedback_id in prior_attempt_ids:
+            if feedback_id in prior_non_retryable_ids:
                 attempts.append(_attempt(run_id, feedback_id, action="skipped", reason="already_attempted_feedback_id", ai=ai_by_id.get(feedback_id)))
+                diagnostic_events.append(_event("candidate_skipped", f"Skipped feedback_id={feedback_id} reason=already_attempted_feedback_id", status="skipped"))
                 continue
+            if feedback_id in prior_retryable_ids:
+                diagnostic_events.append(_event("candidate_retry", f"Retrying feedback_id={feedback_id} after retryable prior attempt", status="running"))
             if len(selected_ids) >= hard_cap or len(selected_ids) >= SUBMIT_JOB_MAX_SELECTED_IDS:
                 attempts.append(_attempt(run_id, feedback_id, action="skipped", reason="hard_cap_reached", ai=ai_by_id.get(feedback_id)))
+                diagnostic_events.append(_event("candidate_skipped", f"Skipped feedback_id={feedback_id} reason=hard_cap_reached", status="skipped"))
                 continue
             selected_ids.append(feedback_id)
+            diagnostic_events.append(_event("candidate_selected", f"Selected feedback_id={feedback_id} for guarded submit", status="running"))
         if not candidate_ids:
             return self.store.update_run(
                 run_id,
@@ -677,7 +687,7 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
                 reason_counts=dict(reason_counts),
                 attempts=attempts,
                 session={"storage_state_path": storage_state_path, "route_specific_checks": "guarded_submit_and_status_sync"},
-                events=[_event("run_finished", f"Auto complaints run finished with status {status}", status="success" if status in SUCCESS_RUN_STATUSES else "error")],
+                events=[*diagnostic_events, _event("run_finished", f"Auto complaints run finished with status {status}", status="success" if status in SUCCESS_RUN_STATUSES else "error")],
             ),
         )
 
