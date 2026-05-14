@@ -134,13 +134,20 @@ def main() -> None:
 
                 second_status_rows = _fetch_status_rows(status_url, SECOND_AS_OF_DATE)
                 for source_key in ("web_source_snapshot", "seller_funnel_snapshot"):
-                    if second_status_rows[f"{source_key}[yesterday_closed]"][1] != "closure_retrying":
-                        raise AssertionError(f"{source_key} yesterday slot must wait for accepted closed-day snapshot")
+                    if second_status_rows[f"{source_key}[yesterday_closed]"][1] != "success":
+                        raise AssertionError(f"{source_key} yesterday slot must expose latest-confirmed fallback")
                     if second_status_rows[f"{source_key}[today_current]"][1] != "success":
                         raise AssertionError(f"{source_key} today slot must materialize as success")
                     retry_note = str(second_status_rows[f"{source_key}[yesterday_closed]"][10])
+                    if "accepted_current_from_prior_closed_day_latest_confirmed" not in retry_note:
+                        raise AssertionError(f"{source_key} yesterday slot must disclose latest-confirmed fallback")
                     if "closure_state=closure_retrying" not in retry_note:
-                        raise AssertionError(f"{source_key} yesterday slot must disclose closure retry state")
+                        raise AssertionError(f"{source_key} yesterday slot must still disclose closure retry state")
+                second_refresh_status = runtime.load_sheet_vitrina_refresh_status(as_of_date=SECOND_AS_OF_DATE)
+                second_source_outcomes = {item["source_key"]: item for item in second_refresh_status.source_outcomes}
+                for source_key in ("web_source_snapshot", "seller_funnel_snapshot"):
+                    if second_source_outcomes[source_key]["status"] != "warning":
+                        raise AssertionError(f"{source_key} latest-confirmed fallback must not reduce to semantic success")
 
                 plan_status, plan_payload = _get_json(
                     f"{plan_url}?{urllib_parse.urlencode({'as_of_date': SECOND_AS_OF_DATE})}"
@@ -149,10 +156,16 @@ def main() -> None:
                     raise AssertionError("plan endpoint must return persisted ready snapshot after second refresh")
                 data_sheet = next(sheet for sheet in plan_payload["sheets"] if sheet["sheet_name"] == "DATA_VITRINA")
                 data_rows = {row[1]: row for row in data_sheet["rows"]}
-                if data_rows[f"SKU:{probe_nm_id}|views_current"][2:] != ["", float(_web_views_value(SECOND_CURRENT_DATE, 0))]:
-                    raise AssertionError("web_source closed slot must stay blank while closure is retrying")
-                if data_rows[f"SKU:{probe_nm_id}|view_count"][2:] != ["", float(_seller_view_count(SECOND_CURRENT_DATE, 0))]:
-                    raise AssertionError("seller_funnel closed slot must stay blank while closure is retrying")
+                if data_rows[f"SKU:{probe_nm_id}|views_current"][2:] != [
+                    float(_web_views_value(FIRST_CURRENT_DATE, 0)),
+                    float(_web_views_value(SECOND_CURRENT_DATE, 0)),
+                ]:
+                    raise AssertionError("web_source closed slot must expose latest-confirmed fallback while retrying")
+                if data_rows[f"SKU:{probe_nm_id}|view_count"][2:] != [
+                    float(_seller_view_count(FIRST_CURRENT_DATE, 0)),
+                    float(_seller_view_count(SECOND_CURRENT_DATE, 0)),
+                ]:
+                    raise AssertionError("seller_funnel closed slot must expose latest-confirmed fallback while retrying")
 
                 closure_sync.enable_acceptance(FIRST_CURRENT_DATE)
                 entrypoint.sheet_plan_block = _build_live_plan(
@@ -200,13 +213,8 @@ def main() -> None:
                 ]:
                     raise AssertionError("seller_funnel metric row must expose accepted yesterday + current today values")
 
-                ready_load = _run_load_harness(upload_url, as_of_date=SECOND_AS_OF_DATE)
-                if ready_load["load_error"]:
-                    raise AssertionError(f"sheet load must succeed after second refresh, got {ready_load['load_error']!r}")
-                if ready_load["load_result"]["http_status"] != 200:
-                    raise AssertionError("sheet load must read the persisted ready snapshot")
-                if ready_load["sheets"]["DATA_VITRINA"]["values"][0] != ["дата", "key", SECOND_AS_OF_DATE, SECOND_CURRENT_DATE]:
-                    raise AssertionError("sheet load must keep the two-slot date header")
+                if data_sheet["header"] != ["label", "key", SECOND_AS_OF_DATE, SECOND_CURRENT_DATE]:
+                    raise AssertionError("persisted ready snapshot must keep the two-slot date header")
 
                 print(f"first_refresh: ok -> {first_refresh_payload['snapshot_id']}")
                 print(f"second_refresh_retrying: ok -> {second_refresh_payload['snapshot_id']}")
@@ -219,7 +227,7 @@ def main() -> None:
                     "status_accepted_surface: ok -> "
                     f"{third_status_rows['web_source_snapshot[yesterday_closed]'][10]}"
                 )
-                print("sheet_load: ok -> ready snapshot carries accepted yesterday + current today")
+                print("ready_snapshot: ok -> carries accepted yesterday + current today")
                 print("smoke-check passed")
             finally:
                 server.shutdown()

@@ -2178,6 +2178,8 @@ def _note_requires_warning(note: str) -> bool:
     normalized = str(note or "").strip()
     if not normalized:
         return False
+    if _status_note_is_unverified_closed_day_fallback(normalized):
+        return True
     if _status_note_is_latest_confirmed(normalized):
         return False
     success_markers = {
@@ -2201,6 +2203,8 @@ def _status_note_is_latest_confirmed(note: str) -> bool:
     normalized = str(note or "").strip().lower()
     if not normalized:
         return False
+    if _status_note_is_unverified_closed_day_fallback(normalized):
+        return False
     latest_confirmed_tokens = (
         "latest_confirmed",
         "fallback",
@@ -2220,6 +2224,11 @@ def _status_note_is_latest_confirmed(note: str) -> bool:
         "exact_date_runtime_cache",
     )
     return any(token in normalized for token in latest_confirmed_tokens)
+
+
+def _status_note_is_unverified_closed_day_fallback(note: str) -> bool:
+    normalized = str(note or "").strip().lower()
+    return "accepted_current_from_prior_closed_day_latest_confirmed" in normalized
 
 
 def _compose_source_reason(slot_outcomes: list[dict[str, Any]]) -> str:
