@@ -1236,11 +1236,16 @@ def _check_unified_tab_navigation(page: object) -> dict[str, object]:
         """() => {
           const panel = document.querySelector('[data-unified-tab-panel="research"]');
           const active = document.querySelector('[data-unified-tab-button].is-active');
-          const title = panel ? (panel.querySelector('h2') || {}).textContent || '' : '';
+          const researchPanel = panel ? panel.querySelector('[data-research-panel]') : null;
+          const tabs = researchPanel ? researchPanel.querySelector('.research-section-tabs') : null;
+          const titleNode = researchPanel ? researchPanel.querySelector('[data-research-section-panel="comparison"] h2') : null;
+          const title = titleNode ? titleNode.textContent || '' : '';
           const researchButton = panel ? panel.querySelector('[data-research-calculate]') : null;
           return !!panel && !panel.hidden && active &&
             (active.textContent || '').trim() === 'Исследования' &&
+            !!tabs && researchPanel.firstElementChild === tabs &&
             title.trim() === 'Сравнение групп SKU' &&
+            (tabs.compareDocumentPosition(titleNode) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0 &&
             !!researchButton;
         }""",
         timeout=5000,
@@ -1406,11 +1411,17 @@ def _check_unified_tab_navigation(page: object) -> dict[str, object]:
     promotions_grid = page.evaluate(
         """() => {
           const shell = document.querySelector('[data-research-promotions-grid]');
+          const hypothesis = document.querySelector('[data-research-promotions-hypothesis]');
+          const table = document.querySelector('[data-research-promotions-table]');
           const headers = Array.from(document.querySelectorAll('[data-research-promotions-table] th')).map(node => (node.textContent || '').trim());
           const firstRow = Array.from(document.querySelectorAll('[data-research-promotions-table] tbody tr:first-child td')).map(node => (node.textContent || '').trim());
           return {
             shell: !!shell,
             gridLibrary: shell ? shell.getAttribute('data-grid-library') : '',
+            hypothesisText: hypothesis ? (hypothesis.textContent || '').trim() : '',
+            hypothesisVisible: !!hypothesis && hypothesis.getClientRects().length > 0,
+            hypothesisBeforeTable: !!hypothesis && !!table &&
+              (hypothesis.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
             headers,
             rowCount: document.querySelectorAll('[data-research-promotions-table] tbody tr').length,
             firstRow
@@ -1421,6 +1432,9 @@ def _check_unified_tab_navigation(page: object) -> dict[str, object]:
     if (
         not promotions_grid["shell"]
         or promotions_grid["gridLibrary"] != "@gravity-ui/table"
+        or "Гипотеза" not in promotions_grid["hypothesisText"]
+        or not promotions_grid["hypothesisVisible"]
+        or not promotions_grid["hypothesisBeforeTable"]
         or expected_promotions_headers.difference(set(promotions_grid["headers"]))
         or promotions_grid["rowCount"] < 2
         or "₽" not in " ".join(promotions_grid["firstRow"])
