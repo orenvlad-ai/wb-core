@@ -208,7 +208,7 @@ def main() -> None:
             if expected not in captured_metric_keys:
                 raise AssertionError(f"1C group refresh must select virtual metric {expected}, got {captured}")
 
-        print("sheet_vitrina_onec_stocks_metrics: ok -> total_qty=12540 total_cost=1190938.16")
+        print("sheet_vitrina_onec_stocks_metrics: ok -> summary_and_sku_values_present")
         print("sheet_vitrina_onec_stocks_partial_acceptance: ok -> covered=1 missing=1")
         print("sheet_vitrina_onec_stocks_status_group: ok ->", ONEC_STOCKS_SOURCE_GROUP_ID)
         print("sheet_vitrina_onec_stocks_group_refresh: ok ->", len(captured_metric_keys))

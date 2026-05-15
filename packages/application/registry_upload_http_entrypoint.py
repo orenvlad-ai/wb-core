@@ -683,13 +683,15 @@ class RegistryUploadHttpEntrypoint:
         date_from: str | None = None,
         date_to: str | None = None,
     ) -> dict[str, Any]:
-        return asdict(
-            self.web_vitrina_block.build(
-                page_route=page_route,
-                read_route=read_route,
-                as_of_date=as_of_date,
-                date_from=date_from,
-                date_to=date_to,
+        return _web_vitrina_contract_response_payload(
+            asdict(
+                self.web_vitrina_block.build(
+                    page_route=page_route,
+                    read_route=read_route,
+                    as_of_date=as_of_date,
+                    date_from=date_from,
+                    date_to=date_to,
+                )
             )
         )
 
@@ -4305,6 +4307,29 @@ def _summarize_refresh_diagnostic_sources(raw_source_slots: Any) -> list[dict[st
         for key in ("rows_fetched", "rows_accepted", "rows_reused", "rows_skipped"):
             summary[key] += int(item.get(key) or 0)
     return [by_source[key] for key in sorted(by_source)]
+
+
+def _web_vitrina_contract_response_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep small contract root fields before heavy rows for bounded live probes."""
+
+    ordered: dict[str, Any] = {}
+    for key in (
+        "contract_name",
+        "contract_version",
+        "page_route",
+        "read_route",
+        "meta",
+        "status_summary",
+        "schema",
+        "capabilities",
+        "rows",
+    ):
+        if key in payload:
+            ordered[key] = payload[key]
+    for key, value in payload.items():
+        if key not in ordered:
+            ordered[key] = value
+    return ordered
 
 
 def _with_page_composition_diagnostics(
