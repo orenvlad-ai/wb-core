@@ -75,17 +75,16 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
                   empty_source_rows: document.querySelectorAll('[data-loading-source-empty]').length
                 })"""
             )
-            if initial_payload != {
-                "shell_hidden": True,
-                "empty_hidden": False,
-                "empty_text": "Статусы источников не загружены. Нажмите «Загрузить», чтобы посмотреть детали.",
-                "load_button": "Загрузить",
-                "group_count": 0,
-                "button_count": 0,
-                "source_row_count": 0,
-                "empty_source_rows": 0,
-            }:
-                raise AssertionError(f"initial source status state must be unloaded, got {initial_payload}")
+            if (
+                initial_payload["shell_hidden"]
+                or not initial_payload["empty_hidden"]
+                or initial_payload["load_button"] != "Загрузить"
+                or initial_payload["group_count"] != 4
+                or initial_payload["button_count"] != 4
+                or initial_payload["source_row_count"] < 1
+                or initial_payload["empty_source_rows"] != 0
+            ):
+                raise AssertionError(f"initial source status shells must be visible but unloaded, got {initial_payload}")
             page.locator("[data-source-status-load]").click()
             page.wait_for_function(
                 """() => {
@@ -97,7 +96,7 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
                 }""",
                 timeout=5000,
             )
-            print("web_vitrina_source_status_lazy_empty: ok -> no fake group shells")
+            print("web_vitrina_source_status_lazy_empty: ok -> visible group shells collapse on empty details")
             browser.close()
 
 

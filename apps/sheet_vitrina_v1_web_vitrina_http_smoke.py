@@ -216,8 +216,13 @@ def main() -> None:
             initial_loading_table = initial_activity_surface.get("loading_table") or {}
             if initial_loading_table.get("source_status_state") != "not_loaded":
                 raise AssertionError(f"initial page composition must not auto-load source details, got {initial_activity_surface}")
-            if initial_loading_table.get("rows") or initial_loading_table.get("groups"):
-                raise AssertionError(f"initial page composition must not expose source group shells, got {initial_loading_table}")
+            initial_groups = {item.get("group_id"): item for item in initial_loading_table.get("groups") or []}
+            initial_rows = initial_loading_table.get("rows") or []
+            initial_onec_row = next((row for row in initial_rows if row.get("source_key") == "onec_stocks"), None)
+            if initial_groups.get("onec_product_capital", {}).get("label") != "1С / товарный капитал":
+                raise AssertionError(f"initial page composition must expose 1C source group shell, got {initial_loading_table}")
+            if not initial_onec_row or "1С WB: капитал, руб" not in (initial_onec_row.get("metric_labels") or []):
+                raise AssertionError(f"initial page composition must expose 1C source metrics before status load, got {initial_loading_table}")
 
             full_table_status, full_table_payload = _get_json(
                 f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&include_table_data=1"
@@ -284,7 +289,7 @@ def main() -> None:
                 raise AssertionError(f"1C product-capital group label mismatch, got {loading_groups}")
             if not loading_groups["seller_portal_bot"].get("session_controls"):
                 raise AssertionError(f"seller portal group must expose session controls, got {loading_groups}")
-            if {row.get("source_group_id") for row in loading_rows} != {"wb_api", "seller_portal_bot"}:
+            if {row.get("source_group_id") for row in loading_rows} != {"wb_api", "seller_portal_bot", "onec_product_capital", "other_sources"}:
                 raise AssertionError(f"loading table rows must be grouped by source group, got {loading_rows}")
             if not str((loading_columns.get("today_status") or {}).get("label") or "").startswith("Сегодня: "):
                 raise AssertionError(f"web-vitrina loading table today column mismatch, got {loading_table}")
@@ -293,14 +298,14 @@ def main() -> None:
             for required_column in ("today_reason", "yesterday_reason", "metrics", "technical_endpoint"):
                 if required_column not in loading_columns:
                     raise AssertionError(f"web-vitrina loading table missing {required_column}, got {loading_table}")
-            if [item.get("endpoint_id") for item in upload_items] != [
-                "prices_snapshot",
-                "seller_funnel_snapshot",
-                "web_source_snapshot",
-            ]:
-                raise AssertionError(f"upload summary must be sorted error -> source-aware success, got {activity_surface}")
-            if [item.get("status_label") for item in upload_items] != ["Ошибка", "Успешно", "Успешно"]:
-                raise AssertionError(f"upload summary status mismatch, got {activity_surface}")
+            endpoint_ids = [item.get("endpoint_id") for item in upload_items]
+            if endpoint_ids[0] != "prices_snapshot" or "onec_stocks" not in endpoint_ids:
+                raise AssertionError(f"upload summary must include 1C after persisted/error sources, got {activity_surface}")
+            onec_upload_item = next((item for item in upload_items if item.get("endpoint_id") == "onec_stocks"), None)
+            if not onec_upload_item or onec_upload_item.get("status_label") != "Внимание":
+                raise AssertionError(f"upload summary must expose unconfirmed 1C state, got {activity_surface}")
+            if [item.get("status_label") for item in upload_items if item.get("endpoint_id") in {"prices_snapshot", "seller_funnel_snapshot", "web_source_snapshot"}] != ["Ошибка", "Успешно", "Успешно"]:
+                raise AssertionError(f"persisted upload summary status mismatch, got {activity_surface}")
             if upload_items[0].get("label_ru") != "Цены и скидки" or upload_items[0].get("reason_ru") != "данные не получены":
                 raise AssertionError(f"upload summary russian label/reason mismatch, got {activity_surface}")
             first_loading_row = loading_rows[0]
