@@ -4456,6 +4456,7 @@ def _updated_cell_status_for_status_rows(rows: list[list[Any]]) -> str:
 
 def _updated_cell_status_for_status_row(row: list[Any]) -> str:
     kind = str(row[1] if len(row) > 1 else "").strip().lower()
+    covered_count = _status_row_covered_count(row)
     note = str(row[10] if len(row) > 10 else "").strip().lower()
     if kind in {"error", "missing", "not_found", "blocked", "not_available"}:
         return ""
@@ -4465,9 +4466,20 @@ def _updated_cell_status_for_status_row(row: list[Any]) -> str:
         return "latest_confirmed"
     if kind == "warning":
         return "latest_confirmed"
+    if kind == "incomplete" and covered_count > 0:
+        return "updated"
     if kind == "success":
         return "updated"
     return ""
+
+
+def _status_row_covered_count(row: list[Any]) -> int:
+    if len(row) <= 8:
+        return 0
+    try:
+        return int(row[8])
+    except (TypeError, ValueError):
+        return 0
 
 
 def _status_row_date(row: list[Any]) -> str:

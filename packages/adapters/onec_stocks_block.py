@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 from urllib import error, parse, request as urllib_request
 
-from packages.contracts.onec_stocks_block import OnecStocksRequest
+from packages.contracts.onec_stocks_block import (
+    ONEC_STOCKS_PARTIAL_FETCH_META_KEY,
+    OnecStocksRequest,
+)
 
 
 ONEC_STOCKS_BASE_URL_ENV = "ONEC_STOCKS_BASE_URL"
@@ -66,6 +69,13 @@ class OnecStocksRuntimeConfig:
     timeout_seconds: float = DEFAULT_ONEC_STOCKS_TIMEOUT_SECONDS
 
 
+@dataclass(frozen=True)
+class _OnecStocksFetchFailure:
+    nm_id: int
+    kind: str
+    status_code: int | None = None
+
+
 class HttpBackedOnecStocksSource:
     """HTTP adapter for the confirmed 1C `/hs/soykasoft/stocks_wb` method."""
 
@@ -82,13 +92,46 @@ class HttpBackedOnecStocksSource:
         if not nm_ids:
             raise ValueError("1C stocks live adapter requires at least one nmId")
 
-        payloads = [
-            self._fetch_one(runtime=runtime, account_id=request.account_id, nm_id=nm_id)
-            for nm_id in nm_ids
-        ]
-        if len(payloads) == 1:
-            return payloads[0]
-        return _merge_onec_stock_payloads(payloads)
+        payloads: list[Mapping[str, Any]] = []
+        failures: list[_OnecStocksFetchFailure] = []
+        for nm_id in nm_ids:
+            try:
+                payloads.append(
+                    self._fetch_one(runtime=runtime, account_id=request.account_id, nm_id=nm_id)
+                )
+            except OnecStocksHttpError as exc:
+                failures.append(
+                    _OnecStocksFetchFailure(
+                        nm_id=nm_id,
+                        kind="http",
+                        status_code=exc.status_code,
+                    )
+                )
+            except OnecStocksRuntimeError:
+                failures.append(_OnecStocksFetchFailure(nm_id=nm_id, kind="runtime"))
+
+        if not payloads:
+            raise OnecStocksRuntimeError(
+                "1C stocks upstream failed for all requested nmIds; "
+                f"requested_count={len(nm_ids)}; "
+                f"failure_count={len(failures)}; "
+                f"status_codes={_format_count_mapping(_status_code_counts(failures))}; "
+                f"error_kinds={_format_count_mapping(_kind_counts(failures))}"
+            )
+        payload = payloads[0] if len(payloads) == 1 else _merge_onec_stock_payloads(payloads)
+        if not failures:
+            return payload
+        payload_with_partial_meta = dict(payload)
+        payload_with_partial_meta[ONEC_STOCKS_PARTIAL_FETCH_META_KEY] = {
+            "requested_count": len(nm_ids),
+            "requested_nm_ids": nm_ids,
+            "successful_request_count": len(payloads),
+            "failure_count": len(failures),
+            "missing_nm_ids": [failure.nm_id for failure in failures],
+            "status_codes": _status_code_counts(failures),
+            "error_kinds": _kind_counts(failures),
+        }
+        return payload_with_partial_meta
 
     def _fetch_one(
         self,
@@ -119,6 +162,8 @@ class HttpBackedOnecStocksSource:
                 raw_payload = response.read()
         except error.HTTPError as exc:
             raise OnecStocksHttpError(exc.code) from exc
+        except (TimeoutError, error.URLError) as exc:
+            raise OnecStocksRuntimeError("1C stocks upstream transport error") from exc
 
         try:
             payload = json.loads(raw_payload.decode("utf-8-sig"))
@@ -205,3 +250,27 @@ def _merge_onec_stock_payloads(payloads: list[Mapping[str, Any]]) -> Mapping[str
             raise OnecStocksRuntimeError("1C stocks upstream JSON items must be a list")
         merged_items.extend(items)
     return {"meta": dict(meta), "items": merged_items}
+
+
+def _status_code_counts(failures: list[_OnecStocksFetchFailure]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for failure in failures:
+        if failure.status_code is None:
+            continue
+        key = str(failure.status_code)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _kind_counts(failures: list[_OnecStocksFetchFailure]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for failure in failures:
+        key = failure.kind.strip() or "unknown"
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _format_count_mapping(value: Mapping[str, int]) -> str:
+    if not value:
+        return "none"
+    return ",".join(f"{key}:{value[key]}" for key in sorted(value))

@@ -27,10 +27,15 @@ from packages.application.sheet_vitrina_v1_onec_stocks import (
     onec_stage_metric_key,
 )
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
+from packages.contracts.onec_stocks_block import (
+    ONEC_STOCKS_PARTIAL_FETCH_META_KEY,
+    OnecStocksRequest,
+)
 from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope
 
 ARTIFACTS = ROOT / "artifacts" / "onec_stocks_block"
 NM_ID = 428855306
+MISSING_NM_ID = 210183919
 AS_OF_DATE = "2026-05-14"
 TODAY_DATE = "2026-05-15"
 REFRESHED_AT = "2026-05-15T12:05:00Z"
@@ -68,6 +73,21 @@ def main() -> None:
             source_keys=[ONEC_STOCKS_SOURCE_KEY],
             metric_keys=metric_keys,
         )
+        partial_onec_block = OnecStocksBlock(
+            _PartialOnecStocksSource(ARTIFACTS),
+            stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
+        )
+        partial_sheet_block = SheetVitrinaV1LivePlanBlock(
+            runtime=runtime,
+            onec_stocks_block=partial_onec_block,
+            now_factory=lambda: datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc),
+        )
+        partial_plan = partial_sheet_block.build_plan(
+            as_of_date=AS_OF_DATE,
+            execution_mode="manual_operator",
+            source_keys=[ONEC_STOCKS_SOURCE_KEY],
+            metric_keys=metric_keys,
+        )
         data_rows = {str(row[1]): row for row in _sheet_rows(plan, "DATA_VITRINA")}
         assert_close(data_rows["TOTAL|total_onec_total_qty"][3], 12540.0, "total 1C qty")
         assert_close(data_rows["TOTAL|total_onec_total_cost_rub"][3], 1190938.16, "total 1C cost")
@@ -94,6 +114,24 @@ def main() -> None:
             raise AssertionError(f"1C today status must be success, got {status_rows}")
         if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"][1] != "missing":
             raise AssertionError(f"1C first-run yesterday rollover must be explicit missing, got {status_rows}")
+
+        partial_data_rows = {str(row[1]): row for row in _sheet_rows(partial_plan, "DATA_VITRINA")}
+        assert_close(
+            partial_data_rows["TOTAL|total_onec_total_qty"][3],
+            12540.0,
+            "partial total 1C qty",
+        )
+        assert_close(
+            partial_data_rows[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"][3],
+            4782.0,
+            "partial SKU 1C qty",
+        )
+        partial_status_rows = {str(row[0]): row for row in _sheet_rows(partial_plan, "STATUS")}
+        partial_today_status = partial_status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[today_current]"]
+        if partial_today_status[1] != "incomplete":
+            raise AssertionError(f"partial 1C today status must be incomplete, got {partial_today_status}")
+        if partial_today_status[8] != 1 or str(MISSING_NM_ID) not in str(partial_today_status[9]):
+            raise AssertionError(f"partial 1C status must expose covered/missing counts, got {partial_today_status}")
 
         current_state = runtime.load_current_state()
         runtime.save_sheet_vitrina_ready_snapshot(
@@ -145,18 +183,21 @@ def main() -> None:
         def build_partial_plan(**kwargs: object) -> SheetVitrinaV1Envelope:
             captured["source_keys"] = list(kwargs.get("source_keys") or [])
             captured["metric_keys"] = list(kwargs.get("metric_keys") or [])
-            return plan
+            return partial_plan
 
         entrypoint.sheet_plan_block.build_plan = build_partial_plan  # type: ignore[method-assign]
         job = entrypoint.start_sheet_source_group_refresh_job(
             source_group_id=ONEC_STOCKS_SOURCE_GROUP_ID,
-            as_of_date=AS_OF_DATE,
+            as_of_date=TODAY_DATE,
         )
         job_snapshot = _wait_job(entrypoint, str(job["job_id"]))
         if job_snapshot["status"] != "success":
             raise AssertionError(f"1C group refresh must finish successfully, got {job_snapshot}")
         if captured.get("source_keys") != [ONEC_STOCKS_SOURCE_KEY]:
             raise AssertionError(f"1C group refresh must select only 1C source, got {captured}")
+        job_result = dict(job_snapshot.get("result") or {})
+        if int(job_result.get("updated_cell_count") or 0) <= 0:
+            raise AssertionError(f"partial 1C group refresh must update cells, got {job_result}")
         captured_metric_keys = set(captured.get("metric_keys") or [])
         for expected in (
             ONEC_STOCKS_TOTAL_QTY_METRIC_KEY,
@@ -168,6 +209,7 @@ def main() -> None:
                 raise AssertionError(f"1C group refresh must select virtual metric {expected}, got {captured}")
 
         print("sheet_vitrina_onec_stocks_metrics: ok -> total_qty=12540 total_cost=1190938.16")
+        print("sheet_vitrina_onec_stocks_partial_acceptance: ok -> covered=1 missing=1")
         print("sheet_vitrina_onec_stocks_status_group: ok ->", ONEC_STOCKS_SOURCE_GROUP_ID)
         print("sheet_vitrina_onec_stocks_group_refresh: ok ->", len(captured_metric_keys))
 
@@ -183,6 +225,13 @@ def _build_bundle() -> dict[str, object]:
                 "display_name": "1C smoke SKU",
                 "group": "1C smoke",
                 "display_order": 1,
+            },
+            {
+                "nm_id": MISSING_NM_ID,
+                "enabled": True,
+                "display_name": "1C missing SKU",
+                "group": "1C smoke",
+                "display_order": 2,
             }
         ],
         "metrics_v2": [
@@ -201,6 +250,24 @@ def _build_bundle() -> dict[str, object]:
         ],
         "formulas_v2": [],
     }
+
+
+class _PartialOnecStocksSource:
+    def __init__(self, artifacts_root: Path) -> None:
+        self._source = ArtifactBackedOnecStocksSource(artifacts_root)
+
+    def fetch(self, request: OnecStocksRequest) -> dict[str, object]:
+        payload = dict(self._source.fetch(request))
+        payload[ONEC_STOCKS_PARTIAL_FETCH_META_KEY] = {
+            "requested_count": 2,
+            "requested_nm_ids": [NM_ID, MISSING_NM_ID],
+            "successful_request_count": 1,
+            "failure_count": 1,
+            "missing_nm_ids": [MISSING_NM_ID],
+            "status_codes": {"401": 1},
+            "error_kinds": {"http": 1},
+        }
+        return payload
 
 
 def _sheet_rows(plan: SheetVitrinaV1Envelope, sheet_name: str) -> list[list[object]]:
