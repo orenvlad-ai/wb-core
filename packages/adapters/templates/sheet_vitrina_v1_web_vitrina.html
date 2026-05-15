@@ -5295,7 +5295,12 @@
       const items = Array.isArray(block.items) ? block.items : [];
       const rows = Array.isArray(block.rows) ? block.rows : items.map(itemToLegacyLoadingRow);
       const groups = Array.isArray(block.groups) ? block.groups : [];
-      if (sourceStatusState !== "loaded") {
+      const canRenderSourceShell = (
+        (sourceStatusState === "loaded" || sourceStatusState === "not_loaded") &&
+        columns.length &&
+        (rows.length || groups.length)
+      );
+      if (sourceStatusState !== "loaded" && !canRenderSourceShell) {
         loadingTableShellNode.classList.add("is-hidden");
         loadingTableEmptyNode.classList.remove("is-hidden");
         loadingTableHeadNode.innerHTML = "";
@@ -5316,7 +5321,7 @@
         state.sourceStatus.loaded = false;
         return;
       }
-      if (!rows.length) {
+      if (!rows.length && !groups.length) {
         loadingTableShellNode.classList.add("is-hidden");
         loadingTableEmptyNode.classList.remove("is-hidden");
         loadingTableHeadNode.innerHTML = "";
@@ -5327,7 +5332,7 @@
         state.sourceStatus.loaded = false;
         return;
       }
-      state.sourceStatus.loaded = true;
+      state.sourceStatus.loaded = sourceStatusState === "loaded";
       loadingTableShellNode.classList.remove("is-hidden");
       loadingTableEmptyNode.classList.add("is-hidden");
       loadingTableHeadNode.innerHTML = "<tr>" + columns.map(function(column) {
@@ -10757,6 +10762,9 @@
       }
       if (normalizedGroupId === "seller_portal_bot") {
         return "Seller Portal / бот";
+      }
+      if (normalizedGroupId === "onec_product_capital") {
+        return "1С / товарный капитал";
       }
       if (normalizedGroupId === "other_sources") {
         return "Прочие источники";

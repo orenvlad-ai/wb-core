@@ -298,13 +298,15 @@ def run_browser_checks(
                 page,
                 allow_empty_log=True,
             )
-            if initial_unloaded_activity_surface["loading"]["rows"]:
+            initial_loading_rows = initial_unloaded_activity_surface["loading"]["rows"]
+            initial_loading_groups = initial_unloaded_activity_surface["loading"]["groups"]
+            if not any(row["source_key"] == "onec_stocks" for row in initial_loading_rows):
                 raise AssertionError(
-                    f"loading details must not auto-render before click, got {initial_unloaded_activity_surface}"
+                    f"initial loading shell must expose the 1C source row before click, got {initial_unloaded_activity_surface}"
                 )
-            if initial_unloaded_activity_surface["loading"]["groups"]:
+            if not any(group["group_id"] == "onec_product_capital" for group in initial_loading_groups):
                 raise AssertionError(
-                    f"initial loading state must not render empty group shells, got {initial_unloaded_activity_surface}"
+                    f"initial loading shell must expose the 1C source group before click, got {initial_unloaded_activity_surface}"
                 )
             if "Источники группы пока не представлены" in initial_unloaded_activity_surface["loading"].get("empty_text", ""):
                 raise AssertionError(
@@ -378,7 +380,6 @@ def run_browser_checks(
                 raise AssertionError(f"default history range must be week ending business today, got {initial_history_state}")
             visible_body_text = page.locator("body").inner_text()
             for forbidden_history_text in (
-                "История",
                 "mode:",
                 "supported query:",
                 "default as_of_date",

@@ -781,11 +781,28 @@ class RegistryUploadHttpEntrypoint:
             contract,
             snapshot_as_of_date=source_status_snapshot_as_of_date,
         )
+        group_refresh_available_dates = self.web_vitrina_block.list_materialized_readable_dates(descending=False)
+        group_refresh_default_date = _default_group_refresh_date(
+            group_refresh_available_dates,
+            preferred_date=current_business_date_iso(self.now_factory()),
+        )
+        metric_labels_by_source = _build_activity_metric_labels_by_source(
+            extend_metrics_with_onec_stock_metrics(
+                getattr(self.runtime.load_current_state(), "metrics_v2", [])
+            )
+        )
         activity_surface = _web_vitrina_source_status_not_loaded_activity_surface(
             snapshot_as_of_date=source_status_snapshot_as_of_date,
             snapshot_id=source_status_snapshot_id,
             refreshed_at=str(contract.meta.refreshed_at),
             read_model=str(contract.status_summary.read_model),
+            available_dates=group_refresh_available_dates,
+            default_refresh_date=group_refresh_default_date,
+            metric_labels_by_source=metric_labels_by_source,
+            group_last_updated_at=_source_group_last_updated_at_for_snapshot(
+                self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=source_status_snapshot_as_of_date),
+                fallback_updated_at=str(contract.meta.refreshed_at),
+            ),
         )
         if include_source_status:
             try:
@@ -4998,9 +5015,33 @@ def _web_vitrina_source_status_not_loaded_activity_surface(
     snapshot_id: str,
     refreshed_at: str,
     read_model: str,
+    available_dates: Iterable[str] = (),
+    default_refresh_date: str = "",
+    metric_labels_by_source: Mapping[str, list[str]] | None = None,
+    group_last_updated_at: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     current_business_date = current_business_date_iso()
     previous_business_date = default_business_as_of_date()
+    upload_summary = _build_web_vitrina_endpoint_summary_block(
+        title="Загрузка данных",
+        subtitle="Статусы источников не загружены.",
+        records={},
+        ordered_source_keys=_collect_activity_source_keys({}, {}),
+        empty_message="Статусы источников не загружены. Нажмите «Загрузить», чтобы посмотреть детали.",
+        block_updated_at=refreshed_at,
+        block_detail=f"snapshot {snapshot_id} · as_of_date {snapshot_as_of_date} · {read_model}",
+    )
+    loading_table = _build_web_vitrina_loading_table(
+        upload_summary=upload_summary,
+        today_date=current_business_date,
+        yesterday_date=previous_business_date,
+        available_dates=available_dates,
+        default_refresh_date=default_refresh_date,
+        metric_labels_by_source=metric_labels_by_source or {},
+        group_last_updated_at=group_last_updated_at or {},
+    )
+    loading_table["source_status_state"] = "not_loaded"
+    loading_table["empty_message"] = "Статусы источников не загружены. Нажмите «Загрузить», чтобы посмотреть детали."
     return {
         "log_block": {
             "title": "Лог",
@@ -5014,29 +5055,8 @@ def _web_vitrina_source_status_not_loaded_activity_surface(
             "log_filename": "",
             "empty_message": "Нажмите «Загрузить» в блоке «Загрузка данных», чтобы прочитать source-status details и лог.",
         },
-        "upload_summary": {
-            "title": "Загрузка данных",
-            "subtitle": "Статусы источников не загружены.",
-            "detail": f"snapshot {snapshot_id} · as_of_date {snapshot_as_of_date} · {read_model}",
-            "updated_at": refreshed_at,
-            "items": [],
-            "empty_message": "Статусы источников не загружены. Нажмите «Загрузить», чтобы посмотреть детали.",
-        },
-        "loading_table": {
-            "title": "Загрузка данных",
-            "subtitle": "Статусы источников не загружены.",
-            "detail": f"snapshot {snapshot_id} · as_of_date {snapshot_as_of_date} · {read_model}",
-            "updated_at": refreshed_at,
-            "today_date": current_business_date,
-            "yesterday_date": previous_business_date,
-            "available_dates": [],
-            "default_refresh_date": "",
-            "groups": [],
-            "columns": [],
-            "rows": [],
-            "source_status_state": "not_loaded",
-            "empty_message": "Статусы источников не загружены. Нажмите «Загрузить», чтобы посмотреть детали.",
-        },
+        "upload_summary": upload_summary,
+        "loading_table": loading_table,
     }
 
 
@@ -5658,7 +5678,7 @@ def _collect_activity_source_keys(
     upload_records: Mapping[str, Mapping[str, Any]],
     update_records: Mapping[str, Mapping[str, Any]],
 ) -> list[str]:
-    seen = set(upload_records) | set(update_records)
+    seen = set(WEB_VITRINA_SOURCE_METRIC_KEYS) | set(upload_records) | set(update_records)
     ordered = [source_key for source_key in SOURCE_DIAGNOSTIC_SPECS if source_key in seen]
     extras = sorted(source_key for source_key in seen if source_key not in SOURCE_DIAGNOSTIC_SPECS)
     return ordered + extras

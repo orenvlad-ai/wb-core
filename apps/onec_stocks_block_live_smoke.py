@@ -18,6 +18,11 @@ from packages.adapters.onec_stocks_block import (
     missing_onec_stocks_live_env,
 )
 from packages.application.onec_stocks_block import OnecStocksBlock
+from packages.application.sheet_vitrina_v1_onec_stocks import (
+    DEFAULT_ONEC_STAGE_MAPPING,
+    ONEC_STOCKS_STAGE_KEYS,
+    normalize_onec_stage_code,
+)
 from packages.contracts.onec_stocks_block import OnecStocksRequest
 
 
@@ -42,7 +47,7 @@ def main() -> None:
         raise SystemExit(f"{ONEC_STOCKS_SMOKE_NM_ID_ENV} must contain digits only")
 
     source = HttpBackedOnecStocksSource()
-    block = OnecStocksBlock(source)
+    block = OnecStocksBlock(source, stage_mapping=DEFAULT_ONEC_STAGE_MAPPING)
     result = block.execute(
         OnecStocksRequest(
             snapshot_type="onec_stocks",
@@ -56,8 +61,20 @@ def main() -> None:
         raise SystemExit(
             f"unexpected live counts: item_count={result.item_count}, stage_count={result.stage_count}"
         )
+    stage_codes = sorted(
+        code
+        for code in {
+            normalize_onec_stage_code(item.canonical_stage_code or item.stage_name)
+            for item in result.items
+        }
+        if code is not None
+    )
+    missing_stage_codes = sorted(set(ONEC_STOCKS_STAGE_KEYS) - set(stage_codes))
+    if missing_stage_codes:
+        raise SystemExit(f"missing expected live 1C stages: {', '.join(missing_stage_codes)}")
     print(f"live-smoke: ok -> {result.kind}")
     print(f"live-smoke: item_count={result.item_count}, stage_count={result.stage_count}")
+    print("live-smoke: stage_codes=" + ",".join(stage_codes))
 
 
 if __name__ == "__main__":
