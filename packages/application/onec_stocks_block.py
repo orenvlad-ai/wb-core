@@ -7,9 +7,11 @@ from typing import Any, Mapping
 from packages.adapters.onec_stocks_block import OnecStocksSource
 from packages.contracts.onec_stocks_block import (
     ALLOWED_ONEC_CANONICAL_STAGE_CODES,
+    ONEC_STOCKS_PARTIAL_FETCH_META_KEY,
     OnecCanonicalStageCode,
     OnecStocksEmpty,
     OnecStocksEnvelope,
+    OnecStocksIncomplete,
     OnecStocksItem,
     OnecStocksMeta,
     OnecStocksNormalizedStage,
@@ -212,4 +214,106 @@ class OnecStocksBlock:
 
     def execute(self, request: OnecStocksRequest) -> OnecStocksEnvelope:
         payload = self._source.fetch(request)
-        return normalize_onec_stocks_payload(payload, stage_mapping=self._stage_mapping)
+        envelope = normalize_onec_stocks_payload(payload, stage_mapping=self._stage_mapping)
+        partial_meta = _partial_fetch_metadata(payload)
+        if partial_meta is None or envelope.result.kind != "success":
+            return envelope
+
+        covered_nm_ids = sorted({row.nm_id for row in envelope.result.items})
+        requested_nm_ids = _partial_requested_nm_ids(
+            request_nm_ids=request.nm_ids,
+            partial_meta=partial_meta,
+        )
+        missing_nm_ids = sorted(
+            set(_partial_missing_nm_ids(partial_meta)) | (set(requested_nm_ids) - set(covered_nm_ids))
+        )
+        requested_count = _positive_int(
+            partial_meta.get("requested_count"),
+            fallback=len(requested_nm_ids),
+        )
+        status_codes = _format_partial_status_codes(partial_meta.get("status_codes"))
+        detail_parts = [
+            "1C stocks current snapshot loaded partially",
+            f"requested_count={requested_count}",
+            f"covered_count={len(covered_nm_ids)}",
+            f"missing_count={len(missing_nm_ids)}",
+        ]
+        if status_codes:
+            detail_parts.append(f"status_codes={status_codes}")
+        return OnecStocksEnvelope(
+            result=OnecStocksIncomplete(
+                kind="incomplete",
+                meta=envelope.result.meta,
+                item_count=envelope.result.item_count,
+                stage_count=envelope.result.stage_count,
+                dynamic_stage_names=envelope.result.dynamic_stage_names,
+                items=envelope.result.items,
+                requested_count=requested_count,
+                covered_count=len(covered_nm_ids),
+                missing_nm_ids=missing_nm_ids,
+                detail="; ".join(detail_parts),
+            )
+        )
+
+
+def _partial_fetch_metadata(payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    raw = payload.get(ONEC_STOCKS_PARTIAL_FETCH_META_KEY)
+    return raw if isinstance(raw, Mapping) else None
+
+
+def _partial_requested_nm_ids(
+    *,
+    request_nm_ids: list[int],
+    partial_meta: Mapping[str, Any],
+) -> list[int]:
+    raw = partial_meta.get("requested_nm_ids")
+    if isinstance(raw, list):
+        parsed = _int_list(raw)
+        if parsed:
+            return parsed
+    return sorted({int(item) for item in request_nm_ids})
+
+
+def _partial_missing_nm_ids(partial_meta: Mapping[str, Any]) -> list[int]:
+    raw = partial_meta.get("missing_nm_ids")
+    return _int_list(raw) if isinstance(raw, list) else []
+
+
+def _int_list(raw_items: list[Any]) -> list[int]:
+    result: list[int] = []
+    for item in raw_items:
+        if isinstance(item, bool):
+            continue
+        try:
+            value = int(item)
+        except (TypeError, ValueError):
+            continue
+        result.append(value)
+    return sorted(set(result))
+
+
+def _positive_int(value: Any, *, fallback: int) -> int:
+    if isinstance(value, bool):
+        return fallback
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def _format_partial_status_codes(value: Any) -> str:
+    if not isinstance(value, Mapping):
+        return ""
+    parts: list[str] = []
+    for status_code, count in sorted(value.items(), key=lambda item: str(item[0])):
+        code = str(status_code).strip()
+        if not code:
+            continue
+        try:
+            parsed_count = int(count)
+        except (TypeError, ValueError):
+            continue
+        if parsed_count > 0:
+            parts.append(f"{code}:{parsed_count}")
+    return ",".join(parts)

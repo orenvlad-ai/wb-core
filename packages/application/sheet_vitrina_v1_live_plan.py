@@ -431,7 +431,7 @@ def _append_source_slot_diagnostic(
         "current_rollover",
     } else 0
     rows_fetched = status.covered_count if normalized_origin == "upstream_fetch" else 0
-    rows_accepted = status.covered_count if status.kind == "success" else 0
+    rows_accepted = status.covered_count if status.kind in {"success", "incomplete"} else 0
     rows_skipped = (
         status.requested_count
         if normalized_origin == "not_supported"
@@ -3127,6 +3127,13 @@ def _is_valid_temporal_candidate(
     if payload is None or not _is_exact_snapshot_payload(payload, column_date):
         return False
     if status.kind != "success":
+        if not (
+            source_key == ONEC_STOCKS_SOURCE_KEY
+            and status.kind == "incomplete"
+            and status.covered_count > 0
+        ):
+            return False
+    if status.kind == "incomplete" and source_key != ONEC_STOCKS_SOURCE_KEY:
         return False
     if _is_invalid_temporal_web_source_payload(
         source_key=source_key,
@@ -3299,7 +3306,12 @@ def _format_temporal_source_key(source_key: str, temporal_slot: str) -> str:
 
 
 def _is_exact_snapshot_payload(payload: Any, column_date: str) -> bool:
-    return str(getattr(payload, "kind", "")) == "success" and _resolve_freshness(payload) == column_date
+    kind = str(getattr(payload, "kind", ""))
+    if kind == "success":
+        return _resolve_freshness(payload) == column_date
+    if kind == "incomplete" and bool(getattr(payload, "temporal_snapshot_acceptable", False)):
+        return _resolve_freshness(payload) == column_date
+    return False
 
 
 def _is_invalid_temporal_web_source_payload(

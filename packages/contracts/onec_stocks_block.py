@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Union
 
 
+ONEC_STOCKS_PARTIAL_FETCH_META_KEY = "_wb_core_partial_fetch"
+
+
 OnecCanonicalStageCode = Literal[
     "CHINA_TO_FF",
     "CN_TO_RU_TRANSIT",
@@ -152,7 +155,38 @@ class OnecStocksEmpty:
         return self.meta.date
 
 
-OnecStocksResult = Union[OnecStocksSuccess, OnecStocksEmpty]
+@dataclass(frozen=True)
+class OnecStocksIncomplete:
+    kind: Literal["incomplete"]
+    meta: OnecStocksMeta
+    item_count: int
+    stage_count: int
+    dynamic_stage_names: list[str]
+    items: list[OnecStocksNormalizedStage]
+    requested_count: int
+    covered_count: int
+    missing_nm_ids: list[int]
+    detail: str
+    temporal_snapshot_acceptable: bool = True
+
+    @property
+    def snapshot_date(self) -> str:
+        return self.meta.date
+
+    @property
+    def date(self) -> str:
+        return self.meta.date
+
+    @property
+    def date_from(self) -> str:
+        return self.meta.date
+
+    @property
+    def date_to(self) -> str:
+        return self.meta.date
+
+
+OnecStocksResult = Union[OnecStocksSuccess, OnecStocksEmpty, OnecStocksIncomplete]
 
 
 @dataclass(frozen=True)
