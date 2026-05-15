@@ -278,8 +278,10 @@ def main() -> None:
             loading_groups = {item.get("group_id"): item for item in loading_table.get("groups") or []}
             if [row.get("source_key") for row in loading_rows] != [item.get("source_key") for item in upload_items]:
                 raise AssertionError(f"web-vitrina loading table must follow upload source truth, got {activity_surface}")
-            if sorted(loading_groups) != ["other_sources", "seller_portal_bot", "wb_api"]:
+            if sorted(loading_groups) != ["onec_product_capital", "other_sources", "seller_portal_bot", "wb_api"]:
                 raise AssertionError(f"web-vitrina loading table must expose stable source groups, got {loading_groups}")
+            if loading_groups["onec_product_capital"].get("label") != "1С / товарный капитал":
+                raise AssertionError(f"1C product-capital group label mismatch, got {loading_groups}")
             if not loading_groups["seller_portal_bot"].get("session_controls"):
                 raise AssertionError(f"seller portal group must expose session controls, got {loading_groups}")
             if {row.get("source_group_id") for row in loading_rows} != {"wb_api", "seller_portal_bot"}:

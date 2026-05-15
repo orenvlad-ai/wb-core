@@ -15,6 +15,7 @@ from typing import Any, Callable, Iterable, Mapping, Protocol
 from packages.adapters.ads_bids_block import HttpBackedAdsBidsSource
 from packages.adapters.ads_compact_block import HttpBackedAdsCompactSource
 from packages.adapters.fin_report_daily_block import HttpBackedFinReportDailySource
+from packages.adapters.onec_stocks_block import HttpBackedOnecStocksSource
 from packages.adapters.prices_snapshot_block import HttpBackedPricesSnapshotSource
 from packages.adapters.sales_funnel_history_block import HttpBackedSalesFunnelHistorySource
 from packages.adapters.seller_funnel_snapshot_block import HttpBackedSellerFunnelSnapshotSource
@@ -26,6 +27,7 @@ from packages.adapters.web_source_snapshot_block import HttpBackedWebSourceSnaps
 from packages.application.ads_bids_block import AdsBidsBlock
 from packages.application.ads_compact_block import AdsCompactBlock
 from packages.application.fin_report_daily_block import FinReportDailyBlock
+from packages.application.onec_stocks_block import OnecStocksBlock
 from packages.application.promo_live_source import PromoLiveSourceBlock
 from packages.application.prices_snapshot_block import PricesSnapshotBlock
 from packages.application.registry_upload_db_backed_runtime import (
@@ -36,6 +38,15 @@ from packages.application.sales_funnel_history_block import SalesFunnelHistoryBl
 from packages.application.seller_funnel_snapshot_block import SellerFunnelSnapshotBlock
 from packages.application.sf_period_block import SfPeriodBlock
 from packages.application.sheet_vitrina_v1 import build_sheet_write_plan
+from packages.application.sheet_vitrina_v1_onec_stocks import (
+    DEFAULT_ONEC_STAGE_MAPPING,
+    ONEC_STOCKS_SOURCE_KEY,
+    build_onec_stocks_lookup,
+    extend_metrics_with_onec_stock_metrics,
+    is_onec_stock_sku_metric_key,
+    resolve_onec_stock_metric_value,
+    resolve_onec_stocks_account_id,
+)
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     CANONICAL_SOURCE_TEMPORAL_POLICIES,
     TEMPORAL_POLICY_YESTERDAY_CLOSED_ONLY,
@@ -55,6 +66,7 @@ from packages.contracts.cost_price_upload import CostPriceCurrentState, CostPric
 from packages.contracts.ads_bids_block import AdsBidsRequest
 from packages.contracts.ads_compact_block import AdsCompactRequest
 from packages.contracts.fin_report_daily_block import FinReportDailyRequest
+from packages.contracts.onec_stocks_block import OnecStocksRequest
 from packages.contracts.promo_live_source import PromoLiveSourceRequest
 from packages.contracts.promo_live_source import (
     PromoLiveSourceEnvelope,
@@ -106,8 +118,8 @@ HISTORICAL_CLOSED_DAY_SOURCE_KEYS = STRICT_CLOSED_DAY_SOURCE_KEYS | {
     "ads_compact",
     "fin_report_daily",
 }
-CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "promo_by_price"}
-CURRENT_SNAPSHOT_ONLY_ROLLOVER_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "spp"}
+CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "promo_by_price", ONEC_STOCKS_SOURCE_KEY}
+CURRENT_SNAPSHOT_ONLY_ROLLOVER_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "spp", ONEC_STOCKS_SOURCE_KEY}
 ACCEPTED_CURRENT_SOURCE_KEYS = HISTORICAL_CLOSED_DAY_SOURCE_KEYS | CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS
 EXACT_DATE_RUNTIME_CACHE_SOURCE_KEYS = {"sales_funnel_history", "stocks", "promo_by_price"}
 TEMPORAL_ROLE_PROVISIONAL_CURRENT = "provisional_current_snapshot"
@@ -137,6 +149,7 @@ SOURCE_CLASSIFICATION_GROUPS = {
     "sf_period": "B_wb_api_date_period_capable",
     "spp": "C_seller_portal_current_snapshot_with_accepted_current_rollover",
     "stocks": "B_wb_api_date_period_capable",
+    ONEC_STOCKS_SOURCE_KEY: "E_onec_product_capital_current_snapshot",
     "ads_compact": "B_wb_api_date_period_capable",
     "fin_report_daily": "B_wb_api_date_period_capable",
     "prices_snapshot": "C_wb_api_current_snapshot_only",
@@ -205,6 +218,12 @@ SOURCE_DIAGNOSTIC_SPECS = {
             "[reportType=STOCK_HISTORY_DAILY_CSV]"
         ),
     },
+    ONEC_STOCKS_SOURCE_KEY: {
+        "module": "packages.application.onec_stocks_block",
+        "block": "OnecStocksBlock",
+        "adapter": "HttpBackedOnecStocksSource",
+        "endpoint": "GET /hs/soykasoft/stocks_wb?account_id=<account_id>&nmId=<nmId>",
+    },
     "ads_compact": {
         "module": "packages.application.ads_compact_block",
         "block": "AdsCompactBlock",
@@ -261,6 +280,7 @@ class SlotLookups:
     spp_lookup: dict[int, Any]
     ads_bids_lookup: dict[int, Any]
     stocks_lookup: dict[int, Any]
+    onec_stocks_lookup: dict[int, dict[str, float]]
     ads_compact_lookup: dict[int, Any]
     fin_lookup: dict[int, Any]
     fin_storage_fee_total: float | None
@@ -814,6 +834,7 @@ class SheetVitrinaV1LivePlanBlock:
         spp_block: SppBlock | None = None,
         ads_bids_block: AdsBidsBlock | None = None,
         stocks_block: StocksBlock | None = None,
+        onec_stocks_block: OnecStocksBlock | None = None,
         ads_compact_block: AdsCompactBlock | None = None,
         fin_report_daily_block: FinReportDailyBlock | None = None,
         promo_live_source_block: PromoLiveSourceProtocol | None = None,
@@ -830,6 +851,10 @@ class SheetVitrinaV1LivePlanBlock:
         self.spp_block = spp_block or SppBlock(HttpBackedSppSource())
         self.ads_bids_block = ads_bids_block or AdsBidsBlock(HttpBackedAdsBidsSource())
         self.stocks_block = stocks_block or StocksBlock(HistoricalCsvBackedStocksSource())
+        self.onec_stocks_block = onec_stocks_block or OnecStocksBlock(
+            HttpBackedOnecStocksSource(),
+            stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
+        )
         self.ads_compact_block = ads_compact_block or AdsCompactBlock(HttpBackedAdsCompactSource())
         self.fin_report_daily_block = fin_report_daily_block or FinReportDailyBlock(HttpBackedFinReportDailySource())
         self.promo_live_source_block = promo_live_source_block or _SyntheticNoPromoLiveSourceBlock()
@@ -884,10 +909,11 @@ class SheetVitrinaV1LivePlanBlock:
         if not enabled_config:
             raise ValueError("current registry config_v2 does not contain enabled rows")
 
-        metrics_by_key = {item.metric_key: item for item in current_state.metrics_v2}
+        effective_metrics = extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+        metrics_by_key = {item.metric_key: item for item in effective_metrics}
         formulas_by_id = {item.formula_id: item for item in current_state.formulas_v2}
         displayed_metrics = sorted(
-            [item for item in current_state.metrics_v2 if item.enabled and item.show_in_data],
+            [item for item in effective_metrics if item.enabled and item.show_in_data],
             key=lambda item: item.display_order,
         )
         if selected_metric_keys:
@@ -1139,6 +1165,7 @@ class SheetVitrinaV1LivePlanBlock:
                 spp_lookup={},
                 ads_bids_lookup={},
                 stocks_lookup={},
+                onec_stocks_lookup={},
                 ads_compact_lookup={},
                 fin_lookup={},
                 fin_storage_fee_total=None,
@@ -1233,6 +1260,16 @@ class SheetVitrinaV1LivePlanBlock:
                         StocksRequest(
                             snapshot_type="stocks",
                             snapshot_date=slot.column_date,
+                            nm_ids=requested_nm_ids,
+                        )
+                    ).result,
+                ),
+                (
+                    ONEC_STOCKS_SOURCE_KEY,
+                    lambda slot=slot: self.onec_stocks_block.execute(
+                        OnecStocksRequest(
+                            snapshot_type=ONEC_STOCKS_SOURCE_KEY,
+                            account_id=resolve_onec_stocks_account_id(),
                             nm_ids=requested_nm_ids,
                         )
                     ).result,
@@ -1353,6 +1390,8 @@ class SheetVitrinaV1LivePlanBlock:
                     current_lookups.ads_bids_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "stocks":
                     current_lookups.stocks_lookup = _index_items_by_nm_id(payload)
+                elif source_key == ONEC_STOCKS_SOURCE_KEY:
+                    current_lookups.onec_stocks_lookup = build_onec_stocks_lookup(payload)
                 elif source_key == "ads_compact":
                     current_lookups.ads_compact_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "fin_report_daily":
@@ -2500,6 +2539,11 @@ class _MetricEvaluator:
             return float(stock_total) * float(price_seller_discounted)
 
         slot_lookups = self._slot_lookups(temporal_slot)
+        if is_onec_stock_sku_metric_key(metric_key):
+            return resolve_onec_stock_metric_value(
+                metric_key,
+                slot_lookups.onec_stocks_lookup.get(nm_id),
+            )
         for lookup_name, attribute, scale in [
             ("seller_funnel_lookup", "view_count", 1.0),
             ("seller_funnel_lookup", "open_card_count", 1.0),
