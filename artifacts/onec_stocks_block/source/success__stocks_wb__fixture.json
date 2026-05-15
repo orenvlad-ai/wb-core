@@ -1,0 +1,35 @@
+{
+  "meta": {
+    "version": "1.0",
+    "marketplace": "WB",
+    "account_id": "000000001",
+    "date": "2026-05-15",
+    "generated_at": "2026-05-15T11:30:37",
+    "currency": "RUB"
+  },
+  "items": [
+    {
+      "nmId": "428855306",
+      "product_1c_id": "НФ-00000114",
+      "vendor_code": "(Matte) iPhone 15 / 16",
+      "name": "(Matte) iPhone 15 / 16  / Защитные стекла",
+      "stages": {
+        "В_пути": {
+          "qty": 4782,
+          "unit_cost_rub": 77.82,
+          "cost_total_rub": 372123.77
+        },
+        "ВБ": {
+          "qty": 6508,
+          "unit_cost_rub": 105.96,
+          "cost_total_rub": 689602.49
+        },
+        "Фулфиллмент": {
+          "qty": 1250,
+          "unit_cost_rub": 103.37,
+          "cost_total_rub": 129211.9
+        }
+      }
+    }
+  ]
+}
