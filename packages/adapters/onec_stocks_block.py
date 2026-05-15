@@ -111,13 +111,15 @@ class HttpBackedOnecStocksSource:
                 failures.append(_OnecStocksFetchFailure(nm_id=nm_id, kind="runtime"))
 
         if not payloads:
-            raise OnecStocksRuntimeError(
-                "1C stocks upstream failed for all requested nmIds; "
-                f"requested_count={len(nm_ids)}; "
-                f"failure_count={len(failures)}; "
-                f"status_codes={_format_count_mapping(_status_code_counts(failures))}; "
-                f"error_kinds={_format_count_mapping(_kind_counts(failures))}"
+            fallback_payload = self._fetch_account_snapshot_after_per_sku_failure(
+                runtime=runtime,
+                account_id=request.account_id,
+                requested_nm_ids=nm_ids,
+                failures=failures,
             )
+            if fallback_payload is not None:
+                return fallback_payload
+            raise _all_requested_nm_ids_failed_error(nm_ids=nm_ids, failures=failures)
         payload = payloads[0] if len(payloads) == 1 else _merge_onec_stock_payloads(payloads)
         if not failures:
             return payload
@@ -133,12 +135,50 @@ class HttpBackedOnecStocksSource:
         }
         return payload_with_partial_meta
 
+    def _fetch_account_snapshot_after_per_sku_failure(
+        self,
+        *,
+        runtime: OnecStocksRuntimeConfig,
+        account_id: str,
+        requested_nm_ids: list[int],
+        failures: list[_OnecStocksFetchFailure],
+    ) -> Mapping[str, Any] | None:
+        try:
+            payload = self._fetch_one(runtime=runtime, account_id=account_id, nm_id=None)
+        except (OnecStocksHttpError, OnecStocksRuntimeError):
+            return None
+
+        filtered_payload = _filter_onec_stock_payload_items(
+            payload,
+            requested_nm_ids=requested_nm_ids,
+        )
+        missing_nm_ids = _missing_requested_nm_ids_from_payload(
+            filtered_payload,
+            requested_nm_ids=requested_nm_ids,
+        )
+        if len(missing_nm_ids) == len(requested_nm_ids):
+            return None
+        if not missing_nm_ids:
+            return filtered_payload
+        payload_with_partial_meta = dict(filtered_payload)
+        payload_with_partial_meta[ONEC_STOCKS_PARTIAL_FETCH_META_KEY] = {
+            "requested_count": len(requested_nm_ids),
+            "requested_nm_ids": requested_nm_ids,
+            "successful_request_count": 1,
+            "failure_count": len(missing_nm_ids),
+            "missing_nm_ids": missing_nm_ids,
+            "status_codes": _status_code_counts(failures),
+            "error_kinds": _kind_counts(failures),
+            "fallback": "account_snapshot_after_per_sku_failure",
+        }
+        return payload_with_partial_meta
+
     def _fetch_one(
         self,
         *,
         runtime: OnecStocksRuntimeConfig,
         account_id: str,
-        nm_id: int,
+        nm_id: int | None,
     ) -> Mapping[str, Any]:
         url = _build_onec_stocks_url(
             base_url=runtime.base_url,
@@ -222,8 +262,11 @@ def _read_timeout_seconds() -> float:
     return timeout_seconds
 
 
-def _build_onec_stocks_url(*, base_url: str, account_id: str, nm_id: int) -> str:
-    query = parse.urlencode({"account_id": account_id, "nmId": str(nm_id)})
+def _build_onec_stocks_url(*, base_url: str, account_id: str, nm_id: int | None) -> str:
+    params = {"account_id": account_id}
+    if nm_id is not None:
+        params["nmId"] = str(nm_id)
+    query = parse.urlencode(params)
     return f"{base_url.rstrip('/')}{ONEC_STOCKS_ENDPOINT_PATH}?{query}"
 
 
@@ -250,6 +293,55 @@ def _merge_onec_stock_payloads(payloads: list[Mapping[str, Any]]) -> Mapping[str
             raise OnecStocksRuntimeError("1C stocks upstream JSON items must be a list")
         merged_items.extend(items)
     return {"meta": dict(meta), "items": merged_items}
+
+
+def _filter_onec_stock_payload_items(
+    payload: Mapping[str, Any],
+    *,
+    requested_nm_ids: list[int],
+) -> Mapping[str, Any]:
+    requested = {str(item) for item in requested_nm_ids}
+    items = payload.get("items")
+    if not isinstance(items, list):
+        raise OnecStocksRuntimeError("1C stocks upstream JSON items must be a list")
+    filtered_items = [
+        item
+        for item in items
+        if isinstance(item, Mapping) and str(item.get("nmId") or "").strip() in requested
+    ]
+    result = dict(payload)
+    result["items"] = filtered_items
+    return result
+
+
+def _missing_requested_nm_ids_from_payload(
+    payload: Mapping[str, Any],
+    *,
+    requested_nm_ids: list[int],
+) -> list[int]:
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return sorted(set(requested_nm_ids))
+    covered = {
+        int(str(item.get("nmId")).strip())
+        for item in items
+        if isinstance(item, Mapping) and str(item.get("nmId") or "").strip().isdigit()
+    }
+    return sorted(set(requested_nm_ids) - covered)
+
+
+def _all_requested_nm_ids_failed_error(
+    *,
+    nm_ids: list[int],
+    failures: list[_OnecStocksFetchFailure],
+) -> OnecStocksRuntimeError:
+    return OnecStocksRuntimeError(
+        "1C stocks upstream failed for all requested nmIds; "
+        f"requested_count={len(nm_ids)}; "
+        f"failure_count={len(failures)}; "
+        f"status_codes={_format_count_mapping(_status_code_counts(failures))}; "
+        f"error_kinds={_format_count_mapping(_kind_counts(failures))}"
+    )
 
 
 def _status_code_counts(failures: list[_OnecStocksFetchFailure]) -> dict[str, int]:
