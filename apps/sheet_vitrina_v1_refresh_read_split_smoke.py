@@ -71,6 +71,37 @@ class CountingBlock:
         return SimpleNamespace(result=payload)
 
 
+class OnecCountingBlock:
+    source_key = "onec_stocks"
+
+    def __init__(self) -> None:
+        self.request_dates: list[str] = []
+
+    def execute(self, request: object) -> SimpleNamespace:
+        self.request_dates.append(TODAY_CURRENT_DATE)
+        payload = SimpleNamespace(
+            kind="success",
+            items=[
+                SimpleNamespace(
+                    nm_id=PROBE_NM_ID,
+                    stage_name="CHINA_TO_FF",
+                    canonical_stage_code="CHINA_TO_FF",
+                    qty=1.0,
+                    unit_cost_rub=1.0,
+                    cost_total_rub=1.0,
+                )
+            ],
+            snapshot_date=TODAY_CURRENT_DATE,
+            date=TODAY_CURRENT_DATE,
+            date_from=TODAY_CURRENT_DATE,
+            date_to=TODAY_CURRENT_DATE,
+            detail="onec_stocks synthetic success for refresh/read split smoke",
+            item_count=1,
+            stage_count=1,
+        )
+        return SimpleNamespace(result=payload)
+
+
 class _NoopClosedDayWebSourceSync:
     def ensure_closed_day_snapshot(self, *, source_key: str, snapshot_date: str) -> None:
         return
@@ -250,7 +281,15 @@ def main() -> None:
             if refresh_manual_result.get("technical_status") != "success":
                 raise AssertionError("refresh_result must persist technical refresh completion")
             if refresh_manual_result.get("semantic_status") != "warning":
-                raise AssertionError(f"refresh_result must persist semantic warning for preserved sources, got {refresh_manual_context}")
+                source_statuses = [
+                    (str(item.get("source_key") or ""), str(item.get("status") or ""))
+                    for item in refresh_payload.get("source_outcomes") or []
+                    if isinstance(item, dict)
+                ]
+                raise AssertionError(
+                    "refresh_result must persist semantic warning for preserved sources, "
+                    f"got {refresh_manual_context}, source_statuses={source_statuses}"
+                )
             if refresh_manual_context.get("last_manual_load_result") is not None:
                 raise AssertionError("refresh_result must not invent a manual load result")
             if [slot["slot_key"] for slot in refresh_payload["temporal_slots"]] != [
@@ -370,6 +409,7 @@ def _build_counting_blocks() -> dict[str, CountingBlock]:
         "spp_block": CountingBlock("spp"),
         "ads_bids_block": CountingBlock("ads_bids"),
         "stocks_block": CountingBlock("stocks"),
+        "onec_stocks_block": OnecCountingBlock(),
         "ads_compact_block": CountingBlock("ads_compact"),
         "fin_report_daily_block": CountingBlock("fin_report_daily"),
     }
@@ -418,6 +458,7 @@ def _assert_counting_calls(counters: dict[str, CountingBlock]) -> None:
         "spp": [TODAY_CURRENT_DATE],
         "ads_bids": [TODAY_CURRENT_DATE],
         "stocks": [AS_OF_DATE],
+        "onec_stocks": [TODAY_CURRENT_DATE],
         "ads_compact": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "fin_report_daily": [AS_OF_DATE, TODAY_CURRENT_DATE],
     }
@@ -430,7 +471,7 @@ def _assert_counting_calls(counters: dict[str, CountingBlock]) -> None:
 
 
 def _expected_request_dates(source_key: str) -> list[str]:
-    if source_key in CURRENT_ONLY_SOURCE_KEYS or source_key == "spp":
+    if source_key in CURRENT_ONLY_SOURCE_KEYS or source_key in {"spp", "onec_stocks"}:
         return [TODAY_CURRENT_DATE]
     if source_key == "stocks":
         return [AS_OF_DATE]

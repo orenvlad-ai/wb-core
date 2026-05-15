@@ -103,11 +103,16 @@ def main() -> None:
         try:
             base_url = f"http://127.0.0.1:{config.port}"
 
-            contract_status, contract_payload = _get_json(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}")
+            contract_status, contract_raw = _get_text(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}")
+            contract_payload = json.loads(contract_raw)
             if contract_status != 200:
                 raise AssertionError(f"web-vitrina read route must return 200, got {contract_status}")
             if contract_payload.get("contract_name") != "web_vitrina_contract" or contract_payload.get("contract_version") != "v1":
                 raise AssertionError(f"web-vitrina contract identity mismatch, got {contract_payload}")
+            if contract_raw.find('"capabilities":') < 0:
+                raise AssertionError("web-vitrina contract response must expose root capabilities")
+            if contract_raw.find('"capabilities":') > contract_raw.find('"rows":'):
+                raise AssertionError("web-vitrina contract must serialize capabilities before heavy rows")
             if contract_payload.get("page_route") != DEFAULT_SHEET_WEB_VITRINA_UI_PATH:
                 raise AssertionError(f"web-vitrina page route mismatch, got {contract_payload}")
             if contract_payload.get("read_route") != DEFAULT_SHEET_WEB_VITRINA_READ_PATH:
