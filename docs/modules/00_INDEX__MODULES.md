@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–32`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–33`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -38,6 +38,7 @@ source_basis:
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/modules/32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md"
+  - "docs/modules/33_MODULE__ONEC_STOCKS_BLOCK.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -75,6 +76,7 @@ related_docs:
   - "30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
   - "31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md"
+  - "33_MODULE__ONEC_STOCKS_BLOCK.md"
 source_of_truth_level: "navigation_only"
 update_note: "Обновлён под Google Sheets decommission: modules 17/18/19/24/25 are archive/migration-only, module 26 current contour is website/operator/web-vitrina, and Google Sheets/GAS is no longer an active runtime/update/write/load/verify target."
 ---
@@ -93,7 +95,7 @@ update_note: "Обновлён под Google Sheets decommission: modules 17/18/
 
 # 1.1 Текущий Checkpoint Main
 
-На текущем `main` main-confirmed модульные блоки доходят до `01–32`.
+На текущем `main` main-confirmed модульные блоки доходят до `01–32`; `33` добавляется как bounded source checkpoint candidate до прохождения production-lane gates.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`
@@ -118,6 +120,7 @@ update_note: "Обновлён под Google Sheets decommission: modules 17/18/
 - `web_vitrina_gravity_table_adapter_block` как bounded phase-3 concrete adapter для `@gravity-ui/table` над stable `view_model`.
 - `web_vitrina_page_composition_block` как bounded phase-4 live page composition на `/sheet-vitrina-v1/vitrina` с existing read route, вкладкой `Отзывы` поверх read-only WB feedbacks route including official WB review tags/chips, current-server-week feedback default and current-date presets with v3/TTL stale-range guard, transient AI prompt/analyze flow с real WB complaint category schema, tag-aware input и `reason` как текстом для WB `Опишите ситуацию`, runtime-журналом `Жалобы`, runtime schedule UI `Авто-жалобы`, async deep read-only status sync job из WB `Мои жалобы` with canonical-supplier route-specific status checks, direct status URL pagination/scroll, public polling, default local `Ждёт ответа` scope and shared Seller Portal automation lock, auth-protected operator-selected async submit job plus runtime-scheduled auto complaint runs over non-journaled 1–2★ AI yes/review rows through the existing guarded Seller Portal runner/resolver plus per-row attempt overlay, description field value/payload evidence, review-tag contradiction guard, historical hard denylist, disabled/already-complained action classification and shared `Есть ответ`/`Ждут ответа` status/date/star/search/virtual-scroll filter-aware actionable-row resolver, read-only single-feedback confirmation/detail-network probe runners, read-only Seller Portal complaint scout + filter DOM scout + target-row probe + no-submit matching replay/dry-run runners, bounded complaint batch wrapper with explicit not-submitted reason taxonomy, canonical EU bot storage-state/no-local-fallback policy и minimal inline client island.
 - `research_sku_group_comparison_block` как первый read-only MVP-контур вкладки `Исследования`: ретроспективное сравнение двух непересекающихся групп SKU по non-financial метрикам поверх persisted ready snapshots, с candidate-only chip `Товар в акции`, compact date-range period controls и scrollable table/grid result.
+- `onec_stocks_block` как bounded source candidate для 1C/Soykasoft API остатков и себестоимости WB, с отдельным parser/normalizer, dynamic stage names и explicit stage-mapping boundary без подключения к витрине или финальным расчетам.
 
 Главный незакрытый gap текущей линии:
 - текущий `main` уже содержит server upload line and bounded refresh/read split for website/operator web-vitrina;
@@ -200,6 +203,7 @@ update_note: "Обновлён под Google Sheets decommission: modules 17/18/
 | `30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md` | `web_vitrina_gravity_table_adapter_block` | `web-vitrina` | phase-3 concrete `@gravity-ui/table` adapter поверх stable `view_model`, с isolated Gravity-specific columns/rows/renderers/options/state surface, подтверждён и смёржен в `main` |
 | `31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md` | `web_vitrina_page_composition_block` | `web-vitrina` | phase-4 server-driven sibling page composition поверх existing read route, truthful reporting blocks, feedbacks tab with snapshot-independent bounded period picker defaulting to the current server week, strict period/star load diagnostics, official WB review tags/chips in table/export/AI input, transient AI prompt/model discovery flow with WB complaint categories/reason-as-description semantics, complaint status join plus runtime submit-attempt overlay, selected-row checkboxes and auth-protected submit-selected job log, runtime-журналом `Жалобы`, `Авто-жалобы` schedule/run UI over runtime state and guarded daily 1–2★ AI yes/review complaint runs, async deep read-only status sync job + route-specific complaints status checks + canonical-supplier direct status URL pagination/scroll + public polling with default local `Ждёт ответа` scope and final/error skip counters, shared Seller Portal automation lock/busy responses, guarded instrumented submit runner with pre-click `Опишите ситуацию` value proof, sanitized payload description evidence, review-tag contradiction guard, historical hard denylist and shared status/date/star/search/virtual-scroll filter-aware actionable-row resolver, disabled/already-complained action classification, bounded complaint batch wrapper with explicit not-submitted reason taxonomy, read-only single-feedback confirmation/detail-network probe runners, read-only Seller Portal complaint scout + filter DOM scout + target-row probe + no-submit matching replay/dry-run runners, resizable columns и browser island подтверждены, смёржены в `main` |
 | `32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md` | `research_sku_group_comparison_block` | `web/operator/research` | read-only MVP вкладки `Исследования`: SKU group comparison over accepted truth / ready snapshots, non-financial metrics only, promo candidate chip, compact period pickers and scrollable result grid |
+| `33_MODULE__ONEC_STOCKS_BLOCK.md` | `onec_stocks_block` | `external-1c-source` | bounded source candidate для 1C/Soykasoft stocks+cost: parser/normalizer, fixture smoke, optional env-guarded live smoke, dynamic stage names and explicit mapping boundary; не подключён к витрине/финальным расчетам |
 
 # 5. Как эта папка используется дальше
 
