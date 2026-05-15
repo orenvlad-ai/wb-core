@@ -7,7 +7,9 @@ from typing import Any, Literal, Mapping, Union
 
 
 OnecCanonicalStageCode = Literal[
+    "CHINA_TO_FF",
     "CN_TO_RU_TRANSIT",
+    "FF_TO_WB",
     "FF_TO_WB_TRANSIT",
     "FF_STOCK",
     "WB_STOCK",
@@ -15,7 +17,9 @@ OnecCanonicalStageCode = Literal[
 ]
 
 ALLOWED_ONEC_CANONICAL_STAGE_CODES: tuple[OnecCanonicalStageCode, ...] = (
+    "CHINA_TO_FF",
     "CN_TO_RU_TRANSIT",
+    "FF_TO_WB",
     "FF_TO_WB_TRANSIT",
     "FF_STOCK",
     "WB_STOCK",
@@ -104,6 +108,22 @@ class OnecStocksSuccess:
         "applied only when explicit config is supplied and no aggregation is performed."
     )
 
+    @property
+    def snapshot_date(self) -> str:
+        return self.meta.date
+
+    @property
+    def date(self) -> str:
+        return self.meta.date
+
+    @property
+    def date_from(self) -> str:
+        return self.meta.date
+
+    @property
+    def date_to(self) -> str:
+        return self.meta.date
+
 
 @dataclass(frozen=True)
 class OnecStocksEmpty:
@@ -114,6 +134,22 @@ class OnecStocksEmpty:
     dynamic_stage_names: list[str]
     items: list[OnecStocksNormalizedStage]
     detail: str
+
+    @property
+    def snapshot_date(self) -> str:
+        return self.meta.date
+
+    @property
+    def date(self) -> str:
+        return self.meta.date
+
+    @property
+    def date_from(self) -> str:
+        return self.meta.date
+
+    @property
+    def date_to(self) -> str:
+        return self.meta.date
 
 
 OnecStocksResult = Union[OnecStocksSuccess, OnecStocksEmpty]

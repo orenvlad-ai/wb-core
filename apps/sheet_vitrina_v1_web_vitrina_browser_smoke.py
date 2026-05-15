@@ -1901,7 +1901,7 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
     if not loading_ids:
         raise AssertionError(f"loading table must expose source rows, got {payload}")
     group_ids = [item["group_id"] for item in payload["loading"]["groups"]]
-    if group_ids != ["wb_api", "seller_portal_bot", "other_sources"]:
+    if group_ids != ["wb_api", "onec_product_capital", "seller_portal_bot", "other_sources"]:
         raise AssertionError(f"loading table must render grouped source headers, got {payload}")
     if not all(item["has_refresh_button"] for item in payload["loading"]["groups"]):
         raise AssertionError(f"each loading group must expose one group refresh button, got {payload}")

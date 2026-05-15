@@ -79,13 +79,28 @@ class HttpBackedOnecStocksSource:
     def fetch(self, request: OnecStocksRequest) -> Mapping[str, Any]:
         runtime = load_onec_stocks_runtime_config()
         nm_ids = sorted({int(nm_id) for nm_id in request.nm_ids})
-        if len(nm_ids) != 1:
-            raise ValueError("1C stocks live adapter currently supports exactly one nmId")
+        if not nm_ids:
+            raise ValueError("1C stocks live adapter requires at least one nmId")
 
+        payloads = [
+            self._fetch_one(runtime=runtime, account_id=request.account_id, nm_id=nm_id)
+            for nm_id in nm_ids
+        ]
+        if len(payloads) == 1:
+            return payloads[0]
+        return _merge_onec_stock_payloads(payloads)
+
+    def _fetch_one(
+        self,
+        *,
+        runtime: OnecStocksRuntimeConfig,
+        account_id: str,
+        nm_id: int,
+    ) -> Mapping[str, Any]:
         url = _build_onec_stocks_url(
             base_url=runtime.base_url,
-            account_id=request.account_id,
-            nm_id=nm_ids[0],
+            account_id=account_id,
+            nm_id=nm_id,
         )
         http_request = urllib_request.Request(
             url,
@@ -170,3 +185,23 @@ def _build_onec_stocks_url(*, base_url: str, account_id: str, nm_id: int) -> str
 def _basic_auth_header(user: str, password: str) -> str:
     raw_value = f"{user}:{password}".encode("utf-8")
     return "Basic " + base64.b64encode(raw_value).decode("ascii")
+
+
+def _merge_onec_stock_payloads(payloads: list[Mapping[str, Any]]) -> Mapping[str, Any]:
+    if not payloads:
+        raise OnecStocksRuntimeError("1C stocks payload merge requires at least one payload")
+    first = payloads[0]
+    meta = first.get("meta")
+    if not isinstance(meta, Mapping):
+        raise OnecStocksRuntimeError("1C stocks upstream JSON meta must be an object")
+
+    merged_items: list[Any] = []
+    for payload in payloads:
+        payload_meta = payload.get("meta")
+        if not isinstance(payload_meta, Mapping):
+            raise OnecStocksRuntimeError("1C stocks upstream JSON meta must be an object")
+        items = payload.get("items")
+        if not isinstance(items, list):
+            raise OnecStocksRuntimeError("1C stocks upstream JSON items must be a list")
+        merged_items.extend(items)
+    return {"meta": dict(meta), "items": merged_items}

@@ -40,6 +40,13 @@ from packages.application.sheet_vitrina_v1_auto_refresh import (
 )
 from packages.application.sheet_vitrina_v1_stock_report import SheetVitrinaV1StockReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import list_active_sku_options
+from packages.application.sheet_vitrina_v1_onec_stocks import (
+    ONEC_STOCKS_METRIC_KEYS,
+    ONEC_STOCKS_SOURCE_GROUP_ID,
+    ONEC_STOCKS_SOURCE_GROUP_LABEL_RU,
+    ONEC_STOCKS_SOURCE_KEY,
+    extend_metrics_with_onec_stock_metrics,
+)
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     effective_source_temporal_policy,
     reduce_source_temporal_semantics,
@@ -148,6 +155,10 @@ WEB_VITRINA_ACTIVITY_ITEM_COPY = {
         "label_ru": "Остатки по складам",
         "description_ru": "История остатков и суммарный stock по складам.",
     },
+    ONEC_STOCKS_SOURCE_KEY: {
+        "label_ru": ONEC_STOCKS_SOURCE_GROUP_LABEL_RU,
+        "description_ru": "Остатки и товарный капитал по стадиям 1С.",
+    },
     "ads_compact": {
         "label_ru": "Рекламная статистика",
         "description_ru": "Просмотры, клики, заказы и расход по рекламе.",
@@ -236,6 +247,7 @@ WEB_VITRINA_SOURCE_METRIC_KEYS = {
         "stock_ru_ural",
         "stock_ru_far_siberia",
     ),
+    ONEC_STOCKS_SOURCE_KEY: ONEC_STOCKS_METRIC_KEYS,
     "ads_compact": (
         "ads_drr_total",
         "ads_drr_attributed_total",
@@ -318,8 +330,19 @@ WEB_VITRINA_SOURCE_GROUPS = {
             "cost_price",
         ),
     },
+    ONEC_STOCKS_SOURCE_GROUP_ID: {
+        "label_ru": ONEC_STOCKS_SOURCE_GROUP_LABEL_RU,
+        "source_keys": (
+            ONEC_STOCKS_SOURCE_KEY,
+        ),
+    },
 }
-WEB_VITRINA_SOURCE_GROUP_ORDER = ("wb_api", "seller_portal_bot", "other_sources")
+WEB_VITRINA_SOURCE_GROUP_ORDER = (
+    "wb_api",
+    ONEC_STOCKS_SOURCE_GROUP_ID,
+    "seller_portal_bot",
+    "other_sources",
+)
 WEB_VITRINA_SOURCE_KEY_TO_GROUP = {
     source_key: group_id
     for group_id, group in WEB_VITRINA_SOURCE_GROUPS.items()
@@ -1239,7 +1262,9 @@ class RegistryUploadHttpEntrypoint:
             preferred_date=current_business_date,
         )
         metric_labels_by_source = _build_activity_metric_labels_by_source(
-            getattr(self.runtime.load_current_state(), "metrics_v2", [])
+            extend_metrics_with_onec_stock_metrics(
+                getattr(self.runtime.load_current_state(), "metrics_v2", [])
+            )
         )
         upload_summary = _build_web_vitrina_endpoint_summary_block(
             title="Загрузка данных",
@@ -1952,7 +1977,10 @@ class RegistryUploadHttpEntrypoint:
         with self._sheet_cycle_lock:
             try:
                 current_state = self.runtime.load_current_state()
-                metric_keys = _metric_keys_for_source_keys(current_state.metrics_v2, source_keys=source_keys)
+                metric_keys = _metric_keys_for_source_keys(
+                    extend_metrics_with_onec_stock_metrics(current_state.metrics_v2),
+                    source_keys=source_keys,
+                )
                 if not metric_keys:
                     raise ValueError(f"source group {source_group_id!r} has no enabled web-vitrina metrics")
                 stage = "source_fetch"

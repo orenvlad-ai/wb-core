@@ -19,6 +19,11 @@ from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
     WEB_VITRINA_SOURCE_METRIC_KEYS,
     RegistryUploadHttpEntrypoint,
 )
+from packages.application.sheet_vitrina_v1_onec_stocks import (  # noqa: E402
+    ONEC_STOCKS_SOURCE_GROUP_ID,
+    extend_metrics_with_onec_stock_metrics,
+)
+from packages.contracts.registry_upload_bundle_v1 import MetricV2Item  # noqa: E402
 from packages.contracts.sheet_vitrina_v1 import (  # noqa: E402
     SheetVitrinaV1Envelope,
     SheetVitrinaV1TemporalSlot,
@@ -58,10 +63,27 @@ def main() -> None:
 
 def _assert_group_metric_coverage() -> None:
     bundle = json.loads(BUNDLE_FIXTURE.read_text(encoding="utf-8"))
+    visible_metrics = extend_metrics_with_onec_stock_metrics(
+        [
+            MetricV2Item(
+                metric_key=str(item["metric_key"]),
+                enabled=bool(item["enabled"]),
+                scope=str(item["scope"]),
+                label_ru=str(item["label_ru"]),
+                calc_type=item["calc_type"],
+                calc_ref=str(item["calc_ref"]),
+                show_in_data=bool(item["show_in_data"]),
+                format=str(item["format"]),
+                display_order=int(item["display_order"]),
+                section=str(item["section"]),
+            )
+            for item in bundle["metrics_v2"]
+        ]
+    )
     visible_metric_keys = [
-        str(item["metric_key"])
-        for item in sorted(bundle["metrics_v2"], key=lambda row: int(row.get("display_order") or 0))
-        if item.get("enabled") and item.get("show_in_data")
+        str(item.metric_key)
+        for item in sorted(visible_metrics, key=lambda row: int(row.display_order or 0))
+        if item.enabled and item.show_in_data
     ]
     metric_to_groups: dict[str, list[str]] = {metric_key: [] for metric_key in visible_metric_keys}
     for group_id, group in WEB_VITRINA_SOURCE_GROUPS.items():
@@ -80,10 +102,16 @@ def _assert_group_metric_coverage() -> None:
         for metric_key in WEB_VITRINA_SOURCE_METRIC_KEYS.get(source_key, ())
     }
     missing_derived = sorted(DERIVED_OTHER_SOURCE_METRICS - other_source_metrics)
-    if missing or duplicate or missing_derived:
+    if (
+        missing
+        or duplicate
+        or missing_derived
+        or not any(groups == [ONEC_STOCKS_SOURCE_GROUP_ID] for groups in metric_to_groups.values())
+    ):
         raise AssertionError(
             "web-vitrina loading group metric coverage failed: "
-            f"missing={missing}, duplicate={duplicate}, missing_derived={missing_derived}"
+            f"missing={missing}, duplicate={duplicate}, missing_derived={missing_derived}, "
+            f"onec_group={ONEC_STOCKS_SOURCE_GROUP_ID}"
         )
     print(
         "web_vitrina_group_metric_coverage: ok ->",
