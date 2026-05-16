@@ -1264,12 +1264,14 @@ class RegistryUploadHttpEntrypoint:
             preferred_as_of_date=snapshot_as_of_date,
             strict_preferred_as_of_date=False,
         )
+        persisted_source_records = _extract_source_records_from_outcomes(refresh_status.source_outcomes)
         upload_records = (
             _extract_upload_source_records_from_job(latest_refresh_job)
             if latest_refresh_job is not None
-            else _extract_source_records_from_outcomes(refresh_status.source_outcomes)
+            else persisted_source_records
         )
-        update_records = _extract_source_records_from_outcomes(refresh_status.source_outcomes)
+        upload_records = {**persisted_source_records, **upload_records}
+        update_records = persisted_source_records
         shared_source_keys = _collect_activity_source_keys(upload_records, update_records)
         upload_source_keys = _ordered_activity_source_keys(shared_source_keys, upload_records)
         update_source_keys = _ordered_activity_source_keys(shared_source_keys, update_records)
@@ -2463,6 +2465,7 @@ class RegistryUploadHttpEntrypoint:
         business_now = to_business_datetime(now).replace(microsecond=0).isoformat()
         auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()
         auto_result = _format_operator_result_payload(auto_update_state.last_run_result) or {}
+        auto_result = _sanitize_auto_result_payload(auto_result)
         auto_context = {
             "last_auto_run_status": auto_update_state.last_run_status or "never",
             "last_auto_run_technical_status": str(auto_result.get("technical_status") or auto_update_state.last_run_status or "never"),
@@ -2471,16 +2474,16 @@ class RegistryUploadHttpEntrypoint:
             "last_successful_auto_update_at": _format_optional_business_timestamp(
                 auto_update_state.last_successful_auto_update_at
             ),
-            "last_auto_run_error": auto_update_state.last_run_error or "",
+            "last_auto_run_error": _sanitize_auto_update_reason(auto_update_state.last_run_error or ""),
             "last_auto_run_status_reason": (
                 str(auto_result.get("semantic_reason") or "")
                 if auto_result
-                else (auto_update_state.last_run_error or "")
+                else _sanitize_auto_update_reason(auto_update_state.last_run_error or "")
             ),
         }
         auto_schedules_payload = self.sheet_auto_refresh_schedules_block.build_payload(auto_context=auto_context)
         schedule_rows = [
-            dict(item)
+            _sanitize_auto_schedule_row(dict(item))
             for item in auto_schedules_payload.get("schedules", [])
             if isinstance(item, Mapping)
         ]
@@ -2528,9 +2531,9 @@ class RegistryUploadHttpEntrypoint:
                 or _auto_update_status_label(last_auto_run_status)
             ),
             "last_auto_run_status_reason": (
-                str(auto_schedules_payload.get("last_auto_run_status_reason") or "")
+                _sanitize_auto_update_reason(str(auto_schedules_payload.get("last_auto_run_status_reason") or ""))
                 or (str(auto_result.get("semantic_reason") or "") if auto_result else "")
-                or (auto_update_state.last_run_error or "")
+                or _sanitize_auto_update_reason(auto_update_state.last_run_error or "")
             ),
             "last_auto_run_technical_status_label": _auto_update_status_label(last_auto_run_technical_status),
             "last_auto_run_time": str(auto_schedules_payload.get("last_auto_run_time") or ""),
@@ -2539,9 +2542,9 @@ class RegistryUploadHttpEntrypoint:
             "last_successful_auto_update_at": str(auto_schedules_payload.get("last_successful_auto_update_at") or ""),
             "last_auto_success_at": str(auto_schedules_payload.get("last_auto_success_at") or ""),
             "last_auto_error_at": str(auto_schedules_payload.get("last_auto_error_at") or ""),
-            "last_auto_error_summary": str(auto_schedules_payload.get("last_auto_error_summary") or ""),
+            "last_auto_error_summary": _sanitize_auto_update_reason(str(auto_schedules_payload.get("last_auto_error_summary") or "")),
             "last_auto_job_id": str(auto_schedules_payload.get("last_auto_job_id") or ""),
-            "last_auto_run_error": str(auto_schedules_payload.get("last_auto_run_error") or ""),
+            "last_auto_run_error": _sanitize_auto_update_reason(str(auto_schedules_payload.get("last_auto_run_error") or "")),
             "last_auto_run_result": auto_result,
         }
 
@@ -3318,12 +3321,42 @@ def _build_auto_update_result_payload(
         "semantic_status": semantic_status,
         "semantic_label": _semantic_status_label(semantic_status),
         "semantic_tone": semantic_status,
-        "semantic_reason": semantic_reason or ("auto_update завершился" if technical_status == "success" else "auto_update завершился ошибкой"),
+        "semantic_reason": _sanitize_auto_update_reason(semantic_reason)
+        or ("auto_update завершился" if technical_status == "success" else "auto_update завершился ошибкой"),
         "snapshot_id": str((load_payload or refresh_payload or {}).get("snapshot_id") or ""),
         "as_of_date": str((load_payload or refresh_payload or {}).get("as_of_date") or ""),
         "refreshed_at": str((load_payload or refresh_payload or {}).get("refreshed_at") or ""),
         "finished_at": finished_at,
     }
+
+
+_ARCHIVED_LEGACY_AUTO_UPDATE_REASON = "legacy Google Sheets load: archived / not executed"
+
+
+def _sanitize_auto_update_reason(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parts = [
+        part.strip()
+        for part in text.split("|")
+        if part.strip() and part.strip() != _ARCHIVED_LEGACY_AUTO_UPDATE_REASON
+    ]
+    return " | ".join(parts)
+
+
+def _sanitize_auto_result_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(payload or {})
+    if "semantic_reason" in result:
+        result["semantic_reason"] = _sanitize_auto_update_reason(result.get("semantic_reason"))
+    return result
+
+
+def _sanitize_auto_schedule_row(row: dict[str, Any]) -> dict[str, Any]:
+    for key in ("last_error", "last_error_summary", "last_result_summary"):
+        if key in row:
+            row[key] = _sanitize_auto_update_reason(row.get(key))
+    return row
 
 
 def _bridge_result_has_sheet_verification(bridge_result: Mapping[str, Any]) -> bool:

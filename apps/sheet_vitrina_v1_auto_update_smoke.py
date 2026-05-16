@@ -27,7 +27,10 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     build_registry_upload_http_server,
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
-from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
+from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
+    RegistryUploadHttpEntrypoint,
+    _sanitize_auto_update_reason,
+)
 from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock  # noqa: E402
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
 from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope  # noqa: E402
@@ -115,6 +118,11 @@ class SequenceTimestampFactory:
 
 
 def main() -> None:
+    sanitized_reason = _sanitize_auto_update_reason(
+        "refresh: 1 из 13 источников требуют внимания. | legacy Google Sheets load: archived / not executed"
+    )
+    if sanitized_reason != "refresh: 1 из 13 источников требуют внимания.":
+        raise AssertionError(f"auto-update sanitizer must drop archived legacy load reason, got {sanitized_reason!r}")
     bundle = _load_json(INPUT_BUNDLE_FIXTURE)
     with TemporaryDirectory(prefix="sheet-vitrina-auto-update-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
