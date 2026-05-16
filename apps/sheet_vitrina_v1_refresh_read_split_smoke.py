@@ -78,7 +78,8 @@ class OnecCountingBlock:
         self.request_dates: list[str] = []
 
     def execute(self, request: object) -> SimpleNamespace:
-        self.request_dates.append(TODAY_CURRENT_DATE)
+        request_date = _request_date(request)
+        self.request_dates.append(request_date)
         payload = SimpleNamespace(
             kind="success",
             items=[
@@ -91,11 +92,11 @@ class OnecCountingBlock:
                     cost_total_rub=1.0,
                 )
             ],
-            snapshot_date=TODAY_CURRENT_DATE,
-            date=TODAY_CURRENT_DATE,
-            date_from=TODAY_CURRENT_DATE,
-            date_to=TODAY_CURRENT_DATE,
-            detail="onec_stocks synthetic success for refresh/read split smoke",
+            snapshot_date=request_date,
+            date=request_date,
+            date_from=request_date,
+            date_to=request_date,
+            detail=f"onec_stocks synthetic success for refresh/read split smoke {request_date}",
             item_count=1,
             stage_count=1,
         )
@@ -361,11 +362,13 @@ def main() -> None:
             if status_rows["ads_bids[today_current]"][1] != "success":
                 raise AssertionError("ads_bids today_current must materialize current data")
             if status_rows["onec_stocks[yesterday_closed]"][1] != "success":
-                raise AssertionError("1C yesterday_closed must materialize from a prior accepted current snapshot")
-            if "accepted_closed_from_prior_current_snapshot" not in str(status_rows["onec_stocks[yesterday_closed]"][10]):
-                raise AssertionError("1C yesterday_closed must explain accepted-current rollover semantics")
+                raise AssertionError("1C yesterday_closed must materialize from a date-specific 1C request")
+            if status_rows["onec_stocks[yesterday_closed]"][3] != AS_OF_DATE:
+                raise AssertionError("1C yesterday_closed must keep matching date lineage")
             if status_rows["onec_stocks[today_current]"][1] != "success":
                 raise AssertionError("1C today_current must materialize current stock-capital snapshot")
+            if status_rows["onec_stocks[today_current]"][3] != TODAY_CURRENT_DATE:
+                raise AssertionError("1C today_current must keep matching date lineage")
             if status_rows["seller_funnel_snapshot[yesterday_closed]"][1] != "success":
                 raise AssertionError("dual-day source must materialize yesterday_closed")
             if status_rows["seller_funnel_snapshot[today_current]"][1] != "success":
@@ -444,30 +447,6 @@ def _seed_prior_accepted_current_snapshots(runtime: RegistryUploadDbBackedRuntim
             items=[SimpleNamespace(nm_id=PROBE_NM_ID, ads_bid_search=10.0, ads_bid_recommendations=7.0)],
         ),
     )
-    runtime.save_temporal_source_slot_snapshot(
-        source_key="onec_stocks",
-        snapshot_date=AS_OF_DATE,
-        snapshot_role=TEMPORAL_ROLE_ACCEPTED_CURRENT,
-        captured_at=ACCEPTED_CURRENT_CAPTURED_AT,
-        payload=SimpleNamespace(
-            kind="success",
-            snapshot_date=AS_OF_DATE,
-            date=AS_OF_DATE,
-            date_from=AS_OF_DATE,
-            date_to=AS_OF_DATE,
-            detail="onec_stocks prior accepted current snapshot",
-            items=[
-                SimpleNamespace(
-                    nm_id=PROBE_NM_ID,
-                    stage_name="CHINA_TO_FF",
-                    canonical_stage_code="CHINA_TO_FF",
-                    qty=0.5,
-                    unit_cost_rub=1.0,
-                    cost_total_rub=0.5,
-                )
-            ],
-        ),
-    )
 
 
 def _request_date(request: object) -> str:
@@ -488,7 +467,7 @@ def _assert_counting_calls(counters: dict[str, CountingBlock]) -> None:
         "spp": [TODAY_CURRENT_DATE],
         "ads_bids": [TODAY_CURRENT_DATE],
         "stocks": [AS_OF_DATE],
-        "onec_stocks": [TODAY_CURRENT_DATE],
+        "onec_stocks": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "ads_compact": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "fin_report_daily": [AS_OF_DATE, TODAY_CURRENT_DATE],
     }
@@ -501,7 +480,7 @@ def _assert_counting_calls(counters: dict[str, CountingBlock]) -> None:
 
 
 def _expected_request_dates(source_key: str) -> list[str]:
-    if source_key in CURRENT_ONLY_SOURCE_KEYS or source_key in {"spp", "onec_stocks"}:
+    if source_key in CURRENT_ONLY_SOURCE_KEYS or source_key == "spp":
         return [TODAY_CURRENT_DATE]
     if source_key == "stocks":
         return [AS_OF_DATE]

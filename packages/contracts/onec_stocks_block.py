@@ -37,6 +37,7 @@ class OnecStocksRequest:
     snapshot_type: str
     account_id: str
     nm_ids: list[int]
+    date: str | None = None
     scenario: Literal["success"] = "success"
 
 

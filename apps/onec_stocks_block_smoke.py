@@ -121,11 +121,32 @@ def _check_block(payload: dict) -> None:
             snapshot_type="onec_stocks",
             account_id=str(payload["meta"]["account_id"]),
             nm_ids=[428855306],
+            date=str(payload["meta"]["date"]),
         )
     ).result
     if result.kind != "success" or result.stage_count != 3:
         raise AssertionError(f"unexpected block result: {result}")
     print("block: ok")
+
+
+def _check_block_rejects_mismatched_date(payload: dict) -> None:
+    block = OnecStocksBlock(_StaticOnecStocksSource(payload))
+    try:
+        block.execute(
+            OnecStocksRequest(
+                snapshot_type="onec_stocks",
+                account_id=str(payload["meta"]["account_id"]),
+                nm_ids=[428855306],
+                date="2026-05-14",
+            )
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if "payload meta.date mismatch" not in message or "requested_date=2026-05-14" not in message:
+            raise AssertionError(f"mismatched date rejection must explain lineage, got {message!r}")
+        print("date-mismatch-rejection: ok")
+        return
+    raise AssertionError("block must reject payload.meta.date that differs from request.date")
 
 
 def _check_partial_block(payload: dict) -> None:
@@ -145,6 +166,7 @@ def _check_partial_block(payload: dict) -> None:
             snapshot_type="onec_stocks",
             account_id=str(payload["meta"]["account_id"]),
             nm_ids=[428855306, 210183919],
+            date=str(payload["meta"]["date"]),
         )
     ).result
     if result.kind != "incomplete":
@@ -171,6 +193,7 @@ def _check_http_account_snapshot_fallback(payload: dict) -> None:
                 snapshot_type="onec_stocks",
                 account_id=str(payload["meta"]["account_id"]),
                 nm_ids=[428855306],
+                date=str(payload["meta"]["date"]),
             )
         ).result
         if full_result.kind != "success" or full_result.stage_count != 3:
@@ -185,7 +208,7 @@ def _check_http_account_snapshot_fallback(payload: dict) -> None:
         raise AssertionError(
             f"expected one account snapshot fallback request, got {account_snapshot_urls}"
         )
-    if any("account_id=000000001" not in url for url in account_snapshot_urls):
+    if any("account_id=000000001" not in url or "date=2026-05-15" not in url for url in account_snapshot_urls):
         raise AssertionError(f"unexpected account snapshot URLs: {account_snapshot_urls}")
     print("http-account-snapshot-fallback: ok")
 
@@ -199,6 +222,7 @@ def _check_http_account_snapshot_primary_multi_sku(payload: dict) -> None:
                 snapshot_type="onec_stocks",
                 account_id=str(payload["meta"]["account_id"]),
                 nm_ids=[428855306, 210183919],
+                date=str(payload["meta"]["date"]),
             )
         ).result
 
@@ -227,7 +251,7 @@ def _check_http_account_snapshot_primary_multi_sku(payload: dict) -> None:
         raise AssertionError(
             f"expected one primary account snapshot request, got {account_snapshot_urls}"
         )
-    if any("account_id=000000001" not in url for url in account_snapshot_urls):
+    if any("account_id=000000001" not in url or "date=2026-05-15" not in url for url in account_snapshot_urls):
         raise AssertionError(f"unexpected account snapshot URLs: {account_snapshot_urls}")
     if any("nmId=" in parse.urlparse(url).query for url in opener.urls):
         raise AssertionError(f"multi-SKU account snapshot must avoid per-SKU URLs first, got {opener.urls}")
@@ -243,6 +267,7 @@ def _check_http_request_headers(payload: dict) -> None:
                 snapshot_type="onec_stocks",
                 account_id=str(payload["meta"]["account_id"]),
                 nm_ids=[428855306],
+                date=str(payload["meta"]["date"]),
             )
         ).result
 
@@ -253,6 +278,9 @@ def _check_http_request_headers(payload: dict) -> None:
     captured = opener.requests[0]
     if captured["method"] != "GET":
         raise AssertionError(f"1C request must use GET, got {captured['method']}")
+    query = parse.parse_qs(parse.urlparse(str(captured["url"])).query)
+    if query.get("date") != [str(payload["meta"]["date"])]:
+        raise AssertionError(f"1C request must send date=YYYY-MM-DD, got {captured['url']}")
     headers = captured["headers"]
     if headers.get("accept") != "application/json":
         raise AssertionError("1C request must send Accept: application/json")
@@ -267,7 +295,7 @@ def _check_http_request_headers(payload: dict) -> None:
 
 def _check_low_level_http_wire_request(payload: dict) -> None:
     with _RawOnecHttpServer(payload) as server:
-        base_url = f"http://127.0.0.1:{server.port}/base/hs/soykasoft/stocks_wb?tenant=demo"
+        base_url = f"http://127.0.0.1:{server.port}/base/hs/soykasoft/stocks_wb?tenant=demo&date=2026-05-01"
         with _temporary_onec_live_env({"ONEC_STOCKS_BASE_URL": base_url}):
             block = OnecStocksBlock(HttpBackedOnecStocksSource())
             result = block.execute(
@@ -275,6 +303,7 @@ def _check_low_level_http_wire_request(payload: dict) -> None:
                     snapshot_type="onec_stocks",
                     account_id=str(payload["meta"]["account_id"]),
                     nm_ids=[428855306],
+                    date=str(payload["meta"]["date"]),
                 )
             ).result
 
@@ -288,7 +317,13 @@ def _check_low_level_http_wire_request(payload: dict) -> None:
         raise AssertionError(f"unexpected 1C request target: {request_line}")
     if request_line.count("/hs/soykasoft/stocks_wb") != 1:
         raise AssertionError(f"1C request target must not duplicate endpoint path: {request_line}")
-    if "tenant=demo" not in request_line or "account_id=000000001" not in request_line or "nmId=428855306" not in request_line:
+    if (
+        "tenant=demo" not in request_line
+        or "account_id=000000001" not in request_line
+        or "date=2026-05-15" not in request_line
+        or "date=2026-05-01" in request_line
+        or "nmId=428855306" not in request_line
+    ):
         raise AssertionError(f"1C request target must preserve base and adapter query params: {request_line}")
 
     header_names = [
@@ -445,6 +480,7 @@ def main() -> None:
     _check_normalization(payload)
     _check_mapping_boundary(payload)
     _check_block(payload)
+    _check_block_rejects_mismatched_date(payload)
     _check_partial_block(payload)
     _check_http_account_snapshot_fallback(payload)
     _check_http_account_snapshot_primary_multi_sku(payload)

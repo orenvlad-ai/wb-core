@@ -118,11 +118,12 @@ HISTORICAL_CLOSED_DAY_SOURCE_KEYS = STRICT_CLOSED_DAY_SOURCE_KEYS | {
     "stocks",
     "ads_compact",
     "fin_report_daily",
+    ONEC_STOCKS_SOURCE_KEY,
 }
-CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "promo_by_price", ONEC_STOCKS_SOURCE_KEY}
-CURRENT_SNAPSHOT_ONLY_ROLLOVER_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "spp", ONEC_STOCKS_SOURCE_KEY}
+CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "promo_by_price"}
+CURRENT_SNAPSHOT_ONLY_ROLLOVER_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "spp"}
 ACCEPTED_CURRENT_SOURCE_KEYS = HISTORICAL_CLOSED_DAY_SOURCE_KEYS | CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS
-EXACT_DATE_RUNTIME_CACHE_SOURCE_KEYS = {"sales_funnel_history", "stocks", "promo_by_price"}
+EXACT_DATE_RUNTIME_CACHE_SOURCE_KEYS = {"sales_funnel_history", "stocks", "promo_by_price", ONEC_STOCKS_SOURCE_KEY}
 TEMPORAL_ROLE_PROVISIONAL_CURRENT = "provisional_current_snapshot"
 TEMPORAL_ROLE_CLOSED_DAY_CANDIDATE = "closed_day_candidate_snapshot"
 TEMPORAL_ROLE_ACCEPTED_CLOSED = "accepted_closed_day_snapshot"
@@ -150,7 +151,7 @@ SOURCE_CLASSIFICATION_GROUPS = {
     "sf_period": "B_wb_api_date_period_capable",
     "spp": "C_seller_portal_current_snapshot_with_accepted_current_rollover",
     "stocks": "B_wb_api_date_period_capable",
-    ONEC_STOCKS_SOURCE_KEY: "E_onec_product_capital_current_snapshot",
+    ONEC_STOCKS_SOURCE_KEY: "E_onec_product_capital_date_capable",
     "ads_compact": "B_wb_api_date_period_capable",
     "fin_report_daily": "B_wb_api_date_period_capable",
     "prices_snapshot": "C_wb_api_current_snapshot_only",
@@ -223,7 +224,7 @@ SOURCE_DIAGNOSTIC_SPECS = {
         "module": "packages.application.onec_stocks_block",
         "block": "OnecStocksBlock",
         "adapter": "HttpBackedOnecStocksSource",
-        "endpoint": "GET /hs/soykasoft/stocks_wb?account_id=<account_id>&nmId=<nmId>",
+        "endpoint": "GET /hs/soykasoft/stocks_wb?account_id=<account_id>&date=<YYYY-MM-DD>&nmId=<nmId>",
     },
     "ads_compact": {
         "module": "packages.application.ads_compact_block",
@@ -1175,19 +1176,6 @@ class SheetVitrinaV1LivePlanBlock:
             )
             for slot in temporal_slots
         }
-        onec_current_snapshot_cache: dict[str, Any] = {}
-
-        def load_onec_stocks_current_snapshot() -> Any:
-            if ONEC_STOCKS_SOURCE_KEY not in onec_current_snapshot_cache:
-                onec_current_snapshot_cache[ONEC_STOCKS_SOURCE_KEY] = self.onec_stocks_block.execute(
-                    OnecStocksRequest(
-                        snapshot_type=ONEC_STOCKS_SOURCE_KEY,
-                        account_id=resolve_onec_stocks_account_id(),
-                        nm_ids=requested_nm_ids,
-                    )
-                ).result
-            return onec_current_snapshot_cache[ONEC_STOCKS_SOURCE_KEY]
-
         load_live_started = _start_refresh_phase(
             diagnostics,
             "load_live_sources_total",
@@ -1279,7 +1267,14 @@ class SheetVitrinaV1LivePlanBlock:
                 ),
                 (
                     ONEC_STOCKS_SOURCE_KEY,
-                    lambda slot=slot: load_onec_stocks_current_snapshot(),
+                    lambda slot=slot: self.onec_stocks_block.execute(
+                        OnecStocksRequest(
+                            snapshot_type=ONEC_STOCKS_SOURCE_KEY,
+                            account_id=resolve_onec_stocks_account_id(),
+                            nm_ids=requested_nm_ids,
+                            date=slot.column_date,
+                        )
+                    ).result,
                 ),
                 (
                     "ads_compact",
