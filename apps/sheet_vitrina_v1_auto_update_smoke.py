@@ -73,8 +73,8 @@ class OnecCountingBlock:
         self.request_dates: list[str] = []
 
     def execute(self, request: object) -> SimpleNamespace:
-        del request
-        self.request_dates.append(TODAY_CURRENT_DATE)
+        request_date = _request_date(request)
+        self.request_dates.append(request_date)
         payload = SimpleNamespace(
             kind="success",
             items=[
@@ -91,11 +91,11 @@ class OnecCountingBlock:
                     cost_total_rub=20.0,
                 )
             ],
-            snapshot_date=TODAY_CURRENT_DATE,
-            date=TODAY_CURRENT_DATE,
-            date_from=TODAY_CURRENT_DATE,
-            date_to=TODAY_CURRENT_DATE,
-            detail="onec_stocks synthetic success for auto update smoke",
+            snapshot_date=request_date,
+            date=request_date,
+            date_from=request_date,
+            date_to=request_date,
+            detail=f"onec_stocks synthetic success for auto update smoke {request_date}",
             item_count=1,
             stage_count=1,
         )
@@ -261,12 +261,14 @@ def main() -> None:
                 if sheet.sheet_name == "STATUS"
                 for row in sheet.rows
             }
-            if status_rows["onec_stocks[yesterday_closed]"][1] != "missing":
-                raise AssertionError(f"auto_refresh must not backfill current 1C into yesterday_closed, got {status_rows}")
-            if "not backfilled into a closed-day column" not in str(status_rows["onec_stocks[yesterday_closed]"][10]):
-                raise AssertionError(f"auto_refresh must explain missing prior 1C accepted current, got {status_rows}")
+            if status_rows["onec_stocks[yesterday_closed]"][1] != "success":
+                raise AssertionError(f"auto_refresh must load historical 1C date directly, got {status_rows}")
+            if status_rows["onec_stocks[yesterday_closed]"][3] != AS_OF_DATE:
+                raise AssertionError(f"auto_refresh 1C yesterday lineage must match requested date, got {status_rows}")
             if status_rows["onec_stocks[today_current]"][1] != "success":
                 raise AssertionError(f"auto_refresh must update 1C today_current, got {status_rows}")
+            if status_rows["onec_stocks[today_current]"][3] != TODAY_CURRENT_DATE:
+                raise AssertionError(f"auto_refresh 1C today lineage must match requested date, got {status_rows}")
 
             status_code, status_payload = _get_json(status_url)
             if status_code != 200:
@@ -330,7 +332,7 @@ def _assert_counting_calls(counters: dict[str, CountingBlock]) -> None:
         "sf_period": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "spp": [TODAY_CURRENT_DATE],
         "ads_bids": [TODAY_CURRENT_DATE],
-        "onec_stocks": [TODAY_CURRENT_DATE],
+        "onec_stocks": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "stocks": [AS_OF_DATE],
         "ads_compact": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "fin_report_daily": [AS_OF_DATE, TODAY_CURRENT_DATE],

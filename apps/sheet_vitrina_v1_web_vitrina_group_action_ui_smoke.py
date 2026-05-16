@@ -173,8 +173,32 @@ def _assert_group_action_launch_error() -> None:
                 raise AssertionError(f"session-check controls must remain rendered, got {payload}")
             if payload["top_status_badge_count"] != 0:
                 raise AssertionError(f"top status badge must not be rendered, got {payload}")
+
+            onec_button = page.locator("[data-refresh-source-group='onec_product_capital']").first
+            page.locator("[data-refresh-source-group-date='onec_product_capital']").fill(valid_refresh_date)
+            with page.expect_response("**/v1/sheet-vitrina-v1/web-vitrina/group-refresh") as onec_response_info:
+                onec_button.click()
+            onec_response = onec_response_info.value
+            onec_request_payload = json.loads(onec_response.request.post_data or "{}")
+            if onec_request_payload != {
+                "async": True,
+                "source_group_id": "onec_product_capital",
+                "as_of_date": valid_refresh_date,
+            }:
+                raise AssertionError(f"1C group refresh must send date-scoped payload, got {onec_request_payload}")
+            page.wait_for_function(
+                """() => {
+                  const group = document.querySelector('[data-loading-group="onec_product_capital"]');
+                  const log = document.querySelector('[data-activity-log-body]');
+                  return !!group && !!log
+                    && group.textContent.includes('Ошибка запуска')
+                    && log.textContent.includes('Не удалось запустить обновление группы 1С / товарный капитал за 2026-04-20: HTTP 404 route not found');
+                }""",
+                timeout=5000,
+            )
             print("web_vitrina_group_action_unsupported_date: ok -> 2026-04-13")
             print("web_vitrina_group_action_launch_404_log: ok ->", payload["request_date"])
+            print("web_vitrina_onec_group_action_payload: ok ->", onec_request_payload["as_of_date"])
             browser.close()
 
 

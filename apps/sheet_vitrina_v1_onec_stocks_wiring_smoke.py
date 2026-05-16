@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import sys
@@ -57,8 +58,9 @@ def main() -> None:
         if accepted.status != "accepted":
             raise AssertionError(f"minimal registry bundle must be accepted, got {accepted}")
 
+        source = _RequestDateArtifactOnecStocksSource(ARTIFACTS)
         onec_block = OnecStocksBlock(
-            ArtifactBackedOnecStocksSource(ARTIFACTS),
+            source,
             stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
         )
         sheet_block = SheetVitrinaV1LivePlanBlock(
@@ -83,8 +85,9 @@ def main() -> None:
             source_keys=[ONEC_STOCKS_SOURCE_KEY],
             metric_keys=metric_keys,
         )
+        partial_source = _PartialOnecStocksSource(ARTIFACTS)
         partial_onec_block = OnecStocksBlock(
-            _PartialOnecStocksSource(ARTIFACTS),
+            partial_source,
             stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
         )
         partial_sheet_block = SheetVitrinaV1LivePlanBlock(
@@ -121,13 +124,15 @@ def main() -> None:
             372123.77 / 4782.0,
             "weighted CHINA_TO_FF unit cost",
         )
-        assert_blank(
+        assert_close(
             data_rows[f"TOTAL|{onec_stage_total_metric_key('CHINA_TO_FF', 'qty')}"][2],
-            "yesterday total CHINA_TO_FF qty without prior accepted current",
+            4782.0,
+            "historical total CHINA_TO_FF qty",
         )
-        assert_blank(
+        assert_close(
             data_rows[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"][2],
-            "yesterday SKU CHINA_TO_FF qty without prior accepted current",
+            4782.0,
+            "historical SKU CHINA_TO_FF qty",
         )
         assert_close(
             data_rows[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"][3],
@@ -151,10 +156,14 @@ def main() -> None:
         if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[today_current]"][1] != "success":
             raise AssertionError(f"1C today status must be success, got {status_rows}")
         yesterday_status = status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"]
-        if yesterday_status[1] != "missing":
-            raise AssertionError(f"1C yesterday status must truthfully stay missing without accepted current, got {status_rows}")
-        if "not backfilled into a closed-day column" not in str(yesterday_status[10]):
-            raise AssertionError(f"1C yesterday status must refuse current-value backfill, got {yesterday_status}")
+        if yesterday_status[1] != "success":
+            raise AssertionError(f"1C yesterday status must load the requested historical date, got {status_rows}")
+        if yesterday_status[3] != AS_OF_DATE:
+            raise AssertionError(f"1C yesterday snapshot lineage must match requested date, got {yesterday_status}")
+        if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[today_current]"][3] != TODAY_DATE:
+            raise AssertionError(f"1C today snapshot lineage must match requested date, got {status_rows}")
+        if sorted(source.request_dates) != [AS_OF_DATE, TODAY_DATE]:
+            raise AssertionError(f"1C live plan must request each slot date separately, got {source.request_dates}")
 
         partial_data_rows = {str(row[1]): row for row in _sheet_rows(partial_plan, "DATA_VITRINA")}
         assert_close(
@@ -173,6 +182,8 @@ def main() -> None:
             raise AssertionError(f"partial 1C today status must be incomplete, got {partial_today_status}")
         if partial_today_status[8] != 1 or str(MISSING_NM_ID) not in str(partial_today_status[9]):
             raise AssertionError(f"partial 1C status must expose covered/missing counts, got {partial_today_status}")
+        if sorted(partial_source.request_dates) != [AS_OF_DATE, TODAY_DATE]:
+            raise AssertionError(f"partial 1C plan must request each slot date separately, got {partial_source.request_dates}")
 
         current_state = runtime.load_current_state()
         runtime.save_sheet_vitrina_ready_snapshot(
@@ -332,16 +343,18 @@ def main() -> None:
             f"TOTAL|{onec_stage_total_metric_key('CHINA_TO_FF', 'qty')}",
             AS_OF_DATE,
             "updated",
-        ) in yesterday_cells:
-            raise AssertionError(f"1C unavailable yesterday refresh must not mark current values as updated, got {yesterday_cells}")
-        if int(yesterday_result.get("updated_cell_count") or 0) != 0:
-            raise AssertionError(f"1C unavailable yesterday refresh must not mark cells updated, got {yesterday_result}")
+        ) not in yesterday_cells:
+            raise AssertionError(f"1C historical group refresh must update requested-date cells, got {yesterday_cells}")
+        if int(yesterday_result.get("updated_cell_count") or 0) <= 0:
+            raise AssertionError(f"1C historical group refresh must mark cells updated, got {yesterday_result}")
         yesterday_merge_summary = dict(yesterday_result.get("merge_summary") or {})
         if int(yesterday_merge_summary.get("status_rows_updated") or 0) <= 0:
-            raise AssertionError(f"1C unavailable yesterday refresh must still update STATUS truth, got {yesterday_result}")
+            raise AssertionError(f"1C historical group refresh must update STATUS truth, got {yesterday_result}")
 
-        _assert_onec_current_rollover_date_specific_snapshots()
-        _assert_onec_current_rollover_period_snapshots()
+        _assert_onec_mismatched_historical_payload_not_reused()
+        _assert_onec_single_metric_historical_action()
+        _assert_onec_date_specific_snapshot_lineage()
+        _assert_onec_date_specific_period_snapshots()
         _assert_weighted_unit_cost_semantics()
 
         print("sheet_vitrina_onec_stocks_metrics: ok -> summary_and_sku_values_present")
@@ -349,8 +362,10 @@ def main() -> None:
         print("sheet_vitrina_onec_stocks_period_visibility: ok -> filter_and_rows_present")
         print("sheet_vitrina_onec_stocks_status_group: ok ->", ONEC_STOCKS_SOURCE_GROUP_ID)
         print("sheet_vitrina_onec_stocks_group_refresh: ok ->", len(captured_metric_keys))
-        print("sheet_vitrina_onec_stocks_date_specific_rollover: ok -> 2026-05-15/2026-05-16")
-        print("sheet_vitrina_onec_stocks_period_rollover: ok -> 2026-05-01..2026-05-16")
+        print("sheet_vitrina_onec_stocks_mismatch_rejection: ok ->", AS_OF_DATE)
+        print("sheet_vitrina_onec_stocks_single_metric_action: ok ->", AS_OF_DATE)
+        print("sheet_vitrina_onec_stocks_date_specific_lineage: ok -> 2026-05-15/2026-05-16/2026-05-17")
+        print("sheet_vitrina_onec_stocks_period_snapshots: ok -> 2026-05-01..2026-05-17")
         print("sheet_vitrina_onec_stocks_weighted_unit_cost: ok -> weighted_avg")
 
 
@@ -392,95 +407,186 @@ def _build_bundle() -> dict[str, object]:
     }
 
 
-def _assert_onec_current_rollover_date_specific_snapshots() -> None:
-    closed_date = "2026-05-15"
-    current_date = "2026-05-16"
-    prior_as_of_date = "2026-05-14"
-    metric_keys = [
-        ONEC_STOCKS_TOTAL_QTY_METRIC_KEY,
-        onec_stage_metric_key("CHINA_TO_FF", "qty"),
-    ]
-    with TemporaryDirectory(prefix="sheet-vitrina-onec-date-rollover-") as tmp:
+def _assert_onec_mismatched_historical_payload_not_reused() -> None:
+    metric_key = onec_stage_metric_key("CHINA_TO_FF", "qty")
+    with TemporaryDirectory(prefix="sheet-vitrina-onec-mismatch-") as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
         accepted = runtime.ingest_bundle(_build_bundle(), activated_at="2026-05-15T08:55:00Z")
         if accepted.status != "accepted":
-            raise AssertionError(f"date rollover registry bundle must be accepted, got {accepted}")
-
-        prior_block = SheetVitrinaV1LivePlanBlock(
+            raise AssertionError(f"mismatch registry bundle must be accepted, got {accepted}")
+        source = _MismatchedHistoricalOnecStocksSource()
+        block = SheetVitrinaV1LivePlanBlock(
             runtime=runtime,
             onec_stocks_block=OnecStocksBlock(
-                _DatedOnecStocksSource(snapshot_date=closed_date, qty=15.0),
+                source,
                 stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
             ),
             now_factory=lambda: datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc),
         )
-        prior_plan = prior_block.build_plan(
-            as_of_date=prior_as_of_date,
+        plan = block.build_plan(
+            as_of_date=AS_OF_DATE,
             execution_mode="manual_operator",
             source_keys=[ONEC_STOCKS_SOURCE_KEY],
-            metric_keys=metric_keys,
+            metric_keys=[metric_key],
         )
-        prior_status = {str(row[0]): row for row in _sheet_rows(prior_plan, "STATUS")}
-        if prior_status[f"{ONEC_STOCKS_SOURCE_KEY}[today_current]"][1] != "success":
-            raise AssertionError(f"prior current 1C snapshot must be accepted, got {prior_status}")
+        rows = {str(row[1]): row for row in _sheet_rows(plan, "DATA_VITRINA")}
+        row = rows[f"SKU:{NM_ID}|{metric_key}"]
+        if row[2] != "":
+            raise AssertionError(f"mismatched historical 1C payload must not populate {AS_OF_DATE}, got {row}")
+        assert_close(row[3], 15.0, "mismatch smoke current 1C qty")
+        status_rows = {str(row[0]): row for row in _sheet_rows(plan, "STATUS")}
+        historical_status = status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"]
+        if historical_status[1] == "success":
+            raise AssertionError(f"mismatched historical 1C payload must not be accepted, got {historical_status}")
+        if historical_status[3] == AS_OF_DATE:
+            raise AssertionError(f"mismatched historical 1C status must not claim requested-date lineage, got {historical_status}")
+        if sorted(set(source.request_dates)) != [AS_OF_DATE, TODAY_DATE]:
+            raise AssertionError(f"mismatch smoke must still request each 1C date separately, got {source.request_dates}")
 
-        current_block = SheetVitrinaV1LivePlanBlock(
+
+def _assert_onec_single_metric_historical_action() -> None:
+    metric_key = onec_stage_metric_key("CHINA_TO_FF", "qty")
+    with TemporaryDirectory(prefix="sheet-vitrina-onec-single-metric-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
+        accepted = runtime.ingest_bundle(_build_bundle(), activated_at="2026-05-15T08:55:00Z")
+        if accepted.status != "accepted":
+            raise AssertionError(f"single metric registry bundle must be accepted, got {accepted}")
+        source = _RequestDateDatedOnecStocksSource()
+        block = SheetVitrinaV1LivePlanBlock(
             runtime=runtime,
             onec_stocks_block=OnecStocksBlock(
-                _DatedOnecStocksSource(snapshot_date=current_date, qty=16.0),
+                source,
+                stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
+            ),
+            now_factory=lambda: datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc),
+        )
+        plan = block.build_plan(
+            as_of_date=AS_OF_DATE,
+            execution_mode="manual_operator",
+            source_keys=[ONEC_STOCKS_SOURCE_KEY],
+            metric_keys=[metric_key],
+        )
+        rows = {str(row[1]): row for row in _sheet_rows(plan, "DATA_VITRINA")}
+        row = rows[f"SKU:{NM_ID}|{metric_key}"]
+        assert_close(row[2], 14.0, "single metric historical 1C qty")
+        assert_close(row[3], 15.0, "single metric current 1C qty")
+        status_rows = {str(row[0]): row for row in _sheet_rows(plan, "STATUS")}
+        if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"][3] != AS_OF_DATE:
+            raise AssertionError(f"single metric historical lineage must match requested date, got {status_rows}")
+        if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[today_current]"][3] != TODAY_DATE:
+            raise AssertionError(f"single metric current lineage must match requested date, got {status_rows}")
+        if sorted(set(source.request_dates)) != [AS_OF_DATE, TODAY_DATE]:
+            raise AssertionError(f"single metric action must request each 1C date separately, got {source.request_dates}")
+
+
+def _assert_onec_date_specific_snapshot_lineage() -> None:
+    closed_date = "2026-05-15"
+    next_closed_date = "2026-05-16"
+    current_date = "2026-05-17"
+    metric_keys = [
+        ONEC_STOCKS_TOTAL_QTY_METRIC_KEY,
+        onec_stage_metric_key("CHINA_TO_FF", "qty"),
+    ]
+    with TemporaryDirectory(prefix="sheet-vitrina-onec-date-lineage-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
+        accepted = runtime.ingest_bundle(_build_bundle(), activated_at="2026-05-15T08:55:00Z")
+        if accepted.status != "accepted":
+            raise AssertionError(f"date lineage registry bundle must be accepted, got {accepted}")
+
+        source = _RequestDateDatedOnecStocksSource()
+        first_block = SheetVitrinaV1LivePlanBlock(
+            runtime=runtime,
+            onec_stocks_block=OnecStocksBlock(
+                source,
                 stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
             ),
             now_factory=lambda: datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc),
         )
-        current_plan = current_block.build_plan(
+        first_plan = first_block.build_plan(
             as_of_date=closed_date,
             execution_mode="manual_operator",
             source_keys=[ONEC_STOCKS_SOURCE_KEY],
             metric_keys=metric_keys,
         )
-        rows = {str(row[1]): row for row in _sheet_rows(current_plan, "DATA_VITRINA")}
-        row = rows[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"]
-        assert_close(row[2], 15.0, "2026-05-15 accepted current rollover qty")
-        assert_close(row[3], 16.0, "2026-05-16 live current qty")
-        if row[2] == row[3]:
-            raise AssertionError(f"1C 2026-05-15 and 2026-05-16 values must be date-specific, got {row}")
-        status_rows = {str(row[0]): row for row in _sheet_rows(current_plan, "STATUS")}
-        yesterday_status = status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"]
-        if yesterday_status[1] != "success":
-            raise AssertionError(f"1C closed date must use prior accepted current snapshot, got {status_rows}")
-        if "accepted_closed_from_prior_current_snapshot" not in str(yesterday_status[10]):
-            raise AssertionError(f"1C closed date must explain accepted-current rollover, got {yesterday_status}")
+        current_state = runtime.load_current_state()
+        runtime.save_sheet_vitrina_ready_snapshot(
+            current_state=current_state,
+            refreshed_at="2026-05-16T12:05:00Z",
+            plan=first_plan,
+        )
 
-
-def _assert_onec_current_rollover_period_snapshots() -> None:
-    start = date(2026, 5, 1)
-    end = date(2026, 5, 16)
-    prior_as_of_date = "2026-04-30"
-    metric_keys = [
-        ONEC_STOCKS_TOTAL_QTY_METRIC_KEY,
-        onec_stage_metric_key("CHINA_TO_FF", "qty"),
-    ]
-    with TemporaryDirectory(prefix="sheet-vitrina-onec-period-rollover-") as tmp:
-        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
-        accepted = runtime.ingest_bundle(_build_bundle(), activated_at="2026-05-01T08:55:00Z")
-        if accepted.status != "accepted":
-            raise AssertionError(f"period rollover registry bundle must be accepted, got {accepted}")
-
-        seed_block = SheetVitrinaV1LivePlanBlock(
+        second_block = SheetVitrinaV1LivePlanBlock(
             runtime=runtime,
             onec_stocks_block=OnecStocksBlock(
-                _DatedOnecStocksSource(snapshot_date=start.isoformat(), qty=1.0),
+                source,
                 stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
             ),
-            now_factory=lambda: datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc),
+            now_factory=lambda: datetime(2026, 5, 17, 12, 0, tzinfo=timezone.utc),
         )
-        seed_block.build_plan(
-            as_of_date=prior_as_of_date,
+        second_plan = second_block.build_plan(
+            as_of_date=next_closed_date,
             execution_mode="manual_operator",
             source_keys=[ONEC_STOCKS_SOURCE_KEY],
             metric_keys=metric_keys,
         )
+        runtime.save_sheet_vitrina_ready_snapshot(
+            current_state=current_state,
+            refreshed_at="2026-05-17T12:05:00Z",
+            plan=second_plan,
+        )
 
+        rows = {str(row[1]): row for row in _sheet_rows(second_plan, "DATA_VITRINA")}
+        row = rows[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"]
+        assert_close(row[2], 16.0, "2026-05-16 historical qty")
+        assert_close(row[3], 17.0, "2026-05-17 current qty")
+        if row[2] == row[3]:
+            raise AssertionError(f"1C 2026-05-16 and 2026-05-17 values must be date-specific, got {row}")
+        status_rows = {str(row[0]): row for row in _sheet_rows(second_plan, "STATUS")}
+        yesterday_status = status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"]
+        if yesterday_status[1] != "success":
+            raise AssertionError(f"1C closed date must use a matching historical source payload, got {status_rows}")
+        if yesterday_status[3] != next_closed_date:
+            raise AssertionError(f"1C closed date lineage must match requested date, got {yesterday_status}")
+        if "accepted_closed_from_prior_current_snapshot" in str(yesterday_status[10]):
+            raise AssertionError(f"1C closed date must not use current-snapshot rollover, got {yesterday_status}")
+
+        expected_dates = [closed_date, next_closed_date, current_date]
+        if sorted(set(source.request_dates)) != expected_dates:
+            raise AssertionError(f"1C must request each lineage date separately, got {source.request_dates}")
+        _assert_runtime_onec_snapshots_have_lineage(runtime, expected_dates)
+
+        web_block = SheetVitrinaV1WebVitrinaBlock(
+            runtime=runtime,
+            now_factory=lambda: datetime(2026, 5, 17, 12, 0, tzinfo=timezone.utc),
+        )
+        period_contract = web_block.build(
+            page_route="/sheet-vitrina-v1/vitrina",
+            read_route="/v1/sheet-vitrina-v1/web-vitrina",
+            date_from=closed_date,
+            date_to=current_date,
+        )
+        web_row = {
+            item.row_id: item
+            for item in period_contract.rows
+        }[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"]
+        for expected_date in expected_dates:
+            assert_close(web_row.values_by_date.get(expected_date), float(expected_date[-2:]), f"{expected_date} web qty")
+
+
+def _assert_onec_date_specific_period_snapshots() -> None:
+    start = date(2026, 5, 1)
+    end = date(2026, 5, 17)
+    metric_keys = [
+        ONEC_STOCKS_TOTAL_QTY_METRIC_KEY,
+        onec_stage_metric_key("CHINA_TO_FF", "qty"),
+    ]
+    with TemporaryDirectory(prefix="sheet-vitrina-onec-period-history-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
+        accepted = runtime.ingest_bundle(_build_bundle(), activated_at="2026-05-01T08:55:00Z")
+        if accepted.status != "accepted":
+            raise AssertionError(f"period history registry bundle must be accepted, got {accepted}")
+
+        source = _RequestDateDatedOnecStocksSource()
         current_state = runtime.load_current_state()
         closed_day = start
         while closed_day < end:
@@ -488,10 +594,7 @@ def _assert_onec_current_rollover_period_snapshots() -> None:
             block = SheetVitrinaV1LivePlanBlock(
                 runtime=runtime,
                 onec_stocks_block=OnecStocksBlock(
-                    _DatedOnecStocksSource(
-                        snapshot_date=current_day.isoformat(),
-                        qty=float(current_day.day),
-                    ),
+                    source,
                     stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
                 ),
                 now_factory=lambda current_day=current_day: datetime(
@@ -515,6 +618,11 @@ def _assert_onec_current_rollover_period_snapshots() -> None:
             }[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"]
             assert_close(row[2], float(closed_day.day), f"{closed_day.isoformat()} closed qty")
             assert_close(row[3], float(current_day.day), f"{current_day.isoformat()} current qty")
+            status_rows = {str(item[0]): item for item in _sheet_rows(plan, "STATUS")}
+            if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"][3] != closed_day.isoformat():
+                raise AssertionError(f"1C closed lineage must match {closed_day.isoformat()}, got {status_rows}")
+            if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[today_current]"][3] != current_day.isoformat():
+                raise AssertionError(f"1C current lineage must match {current_day.isoformat()}, got {status_rows}")
             runtime.save_sheet_vitrina_ready_snapshot(
                 current_state=current_state,
                 refreshed_at=f"{current_day.isoformat()}T12:05:00Z",
@@ -522,9 +630,17 @@ def _assert_onec_current_rollover_period_snapshots() -> None:
             )
             closed_day = current_day
 
+        expected_dates = [
+            (start + timedelta(days=offset)).isoformat()
+            for offset in range((end - start).days + 1)
+        ]
+        if sorted(set(source.request_dates)) != expected_dates:
+            raise AssertionError(f"period 1C must request every date separately, got {source.request_dates}")
+        _assert_runtime_onec_snapshots_have_lineage(runtime, expected_dates)
+
         web_block = SheetVitrinaV1WebVitrinaBlock(
             runtime=runtime,
-            now_factory=lambda: datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc),
+            now_factory=lambda: datetime(2026, 5, 17, 12, 0, tzinfo=timezone.utc),
         )
         period_contract = web_block.build(
             page_route="/sheet-vitrina-v1/vitrina",
@@ -536,16 +652,14 @@ def _assert_onec_current_rollover_period_snapshots() -> None:
             item.row_id: item
             for item in period_contract.rows
         }[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"]
-        expected_dates = [
-            (start + timedelta(days=offset)).isoformat()
-            for offset in range((end - start).days + 1)
-        ]
         actual_values = [
             row.values_by_date.get(snapshot_date)
             for snapshot_date in expected_dates
         ]
         for offset, actual in enumerate(actual_values, start=1):
             assert_close(actual, float(offset), f"period {expected_dates[offset - 1]} qty")
+        for snapshot_date in expected_dates[:14]:
+            assert_nonblank(row.values_by_date.get(snapshot_date), f"period {snapshot_date} 1C value")
         if len({float(value) for value in actual_values if isinstance(value, (int, float))}) != len(expected_dates):
             raise AssertionError(f"period 1C values must stay date-specific, got {actual_values}")
 
@@ -591,15 +705,18 @@ def _assert_weighted_unit_cost_semantics() -> None:
             25.0,
             "weighted total unit cost",
         )
-        assert_blank(
+        assert_close(
             rows[f"TOTAL|{onec_stage_total_metric_key('CHINA_TO_FF', 'unit_cost_rub')}"][2],
-            "weighted yesterday total unit cost without prior accepted current",
+            25.0,
+            "weighted historical total unit cost",
         )
         if rows[f"SKU:{NM_ID}|onec_CHINA_TO_FF_unit_cost_rub"][3] == rows[f"SKU:{MISSING_NM_ID}|onec_CHINA_TO_FF_unit_cost_rub"][3]:
             raise AssertionError("weighted fixture must keep distinct SKU unit costs")
         status_rows = {str(row[0]): row for row in _sheet_rows(plan, "STATUS")}
-        if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"][1] != "missing":
-            raise AssertionError(f"weighted 1C yesterday status must stay missing without accepted current, got {status_rows}")
+        if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"][1] != "success":
+            raise AssertionError(f"weighted 1C historical status must be success, got {status_rows}")
+        if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"][3] != AS_OF_DATE:
+            raise AssertionError(f"weighted 1C historical lineage must match requested date, got {status_rows}")
 
 
 def _build_weighted_bundle() -> dict[str, object]:
@@ -688,7 +805,11 @@ def _build_legacy_period_snapshot() -> SheetVitrinaV1Envelope:
 
 class _PartialOnecStocksSource:
     def __init__(self, artifacts_root: Path) -> None:
-        self._source = ArtifactBackedOnecStocksSource(artifacts_root)
+        self._source = _RequestDateArtifactOnecStocksSource(artifacts_root)
+
+    @property
+    def request_dates(self) -> list[str]:
+        return self._source.request_dates
 
     def fetch(self, request: OnecStocksRequest) -> dict[str, object]:
         payload = dict(self._source.fetch(request))
@@ -704,15 +825,32 @@ class _PartialOnecStocksSource:
         return payload
 
 
+class _RequestDateArtifactOnecStocksSource:
+    def __init__(self, artifacts_root: Path) -> None:
+        self._source = ArtifactBackedOnecStocksSource(artifacts_root)
+        self.request_dates: list[str] = []
+
+    def fetch(self, request: OnecStocksRequest) -> dict[str, object]:
+        request_date = _request_date(request)
+        self.request_dates.append(request_date)
+        payload = deepcopy(self._source.fetch(request))
+        meta = dict(payload.get("meta") or {})
+        meta["date"] = request_date
+        meta["generated_at"] = f"{request_date}T11:30:37"
+        payload["meta"] = meta
+        return payload
+
+
 class _WeightedOnecStocksSource:
     def fetch(self, request: OnecStocksRequest) -> dict[str, object]:
+        request_date = _request_date(request)
         return {
             "meta": {
                 "version": "1.0",
                 "marketplace": "WB",
                 "account_id": request.account_id,
-                "date": TODAY_DATE,
-                "generated_at": "2026-05-15T11:30:37",
+                "date": request_date,
+                "generated_at": f"{request_date}T11:30:37",
                 "currency": "RUB",
             },
             "items": [
@@ -746,24 +884,50 @@ class _WeightedOnecStocksSource:
         }
 
 
-class _DatedOnecStocksSource:
-    def __init__(self, *, snapshot_date: str, qty: float) -> None:
-        self.snapshot_date = snapshot_date
-        self.qty = qty
+class _RequestDateDatedOnecStocksSource:
+    def __init__(self) -> None:
+        self.request_dates: list[str] = []
 
     def fetch(self, request: OnecStocksRequest) -> dict[str, object]:
+        request_date = _request_date(request)
+        self.request_dates.append(request_date)
+        qty = float(date.fromisoformat(request_date).day)
         return {
             "meta": {
                 "version": "1.0",
                 "marketplace": "WB",
                 "account_id": request.account_id,
-                "date": self.snapshot_date,
-                "generated_at": f"{self.snapshot_date}T11:30:37",
+                "date": request_date,
+                "generated_at": f"{request_date}T11:30:37",
                 "currency": "RUB",
             },
             "items": [
-                _build_dated_onec_item(NM_ID, self.qty, "dated-a"),
-                _build_dated_onec_item(MISSING_NM_ID, self.qty + 1.0, "dated-b"),
+                _build_dated_onec_item(NM_ID, qty, "dated-a"),
+                _build_dated_onec_item(MISSING_NM_ID, qty + 1.0, "dated-b"),
+            ],
+        }
+
+
+class _MismatchedHistoricalOnecStocksSource:
+    def __init__(self) -> None:
+        self.request_dates: list[str] = []
+
+    def fetch(self, request: OnecStocksRequest) -> dict[str, object]:
+        request_date = _request_date(request)
+        self.request_dates.append(request_date)
+        payload_date = TODAY_DATE if request_date != TODAY_DATE else request_date
+        qty = float(date.fromisoformat(payload_date).day)
+        return {
+            "meta": {
+                "version": "1.0",
+                "marketplace": "WB",
+                "account_id": request.account_id,
+                "date": payload_date,
+                "generated_at": f"{payload_date}T11:30:37",
+                "currency": "RUB",
+            },
+            "items": [
+                _build_dated_onec_item(NM_ID, qty, "mismatch-a"),
             ],
         }
 
@@ -782,6 +946,43 @@ def _build_dated_onec_item(nm_id: int, qty: float, suffix: str) -> dict[str, obj
             },
         },
     }
+
+
+def _request_date(request: OnecStocksRequest) -> str:
+    request_date = str(request.date or "").strip()
+    if not request_date:
+        raise AssertionError("1C smoke source must be called with request.date")
+    return request_date
+
+
+def _assert_runtime_onec_snapshots_have_lineage(
+    runtime: RegistryUploadDbBackedRuntime,
+    expected_dates: list[str],
+) -> None:
+    snapshot_dates = runtime.list_temporal_source_snapshot_dates(source_key=ONEC_STOCKS_SOURCE_KEY)
+    if snapshot_dates != expected_dates:
+        raise AssertionError(f"runtime must persist one 1C snapshot per requested date, got {snapshot_dates}")
+    for expected_date in expected_dates:
+        payload, captured_at = runtime.load_temporal_source_snapshot(
+            source_key=ONEC_STOCKS_SOURCE_KEY,
+            snapshot_date=expected_date,
+        )
+        if not captured_at:
+            raise AssertionError(f"runtime 1C snapshot {expected_date} must preserve captured_at")
+        payload_date = _payload_meta_date(payload)
+        if payload_date != expected_date:
+            raise AssertionError(
+                f"runtime 1C snapshot {expected_date} must preserve meta.date lineage, got {payload_date!r}"
+            )
+
+
+def _payload_meta_date(payload: object) -> str:
+    meta = getattr(payload, "meta", None)
+    if isinstance(payload, dict):
+        meta = payload.get("meta")
+    if isinstance(meta, dict):
+        return str(meta.get("date") or "")
+    return str(getattr(meta, "date", "") or "")
 
 
 def _sheet_rows(plan: SheetVitrinaV1Envelope, sheet_name: str) -> list[list[object]]:

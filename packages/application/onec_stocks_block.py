@@ -214,6 +214,7 @@ class OnecStocksBlock:
 
     def execute(self, request: OnecStocksRequest) -> OnecStocksEnvelope:
         payload = self._source.fetch(request)
+        _validate_requested_payload_date(payload, request.date)
         envelope = normalize_onec_stocks_payload(payload, stage_mapping=self._stage_mapping)
         partial_meta = _partial_fetch_metadata(payload)
         if partial_meta is None or envelope.result.kind != "success":
@@ -256,6 +257,23 @@ class OnecStocksBlock:
                 missing_nm_ids=missing_nm_ids,
                 detail="; ".join(detail_parts),
             )
+        )
+
+
+def _validate_requested_payload_date(payload: Mapping[str, Any], requested_date: str | None) -> None:
+    normalized_requested_date = str(requested_date or "").strip()
+    if not normalized_requested_date:
+        return
+    meta_payload = payload.get("meta")
+    payload_date = (
+        str(meta_payload.get("date") or "").strip()
+        if isinstance(meta_payload, Mapping)
+        else ""
+    )
+    if payload_date != normalized_requested_date:
+        raise ValueError(
+            "1C stocks payload meta.date mismatch: "
+            f"requested_date={normalized_requested_date}; payload_meta_date={payload_date or '<missing>'}"
         )
 
 

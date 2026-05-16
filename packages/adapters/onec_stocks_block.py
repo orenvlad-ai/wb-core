@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass, field
+from datetime import datetime
 import http.client
 import json
 import os
@@ -101,11 +102,13 @@ class HttpBackedOnecStocksSource:
         nm_ids = sorted({int(nm_id) for nm_id in request.nm_ids})
         if not nm_ids:
             raise ValueError("1C stocks live adapter requires at least one nmId")
+        request_date = _normalize_onec_request_date(request.date)
 
         if len(nm_ids) > 1:
             account_payload = self._fetch_account_snapshot(
                 runtime=runtime,
                 account_id=request.account_id,
+                request_date=request_date,
                 requested_nm_ids=nm_ids,
                 failures=[],
                 fallback_label="account_snapshot_primary",
@@ -118,7 +121,12 @@ class HttpBackedOnecStocksSource:
         for nm_id in nm_ids:
             try:
                 payloads.append(
-                    self._fetch_one(runtime=runtime, account_id=request.account_id, nm_id=nm_id)
+                    self._fetch_one(
+                        runtime=runtime,
+                        account_id=request.account_id,
+                        request_date=request_date,
+                        nm_id=nm_id,
+                    )
                 )
             except OnecStocksHttpError as exc:
                 failures.append(
@@ -135,6 +143,7 @@ class HttpBackedOnecStocksSource:
             fallback_payload = self._fetch_account_snapshot(
                 runtime=runtime,
                 account_id=request.account_id,
+                request_date=request_date,
                 requested_nm_ids=nm_ids,
                 failures=failures,
                 fallback_label="account_snapshot_after_per_sku_failure",
@@ -162,12 +171,18 @@ class HttpBackedOnecStocksSource:
         *,
         runtime: OnecStocksRuntimeConfig,
         account_id: str,
+        request_date: str | None,
         requested_nm_ids: list[int],
         failures: list[_OnecStocksFetchFailure],
         fallback_label: str,
     ) -> Mapping[str, Any] | None:
         try:
-            payload = self._fetch_one(runtime=runtime, account_id=account_id, nm_id=None)
+            payload = self._fetch_one(
+                runtime=runtime,
+                account_id=account_id,
+                request_date=request_date,
+                nm_id=None,
+            )
         except (OnecStocksHttpError, OnecStocksRuntimeError):
             return None
 
@@ -201,11 +216,13 @@ class HttpBackedOnecStocksSource:
         *,
         runtime: OnecStocksRuntimeConfig,
         account_id: str,
+        request_date: str | None,
         nm_id: int | None,
     ) -> Mapping[str, Any]:
         url = _build_onec_stocks_url(
             base_url=runtime.base_url,
             account_id=account_id,
+            request_date=request_date,
             nm_id=nm_id,
         )
         headers = {
@@ -285,7 +302,24 @@ def _read_timeout_seconds() -> float:
     return timeout_seconds
 
 
-def _build_onec_stocks_url(*, base_url: str, account_id: str, nm_id: int | None) -> str:
+def _normalize_onec_request_date(value: str | None) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    try:
+        datetime.strptime(normalized, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"1C stocks request.date must be YYYY-MM-DD, got {normalized!r}") from exc
+    return normalized
+
+
+def _build_onec_stocks_url(
+    *,
+    base_url: str,
+    account_id: str,
+    request_date: str | None,
+    nm_id: int | None,
+) -> str:
     parsed = parse.urlsplit(base_url.strip())
     endpoint_path = ONEC_STOCKS_ENDPOINT_PATH
     base_path = parsed.path.rstrip("/")
@@ -297,9 +331,11 @@ def _build_onec_stocks_url(*, base_url: str, account_id: str, nm_id: int | None)
     params = [
         (name, value)
         for name, value in parse.parse_qsl(parsed.query, keep_blank_values=True)
-        if name not in {"account_id", "nmId"}
+        if name not in {"account_id", "nmId", "date"}
     ]
     params.append(("account_id", account_id))
+    if request_date:
+        params.append(("date", request_date))
     if nm_id is not None:
         params.append(("nmId", str(nm_id)))
     query = parse.urlencode(params)
