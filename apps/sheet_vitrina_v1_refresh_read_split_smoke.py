@@ -360,6 +360,12 @@ def main() -> None:
                 raise AssertionError("ads_bids yesterday_closed must explain accepted-current rollover semantics")
             if status_rows["ads_bids[today_current]"][1] != "success":
                 raise AssertionError("ads_bids today_current must materialize current data")
+            if status_rows["onec_stocks[yesterday_closed]"][1] != "success":
+                raise AssertionError("1C yesterday_closed must materialize from current stock-capital snapshot")
+            if "onec_current_snapshot_used_for_yesterday_closed" not in str(status_rows["onec_stocks[yesterday_closed]"][10]):
+                raise AssertionError("1C yesterday_closed must explain current snapshot semantics")
+            if status_rows["onec_stocks[today_current]"][1] != "success":
+                raise AssertionError("1C today_current must materialize current stock-capital snapshot")
             if status_rows["seller_funnel_snapshot[yesterday_closed]"][1] != "success":
                 raise AssertionError("dual-day source must materialize yesterday_closed")
             if status_rows["seller_funnel_snapshot[today_current]"][1] != "success":

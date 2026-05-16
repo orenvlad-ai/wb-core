@@ -44,6 +44,7 @@ from packages.application.sheet_vitrina_v1_onec_stocks import (
     build_onec_stocks_lookup,
     extend_metrics_with_onec_stock_metrics,
     is_onec_stock_sku_metric_key,
+    onec_weighted_unit_cost_components,
     resolve_onec_stock_metric_value,
     resolve_onec_stocks_account_id,
 )
@@ -1174,6 +1175,18 @@ class SheetVitrinaV1LivePlanBlock:
             )
             for slot in temporal_slots
         }
+        onec_current_snapshot_cache: dict[str, Any] = {}
+
+        def load_onec_stocks_current_snapshot() -> Any:
+            if ONEC_STOCKS_SOURCE_KEY not in onec_current_snapshot_cache:
+                onec_current_snapshot_cache[ONEC_STOCKS_SOURCE_KEY] = self.onec_stocks_block.execute(
+                    OnecStocksRequest(
+                        snapshot_type=ONEC_STOCKS_SOURCE_KEY,
+                        account_id=resolve_onec_stocks_account_id(),
+                        nm_ids=requested_nm_ids,
+                    )
+                ).result
+            return onec_current_snapshot_cache[ONEC_STOCKS_SOURCE_KEY]
 
         load_live_started = _start_refresh_phase(
             diagnostics,
@@ -1266,13 +1279,7 @@ class SheetVitrinaV1LivePlanBlock:
                 ),
                 (
                     ONEC_STOCKS_SOURCE_KEY,
-                    lambda slot=slot: self.onec_stocks_block.execute(
-                        OnecStocksRequest(
-                            snapshot_type=ONEC_STOCKS_SOURCE_KEY,
-                            account_id=resolve_onec_stocks_account_id(),
-                            nm_ids=requested_nm_ids,
-                        )
-                    ).result,
+                    lambda slot=slot: load_onec_stocks_current_snapshot(),
                 ),
                 (
                     "ads_compact",
@@ -1526,6 +1533,7 @@ class SheetVitrinaV1LivePlanBlock:
                 temporal_policy=temporal_policy,
                 column_date=column_date,
                 requested_nm_ids=requested_nm_ids,
+                loader=loader,
             )
         if temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED and source_key in HISTORICAL_CLOSED_DAY_SOURCE_KEYS:
             return self._capture_temporal_source_with_acceptance(
@@ -1663,6 +1671,7 @@ class SheetVitrinaV1LivePlanBlock:
         temporal_policy: str,
         column_date: str,
         requested_nm_ids: list[int],
+        loader: Callable[[], Any] | None = None,
     ) -> tuple[LiveSourceStatus, Any | None]:
         accepted_snapshot = self._load_slot_snapshot_status(
             source_key=source_key,
@@ -1678,6 +1687,33 @@ class SheetVitrinaV1LivePlanBlock:
             if accepted_at:
                 note = f"{note}; accepted_at={accepted_at}"
             return _append_status_note(accepted_status, note), accepted_payload
+
+        if source_key == ONEC_STOCKS_SOURCE_KEY and loader is not None:
+            status, payload = _capture_live_source(
+                source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
+                requested_nm_ids=requested_nm_ids,
+                loader=loader,
+            )
+            if status.kind in {"success", "incomplete"} and (
+                status.kind == "success" or status.covered_count > 0
+            ):
+                upstream_date = status.freshness or status.snapshot_date or status.date
+                return (
+                    _append_status_note(
+                        status,
+                        (
+                            "resolution_rule=onec_current_snapshot_used_for_yesterday_closed; "
+                            f"requested_slot_date={column_date}; "
+                            f"upstream_snapshot_date={upstream_date}; "
+                            "endpoint_has_no_historical_date_parameter"
+                        ),
+                    ),
+                    payload,
+                )
+            return status, payload
 
         return (
             LiveSourceStatus(
@@ -2428,6 +2464,8 @@ class _MetricEvaluator:
         if metric.calc_type == "metric":
             if metric.metric_key == "fin_storage_fee_total":
                 value = self._slot_lookups(temporal_slot).fin_storage_fee_total
+            elif onec_weighted_unit_cost_components(metric.metric_key) is not None:
+                value = self._aggregate_onec_weighted_unit_cost(metric.metric_key, temporal_slot)
             elif metric.metric_key.startswith(AGGREGATE_SUM_PREFIX):
                 value = self._aggregate_sum(metric.calc_ref, self.enabled_config, temporal_slot)
             elif metric.metric_key.startswith(AGGREGATE_AVG_PREFIX):
@@ -2512,6 +2550,17 @@ class _MetricEvaluator:
         values = [self.resolve_sku(metric_key, item.nm_id, temporal_slot) for item in config_items]
         numeric = [value for value in values if value is not None]
         return float(sum(numeric)) / len(numeric) if numeric else None
+
+    def _aggregate_onec_weighted_unit_cost(self, metric_key: str, temporal_slot: str) -> float | None:
+        components = onec_weighted_unit_cost_components(metric_key)
+        if components is None:
+            return None
+        cost_metric_key, qty_metric_key = components
+        total_cost = self._aggregate_sum(cost_metric_key, self.enabled_config, temporal_slot)
+        total_qty = self._aggregate_sum(qty_metric_key, self.enabled_config, temporal_slot)
+        if total_cost is None or total_qty in (None, 0):
+            return None
+        return float(total_cost) / float(total_qty)
 
     def _resolve_direct_sku(self, metric_key: str, nm_id: int, temporal_slot: str) -> float | None:
         if metric_key == "cost_price_rub":

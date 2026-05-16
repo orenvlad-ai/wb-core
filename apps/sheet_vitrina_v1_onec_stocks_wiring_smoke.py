@@ -19,12 +19,16 @@ from packages.application.registry_upload_http_entrypoint import RegistryUploadH
 from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock, STATUS_HEADER
 from packages.application.sheet_vitrina_v1_onec_stocks import (
     DEFAULT_ONEC_STAGE_MAPPING,
+    ONEC_STOCKS_STAGE_FIELDS,
+    ONEC_STOCKS_STAGE_KEYS,
     ONEC_STOCKS_SOURCE_GROUP_ID,
     ONEC_STOCKS_SOURCE_GROUP_LABEL_RU,
     ONEC_STOCKS_SOURCE_KEY,
+    ONEC_STOCKS_TOTAL_STAGE_METRIC_KEYS,
     ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY,
     ONEC_STOCKS_TOTAL_QTY_METRIC_KEY,
     onec_stage_metric_key,
+    onec_stage_total_metric_key,
 )
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
 from packages.contracts.onec_stocks_block import (
@@ -65,6 +69,7 @@ def main() -> None:
         metric_keys = [
             ONEC_STOCKS_TOTAL_QTY_METRIC_KEY,
             ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY,
+            *ONEC_STOCKS_TOTAL_STAGE_METRIC_KEYS,
             onec_stage_metric_key("CHINA_TO_FF", "qty"),
             onec_stage_metric_key("CHINA_TO_FF", "unit_cost_rub"),
             onec_stage_metric_key("CHINA_TO_FF", "cost_total_rub"),
@@ -96,6 +101,31 @@ def main() -> None:
         data_rows = {str(row[1]): row for row in _sheet_rows(plan, "DATA_VITRINA")}
         assert_close(data_rows["TOTAL|total_onec_total_qty"][3], 12540.0, "total 1C qty")
         assert_close(data_rows["TOTAL|total_onec_total_cost_rub"][3], 1190938.16, "total 1C cost")
+        for stage_key in ONEC_STOCKS_STAGE_KEYS:
+            for field in ONEC_STOCKS_STAGE_FIELDS:
+                row_id = f"TOTAL|{onec_stage_total_metric_key(stage_key, field)}"
+                if row_id not in data_rows:
+                    raise AssertionError(f"summary/totals must expose 1C stage metric {row_id}")
+        assert_close(
+            data_rows[f"TOTAL|{onec_stage_total_metric_key('CHINA_TO_FF', 'qty')}"][3],
+            4782.0,
+            "total CHINA_TO_FF qty",
+        )
+        assert_close(
+            data_rows[f"TOTAL|{onec_stage_total_metric_key('CHINA_TO_FF', 'cost_total_rub')}"][3],
+            372123.77,
+            "total CHINA_TO_FF cost",
+        )
+        assert_close(
+            data_rows[f"TOTAL|{onec_stage_total_metric_key('CHINA_TO_FF', 'unit_cost_rub')}"][3],
+            372123.77 / 4782.0,
+            "weighted CHINA_TO_FF unit cost",
+        )
+        assert_close(
+            data_rows[f"TOTAL|{onec_stage_total_metric_key('CHINA_TO_FF', 'qty')}"][2],
+            4782.0,
+            "yesterday total CHINA_TO_FF qty",
+        )
         assert_close(
             data_rows[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"][3],
             4782.0,
@@ -103,7 +133,7 @@ def main() -> None:
         )
         assert_close(
             data_rows[f"SKU:{NM_ID}|onec_CHINA_TO_FF_unit_cost_rub"][3],
-            77.82,
+            372123.77 / 4782.0,
             "CHINA_TO_FF unit cost",
         )
         assert_close(
@@ -117,8 +147,11 @@ def main() -> None:
         status_rows = {str(row[0]): row for row in _sheet_rows(plan, "STATUS")}
         if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[today_current]"][1] != "success":
             raise AssertionError(f"1C today status must be success, got {status_rows}")
-        if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"][1] != "missing":
-            raise AssertionError(f"1C first-run yesterday rollover must be explicit missing, got {status_rows}")
+        yesterday_status = status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"]
+        if yesterday_status[1] != "success":
+            raise AssertionError(f"1C yesterday status must be success, got {status_rows}")
+        if "onec_current_snapshot_used_for_yesterday_closed" not in str(yesterday_status[10]):
+            raise AssertionError(f"1C yesterday status must explain current snapshot semantics, got {yesterday_status}")
 
         partial_data_rows = {str(row[1]): row for row in _sheet_rows(partial_plan, "DATA_VITRINA")}
         assert_close(
@@ -238,6 +271,7 @@ def main() -> None:
         }
         for expected_metric_key in (
             ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY,
+            onec_stage_total_metric_key("CHINA_TO_FF", "unit_cost_rub"),
             onec_stage_metric_key("CHINA_TO_FF", "qty"),
         ):
             if expected_metric_key not in metric_option_values:
@@ -269,17 +303,43 @@ def main() -> None:
         for expected in (
             ONEC_STOCKS_TOTAL_QTY_METRIC_KEY,
             ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY,
+            onec_stage_total_metric_key("CHINA_TO_FF", "qty"),
+            onec_stage_total_metric_key("CHINA_TO_FF", "unit_cost_rub"),
             onec_stage_metric_key("CHINA_TO_FF", "qty"),
             onec_stage_metric_key("WB_STOCK", "cost_total_rub"),
         ):
             if expected not in captured_metric_keys:
                 raise AssertionError(f"1C group refresh must select virtual metric {expected}, got {captured}")
 
+        captured.clear()
+        yesterday_job = entrypoint.start_sheet_source_group_refresh_job(
+            source_group_id=ONEC_STOCKS_SOURCE_GROUP_ID,
+            as_of_date=AS_OF_DATE,
+        )
+        yesterday_job_snapshot = _wait_job(entrypoint, str(yesterday_job["job_id"]))
+        if yesterday_job_snapshot["status"] != "success":
+            raise AssertionError(f"1C yesterday group refresh must finish successfully, got {yesterday_job_snapshot}")
+        yesterday_result = dict(yesterday_job_snapshot.get("result") or {})
+        yesterday_cells = {
+            (str(cell.get("row_id") or ""), str(cell.get("as_of_date") or ""), str(cell.get("status") or ""))
+            for cell in (yesterday_result.get("updated_cells") or [])
+            if isinstance(cell, dict)
+        }
+        if (
+            f"TOTAL|{onec_stage_total_metric_key('CHINA_TO_FF', 'qty')}",
+            AS_OF_DATE,
+            "updated",
+        ) not in yesterday_cells:
+            raise AssertionError(f"1C yesterday group refresh must update summary stage cells, got {yesterday_cells}")
+
+        _assert_weighted_unit_cost_semantics()
+
         print("sheet_vitrina_onec_stocks_metrics: ok -> summary_and_sku_values_present")
         print("sheet_vitrina_onec_stocks_partial_acceptance: ok -> covered=1 missing=1")
         print("sheet_vitrina_onec_stocks_period_visibility: ok -> filter_and_rows_present")
         print("sheet_vitrina_onec_stocks_status_group: ok ->", ONEC_STOCKS_SOURCE_GROUP_ID)
         print("sheet_vitrina_onec_stocks_group_refresh: ok ->", len(captured_metric_keys))
+        print("sheet_vitrina_onec_stocks_weighted_unit_cost: ok -> weighted_avg")
 
 
 def _build_bundle() -> dict[str, object]:
@@ -316,6 +376,84 @@ def _build_bundle() -> dict[str, object]:
                 "section": "Запасы",
             }
         ],
+        "formulas_v2": [],
+    }
+
+
+def _assert_weighted_unit_cost_semantics() -> None:
+    with TemporaryDirectory(prefix="sheet-vitrina-onec-weighted-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
+        accepted = runtime.ingest_bundle(_build_weighted_bundle(), activated_at="2026-05-15T11:55:00Z")
+        if accepted.status != "accepted":
+            raise AssertionError(f"weighted registry bundle must be accepted, got {accepted}")
+        block = SheetVitrinaV1LivePlanBlock(
+            runtime=runtime,
+            onec_stocks_block=OnecStocksBlock(
+                _WeightedOnecStocksSource(),
+                stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
+            ),
+            now_factory=lambda: datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc),
+        )
+        plan = block.build_plan(
+            as_of_date=AS_OF_DATE,
+            execution_mode="manual_operator",
+            source_keys=[ONEC_STOCKS_SOURCE_KEY],
+            metric_keys=[
+                onec_stage_total_metric_key("CHINA_TO_FF", "qty"),
+                onec_stage_total_metric_key("CHINA_TO_FF", "cost_total_rub"),
+                onec_stage_total_metric_key("CHINA_TO_FF", "unit_cost_rub"),
+                onec_stage_metric_key("CHINA_TO_FF", "unit_cost_rub"),
+            ],
+        )
+        rows = {str(row[1]): row for row in _sheet_rows(plan, "DATA_VITRINA")}
+        assert_close(
+            rows[f"TOTAL|{onec_stage_total_metric_key('CHINA_TO_FF', 'qty')}"][3],
+            4.0,
+            "weighted total qty",
+        )
+        assert_close(
+            rows[f"TOTAL|{onec_stage_total_metric_key('CHINA_TO_FF', 'cost_total_rub')}"][3],
+            100.0,
+            "weighted total cost",
+        )
+        assert_close(
+            rows[f"TOTAL|{onec_stage_total_metric_key('CHINA_TO_FF', 'unit_cost_rub')}"][3],
+            25.0,
+            "weighted total unit cost",
+        )
+        assert_close(
+            rows[f"TOTAL|{onec_stage_total_metric_key('CHINA_TO_FF', 'unit_cost_rub')}"][2],
+            25.0,
+            "weighted yesterday total unit cost",
+        )
+        if rows[f"SKU:{NM_ID}|onec_CHINA_TO_FF_unit_cost_rub"][3] == rows[f"SKU:{MISSING_NM_ID}|onec_CHINA_TO_FF_unit_cost_rub"][3]:
+            raise AssertionError("weighted fixture must keep distinct SKU unit costs")
+        status_rows = {str(row[0]): row for row in _sheet_rows(plan, "STATUS")}
+        if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"][1] != "success":
+            raise AssertionError(f"weighted 1C yesterday status must succeed, got {status_rows}")
+
+
+def _build_weighted_bundle() -> dict[str, object]:
+    return {
+        "bundle_version": "sheet_vitrina_onec_weighted_unit_cost_smoke",
+        "uploaded_at": "2026-05-15T11:55:00Z",
+        "config_v2": [
+            {
+                "nm_id": NM_ID,
+                "enabled": True,
+                "display_name": "1C weighted SKU A",
+                "group": "1C weighted",
+                "display_order": 1,
+            },
+            {
+                "nm_id": MISSING_NM_ID,
+                "enabled": True,
+                "display_name": "1C weighted SKU B",
+                "group": "1C weighted",
+                "display_order": 2,
+            },
+        ],
+        "metrics_v2": [],
         "formulas_v2": [],
     }
 
@@ -395,6 +533,48 @@ class _PartialOnecStocksSource:
             "error_kinds": {"http": 1},
         }
         return payload
+
+
+class _WeightedOnecStocksSource:
+    def fetch(self, request: OnecStocksRequest) -> dict[str, object]:
+        return {
+            "meta": {
+                "version": "1.0",
+                "marketplace": "WB",
+                "account_id": request.account_id,
+                "date": TODAY_DATE,
+                "generated_at": "2026-05-15T11:30:37",
+                "currency": "RUB",
+            },
+            "items": [
+                {
+                    "nmId": str(NM_ID),
+                    "product_1c_id": "weighted-a",
+                    "vendor_code": "weighted-a",
+                    "name": "weighted-a",
+                    "stages": {
+                        "В_пути": {
+                            "qty": 1.0,
+                            "unit_cost_rub": 10.0,
+                            "cost_total_rub": 10.0,
+                        },
+                    },
+                },
+                {
+                    "nmId": str(MISSING_NM_ID),
+                    "product_1c_id": "weighted-b",
+                    "vendor_code": "weighted-b",
+                    "name": "weighted-b",
+                    "stages": {
+                        "В_пути": {
+                            "qty": 3.0,
+                            "unit_cost_rub": 30.0,
+                            "cost_total_rub": 90.0,
+                        },
+                    },
+                },
+            ],
+        }
 
 
 def _sheet_rows(plan: SheetVitrinaV1Envelope, sheet_name: str) -> list[list[object]]:

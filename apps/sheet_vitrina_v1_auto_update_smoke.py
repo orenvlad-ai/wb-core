@@ -66,6 +66,42 @@ class CountingBlock:
         return SimpleNamespace(result=payload)
 
 
+class OnecCountingBlock:
+    source_key = "onec_stocks"
+
+    def __init__(self) -> None:
+        self.request_dates: list[str] = []
+
+    def execute(self, request: object) -> SimpleNamespace:
+        del request
+        self.request_dates.append(TODAY_CURRENT_DATE)
+        payload = SimpleNamespace(
+            kind="success",
+            items=[
+                SimpleNamespace(
+                    nm_id=next(
+                        int(item["nm_id"])
+                        for item in _load_json(INPUT_BUNDLE_FIXTURE)["config_v2"]
+                        if item["enabled"]
+                    ),
+                    stage_name="CHINA_TO_FF",
+                    canonical_stage_code="CHINA_TO_FF",
+                    qty=2.0,
+                    unit_cost_rub=10.0,
+                    cost_total_rub=20.0,
+                )
+            ],
+            snapshot_date=TODAY_CURRENT_DATE,
+            date=TODAY_CURRENT_DATE,
+            date_from=TODAY_CURRENT_DATE,
+            date_to=TODAY_CURRENT_DATE,
+            detail="onec_stocks synthetic success for auto update smoke",
+            item_count=1,
+            stage_count=1,
+        )
+        return SimpleNamespace(result=payload)
+
+
 class FakeSheetLoadRunner:
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -218,6 +254,17 @@ def main() -> None:
             if "legacy Google Sheets load: archived / not executed" in refresh_reason:
                 raise AssertionError(f"archived legacy load must not pollute auto-refresh reason: {refresh_reason}")
             _assert_counting_calls(counters)
+            plan = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=AS_OF_DATE)
+            status_rows = {
+                str(row[0]): row
+                for sheet in plan.sheets
+                if sheet.sheet_name == "STATUS"
+                for row in sheet.rows
+            }
+            if status_rows["onec_stocks[yesterday_closed]"][1] != "success":
+                raise AssertionError(f"auto_refresh must update 1C yesterday_closed, got {status_rows}")
+            if status_rows["onec_stocks[today_current]"][1] != "success":
+                raise AssertionError(f"auto_refresh must update 1C today_current, got {status_rows}")
 
             status_code, status_payload = _get_json(status_url)
             if status_code != 200:
@@ -281,6 +328,7 @@ def _assert_counting_calls(counters: dict[str, CountingBlock]) -> None:
         "sf_period": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "spp": [TODAY_CURRENT_DATE],
         "ads_bids": [TODAY_CURRENT_DATE],
+        "onec_stocks": [TODAY_CURRENT_DATE],
         "stocks": [AS_OF_DATE],
         "ads_compact": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "fin_report_daily": [AS_OF_DATE, TODAY_CURRENT_DATE],
@@ -302,6 +350,7 @@ def _build_counting_blocks() -> dict[str, CountingBlock]:
         "sf_period_block": CountingBlock("sf_period"),
         "spp_block": CountingBlock("spp"),
         "ads_bids_block": CountingBlock("ads_bids"),
+        "onec_stocks_block": OnecCountingBlock(),
         "stocks_block": CountingBlock("stocks"),
         "ads_compact_block": CountingBlock("ads_compact"),
         "fin_report_daily_block": CountingBlock("fin_report_daily"),
