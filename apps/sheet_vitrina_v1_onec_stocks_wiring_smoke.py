@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import sys
@@ -194,7 +195,7 @@ def main() -> None:
         runtime.save_sheet_vitrina_ready_snapshot(
             current_state=current_state,
             refreshed_at=REFRESHED_AT,
-            plan=plan,
+            plan=_with_unrelated_source_error(plan),
         )
         web_block = SheetVitrinaV1WebVitrinaBlock(
             runtime=runtime,
@@ -313,6 +314,10 @@ def main() -> None:
         job_result = dict(job_snapshot.get("result") or {})
         if int(job_result.get("updated_cell_count") or 0) <= 0:
             raise AssertionError(f"partial 1C group refresh must update cells, got {job_result}")
+        if job_result.get("snapshot_semantic_status") != "error":
+            raise AssertionError(f"group refresh must preserve overall snapshot semantic status, got {job_result}")
+        if job_result.get("semantic_status") == "error" or job_result.get("status_label") == "Ошибка":
+            raise AssertionError(f"1C group refresh must not surface unrelated source errors as group blockers, got {job_result}")
         captured_metric_keys = set(captured.get("metric_keys") or [])
         for expected in (
             ONEC_STOCKS_TOTAL_QTY_METRIC_KEY,
@@ -801,6 +806,39 @@ def _build_legacy_period_snapshot() -> SheetVitrinaV1Envelope:
             ),
         ],
     )
+
+
+def _with_unrelated_source_error(plan: SheetVitrinaV1Envelope) -> SheetVitrinaV1Envelope:
+    sheets: list[SheetVitrinaWriteTarget] = []
+    for sheet in plan.sheets:
+        if sheet.sheet_name != "STATUS":
+            sheets.append(sheet)
+            continue
+        rows = [list(row) for row in sheet.rows]
+        rows.append(
+            [
+                "prices_snapshot[today_current]",
+                "error",
+                "blocked",
+                TODAY_DATE,
+                "",
+                "",
+                "",
+                0,
+                0,
+                "",
+                "synthetic unrelated source error for group status smoke",
+            ]
+        )
+        sheets.append(
+            replace(
+                sheet,
+                rows=rows,
+                row_count=len(rows),
+                column_count=len(sheet.header),
+            )
+        )
+    return replace(plan, sheets=sheets)
 
 
 class _PartialOnecStocksSource:
