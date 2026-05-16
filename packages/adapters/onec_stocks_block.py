@@ -202,6 +202,7 @@ class HttpBackedOnecStocksSource:
             url,
             headers={
                 "Accept": "application/json",
+                "Content-Type": "application/json",
                 "Authorization": _basic_auth_header(
                     runtime.basic_user,
                     runtime.basic_password,
