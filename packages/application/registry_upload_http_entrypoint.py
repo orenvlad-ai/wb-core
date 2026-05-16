@@ -5965,6 +5965,10 @@ def _humanize_note(note: str) -> str:
             "закрытый день materialize-ится через current-rollover",
         ),
         (
+            "current-snapshot-only yesterday_closed requires a prior accepted current snapshot for requested date; endpoint has no historical date parameter, so current values are not backfilled into a closed-day column",
+            "нет ранее принятого current snapshot для этой даты; текущие значения не подставлены в закрытый день",
+        ),
+        (
             "resolution_rule=accepted_closed_preserved_after_invalid_attempt",
             "использована последняя подтверждённая закрытая версия",
         ),

@@ -261,8 +261,10 @@ def main() -> None:
                 if sheet.sheet_name == "STATUS"
                 for row in sheet.rows
             }
-            if status_rows["onec_stocks[yesterday_closed]"][1] != "success":
-                raise AssertionError(f"auto_refresh must update 1C yesterday_closed, got {status_rows}")
+            if status_rows["onec_stocks[yesterday_closed]"][1] != "missing":
+                raise AssertionError(f"auto_refresh must not backfill current 1C into yesterday_closed, got {status_rows}")
+            if "not backfilled into a closed-day column" not in str(status_rows["onec_stocks[yesterday_closed]"][10]):
+                raise AssertionError(f"auto_refresh must explain missing prior 1C accepted current, got {status_rows}")
             if status_rows["onec_stocks[today_current]"][1] != "success":
                 raise AssertionError(f"auto_refresh must update 1C today_current, got {status_rows}")
 
