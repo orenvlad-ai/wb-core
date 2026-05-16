@@ -2115,6 +2115,13 @@ class RegistryUploadHttpEntrypoint:
                 finished_at = self.activated_at_factory()
                 duration_seconds = _duration_seconds(started_at, finished_at)
                 payload = asdict(refresh_result)
+                snapshot_semantic = {
+                    "status": str(payload.get("semantic_status") or ""),
+                    "label": str(payload.get("semantic_label") or ""),
+                    "tone": str(payload.get("semantic_tone") or ""),
+                    "reason": str(payload.get("semantic_reason") or ""),
+                }
+                group_semantic = _source_group_refresh_semantic_payload(merge_summary)
                 payload.update(
                     {
                         "operation": "refresh_group",
@@ -2132,8 +2139,16 @@ class RegistryUploadHttpEntrypoint:
                         "updated_cell_count": merge_summary["updated_cell_count"],
                         "latest_confirmed_cell_count": merge_summary["latest_confirmed_cell_count"],
                         "technical_status": payload["status"],
-                        "status_label": payload["semantic_label"],
-                        "status_reason": payload["semantic_reason"],
+                        "semantic_status": group_semantic["semantic_status"],
+                        "semantic_label": group_semantic["semantic_label"],
+                        "semantic_tone": group_semantic["semantic_tone"],
+                        "semantic_reason": group_semantic["semantic_reason"],
+                        "status_label": group_semantic["semantic_label"],
+                        "status_reason": group_semantic["semantic_reason"],
+                        "snapshot_semantic_status": snapshot_semantic["status"],
+                        "snapshot_semantic_label": snapshot_semantic["label"],
+                        "snapshot_semantic_tone": snapshot_semantic["tone"],
+                        "snapshot_semantic_reason": snapshot_semantic["reason"],
                         "server_context": self.build_sheet_server_context(),
                         "manual_context": self.build_sheet_manual_context(),
                         "load_context": self.build_sheet_load_context(),
@@ -3975,6 +3990,7 @@ def _merge_source_group_ready_snapshot(
         "rows_updated": rows_updated,
         "rows_preserved": rows_preserved,
         "status_rows_updated": len(selected_status_rows),
+        "source_status_counts": _source_status_kind_counts(selected_status_rows),
         "source_group_id": source_group_id,
         "source_keys": sorted(source_key_set),
         "metric_keys": sorted(metric_key_set),
@@ -3985,6 +4001,67 @@ def _merge_source_group_ready_snapshot(
         "updated_cell_count": _count_updated_cells_by_status(updated_cells, "updated"),
         "latest_confirmed_cell_count": _count_updated_cells_by_status(updated_cells, "latest_confirmed"),
     }
+
+
+def _source_group_refresh_semantic_payload(merge_summary: Mapping[str, Any]) -> dict[str, str]:
+    updated_cells = _int_from_mapping(merge_summary, "updated_cell_count")
+    latest_confirmed_cells = _int_from_mapping(merge_summary, "latest_confirmed_cell_count")
+    source_status_counts = merge_summary.get("source_status_counts")
+    counts = dict(source_status_counts) if isinstance(source_status_counts, Mapping) else {}
+    blocking_count = sum(
+        _int_from_any(counts.get(status))
+        for status in ("error", "missing", "not_found", "blocked", "not_available")
+    )
+    warning_count = sum(
+        _int_from_any(counts.get(status))
+        for status in ("warning", "incomplete")
+    )
+    confirmed_cells = updated_cells + latest_confirmed_cells
+    if blocking_count:
+        semantic_status = "error"
+        semantic_reason = "Группа не подтвердила данные: источник вернул blocker/error."
+    elif confirmed_cells <= 0:
+        semantic_status = "warning"
+        semantic_reason = "Группа завершилась без подтверждённых ячеек для выбранной даты."
+    elif warning_count:
+        semantic_status = "warning"
+        semantic_reason = (
+            f"Группа обновлена частично: обновлено {updated_cells}, "
+            f"подтверждено без изменений {latest_confirmed_cells}."
+        )
+    else:
+        semantic_status = "success"
+        semantic_reason = (
+            f"Группа обновлена: обновлено {updated_cells}, "
+            f"подтверждено без изменений {latest_confirmed_cells}."
+        )
+    return {
+        "semantic_status": semantic_status,
+        "semantic_label": _semantic_status_label(semantic_status),
+        "semantic_tone": semantic_status,
+        "semantic_reason": semantic_reason,
+    }
+
+
+def _source_status_kind_counts(rows: Iterable[list[Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        kind = str(row[1] if len(row) > 1 else "").strip().lower()
+        if not kind:
+            continue
+        counts[kind] = counts.get(kind, 0) + 1
+    return counts
+
+
+def _int_from_mapping(payload: Mapping[str, Any], key: str) -> int:
+    return _int_from_any(payload.get(key))
+
+
+def _int_from_any(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _with_full_refresh_metadata(
