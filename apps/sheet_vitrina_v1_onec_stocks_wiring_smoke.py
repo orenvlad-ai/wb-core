@@ -16,7 +16,7 @@ from packages.adapters.onec_stocks_block import ArtifactBackedOnecStocksSource
 from packages.application.onec_stocks_block import OnecStocksBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
-from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock
+from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock, STATUS_HEADER
 from packages.application.sheet_vitrina_v1_onec_stocks import (
     DEFAULT_ONEC_STAGE_MAPPING,
     ONEC_STOCKS_SOURCE_GROUP_ID,
@@ -31,13 +31,18 @@ from packages.contracts.onec_stocks_block import (
     ONEC_STOCKS_PARTIAL_FETCH_META_KEY,
     OnecStocksRequest,
 )
-from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope
+from packages.contracts.sheet_vitrina_v1 import (
+    SheetVitrinaV1Envelope,
+    SheetVitrinaV1TemporalSlot,
+    SheetVitrinaWriteTarget,
+)
 
 ARTIFACTS = ROOT / "artifacts" / "onec_stocks_block"
 NM_ID = 428855306
 MISSING_NM_ID = 210183919
 AS_OF_DATE = "2026-05-14"
 TODAY_DATE = "2026-05-15"
+PERIOD_OLD_DATE = "2026-05-13"
 REFRESHED_AT = "2026-05-15T12:05:00Z"
 
 
@@ -136,13 +141,19 @@ def main() -> None:
         current_state = runtime.load_current_state()
         runtime.save_sheet_vitrina_ready_snapshot(
             current_state=current_state,
+            refreshed_at="2026-05-13T12:05:00Z",
+            plan=_build_legacy_period_snapshot(),
+        )
+        runtime.save_sheet_vitrina_ready_snapshot(
+            current_state=current_state,
             refreshed_at=REFRESHED_AT,
             plan=plan,
         )
-        web_contract = SheetVitrinaV1WebVitrinaBlock(
+        web_block = SheetVitrinaV1WebVitrinaBlock(
             runtime=runtime,
             now_factory=lambda: datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc),
-        ).build(
+        )
+        web_contract = web_block.build(
             page_route="/sheet-vitrina-v1/vitrina",
             read_route="/v1/sheet-vitrina-v1/web-vitrina",
             as_of_date=AS_OF_DATE,
@@ -150,6 +161,34 @@ def main() -> None:
         web_rows = {row.row_id: row for row in web_contract.rows}
         if web_rows["TOTAL|total_onec_total_cost_rub"].section != ONEC_STOCKS_SOURCE_GROUP_LABEL_RU:
             raise AssertionError(f"web contract must expose 1C section labels, got {web_rows}")
+        assert_nonblank(
+            web_rows["TOTAL|total_onec_total_cost_rub"].values_by_date.get(TODAY_DATE),
+            "web explicit as_of_date total 1C cost",
+        )
+        assert_nonblank(
+            web_rows[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"].values_by_date.get(TODAY_DATE),
+            "web explicit as_of_date SKU 1C qty",
+        )
+
+        period_contract = web_block.build(
+            page_route="/sheet-vitrina-v1/vitrina",
+            read_route="/v1/sheet-vitrina-v1/web-vitrina",
+            date_from=PERIOD_OLD_DATE,
+            date_to=TODAY_DATE,
+        )
+        period_rows = {row.row_id: row for row in period_contract.rows}
+        if "TOTAL|total_onec_total_cost_rub" not in period_rows:
+            raise AssertionError(f"period web contract must keep 1C total rows visible, got {period_rows}")
+        if f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty" not in period_rows:
+            raise AssertionError(f"period web contract must keep 1C SKU rows visible, got {period_rows}")
+        assert_nonblank(
+            period_rows["TOTAL|total_onec_total_cost_rub"].values_by_date.get(TODAY_DATE),
+            "period total 1C cost",
+        )
+        assert_nonblank(
+            period_rows[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"].values_by_date.get(TODAY_DATE),
+            "period SKU 1C qty",
+        )
 
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=Path(tmp),
@@ -177,6 +216,34 @@ def main() -> None:
             raise AssertionError(f"1C loading row must carry source group id, got {loading_table}")
         if "1С: товарный капитал всего, руб" not in onec_rows[0]["metric_labels"]:
             raise AssertionError(f"1C loading row must expose metric labels, got {onec_rows[0]}")
+        period_page_payload = entrypoint.handle_sheet_web_vitrina_page_composition_request(
+            page_route="/sheet-vitrina-v1/vitrina",
+            read_route="/v1/sheet-vitrina-v1/web-vitrina",
+            operator_route="/sheet-vitrina-v1/operator",
+            date_from=PERIOD_OLD_DATE,
+            date_to=TODAY_DATE,
+            include_table_data=True,
+        )
+        metric_control = next(
+            (
+                control
+                for control in (period_page_payload.get("filter_surface") or {}).get("controls", [])
+                if control.get("control_id") == "metric"
+            ),
+            None,
+        )
+        metric_option_values = {
+            str(option.get("value") or "")
+            for option in ((metric_control or {}).get("options") or [])
+        }
+        for expected_metric_key in (
+            ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY,
+            onec_stage_metric_key("CHINA_TO_FF", "qty"),
+        ):
+            if expected_metric_key not in metric_option_values:
+                raise AssertionError(
+                    f"period filter/options must expose 1C metric {expected_metric_key}, got {metric_option_values}"
+                )
 
         captured: dict[str, object] = {}
 
@@ -210,6 +277,7 @@ def main() -> None:
 
         print("sheet_vitrina_onec_stocks_metrics: ok -> summary_and_sku_values_present")
         print("sheet_vitrina_onec_stocks_partial_acceptance: ok -> covered=1 missing=1")
+        print("sheet_vitrina_onec_stocks_period_visibility: ok -> filter_and_rows_present")
         print("sheet_vitrina_onec_stocks_status_group: ok ->", ONEC_STOCKS_SOURCE_GROUP_ID)
         print("sheet_vitrina_onec_stocks_group_refresh: ok ->", len(captured_metric_keys))
 
@@ -252,6 +320,65 @@ def _build_bundle() -> dict[str, object]:
     }
 
 
+def _build_legacy_period_snapshot() -> SheetVitrinaV1Envelope:
+    return SheetVitrinaV1Envelope(
+        plan_version="sheet_vitrina_onec_stocks_wiring_smoke__legacy_period",
+        snapshot_id=f"{PERIOD_OLD_DATE}__legacy_without_onec_rows__ready",
+        as_of_date=PERIOD_OLD_DATE,
+        date_columns=[PERIOD_OLD_DATE],
+        temporal_slots=[
+            SheetVitrinaV1TemporalSlot(
+                slot_key="snapshot",
+                slot_label=PERIOD_OLD_DATE,
+                column_date=PERIOD_OLD_DATE,
+            )
+        ],
+        source_temporal_policies={},
+        sheets=[
+            SheetVitrinaWriteTarget(
+                sheet_name="DATA_VITRINA",
+                write_start_cell="A1",
+                write_rect="A1:C2",
+                clear_range="A:Z",
+                write_mode="overwrite",
+                partial_update_allowed=False,
+                header=["label", "key", PERIOD_OLD_DATE],
+                rows=[
+                    ["Legacy smoke row", f"SKU:{NM_ID}|legacy_smoke_metric", 1],
+                ],
+                row_count=1,
+                column_count=3,
+            ),
+            SheetVitrinaWriteTarget(
+                sheet_name="STATUS",
+                write_start_cell="A1",
+                write_rect="A1:K2",
+                clear_range="A:Z",
+                write_mode="overwrite",
+                partial_update_allowed=False,
+                header=STATUS_HEADER,
+                rows=[
+                    [
+                        "legacy_smoke_source[snapshot]",
+                        "success",
+                        PERIOD_OLD_DATE,
+                        PERIOD_OLD_DATE,
+                        PERIOD_OLD_DATE,
+                        "",
+                        "",
+                        1,
+                        1,
+                        "",
+                        "",
+                    ]
+                ],
+                row_count=1,
+                column_count=len(STATUS_HEADER),
+            ),
+        ],
+    )
+
+
 class _PartialOnecStocksSource:
     def __init__(self, artifacts_root: Path) -> None:
         self._source = ArtifactBackedOnecStocksSource(artifacts_root)
@@ -290,6 +417,11 @@ def _wait_job(entrypoint: RegistryUploadHttpEntrypoint, job_id: str) -> dict[str
 def assert_close(actual: object, expected: float, label: str) -> None:
     if not isinstance(actual, (int, float)) or abs(float(actual) - expected) > 0.01:
         raise AssertionError(f"{label} mismatch: expected {expected}, got {actual!r}")
+
+
+def assert_nonblank(actual: object, label: str) -> None:
+    if actual is None or str(actual).strip() == "":
+        raise AssertionError(f"{label} must be nonblank, got {actual!r}")
 
 
 if __name__ == "__main__":

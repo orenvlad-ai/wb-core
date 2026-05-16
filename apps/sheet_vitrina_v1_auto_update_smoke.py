@@ -206,6 +206,9 @@ def main() -> None:
                 raise AssertionError("refresh-only daily path must not run the legacy Google Sheets bridge")
             if refresh_payload.get("manual_context") != _expected_manual_context():
                 raise AssertionError("refresh-only daily path must not pollute manual operator timestamps")
+            refresh_reason = str(refresh_payload.get("semantic_reason") or "")
+            if "legacy Google Sheets load: archived / not executed" in refresh_reason:
+                raise AssertionError(f"archived legacy load must not pollute auto-refresh reason: {refresh_reason}")
             _assert_counting_calls(counters)
 
             status_code, status_payload = _get_json(status_url)

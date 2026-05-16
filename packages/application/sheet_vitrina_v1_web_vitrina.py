@@ -317,10 +317,13 @@ def _build_period_snapshot(
     materialized_bindings = [binding for binding in period_date_bindings if not binding.missing]
     if not materialized_bindings:
         raise ValueError("web_vitrina period window has no materialized row template")
-    template_sheet = _require_data_sheet(
-        snapshots_by_as_of_date[materialized_bindings[0].snapshot_as_of_date]
+    template_sheets = _period_template_sheets(
+        snapshots_by_as_of_date=snapshots_by_as_of_date,
+        materialized_bindings=materialized_bindings,
+        default_visible_snapshot=default_visible_snapshot,
     )
-    template_rows = list(template_sheet.rows)
+    template_sheet = template_sheets[0]
+    template_rows = _merge_period_template_rows(template_sheets)
     value_maps = {
         binding.requested_date: _extract_snapshot_values_by_row_id(
             _require_data_sheet(snapshots_by_as_of_date[binding.snapshot_as_of_date]),
@@ -341,11 +344,7 @@ def _build_period_snapshot(
             if values_by_row_id is None:
                 combined_row.append(None)
                 continue
-            if row_id not in values_by_row_id:
-                raise ValueError(
-                    f"period window row universe mismatch for {row_id!r} on {snapshot_date}"
-                )
-            combined_row.append(values_by_row_id[row_id])
+            combined_row.append(values_by_row_id.get(row_id))
         combined_rows.append(combined_row)
 
     return SheetVitrinaV1Envelope(
@@ -373,6 +372,49 @@ def _build_period_snapshot(
             )
         ],
     ), period_date_bindings
+
+
+def _period_template_sheets(
+    *,
+    snapshots_by_as_of_date: Mapping[str, SheetVitrinaV1Envelope],
+    materialized_bindings: list[_PeriodDateBinding],
+    default_visible_snapshot: SheetVitrinaV1Envelope | None,
+) -> list[SheetVitrinaWriteTarget]:
+    preferred_snapshot_keys: list[str] = []
+    if default_visible_snapshot is not None:
+        preferred_snapshot_keys.append(default_visible_snapshot.as_of_date)
+    preferred_snapshot_keys.extend(
+        binding.snapshot_as_of_date
+        for binding in reversed(materialized_bindings)
+        if binding.snapshot_as_of_date
+    )
+    preferred_snapshot_keys.extend(
+        binding.snapshot_as_of_date
+        for binding in materialized_bindings
+        if binding.snapshot_as_of_date
+    )
+
+    seen: set[str] = set()
+    sheets: list[SheetVitrinaWriteTarget] = []
+    for snapshot_key in preferred_snapshot_keys:
+        if not snapshot_key or snapshot_key in seen or snapshot_key not in snapshots_by_as_of_date:
+            continue
+        seen.add(snapshot_key)
+        sheets.append(_require_data_sheet(snapshots_by_as_of_date[snapshot_key]))
+    if not sheets:
+        raise ValueError("web_vitrina period window has no materialized row template")
+    return sheets
+
+
+def _merge_period_template_rows(template_sheets: list[SheetVitrinaWriteTarget]) -> list[list[Any]]:
+    rows_by_id: dict[str, list[Any]] = {}
+    for sheet in template_sheets:
+        for row in sheet.rows:
+            row_id = str(row[1] or "").strip() if len(row) > 1 else ""
+            if not row_id or row_id in rows_by_id:
+                continue
+            rows_by_id[row_id] = list(row[:2])
+    return list(rows_by_id.values())
 
 
 def _resolve_period_date_bindings(

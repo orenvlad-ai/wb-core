@@ -3309,7 +3309,6 @@ def _build_auto_update_result_payload(
             for part in [
                 f"refresh: {str((refresh_payload or {}).get('semantic_reason') or '').strip()}",
                 f"load: {str((load_payload or {}).get('semantic_reason') or '').strip()}",
-                "legacy Google Sheets load: archived / not executed",
             ]
             if not part.endswith(": ") and (load_payload is not None or not part.startswith("load:"))
         )
