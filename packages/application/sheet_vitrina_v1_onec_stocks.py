@@ -46,9 +46,17 @@ ONEC_STOCKS_SKU_TOTAL_QTY_METRIC_KEY = "onec_total_qty"
 ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY = "onec_total_cost_rub"
 ONEC_STOCKS_TOTAL_QTY_METRIC_KEY = "total_onec_total_qty"
 ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY = "total_onec_total_cost_rub"
-ONEC_STOCKS_TOTAL_METRIC_KEYS: tuple[str, str] = (
+ONEC_STOCKS_STAGE_TOTAL_UNIT_COST_FIELD = "unit_cost_rub"
+ONEC_STOCKS_TOTAL_STAGE_METRIC_KEYS: tuple[str, ...] = tuple(
+    f"{'avg' if field == ONEC_STOCKS_STAGE_TOTAL_UNIT_COST_FIELD else 'total'}"
+    f"_onec_{stage_key}_{field}"
+    for stage_key in ONEC_STOCKS_STAGE_KEYS
+    for field in ONEC_STOCKS_STAGE_FIELDS
+)
+ONEC_STOCKS_TOTAL_METRIC_KEYS: tuple[str, ...] = (
     ONEC_STOCKS_TOTAL_QTY_METRIC_KEY,
     ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY,
+    *ONEC_STOCKS_TOTAL_STAGE_METRIC_KEYS,
 )
 ONEC_STOCKS_SKU_STAGE_METRIC_KEYS: tuple[str, ...] = tuple(
     f"onec_{stage_key}_{field}"
@@ -134,6 +142,30 @@ def build_onec_stock_metric_items() -> list[MetricV2Item]:
     for stage_key in ONEC_STOCKS_STAGE_KEYS:
         stage_label = ONEC_STOCKS_STAGE_LABELS_RU[stage_key]
         for field in ONEC_STOCKS_STAGE_FIELDS:
+            total_metric_key = onec_stage_total_metric_key(stage_key, field)
+            label = (
+                f"1С {stage_label}: средневзвешенная себестоимость за ед., руб"
+                if field == ONEC_STOCKS_STAGE_TOTAL_UNIT_COST_FIELD
+                else f"1С {stage_label}: всего {ONEC_STOCKS_FIELD_LABELS_RU[field]}"
+            )
+            items.append(
+                MetricV2Item(
+                    metric_key=total_metric_key,
+                    enabled=True,
+                    scope="TOTAL",
+                    label_ru=label,
+                    calc_type="metric",
+                    calc_ref=onec_stage_metric_key(stage_key, field),
+                    show_in_data=True,
+                    format=ONEC_STOCKS_FIELD_FORMATS[field],
+                    display_order=order,
+                    section=ONEC_STOCKS_SECTION_RU,
+                )
+            )
+            order += 10
+    for stage_key in ONEC_STOCKS_STAGE_KEYS:
+        stage_label = ONEC_STOCKS_STAGE_LABELS_RU[stage_key]
+        for field in ONEC_STOCKS_STAGE_FIELDS:
             items.append(
                 MetricV2Item(
                     metric_key=onec_stage_metric_key(stage_key, field),
@@ -182,6 +214,22 @@ def build_onec_stock_metric_items() -> list[MetricV2Item]:
 
 def onec_stage_metric_key(stage_key: str, field: str) -> str:
     return f"onec_{stage_key}_{field}"
+
+
+def onec_stage_total_metric_key(stage_key: str, field: str) -> str:
+    prefix = "avg" if field == ONEC_STOCKS_STAGE_TOTAL_UNIT_COST_FIELD else "total"
+    return f"{prefix}_onec_{stage_key}_{field}"
+
+
+def onec_weighted_unit_cost_components(metric_key: str) -> tuple[str, str] | None:
+    normalized = str(metric_key or "").strip()
+    for stage_key in ONEC_STOCKS_STAGE_KEYS:
+        if normalized == onec_stage_total_metric_key(stage_key, ONEC_STOCKS_STAGE_TOTAL_UNIT_COST_FIELD):
+            return (
+                onec_stage_metric_key(stage_key, "cost_total_rub"),
+                onec_stage_metric_key(stage_key, "qty"),
+            )
+    return None
 
 
 def is_onec_stock_metric_key(metric_key: str) -> bool:

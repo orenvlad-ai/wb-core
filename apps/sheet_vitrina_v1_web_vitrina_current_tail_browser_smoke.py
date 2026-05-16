@@ -37,6 +37,8 @@ BUNDLE_FIXTURE = (
     ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
 )
 NOW = datetime(2026, 4, 21, 15, 0, tzinfo=timezone.utc)
+EXPECTED_WEEK_DATE_FROM = "2026-04-15"
+EXPECTED_WEEK_DATE_TO = "2026-04-21"
 STATUS_HEADER = [
     "source_key",
     "kind",
@@ -157,7 +159,8 @@ def run_browser_check(base_url: str) -> dict[str, object]:
             page.locator("[data-history-toggle]").click()
             page.locator("[data-history-preset='week']").click()
             page.wait_for_function(
-                "() => document.querySelector('[data-history-date-from]').value === '2026-04-18' && document.querySelector('[data-history-date-to]').value === '2026-04-21'",
+                f"""() => document.querySelector('[data-history-date-from]').value === '{EXPECTED_WEEK_DATE_FROM}' &&
+                  document.querySelector('[data-history-date-to]').value === '{EXPECTED_WEEK_DATE_TO}'""",
                 timeout=5000,
             )
             preset_range = {
@@ -166,7 +169,8 @@ def run_browser_check(base_url: str) -> dict[str, object]:
             }
             page.locator("[data-history-save]").click()
             page.wait_for_function(
-                "() => new URL(window.location.href).searchParams.get('date_from') === '2026-04-18' && new URL(window.location.href).searchParams.get('date_to') === '2026-04-21'",
+                f"""() => new URL(window.location.href).searchParams.get('date_from') === '{EXPECTED_WEEK_DATE_FROM}' &&
+                  new URL(window.location.href).searchParams.get('date_to') === '{EXPECTED_WEEK_DATE_TO}'""",
                 timeout=5000,
             )
             page.wait_for_function(
