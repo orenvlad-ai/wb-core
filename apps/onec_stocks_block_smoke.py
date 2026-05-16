@@ -6,8 +6,10 @@ from copy import deepcopy
 import json
 import os
 from pathlib import Path
+import socketserver
 import sys
-from urllib import error, parse
+import threading
+from urllib import parse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +19,7 @@ if str(ROOT) not in sys.path:
 from packages.adapters.onec_stocks_block import (
     ArtifactBackedOnecStocksSource,
     HttpBackedOnecStocksSource,
+    OnecStocksHttpError,
 )
 from packages.application.onec_stocks_block import (
     OnecStocksBlock,
@@ -262,6 +265,47 @@ def _check_http_request_headers(payload: dict) -> None:
     print("http-request-headers: ok")
 
 
+def _check_low_level_http_wire_request(payload: dict) -> None:
+    with _RawOnecHttpServer(payload) as server:
+        base_url = f"http://127.0.0.1:{server.port}/base/hs/soykasoft/stocks_wb?tenant=demo"
+        with _temporary_onec_live_env({"ONEC_STOCKS_BASE_URL": base_url}):
+            block = OnecStocksBlock(HttpBackedOnecStocksSource())
+            result = block.execute(
+                OnecStocksRequest(
+                    snapshot_type="onec_stocks",
+                    account_id=str(payload["meta"]["account_id"]),
+                    nm_ids=[428855306],
+                )
+            ).result
+
+    if result.kind != "success":
+        raise AssertionError(f"wire capture request must succeed, got {result.kind}")
+    if len(server.raw_requests) != 1:
+        raise AssertionError(f"expected one raw HTTP request, got {len(server.raw_requests)}")
+    raw_request = server.raw_requests[0].decode("iso-8859-1")
+    request_line, raw_headers = raw_request.split("\r\n", 1)
+    if not request_line.startswith("GET /base/hs/soykasoft/stocks_wb?"):
+        raise AssertionError(f"unexpected 1C request target: {request_line}")
+    if request_line.count("/hs/soykasoft/stocks_wb") != 1:
+        raise AssertionError(f"1C request target must not duplicate endpoint path: {request_line}")
+    if "tenant=demo" not in request_line or "account_id=000000001" not in request_line or "nmId=428855306" not in request_line:
+        raise AssertionError(f"1C request target must preserve base and adapter query params: {request_line}")
+
+    header_names = [
+        line.split(":", 1)[0]
+        for line in raw_headers.split("\r\n")
+        if line and ":" in line
+    ]
+    for expected in ["host", "accept", "content-type", "authorization", "token"]:
+        if expected not in header_names:
+            raise AssertionError(f"wire request missing lower-case header {expected!r}: {header_names}")
+    forbidden_cased_headers = {"Host", "Accept", "Content-Type", "Authorization", "Token"}
+    leaked_cased_headers = sorted(forbidden_cased_headers.intersection(header_names))
+    if leaked_cased_headers:
+        raise AssertionError(f"wire request leaked non-lower-case headers: {leaked_cased_headers}")
+    print("low-level-http-wire-request: ok")
+
+
 class _StaticOnecStocksSource:
     def __init__(self, payload: dict) -> None:
         self._payload = payload
@@ -275,15 +319,15 @@ class _PerSkuUnauthorizedThenAccountSnapshot:
         self._payload = payload
         self.urls: list[str] = []
 
-    def __call__(self, http_request, timeout: float):
+    def __call__(self, url: str, *, headers: dict[str, str], timeout: float) -> bytes:
+        del headers
         del timeout
-        url = http_request.get_full_url()
         self.urls.append(url)
         parsed_url = parse.urlparse(url)
         query = parse.parse_qs(parsed_url.query)
         if "nmId" in query:
-            raise error.HTTPError(url, 401, "unauthorized", hdrs=None, fp=None)
-        return _FakeHttpResponse(self._payload)
+            raise OnecStocksHttpError(401)
+        return json.dumps(self._payload).encode("utf-8")
 
 
 class _AccountSnapshotOnly:
@@ -291,15 +335,15 @@ class _AccountSnapshotOnly:
         self._payload = payload
         self.urls: list[str] = []
 
-    def __call__(self, http_request, timeout: float):
+    def __call__(self, url: str, *, headers: dict[str, str], timeout: float) -> bytes:
+        del headers
         del timeout
-        url = http_request.get_full_url()
         self.urls.append(url)
         parsed_url = parse.urlparse(url)
         query = parse.parse_qs(parsed_url.query)
         if "nmId" in query:
             raise AssertionError(f"unexpected per-SKU request before account snapshot: {url}")
-        return _FakeHttpResponse(self._payload)
+        return json.dumps(self._payload).encode("utf-8")
 
 
 class _HeaderCapturingOpener:
@@ -307,33 +351,64 @@ class _HeaderCapturingOpener:
         self._payload = payload
         self.requests: list[dict[str, object]] = []
 
-    def __call__(self, http_request, timeout: float):
+    def __call__(self, url: str, *, headers: dict[str, str], timeout: float) -> bytes:
         del timeout
         self.requests.append(
             {
-                "method": http_request.get_method(),
-                "url": http_request.get_full_url(),
-                "headers": {
-                    str(name).lower(): value
-                    for name, value in http_request.header_items()
-                },
+                "method": "GET",
+                "url": url,
+                "headers": dict(headers),
             }
         )
-        return _FakeHttpResponse(self._payload)
+        return json.dumps(self._payload).encode("utf-8")
 
 
-class _FakeHttpResponse:
+class _RawOnecHttpServer:
     def __init__(self, payload: dict) -> None:
         self._payload = payload
+        self.raw_requests: list[bytes] = []
+        self._server = _ThreadedTcpServer(("127.0.0.1", 0), _RawOnecHttpHandler)
+        self._server.payload = payload
+        self._server.raw_requests = self.raw_requests
+        self.port = int(self._server.server_address[1])
 
     def __enter__(self):
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
         return self
 
     def __exit__(self, exc_type, exc, traceback) -> bool:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
         return False
 
-    def read(self) -> bytes:
-        return json.dumps(self._payload).encode("utf-8")
+
+class _ThreadedTcpServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+class _RawOnecHttpHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        raw_request = b""
+        self.request.settimeout(5)
+        while b"\r\n\r\n" not in raw_request:
+            chunk = self.request.recv(4096)
+            if not chunk:
+                break
+            raw_request += chunk
+        self.server.raw_requests.append(raw_request)
+        body = json.dumps(self.server.payload).encode("utf-8")
+        response = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"content-type: application/json\r\n"
+            + f"content-length: {len(body)}\r\n".encode("ascii")
+            + b"connection: close\r\n"
+            b"\r\n"
+            + body
+        )
+        self.request.sendall(response)
 
 
 class _temporary_onec_live_env:
@@ -344,9 +419,14 @@ class _temporary_onec_live_env:
         "ONEC_STOCKS_TOKEN": "token",
     }
 
+    def __init__(self, overrides: dict[str, str] | None = None) -> None:
+        self._values = dict(self._VALUES)
+        if overrides:
+            self._values.update(overrides)
+
     def __enter__(self):
-        self._previous = {name: os.environ.get(name) for name in self._VALUES}
-        os.environ.update(self._VALUES)
+        self._previous = {name: os.environ.get(name) for name in self._values}
+        os.environ.update(self._values)
         return self
 
     def __exit__(self, exc_type, exc, traceback) -> bool:
@@ -369,6 +449,7 @@ def main() -> None:
     _check_http_account_snapshot_fallback(payload)
     _check_http_account_snapshot_primary_multi_sku(payload)
     _check_http_request_headers(payload)
+    _check_low_level_http_wire_request(payload)
     print("smoke-check passed")
 
 

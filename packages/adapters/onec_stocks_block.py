@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass, field
+import http.client
 import json
 import os
 from pathlib import Path
+import ssl
 from typing import Any, Callable, Mapping, Protocol
-from urllib import error, parse, request as urllib_request
+from urllib import parse
 
 from packages.contracts.onec_stocks_block import (
     ONEC_STOCKS_PARTIAL_FETCH_META_KEY,
@@ -84,7 +86,15 @@ class HttpBackedOnecStocksSource:
         *,
         opener: Callable[..., Any] | None = None,
     ) -> None:
-        self._opener = opener or urllib_request.urlopen
+        if opener is None:
+            self._opener = _open_onec_stocks_http_url
+        else:
+            self._opener = lambda url, *, headers, timeout: _open_with_custom_opener(
+                opener,
+                url,
+                headers=headers,
+                timeout=timeout,
+            )
 
     def fetch(self, request: OnecStocksRequest) -> Mapping[str, Any]:
         runtime = load_onec_stocks_runtime_config()
@@ -198,25 +208,24 @@ class HttpBackedOnecStocksSource:
             account_id=account_id,
             nm_id=nm_id,
         )
-        http_request = urllib_request.Request(
-            url,
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "Authorization": _basic_auth_header(
-                    runtime.basic_user,
-                    runtime.basic_password,
-                ),
-                "token": runtime.token,
-            },
-            method="GET",
-        )
+        headers = {
+            "accept": "application/json",
+            "content-type": "application/json",
+            "authorization": _basic_auth_header(
+                runtime.basic_user,
+                runtime.basic_password,
+            ),
+            "token": runtime.token,
+        }
         try:
-            with self._opener(http_request, timeout=runtime.timeout_seconds) as response:
-                raw_payload = response.read()
-        except error.HTTPError as exc:
-            raise OnecStocksHttpError(exc.code) from exc
-        except (TimeoutError, error.URLError) as exc:
+            raw_payload = self._opener(
+                url,
+                headers=headers,
+                timeout=runtime.timeout_seconds,
+            )
+        except OnecStocksHttpError:
+            raise
+        except (TimeoutError, OSError, http.client.HTTPException) as exc:
             raise OnecStocksRuntimeError("1C stocks upstream transport error") from exc
 
         try:
@@ -277,11 +286,145 @@ def _read_timeout_seconds() -> float:
 
 
 def _build_onec_stocks_url(*, base_url: str, account_id: str, nm_id: int | None) -> str:
-    params = {"account_id": account_id}
+    parsed = parse.urlsplit(base_url.strip())
+    endpoint_path = ONEC_STOCKS_ENDPOINT_PATH
+    base_path = parsed.path.rstrip("/")
+    if base_path == endpoint_path or base_path.endswith(endpoint_path):
+        path = base_path
+    else:
+        path = f"{base_path}{endpoint_path}" if base_path else endpoint_path
+
+    params = [
+        (name, value)
+        for name, value in parse.parse_qsl(parsed.query, keep_blank_values=True)
+        if name not in {"account_id", "nmId"}
+    ]
+    params.append(("account_id", account_id))
     if nm_id is not None:
-        params["nmId"] = str(nm_id)
+        params.append(("nmId", str(nm_id)))
     query = parse.urlencode(params)
-    return f"{base_url.rstrip('/')}{ONEC_STOCKS_ENDPOINT_PATH}?{query}"
+    return parse.urlunsplit((parsed.scheme, parsed.netloc, path, query, ""))
+
+
+def _open_onec_stocks_http_url(
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    timeout: float,
+) -> bytes:
+    parsed = parse.urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise OnecStocksRuntimeError("1C stocks upstream URL must be http(s)")
+
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise OnecStocksRuntimeError("1C stocks upstream URL port is invalid") from exc
+    target = parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+    if parsed.scheme == "https":
+        connection: http.client.HTTPConnection = http.client.HTTPSConnection(
+            parsed.hostname,
+            port=port,
+            timeout=timeout,
+            context=ssl.create_default_context(),
+        )
+    else:
+        connection = http.client.HTTPConnection(
+            parsed.hostname,
+            port=port,
+            timeout=timeout,
+        )
+
+    try:
+        connection.putrequest(
+            "GET",
+            target,
+            skip_host=True,
+            skip_accept_encoding=True,
+        )
+        connection.putheader("host", _http_host_header(parsed, port=port))
+        for name, value in headers.items():
+            connection.putheader(str(name).lower(), str(value))
+        connection.endheaders()
+        response = connection.getresponse()
+        if response.status >= 400:
+            raise OnecStocksHttpError(response.status)
+        return response.read()
+    finally:
+        connection.close()
+
+
+def _http_host_header(parsed: parse.SplitResult, *, port: int | None) -> str:
+    host = parsed.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    default_port = 443 if parsed.scheme == "https" else 80
+    if port is not None and port != default_port:
+        return f"{host}:{port}"
+    return host
+
+
+def _open_with_custom_opener(
+    opener: Callable[..., Any],
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    timeout: float,
+) -> bytes:
+    try:
+        try:
+            result = opener(url, headers=headers, timeout=timeout)
+        except TypeError as first_exc:
+            try:
+                result = opener(
+                    _OnecStocksHttpRequestPreview(url=url, headers=headers),
+                    timeout=timeout,
+                )
+            except TypeError:
+                raise first_exc
+    except Exception as exc:
+        _raise_onec_http_status_if_present(exc)
+        raise
+
+    try:
+        return _read_custom_opener_payload(result)
+    except Exception as exc:
+        _raise_onec_http_status_if_present(exc)
+        raise
+
+
+class _OnecStocksHttpRequestPreview:
+    def __init__(self, *, url: str, headers: Mapping[str, str]) -> None:
+        self._url = url
+        self._headers = dict(headers)
+
+    def get_full_url(self) -> str:
+        return self._url
+
+    def get_method(self) -> str:
+        return "GET"
+
+    def header_items(self) -> list[tuple[str, str]]:
+        return list(self._headers.items())
+
+
+def _read_custom_opener_payload(result: Any) -> bytes:
+    if isinstance(result, bytes):
+        return result
+    if hasattr(result, "__enter__"):
+        with result as response:
+            return response.read()
+    if hasattr(result, "read"):
+        return result.read()
+    raise TypeError("1C stocks custom opener must return bytes or a readable response")
+
+
+def _raise_onec_http_status_if_present(exc: Exception) -> None:
+    status_code = getattr(exc, "code", None)
+    if status_code is None:
+        status_code = getattr(exc, "status", None)
+    if isinstance(status_code, int):
+        raise OnecStocksHttpError(status_code) from exc
 
 
 def _basic_auth_header(user: str, password: str) -> str:
