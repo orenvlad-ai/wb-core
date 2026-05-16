@@ -240,6 +240,9 @@ class OnecStocksBlock:
         ]
         if status_codes:
             detail_parts.append(f"status_codes={status_codes}")
+        fallback = _partial_fallback(partial_meta)
+        if fallback:
+            detail_parts.append(f"fallback={fallback}")
         return OnecStocksEnvelope(
             result=OnecStocksIncomplete(
                 kind="incomplete",
@@ -300,6 +303,13 @@ def _positive_int(value: Any, *, fallback: int) -> int:
     except (TypeError, ValueError):
         return fallback
     return parsed if parsed > 0 else fallback
+
+
+def _partial_fallback(partial_meta: Mapping[str, Any]) -> str:
+    fallback = str(partial_meta.get("fallback") or "").strip()
+    if not fallback:
+        return ""
+    return fallback if fallback.replace("_", "").isalnum() else "custom"
 
 
 def _format_partial_status_codes(value: Any) -> str:
