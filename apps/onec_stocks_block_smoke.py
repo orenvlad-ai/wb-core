@@ -173,6 +173,24 @@ def _check_http_account_snapshot_fallback(payload: dict) -> None:
         if full_result.kind != "success" or full_result.stage_count != 3:
             raise AssertionError(f"fallback full coverage must be success, got {full_result}")
 
+    account_snapshot_urls = [
+        url
+        for url in opener.urls
+        if "nmId=" not in parse.urlparse(url).query
+    ]
+    if len(account_snapshot_urls) != 1:
+        raise AssertionError(
+            f"expected one account snapshot fallback request, got {account_snapshot_urls}"
+        )
+    if any("account_id=000000001" not in url for url in account_snapshot_urls):
+        raise AssertionError(f"unexpected account snapshot URLs: {account_snapshot_urls}")
+    print("http-account-snapshot-fallback: ok")
+
+
+def _check_http_account_snapshot_primary_multi_sku(payload: dict) -> None:
+    opener = _AccountSnapshotOnly(payload)
+    with _temporary_onec_live_env():
+        block = OnecStocksBlock(HttpBackedOnecStocksSource(opener=opener))
         partial_result = block.execute(
             OnecStocksRequest(
                 snapshot_type="onec_stocks",
@@ -182,19 +200,19 @@ def _check_http_account_snapshot_fallback(payload: dict) -> None:
         ).result
 
     if partial_result.kind != "incomplete":
-        raise AssertionError(f"fallback partial coverage must be incomplete, got {partial_result}")
+        raise AssertionError(f"primary account snapshot partial coverage must be incomplete, got {partial_result}")
     if partial_result.requested_count != 2 or partial_result.covered_count != 1:
         raise AssertionError(
-            "unexpected fallback partial counts: "
+            "unexpected primary account snapshot partial counts: "
             f"requested={partial_result.requested_count}, covered={partial_result.covered_count}"
         )
     if partial_result.missing_nm_ids != [210183919]:
         raise AssertionError(
-            f"unexpected fallback partial missing nmIds: {partial_result.missing_nm_ids}"
+            f"unexpected primary account snapshot partial missing nmIds: {partial_result.missing_nm_ids}"
         )
-    if "status_codes=401:2" not in partial_result.detail:
+    if "status_codes=" in partial_result.detail or "account_snapshot_primary" not in partial_result.detail:
         raise AssertionError(
-            "fallback partial detail must keep sanitized per-SKU failure counts, "
+            "primary account snapshot partial detail must not invent per-SKU failure counts, "
             f"got {partial_result.detail}"
         )
     account_snapshot_urls = [
@@ -202,13 +220,15 @@ def _check_http_account_snapshot_fallback(payload: dict) -> None:
         for url in opener.urls
         if "nmId=" not in parse.urlparse(url).query
     ]
-    if len(account_snapshot_urls) != 2:
+    if len(account_snapshot_urls) != 1:
         raise AssertionError(
-            f"expected two account snapshot fallback requests, got {account_snapshot_urls}"
+            f"expected one primary account snapshot request, got {account_snapshot_urls}"
         )
     if any("account_id=000000001" not in url for url in account_snapshot_urls):
         raise AssertionError(f"unexpected account snapshot URLs: {account_snapshot_urls}")
-    print("http-account-snapshot-fallback: ok")
+    if any("nmId=" in parse.urlparse(url).query for url in opener.urls):
+        raise AssertionError(f"multi-SKU account snapshot must avoid per-SKU URLs first, got {opener.urls}")
+    print("http-account-snapshot-primary-multi-sku: ok")
 
 
 class _StaticOnecStocksSource:
@@ -232,6 +252,22 @@ class _PerSkuUnauthorizedThenAccountSnapshot:
         query = parse.parse_qs(parsed_url.query)
         if "nmId" in query:
             raise error.HTTPError(url, 401, "unauthorized", hdrs=None, fp=None)
+        return _FakeHttpResponse(self._payload)
+
+
+class _AccountSnapshotOnly:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+        self.urls: list[str] = []
+
+    def __call__(self, http_request, timeout: float):
+        del timeout
+        url = http_request.get_full_url()
+        self.urls.append(url)
+        parsed_url = parse.urlparse(url)
+        query = parse.parse_qs(parsed_url.query)
+        if "nmId" in query:
+            raise AssertionError(f"unexpected per-SKU request before account snapshot: {url}")
         return _FakeHttpResponse(self._payload)
 
 
@@ -280,6 +316,7 @@ def main() -> None:
     _check_block(payload)
     _check_partial_block(payload)
     _check_http_account_snapshot_fallback(payload)
+    _check_http_account_snapshot_primary_multi_sku(payload)
     print("smoke-check passed")
 
 

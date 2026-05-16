@@ -92,6 +92,17 @@ class HttpBackedOnecStocksSource:
         if not nm_ids:
             raise ValueError("1C stocks live adapter requires at least one nmId")
 
+        if len(nm_ids) > 1:
+            account_payload = self._fetch_account_snapshot(
+                runtime=runtime,
+                account_id=request.account_id,
+                requested_nm_ids=nm_ids,
+                failures=[],
+                fallback_label="account_snapshot_primary",
+            )
+            if account_payload is not None:
+                return account_payload
+
         payloads: list[Mapping[str, Any]] = []
         failures: list[_OnecStocksFetchFailure] = []
         for nm_id in nm_ids:
@@ -111,11 +122,12 @@ class HttpBackedOnecStocksSource:
                 failures.append(_OnecStocksFetchFailure(nm_id=nm_id, kind="runtime"))
 
         if not payloads:
-            fallback_payload = self._fetch_account_snapshot_after_per_sku_failure(
+            fallback_payload = self._fetch_account_snapshot(
                 runtime=runtime,
                 account_id=request.account_id,
                 requested_nm_ids=nm_ids,
                 failures=failures,
+                fallback_label="account_snapshot_after_per_sku_failure",
             )
             if fallback_payload is not None:
                 return fallback_payload
@@ -135,13 +147,14 @@ class HttpBackedOnecStocksSource:
         }
         return payload_with_partial_meta
 
-    def _fetch_account_snapshot_after_per_sku_failure(
+    def _fetch_account_snapshot(
         self,
         *,
         runtime: OnecStocksRuntimeConfig,
         account_id: str,
         requested_nm_ids: list[int],
         failures: list[_OnecStocksFetchFailure],
+        fallback_label: str,
     ) -> Mapping[str, Any] | None:
         try:
             payload = self._fetch_one(runtime=runtime, account_id=account_id, nm_id=None)
@@ -169,7 +182,7 @@ class HttpBackedOnecStocksSource:
             "missing_nm_ids": missing_nm_ids,
             "status_codes": _status_code_counts(failures),
             "error_kinds": _kind_counts(failures),
-            "fallback": "account_snapshot_after_per_sku_failure",
+            "fallback": fallback_label,
         }
         return payload_with_partial_meta
 
