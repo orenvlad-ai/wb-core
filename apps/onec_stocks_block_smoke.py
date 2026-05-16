@@ -231,6 +231,37 @@ def _check_http_account_snapshot_primary_multi_sku(payload: dict) -> None:
     print("http-account-snapshot-primary-multi-sku: ok")
 
 
+def _check_http_request_headers(payload: dict) -> None:
+    opener = _HeaderCapturingOpener(payload)
+    with _temporary_onec_live_env():
+        block = OnecStocksBlock(HttpBackedOnecStocksSource(opener=opener))
+        result = block.execute(
+            OnecStocksRequest(
+                snapshot_type="onec_stocks",
+                account_id=str(payload["meta"]["account_id"]),
+                nm_ids=[428855306],
+            )
+        ).result
+
+    if result.kind != "success":
+        raise AssertionError(f"header capture request must succeed, got {result.kind}")
+    if len(opener.requests) != 1:
+        raise AssertionError(f"expected one captured request, got {len(opener.requests)}")
+    captured = opener.requests[0]
+    if captured["method"] != "GET":
+        raise AssertionError(f"1C request must use GET, got {captured['method']}")
+    headers = captured["headers"]
+    if headers.get("accept") != "application/json":
+        raise AssertionError("1C request must send Accept: application/json")
+    if headers.get("content-type") != "application/json":
+        raise AssertionError("1C request must send Content-Type: application/json")
+    if not str(headers.get("authorization") or "").startswith("Basic "):
+        raise AssertionError("1C request must send Basic Authorization header")
+    if not str(headers.get("token") or "").strip():
+        raise AssertionError("1C request must send token header")
+    print("http-request-headers: ok")
+
+
 class _StaticOnecStocksSource:
     def __init__(self, payload: dict) -> None:
         self._payload = payload
@@ -268,6 +299,26 @@ class _AccountSnapshotOnly:
         query = parse.parse_qs(parsed_url.query)
         if "nmId" in query:
             raise AssertionError(f"unexpected per-SKU request before account snapshot: {url}")
+        return _FakeHttpResponse(self._payload)
+
+
+class _HeaderCapturingOpener:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+        self.requests: list[dict[str, object]] = []
+
+    def __call__(self, http_request, timeout: float):
+        del timeout
+        self.requests.append(
+            {
+                "method": http_request.get_method(),
+                "url": http_request.get_full_url(),
+                "headers": {
+                    str(name).lower(): value
+                    for name, value in http_request.header_items()
+                },
+            }
+        )
         return _FakeHttpResponse(self._payload)
 
 
@@ -317,6 +368,7 @@ def main() -> None:
     _check_partial_block(payload)
     _check_http_account_snapshot_fallback(payload)
     _check_http_account_snapshot_primary_multi_sku(payload)
+    _check_http_request_headers(payload)
     print("smoke-check passed")
 
 
