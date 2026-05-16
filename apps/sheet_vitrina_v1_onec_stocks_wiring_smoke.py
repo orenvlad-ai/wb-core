@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import sys
 import time
@@ -121,10 +121,13 @@ def main() -> None:
             372123.77 / 4782.0,
             "weighted CHINA_TO_FF unit cost",
         )
-        assert_close(
+        assert_blank(
             data_rows[f"TOTAL|{onec_stage_total_metric_key('CHINA_TO_FF', 'qty')}"][2],
-            4782.0,
-            "yesterday total CHINA_TO_FF qty",
+            "yesterday total CHINA_TO_FF qty without prior accepted current",
+        )
+        assert_blank(
+            data_rows[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"][2],
+            "yesterday SKU CHINA_TO_FF qty without prior accepted current",
         )
         assert_close(
             data_rows[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"][3],
@@ -148,10 +151,10 @@ def main() -> None:
         if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[today_current]"][1] != "success":
             raise AssertionError(f"1C today status must be success, got {status_rows}")
         yesterday_status = status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"]
-        if yesterday_status[1] != "success":
-            raise AssertionError(f"1C yesterday status must be success, got {status_rows}")
-        if "onec_current_snapshot_used_for_yesterday_closed" not in str(yesterday_status[10]):
-            raise AssertionError(f"1C yesterday status must explain current snapshot semantics, got {yesterday_status}")
+        if yesterday_status[1] != "missing":
+            raise AssertionError(f"1C yesterday status must truthfully stay missing without accepted current, got {status_rows}")
+        if "not backfilled into a closed-day column" not in str(yesterday_status[10]):
+            raise AssertionError(f"1C yesterday status must refuse current-value backfill, got {yesterday_status}")
 
         partial_data_rows = {str(row[1]): row for row in _sheet_rows(partial_plan, "DATA_VITRINA")}
         assert_close(
@@ -329,9 +332,16 @@ def main() -> None:
             f"TOTAL|{onec_stage_total_metric_key('CHINA_TO_FF', 'qty')}",
             AS_OF_DATE,
             "updated",
-        ) not in yesterday_cells:
-            raise AssertionError(f"1C yesterday group refresh must update summary stage cells, got {yesterday_cells}")
+        ) in yesterday_cells:
+            raise AssertionError(f"1C unavailable yesterday refresh must not mark current values as updated, got {yesterday_cells}")
+        if int(yesterday_result.get("updated_cell_count") or 0) != 0:
+            raise AssertionError(f"1C unavailable yesterday refresh must not mark cells updated, got {yesterday_result}")
+        yesterday_merge_summary = dict(yesterday_result.get("merge_summary") or {})
+        if int(yesterday_merge_summary.get("status_rows_updated") or 0) <= 0:
+            raise AssertionError(f"1C unavailable yesterday refresh must still update STATUS truth, got {yesterday_result}")
 
+        _assert_onec_current_rollover_date_specific_snapshots()
+        _assert_onec_current_rollover_period_snapshots()
         _assert_weighted_unit_cost_semantics()
 
         print("sheet_vitrina_onec_stocks_metrics: ok -> summary_and_sku_values_present")
@@ -339,6 +349,8 @@ def main() -> None:
         print("sheet_vitrina_onec_stocks_period_visibility: ok -> filter_and_rows_present")
         print("sheet_vitrina_onec_stocks_status_group: ok ->", ONEC_STOCKS_SOURCE_GROUP_ID)
         print("sheet_vitrina_onec_stocks_group_refresh: ok ->", len(captured_metric_keys))
+        print("sheet_vitrina_onec_stocks_date_specific_rollover: ok -> 2026-05-15/2026-05-16")
+        print("sheet_vitrina_onec_stocks_period_rollover: ok -> 2026-05-01..2026-05-16")
         print("sheet_vitrina_onec_stocks_weighted_unit_cost: ok -> weighted_avg")
 
 
@@ -378,6 +390,164 @@ def _build_bundle() -> dict[str, object]:
         ],
         "formulas_v2": [],
     }
+
+
+def _assert_onec_current_rollover_date_specific_snapshots() -> None:
+    closed_date = "2026-05-15"
+    current_date = "2026-05-16"
+    prior_as_of_date = "2026-05-14"
+    metric_keys = [
+        ONEC_STOCKS_TOTAL_QTY_METRIC_KEY,
+        onec_stage_metric_key("CHINA_TO_FF", "qty"),
+    ]
+    with TemporaryDirectory(prefix="sheet-vitrina-onec-date-rollover-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
+        accepted = runtime.ingest_bundle(_build_bundle(), activated_at="2026-05-15T08:55:00Z")
+        if accepted.status != "accepted":
+            raise AssertionError(f"date rollover registry bundle must be accepted, got {accepted}")
+
+        prior_block = SheetVitrinaV1LivePlanBlock(
+            runtime=runtime,
+            onec_stocks_block=OnecStocksBlock(
+                _DatedOnecStocksSource(snapshot_date=closed_date, qty=15.0),
+                stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
+            ),
+            now_factory=lambda: datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc),
+        )
+        prior_plan = prior_block.build_plan(
+            as_of_date=prior_as_of_date,
+            execution_mode="manual_operator",
+            source_keys=[ONEC_STOCKS_SOURCE_KEY],
+            metric_keys=metric_keys,
+        )
+        prior_status = {str(row[0]): row for row in _sheet_rows(prior_plan, "STATUS")}
+        if prior_status[f"{ONEC_STOCKS_SOURCE_KEY}[today_current]"][1] != "success":
+            raise AssertionError(f"prior current 1C snapshot must be accepted, got {prior_status}")
+
+        current_block = SheetVitrinaV1LivePlanBlock(
+            runtime=runtime,
+            onec_stocks_block=OnecStocksBlock(
+                _DatedOnecStocksSource(snapshot_date=current_date, qty=16.0),
+                stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
+            ),
+            now_factory=lambda: datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc),
+        )
+        current_plan = current_block.build_plan(
+            as_of_date=closed_date,
+            execution_mode="manual_operator",
+            source_keys=[ONEC_STOCKS_SOURCE_KEY],
+            metric_keys=metric_keys,
+        )
+        rows = {str(row[1]): row for row in _sheet_rows(current_plan, "DATA_VITRINA")}
+        row = rows[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"]
+        assert_close(row[2], 15.0, "2026-05-15 accepted current rollover qty")
+        assert_close(row[3], 16.0, "2026-05-16 live current qty")
+        if row[2] == row[3]:
+            raise AssertionError(f"1C 2026-05-15 and 2026-05-16 values must be date-specific, got {row}")
+        status_rows = {str(row[0]): row for row in _sheet_rows(current_plan, "STATUS")}
+        yesterday_status = status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"]
+        if yesterday_status[1] != "success":
+            raise AssertionError(f"1C closed date must use prior accepted current snapshot, got {status_rows}")
+        if "accepted_closed_from_prior_current_snapshot" not in str(yesterday_status[10]):
+            raise AssertionError(f"1C closed date must explain accepted-current rollover, got {yesterday_status}")
+
+
+def _assert_onec_current_rollover_period_snapshots() -> None:
+    start = date(2026, 5, 1)
+    end = date(2026, 5, 16)
+    prior_as_of_date = "2026-04-30"
+    metric_keys = [
+        ONEC_STOCKS_TOTAL_QTY_METRIC_KEY,
+        onec_stage_metric_key("CHINA_TO_FF", "qty"),
+    ]
+    with TemporaryDirectory(prefix="sheet-vitrina-onec-period-rollover-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
+        accepted = runtime.ingest_bundle(_build_bundle(), activated_at="2026-05-01T08:55:00Z")
+        if accepted.status != "accepted":
+            raise AssertionError(f"period rollover registry bundle must be accepted, got {accepted}")
+
+        seed_block = SheetVitrinaV1LivePlanBlock(
+            runtime=runtime,
+            onec_stocks_block=OnecStocksBlock(
+                _DatedOnecStocksSource(snapshot_date=start.isoformat(), qty=1.0),
+                stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
+            ),
+            now_factory=lambda: datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc),
+        )
+        seed_block.build_plan(
+            as_of_date=prior_as_of_date,
+            execution_mode="manual_operator",
+            source_keys=[ONEC_STOCKS_SOURCE_KEY],
+            metric_keys=metric_keys,
+        )
+
+        current_state = runtime.load_current_state()
+        closed_day = start
+        while closed_day < end:
+            current_day = closed_day + timedelta(days=1)
+            block = SheetVitrinaV1LivePlanBlock(
+                runtime=runtime,
+                onec_stocks_block=OnecStocksBlock(
+                    _DatedOnecStocksSource(
+                        snapshot_date=current_day.isoformat(),
+                        qty=float(current_day.day),
+                    ),
+                    stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
+                ),
+                now_factory=lambda current_day=current_day: datetime(
+                    current_day.year,
+                    current_day.month,
+                    current_day.day,
+                    12,
+                    0,
+                    tzinfo=timezone.utc,
+                ),
+            )
+            plan = block.build_plan(
+                as_of_date=closed_day.isoformat(),
+                execution_mode="manual_operator",
+                source_keys=[ONEC_STOCKS_SOURCE_KEY],
+                metric_keys=metric_keys,
+            )
+            row = {
+                str(item[1]): item
+                for item in _sheet_rows(plan, "DATA_VITRINA")
+            }[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"]
+            assert_close(row[2], float(closed_day.day), f"{closed_day.isoformat()} closed qty")
+            assert_close(row[3], float(current_day.day), f"{current_day.isoformat()} current qty")
+            runtime.save_sheet_vitrina_ready_snapshot(
+                current_state=current_state,
+                refreshed_at=f"{current_day.isoformat()}T12:05:00Z",
+                plan=plan,
+            )
+            closed_day = current_day
+
+        web_block = SheetVitrinaV1WebVitrinaBlock(
+            runtime=runtime,
+            now_factory=lambda: datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc),
+        )
+        period_contract = web_block.build(
+            page_route="/sheet-vitrina-v1/vitrina",
+            read_route="/v1/sheet-vitrina-v1/web-vitrina",
+            date_from=start.isoformat(),
+            date_to=end.isoformat(),
+        )
+        row = {
+            item.row_id: item
+            for item in period_contract.rows
+        }[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"]
+        expected_dates = [
+            (start + timedelta(days=offset)).isoformat()
+            for offset in range((end - start).days + 1)
+        ]
+        actual_values = [
+            row.values_by_date.get(snapshot_date)
+            for snapshot_date in expected_dates
+        ]
+        for offset, actual in enumerate(actual_values, start=1):
+            assert_close(actual, float(offset), f"period {expected_dates[offset - 1]} qty")
+        if len({float(value) for value in actual_values if isinstance(value, (int, float))}) != len(expected_dates):
+            raise AssertionError(f"period 1C values must stay date-specific, got {actual_values}")
 
 
 def _assert_weighted_unit_cost_semantics() -> None:
@@ -421,16 +591,15 @@ def _assert_weighted_unit_cost_semantics() -> None:
             25.0,
             "weighted total unit cost",
         )
-        assert_close(
+        assert_blank(
             rows[f"TOTAL|{onec_stage_total_metric_key('CHINA_TO_FF', 'unit_cost_rub')}"][2],
-            25.0,
-            "weighted yesterday total unit cost",
+            "weighted yesterday total unit cost without prior accepted current",
         )
         if rows[f"SKU:{NM_ID}|onec_CHINA_TO_FF_unit_cost_rub"][3] == rows[f"SKU:{MISSING_NM_ID}|onec_CHINA_TO_FF_unit_cost_rub"][3]:
             raise AssertionError("weighted fixture must keep distinct SKU unit costs")
         status_rows = {str(row[0]): row for row in _sheet_rows(plan, "STATUS")}
-        if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"][1] != "success":
-            raise AssertionError(f"weighted 1C yesterday status must succeed, got {status_rows}")
+        if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"][1] != "missing":
+            raise AssertionError(f"weighted 1C yesterday status must stay missing without accepted current, got {status_rows}")
 
 
 def _build_weighted_bundle() -> dict[str, object]:
@@ -577,6 +746,44 @@ class _WeightedOnecStocksSource:
         }
 
 
+class _DatedOnecStocksSource:
+    def __init__(self, *, snapshot_date: str, qty: float) -> None:
+        self.snapshot_date = snapshot_date
+        self.qty = qty
+
+    def fetch(self, request: OnecStocksRequest) -> dict[str, object]:
+        return {
+            "meta": {
+                "version": "1.0",
+                "marketplace": "WB",
+                "account_id": request.account_id,
+                "date": self.snapshot_date,
+                "generated_at": f"{self.snapshot_date}T11:30:37",
+                "currency": "RUB",
+            },
+            "items": [
+                _build_dated_onec_item(NM_ID, self.qty, "dated-a"),
+                _build_dated_onec_item(MISSING_NM_ID, self.qty + 1.0, "dated-b"),
+            ],
+        }
+
+
+def _build_dated_onec_item(nm_id: int, qty: float, suffix: str) -> dict[str, object]:
+    return {
+        "nmId": str(nm_id),
+        "product_1c_id": suffix,
+        "vendor_code": suffix,
+        "name": suffix,
+        "stages": {
+            "В_пути": {
+                "qty": qty,
+                "unit_cost_rub": 10.0,
+                "cost_total_rub": qty * 10.0,
+            },
+        },
+    }
+
+
 def _sheet_rows(plan: SheetVitrinaV1Envelope, sheet_name: str) -> list[list[object]]:
     for sheet in plan.sheets:
         if sheet.sheet_name == sheet_name:
@@ -602,6 +809,11 @@ def assert_close(actual: object, expected: float, label: str) -> None:
 def assert_nonblank(actual: object, label: str) -> None:
     if actual is None or str(actual).strip() == "":
         raise AssertionError(f"{label} must be nonblank, got {actual!r}")
+
+
+def assert_blank(actual: object, label: str) -> None:
+    if actual is not None and str(actual).strip() != "":
+        raise AssertionError(f"{label} must stay blank, got {actual!r}")
 
 
 if __name__ == "__main__":

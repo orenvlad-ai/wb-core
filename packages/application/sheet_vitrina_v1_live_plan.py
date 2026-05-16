@@ -1688,33 +1688,6 @@ class SheetVitrinaV1LivePlanBlock:
                 note = f"{note}; accepted_at={accepted_at}"
             return _append_status_note(accepted_status, note), accepted_payload
 
-        if source_key == ONEC_STOCKS_SOURCE_KEY and loader is not None:
-            status, payload = _capture_live_source(
-                source_key=source_key,
-                temporal_slot=temporal_slot,
-                temporal_policy=temporal_policy,
-                column_date=column_date,
-                requested_nm_ids=requested_nm_ids,
-                loader=loader,
-            )
-            if status.kind in {"success", "incomplete"} and (
-                status.kind == "success" or status.covered_count > 0
-            ):
-                upstream_date = status.freshness or status.snapshot_date or status.date
-                return (
-                    _append_status_note(
-                        status,
-                        (
-                            "resolution_rule=onec_current_snapshot_used_for_yesterday_closed; "
-                            f"requested_slot_date={column_date}; "
-                            f"upstream_snapshot_date={upstream_date}; "
-                            "endpoint_has_no_historical_date_parameter"
-                        ),
-                    ),
-                    payload,
-                )
-            return status, payload
-
         return (
             LiveSourceStatus(
                 source_key=source_key,
@@ -1731,8 +1704,9 @@ class SheetVitrinaV1LivePlanBlock:
                 covered_count=0,
                 missing_nm_ids=sorted(set(requested_nm_ids)),
                 note=(
-                    "current-snapshot-only yesterday_closed requires prior accepted current snapshot; "
-                    "accepted current snapshot missing for requested closed day"
+                    "current-snapshot-only yesterday_closed requires a prior accepted current snapshot "
+                    "for requested date; endpoint has no historical date parameter, so current values "
+                    "are not backfilled into a closed-day column"
                 ),
             ),
             None,
@@ -2903,10 +2877,10 @@ def _capture_live_source(
                 column_date=column_date,
                 kind=kind,
                 freshness=_resolve_freshness(payload),
-                snapshot_date=str(getattr(payload, "snapshot_date", "") or ""),
-                date=str(getattr(payload, "date", "") or ""),
-                date_from=str(getattr(payload, "date_from", "") or ""),
-                date_to=str(getattr(payload, "date_to", "") or ""),
+                snapshot_date=_payload_temporal_value(payload, "snapshot_date"),
+                date=_payload_temporal_value(payload, "date"),
+                date_from=_payload_temporal_value(payload, "date_from"),
+                date_to=_payload_temporal_value(payload, "date_to"),
                 requested_count=requested_count,
                 covered_count=covered_count,
                 missing_nm_ids=missing_nm_ids,
@@ -2927,10 +2901,10 @@ def _capture_live_source(
             column_date=column_date,
             kind=kind,
             freshness=_resolve_freshness(payload),
-            snapshot_date=str(getattr(payload, "snapshot_date", "") or ""),
-            date=str(getattr(payload, "date", "") or ""),
-            date_from=str(getattr(payload, "date_from", "") or ""),
-            date_to=str(getattr(payload, "date_to", "") or ""),
+            snapshot_date=_payload_temporal_value(payload, "snapshot_date"),
+            date=_payload_temporal_value(payload, "date"),
+            date_from=_payload_temporal_value(payload, "date_from"),
+            date_to=_payload_temporal_value(payload, "date_to"),
             requested_count=len(requested_nm_ids),
             covered_count=len(covered_nm_ids),
             missing_nm_ids=sorted(set(requested_nm_ids) - set(covered_nm_ids)),
@@ -2993,10 +2967,10 @@ def _build_invalid_temporal_web_source_status(
         column_date=column_date,
         kind="error",
         freshness=_resolve_freshness(payload),
-        snapshot_date=str(getattr(payload, "snapshot_date", "") or ""),
-        date=str(getattr(payload, "date", "") or ""),
-        date_from=str(getattr(payload, "date_from", "") or ""),
-        date_to=str(getattr(payload, "date_to", "") or ""),
+        snapshot_date=_payload_temporal_value(payload, "snapshot_date"),
+        date=_payload_temporal_value(payload, "date"),
+        date_from=_payload_temporal_value(payload, "date_from"),
+        date_to=_payload_temporal_value(payload, "date_to"),
         requested_count=len(requested_nm_ids),
         covered_count=0,
         missing_nm_ids=sorted(set(requested_nm_ids)),
@@ -3340,9 +3314,24 @@ def _plain_jsonable(value: Any) -> Any:
 
 def _resolve_freshness(payload: Any) -> str:
     for field in ("snapshot_date", "date", "date_to"):
-        value = getattr(payload, field, None)
-        if isinstance(value, str) and value:
+        value = _payload_temporal_value(payload, field)
+        if value:
             return value
+    return ""
+
+
+def _payload_temporal_value(payload: Any, field: str) -> str:
+    value = getattr(payload, field, None)
+    if isinstance(value, str) and value:
+        return value
+    if field in {"snapshot_date", "date", "date_from", "date_to"}:
+        meta = getattr(payload, "meta", None)
+        if isinstance(meta, Mapping):
+            meta_date = meta.get("date")
+        else:
+            meta_date = getattr(meta, "date", None)
+        if isinstance(meta_date, str) and meta_date:
+            return meta_date
     return ""
 
 

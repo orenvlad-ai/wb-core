@@ -361,9 +361,9 @@ def main() -> None:
             if status_rows["ads_bids[today_current]"][1] != "success":
                 raise AssertionError("ads_bids today_current must materialize current data")
             if status_rows["onec_stocks[yesterday_closed]"][1] != "success":
-                raise AssertionError("1C yesterday_closed must materialize from current stock-capital snapshot")
-            if "onec_current_snapshot_used_for_yesterday_closed" not in str(status_rows["onec_stocks[yesterday_closed]"][10]):
-                raise AssertionError("1C yesterday_closed must explain current snapshot semantics")
+                raise AssertionError("1C yesterday_closed must materialize from a prior accepted current snapshot")
+            if "accepted_closed_from_prior_current_snapshot" not in str(status_rows["onec_stocks[yesterday_closed]"][10]):
+                raise AssertionError("1C yesterday_closed must explain accepted-current rollover semantics")
             if status_rows["onec_stocks[today_current]"][1] != "success":
                 raise AssertionError("1C today_current must materialize current stock-capital snapshot")
             if status_rows["seller_funnel_snapshot[yesterday_closed]"][1] != "success":
@@ -442,6 +442,30 @@ def _seed_prior_accepted_current_snapshots(runtime: RegistryUploadDbBackedRuntim
             kind="success",
             snapshot_date=AS_OF_DATE,
             items=[SimpleNamespace(nm_id=PROBE_NM_ID, ads_bid_search=10.0, ads_bid_recommendations=7.0)],
+        ),
+    )
+    runtime.save_temporal_source_slot_snapshot(
+        source_key="onec_stocks",
+        snapshot_date=AS_OF_DATE,
+        snapshot_role=TEMPORAL_ROLE_ACCEPTED_CURRENT,
+        captured_at=ACCEPTED_CURRENT_CAPTURED_AT,
+        payload=SimpleNamespace(
+            kind="success",
+            snapshot_date=AS_OF_DATE,
+            date=AS_OF_DATE,
+            date_from=AS_OF_DATE,
+            date_to=AS_OF_DATE,
+            detail="onec_stocks prior accepted current snapshot",
+            items=[
+                SimpleNamespace(
+                    nm_id=PROBE_NM_ID,
+                    stage_name="CHINA_TO_FF",
+                    canonical_stage_code="CHINA_TO_FF",
+                    qty=0.5,
+                    unit_cost_rub=1.0,
+                    cost_total_rub=0.5,
+                )
+            ],
         ),
     )
 
