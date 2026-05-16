@@ -5208,7 +5208,7 @@
         }
       }
       if (dataFreshnessCard) {
-        const freshnessText = formatSummaryCardValue(dataFreshnessCard) || "нет данных";
+        const freshnessText = formatSummaryCardValue(dataFreshnessCard, {suppressTimezone: true}) || "нет данных";
         parts.push(
           '<span class="table-summary-token table-summary-freshness" data-table-summary-freshness' +
             (dataFreshnessCard.updated_at ? ' data-table-summary-freshness-at="' + escapeHtml(dataFreshnessCard.updated_at) + '"' : "") +
@@ -5591,17 +5591,18 @@
       };
     }
 
-    function formatSummaryCardValue(card) {
+    function formatSummaryCardValue(card, options) {
       if (card && card.value_kind === "timestamp") {
-        return formatTimestampDisplay(card.value);
+        return formatTimestampDisplay(card.value, options);
       }
       return String((card && card.value) || "");
     }
 
     function formatTimestampDisplay(value, options) {
       const timezone = options && options.timezone ? String(options.timezone) : "";
+      const suppressTimezone = !!(options && options.suppressTimezone);
       if (value instanceof Date && !Number.isNaN(value.getTime())) {
-        return formatClientTimestamp(value, timezone);
+        return formatClientTimestamp(value, timezone, {suppressTimezone: suppressTimezone});
       }
       const text = String(value || "").trim();
       if (!text) {
@@ -5611,11 +5612,12 @@
       if (Number.isNaN(parsed.getTime())) {
         return text;
       }
-      return formatClientTimestamp(parsed, timezone);
+      return formatClientTimestamp(parsed, timezone, {suppressTimezone: suppressTimezone});
     }
 
-    function formatClientTimestamp(dateValue, timezoneOverride) {
+    function formatClientTimestamp(dateValue, timezoneOverride, options) {
       const timezone = String(timezoneOverride || "").trim();
+      const suppressTimezone = !!(options && options.suppressTimezone);
       const formatOptions = {
         dateStyle: "short",
         timeStyle: "medium"
@@ -5624,7 +5626,7 @@
         formatOptions.timeZone = timezone;
       }
       const formatted = new Intl.DateTimeFormat("ru-RU", formatOptions).format(dateValue);
-      const label = timezone || browserTimezoneLabel();
+      const label = suppressTimezone ? "" : (timezone || browserTimezoneLabel());
       return label ? formatted + " (" + label + ")" : formatted;
     }
 
