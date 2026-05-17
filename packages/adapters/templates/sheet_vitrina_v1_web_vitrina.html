@@ -2097,10 +2097,18 @@
     }
 
     .metrics-config-section-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 4px;
       margin: 2px 0 0;
       color: var(--muted);
       font-size: 10.5px;
       font-weight: 700;
+    }
+
+    .metrics-config-section-label {
+      min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -2164,6 +2172,12 @@
       gap: 2px;
     }
 
+    .metrics-config-block-move {
+      display: inline-flex;
+      flex: 0 0 auto;
+      gap: 2px;
+    }
+
     .metrics-config-button,
     .metric-anchor-toggle {
       border: 1px solid var(--border);
@@ -2185,6 +2199,23 @@
     .metrics-config-move-button {
       width: 21px;
       padding: 1px 0;
+    }
+
+    .metrics-config-block-move-button {
+      width: 21px;
+      min-height: 18px;
+      padding: 0;
+      border-color: rgba(139, 92, 246, 0.24);
+      background: rgba(139, 92, 246, 0.09);
+      color: var(--muted-strong);
+    }
+
+    .metrics-config-block-move-button:disabled {
+      opacity: 0.34;
+      cursor: default;
+      border-color: var(--border);
+      background: rgba(255, 255, 255, 0.025);
+      color: var(--muted);
     }
 
     .metrics-config-action-button {
@@ -4167,6 +4198,8 @@
         groups: [],
         optionByKey: new Map(),
         groupByKey: {},
+        groupOrderByScope: {},
+        groupOrderCustomScopes: new Set(),
         orderByGroup: {},
         hiddenByGroup: {},
         anchorByGroup: {},
@@ -4639,6 +4672,7 @@
       resetMetricSelectionToAll(state.composition);
       resetMetricPresentationToDefault(state.composition);
       syncControlValues();
+      renderMetricPresentationPanel(state.composition);
       renderTable();
     });
 
@@ -5508,16 +5542,68 @@
       return result;
     }
 
+    function defaultMetricGroupOrderByScope(groups) {
+      const result = {};
+      (Array.isArray(groups) ? groups : []).forEach(function(group) {
+        const scopeId = metricPresentationScopeId(group);
+        if (!result[scopeId]) {
+          result[scopeId] = [];
+        }
+        if (result[scopeId].indexOf(group.groupId) === -1) {
+          result[scopeId].push(group.groupId);
+        }
+      });
+      return result;
+    }
+
+    function sanitizeMetricGroupOrderByScope(candidate, defaultOrderByScope) {
+      const result = {};
+      Object.keys(defaultOrderByScope || {}).forEach(function(scopeId) {
+        const defaultOrder = defaultOrderByScope[scopeId] || [];
+        const allowed = new Set(defaultOrder);
+        const seen = new Set();
+        result[scopeId] = [];
+        const candidateOrder = candidate && Array.isArray(candidate[scopeId]) ? candidate[scopeId] : [];
+        candidateOrder.forEach(function(groupId) {
+          const normalized = String(groupId || "");
+          if (allowed.has(normalized) && !seen.has(normalized)) {
+            result[scopeId].push(normalized);
+            seen.add(normalized);
+          }
+        });
+        defaultOrder.forEach(function(groupId) {
+          if (!seen.has(groupId)) {
+            result[scopeId].push(groupId);
+            seen.add(groupId);
+          }
+        });
+      });
+      return result;
+    }
+
+    function metricPresentationScopeId(group) {
+      return String((group && group.scopeGroupId) || String((group && group.groupId) || "").split("::")[0] || "sku");
+    }
+
     function initializeMetricPresentation(payload, options) {
       const forceDefault = !!(options && options.forceDefault);
       const model = buildMetricPresentationModel(payload);
       const storageKey = buildMetricPresentationStorageKey(payload);
       const persisted = forceDefault ? null : readPersistedMetricPresentation(storageKey);
       const groups = model.groups;
+      const defaultGroupOrderByScope = defaultMetricGroupOrderByScope(groups);
       const groupByKey = {};
       state.metricPresentation.storageKey = storageKey;
       state.metricPresentation.groups = groups;
       state.metricPresentation.optionByKey = model.optionByKey;
+      state.metricPresentation.groupOrderByScope = sanitizeMetricGroupOrderByScope(
+        persisted && persisted.group_order_by_scope,
+        defaultGroupOrderByScope
+      );
+      state.metricPresentation.groupOrderCustomScopes = sanitizeMetricGroupOrderCustomScopes(
+        persisted && persisted.group_order_custom_scopes,
+        state.metricPresentation.groupOrderByScope
+      );
       state.metricPresentation.orderByGroup = {};
       state.metricPresentation.hiddenByGroup = {};
       state.metricPresentation.anchorByGroup = {};
@@ -5571,14 +5657,40 @@
         };
       });
       try {
-        window.localStorage.setItem(storageKey, JSON.stringify({version: 1, groups: groups}));
+        window.localStorage.setItem(storageKey, JSON.stringify({
+          version: 1,
+          groups: groups,
+          group_order_by_scope: cloneMetricGroupOrderByScope(),
+          group_order_custom_scopes: Array.from(state.metricPresentation.groupOrderCustomScopes || [])
+        }));
       } catch (error) {
         // Browser-local presentation preferences must not block table rendering.
       }
     }
 
+    function cloneMetricGroupOrderByScope() {
+      const result = {};
+      Object.keys(state.metricPresentation.groupOrderByScope || {}).forEach(function(scopeId) {
+        result[scopeId] = (state.metricPresentation.groupOrderByScope[scopeId] || []).slice();
+      });
+      return result;
+    }
+
+    function sanitizeMetricGroupOrderCustomScopes(candidate, orderByScope) {
+      const allowed = new Set(Object.keys(orderByScope || {}));
+      const result = new Set();
+      (Array.isArray(candidate) ? candidate : []).forEach(function(scopeId) {
+        const normalized = String(scopeId || "");
+        if (allowed.has(normalized)) {
+          result.add(normalized);
+        }
+      });
+      return result;
+    }
+
     function resetMetricPresentationToDefault(payload) {
       initializeMetricPresentation(payload, {forceDefault: true});
+      persistMetricPresentation();
     }
 
     function selectedMetricKeysForGroup(group) {
@@ -5646,7 +5758,7 @@
     function metricPresentationScopes(groups) {
       const scopesById = new Map();
       (groups || []).forEach(function(group) {
-        const scopeId = String(group.scopeGroupId || String(group.groupId || "").split("::")[0] || "sku");
+        const scopeId = metricPresentationScopeId(group);
         const scopeLabel = String(group.scopeGroupLabel || (scopeId === "total" ? "Итого" : (scopeId === "sku" ? "SKU" : scopeId)));
         if (!scopesById.has(scopeId)) {
           scopesById.set(scopeId, {
@@ -5657,7 +5769,13 @@
         }
         scopesById.get(scopeId).groups.push(group);
       });
-      return Array.from(scopesById.values()).sort(function(left, right) {
+      return Array.from(scopesById.values()).map(function(scope) {
+        return {
+          scopeId: scope.scopeId,
+          label: scope.label,
+          groups: sortMetricPresentationGroupsForScope(scope.groups, scope.scopeId)
+        };
+      }).sort(function(left, right) {
         const rank = {total: 0, sku: 1};
         const leftRank = Object.prototype.hasOwnProperty.call(rank, left.scopeId) ? rank[left.scopeId] : 10;
         const rightRank = Object.prototype.hasOwnProperty.call(rank, right.scopeId) ? rank[right.scopeId] : 10;
@@ -5668,8 +5786,23 @@
       });
     }
 
+    function sortMetricPresentationGroupsForScope(groups, scopeId) {
+      const order = state.metricPresentation.groupOrderByScope[scopeId] || [];
+      const orderIndex = new Map(order.map(function(groupId, index) {
+        return [groupId, index];
+      }));
+      return (groups || []).slice().sort(function(left, right) {
+        const leftOrder = orderIndex.has(left.groupId) ? orderIndex.get(left.groupId) : 999999;
+        const rightOrder = orderIndex.has(right.groupId) ? orderIndex.get(right.groupId) : 999999;
+        if (leftOrder !== rightOrder) {
+          return leftOrder - rightOrder;
+        }
+        return String(left.label || "").localeCompare(String(right.label || ""), "ru");
+      });
+    }
+
     function renderMetricConfigZone(scope, title, hiddenZone) {
-      const sections = (scope.groups || []).map(function(group) {
+      const sections = (scope.groups || []).map(function(group, groupIndex) {
         const metricKeys = hiddenZone ? hiddenMetricKeysForGroup(group) : visibleMetricKeysForGroup(group);
         if (!metricKeys.length) {
           return "";
@@ -5677,9 +5810,14 @@
         const rows = metricKeys.map(function(metricKey) {
           return renderMetricConfigRow(group, metricKey, hiddenZone);
         }).join("");
+        const isFirst = groupIndex === 0;
+        const isLast = groupIndex === (scope.groups || []).length - 1;
         return [
           '<div class="metrics-config-section" data-metrics-config-group="' + escapeHtml(group.groupId) + '" data-metrics-config-section="' + escapeHtml(group.sectionId || "") + '">',
-          '<p class="metrics-config-section-title" title="' + escapeHtml(group.sectionLabel || group.label || "") + '">' + escapeHtml(group.sectionLabel || group.label || "Без секции") + '</p>',
+          '<div class="metrics-config-section-title" title="' + escapeHtml(group.sectionLabel || group.label || "") + '">',
+          '<span class="metrics-config-section-label">' + escapeHtml(group.sectionLabel || group.label || "Без секции") + '</span>',
+          renderMetricGroupMoveControls(scope.scopeId, group.groupId, isFirst, isLast),
+          "</div>",
           rows,
           "</div>"
         ].join("");
@@ -5689,6 +5827,15 @@
         '<p class="metrics-config-zone-title"><span class="metrics-config-scope-label" title="' + escapeHtml(scope.label) + '">' + escapeHtml(scope.label) + '</span><span class="metrics-config-zone-kind">' + escapeHtml(title) + '</span></p>',
         sections || '<p class="metrics-presentation-empty">Нет метрик.</p>',
         "</section>"
+      ].join("");
+    }
+
+    function renderMetricGroupMoveControls(scopeId, groupId, isFirst, isLast) {
+      return [
+        '<span class="metrics-config-block-move" data-metric-group-move-controls="' + escapeHtml(groupId) + '">',
+        '<button class="metrics-config-button metrics-config-block-move-button" type="button" data-metric-group-action="up" data-metric-config-scope="' + escapeHtml(scopeId) + '" data-metric-config-group="' + escapeHtml(groupId) + '" title="Блок выше"' + (isFirst ? " disabled" : "") + '>↑</button>',
+        '<button class="metrics-config-button metrics-config-block-move-button" type="button" data-metric-group-action="down" data-metric-config-scope="' + escapeHtml(scopeId) + '" data-metric-config-group="' + escapeHtml(groupId) + '" title="Блок ниже"' + (isLast ? " disabled" : "") + '>↓</button>',
+        "</span>"
       ].join("");
     }
 
@@ -5725,6 +5872,19 @@
     }
 
     function handleMetricPresentationClick(event) {
+      const groupButton = event.target.closest("[data-metric-group-action]");
+      if (groupButton) {
+        event.preventDefault();
+        if (groupButton.disabled) {
+          return;
+        }
+        moveMetricGroupInPresentation(
+          String(groupButton.getAttribute("data-metric-config-scope") || ""),
+          String(groupButton.getAttribute("data-metric-config-group") || ""),
+          String(groupButton.getAttribute("data-metric-group-action") || "") === "up" ? -1 : 1
+        );
+        return;
+      }
       const button = event.target.closest("[data-metric-config-action]");
       if (!button) {
         return;
@@ -5757,6 +5917,38 @@
       } else if (action === "show") {
         showMetricImmediately(groupId, metricKey);
       }
+      persistMetricPresentation();
+      renderMetricPresentationPanel(state.composition);
+      renderTable();
+    }
+
+    function moveMetricGroupInPresentation(scopeId, groupId, delta) {
+      if (!scopeId || !groupId || !delta) {
+        return;
+      }
+      const order = (state.metricPresentation.groupOrderByScope[scopeId] || []).slice();
+      const visibleGroups = sortMetricPresentationGroupsForScope(
+        (state.metricPresentation.groups || []).filter(function(group) {
+          return metricPresentationScopeId(group) === scopeId && selectedMetricKeysForGroup(group).length > 0;
+        }),
+        scopeId
+      ).map(function(group) {
+        return group.groupId;
+      });
+      const visibleIndex = visibleGroups.indexOf(groupId);
+      const targetGroupId = visibleGroups[visibleIndex + delta];
+      if (!targetGroupId) {
+        return;
+      }
+      const leftIndex = order.indexOf(groupId);
+      const rightIndex = order.indexOf(targetGroupId);
+      if (leftIndex < 0 || rightIndex < 0) {
+        return;
+      }
+      order[leftIndex] = targetGroupId;
+      order[rightIndex] = groupId;
+      state.metricPresentation.groupOrderByScope[scopeId] = order;
+      state.metricPresentation.groupOrderCustomScopes.add(scopeId);
       persistMetricPresentation();
       renderMetricPresentationPanel(state.composition);
       renderTable();
@@ -5845,22 +6037,52 @@
       return sourceRows.slice().sort(function(left, right) {
         const leftGroup = rowMetricPresentationGroupId(left);
         const rightGroup = rowMetricPresentationGroupId(right);
-        if (
-          leftGroup === rightGroup &&
-          String(left.section_id || "") === String(right.section_id || "") &&
-          String(left.group_id || "") === String(right.group_id || "") &&
-          skuClusterIdentity(left) === skuClusterIdentity(right)
-        ) {
-          const leftOrder = metricPresentationOrder(leftGroup, String(cellValue(left, "metric_key") || ""));
-          const rightOrder = metricPresentationOrder(rightGroup, String(cellValue(right, "metric_key") || ""));
-          if (leftOrder !== rightOrder) {
-            return leftOrder - rightOrder;
+        if (rowsShareMetricPresentationCluster(left, right)) {
+          const leftGroupOrder = metricPresentationGroupOrder(leftGroup);
+          const rightGroupOrder = metricPresentationGroupOrder(rightGroup);
+          if (leftGroupOrder !== rightGroupOrder) {
+            return leftGroupOrder - rightGroupOrder;
+          }
+          if (leftGroup === rightGroup) {
+            const leftOrder = metricPresentationOrder(leftGroup, String(cellValue(left, "metric_key") || ""));
+            const rightOrder = metricPresentationOrder(rightGroup, String(cellValue(right, "metric_key") || ""));
+            if (leftOrder !== rightOrder) {
+              return leftOrder - rightOrder;
+            }
           }
         }
         return (originalIndex.get(left.row_id) || 0) - (originalIndex.get(right.row_id) || 0);
       }).filter(function(row) {
         return !isMetricHiddenByPresentation(row);
       });
+    }
+
+    function rowsShareMetricPresentationCluster(left, right) {
+      const leftKind = String((left && left.row_kind) || "").toLowerCase();
+      const rightKind = String((right && right.row_kind) || "").toLowerCase();
+      if (leftKind !== rightKind) {
+        return false;
+      }
+      if (leftKind === "total") {
+        return true;
+      }
+      if (String((left && left.group_id) || "") !== String((right && right.group_id) || "")) {
+        return false;
+      }
+      return skuClusterIdentity(left) === skuClusterIdentity(right);
+    }
+
+    function metricPresentationGroupOrder(groupId) {
+      const group = (state.metricPresentation.groups || []).find(function(item) {
+        return item.groupId === groupId;
+      });
+      const scopeId = group ? metricPresentationScopeId(group) : String(groupId || "").split("::")[0];
+      if (!state.metricPresentation.groupOrderCustomScopes.has(scopeId)) {
+        return 999999;
+      }
+      const order = state.metricPresentation.groupOrderByScope[scopeId] || [];
+      const index = order.indexOf(groupId);
+      return index === -1 ? 999999 : index;
     }
 
     function metricPresentationOrder(groupId, metricKey) {
@@ -7429,10 +7651,10 @@
       initializeMetricSelection(payload);
       renderFilterControls(payload);
       initializeColumnVisibility(payload);
-      initializeMetricPresentation(payload);
       if (!state.filters.sort) {
         state.filters.sort = (payload.filter_surface && payload.filter_surface.default_sort_value) || "";
       }
+      initializeMetricPresentation(payload);
       const meta = payload.meta || {};
       pageMetaNode.textContent = "";
       pageMetaNode.hidden = true;
@@ -7568,13 +7790,28 @@
       const renderedGroups = new Set();
       const bodyParts = [];
 
-      (payload.table_surface.groupings || []).forEach(function(grouping) {
+      const groupedBlocks = (payload.table_surface.groupings || []).map(function(grouping) {
         const groupedRows = (grouping.row_ids || [])
           .filter(function(rowId) { return visibleRowIds.has(rowId); })
           .map(function(rowId) { return rowById.get(rowId); })
           .sort(function(left, right) {
             return (orderIndex.get(left.row_id) || 0) - (orderIndex.get(right.row_id) || 0);
           });
+        return {
+          grouping: grouping,
+          groupedRows: groupedRows,
+          firstOrder: groupedRows.length ? (orderIndex.get(groupedRows[0].row_id) || 0) : 999999
+        };
+      }).sort(function(left, right) {
+        if (left.firstOrder !== right.firstOrder) {
+          return left.firstOrder - right.firstOrder;
+        }
+        return String(left.grouping.title || "").localeCompare(String(right.grouping.title || ""), "ru");
+      });
+
+      groupedBlocks.forEach(function(block) {
+        const grouping = block.grouping;
+        const groupedRows = block.groupedRows;
         if (!groupedRows.length) {
           return;
         }
