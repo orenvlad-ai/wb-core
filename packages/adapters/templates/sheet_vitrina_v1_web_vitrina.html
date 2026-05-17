@@ -2149,7 +2149,7 @@
 
     .metrics-config-row {
       display: grid;
-      grid-template-columns: 14px minmax(0, 1fr) auto;
+      grid-template-columns: 16px minmax(0, 1fr) auto;
       align-items: center;
       gap: 4px;
       min-height: 24px;
@@ -2165,21 +2165,19 @@
       background: rgba(139, 92, 246, 0.075);
     }
 
-    .metrics-config-row.is-anchor {
-      border-color: rgba(34, 197, 94, 0.38);
-      background: rgba(34, 197, 94, 0.08);
+    .metrics-config-row.is-dragging,
+    .metrics-config-paired-row.is-dragging {
+      opacity: 0.58;
     }
 
-    .metrics-config-anchor {
-      width: 13px;
-      height: 13px;
-      margin: 0;
-      accent-color: var(--accent);
+    .metrics-config-row.is-drop-before,
+    .metrics-config-paired-row.is-drop-before {
+      box-shadow: inset 0 2px 0 var(--accent-hover);
     }
 
-    .metrics-config-anchor:focus-visible {
-      outline: 2px solid var(--accent-focus);
-      outline-offset: 2px;
+    .metrics-config-row.is-drop-after,
+    .metrics-config-paired-row.is-drop-after {
+      box-shadow: inset 0 -2px 0 var(--accent-hover);
     }
 
     .metrics-config-main {
@@ -2199,20 +2197,49 @@
       color: var(--text);
     }
 
-    .metrics-config-move {
+    .metrics-config-drag-handle,
+    .metrics-config-block-drag-handle {
       display: inline-flex;
       flex: 0 0 auto;
-      gap: 2px;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid rgba(139, 92, 246, 0.24);
+      border-radius: 5px;
+      background: rgba(139, 92, 246, 0.07);
+      color: var(--muted-strong);
+      font-weight: 800;
+      line-height: 1;
+      cursor: grab;
+      user-select: none;
+      touch-action: none;
     }
 
-    .metrics-config-block-move {
-      display: inline-flex;
-      flex: 0 0 auto;
-      gap: 2px;
+    .metrics-config-drag-handle {
+      width: 16px;
+      min-height: 18px;
+      font-size: 11px;
+    }
+
+    .metrics-config-block-drag-handle {
+      width: 20px;
+      min-height: 18px;
+      margin-left: auto;
+      font-size: 11px;
+    }
+
+    .metrics-config-drag-handle:active,
+    .metrics-config-block-drag-handle:active {
+      cursor: grabbing;
+    }
+
+    .metrics-config-drag-handle:focus-visible,
+    .metrics-config-block-drag-handle:focus-visible {
+      outline: 2px solid var(--accent-focus);
+      outline-offset: 2px;
     }
 
     .metrics-config-button,
-    .metric-anchor-toggle {
+    .metric-disclosure-toggle {
       border: 1px solid var(--border);
       border-radius: 6px;
       background: var(--panel-subtle);
@@ -2229,51 +2256,51 @@
       white-space: nowrap;
     }
 
-    .metrics-config-move-button {
-      width: 21px;
-      padding: 1px 0;
-    }
-
-    .metrics-config-block-move-button {
-      width: 21px;
-      min-height: 18px;
-      padding: 0;
-      border-color: rgba(139, 92, 246, 0.24);
-      background: rgba(139, 92, 246, 0.09);
-      color: var(--muted-strong);
-    }
-
-    .metrics-config-block-move-button:disabled {
-      opacity: 0.34;
-      cursor: default;
-      border-color: var(--border);
-      background: rgba(255, 255, 255, 0.025);
-      color: var(--muted);
-    }
-
     .metrics-config-action-button {
       min-width: 52px;
     }
 
     .metrics-config-button:hover,
-    .metric-anchor-toggle:hover {
+    .metric-disclosure-toggle:hover {
       border-color: rgba(139, 92, 246, 0.44);
       background: rgba(139, 92, 246, 0.08);
     }
 
     .metrics-config-button:focus-visible,
-    .metric-anchor-toggle:focus-visible {
+    .metric-disclosure-toggle:focus-visible {
       outline: 2px solid var(--accent-focus);
       outline-offset: 2px;
     }
 
-    .metric-anchor-toggle {
-      display: inline-flex;
+    .metric-label-with-disclosure {
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr);
       align-items: center;
-      margin-left: 6px;
-      padding: 2px 6px;
-      vertical-align: middle;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .metric-label-text {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
       white-space: nowrap;
+    }
+
+    .metric-disclosure-toggle {
+      width: 18px;
+      height: 18px;
+      min-width: 18px;
+      padding: 0;
+      font-size: 11px;
+      line-height: 1;
+      color: var(--muted-strong);
+    }
+
+    .metric-disclosure-toggle[aria-expanded="true"] {
+      color: var(--text);
+      border-color: rgba(139, 92, 246, 0.44);
+      background: rgba(139, 92, 246, 0.1);
     }
 
     .column-checkbox-meta {
@@ -4240,7 +4267,6 @@
         groupOrderCustomScopes: new Set(),
         orderByGroup: {},
         hiddenByGroup: {},
-        anchorByGroup: {},
         expandedGroupIds: new Set()
       },
       sellerSession: {
@@ -4410,6 +4436,7 @@
       sessionHighlights: {}
     };
     let sellerRecoveryPollHandle = null;
+    let metricPresentationDragState = null;
 
     if (openOperatorLink) {
       openOperatorLink.href = WEB_VITRINA_CONFIG.operator_path;
@@ -4431,7 +4458,10 @@
     });
     if (metricsPresentationBodyNode) {
       metricsPresentationBodyNode.addEventListener("click", handleMetricPresentationClick);
-      metricsPresentationBodyNode.addEventListener("change", handleMetricPresentationChange);
+      metricsPresentationBodyNode.addEventListener("dragstart", handleMetricPresentationDragStart);
+      metricsPresentationBodyNode.addEventListener("dragover", handleMetricPresentationDragOver);
+      metricsPresentationBodyNode.addEventListener("drop", handleMetricPresentationDrop);
+      metricsPresentationBodyNode.addEventListener("dragend", handleMetricPresentationDragEnd);
     }
     if (tableBodyNode) {
       tableBodyNode.addEventListener("click", function(event) {
@@ -5644,7 +5674,6 @@
       );
       state.metricPresentation.orderByGroup = {};
       state.metricPresentation.hiddenByGroup = {};
-      state.metricPresentation.anchorByGroup = {};
       state.metricPresentation.expandedGroupIds = new Set();
       groups.forEach(function(group) {
         const groupId = group.groupId;
@@ -5659,14 +5688,8 @@
             hidden.add(normalized);
           }
         });
-        let anchor = String(savedGroup.anchor || "");
-        if (!allowedSet.has(anchor)) {
-          anchor = defaultOrder[0] || "";
-        }
-        hidden.delete(anchor);
         state.metricPresentation.orderByGroup[groupId] = order;
         state.metricPresentation.hiddenByGroup[groupId] = hidden;
-        state.metricPresentation.anchorByGroup[groupId] = anchor;
         if (savedGroup.expanded === true) {
           state.metricPresentation.expandedGroupIds.add(groupId);
         }
@@ -5690,7 +5713,6 @@
         groups[groupId] = {
           order: (state.metricPresentation.orderByGroup[groupId] || group.metricKeys || []).slice(),
           hidden: Array.from(state.metricPresentation.hiddenByGroup[groupId] || []),
-          anchor: String(state.metricPresentation.anchorByGroup[groupId] || ""),
           expanded: state.metricPresentation.expandedGroupIds.has(groupId)
         };
       });
@@ -5741,27 +5763,21 @@
 
     function visibleMetricKeysForGroup(group) {
       const hidden = state.metricPresentation.hiddenByGroup[group.groupId] || new Set();
-      const anchor = effectiveMetricPresentationAnchor(group);
       return selectedMetricKeysForGroup(group).filter(function(metricKey) {
-        return metricKey === anchor || !hidden.has(metricKey);
+        return !hidden.has(metricKey);
       });
     }
 
     function hiddenMetricKeysForGroup(group) {
       const hidden = state.metricPresentation.hiddenByGroup[group.groupId] || new Set();
-      const anchor = effectiveMetricPresentationAnchor(group);
       return selectedMetricKeysForGroup(group).filter(function(metricKey) {
-        return metricKey !== anchor && hidden.has(metricKey);
+        return hidden.has(metricKey);
       });
     }
 
     function effectiveMetricPresentationAnchor(group) {
-      const selected = selectedMetricKeysForGroup(group);
-      const savedAnchor = String(state.metricPresentation.anchorByGroup[group.groupId] || "");
-      if (selected.indexOf(savedAnchor) !== -1) {
-        return savedAnchor;
-      }
-      return selected[0] || "";
+      const visible = visibleMetricKeysForGroup(group);
+      return visible.length ? visible[visible.length - 1] : "";
     }
 
     function renderMetricPresentationPanel(payload) {
@@ -5880,7 +5896,7 @@
         '<div class="metrics-config-section" data-metrics-config-group="' + escapeHtml(group.groupId) + '" data-metrics-config-section="' + escapeHtml(group.sectionId || "") + '">',
         '<div class="metrics-config-section-title" title="' + escapeHtml(group.sectionLabel || group.label || "") + '">',
         '<span class="metrics-config-section-label">' + escapeHtml(group.sectionLabel || group.label || "Без секции") + '</span>',
-        hiddenZone ? "" : renderMetricGroupMoveControls(scope.scopeId, group.groupId, isFirst, isLast),
+        hiddenZone ? "" : renderMetricGroupDragHandle(scope.scopeId, group.groupId),
         "</div>",
         rows,
         "</div>",
@@ -5888,11 +5904,10 @@
       ].join("");
     }
 
-    function renderMetricGroupMoveControls(scopeId, groupId, isFirst, isLast) {
+    function renderMetricGroupDragHandle(scopeId, groupId) {
       return [
-        '<span class="metrics-config-block-move" data-metric-group-move-controls="' + escapeHtml(groupId) + '">',
-        '<button class="metrics-config-button metrics-config-block-move-button" type="button" data-metric-group-action="up" data-metric-config-scope="' + escapeHtml(scopeId) + '" data-metric-config-group="' + escapeHtml(groupId) + '" title="Блок выше"' + (isFirst ? " disabled" : "") + '>↑</button>',
-        '<button class="metrics-config-button metrics-config-block-move-button" type="button" data-metric-group-action="down" data-metric-config-scope="' + escapeHtml(scopeId) + '" data-metric-config-group="' + escapeHtml(groupId) + '" title="Блок ниже"' + (isLast ? " disabled" : "") + '>↓</button>',
+        '<span class="metrics-config-block-drag-handle" draggable="true" role="button" tabindex="0" aria-label="Перетащить блок метрик" data-metric-group-drag-handle data-metric-config-scope="' + escapeHtml(scopeId) + '" data-metric-config-group="' + escapeHtml(groupId) + '" title="Перетащить блок">',
+        "⋮⋮",
         "</span>"
       ].join("");
     }
@@ -5907,23 +5922,14 @@
 
     function renderMetricConfigRow(group, metricKey, hiddenZone) {
       const option = state.metricPresentation.optionByKey.get(metricKey) || {label: metricKey};
-      const anchor = effectiveMetricPresentationAnchor(group);
-      const isAnchor = metricKey === anchor;
       const label = String(option.label || metricKey);
       const actionLabel = compactMetricActionLabel(hiddenZone);
       const actionTitle = metricActionTitle(hiddenZone);
-      const moveControls = hiddenZone ? "" : [
-        '<span class="metrics-config-move">',
-        '<button class="metrics-config-button metrics-config-move-button" type="button" data-metric-config-action="up" data-metric-config-group="' + escapeHtml(group.groupId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '" title="Выше">↑</button>',
-        '<button class="metrics-config-button metrics-config-move-button" type="button" data-metric-config-action="down" data-metric-config-group="' + escapeHtml(group.groupId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '" title="Ниже">↓</button>',
-        "</span>"
-      ].join("");
       return [
-        '<div class="metrics-config-row' + (isAnchor ? " is-anchor" : "") + '" data-metric-config-row="' + escapeHtml(metricKey) + '" data-metric-config-group-id="' + escapeHtml(group.groupId) + '" data-metric-config-zone="' + (hiddenZone ? "hidden" : "visible") + '">',
-        '<input class="metrics-config-anchor" type="radio" name="metric-anchor-' + escapeHtml(group.groupId) + '" data-metric-anchor-group="' + escapeHtml(group.groupId) + '" value="' + escapeHtml(metricKey) + '"' + (isAnchor ? " checked" : "") + ' title="Главная метрика">',
+        '<div class="metrics-config-row" data-metric-config-row="' + escapeHtml(metricKey) + '" data-metric-config-group-id="' + escapeHtml(group.groupId) + '" data-metric-config-zone="' + (hiddenZone ? "hidden" : "visible") + '">',
+        '<span class="metrics-config-drag-handle" draggable="true" role="button" tabindex="0" aria-label="Перетащить метрику" data-metric-drag-handle data-metric-config-group="' + escapeHtml(group.groupId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '" data-metric-config-zone="' + (hiddenZone ? "hidden" : "visible") + '" title="Перетащить метрику">⋮⋮</span>',
         '<span class="metrics-config-main">',
         '<span class="metrics-config-label" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</span>',
-        moveControls,
         "</span>",
         '<button class="metrics-config-button metrics-config-action-button" type="button" data-metric-config-action="' + (hiddenZone ? "show" : "hide") + '" data-metric-config-group="' + escapeHtml(group.groupId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '" title="' + escapeHtml(actionTitle) + '">' +
           escapeHtml(actionLabel) +
@@ -5933,19 +5939,6 @@
     }
 
     function handleMetricPresentationClick(event) {
-      const groupButton = event.target.closest("[data-metric-group-action]");
-      if (groupButton) {
-        event.preventDefault();
-        if (groupButton.disabled) {
-          return;
-        }
-        moveMetricGroupInPresentation(
-          String(groupButton.getAttribute("data-metric-config-scope") || ""),
-          String(groupButton.getAttribute("data-metric-config-group") || ""),
-          String(groupButton.getAttribute("data-metric-group-action") || "") === "up" ? -1 : 1
-        );
-        return;
-      }
       const button = event.target.closest("[data-metric-config-action]");
       if (!button) {
         return;
@@ -5957,23 +5950,160 @@
       updateMetricPresentationAction(action, groupId, metricKey);
     }
 
-    function handleMetricPresentationChange(event) {
-      const node = event.target.closest("[data-metric-anchor-group]");
-      if (!node) {
+    function handleMetricPresentationDragStart(event) {
+      const metricHandle = event.target.closest("[data-metric-drag-handle]");
+      if (metricHandle) {
+        const row = metricHandle.closest("[data-metric-config-row]");
+        if (!row) {
+          return;
+        }
+        metricPresentationDragState = {
+          type: "metric",
+          groupId: String(row.getAttribute("data-metric-config-group-id") || ""),
+          metricKey: String(row.getAttribute("data-metric-config-row") || ""),
+          zone: String(row.getAttribute("data-metric-config-zone") || "")
+        };
+        row.classList.add("is-dragging");
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", metricPresentationDragState.metricKey);
+        }
         return;
       }
-      const groupId = String(node.getAttribute("data-metric-anchor-group") || "");
-      const metricKey = String(node.value || "");
-      setMetricPresentationAnchor(groupId, metricKey);
+      const groupHandle = event.target.closest("[data-metric-group-drag-handle]");
+      if (groupHandle) {
+        const row = groupHandle.closest("[data-metrics-config-paired-row]");
+        if (!row) {
+          return;
+        }
+        metricPresentationDragState = {
+          type: "group",
+          scopeId: String(row.getAttribute("data-metrics-config-scope") || ""),
+          groupId: String(row.getAttribute("data-metrics-config-group") || "")
+        };
+        row.classList.add("is-dragging");
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", metricPresentationDragState.groupId);
+        }
+      }
+    }
+
+    function handleMetricPresentationDragOver(event) {
+      const target = metricPresentationDropTarget(event);
+      clearMetricPresentationDropMarkers();
+      if (!target) {
+        return;
+      }
+      event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = "move";
+      }
+      target.node.classList.add(target.placement === "before" ? "is-drop-before" : "is-drop-after");
+    }
+
+    function handleMetricPresentationDrop(event) {
+      const target = metricPresentationDropTarget(event);
+      clearMetricPresentationDropMarkers();
+      if (!target) {
+        metricPresentationDragState = null;
+        return;
+      }
+      event.preventDefault();
+      if (metricPresentationDragState.type === "metric") {
+        moveMetricInPresentationByDrag(
+          metricPresentationDragState.groupId,
+          metricPresentationDragState.metricKey,
+          target.metricKey,
+          metricPresentationDragState.zone,
+          target.placement
+        );
+      } else if (metricPresentationDragState.type === "group") {
+        moveMetricGroupInPresentationByDrag(
+          metricPresentationDragState.scopeId,
+          metricPresentationDragState.groupId,
+          target.groupId,
+          target.placement
+        );
+      }
+      metricPresentationDragState = null;
+    }
+
+    function handleMetricPresentationDragEnd() {
+      clearMetricPresentationDropMarkers();
+      metricPresentationDragState = null;
+    }
+
+    function clearMetricPresentationDropMarkers() {
+      if (!metricsPresentationBodyNode) {
+        return;
+      }
+      metricsPresentationBodyNode.querySelectorAll(".is-dragging, .is-drop-before, .is-drop-after").forEach(function(node) {
+        node.classList.remove("is-dragging", "is-drop-before", "is-drop-after");
+      });
+    }
+
+    function metricPresentationDropTarget(event) {
+      if (!metricPresentationDragState) {
+        return null;
+      }
+      if (metricPresentationDragState.type === "metric") {
+        const row = event.target.closest("[data-metric-config-row]");
+        if (!row) {
+          return null;
+        }
+        const groupId = String(row.getAttribute("data-metric-config-group-id") || "");
+        const metricKey = String(row.getAttribute("data-metric-config-row") || "");
+        const zone = String(row.getAttribute("data-metric-config-zone") || "");
+        if (
+          !metricKey ||
+          metricKey === metricPresentationDragState.metricKey ||
+          groupId !== metricPresentationDragState.groupId ||
+          zone !== metricPresentationDragState.zone
+        ) {
+          return null;
+        }
+        const rect = row.getBoundingClientRect();
+        return {
+          type: "metric",
+          node: row,
+          groupId: groupId,
+          metricKey: metricKey,
+          zone: zone,
+          placement: event.clientY < rect.top + rect.height / 2 ? "before" : "after"
+        };
+      }
+      if (metricPresentationDragState.type === "group") {
+        const row = event.target.closest("[data-metrics-config-paired-row]");
+        if (!row) {
+          return null;
+        }
+        const scopeId = String(row.getAttribute("data-metrics-config-scope") || "");
+        const groupId = String(row.getAttribute("data-metrics-config-group") || "");
+        if (
+          !groupId ||
+          groupId === metricPresentationDragState.groupId ||
+          scopeId !== metricPresentationDragState.scopeId
+        ) {
+          return null;
+        }
+        const rect = row.getBoundingClientRect();
+        return {
+          type: "group",
+          node: row,
+          scopeId: scopeId,
+          groupId: groupId,
+          placement: event.clientY < rect.top + rect.height / 2 ? "before" : "after"
+        };
+      }
+      return null;
     }
 
     function updateMetricPresentationAction(action, groupId, metricKey) {
       if (!groupId || !metricKey) {
         return;
       }
-      if (action === "up" || action === "down") {
-        moveMetricInPresentation(groupId, metricKey, action === "up" ? -1 : 1);
-      } else if (action === "hide") {
+      if (action === "hide") {
         hideMetricUnderAnchor(groupId, metricKey);
       } else if (action === "show") {
         showMetricImmediately(groupId, metricKey);
@@ -5983,31 +6113,25 @@
       renderTable();
     }
 
-    function moveMetricGroupInPresentation(scopeId, groupId, delta) {
-      if (!scopeId || !groupId || !delta) {
+    function moveMetricGroupInPresentationByDrag(scopeId, groupId, targetGroupId, placement) {
+      if (!scopeId || !groupId || !targetGroupId || groupId === targetGroupId) {
         return;
       }
       const order = (state.metricPresentation.groupOrderByScope[scopeId] || []).slice();
-      const visibleGroups = sortMetricPresentationGroupsForScope(
-        (state.metricPresentation.groups || []).filter(function(group) {
-          return metricPresentationScopeId(group) === scopeId && selectedMetricKeysForGroup(group).length > 0;
-        }),
-        scopeId
-      ).map(function(group) {
-        return group.groupId;
-      });
-      const visibleIndex = visibleGroups.indexOf(groupId);
-      const targetGroupId = visibleGroups[visibleIndex + delta];
-      if (!targetGroupId) {
+      const sourceIndex = order.indexOf(groupId);
+      const targetIndex = order.indexOf(targetGroupId);
+      if (sourceIndex < 0 || targetIndex < 0) {
         return;
       }
-      const leftIndex = order.indexOf(groupId);
-      const rightIndex = order.indexOf(targetGroupId);
-      if (leftIndex < 0 || rightIndex < 0) {
+      order.splice(sourceIndex, 1);
+      let insertIndex = order.indexOf(targetGroupId);
+      if (insertIndex < 0) {
         return;
       }
-      order[leftIndex] = targetGroupId;
-      order[rightIndex] = groupId;
+      if (placement === "after") {
+        insertIndex += 1;
+      }
+      order.splice(insertIndex, 0, groupId);
       state.metricPresentation.groupOrderByScope[scopeId] = order;
       state.metricPresentation.groupOrderCustomScopes.add(scopeId);
       persistMetricPresentation();
@@ -6015,42 +6139,50 @@
       renderTable();
     }
 
-    function moveMetricInPresentation(groupId, metricKey, delta) {
+    function moveMetricInPresentationByDrag(groupId, metricKey, targetMetricKey, zone, placement) {
+      if (!groupId || !metricKey || !targetMetricKey || metricKey === targetMetricKey) {
+        return;
+      }
+      const group = (state.metricPresentation.groups || []).find(function(item) {
+        return item.groupId === groupId;
+      });
+      if (!group) {
+        return;
+      }
       const order = (state.metricPresentation.orderByGroup[groupId] || []).slice();
-      const selected = selectedMetricKeysForGroup({groupId: groupId, metricKeys: order});
-      const selectedIndex = selected.indexOf(metricKey);
-      const targetMetric = selected[selectedIndex + delta];
-      if (!targetMetric) {
+      const zoneKeys = (zone === "hidden" ? hiddenMetricKeysForGroup(group) : visibleMetricKeysForGroup(group)).slice();
+      if (zoneKeys.indexOf(metricKey) === -1 || zoneKeys.indexOf(targetMetricKey) === -1) {
         return;
       }
-      const leftIndex = order.indexOf(metricKey);
-      const rightIndex = order.indexOf(targetMetric);
-      if (leftIndex < 0 || rightIndex < 0) {
+      const reorderedZone = zoneKeys.slice();
+      const sourceIndex = reorderedZone.indexOf(metricKey);
+      reorderedZone.splice(sourceIndex, 1);
+      let insertIndex = reorderedZone.indexOf(targetMetricKey);
+      if (insertIndex < 0) {
         return;
       }
-      order[leftIndex] = targetMetric;
-      order[rightIndex] = metricKey;
-      state.metricPresentation.orderByGroup[groupId] = order;
+      if (placement === "after") {
+        insertIndex += 1;
+      }
+      reorderedZone.splice(insertIndex, 0, metricKey);
+      const zoneSet = new Set(zoneKeys);
+      let zoneIndex = 0;
+      state.metricPresentation.orderByGroup[groupId] = order.map(function(candidate) {
+        if (!zoneSet.has(candidate)) {
+          return candidate;
+        }
+        const replacement = reorderedZone[zoneIndex];
+        zoneIndex += 1;
+        return replacement;
+      });
+      persistMetricPresentation();
+      renderMetricPresentationPanel(state.composition);
+      renderTable();
     }
 
     function hideMetricUnderAnchor(groupId, metricKey) {
-      const order = state.metricPresentation.orderByGroup[groupId] || [];
-      if (order.length <= 1) {
-        return;
-      }
-      let anchor = state.metricPresentation.anchorByGroup[groupId] || "";
-      if (anchor === metricKey) {
-        anchor = order.find(function(candidate) {
-          return candidate !== metricKey && (state.filters.selectedMetricKeys || new Set()).has(candidate);
-        }) || "";
-        state.metricPresentation.anchorByGroup[groupId] = anchor;
-      }
-      if (!anchor) {
-        return;
-      }
       const hidden = new Set(state.metricPresentation.hiddenByGroup[groupId] || []);
       hidden.add(metricKey);
-      hidden.delete(anchor);
       state.metricPresentation.hiddenByGroup[groupId] = hidden;
       state.metricPresentation.expandedGroupIds.delete(groupId);
     }
@@ -6059,23 +6191,6 @@
       const hidden = new Set(state.metricPresentation.hiddenByGroup[groupId] || []);
       hidden.delete(metricKey);
       state.metricPresentation.hiddenByGroup[groupId] = hidden;
-    }
-
-    function setMetricPresentationAnchor(groupId, metricKey) {
-      if (!groupId || !metricKey) {
-        return;
-      }
-      const order = state.metricPresentation.orderByGroup[groupId] || [];
-      if (order.indexOf(metricKey) === -1) {
-        return;
-      }
-      state.metricPresentation.anchorByGroup[groupId] = metricKey;
-      const hidden = new Set(state.metricPresentation.hiddenByGroup[groupId] || []);
-      hidden.delete(metricKey);
-      state.metricPresentation.hiddenByGroup[groupId] = hidden;
-      persistMetricPresentation();
-      renderMetricPresentationPanel(state.composition);
-      renderTable();
     }
 
     function toggleMetricPresentationGroup(groupId) {
@@ -6105,8 +6220,8 @@
             return leftGroupOrder - rightGroupOrder;
           }
           if (leftGroup === rightGroup) {
-            const leftOrder = metricPresentationOrder(leftGroup, String(cellValue(left, "metric_key") || ""));
-            const rightOrder = metricPresentationOrder(rightGroup, String(cellValue(right, "metric_key") || ""));
+            const leftOrder = metricPresentationTableOrder(leftGroup, String(cellValue(left, "metric_key") || ""));
+            const rightOrder = metricPresentationTableOrder(rightGroup, String(cellValue(right, "metric_key") || ""));
             if (leftOrder !== rightOrder) {
               return leftOrder - rightOrder;
             }
@@ -6152,20 +6267,43 @@
       return index === -1 ? 999999 : index;
     }
 
+    function metricPresentationTableOrder(groupId, metricKey) {
+      const group = (state.metricPresentation.groups || []).find(function(item) {
+        return item.groupId === groupId;
+      });
+      if (!group) {
+        return metricPresentationOrder(groupId, metricKey);
+      }
+      const visible = visibleMetricKeysForGroup(group);
+      const visibleIndex = visible.indexOf(metricKey);
+      if (visibleIndex !== -1) {
+        return visibleIndex;
+      }
+      const hidden = hiddenMetricKeysForGroup(group);
+      const hiddenIndex = hidden.indexOf(metricKey);
+      if (hiddenIndex !== -1) {
+        return visible.length + hiddenIndex;
+      }
+      return metricPresentationOrder(groupId, metricKey);
+    }
+
     function isMetricHiddenByPresentation(row) {
       const groupId = rowMetricPresentationGroupId(row);
-      if (state.metricPresentation.expandedGroupIds.has(groupId)) {
-        return false;
-      }
       const metricKey = String(cellValue(row, "metric_key") || "");
       const group = (state.metricPresentation.groups || []).find(function(item) {
         return item.groupId === groupId;
       }) || {groupId: groupId, metricKeys: state.metricPresentation.orderByGroup[groupId] || []};
       const anchor = effectiveMetricPresentationAnchor(group);
+      const hidden = state.metricPresentation.hiddenByGroup[groupId] || new Set();
+      if (!anchor && hidden.has(metricKey)) {
+        return true;
+      }
+      if (state.metricPresentation.expandedGroupIds.has(groupId)) {
+        return false;
+      }
       if (metricKey === anchor) {
         return false;
       }
-      const hidden = state.metricPresentation.hiddenByGroup[groupId] || new Set();
       return hidden.has(metricKey);
     }
 
@@ -8047,7 +8185,7 @@
 
     function formatCellContent(column, row, cell) {
       if (column.id === "metric_label") {
-        const content = escapeHtml(formatCellValue(cell));
+        const content = '<span class="metric-label-text">' + escapeHtml(formatCellValue(cell)) + '</span>';
         const groupId = rowMetricPresentationGroupId(row);
         const group = (state.metricPresentation.groups || []).find(function(item) {
           return item.groupId === groupId;
@@ -8058,11 +8196,13 @@
         if (hiddenCount > 0 && metricKey === anchor) {
           const expanded = state.metricPresentation.expandedGroupIds.has(groupId);
           return [
+            '<span class="metric-label-with-disclosure">',
+            '<button class="metric-disclosure-toggle" type="button" data-metric-group-toggle="' + escapeHtml(groupId) + '" aria-expanded="' + (expanded ? "true" : "false") + '" aria-label="' + escapeHtml((expanded ? "Скрыть" : "Показать") + " скрытые метрики: " + hiddenCount) + '" title="' + escapeHtml((expanded ? "Скрыть" : "Показать") + " скрытые метрики: " + hiddenCount) + '">',
+            expanded ? "▾" : "▸",
+            "</button>",
             content,
-            '<button class="metric-anchor-toggle" type="button" data-metric-group-toggle="' + escapeHtml(groupId) + '">',
-            expanded ? "скрыть" : "ещё " + hiddenCount,
-            "</button>"
-          ].join(" ");
+            "</span>"
+          ].join("");
         }
         return content;
       }
