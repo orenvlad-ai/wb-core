@@ -448,6 +448,12 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - `avg_cost_price_rub` = weighted average по enabled SKU rows
   - `total_proxy_profit_rub` = canonical TOTAL key для operator-facing строки `Прибыль прокси всего, ₽`
   - `proxy_margin_pct_total` = canonical TOTAL key для operator-facing строки `Прокси маржинальность всего, %`
+- Current 1C-based profitability keys are runtime-extended from repo code, not guessed from legacy bootstrap:
+  - `onec_WB_STOCK_unit_cost_rub` = SKU-level 1C WB unit cost source metric
+  - `onec_total_cost_rub` / `total_onec_total_cost_rub` = SKU/TOTAL 1C товарный капитал source metrics
+  - `proxy_profit_2_rub` / `total_proxy_profit_2_rub` = proxy-profit formula with only `cost_price_rub` replaced by `onec_WB_STOCK_unit_cost_rub`
+  - `proxy_margin_2_pct` / `proxy_margin_2_pct_total` = SKU `proxy_profit_2_rub / orderSum`, TOTAL `SUM(proxy_profit_2_rub) / SUM(orderSum)`
+  - `inventory_capital_return_pct` / `inventory_capital_return_pct_total` = SKU `proxy_profit_2_rub / onec_total_cost_rub`, TOTAL `SUM(proxy_profit_2_rub) / SUM(onec_total_cost_rub)`
 - `total_proxy_profit_rub` не invent-ится как новый surface key: используется уже существующий canonical uploaded metric key из current bundle.
 - `Прибыль прокси всего` из operator wording фиксируется на canonical row `total_proxy_profit_rub` с текущим repo label `Прибыль прокси всего, ₽`.
 
@@ -491,6 +497,9 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - SKU `proxy_profit_rub` / `profit_proxy_rub` uses existing canonical formula `{orderSum}*0,5096-{orderCount}*0,91*{cost_price_rub}-{ads_sum}`;
   - TOTAL `total_proxy_profit_rub` = sum of SKU `proxy_profit_rub`;
   - TOTAL `proxy_margin_pct_total` = `total_proxy_profit_rub / total_orderSum`, если denominator допустим.
+  - 1C `proxy_profit_2_rub` uses the same coefficients and dependencies as `proxy_profit_rub`, replacing only `cost_price_rub` with `onec_WB_STOCK_unit_cost_rub`;
+  - 1C percent totals `proxy_margin_2_pct_total` and `inventory_capital_return_pct_total` are ratio-of-aggregates, not averages of SKU rows;
+  - zero denominators for the new percent metrics return `0.0` when numerator data is present, matching existing proxy margin behavior.
 - Пустой или неполный `COST_PRICE` dataset не валит refresh/load:
   - cost-based rows остаются blank;
   - `STATUS.cost_price[*]` объясняет missing/incomplete coverage;

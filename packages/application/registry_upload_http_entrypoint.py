@@ -41,10 +41,19 @@ from packages.application.sheet_vitrina_v1_auto_refresh import (
 from packages.application.sheet_vitrina_v1_stock_report import SheetVitrinaV1StockReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import list_active_sku_options
 from packages.application.sheet_vitrina_v1_onec_stocks import (
+    ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
+    ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
+    ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY,
+    ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY,
+    ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY,
     ONEC_STOCKS_METRIC_KEYS,
     ONEC_STOCKS_SOURCE_GROUP_ID,
     ONEC_STOCKS_SOURCE_GROUP_LABEL_RU,
     ONEC_STOCKS_SOURCE_KEY,
+    ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY,
+    ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY,
+    ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY,
+    ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY,
     extend_metrics_with_onec_stock_metrics,
 )
 from packages.application.sheet_vitrina_v1_temporal_policy import (
@@ -3888,6 +3897,13 @@ def _merge_source_group_ready_snapshot(
             selected_dates=[selected_date],
             updated_row_ids=merged_row_ids,
         )
+    if source_group_id == ONEC_STOCKS_SOURCE_GROUP_ID and selected_date:
+        _recompute_onec_derived_rows(
+            rows=merged_data_rows,
+            header=previous_data.header,
+            selected_dates=[selected_date],
+            updated_row_ids=merged_row_ids,
+        )
 
     selected_status_rows = [
         list(row)
@@ -4711,6 +4727,109 @@ def _compute_proxy_profit_for_scope(
     if None in {order_sum, order_count, cost_price, ads_sum}:
         return None
     return float(order_sum) * 0.5096 - float(order_count) * 0.91 * float(cost_price) - float(ads_sum)
+
+
+def _recompute_onec_derived_rows(
+    *,
+    rows: list[list[Any]],
+    header: Iterable[Any],
+    selected_dates: Iterable[str],
+    updated_row_ids: set[str],
+) -> None:
+    row_by_id = {_row_id(row): row for row in rows if _row_id(row)}
+    date_indexes = [
+        index
+        for selected_date in selected_dates
+        for index in _sheet_header_indexes(header, selected_date)
+    ]
+    if not date_indexes:
+        return
+    for date_index in date_indexes:
+        for row_id, row in sorted(row_by_id.items()):
+            if (
+                row_id not in updated_row_ids
+                or _metric_key_from_row_id(row_id) != ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY
+            ):
+                continue
+            scope = _row_scope_from_row_id(row_id)
+            value = _compute_proxy_profit_2_for_scope(row_by_id, scope=scope, date_index=date_index)
+            _set_row_value(row, date_index, _to_sheet_cell_number(value))
+        for row_id, row in sorted(row_by_id.items()):
+            if (
+                row_id not in updated_row_ids
+                or _metric_key_from_row_id(row_id) != ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY
+            ):
+                continue
+            value = _sum_sku_metric_values(
+                row_by_id,
+                metric_key=ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY,
+                date_index=date_index,
+            )
+            _set_row_value(row, date_index, _to_sheet_cell_number(value))
+        for row_id, row in sorted(row_by_id.items()):
+            metric_key = _metric_key_from_row_id(row_id)
+            if row_id not in updated_row_ids or metric_key not in {
+                ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY,
+                ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY,
+                ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
+                ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
+            }:
+                continue
+            scope = _row_scope_from_row_id(row_id)
+            if metric_key == ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY:
+                numerator_metric = ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY
+                denominator_metric = "orderSum"
+            elif metric_key == ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY:
+                numerator_metric = ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY
+                denominator_metric = "total_orderSum"
+            elif metric_key == ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY:
+                numerator_metric = ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY
+                denominator_metric = ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY
+            else:
+                numerator_metric = ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY
+                denominator_metric = ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY
+            numerator = _row_metric_number(
+                row_by_id,
+                scope=scope,
+                metric_key=numerator_metric,
+                date_index=date_index,
+            )
+            denominator = _row_metric_number(
+                row_by_id,
+                scope=scope,
+                metric_key=denominator_metric,
+                date_index=date_index,
+            )
+            value = _divide_cell_numbers_or_zero(numerator, denominator)
+            _set_row_value(row, date_index, _to_sheet_cell_number(value))
+
+
+def _compute_proxy_profit_2_for_scope(
+    row_by_id: Mapping[str, list[Any]],
+    *,
+    scope: str,
+    date_index: int,
+) -> float | None:
+    order_sum = _row_metric_number(row_by_id, scope=scope, metric_key="orderSum", date_index=date_index)
+    order_count = _row_metric_number(row_by_id, scope=scope, metric_key="orderCount", date_index=date_index)
+    onec_wb_unit_cost = _row_metric_number(
+        row_by_id,
+        scope=scope,
+        metric_key=ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY,
+        date_index=date_index,
+    )
+    ads_sum = _row_metric_number(row_by_id, scope=scope, metric_key="ads_sum", date_index=date_index)
+    if None in {order_sum, order_count, onec_wb_unit_cost, ads_sum}:
+        return None
+    return float(order_sum) * 0.5096 - float(order_count) * 0.91 * float(onec_wb_unit_cost) - float(ads_sum)
+
+
+def _divide_cell_numbers_or_zero(numerator: float | None, denominator: float | None) -> float | None:
+    if numerator is None or denominator is None:
+        return None
+    if float(denominator) == 0.0:
+        return 0.0
+    return float(numerator) / float(denominator)
 
 
 def _sum_sku_metric_values(

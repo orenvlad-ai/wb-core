@@ -40,7 +40,16 @@ from packages.application.sf_period_block import SfPeriodBlock
 from packages.application.sheet_vitrina_v1 import build_sheet_write_plan
 from packages.application.sheet_vitrina_v1_onec_stocks import (
     DEFAULT_ONEC_STAGE_MAPPING,
+    ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
+    ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
+    ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY,
+    ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY,
+    ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY,
     ONEC_STOCKS_SOURCE_KEY,
+    ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY,
+    ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY,
+    ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY,
+    ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY,
     build_onec_stocks_lookup,
     extend_metrics_with_onec_stock_metrics,
     is_onec_stock_sku_metric_key,
@@ -2433,6 +2442,22 @@ class _MetricEvaluator:
         if metric.calc_type == "metric":
             if metric.metric_key == "fin_storage_fee_total":
                 value = self._slot_lookups(temporal_slot).fin_storage_fee_total
+            elif metric.metric_key == ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY:
+                value = self._aggregate_sum(
+                    ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY,
+                    self.enabled_config,
+                    temporal_slot,
+                )
+            elif metric.metric_key == ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY:
+                value = _divide_or_zero(
+                    self.resolve_total(ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY, temporal_slot),
+                    self.resolve_total("total_orderSum", temporal_slot),
+                )
+            elif metric.metric_key == ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY:
+                value = _divide_or_zero(
+                    self.resolve_total(ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY, temporal_slot),
+                    self.resolve_total(ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY, temporal_slot),
+                )
             elif onec_weighted_unit_cost_components(metric.metric_key) is not None:
                 value = self._aggregate_onec_weighted_unit_cost(metric.metric_key, temporal_slot)
             elif metric.metric_key.startswith(AGGREGATE_SUM_PREFIX):
@@ -2549,6 +2574,32 @@ class _MetricEvaluator:
             if None in {order_sum, order_count, cost_price, ads_sum}:
                 return None
             return float(order_sum) * 0.5096 - float(order_count) * 0.91 * float(cost_price) - float(ads_sum)
+        if metric_key == ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY:
+            order_sum = self.resolve_sku("orderSum", nm_id, temporal_slot)
+            order_count = self.resolve_sku("orderCount", nm_id, temporal_slot)
+            onec_wb_unit_cost = self.resolve_sku(
+                ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY,
+                nm_id,
+                temporal_slot,
+            )
+            ads_sum = self.resolve_sku("ads_sum", nm_id, temporal_slot)
+            if None in {order_sum, order_count, onec_wb_unit_cost, ads_sum}:
+                return None
+            return (
+                float(order_sum) * 0.5096
+                - float(order_count) * 0.91 * float(onec_wb_unit_cost)
+                - float(ads_sum)
+            )
+        if metric_key == ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY:
+            return _divide_or_zero(
+                self.resolve_sku(ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY, nm_id, temporal_slot),
+                self.resolve_sku("orderSum", nm_id, temporal_slot),
+            )
+        if metric_key == ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY:
+            return _divide_or_zero(
+                self.resolve_sku(ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY, nm_id, temporal_slot),
+                self.resolve_sku(ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY, nm_id, temporal_slot),
+            )
         if metric_key == "inventory_value_retail_rub":
             stock_total = self.resolve_sku("stock_total", nm_id, temporal_slot)
             price_seller_discounted = self.resolve_sku("price_seller_discounted", nm_id, temporal_slot)
@@ -3613,6 +3664,14 @@ def _split_ratio(value: str) -> tuple[str, str]:
         raise ValueError(f"ratio calc_ref must contain numerator/denominator: {value}")
     numerator, denominator = value.split("/", 1)
     return numerator.strip(), denominator.strip()
+
+
+def _divide_or_zero(numerator: float | None, denominator: float | None) -> float | None:
+    if numerator is None or denominator is None:
+        return None
+    if float(denominator) == 0.0:
+        return 0.0
+    return float(numerator) / float(denominator)
 
 
 def _evaluate_formula(expression: str, resolver: Callable[[str], float | None]) -> float | None:

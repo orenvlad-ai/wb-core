@@ -20,7 +20,17 @@ from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
     RegistryUploadHttpEntrypoint,
 )
 from packages.application.sheet_vitrina_v1_onec_stocks import (  # noqa: E402
+    ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
+    ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
+    ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY,
+    ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY,
+    ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY,
+    ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY,
     ONEC_STOCKS_SOURCE_GROUP_ID,
+    ONEC_STOCKS_SOURCE_KEY,
+    ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY,
+    ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY,
+    ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY,
     extend_metrics_with_onec_stock_metrics,
 )
 from packages.contracts.registry_upload_bundle_v1 import MetricV2Item  # noqa: E402
@@ -54,11 +64,20 @@ DERIVED_OTHER_SOURCE_METRICS = {
     "proxy_margin_pct",
     "proxy_profit_rub",
 }
+DERIVED_ONEC_SOURCE_METRICS = {
+    ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY,
+    ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY,
+    ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
+    ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY,
+    ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY,
+    ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
+}
 
 
 def main() -> None:
     _assert_group_metric_coverage()
     _assert_other_sources_recomputes_derived_metrics()
+    _assert_onec_sources_recomputes_derived_metrics()
 
 
 def _assert_group_metric_coverage() -> None:
@@ -101,16 +120,24 @@ def _assert_group_metric_coverage() -> None:
         for source_key in WEB_VITRINA_SOURCE_GROUPS["other_sources"]["source_keys"]
         for metric_key in WEB_VITRINA_SOURCE_METRIC_KEYS.get(source_key, ())
     }
+    onec_source_metrics = {
+        metric_key
+        for source_key in WEB_VITRINA_SOURCE_GROUPS[ONEC_STOCKS_SOURCE_GROUP_ID]["source_keys"]
+        for metric_key in WEB_VITRINA_SOURCE_METRIC_KEYS.get(source_key, ())
+    }
     missing_derived = sorted(DERIVED_OTHER_SOURCE_METRICS - other_source_metrics)
+    missing_onec_derived = sorted(DERIVED_ONEC_SOURCE_METRICS - onec_source_metrics)
     if (
         missing
         or duplicate
         or missing_derived
+        or missing_onec_derived
         or not any(groups == [ONEC_STOCKS_SOURCE_GROUP_ID] for groups in metric_to_groups.values())
     ):
         raise AssertionError(
             "web-vitrina loading group metric coverage failed: "
             f"missing={missing}, duplicate={duplicate}, missing_derived={missing_derived}, "
+            f"missing_onec_derived={missing_onec_derived}, "
             f"onec_group={ONEC_STOCKS_SOURCE_GROUP_ID}"
         )
     print(
@@ -214,6 +241,115 @@ def _assert_other_sources_recomputes_derived_metrics() -> None:
         )
 
 
+def _assert_onec_sources_recomputes_derived_metrics() -> None:
+    bundle = json.loads(BUNDLE_FIXTURE.read_text(encoding="utf-8"))
+    with TemporaryDirectory(prefix="sheet-vitrina-onec-group-coverage-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
+        accepted = runtime.ingest_bundle(bundle, activated_at="2026-04-20T09:00:00Z")
+        if accepted.status != "accepted":
+            raise AssertionError(f"fixture bundle must be accepted, got {accepted}")
+        current_state = runtime.load_current_state()
+        nm_id = next(item.nm_id for item in current_state.config_v2 if item.enabled)
+        runtime.save_sheet_vitrina_ready_snapshot(
+            current_state=current_state,
+            refreshed_at=OLD_REFRESHED_AT,
+            plan=_build_previous_onec_plan(nm_id=nm_id),
+        )
+
+        entrypoint = RegistryUploadHttpEntrypoint(
+            runtime_dir=Path(tmp),
+            runtime=runtime,
+            activated_at_factory=lambda: NEW_REFRESHED_AT,
+            refreshed_at_factory=lambda: NEW_REFRESHED_AT,
+            now_factory=lambda: datetime(2026, 4, 21, 15, 0, tzinfo=timezone.utc),
+        )
+        captured: dict[str, object] = {}
+
+        def build_partial_plan(**kwargs: object) -> SheetVitrinaV1Envelope:
+            captured["source_keys"] = list(kwargs.get("source_keys") or [])
+            captured["metric_keys"] = list(kwargs.get("metric_keys") or [])
+            return _build_partial_onec_plan(nm_id=nm_id)
+
+        entrypoint.sheet_plan_block.build_plan = build_partial_plan  # type: ignore[method-assign]
+        job = entrypoint.start_sheet_source_group_refresh_job(
+            source_group_id=ONEC_STOCKS_SOURCE_GROUP_ID,
+            as_of_date="2026-04-21",
+        )
+        job_snapshot = _wait_job(entrypoint, str(job["job_id"]))
+        if job_snapshot["status"] != "success":
+            raise AssertionError(f"1C group refresh must succeed, got {job_snapshot}")
+        if captured.get("source_keys") != [ONEC_STOCKS_SOURCE_KEY]:
+            raise AssertionError(f"1C group refresh must select only 1C source, got {captured}")
+        for metric_key in DERIVED_ONEC_SOURCE_METRICS:
+            if metric_key not in captured["metric_keys"]:
+                raise AssertionError(f"1C group refresh must include derived metric {metric_key}, got {captured}")
+
+        merged = runtime.load_sheet_vitrina_ready_snapshot(as_of_date="2026-04-20")
+        data_rows = {row[1]: row for row in _sheet(merged, "DATA_VITRINA").rows}
+        expected_proxy_profit = 45.6
+        expected_margin = 0.0456
+        expected_inventory_return = expected_proxy_profit / 5000.0
+        assert_close(
+            data_rows[f"SKU:{nm_id}|{ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY}"][3],
+            200.0,
+            "1C WB unit cost selected date",
+        )
+        assert_close(
+            data_rows[f"SKU:{nm_id}|{ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY}"][3],
+            5000.0,
+            "1C inventory capital selected date",
+        )
+        assert_close(
+            data_rows[f"SKU:{nm_id}|{ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY}"][3],
+            expected_proxy_profit,
+            "SKU proxy profit 2",
+        )
+        assert_close(
+            data_rows[f"SKU:{nm_id}|{ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY}"][3],
+            expected_margin,
+            "SKU proxy margin 2",
+        )
+        assert_close(
+            data_rows[f"SKU:{nm_id}|{ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY}"][3],
+            expected_inventory_return,
+            "SKU inventory capital return",
+        )
+        assert_close(
+            data_rows[f"TOTAL|{ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY}"][3],
+            expected_proxy_profit,
+            "total proxy profit 2",
+        )
+        assert_close(
+            data_rows[f"TOTAL|{ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY}"][3],
+            expected_margin,
+            "total proxy margin 2",
+        )
+        assert_close(
+            data_rows[f"TOTAL|{ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY}"][3],
+            expected_inventory_return,
+            "total inventory capital return",
+        )
+
+        result = job_snapshot["result"]
+        updated_cells = result["merge_summary"]["updated_cells"]
+        highlighted = {(cell["row_id"], cell["as_of_date"], cell["status"]) for cell in updated_cells}
+        for row_id in (
+            f"SKU:{nm_id}|{ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY}",
+            f"SKU:{nm_id}|{ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY}",
+            f"SKU:{nm_id}|{ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY}",
+            f"TOTAL|{ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY}",
+            f"TOTAL|{ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY}",
+            f"TOTAL|{ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY}",
+        ):
+            if (row_id, "2026-04-21", "updated") not in highlighted:
+                raise AssertionError(f"updated_cells must include 1C derived highlight for {row_id}, got {updated_cells}")
+        print(
+            "web_vitrina_onec_derived_refresh: ok ->",
+            result["merge_summary"]["updated_cell_count"],
+            sorted(DERIVED_ONEC_SOURCE_METRICS),
+        )
+
+
 def _build_previous_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
     return SheetVitrinaV1Envelope(
         plan_version="delivery_contract_v1__sheet_scaffold_v1",
@@ -267,6 +403,73 @@ def _build_previous_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
     )
 
 
+def _build_previous_onec_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
+    return SheetVitrinaV1Envelope(
+        plan_version="delivery_contract_v1__sheet_scaffold_v1",
+        snapshot_id="previous-onec-snapshot",
+        as_of_date="2026-04-20",
+        date_columns=["2026-04-20", "2026-04-21"],
+        temporal_slots=[
+            SheetVitrinaV1TemporalSlot(slot_key="yesterday_closed", slot_label="Вчера", column_date="2026-04-20"),
+            SheetVitrinaV1TemporalSlot(slot_key="today_current", slot_label="Сегодня", column_date="2026-04-21"),
+        ],
+        source_temporal_policies={},
+        sheets=[
+            SheetVitrinaWriteTarget(
+                sheet_name="DATA_VITRINA",
+                write_start_cell="A1",
+                write_rect="A1:D14",
+                clear_range="A:Z",
+                write_mode="overwrite",
+                partial_update_allowed=False,
+                header=["label", "key", "2026-04-20", "2026-04-21"],
+                rows=[
+                    ["Итого: сумма заказов", "TOTAL|total_orderSum", 900, 1000],
+                    ["Итого: 1C товарный капитал", f"TOTAL|{ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY}", 3000, 3000],
+                    ["Итого: прокси прибыль 2", f"TOTAL|{ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY}", 0, 0],
+                    ["Итого: прокси маржинальность 2", f"TOTAL|{ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY}", 0, 0],
+                    [
+                        "Итого: рентабельность товарных остатков",
+                        f"TOTAL|{ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY}",
+                        0,
+                        0,
+                    ],
+                    ["SKU: сумма заказов", f"SKU:{nm_id}|orderSum", 900, 1000],
+                    ["SKU: количество заказов", f"SKU:{nm_id}|orderCount", 1, 2],
+                    ["SKU: реклама", f"SKU:{nm_id}|ads_sum", 50, 100],
+                    ["SKU: 1C ВБ себестоимость", f"SKU:{nm_id}|{ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY}", 100, 100],
+                    ["SKU: 1C товарный капитал", f"SKU:{nm_id}|{ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY}", 3000, 3000],
+                    ["SKU: прокси прибыль 2", f"SKU:{nm_id}|{ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY}", 0, 0],
+                    ["SKU: прокси маржинальность 2", f"SKU:{nm_id}|{ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY}", 0, 0],
+                    [
+                        "SKU: рентабельность товарных остатков",
+                        f"SKU:{nm_id}|{ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY}",
+                        0,
+                        0,
+                    ],
+                ],
+                row_count=13,
+                column_count=4,
+            ),
+            SheetVitrinaWriteTarget(
+                sheet_name="STATUS",
+                write_start_cell="A1",
+                write_rect="A1:K3",
+                clear_range="A:Z",
+                write_mode="overwrite",
+                partial_update_allowed=False,
+                header=STATUS_HEADER,
+                rows=[
+                    _status_row(f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]", "success", "old 1C yesterday"),
+                    _status_row(f"{ONEC_STOCKS_SOURCE_KEY}[today_current]", "success", "old 1C today"),
+                ],
+                row_count=2,
+                column_count=len(STATUS_HEADER),
+            ),
+        ],
+    )
+
+
 def _build_partial_other_sources_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
     return SheetVitrinaV1Envelope(
         plan_version="delivery_contract_v1__sheet_scaffold_v1",
@@ -306,6 +509,66 @@ def _build_partial_other_sources_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
                 partial_update_allowed=False,
                 header=STATUS_HEADER,
                 rows=[_status_row("cost_price[today_current]", "success", "new cost today")],
+                row_count=1,
+                column_count=len(STATUS_HEADER),
+            ),
+        ],
+    )
+
+
+def _build_partial_onec_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
+    return SheetVitrinaV1Envelope(
+        plan_version="delivery_contract_v1__sheet_scaffold_v1",
+        snapshot_id="partial-onec-snapshot",
+        as_of_date="2026-04-20",
+        date_columns=["2026-04-20", "2026-04-21"],
+        temporal_slots=[
+            SheetVitrinaV1TemporalSlot(slot_key="yesterday_closed", slot_label="Вчера", column_date="2026-04-20"),
+            SheetVitrinaV1TemporalSlot(slot_key="today_current", slot_label="Сегодня", column_date="2026-04-21"),
+        ],
+        source_temporal_policies={},
+        sheets=[
+            SheetVitrinaWriteTarget(
+                sheet_name="DATA_VITRINA",
+                write_start_cell="A1",
+                write_rect="A1:D11",
+                clear_range="A:Z",
+                write_mode="overwrite",
+                partial_update_allowed=False,
+                header=["label", "key", "2026-04-20", "2026-04-21"],
+                rows=[
+                    ["Итого: 1C товарный капитал", f"TOTAL|{ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY}", 3333, 5000],
+                    ["Итого: прокси прибыль 2", f"TOTAL|{ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY}", 999, 999],
+                    ["Итого: прокси маржинальность 2", f"TOTAL|{ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY}", 999, 999],
+                    [
+                        "Итого: рентабельность товарных остатков",
+                        f"TOTAL|{ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY}",
+                        999,
+                        999,
+                    ],
+                    ["SKU: 1C ВБ себестоимость", f"SKU:{nm_id}|{ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY}", 111, 200],
+                    ["SKU: 1C товарный капитал", f"SKU:{nm_id}|{ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY}", 3333, 5000],
+                    ["SKU: прокси прибыль 2", f"SKU:{nm_id}|{ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY}", 999, 999],
+                    ["SKU: прокси маржинальность 2", f"SKU:{nm_id}|{ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY}", 999, 999],
+                    [
+                        "SKU: рентабельность товарных остатков",
+                        f"SKU:{nm_id}|{ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY}",
+                        999,
+                        999,
+                    ],
+                ],
+                row_count=9,
+                column_count=4,
+            ),
+            SheetVitrinaWriteTarget(
+                sheet_name="STATUS",
+                write_start_cell="A1",
+                write_rect="A1:K2",
+                clear_range="A:Z",
+                write_mode="overwrite",
+                partial_update_allowed=False,
+                header=STATUS_HEADER,
+                rows=[_status_row(f"{ONEC_STOCKS_SOURCE_KEY}[today_current]", "success", "new 1C today")],
                 row_count=1,
                 column_count=len(STATUS_HEADER),
             ),

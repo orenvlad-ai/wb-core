@@ -2,14 +2,17 @@
 title: "Модуль: onec_stocks_block"
 doc_id: "WB-CORE-MODULE-33-ONEC-STOCKS-BLOCK"
 doc_type: "module"
-status: "bounded_source_candidate"
-purpose: "Зафиксировать bounded-интеграцию 1C/Soykasoft API остатков и себестоимости WB без подключения к финальным расчетам."
-scope: "Новый source/adapter/parser/normalizer для `/hs/soykasoft/stocks_wb`, fixture-backed smoke, optional live smoke и runtime env contract."
+status: "active"
+purpose: "Зафиксировать bounded-интеграцию 1C/Soykasoft API остатков, себестоимости WB, товарного капитала и связанных расчётных метрик web-vitrina."
+scope: "Source/adapter/parser/normalizer для `/hs/soykasoft/stocks_wb`, date-specific historical load через `date=YYYY-MM-DD`, web-vitrina metric wiring, fixture-backed smokes, optional live smoke и runtime env contract."
 source_basis:
   - "packages/contracts/onec_stocks_block.py"
   - "packages/adapters/onec_stocks_block.py"
   - "packages/application/onec_stocks_block.py"
+  - "packages/application/sheet_vitrina_v1_onec_stocks.py"
+  - "packages/application/sheet_vitrina_v1_live_plan.py"
   - "apps/onec_stocks_block_smoke.py"
+  - "apps/sheet_vitrina_v1_onec_stocks_wiring_smoke.py"
   - "apps/onec_stocks_block_live_smoke.py"
   - "artifacts/onec_stocks_block/source/success__stocks_wb__fixture.json"
   - "artifacts/onec_stocks_block/evidence/initial__onec-stocks__evidence.md"
@@ -17,26 +20,30 @@ related_modules:
   - "packages/contracts/onec_stocks_block.py"
   - "packages/adapters/onec_stocks_block.py"
   - "packages/application/onec_stocks_block.py"
+  - "packages/application/sheet_vitrina_v1_onec_stocks.py"
+  - "packages/application/sheet_vitrina_v1_live_plan.py"
 related_tables: []
 related_endpoints:
   - "/hs/soykasoft/stocks_wb"
 related_runners:
   - "apps/onec_stocks_block_smoke.py"
+  - "apps/sheet_vitrina_v1_onec_stocks_wiring_smoke.py"
+  - "apps/sheet_vitrina_v1_web_vitrina_group_coverage_smoke.py"
   - "apps/onec_stocks_block_live_smoke.py"
 related_docs:
   - "docs/modules/07_MODULE__STOCKS_BLOCK.md"
   - "docs/modules/12_MODULE__COGS_BY_GROUP_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Создан как bounded source checkpoint для 1C/Soykasoft stocks+cost source; не заменяет `stocks_block` или `cogs_by_group_block`."
+update_note: "1C source теперь date-specific для истории и подключён к web-vitrina как source group `onec_product_capital`; расчётные метрики `proxy_profit_2_rub`, `proxy_margin_2_pct` и `inventory_capital_return_pct` используют 1C WB unit cost и 1C товарный капитал."
 ---
 
 # 1. Идентификатор и статус
 
 - `module_id`: `onec_stocks_block`
 - `family`: `external-1c-source`
-- `status_transfer`: bounded source path добавлен в `wb-core`
-- `status_verification`: fixture-backed smoke подтверждает parser/normalizer; live smoke optional и env-guarded
-- `status_main`: candidate до прохождения production-lane gates
+- `status_transfer`: bounded source path и web-vitrina metric wiring добавлены в `wb-core`
+- `status_verification`: fixture-backed source smoke, wiring smoke и group-coverage smoke подтверждают parser/normalizer, date-specific snapshots, source group wiring и расчётные метрики; live smoke optional и env-guarded
+- `status_main`: active после production-lane gates
 
 # 2. Runtime contract
 
@@ -53,7 +60,8 @@ HTTP contract:
 
 - method path: `/hs/soykasoft/stocks_wb`
 - auth: HTTP Basic auth from env plus HTTP header `token` from env
-- confirmed query shape: `account_id=<id>&nmId=<nmId>`
+- confirmed current/historical query shape: `account_id=<id>&date=<YYYY-MM-DD>&nmId=<nmId>`
+- historical loads must pass `date=<requested_date>` and accept a snapshot only when `payload.meta.date == requested_date`
 - current live adapter is intentionally bounded to exactly one `nmId` per request until the 1C batch contract is explicitly confirmed.
 
 # 3. Source payload fields
@@ -101,16 +109,36 @@ Current normalization flattens source stage rows and may annotate a row with `ca
 
 # 6. What is not wired
 
-This checkpoint does not:
+This module still does not:
 
 - replace existing WB official `stocks_block`;
 - replace or feed `cogs_by_group_block`;
-- connect 1C values to web-vitrina, ready snapshots, final financial calculations or sheet/export surfaces;
 - define production mapping config storage;
 - confirm multi-`nmId` live batching;
-- promote any source data into accepted truth.
 
-# 7. Known gaps and next step
+# 7. Web-vitrina metrics
+
+The active web-vitrina source group is:
+
+- `source_group_id = onec_product_capital`
+- `source_key = onec_stocks`
+- label = `1С / товарный капитал`
+
+Source metric ids used by derived calculations:
+
+- `onec_WB_STOCK_unit_cost_rub` = SKU-level `1С WB: себестоимость за ед., руб`
+- `onec_total_cost_rub` = SKU-level `1С товарный капитал всего, руб`
+- `total_onec_total_cost_rub` = TOTAL `1С: товарный капитал всего, руб`
+
+Derived metrics:
+
+- `proxy_profit_2_rub` / `total_proxy_profit_2_rub`: current proxy-profit formula with only `cost_price_rub` replaced by `onec_WB_STOCK_unit_cost_rub`
+- `proxy_margin_2_pct` / `proxy_margin_2_pct_total`: SKU `proxy_profit_2_rub / orderSum`, TOTAL `SUM(proxy_profit_2_rub) / SUM(orderSum)`
+- `inventory_capital_return_pct` / `inventory_capital_return_pct_total`: SKU `proxy_profit_2_rub / onec_total_cost_rub`, TOTAL `SUM(proxy_profit_2_rub) / SUM(onec_total_cost_rub)`
+
+Percent totals are ratio-of-aggregates and are not row averages. Zero denominators return `0.0` when numerator data is present, matching the existing proxy margin protection.
+
+# 8. Known gaps and next step
 
 Next step for ingestion is an explicit acceptance layer that owns:
 

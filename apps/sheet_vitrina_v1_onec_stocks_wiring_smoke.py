@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import sys
 import time
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,21 +19,37 @@ from packages.adapters.onec_stocks_block import ArtifactBackedOnecStocksSource
 from packages.application.onec_stocks_block import OnecStocksBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
-from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock, STATUS_HEADER
+from packages.application.sheet_vitrina_v1_live_plan import (
+    SheetVitrinaV1LivePlanBlock,
+    SlotLookups,
+    STATUS_HEADER,
+    TemporalLiveSources,
+    _MetricEvaluator,
+)
 from packages.application.sheet_vitrina_v1_onec_stocks import (
     DEFAULT_ONEC_STAGE_MAPPING,
+    ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
+    ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
+    ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY,
+    ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY,
+    ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY,
     ONEC_STOCKS_STAGE_FIELDS,
     ONEC_STOCKS_STAGE_KEYS,
+    ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY,
     ONEC_STOCKS_SOURCE_GROUP_ID,
     ONEC_STOCKS_SOURCE_GROUP_LABEL_RU,
     ONEC_STOCKS_SOURCE_KEY,
     ONEC_STOCKS_TOTAL_STAGE_METRIC_KEYS,
     ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY,
     ONEC_STOCKS_TOTAL_QTY_METRIC_KEY,
+    ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY,
+    ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY,
+    extend_metrics_with_onec_stock_metrics,
     onec_stage_metric_key,
     onec_stage_total_metric_key,
 )
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
+from packages.contracts.registry_upload_bundle_v1 import ConfigV2Item, MetricV2Item
 from packages.contracts.onec_stocks_block import (
     ONEC_STOCKS_PARTIAL_FETCH_META_KEY,
     OnecStocksRequest,
@@ -360,6 +377,7 @@ def main() -> None:
         _assert_onec_single_metric_historical_action()
         _assert_onec_date_specific_snapshot_lineage()
         _assert_onec_date_specific_period_snapshots()
+        _assert_onec_profitability_metric_calculations()
         _assert_weighted_unit_cost_semantics()
 
         print("sheet_vitrina_onec_stocks_metrics: ok -> summary_and_sku_values_present")
@@ -371,6 +389,7 @@ def main() -> None:
         print("sheet_vitrina_onec_stocks_single_metric_action: ok ->", AS_OF_DATE)
         print("sheet_vitrina_onec_stocks_date_specific_lineage: ok -> 2026-05-15/2026-05-16/2026-05-17")
         print("sheet_vitrina_onec_stocks_period_snapshots: ok -> 2026-05-01..2026-05-17")
+        print("sheet_vitrina_onec_profitability_metrics: ok -> sku_total_zero_denominator")
         print("sheet_vitrina_onec_stocks_weighted_unit_cost: ok -> weighted_avg")
 
 
@@ -667,6 +686,200 @@ def _assert_onec_date_specific_period_snapshots() -> None:
             assert_nonblank(row.values_by_date.get(snapshot_date), f"period {snapshot_date} 1C value")
         if len({float(value) for value in actual_values if isinstance(value, (int, float))}) != len(expected_dates):
             raise AssertionError(f"period 1C values must stay date-specific, got {actual_values}")
+
+
+def _assert_onec_profitability_metric_calculations() -> None:
+    sku_a = 111111
+    sku_b = 222222
+    evaluator = _build_profitability_evaluator(
+        config_items=[
+            ConfigV2Item(nm_id=sku_a, enabled=True, display_name="A", group="G", display_order=1),
+            ConfigV2Item(nm_id=sku_b, enabled=True, display_name="B", group="G", display_order=2),
+        ],
+        history_lookup={
+            sku_a: {"orderSum": 1000.0, "orderCount": 2.0},
+            sku_b: {"orderSum": 2000.0, "orderCount": 1.0},
+        },
+        ads_sum_by_nm_id={
+            sku_a: 100.0,
+            sku_b: 50.0,
+        },
+        onec_lookup={
+            sku_a: {
+                ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY: 200.0,
+                ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY: 5000.0,
+            },
+            sku_b: {
+                ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY: 100.0,
+                ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY: 1000.0,
+            },
+        },
+    )
+    profit_a = 1000.0 * 0.5096 - 2.0 * 0.91 * 200.0 - 100.0
+    profit_b = 2000.0 * 0.5096 - 1.0 * 0.91 * 100.0 - 50.0
+    total_profit = profit_a + profit_b
+    assert_close(
+        evaluator.resolve_sku(ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY, sku_a, "slot"),
+        profit_a,
+        "SKU proxy_profit_2_rub",
+    )
+    assert_close(
+        evaluator.resolve_sku(ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY, sku_a, "slot"),
+        profit_a / 1000.0,
+        "SKU proxy_margin_2_pct",
+    )
+    assert_close(
+        evaluator.resolve_sku(ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY, sku_a, "slot"),
+        profit_a / 5000.0,
+        "SKU inventory_capital_return_pct",
+    )
+    assert_close(
+        evaluator.resolve_total(ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY, "slot"),
+        total_profit,
+        "TOTAL proxy profit 2",
+    )
+    total_margin = evaluator.resolve_total(ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY, "slot")
+    total_inventory_return = evaluator.resolve_total(ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY, "slot")
+    assert_close(total_margin, total_profit / 3000.0, "TOTAL proxy margin 2 aggregated")
+    assert_close(total_inventory_return, total_profit / 6000.0, "TOTAL inventory return aggregated")
+    row_average_margin = ((profit_a / 1000.0) + (profit_b / 2000.0)) / 2.0
+    row_average_inventory_return = ((profit_a / 5000.0) + (profit_b / 1000.0)) / 2.0
+    if abs(float(total_margin) - row_average_margin) < 0.000001:
+        raise AssertionError("total proxy_margin_2_pct must not be row average")
+    if abs(float(total_inventory_return) - row_average_inventory_return) < 0.000001:
+        raise AssertionError("total inventory_capital_return_pct must not be row average")
+
+    zero_sku = 333333
+    zero_evaluator = _build_profitability_evaluator(
+        config_items=[
+            ConfigV2Item(nm_id=zero_sku, enabled=True, display_name="Zero", group="G", display_order=1),
+        ],
+        history_lookup={zero_sku: {"orderSum": 0.0, "orderCount": 1.0}},
+        ads_sum_by_nm_id={zero_sku: 0.0},
+        onec_lookup={
+            zero_sku: {
+                ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY: 10.0,
+                ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY: 0.0,
+            }
+        },
+    )
+    assert_close(
+        zero_evaluator.resolve_sku(ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY, zero_sku, "slot"),
+        0.0,
+        "zero denominator SKU margin",
+    )
+    assert_close(
+        zero_evaluator.resolve_sku(ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY, zero_sku, "slot"),
+        0.0,
+        "zero denominator SKU inventory return",
+    )
+    assert_close(
+        zero_evaluator.resolve_total(ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY, "slot"),
+        0.0,
+        "zero denominator total margin",
+    )
+    assert_close(
+        zero_evaluator.resolve_total(ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY, "slot"),
+        0.0,
+        "zero denominator total inventory return",
+    )
+
+
+def _build_profitability_evaluator(
+    *,
+    config_items: list[ConfigV2Item],
+    history_lookup: dict[int, dict[str, float]],
+    ads_sum_by_nm_id: dict[int, float],
+    onec_lookup: dict[int, dict[str, float]],
+) -> _MetricEvaluator:
+    metrics = extend_metrics_with_onec_stock_metrics(
+        [
+            MetricV2Item(
+                metric_key="orderSum",
+                enabled=True,
+                scope="SKU",
+                label_ru="Сумма заказов",
+                calc_type="metric",
+                calc_ref="orderSum",
+                show_in_data=True,
+                format="rub",
+                display_order=10,
+                section="Воронка",
+            ),
+            MetricV2Item(
+                metric_key="orderCount",
+                enabled=True,
+                scope="SKU",
+                label_ru="Заказы",
+                calc_type="metric",
+                calc_ref="orderCount",
+                show_in_data=True,
+                format="integer",
+                display_order=20,
+                section="Воронка",
+            ),
+            MetricV2Item(
+                metric_key="ads_sum",
+                enabled=True,
+                scope="SKU",
+                label_ru="Расход рекламы",
+                calc_type="metric",
+                calc_ref="ads_sum",
+                show_in_data=True,
+                format="rub",
+                display_order=30,
+                section="Реклама",
+            ),
+            MetricV2Item(
+                metric_key="total_orderSum",
+                enabled=True,
+                scope="TOTAL",
+                label_ru="Сумма заказов всего",
+                calc_type="metric",
+                calc_ref="orderSum",
+                show_in_data=True,
+                format="rub",
+                display_order=40,
+                section="Воронка",
+            ),
+        ]
+    )
+    slot_lookups = SlotLookups(
+        seller_funnel_lookup={},
+        history_lookup=history_lookup,
+        web_lookup={},
+        prices_lookup={},
+        sf_period_lookup={},
+        spp_lookup={},
+        ads_bids_lookup={},
+        stocks_lookup={},
+        onec_stocks_lookup=onec_lookup,
+        ads_compact_lookup={
+            nm_id: SimpleNamespace(ads_sum=ads_sum)
+            for nm_id, ads_sum in ads_sum_by_nm_id.items()
+        },
+        fin_lookup={},
+        fin_storage_fee_total=None,
+        cost_price_lookup={},
+        promo_lookup={},
+    )
+    return _MetricEvaluator(
+        enabled_config=config_items,
+        metrics_by_key={item.metric_key: item for item in metrics},
+        formulas_by_id={},
+        live_sources=TemporalLiveSources(
+            temporal_slots=[
+                SheetVitrinaV1TemporalSlot(
+                    slot_key="slot",
+                    slot_label="Slot",
+                    column_date=AS_OF_DATE,
+                )
+            ],
+            statuses=[],
+            slot_lookups={"slot": slot_lookups},
+            source_temporal_policies={},
+        ),
+    )
 
 
 def _assert_weighted_unit_cost_semantics() -> None:
