@@ -876,17 +876,57 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
           if (panel) {
             panel.open = true;
           }
-          const groups = Array.from(document.querySelectorAll('[data-metrics-config-group]')).map((group) => ({
-            id: group.getAttribute('data-metrics-config-group') || '',
-            rows: Array.from(group.querySelectorAll('[data-metric-config-row]')).map((row) => row.getAttribute('data-metric-config-row') || '')
-          }));
+          const numbers = (value) => (String(value || '').match(/\\d+(?:\\.\\d+)?/g) || []).map(Number);
+          const isNearWhite = (value) => {
+            const rgb = numbers(value);
+            const alpha = rgb.length >= 4 ? rgb[3] : 1;
+            return rgb.length >= 3 && alpha > 0.88 && rgb[0] > 235 && rgb[1] > 235 && rgb[2] > 235;
+          };
+          const text = panel ? (panel.innerText || '') : '';
+          const grid = panel ? panel.querySelector('[data-metrics-config-grid]') : null;
+          const gridColumns = grid ? getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length : 0;
+          const rows = Array.from(document.querySelectorAll('[data-metric-config-row]'));
+          const groupsById = new Map();
+          rows.forEach((row) => {
+            const groupId = row.getAttribute('data-metric-config-group-id') || '';
+            if (!groupsById.has(groupId)) {
+              groupsById.set(groupId, []);
+            }
+            groupsById.get(groupId).push(row.getAttribute('data-metric-config-row') || '');
+          });
+          const groups = Array.from(groupsById.entries()).map(([id, groupRows]) => ({id, rows: groupRows}));
+          const rowHeights = rows.map((row) => row.getBoundingClientRect().height);
+          const arrowGaps = rows.map((row) => {
+            const label = row.querySelector('.metrics-config-label');
+            const up = row.querySelector('[data-metric-config-action="up"]');
+            if (!label || !up) {
+              return 0;
+            }
+            return Math.max(0, up.getBoundingClientRect().left - label.getBoundingClientRect().right);
+          });
+          const whiteNodes = Array.from(panel ? panel.querySelectorAll([
+            '.metrics-presentation-body',
+            '.metrics-config-zone',
+            '.metrics-config-row',
+            '.metrics-config-button'
+          ].join(',')) : []).filter((node) => isNearWhite(getComputedStyle(node).backgroundColor));
+          const actionLabels = Array.from(panel ? panel.querySelectorAll('[data-metric-config-action="hide"], [data-metric-config-action="show"]') : [])
+            .map((node) => (node.textContent || '').trim());
           return {
             exists: !!panel,
             afterToolbar,
             beforeTable,
             summary: ((document.querySelector('[data-metrics-presentation-summary]') || {}).textContent || '').trim(),
             groupCount: groups.length,
-            groups
+            groups,
+            gridColumns,
+            zoneTitles: Array.from(panel ? panel.querySelectorAll('.metrics-config-zone-kind') : []).map((node) => (node.textContent || '').trim()),
+            actionLabels,
+            oldLabelHits: ['Показывать сразу', 'Скрыто под раскрытием', 'Скрыть под раскрытием', 'Показать сразу'].filter((item) => text.includes(item)),
+            whiteNodeCount: whiteNodes.length,
+            maxRowHeight: rowHeights.length ? Math.max(...rowHeights) : 0,
+            maxArrowGap: arrowGaps.length ? Math.max(...arrowGaps) : 0,
+            scopeCount: Number(grid ? (grid.getAttribute('data-metrics-config-scope-count') || '0') : '0')
           };
         }"""
     )
@@ -900,6 +940,16 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     target_group = next((group for group in panel_state["groups"] if len(group["rows"]) >= 2), None)
     if target_group is None:
         raise AssertionError(f"metrics presentation needs a group with at least two selected metrics, got {panel_state}")
+    if int(panel_state["scopeCount"]) >= 2 and int(panel_state["gridColumns"]) != 4:
+        raise AssertionError(f"metrics presentation must use four desktop columns for two scope buckets, got {panel_state}")
+    if int(panel_state["whiteNodeCount"]) != 0 or panel_state["oldLabelHits"]:
+        raise AssertionError(f"metrics presentation must use compact dark labels with no old wording, got {panel_state}")
+    if "Показано" not in panel_state["zoneTitles"] or "Скрыто" not in panel_state["zoneTitles"]:
+        raise AssertionError(f"metrics presentation zones must be named Показано/Скрыто, got {panel_state}")
+    if not set(panel_state["actionLabels"]).issubset({"Скрыть", "Показать"}):
+        raise AssertionError(f"metrics presentation action buttons must be compact, got {panel_state}")
+    if float(panel_state["maxRowHeight"]) > 34 or float(panel_state["maxArrowGap"]) > 10:
+        raise AssertionError(f"metrics rows must be compact and keep arrows near labels, got {panel_state}")
     selected_keys = [str(target_group["rows"][0]), str(target_group["rows"][1])]
 
     page.evaluate(
@@ -938,7 +988,7 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     _click_metric_config_action(page, group_id=target_group["id"], metric_key=selected_keys[0], action="down")
     page.wait_for_timeout(150)
     panel_order_after_move = page.evaluate(
-        """(groupId) => Array.from(document.querySelectorAll('[data-metrics-config-group="' + groupId + '"] [data-metric-config-row]'))
+        """(groupId) => Array.from(document.querySelectorAll('[data-metric-config-row][data-metric-config-group-id="' + groupId + '"]'))
           .map((row) => row.getAttribute('data-metric-config-row') || '')""",
         target_group["id"],
     )
@@ -1232,7 +1282,7 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
           const buttonRect = loadButton ? loadButton.getBoundingClientRect() : {left: 0, right: 0, top: 0, bottom: 0};
           const statusRect = loadStatus ? loadStatus.getBoundingClientRect() : {left: 0, right: 0, top: 0, bottom: 0};
           const headerRect = header ? header.getBoundingClientRect() : {left: 0, right: 0, width: 0};
-          const forbidden = ['sheet_vitrina_v1', 'Основная web-витрина', 'В выбранном периоде', 'grid library', 'rows:', 'columns:', 'Снимок:', 'Вчера:', 'Сегодня:', 'TZ:'];
+          const forbidden = ['sheet_vitrina_v1', 'Основная web-витрина', 'В выбранном периоде', 'grid library', 'rows:', 'columns:', 'Снимок:', 'Вчера:', 'Сегодня:', 'TZ:', 'Статус последней загрузки', 'today_current', 'yesterday_closed', 'load window'];
           return {
             top_panel_count: document.querySelectorAll('[data-top-panel]').length,
             table_header_count: document.querySelectorAll('[data-table-header]').length,
@@ -1250,7 +1300,7 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
             load_status_hidden: loadStatus ? !!loadStatus.hidden : null,
             load_button_text: loadButton ? ((loadButton.textContent || '').trim()) : '',
             load_button_right_aligned: !!loadButton && buttonRect.left > headerRect.left + headerRect.width / 2,
-            load_status_under_button: !!loadStatus && !loadStatus.hidden && statusRect.top >= buttonRect.bottom - 2 && statusRect.right <= buttonRect.right + 4,
+            load_status_inline_left_of_button: !!loadStatus && !loadStatus.hidden && statusRect.right <= buttonRect.left + 2 && Math.abs(((statusRect.top + statusRect.bottom) / 2) - ((buttonRect.top + buttonRect.bottom) / 2)) <= 8,
             asia_yekaterinburg_in_meta: (metaText.match(/Asia\\/Yekaterinburg/g) || []).length,
             header_text: text,
             has_freshness_badge: !!freshnessBadge && !freshnessBadge.hidden,
@@ -1268,7 +1318,7 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         or payload["source_text"] != ""
         or payload["load_button_text"] != "Загрузить"
         or not payload["load_button_right_aligned"]
-        or not payload["load_status_under_button"]
+        or not payload["load_status_inline_left_of_button"]
         or payload["load_status_hidden"]
         or not payload["has_freshness_badge"]
     ):
@@ -1277,8 +1327,15 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         raise AssertionError(f"table header must not expose old technical/source text, got {payload}")
     if "Обновлено:" not in payload["summary_text"] or "Свежесть данных:" not in payload["summary_text"]:
         raise AssertionError(f"table header summary must expose compact freshness timestamps, got {payload}")
-    if "Статус последней загрузки:" not in payload["load_status_text"]:
-        raise AssertionError(f"load status must be visually attached to data loading, got {payload}")
+    if not str(payload["load_status_text"]).startswith("Последняя загрузка: "):
+        raise AssertionError(f"load status must use compact latest-load wording, got {payload}")
+    if str(payload["load_status_text"]).removeprefix("Последняя загрузка: ") not in {
+        "успешно",
+        "ошибка",
+        "предупреждение",
+        "нет данных",
+    }:
+        raise AssertionError(f"load status must use a short semantic value, got {payload}")
     return payload
 
 
@@ -1933,8 +1990,6 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
           const loadStatusNode = document.querySelector('[data-table-load-status]');
           const updatedNode = node ? node.querySelector('[data-table-summary-updated]') : null;
           const freshnessNode = node ? node.querySelector('[data-table-summary-freshness]') : null;
-          const statusNode = loadStatusNode ? loadStatusNode.querySelector('[data-table-summary-status]') : null;
-          const detailNode = loadStatusNode ? loadStatusNode.querySelector('[data-table-summary-status-detail]') : null;
           const trimPrefix = (value, prefix) => {
             const text = String(value || '').trim();
             return text.startsWith(prefix) ? text.slice(prefix.length).trim() : text;
@@ -1949,21 +2004,23 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
             freshness: trimPrefix(freshnessNode ? freshnessNode.textContent : '', 'Свежесть данных:'),
             freshness_at: freshnessNode ? String(freshnessNode.getAttribute('data-table-summary-freshness-at') || '').trim() : '',
             freshness_source: freshnessNode ? String(freshnessNode.getAttribute('data-table-summary-freshness-source') || '').trim() : '',
-            status: trimPrefix(statusNode ? statusNode.textContent : '', 'Статус последней загрузки:'),
-            status_detail: detailNode ? String(detailNode.textContent || '').trim() : ''
+            status: trimPrefix(loadStatusNode ? loadStatusNode.textContent : '', 'Последняя загрузка:'),
+            status_detail: ''
           };
         }"""
     )
     if payload.get("hidden"):
         raise AssertionError(f"table header summary line must be visible, got {payload}")
     if payload.get("load_status_hidden"):
-        raise AssertionError(f"load status must be visible under the load button, got {payload}")
+        raise AssertionError(f"load status must be visible inline with the load button, got {payload}")
     text = str(payload.get("text") or "")
     load_status_text = str(payload.get("load_status_text") or "")
     if "Обновлено:" not in text or "Свежесть данных:" not in text or "Статус:" in text:
         raise AssertionError(f"table header summary must include only updated/freshness labels, got {payload}")
-    if "Статус последней загрузки:" not in load_status_text:
-        raise AssertionError(f"load status must describe the latest load only, got {payload}")
+    if not load_status_text.startswith("Последняя загрузка: "):
+        raise AssertionError(f"load status must describe the latest load only with compact wording, got {payload}")
+    if "Статус последней загрузки" in load_status_text or "today_current" in load_status_text or "yesterday_closed" in load_status_text:
+        raise AssertionError(f"load status must not expose technical/latest-window wording, got {payload}")
     if text.count("Asia/Yekaterinburg") > 1:
         raise AssertionError(f"table header summary must show timezone once at most, got {text!r}")
     cards = {
@@ -2141,9 +2198,9 @@ def _wait_for_action_completion(
 
 def _badge_label(tone: str | None) -> str | None:
     mapping = {
-        "success": "Успешно",
-        "warning": "Внимание",
-        "error": "Ошибка",
+        "success": "успешно",
+        "warning": "предупреждение",
+        "error": "ошибка",
     }
     if tone is None:
         return None
