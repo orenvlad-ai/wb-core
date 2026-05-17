@@ -885,6 +885,9 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
           const text = panel ? (panel.innerText || '') : '';
           const grid = panel ? panel.querySelector('[data-metrics-config-grid]') : null;
           const gridColumns = grid ? getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length : 0;
+          const scopePairColumns = Array.from(panel ? panel.querySelectorAll('[data-metrics-config-scope-pair]') : [])
+            .map((node) => getComputedStyle(node).gridTemplateColumns.split(' ').filter(Boolean).length);
+          const effectiveGridColumns = gridColumns * (scopePairColumns.length ? Math.max(...scopePairColumns) : 1);
           const rows = Array.from(document.querySelectorAll('[data-metric-config-row]'));
           const groupsById = new Map();
           rows.forEach((row) => {
@@ -900,21 +903,53 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
             groupsById.get(groupId).rows.push(row.getAttribute('data-metric-config-row') || '');
           });
           const groups = Array.from(groupsById.values());
-          const scopeGroups = Array.from(panel ? panel.querySelectorAll('[data-metrics-config-zone="visible"]') : []).map((zone) => ({
-            scopeId: zone.getAttribute('data-metrics-config-scope') || '',
-            groups: Array.from(zone.querySelectorAll('[data-metrics-config-group]')).map((section) => {
-              const up = section.querySelector('[data-metric-group-action="up"]');
-              const down = section.querySelector('[data-metric-group-action="down"]');
-              return {
-                id: section.getAttribute('data-metrics-config-group') || '',
-                rows: Array.from(section.querySelectorAll('[data-metric-config-row]'))
-                  .map((row) => row.getAttribute('data-metric-config-row') || '')
-                  .filter(Boolean),
-                upDisabled: !!(up && up.disabled),
-                downDisabled: !!(down && down.disabled)
-              };
-            }).filter((group) => group.id && group.rows.length)
-          })).filter((scope) => scope.scopeId && scope.groups.length);
+          const scopeGroupsById = new Map();
+          Array.from(panel ? panel.querySelectorAll('[data-metrics-config-zone="visible"] [data-metrics-config-group]') : []).forEach((section) => {
+            const zone = section.closest('[data-metrics-config-zone]');
+            const scopeId = zone ? (zone.getAttribute('data-metrics-config-scope') || '') : '';
+            if (!scopeId) {
+              return;
+            }
+            if (!scopeGroupsById.has(scopeId)) {
+              scopeGroupsById.set(scopeId, {scopeId, groups: []});
+            }
+            const up = section.querySelector('[data-metric-group-action="up"]');
+            const down = section.querySelector('[data-metric-group-action="down"]');
+            scopeGroupsById.get(scopeId).groups.push({
+              id: section.getAttribute('data-metrics-config-group') || '',
+              label: ((section.querySelector('.metrics-config-section-label') || {}).textContent || '').trim(),
+              rows: Array.from(section.querySelectorAll('[data-metric-config-row]'))
+                .map((row) => row.getAttribute('data-metric-config-row') || '')
+                .filter(Boolean),
+              upDisabled: !!(up && up.disabled),
+              downDisabled: !!(down && down.disabled)
+            });
+          });
+          const scopeGroups = Array.from(scopeGroupsById.values()).filter((scope) => scope.scopeId && scope.groups.length);
+          const pairedRows = Array.from(panel ? panel.querySelectorAll('[data-metrics-config-paired-row]') : []).map((row) => {
+            const visibleZone = row.querySelector('[data-metrics-config-zone="visible"]');
+            const hiddenZone = row.querySelector('[data-metrics-config-zone="hidden"]');
+            const visibleSection = visibleZone ? visibleZone.querySelector('[data-metrics-config-group]') : null;
+            const hiddenSection = hiddenZone ? hiddenZone.querySelector('[data-metrics-config-group]') : null;
+            const rowRect = row.getBoundingClientRect();
+            const visibleRect = visibleZone ? visibleZone.getBoundingClientRect() : {top: 0, height: 0};
+            const hiddenRect = hiddenZone ? hiddenZone.getBoundingClientRect() : {top: 0, height: 0};
+            return {
+              groupId: row.getAttribute('data-metrics-config-group') || '',
+              visibleGroupId: visibleSection ? (visibleSection.getAttribute('data-metrics-config-group') || '') : '',
+              hiddenGroupId: hiddenSection ? (hiddenSection.getAttribute('data-metrics-config-group') || '') : '',
+              visibleRows: Array.from(visibleZone ? visibleZone.querySelectorAll('[data-metric-config-row]') : [])
+                .map((metricRow) => metricRow.getAttribute('data-metric-config-row') || '')
+                .filter(Boolean),
+              hiddenRows: Array.from(hiddenZone ? hiddenZone.querySelectorAll('[data-metric-config-row]') : [])
+                .map((metricRow) => metricRow.getAttribute('data-metric-config-row') || '')
+                .filter(Boolean),
+              topDelta: Math.abs(Number(visibleRect.top || 0) - Number(hiddenRect.top || 0)),
+              rowHeight: Number(rowRect.height || 0),
+              visibleHeight: Number(visibleRect.height || 0),
+              hiddenHeight: Number(hiddenRect.height || 0)
+            };
+          });
           const rowHeights = rows.map((row) => row.getBoundingClientRect().height);
           const arrowGaps = rows.map((row) => {
             const label = row.querySelector('.metrics-config-label');
@@ -926,6 +961,8 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
           });
           const whiteNodes = Array.from(panel ? panel.querySelectorAll([
             '.metrics-presentation-body',
+            '.metrics-config-scope-pair',
+            '.metrics-config-paired-row',
             '.metrics-config-zone',
             '.metrics-config-row',
             '.metrics-config-button',
@@ -941,8 +978,11 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
             groupCount: groups.length,
             groups,
             scopeGroups,
+            pairedRows,
             blockControlCount: panel ? panel.querySelectorAll('[data-metric-group-action]').length : 0,
-            gridColumns,
+            gridColumns: effectiveGridColumns,
+            outerGridColumns: gridColumns,
+            scopePairColumns,
             zoneTitles: Array.from(panel ? panel.querySelectorAll('.metrics-config-zone-kind') : []).map((node) => (node.textContent || '').trim()),
             actionLabels,
             oldLabelHits: ['Показывать сразу', 'Скрыто под раскрытием', 'Скрыть под раскрытием', 'Показать сразу'].filter((item) => text.includes(item)),
@@ -979,6 +1019,22 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         raise AssertionError(f"metrics presentation needs a group with at least two selected metrics, got {panel_state}")
     if int(panel_state["scopeCount"]) >= 2 and int(panel_state["gridColumns"]) != 4:
         raise AssertionError(f"metrics presentation must use four desktop columns for two scope buckets, got {panel_state}")
+    paired_rows = panel_state["pairedRows"]
+    if not paired_rows:
+        raise AssertionError(f"metrics presentation must render paired shown/hidden rows, got {panel_state}")
+    for paired_row in paired_rows:
+        if (
+            paired_row["groupId"] != paired_row["visibleGroupId"]
+            or paired_row["groupId"] != paired_row["hiddenGroupId"]
+        ):
+            raise AssertionError(f"paired row must bind visible+hidden cells to one logical group, got {paired_row}")
+        if float(paired_row["topDelta"]) > 1.5:
+            raise AssertionError(f"paired row visible/hidden cells must share one vertical row, got {paired_row}")
+        if float(paired_row["rowHeight"]) + 2 < max(float(paired_row["visibleHeight"]), float(paired_row["hiddenHeight"])):
+            raise AssertionError(f"paired row height must contain both cells, got {paired_row}")
+        if paired_row["visibleRows"] and not paired_row["hiddenRows"]:
+            if float(paired_row["hiddenHeight"]) + 2 < float(paired_row["visibleHeight"]):
+                raise AssertionError(f"empty hidden cell must preserve height opposite shown cell, got {paired_row}")
     if int(panel_state["whiteNodeCount"]) != 0 or panel_state["oldLabelHits"]:
         raise AssertionError(f"metrics presentation must use compact dark labels with no old wording, got {panel_state}")
     if "Показано" not in panel_state["zoneTitles"] or "Скрыто" not in panel_state["zoneTitles"]:
@@ -1120,6 +1176,16 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     mirror_state = _metric_zone_group_rows(page, scope_id=str(target_group["scopeId"]))
     if mirror_state["visibleGroupIds"] != mirror_state["hiddenGroupIds"]:
         raise AssertionError(f"visible and hidden metric subblocks must mirror each other, got {mirror_state}")
+    if mirror_state["pairedGroupIds"] != mirror_state["visibleGroupIds"]:
+        raise AssertionError(f"visible and hidden metric subblocks must render as shared paired rows, got {mirror_state}")
+    for paired_row in mirror_state["pairedRows"]:
+        if paired_row["id"] != paired_row["visibleId"] or paired_row["id"] != paired_row["hiddenId"]:
+            raise AssertionError(f"paired row must keep one shared group id, got {paired_row}")
+        if float(paired_row["topDelta"]) > 1.5:
+            raise AssertionError(f"paired row sides must stay vertically aligned, got {paired_row}")
+        if paired_row["visibleRows"] and not paired_row["hiddenRows"]:
+            if float(paired_row["hiddenHeight"]) + 2 < float(paired_row["visibleHeight"]):
+                raise AssertionError(f"empty hidden paired cell must preserve opposite row height, got {paired_row}")
     if int(mirror_state["hiddenBlockControlCount"]) != 0:
         raise AssertionError(f"hidden metric side must not expose independent block-order controls, got {mirror_state}")
     if int(mirror_state["hiddenMetricMoveControlCount"]) != 0:
@@ -1207,15 +1273,45 @@ def _metric_zone_group_rows(page: object, *, scope_id: str) -> dict[str, object]
           })).filter((group) => group.id);
           const visibleGroups = collect('visible');
           const hiddenGroups = collect('hidden');
+          const pairedRows = Array.from(document.querySelectorAll(
+            '[data-metrics-config-paired-row][data-metrics-config-scope="' + scopeId + '"]'
+          )).map((row) => {
+            const visibleZone = row.querySelector('[data-metrics-config-zone="visible"]');
+            const hiddenZone = row.querySelector('[data-metrics-config-zone="hidden"]');
+            const visibleSection = visibleZone ? visibleZone.querySelector('[data-metrics-config-group]') : null;
+            const hiddenSection = hiddenZone ? hiddenZone.querySelector('[data-metrics-config-group]') : null;
+            const visibleRect = visibleZone ? visibleZone.getBoundingClientRect() : {top: 0, height: 0};
+            const hiddenRect = hiddenZone ? hiddenZone.getBoundingClientRect() : {top: 0, height: 0};
+            return {
+              id: row.getAttribute('data-metrics-config-group') || '',
+              visibleId: visibleSection ? (visibleSection.getAttribute('data-metrics-config-group') || '') : '',
+              hiddenId: hiddenSection ? (hiddenSection.getAttribute('data-metrics-config-group') || '') : '',
+              visibleRows: Array.from(visibleZone ? visibleZone.querySelectorAll('[data-metric-config-row]') : [])
+                .map((metricRow) => metricRow.getAttribute('data-metric-config-row') || '')
+                .filter(Boolean),
+              hiddenRows: Array.from(hiddenZone ? hiddenZone.querySelectorAll('[data-metric-config-row]') : [])
+                .map((metricRow) => metricRow.getAttribute('data-metric-config-row') || '')
+                .filter(Boolean),
+              topDelta: Math.abs(Number(visibleRect.top || 0) - Number(hiddenRect.top || 0)),
+              visibleHeight: Number(visibleRect.height || 0),
+              hiddenHeight: Number(hiddenRect.height || 0)
+            };
+          });
+          const hiddenZones = Array.from(document.querySelectorAll(
+            '[data-metrics-config-zone="hidden"][data-metrics-config-scope="' + scopeId + '"]'
+          ));
           return {
             visibleGroups,
             hiddenGroups,
+            pairedRows,
             visibleGroupIds: visibleGroups.map((group) => group.id),
             hiddenGroupIds: hiddenGroups.map((group) => group.id),
+            pairedGroupIds: pairedRows.map((group) => group.id),
             hiddenBlockControlCount: hiddenGroups.reduce((sum, group) => sum + group.blockControlCount, 0),
-            hiddenMetricMoveControlCount: (document.querySelector(
-              '[data-metrics-config-zone="hidden"][data-metrics-config-scope="' + scopeId + '"]'
-            ) || document.createElement('div')).querySelectorAll('[data-metric-config-action="up"], [data-metric-config-action="down"]').length
+            hiddenMetricMoveControlCount: hiddenZones.reduce(
+              (sum, zone) => sum + zone.querySelectorAll('[data-metric-config-action="up"], [data-metric-config-action="down"]').length,
+              0
+            )
           };
         }""",
         scope_id,
