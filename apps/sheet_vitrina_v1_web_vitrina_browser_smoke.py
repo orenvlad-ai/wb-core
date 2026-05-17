@@ -866,6 +866,8 @@ def _check_metric_multiselect_controls(page: object) -> dict[str, object]:
 
 def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     storage_key = "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1:metric-presentation:v1"
+    page.locator("[data-reset-filters]").click()
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
     panel_state = page.evaluate(
         """() => {
           const toolbar = document.querySelector('[data-table-toolbar]');
@@ -895,6 +897,21 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
             groupsById.get(groupId).push(row.getAttribute('data-metric-config-row') || '');
           });
           const groups = Array.from(groupsById.entries()).map(([id, groupRows]) => ({id, rows: groupRows}));
+          const scopeGroups = Array.from(panel ? panel.querySelectorAll('[data-metrics-config-zone="visible"]') : []).map((zone) => ({
+            scopeId: zone.getAttribute('data-metrics-config-scope') || '',
+            groups: Array.from(zone.querySelectorAll('[data-metrics-config-group]')).map((section) => {
+              const up = section.querySelector('[data-metric-group-action="up"]');
+              const down = section.querySelector('[data-metric-group-action="down"]');
+              return {
+                id: section.getAttribute('data-metrics-config-group') || '',
+                rows: Array.from(section.querySelectorAll('[data-metric-config-row]'))
+                  .map((row) => row.getAttribute('data-metric-config-row') || '')
+                  .filter(Boolean),
+                upDisabled: !!(up && up.disabled),
+                downDisabled: !!(down && down.disabled)
+              };
+            }).filter((group) => group.id && group.rows.length)
+          })).filter((scope) => scope.scopeId && scope.groups.length);
           const rowHeights = rows.map((row) => row.getBoundingClientRect().height);
           const arrowGaps = rows.map((row) => {
             const label = row.querySelector('.metrics-config-label');
@@ -908,7 +925,8 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
             '.metrics-presentation-body',
             '.metrics-config-zone',
             '.metrics-config-row',
-            '.metrics-config-button'
+            '.metrics-config-button',
+            '.metrics-config-block-move-button'
           ].join(',')) : []).filter((node) => isNearWhite(getComputedStyle(node).backgroundColor));
           const actionLabels = Array.from(panel ? panel.querySelectorAll('[data-metric-config-action="hide"], [data-metric-config-action="show"]') : [])
             .map((node) => (node.textContent || '').trim());
@@ -919,6 +937,8 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
             summary: ((document.querySelector('[data-metrics-presentation-summary]') || {}).textContent || '').trim(),
             groupCount: groups.length,
             groups,
+            scopeGroups,
+            blockControlCount: panel ? panel.querySelectorAll('[data-metric-group-action]').length : 0,
             gridColumns,
             zoneTitles: Array.from(panel ? panel.querySelectorAll('.metrics-config-zone-kind') : []).map((node) => (node.textContent || '').trim()),
             actionLabels,
@@ -937,6 +957,20 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         or int(panel_state["groupCount"]) <= 0
     ):
         raise AssertionError(f"metrics presentation panel must sit between toolbar and table, got {panel_state}")
+    if int(panel_state["blockControlCount"]) <= 0:
+        raise AssertionError(f"metrics presentation groups must expose block order controls, got {panel_state}")
+    for scope in panel_state["scopeGroups"]:
+        scope_groups = scope["groups"]
+        if scope_groups and not scope_groups[0]["upDisabled"]:
+            raise AssertionError(f"first metric group in scope must disable ↑, got {scope}")
+        if scope_groups and not scope_groups[-1]["downDisabled"]:
+            raise AssertionError(f"last metric group in scope must disable ↓, got {scope}")
+    block_scope = next(
+        (scope for scope in panel_state["scopeGroups"] if len(scope["groups"]) >= 2),
+        None,
+    )
+    if block_scope is None:
+        raise AssertionError(f"metrics presentation needs at least two groups in one scope for block-order controls, got {panel_state}")
     target_group = next((group for group in panel_state["groups"] if len(group["rows"]) >= 2), None)
     if target_group is None:
         raise AssertionError(f"metrics presentation needs a group with at least two selected metrics, got {panel_state}")
@@ -950,6 +984,81 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         raise AssertionError(f"metrics presentation action buttons must be compact, got {panel_state}")
     if float(panel_state["maxRowHeight"]) > 34 or float(panel_state["maxArrowGap"]) > 10:
         raise AssertionError(f"metrics rows must be compact and keep arrows near labels, got {panel_state}")
+
+    block_scope_id = str(block_scope["scopeId"])
+    initial_block_order = [str(group["id"]) for group in block_scope["groups"]]
+    first_block = block_scope["groups"][0]
+    second_block = block_scope["groups"][1]
+    selected_block_keys = [str(first_block["rows"][0]), str(second_block["rows"][0])]
+    if selected_block_keys[0] == selected_block_keys[1]:
+        raise AssertionError(f"block-order check needs distinct metric keys, got {selected_block_keys}")
+
+    page.evaluate(
+        """(keys) => {
+          const allNode = document.querySelector('[data-metric-filter-all]');
+          if (allNode && allNode.checked) {
+            allNode.click();
+          }
+          keys.forEach((key) => {
+            const node = Array.from(document.querySelectorAll('[data-metric-filter-option]')).find((item) => item.value === key);
+            if (node && !node.checked) {
+              node.click();
+            }
+          });
+          const panel = document.querySelector('[data-metrics-presentation]');
+          if (panel) {
+            panel.open = true;
+          }
+        }""",
+        selected_block_keys,
+    )
+    page.wait_for_function(
+        """(keys) => {
+          const visibleKeys = Array.from(new Set(Array.from(document.querySelectorAll('[data-table-body] [data-metric-key]'))
+            .map((node) => node.getAttribute('data-metric-key') || '')
+            .filter(Boolean)));
+          return visibleKeys.length === keys.length && keys.every((key) => visibleKeys.includes(key));
+        }""",
+        arg=selected_block_keys,
+        timeout=5000,
+    )
+    selected_scope_order = _metric_group_order_for_scope(page, block_scope_id)
+    if selected_scope_order[:2] != initial_block_order[:2]:
+        raise AssertionError(
+            f"selected block groups must keep default order before move, got {selected_scope_order}, expected {initial_block_order[:2]}"
+        )
+    _click_metric_group_action(page, scope_id=block_scope_id, group_id=str(first_block["id"]), action="down")
+    page.wait_for_timeout(150)
+    moved_scope_order = _metric_group_order_for_scope(page, block_scope_id)
+    if moved_scope_order[:2] != [initial_block_order[1], initial_block_order[0]]:
+        raise AssertionError(f"block order controls must reorder panel groups, got {moved_scope_order}")
+    table_order_after_group_move = _visible_metric_keys(page)
+    if table_order_after_group_move[:2] != [selected_block_keys[1], selected_block_keys[0]]:
+        raise AssertionError(
+            f"block order controls must reorder table groups, got {table_order_after_group_move[:6]}, expected {selected_block_keys[::-1]}"
+        )
+    persisted_group_order = _persisted_metric_group_order(page, storage_key, block_scope_id)
+    if persisted_group_order[:2] != [initial_block_order[1], initial_block_order[0]]:
+        raise AssertionError(f"block order must persist in metric-presentation storage, got {persisted_group_order}")
+    persisted_custom_scopes = _persisted_metric_group_order_custom_scopes(page, storage_key)
+    if block_scope_id not in persisted_custom_scopes:
+        raise AssertionError(f"block order persistence must mark the moved scope as custom, got {persisted_custom_scopes}")
+
+    page.locator("[data-reset-filters]").click()
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
+    page.evaluate("() => { const panel = document.querySelector('[data-metrics-presentation]'); if (panel) { panel.open = true; } }")
+    reset_scope_order = _metric_group_order_for_scope(page, block_scope_id)
+    if reset_scope_order != initial_block_order:
+        raise AssertionError(f"reset must restore default block order, got {reset_scope_order}, expected {initial_block_order}")
+    reset_persisted_group_order = _persisted_metric_group_order(page, storage_key, block_scope_id)
+    if reset_persisted_group_order != initial_block_order:
+        raise AssertionError(
+            f"reset must persist default block order, got {reset_persisted_group_order}, expected {initial_block_order}"
+        )
+    reset_custom_scopes = _persisted_metric_group_order_custom_scopes(page, storage_key)
+    if reset_custom_scopes:
+        raise AssertionError(f"reset must clear custom block-order scopes, got {reset_custom_scopes}")
+
     selected_keys = [str(target_group["rows"][0]), str(target_group["rows"][1])]
 
     page.evaluate(
@@ -1030,6 +1139,8 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         raise AssertionError("broken metric-presentation localStorage must not crash the page")
     return {
         "selected_keys": selected_keys,
+        "block_order_scope": block_scope_id,
+        "block_order_changed": moved_scope_order[:2],
         "order_changed": panel_order_after_move[:2],
         "hidden_count_before_expand": hidden_counts.get(selected_keys[0], 0),
         "expanded_count": expanded_counts.get(selected_keys[0], 0),
@@ -1042,6 +1153,67 @@ def _visible_metric_keys(page: object) -> list[str]:
         """() => Array.from(new Set(Array.from(document.querySelectorAll('[data-table-body] [data-metric-key]'))
           .map((node) => node.getAttribute('data-metric-key') || '')
           .filter(Boolean)))"""
+    )
+
+
+def _metric_group_order_for_scope(page: object, scope_id: str) -> list[str]:
+    return page.evaluate(
+        """(scopeId) => {
+          const selector = '[data-metrics-config-zone="visible"][data-metrics-config-scope="' + scopeId + '"] [data-metrics-config-group]';
+          return Array.from(document.querySelectorAll(selector))
+            .map((node) => node.getAttribute('data-metrics-config-group') || '')
+            .filter(Boolean);
+        }""",
+        scope_id,
+    )
+
+
+def _click_metric_group_action(page: object, *, scope_id: str, group_id: str, action: str) -> None:
+    clicked = page.evaluate(
+        """({scopeId, groupId, action}) => {
+          const button = Array.from(document.querySelectorAll('[data-metric-group-action]')).find((node) =>
+            !node.disabled &&
+            (node.getAttribute('data-metric-config-scope') || '') === scopeId &&
+            (node.getAttribute('data-metric-config-group') || '') === groupId &&
+            (node.getAttribute('data-metric-group-action') || '') === action
+          );
+          if (!button) {
+            return false;
+          }
+          button.click();
+          return true;
+        }""",
+        {"scopeId": scope_id, "groupId": group_id, "action": action},
+    )
+    if not clicked:
+        raise AssertionError(f"missing metric group action {action!r} for {scope_id!r}/{group_id!r}")
+
+
+def _persisted_metric_group_order(page: object, storage_key: str, scope_id: str) -> list[str]:
+    return page.evaluate(
+        """({storageKey, scopeId}) => {
+          try {
+            const parsed = JSON.parse(window.localStorage.getItem(storageKey) || '{}');
+            return (((parsed || {}).group_order_by_scope || {})[scopeId] || []).filter(Boolean);
+          } catch (error) {
+            return [];
+          }
+        }""",
+        {"storageKey": storage_key, "scopeId": scope_id},
+    )
+
+
+def _persisted_metric_group_order_custom_scopes(page: object, storage_key: str) -> list[str]:
+    return page.evaluate(
+        """(storageKey) => {
+          try {
+            const parsed = JSON.parse(window.localStorage.getItem(storageKey) || '{}');
+            return ((parsed || {}).group_order_custom_scopes || []).filter(Boolean);
+          } catch (error) {
+            return [];
+          }
+        }""",
+        storage_key,
     )
 
 
