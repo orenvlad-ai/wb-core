@@ -11,17 +11,19 @@ source_basis:
   - "docs/modules/00_INDEX__MODULES.md"
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
+  - "docs/modules/33_MODULE__ONEC_STOCKS_BLOCK.md"
 source_of_truth_level: "derived_secondary_project_pack"
 related_docs:
   - "README.md"
   - "docs/architecture/01_target_architecture.md"
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
+  - "docs/modules/33_MODULE__ONEC_STOCKS_BLOCK.md"
 update_triggers:
   - "изменение canonical naming"
   - "появление нового публичного термина"
   - "изменение operator-visible labels"
-built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
+built_from_commit: "2788d9abfa7db64b849b6337a3f6c02b0c726fb4"
 ---
 
 # Summary
@@ -65,6 +67,10 @@ built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
 | `owner runtime API` | `wb-ai-api.service`, `localhost owner API`, `127.0.0.1:8000` | EU host-local owner runtime for bot-backed web-source/seller-funnel handoff; not public nginx route and not `api.selleros.pro` surface |
 | `operator dark/violet theme` | `dark operator UI`, `violet primary accent` | current visual shell for `/sheet-vitrina-v1/vitrina` and `/sheet-vitrina-v1/operator`; primary/action accent is violet/indigo, while green is reserved for semantic success/status |
 | `research_sku_group_comparison` | `Исследования`, `Сравнение групп SKU` | read-only retrospective comparison of two SKU groups over persisted ready snapshots; no causal/statistical claims |
+| `onec_stocks_block` | `1C/Soykasoft stocks`, `1С остатки`, `1С себестоимость WB` | active bounded source module for `/hs/soykasoft/stocks_wb`; owns parser/normalizer, date-specific current/historical load and web-vitrina metric wiring |
+| `onec_product_capital` | `1С / товарный капитал`, `1C source group` | web-vitrina source group for `onec_stocks`; supports date-scoped group refresh and source-status rows |
+| `1C profitability metrics` | `proxy_profit_2_rub`, `proxy_margin_2_pct`, `inventory_capital_return_pct` | runtime-extended 1C-derived rows: proxy profit with 1C WB unit cost, proxy margin 2 and inventory capital return; TOTAL percent rows are ratio-of-aggregates |
+| `1C stage buckets` | `CHINA_TO_FF`, `FF_STOCK`, `FF_TO_WB`, `WB_STOCK` | current web-vitrina buckets for normalized 1C stock capital; source aliases such as `CN_TO_RU_TRANSIT` and `FF_TO_WB_TRANSIT` fold into current buckets |
 | `SPP current source` | `discountOnSite`, `Seller Portal discounts-prices SPP` | current-visible SPP source from Seller Portal; exact current-day evidence may roll over as accepted closed-day truth, while legacy sales-row average remains explicit fallback only |
 | `promo current invariant smoke` | `promo invariant guard` | read-only live/public guard for current promo row visibility and expected ended/no-download artifact handling |
 | `normalized promo archive` | `campaign_rows.jsonl`, `campaign_rows_manifest.json` | normalized campaign-row truth for historical promo replay without permanent raw workbook dependency |
@@ -98,7 +104,7 @@ built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
 # Known gaps
 
 - Final production naming для будущих hosted/runtime/deploy слоёв ещё не зафиксирован.
-- Текущий main-confirmed uploaded package уже фиксируется как `102` metrics rows / `95` enabled+show_in_data metric keys в current truth; operator-facing `DATA_VITRINA` при этом materialize-ит тот же server-driven row set как thin two-day `date_matrix` (`1631` source rows -> `1698` rendered rows на `yesterday_closed + today_current`) без локального subset path.
+- Текущий main-confirmed uploaded package уже фиксируется как `102` metrics rows / `95` enabled+show_in_data uploaded metric keys; active 1C product-capital/profitability rows are runtime extensions, not extra upload rows. Operator-facing historical `DATA_VITRINA` baseline materialize-ит uploaded row set как thin two-day `date_matrix` (`1631` source rows -> `1698` rendered rows на `yesterday_closed + today_current`) без локального subset path.
 - User-facing labels for current web-vitrina are now centralized around `Витрина`, `Поставки`, `Загрузить и обновить`, `Загрузка данных`, `Обновить группу`, `Отчёты`, `Отчёт по остаткам`, `Выполнение плана`, `Исторические данные для отчёта`, `Отзывы`, `Жалобы`, `Исследования`, `Товар в акции` and `ЕБД`. Stale labels such as `Витрина 2` or old supply top-level names are not current UI labels.
 
 # Not in scope

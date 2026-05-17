@@ -15,6 +15,9 @@ source_basis:
   - "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"
   - "apps/registry_upload_http_entrypoint_public_routes_smoke.py"
   - "apps/sheet_vitrina_v1_business_time_smoke.py"
+  - "apps/onec_stocks_block_smoke.py"
+  - "apps/sheet_vitrina_v1_onec_stocks_wiring_smoke.py"
+  - "apps/onec_stocks_block_live_smoke.py"
   - "apps/sheet_vitrina_v1_registry_upload_trigger_smoke.py"
   - "apps/sheet_vitrina_v1_registry_seed_v3_bootstrap_smoke.py"
   - "apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py"
@@ -63,7 +66,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
+built_from_commit: "2788d9abfa7db64b849b6337a3f6c02b0c726fb4"
 ---
 
 # Summary
@@ -95,6 +98,8 @@ python3 apps/sheet_vitrina_v1_business_time_smoke.py
 python3 apps/stocks_block_smoke.py
 python3 apps/stocks_block_region_mapping_smoke.py
 python3 apps/stocks_block_batching_smoke.py
+python3 apps/onec_stocks_block_smoke.py
+python3 apps/sheet_vitrina_v1_onec_stocks_wiring_smoke.py
 python3 apps/sheet_vitrina_v1_registry_upload_trigger_smoke.py
 python3 apps/sheet_vitrina_v1_cost_price_upload_smoke.py
 python3 apps/sheet_vitrina_v1_cost_price_read_side_smoke.py
@@ -166,6 +171,12 @@ python3 apps/sheet_vitrina_v1_promo_live_source_integration_smoke.py
 python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py
 git diff --check
 ```
+
+Current 1C/Soykasoft smoke intent:
+- `apps/onec_stocks_block_smoke.py` proves the 1C stocks parser/normalizer contract, supported stage-code preservation, canonical cost fields, date mismatch rejection and partial-fetch diagnostics without live secrets.
+- `apps/sheet_vitrina_v1_onec_stocks_wiring_smoke.py` proves date-specific current/historical web-vitrina load, source group `onec_product_capital`, stage rows, weighted unit-cost totals, group-refresh merge semantics and runtime-extended 1C profitability metrics.
+- `apps/sheet_vitrina_v1_web_vitrina_group_coverage_smoke.py` keeps `onec_product_capital` visible in grouped `Загрузка данных` / page-composition source metadata.
+- `apps/onec_stocks_block_live_smoke.py` is optional/env-guarded live evidence and is not required for repo-only derived-sync closure.
 
 Current promo smoke intent:
 - `apps/sheet_vitrina_v1_promo_live_source_smoke.py` now additionally proves historical interval replay fills the exact-date promo seam on `yesterday_closed` cache miss.
@@ -592,8 +603,11 @@ Use this section for current website/operator/public verification. Legacy Google
 - `GET /v1/sheet-vitrina-v1/web-vitrina` остаётся cheap read-only JSON path: default v1 shape = `contract_name / contract_version / page_route / read_route / meta / status_summary / schema / rows / capabilities`, optional `as_of_date` stays on том же route и не имеет права trigger-ить refresh/upstream fetch;
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition` now adds the page-only payload for `/sheet-vitrina-v1/vitrina`: `composition_name / composition_version / meta / summary_cards / filter_surface / table_surface / status_summary / capabilities`; default page-composition keeps source-status details unloaded, route still stays read-only and must not trigger refresh/upstream fetch;
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition&include_source_status=1` returns the detailed grouped `Загрузка данных` payload for an explicit details request; it must use server-owned `snapshot_as_of_date`, expose `source_status_state`, and must not infer date from browser-local today or the rightmost `today_current` column;
+- grouped `Загрузка данных` must include `onec_product_capital` / `1С / товарный капитал`; its group refresh is date-scoped and may update only 1C-owned rows/source status for the requested date;
+- 1C stage rows use current buckets `CHINA_TO_FF`, `FF_STOCK`, `FF_TO_WB`, `WB_STOCK`; source aliases such as `CN_TO_RU_TRANSIT` and `FF_TO_WB_TRANSIT` fold into the canonical web-vitrina buckets;
+- 1C profitability rows are server-side derived from current 1C product-capital truth; total percent rows are ratio-of-aggregates, not averaged row percentages;
 - vitrina page shows primary action `Загрузить и обновить`; old top-panel `Обновить`, `JSON Connect` and permanent top status badge are not active current UI.
-- bottom `Действия и состояния` contains server-driven lazy `Загрузка данных`: initial `not_loaded` + `Загрузить`, then grouped table (`WB API`, `Seller Portal / бот`, `Прочие источники`) after explicit details load, plus secondary `Лог`; former sibling block `Обновление данных` is not active page-composition UI.
+- bottom `Действия и состояния` contains server-driven lazy `Загрузка данных`: initial `not_loaded` + `Загрузить`, then grouped table (`WB API`, `1С / товарный капитал`, `Seller Portal / бот`, `Прочие источники`) after explicit details load, plus secondary `Лог`; former sibling block `Обновление данных` is not active page-composition UI.
 - compact toolbar above the table owns `Диапазон`, `Поиск`, `Секции`, `Группа`, `Тип строк`, `Метрики`, `Столбцы`, `Сброс`; the old always-expanded `История`, visible sort selector and separate `Фильтры и настройки` card are not default page sections.
 - no-query page-composition opens latest three server-readable business dates inclusive, ending on backend-owned `today_current_date` when available; explicit `as_of_date` and `date_from/date_to` remain read-only ready-snapshot reads.
 - `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` must reach app-level validation. A request without `source_group_id` returns app-level `400 {"error":"source_group_id is required"}`, not proxy `404`.
@@ -625,8 +639,8 @@ Use this section for current website/operator/public verification. Legacy Google
 - при missing ready snapshot тот же `GET /v1/sheet-vitrina-v1/status` остаётся truthful `422`, но всё равно отдаёт `server_context`, чтобы operator page показывала текущие timezone/scheduler facts уже в empty state;
 - around UTC boundary `19:00–23:59`, `today_current` must already point to next `Asia/Yekaterinburg` business day;
 - `CONFIG!H:I` preserves `endpoint_url`, `last_bundle_version`, `last_status`, `last_http_status`;
-- current truth / ready snapshot keep `95` enabled+show_in_data metrics;
-- `DATA_VITRINA` keeps the same server-driven truth as operator-facing two-day `date_matrix`: `1631` source rows, `34` blocks, `33` separators, `1698` rendered rows и `95` unique metric keys при `yesterday_closed + today_current`;
+- uploaded registry baseline keeps `95` enabled+show_in_data metrics; current web-vitrina can be runtime-extended by active 1C product-capital metrics from `onec_stocks_block`;
+- historical/operator `DATA_VITRINA` uploaded baseline keeps the same server-driven truth as two-day `date_matrix`: `1631` source rows, `34` blocks, `33` separators, `1698` rendered rows и `95` uploaded metric keys при `yesterday_closed + today_current`; these counts are not a cap on runtime-extended 1C rows;
 - `STATUS` names live sources per temporal slot, such as `seller_funnel_snapshot[yesterday_closed]`, `seller_funnel_snapshot[today_current]`, `stocks[yesterday_closed]`, `stocks[today_current]`, `cost_price[yesterday_closed]`, `cost_price[today_current]`, `promo_by_price[yesterday_closed]`, `promo_by_price[today_current]`;
 - current-snapshot/accepted-rollover sources (`prices_snapshot`, `ads_bids`, `spp`) are expected to read `yesterday_closed` from the already accepted current snapshot of the previous business day instead of historical refetching or blanking the closed-day column; SPP's fresh visible source is Seller Portal `discountOnSite`, not WB Statistics sales-average fallback.
 - `stocks[yesterday_closed]` is expected to materialize as success from exact-date runtime cache / historical CSV; `stocks[today_current]` is expected to stay truthful `not_available`/blank under the current `yesterday_closed_only` policy;
@@ -665,6 +679,9 @@ Use this section for current website/operator/public verification. Legacy Google
 | `STATUS.stocks[yesterday_closed] = error` with note from historical CSV fetch | closed-day stocks path failed before exact-date runtime cache was materialized; inspect Seller Analytics CSV create/poll/download chain and runtime backfill state |
 | `STATUS.stocks[yesterday_closed] = not_available` | stale deploy or stale ready snapshot: after the historical stocks checkpoint switch, this source should no longer stay current-only in `sheet_vitrina_v1` |
 | `STATUS.stocks[today_current] = not_available` | truthful result under the current `yesterday_closed_only` policy; investigate only if source/card/aggregate status is still degraded because of this non-required slot |
+| `STATUS.onec_stocks[*] = error` with payload date mismatch | 1C payload belongs to another business date; do not reuse it for historical truth or group-refresh cells |
+| `onec_product_capital` missing from grouped `Загрузка данных` | stale deploy, stale page composition or stale source-group metadata for active 1C product-capital wiring |
+| 1C profitability TOTAL percent differs from ratio-of-aggregates | regression in server-side 1C profitability calculation; inspect `proxy_profit_2` / `inventory_capital_return` total builders |
 | `STATUS.web_source_snapshot[yesterday_closed] = not_found` or `STATUS.seller_funnel_snapshot[yesterday_closed] = not_found` with `resolution_rule=explicit_or_latest_date_match` | upstream latest payload no longer matches requested day and exact-date runtime cache for that date is still missing |
 | `STATUS.web_source_snapshot[yesterday_closed]` or `STATUS.seller_funnel_snapshot[yesterday_closed]` is `closure_retrying` / `closure_rate_limited` / `closure_exhausted` | strict closed-day acceptance has not confirmed final truth yet; closed slot must stay blank/error instead of silently inheriting provisional same-day values |
 | `STATUS.web_source_snapshot[today_current].note` or `STATUS.seller_funnel_snapshot[today_current].note` starts with `current_day_web_source_sync_failed=` | bounded refresh tried server-local same-day capture/handoff and failed before exact-date local snapshot became available; investigate `/opt/wb-web-bot` runners, `/opt/wb-ai/run_web_source_handoff.py`, env and host-local owner paths |

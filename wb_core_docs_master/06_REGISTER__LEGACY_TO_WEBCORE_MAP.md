@@ -14,6 +14,7 @@ source_basis:
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
   - "docs/modules/27_MODULE__PROMO_XLSX_COLLECTOR_BLOCK.md"
   - "docs/modules/28_MODULE__PROMO_LIVE_SOURCE_WIRING_BLOCK.md"
+  - "docs/modules/33_MODULE__ONEC_STOCKS_BLOCK.md"
 source_of_truth_level: "derived_secondary_project_pack"
 related_docs:
   - "README.md"
@@ -24,11 +25,12 @@ related_docs:
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
   - "docs/modules/27_MODULE__PROMO_XLSX_COLLECTOR_BLOCK.md"
   - "docs/modules/28_MODULE__PROMO_LIVE_SOURCE_WIRING_BLOCK.md"
+  - "docs/modules/33_MODULE__ONEC_STOCKS_BLOCK.md"
 update_triggers:
   - "перенос новой legacy capability"
   - "изменение migration boundary"
   - "закрытие крупного compatibility gap"
-built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
+built_from_commit: "2788d9abfa7db64b849b6337a3f6c02b0c726fb4"
 ---
 
 # Summary
@@ -42,9 +44,9 @@ built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
 | --- | --- | --- | --- |
 | `wb-table-audit` Apps Script operator shell | `gas/sheet_vitrina_v1/*` + website/operator `sheet_vitrina_v1` | archived for Google Sheets; current operator is unified website/public web-vitrina | former sheet-side contour is migration evidence with archive guards, not active UI/update/write/verify target; `/sheet-vitrina-v1/vitrina` is the primary current UI with vitrina/supply/reports/feedbacks/research tabs and `/sheet-vitrina-v1/operator` is compatibility entry |
 | legacy `CONFIG` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `registry_upload_bundle_v1_block` | перенесён в compact V2/V3 form | не равен full legacy `CONFIG` 1:1 |
-| legacy `METRICS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `sheet_vitrina_v1_mvp_end_to_end_block` | uploaded compact package перенесён | historical sheet/upload dictionary materialized `102` rows; current truth / server plan держат `95` enabled+show_in_data metrics, а website/operator web-vitrina reads the same server-driven ready snapshot |
+| legacy `METRICS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `sheet_vitrina_v1_mvp_end_to_end_block` + runtime extensions in `sheet_vitrina_v1_onec_stocks` | uploaded compact package перенесён; 1C profitability metrics are repo-runtime extensions, not legacy upload rows | historical sheet/upload dictionary materialized `102` rows; current truth / server plan держат `95` enabled+show_in_data uploaded metrics plus runtime-extended 1C profitability metrics, а website/operator web-vitrina reads the same server-driven ready snapshot |
 | legacy `FORMULAS` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` + `registry_upload_bundle_v1_block` | current uploaded set перенесён | historical sheet-side seed and upload bundle держат `7` formulas rows, нужных authoritative `metrics_v2`; Google Sheets seed is archived |
-| legacy `DATA`/vitrina readback | `sheet_vitrina_v1_mvp_end_to_end_block` + `promo_live_source_wiring_block` | bounded replacement есть | rows materialize-ятся по uploaded package; `COST_PRICE` overlay и promo-backed `promo_by_price` rows уже server-side integrated в current refresh/runtime/read-side contour |
+| legacy `DATA`/vitrina readback | `sheet_vitrina_v1_mvp_end_to_end_block` + `promo_live_source_wiring_block` + `onec_stocks_block` | bounded replacement есть | rows materialize-ятся server-side; `COST_PRICE` overlay, promo-backed `promo_by_price` rows and 1C product-capital/profitability rows are integrated in current refresh/runtime/read-side contour |
 | legacy report historical fact gaps | accepted temporal slots + `manual_monthly_plan_report_baseline` + one-off ready-fact reconcile + Reports ready-snapshot selector | bounded server-side replacement есть | daily/stock default reads use persisted ready snapshots already materialized in server runtime; plan-report may use controlled monthly XLSX baseline only for full-month aggregates; ready snapshots may be one-off reconcile input for missing accepted `fin_report_daily` / `ads_compact` slots; neither path revives Google Sheets/GAS as report truth |
 | feedback complaints / Seller Portal complaint handling | `Отзывы` nested `Жалобы` runtime journal/status sync + protected selected-row submit job + nested `Авто-жалобы` schedules/run-now/tick + guarded support/probe runners | bounded replacement есть for status/evidence, selected-row submit and runtime-scheduled auto-complaints; broad public/browser-side submit deliberately absent | current auth-protected web UI can submit only selected/analyzed rows through bounded jobs; auto-complaints use runtime schedules, saved AI and the same guarded submit path; real submit still requires exact match/hard caps, and uncertain results require read-only confirmation/detail probes |
 | legacy `AI_EXPORT` | отдельного полного replacement пока нет | open gap | compatibility boundary ещё не закрыт |
