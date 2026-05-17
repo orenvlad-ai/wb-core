@@ -134,7 +134,7 @@ update_note: "Phase 3 web-vitrina materialize-ит первый concrete `grid_a
 
 - real bundled `@gravity-ui/table` package/runtime rendering on `/sheet-vitrina-v1/vitrina`
 - grid virtualization/resizing UX implementation
-- browser-local metric presentation state on `/sheet-vitrina-v1/vitrina` (scope-local block/group drag order, selected-metric drag order, visible/hidden placement and auto-derived disclosure at the last shown metric) belongs to the page-composition client layer above the adapter payload; it does not change adapter contract, metric registry, formulas or source truth.
+- browser-local metric presentation state on `/sheet-vitrina-v1/vitrina` (scope-local `Итого`/`SKU` metric order, per-metric display status `Показано`/`Свернуто`/`Скрыто`, and icon-only disclosure expansion state) belongs to the page-composition client layer above the adapter payload; it does not change adapter contract, metric registry, formulas or source truth.
 - export layer
 - any business-truth logic in browser
 - Google Sheets cutover
