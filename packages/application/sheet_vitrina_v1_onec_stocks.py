@@ -46,6 +46,13 @@ ONEC_STOCKS_SKU_TOTAL_QTY_METRIC_KEY = "onec_total_qty"
 ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY = "onec_total_cost_rub"
 ONEC_STOCKS_TOTAL_QTY_METRIC_KEY = "total_onec_total_qty"
 ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY = "total_onec_total_cost_rub"
+ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY = "onec_WB_STOCK_unit_cost_rub"
+ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY = "proxy_profit_2_rub"
+ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY = "total_proxy_profit_2_rub"
+ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY = "proxy_margin_2_pct"
+ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY = "proxy_margin_2_pct_total"
+ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY = "inventory_capital_return_pct"
+ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY = "inventory_capital_return_pct_total"
 ONEC_STOCKS_STAGE_TOTAL_UNIT_COST_FIELD = "unit_cost_rub"
 ONEC_STOCKS_TOTAL_STAGE_METRIC_KEYS: tuple[str, ...] = tuple(
     f"{'avg' if field == ONEC_STOCKS_STAGE_TOTAL_UNIT_COST_FIELD else 'total'}"
@@ -58,6 +65,11 @@ ONEC_STOCKS_TOTAL_METRIC_KEYS: tuple[str, ...] = (
     ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY,
     *ONEC_STOCKS_TOTAL_STAGE_METRIC_KEYS,
 )
+ONEC_STOCKS_DERIVED_TOTAL_METRIC_KEYS: tuple[str, ...] = (
+    ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY,
+    ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY,
+    ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
+)
 ONEC_STOCKS_SKU_STAGE_METRIC_KEYS: tuple[str, ...] = tuple(
     f"onec_{stage_key}_{field}"
     for stage_key in ONEC_STOCKS_STAGE_KEYS
@@ -68,9 +80,16 @@ ONEC_STOCKS_SKU_METRIC_KEYS: tuple[str, ...] = (
     ONEC_STOCKS_SKU_TOTAL_QTY_METRIC_KEY,
     ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY,
 )
+ONEC_STOCKS_DERIVED_SKU_METRIC_KEYS: tuple[str, ...] = (
+    ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY,
+    ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY,
+    ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
+)
 ONEC_STOCKS_METRIC_KEYS: tuple[str, ...] = (
     *ONEC_STOCKS_TOTAL_METRIC_KEYS,
+    *ONEC_STOCKS_DERIVED_TOTAL_METRIC_KEYS,
     *ONEC_STOCKS_SKU_METRIC_KEYS,
+    *ONEC_STOCKS_DERIVED_SKU_METRIC_KEYS,
 )
 
 DEFAULT_ONEC_STAGE_MAPPING: Mapping[str, str] = {
@@ -136,6 +155,42 @@ def build_onec_stock_metric_items() -> list[MetricV2Item]:
             format="rub",
             display_order=1040,
             section=ONEC_STOCKS_SECTION_RU,
+        ),
+        MetricV2Item(
+            metric_key=ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY,
+            enabled=True,
+            scope="TOTAL",
+            label_ru="Прокси прибыль 2 всего, ₽",
+            calc_type="metric",
+            calc_ref=ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY,
+            show_in_data=True,
+            format="rub",
+            display_order=21,
+            section="Экономика",
+        ),
+        MetricV2Item(
+            metric_key=ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY,
+            enabled=True,
+            scope="TOTAL",
+            label_ru="Прокси маржинальность 2 всего, %",
+            calc_type="metric",
+            calc_ref=ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY,
+            show_in_data=True,
+            format="percent",
+            display_order=22,
+            section="Экономика",
+        ),
+        MetricV2Item(
+            metric_key=ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
+            enabled=True,
+            scope="TOTAL",
+            label_ru="Рентабельность товарных остатков всего, %",
+            calc_type="metric",
+            calc_ref=ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
+            show_in_data=True,
+            format="percent",
+            display_order=23,
+            section="Экономика",
         ),
     ]
     order = 1050
@@ -206,6 +261,46 @@ def build_onec_stock_metric_items() -> list[MetricV2Item]:
                 format="rub",
                 display_order=order + 10,
                 section=ONEC_STOCKS_SECTION_RU,
+            ),
+        ]
+    )
+    items.extend(
+        [
+            MetricV2Item(
+                metric_key=ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY,
+                enabled=True,
+                scope="SKU",
+                label_ru="Прокси прибыль 2",
+                calc_type="metric",
+                calc_ref=ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY,
+                show_in_data=True,
+                format="rub",
+                display_order=501,
+                section="Экономика",
+            ),
+            MetricV2Item(
+                metric_key=ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY,
+                enabled=True,
+                scope="SKU",
+                label_ru="Прокси маржинальность 2, %",
+                calc_type="metric",
+                calc_ref=ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY,
+                show_in_data=True,
+                format="percent",
+                display_order=502,
+                section="Экономика",
+            ),
+            MetricV2Item(
+                metric_key=ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
+                enabled=True,
+                scope="SKU",
+                label_ru="Рентабельность товарных остатков, %",
+                calc_type="metric",
+                calc_ref=ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
+                show_in_data=True,
+                format="percent",
+                display_order=503,
+                section="Экономика",
             ),
         ]
     )
