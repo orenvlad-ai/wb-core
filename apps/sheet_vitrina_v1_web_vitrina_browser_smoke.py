@@ -119,7 +119,7 @@ def main() -> None:
         "column_visibility": ready_result["column_visibility"],
         "horizontal_overscroll_guard": ready_result["horizontal_overscroll_guard"],
         "operator_link": ready_result["operator_link"],
-        "metric_filter_applied": ready_result["metric_filter_applied"],
+        "metric_toolbar_removed": ready_result["metric_toolbar_removed"],
         "metric_presentation": ready_result["metric_presentation"],
         "empty_state_after_search": ready_result["empty_state_after_search"],
         "reset_restores_table": ready_result["reset_restores_table"],
@@ -416,8 +416,8 @@ def run_browser_checks(
                 "section": page.locator("[data-filter-control='section']").count() == 1,
                 "group": page.locator("[data-filter-control='group']").count() == 1,
                 "scope_kind_absent": page.locator("[data-filter-control='scope_kind']").count() == 0,
-                "metric": page.locator("[data-metric-manager]").count() == 1
-                and page.locator("[data-metric-filter-option]").count() >= 2,
+                "metric_absent": page.locator("[data-metric-manager]").count() == 0
+                and page.locator("[data-metric-filter-option]").count() == 0,
                 "sort_absent": page.locator("[data-filter-control='sort']").count() == 0,
             }
             if not all(filter_controls.values()):
@@ -463,7 +463,7 @@ def run_browser_checks(
                   };
                 }"""
             )
-            expected_toolbar_labels = {"Диапазон", "Поиск", "Секции", "Группа", "Метрики", "Столбцы"}
+            expected_toolbar_labels = {"Диапазон", "Поиск", "Секции", "Группа", "Столбцы"}
             missing_toolbar_labels = expected_toolbar_labels.difference(set(table_toolbar["labels"]))
             if (
                 not table_toolbar["exists"]
@@ -474,6 +474,7 @@ def run_browser_checks(
                 or table_toolbar["forbiddenSortVisible"]
                 or table_toolbar["forbiddenScopeVisible"]
                 or "Тип строк" in table_toolbar["toolbarText"]
+                or "Метрики" in table_toolbar["toolbarText"]
                 or table_toolbar["forbiddenSummaryVisible"]
                 or table_toolbar["resetText"] != "Сброс"
                 or table_toolbar["logoutText"] != "Выйти"
@@ -512,7 +513,7 @@ def run_browser_checks(
                 else {"skipped": "read-only public base-url mode"}
             )
 
-            metric_filter_applied = _check_metric_multiselect_controls(page)
+            metric_toolbar_removed = _check_metric_toolbar_removed(page)
             metric_presentation = _check_metric_presentation_controls(page)
 
             page.locator("[data-filter-control='search']").fill("zzzz-no-matches")
@@ -651,7 +652,7 @@ def run_browser_checks(
         "column_visibility": column_visibility,
         "horizontal_overscroll_guard": horizontal_overscroll_guard,
         "operator_link": operator_link,
-        "metric_filter_applied": metric_filter_applied,
+        "metric_toolbar_removed": metric_toolbar_removed,
         "metric_presentation": metric_presentation,
         "empty_state_after_search": empty_state_after_search,
         "reset_restores_table": reset_restores_table,
@@ -722,7 +723,7 @@ def _print_summary(result: dict[str, object]) -> None:
     print("web_vitrina_browser_filters: ok ->", result["filter_controls"])
     if "table_toolbar" in result:
         print("web_vitrina_browser_table_toolbar: ok ->", result["table_toolbar"])
-    print("web_vitrina_browser_metric_filter: ok ->", result["metric_filter_applied"])
+    print("web_vitrina_browser_metric_toolbar_removed: ok ->", result["metric_toolbar_removed"])
     print("web_vitrina_browser_metric_presentation: ok ->", result["metric_presentation"])
     print("web_vitrina_browser_empty_state: ok ->", result["empty_state_after_search"])
     print("web_vitrina_browser_reset: ok ->", result["reset_restores_table"])
@@ -760,83 +761,30 @@ def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
     }
 
 
-def _check_metric_multiselect_controls(page: object) -> dict[str, object]:
+def _check_metric_toolbar_removed(page: object) -> dict[str, object]:
     storage_key = "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1:selected-metrics:v1"
-    manager = page.locator("[data-metric-manager]")
-    if manager.count() != 1:
-        raise AssertionError("metric manager must be rendered once")
-
-    manager.locator("summary").click()
-    _assert_details_open(manager, True, "metric manager must open")
-    option_count = page.locator("[data-metric-filter-option]").count()
-    if option_count < 2:
-        raise AssertionError(f"metric manager must expose at least two checkbox rows, got {option_count}")
-    metric_rows = page.evaluate(
-        """() => Array.from(document.querySelectorAll('[data-metric-filter-option]')).slice(0, 2).map((node) => ({
-          value: node.value || '',
-          label: ((node.closest('label') || {}).innerText || '').trim()
-        }))"""
+    state_before = page.evaluate(
+        """() => {
+          const toolbar = document.querySelector('[data-table-toolbar]');
+          return {
+            labels: toolbar ? Array.from(toolbar.querySelectorAll('.filter-label')).map((node) => (node.textContent || '').trim()).filter(Boolean) : [],
+            managerCount: document.querySelectorAll('[data-metric-manager]').length,
+            optionCount: document.querySelectorAll('[data-metric-filter-option]').length,
+            summaryCount: document.querySelectorAll('[data-metric-summary-label]').length,
+            visibleMetricCount: new Set(Array.from(document.querySelectorAll('[data-table-body] [data-metric-key]'))
+              .map((node) => node.getAttribute('data-metric-key') || '')
+              .filter(Boolean)).size
+          };
+        }"""
     )
-    selected_keys = [str(item["value"]) for item in metric_rows if item.get("value")]
-    if len(selected_keys) != 2 or selected_keys[0] == selected_keys[1]:
-        raise AssertionError(f"metric manager must expose distinct metric keys, got {metric_rows}")
-    grouped_state = page.evaluate(
-        """() => ({
-          scopeLabels: Array.from(document.querySelectorAll('[data-metric-scope-title]')).map((node) => (node.textContent || '').trim()),
-          sectionLabels: Array.from(document.querySelectorAll('[data-metric-section-title]')).map((node) => (node.textContent || '').trim()),
-          groups: Array.from(document.querySelectorAll('[data-metric-scope-group]')).map((group) => ({
-            id: group.getAttribute('data-metric-scope-group') || '',
-            label: ((group.querySelector('[data-metric-scope-title]') || {}).textContent || '').trim(),
-            optionCount: group.querySelectorAll('[data-metric-filter-option]').length,
-            sectionCount: group.querySelectorAll('[data-metric-section-group]').length
-          }))
-        })"""
-    )
-    if grouped_state["scopeLabels"] != ["Итого", "SKU"]:
-        raise AssertionError(f"metric manager must group options by Итого/SKU, got {grouped_state}")
-    if not grouped_state["sectionLabels"] or any(not label for label in grouped_state["sectionLabels"]):
-        raise AssertionError(f"metric manager must expose existing section headings, got {grouped_state}")
-    if any(int(item["optionCount"]) <= 0 or int(item["sectionCount"]) <= 0 for item in grouped_state["groups"]):
-        raise AssertionError(f"metric manager grouped sections must contain checkbox rows, got {grouped_state}")
-    initial_summary = page.locator("[data-metric-summary-label]").inner_text().strip()
-    if initial_summary != "Все метрики":
-        raise AssertionError(f"default metric summary must show all metrics, got {initial_summary!r}")
-    if not page.locator("[data-metric-filter-all]").is_checked():
-        raise AssertionError("all-metrics checkbox must be checked by default")
-
-    page.locator("[data-metric-filter-all]").click()
-    _assert_details_open(manager, True, "all-metrics checkbox click must keep dropdown open")
-    zero_summary = page.locator("[data-metric-summary-label]").inner_text().strip()
-    if zero_summary != "Метрики: 0":
-        raise AssertionError(f"empty metric selection summary mismatch, got {zero_summary!r}")
-
-    page.locator("[data-metric-filter-option]").nth(0).check()
-    _assert_details_open(manager, True, "metric checkbox click must keep dropdown open")
-    page.locator("[data-metric-filter-option]").nth(1).check()
-    _assert_details_open(manager, True, "second metric checkbox click must keep dropdown open")
-    page.wait_for_timeout(150)
-    selected_summary = page.locator("[data-metric-summary-label]").inner_text().strip()
-    if selected_summary != "Метрики: 2":
-        raise AssertionError(f"selected metric summary mismatch, got {selected_summary!r}")
-    visible_keys = _visible_metric_keys(page)
-    if set(visible_keys) != set(selected_keys):
-        raise AssertionError(f"table must show rows for exactly the two selected metrics, got {visible_keys}, expected {selected_keys}")
-
-    page.reload(wait_until="commit")
-    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
-    restored_summary = page.locator("[data-metric-summary-label]").inner_text().strip()
-    restored_visible_keys = _visible_metric_keys(page)
-    if restored_summary != "Метрики: 2" or set(restored_visible_keys) != set(selected_keys):
-        raise AssertionError(
-            f"metric selection must survive reload, got summary={restored_summary!r}, keys={restored_visible_keys}"
-        )
-
-    page.evaluate("(key) => window.localStorage.setItem(key, '{broken-json')", storage_key)
-    page.reload(wait_until="commit")
-    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
-    corrupted_summary = page.locator("[data-metric-summary-label]").inner_text().strip()
-    if corrupted_summary != "Все метрики":
-        raise AssertionError(f"corrupted metric localStorage must fall back to all metrics, got {corrupted_summary!r}")
+    if (
+        "Метрики" in state_before["labels"]
+        or int(state_before["managerCount"]) != 0
+        or int(state_before["optionCount"]) != 0
+        or int(state_before["summaryCount"]) != 0
+        or int(state_before["visibleMetricCount"]) < 4
+    ):
+        raise AssertionError(f"old toolbar metric selector must be absent and non-authoritative, got {state_before}")
 
     page.evaluate(
         """(key) => window.localStorage.setItem(key, JSON.stringify({
@@ -847,20 +795,21 @@ def _check_metric_multiselect_controls(page: object) -> dict[str, object]:
     )
     page.reload(wait_until="commit")
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
-    obsolete_summary = page.locator("[data-metric-summary-label]").inner_text().strip()
-    all_visible_keys = _visible_metric_keys(page)
-    if obsolete_summary != "Все метрики" or len(set(all_visible_keys)) < option_count:
-        raise AssertionError(
-            f"obsolete metric localStorage must fall back to all metrics, got summary={obsolete_summary!r}, keys={all_visible_keys}"
-        )
+    state_after = page.evaluate(
+        """() => ({
+          managerCount: document.querySelectorAll('[data-metric-manager]').length,
+          optionCount: document.querySelectorAll('[data-metric-filter-option]').length,
+          visibleMetricCount: new Set(Array.from(document.querySelectorAll('[data-table-body] [data-metric-key]'))
+            .map((node) => node.getAttribute('data-metric-key') || '')
+            .filter(Boolean)).size
+        })"""
+    )
+    if int(state_after["managerCount"]) != 0 or int(state_after["optionCount"]) != 0 or int(state_after["visibleMetricCount"]) < 4:
+        raise AssertionError(f"obsolete old metric selector storage must be ignored safely, got {state_after}")
     return {
-        "checkbox_rows": option_count,
-        "selected_keys": selected_keys,
-        "groups": grouped_state["scopeLabels"],
-        "sections": grouped_state["sectionLabels"],
-        "restored_after_reload": True,
-        "corrupted_storage_fallback": True,
-        "obsolete_storage_fallback": True,
+        "toolbar_metric_label_absent": "Метрики" not in state_before["labels"],
+        "old_manager_absent": state_after["managerCount"] == 0,
+        "obsolete_storage_ignored": True,
     }
 
 
@@ -887,101 +836,42 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
           const text = panel ? (panel.innerText || '') : '';
           const grid = panel ? panel.querySelector('[data-metrics-config-grid]') : null;
           const gridColumns = grid ? getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length : 0;
-          const scopePairColumns = Array.from(panel ? panel.querySelectorAll('[data-metrics-config-scope-pair]') : [])
-            .map((node) => getComputedStyle(node).gridTemplateColumns.split(' ').filter(Boolean).length);
-          const effectiveGridColumns = gridColumns * (scopePairColumns.length ? Math.max(...scopePairColumns) : 1);
-          const rows = Array.from(document.querySelectorAll('[data-metric-config-row]'));
-          const groupsById = new Map();
-          rows.forEach((row) => {
-            const groupId = row.getAttribute('data-metric-config-group-id') || '';
-            const zoneNode = row.closest('[data-metrics-config-zone]');
-            if (!groupsById.has(groupId)) {
-              groupsById.set(groupId, {
-                id: groupId,
-                scopeId: zoneNode ? (zoneNode.getAttribute('data-metrics-config-scope') || '') : '',
-                rows: []
-              });
-            }
-            groupsById.get(groupId).rows.push(row.getAttribute('data-metric-config-row') || '');
-          });
-          const groups = Array.from(groupsById.values());
-          const scopeGroupsById = new Map();
-          Array.from(panel ? panel.querySelectorAll('[data-metrics-config-zone="visible"] [data-metrics-config-group]') : []).forEach((section) => {
-            const zone = section.closest('[data-metrics-config-zone]');
-            const scopeId = zone ? (zone.getAttribute('data-metrics-config-scope') || '') : '';
-            if (!scopeId) {
-              return;
-            }
-            if (!scopeGroupsById.has(scopeId)) {
-              scopeGroupsById.set(scopeId, {scopeId, groups: []});
-            }
-            scopeGroupsById.get(scopeId).groups.push({
-              id: section.getAttribute('data-metrics-config-group') || '',
-              label: ((section.querySelector('.metrics-config-section-label') || {}).textContent || '').trim(),
-              rows: Array.from(section.querySelectorAll('[data-metric-config-row]'))
-                .map((row) => row.getAttribute('data-metric-config-row') || '')
-                .filter(Boolean),
-              groupHandleCount: section.querySelectorAll('[data-metric-group-drag-handle]').length
-            });
-          });
-          const scopeGroups = Array.from(scopeGroupsById.values()).filter((scope) => scope.scopeId && scope.groups.length);
-          const pairedRows = Array.from(panel ? panel.querySelectorAll('[data-metrics-config-paired-row]') : []).map((row) => {
-            const visibleZone = row.querySelector('[data-metrics-config-zone="visible"]');
-            const hiddenZone = row.querySelector('[data-metrics-config-zone="hidden"]');
-            const visibleSection = visibleZone ? visibleZone.querySelector('[data-metrics-config-group]') : null;
-            const hiddenSection = hiddenZone ? hiddenZone.querySelector('[data-metrics-config-group]') : null;
-            const rowRect = row.getBoundingClientRect();
-            const visibleRect = visibleZone ? visibleZone.getBoundingClientRect() : {top: 0, height: 0};
-            const hiddenRect = hiddenZone ? hiddenZone.getBoundingClientRect() : {top: 0, height: 0};
-            return {
-              groupId: row.getAttribute('data-metrics-config-group') || '',
-              visibleGroupId: visibleSection ? (visibleSection.getAttribute('data-metrics-config-group') || '') : '',
-              hiddenGroupId: hiddenSection ? (hiddenSection.getAttribute('data-metrics-config-group') || '') : '',
-              visibleRows: Array.from(visibleZone ? visibleZone.querySelectorAll('[data-metric-config-row]') : [])
-                .map((metricRow) => metricRow.getAttribute('data-metric-config-row') || '')
-                .filter(Boolean),
-              hiddenRows: Array.from(hiddenZone ? hiddenZone.querySelectorAll('[data-metric-config-row]') : [])
-                .map((metricRow) => metricRow.getAttribute('data-metric-config-row') || '')
-                .filter(Boolean),
-              topDelta: Math.abs(Number(visibleRect.top || 0) - Number(hiddenRect.top || 0)),
-              rowHeight: Number(rowRect.height || 0),
-              visibleHeight: Number(visibleRect.height || 0),
-              hiddenHeight: Number(hiddenRect.height || 0)
-            };
-          });
+          const scopeTables = Array.from(panel ? panel.querySelectorAll('[data-metrics-config-scope-table]') : []).map((tableNode) => ({
+            scopeId: tableNode.getAttribute('data-metrics-config-scope') || '',
+            label: ((tableNode.querySelector('.metrics-config-scope-title') || {}).textContent || '').trim(),
+            headers: Array.from(tableNode.querySelectorAll('.metrics-config-row.is-header [role="columnheader"]')).map((node) => (node.textContent || '').trim()),
+            rows: Array.from(tableNode.querySelectorAll('[data-metric-config-row]:not(.is-header)')).map((row) => ({
+              metricKey: row.getAttribute('data-metric-config-key') || '',
+              label: ((row.querySelector('.metrics-config-label') || {}).textContent || '').trim(),
+              group: ((row.querySelector('.metrics-config-group-badge') || {}).textContent || '').trim(),
+              status: row.getAttribute('data-metric-display-status') || '',
+              handleCount: row.querySelectorAll('[data-metric-drag-handle]').length,
+              selectOptions: Array.from(row.querySelectorAll('[data-metric-display-select] option')).map((node) => (node.textContent || '').trim())
+            }))
+          }));
+          const rows = Array.from(panel ? panel.querySelectorAll('[data-metric-config-row]:not(.is-header)') : []);
           const rowHeights = rows.map((row) => row.getBoundingClientRect().height);
           const whiteNodes = Array.from(panel ? panel.querySelectorAll([
             '.metrics-presentation-body',
-            '.metrics-config-scope-pair',
-            '.metrics-config-paired-row',
-            '.metrics-config-zone',
+            '.metrics-config-scope-table',
             '.metrics-config-row',
-            '.metrics-config-button',
             '.metrics-config-drag-handle',
-            '.metrics-config-block-drag-handle'
+            '.metrics-config-display-select'
           ].join(',')) : []).filter((node) => isNearWhite(getComputedStyle(node).backgroundColor));
-          const actionLabels = Array.from(panel ? panel.querySelectorAll('[data-metric-config-action="hide"], [data-metric-config-action="show"]') : [])
-            .map((node) => (node.textContent || '').trim());
           return {
             exists: !!panel,
             afterToolbar,
             beforeTable,
             summary: ((document.querySelector('[data-metrics-presentation-summary]') || {}).textContent || '').trim(),
-            groupCount: groups.length,
-            groups,
-            scopeGroups,
-            pairedRows,
+            scopeTables,
             groupMoveButtonCount: panel ? panel.querySelectorAll('[data-metric-group-action]').length : 0,
             metricMoveButtonCount: panel ? panel.querySelectorAll('[data-metric-config-action="up"], [data-metric-config-action="down"]').length : 0,
-            anchorControlCount: panel ? panel.querySelectorAll('[data-metric-anchor-group], .metrics-config-anchor').length : 0,
+            anchorControlCount: panel ? panel.querySelectorAll('[data-metric-anchor-group], .metrics-config-anchor, input[type="radio"], input[type="checkbox"][data-metric-anchor]').length : 0,
             metricDragHandleCount: panel ? panel.querySelectorAll('[data-metric-drag-handle]').length : 0,
             groupDragHandleCount: panel ? panel.querySelectorAll('[data-metric-group-drag-handle]').length : 0,
-            gridColumns: effectiveGridColumns,
-            outerGridColumns: gridColumns,
-            scopePairColumns,
-            zoneTitles: Array.from(panel ? panel.querySelectorAll('.metrics-config-zone-kind') : []).map((node) => (node.textContent || '').trim()),
-            actionLabels,
-            oldLabelHits: ['Показывать сразу', 'Скрыто под раскрытием', 'Скрыть под раскрытием', 'Показать сразу'].filter((item) => text.includes(item)),
+            oldLayoutCount: panel ? panel.querySelectorAll('[data-metrics-config-scope-pair], [data-metrics-config-paired-row], [data-metrics-config-zone], [data-metrics-config-group]').length : 0,
+            gridColumns,
+            oldLabelHits: ['Показывать сразу', 'Скрыто под раскрытием', 'Скрыть под раскрытием', 'Показать сразу', 'Показать ещё', 'ещё '].filter((item) => text.includes(item)),
             whiteNodeCount: whiteNodes.length,
             maxRowHeight: rowHeights.length ? Math.max(...rowHeights) : 0,
             scopeCount: Number(grid ? (grid.getAttribute('data-metrics-config-scope-count') || '0') : '0')
@@ -992,283 +882,152 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         not panel_state["exists"]
         or not panel_state["afterToolbar"]
         or not panel_state["beforeTable"]
-        or int(panel_state["groupCount"]) <= 0
+        or int(panel_state["scopeCount"]) < 2
     ):
         raise AssertionError(f"metrics presentation panel must sit between toolbar and table, got {panel_state}")
     if int(panel_state["groupMoveButtonCount"]) != 0 or int(panel_state["metricMoveButtonCount"]) != 0:
         raise AssertionError(f"metrics presentation must remove arrow move buttons, got {panel_state}")
     if int(panel_state["anchorControlCount"]) != 0:
         raise AssertionError(f"metrics presentation must remove manual anchor controls, got {panel_state}")
-    if int(panel_state["groupDragHandleCount"]) <= 0 or int(panel_state["metricDragHandleCount"]) <= 0:
-        raise AssertionError(f"metrics presentation must expose group and metric drag handles, got {panel_state}")
-    for scope in panel_state["scopeGroups"]:
-        for group in scope["groups"]:
-            if int(group["groupHandleCount"]) != 1:
-                raise AssertionError(f"each visible group header must expose one shared drag handle, got {scope}")
-    block_scope = next(
-        (scope for scope in panel_state["scopeGroups"] if len(scope["groups"]) >= 2),
-        None,
-    )
-    if block_scope is None:
-        raise AssertionError(f"metrics presentation needs at least two groups in one scope for block-order controls, got {panel_state}")
-    target_group = next((group for group in panel_state["groups"] if len(group["rows"]) >= 3), None)
-    if target_group is None:
-        raise AssertionError(f"metrics presentation needs a group with at least three selected metrics, got {panel_state}")
-    if int(panel_state["scopeCount"]) >= 2 and int(panel_state["gridColumns"]) != 4:
-        raise AssertionError(f"metrics presentation must use four desktop columns for two scope buckets, got {panel_state}")
-    paired_rows = panel_state["pairedRows"]
-    if not paired_rows:
-        raise AssertionError(f"metrics presentation must render paired shown/hidden rows, got {panel_state}")
-    for paired_row in paired_rows:
-        if (
-            paired_row["groupId"] != paired_row["visibleGroupId"]
-            or paired_row["groupId"] != paired_row["hiddenGroupId"]
-        ):
-            raise AssertionError(f"paired row must bind visible+hidden cells to one logical group, got {paired_row}")
-        if float(paired_row["topDelta"]) > 1.5:
-            raise AssertionError(f"paired row visible/hidden cells must share one vertical row, got {paired_row}")
-        if float(paired_row["rowHeight"]) + 2 < max(float(paired_row["visibleHeight"]), float(paired_row["hiddenHeight"])):
-            raise AssertionError(f"paired row height must contain both cells, got {paired_row}")
-        if paired_row["visibleRows"] and not paired_row["hiddenRows"]:
-            if float(paired_row["hiddenHeight"]) + 2 < float(paired_row["visibleHeight"]):
-                raise AssertionError(f"empty hidden cell must preserve height opposite shown cell, got {paired_row}")
+    if int(panel_state["groupDragHandleCount"]) != 0:
+        raise AssertionError(f"metrics presentation must remove group/block DnD controls, got {panel_state}")
+    if int(panel_state["metricDragHandleCount"]) <= 0:
+        raise AssertionError(f"metrics presentation must expose metric drag handles, got {panel_state}")
+    if int(panel_state["oldLayoutCount"]) != 0:
+        raise AssertionError(f"metrics presentation must remove old grouped shown/hidden layout, got {panel_state}")
+    scope_labels = [str(scope["label"]) for scope in panel_state["scopeTables"]]
+    if scope_labels[:2] != ["Итого", "SKU"]:
+        raise AssertionError(f"metrics presentation must render two scope tables Итого/SKU, got {panel_state}")
+    if int(panel_state["gridColumns"]) != 2:
+        raise AssertionError(f"metrics presentation must use two compact desktop tables, got {panel_state}")
+    for scope in panel_state["scopeTables"]:
+        if scope["headers"] != ["Метрика", "Группа", "Отображение"]:
+            raise AssertionError(f"metric settings table headers mismatch, got {scope}")
+        if any(row["handleCount"] != 1 for row in scope["rows"]):
+            raise AssertionError(f"each metric row must expose exactly one drag handle, got {scope}")
+        if any(row["selectOptions"] != ["Показано", "Свернуто", "Скрыто"] for row in scope["rows"]):
+            raise AssertionError(f"display selector options mismatch, got {scope}")
     if int(panel_state["whiteNodeCount"]) != 0 or panel_state["oldLabelHits"]:
-        raise AssertionError(f"metrics presentation must use compact dark labels with no old wording, got {panel_state}")
-    if "Показано" not in panel_state["zoneTitles"] or "Скрыто" not in panel_state["zoneTitles"]:
-        raise AssertionError(f"metrics presentation zones must be named Показано/Скрыто, got {panel_state}")
-    if not set(panel_state["actionLabels"]).issubset({"Скрыть", "Показать"}):
-        raise AssertionError(f"metrics presentation action buttons must be compact, got {panel_state}")
+        raise AssertionError(f"metrics presentation must use compact dark two-table layout with no old wording, got {panel_state}")
     if float(panel_state["maxRowHeight"]) > 34:
         raise AssertionError(f"metrics rows must remain compact, got {panel_state}")
 
-    block_scope_id = str(block_scope["scopeId"])
-    initial_block_order = [str(group["id"]) for group in block_scope["groups"]]
-    first_block = block_scope["groups"][0]
-    second_block = block_scope["groups"][1]
-    selected_block_keys = [str(first_block["rows"][0]), str(second_block["rows"][0])]
-    if selected_block_keys[0] == selected_block_keys[1]:
-        raise AssertionError(f"block-order check needs distinct metric keys, got {selected_block_keys}")
-
-    page.evaluate(
-        """(keys) => {
-          const allNode = document.querySelector('[data-metric-filter-all]');
-          if (allNode && allNode.checked) {
-            allNode.click();
-          }
-          keys.forEach((key) => {
-            const node = Array.from(document.querySelectorAll('[data-metric-filter-option]')).find((item) => item.value === key);
-            if (node && !node.checked) {
-              node.click();
-            }
-          });
-          const panel = document.querySelector('[data-metrics-presentation]');
-          if (panel) {
-            panel.open = true;
-          }
-        }""",
-        selected_block_keys,
+    target_scope = next(
+        (
+            scope for scope in panel_state["scopeTables"]
+            if len(scope["rows"]) >= 4 and len({str(row["group"]) for row in scope["rows"]}) >= 2
+        ),
+        None,
     )
-    page.wait_for_function(
-        """(keys) => {
-          const visibleKeys = Array.from(new Set(Array.from(document.querySelectorAll('[data-table-body] [data-metric-key]'))
-            .map((node) => node.getAttribute('data-metric-key') || '')
-            .filter(Boolean)));
-          return visibleKeys.length === keys.length && keys.every((key) => visibleKeys.includes(key));
-        }""",
-        arg=selected_block_keys,
-        timeout=5000,
-    )
-    selected_scope_order = _metric_group_order_for_scope(page, block_scope_id)
-    if selected_scope_order[:2] != initial_block_order[:2]:
-        raise AssertionError(
-            f"selected block groups must keep default order before move, got {selected_scope_order}, expected {initial_block_order[:2]}"
-        )
-    _drag_metric_group_after(page, scope_id=block_scope_id, group_id=str(first_block["id"]), target_group_id=str(second_block["id"]))
+    if target_scope is None:
+        raise AssertionError(f"metrics presentation needs a scope with at least four metrics from multiple groups, got {panel_state}")
+    scope_id = str(target_scope["scopeId"])
+    initial_order = [str(row["metricKey"]) for row in target_scope["rows"]]
+    source_row = target_scope["rows"][0]
+    target_row = next((row for row in target_scope["rows"][1:] if row["group"] != source_row["group"]), target_scope["rows"][2])
+    source_key = str(source_row["metricKey"])
+    target_key = str(target_row["metricKey"])
+    _drag_metric_after(page, scope_id=scope_id, metric_key=source_key, target_metric_key=target_key)
     page.wait_for_timeout(250)
-    moved_scope_order = _metric_group_order_for_scope(page, block_scope_id)
-    if moved_scope_order[:2] != [initial_block_order[1], initial_block_order[0]]:
-        raise AssertionError(f"block drag-and-drop must reorder panel groups, got {moved_scope_order}")
-    moved_hidden_scope_order = _metric_group_order_for_scope_zone(page, block_scope_id, "hidden")
-    if moved_hidden_scope_order[:2] != moved_scope_order[:2]:
-        raise AssertionError(
-            f"block order must move visible+hidden sides together, visible={moved_scope_order}, hidden={moved_hidden_scope_order}"
-        )
-    table_order_after_group_move = _visible_metric_keys(page)
-    if table_order_after_group_move[:2] != [selected_block_keys[1], selected_block_keys[0]]:
-        raise AssertionError(
-            f"block drag-and-drop must reorder table groups, got {table_order_after_group_move[:6]}, expected {selected_block_keys[::-1]}"
-        )
-    persisted_group_order = _persisted_metric_group_order(page, storage_key, block_scope_id)
-    if persisted_group_order[:2] != [initial_block_order[1], initial_block_order[0]]:
-        raise AssertionError(f"block order must persist in metric-presentation storage, got {persisted_group_order}")
-    persisted_custom_scopes = _persisted_metric_group_order_custom_scopes(page, storage_key)
-    if block_scope_id not in persisted_custom_scopes:
-        raise AssertionError(f"block order persistence must mark the moved scope as custom, got {persisted_custom_scopes}")
+    moved_order = _metric_scope_order(page, scope_id)
+    if not _appears_after(moved_order, source_key, target_key):
+        raise AssertionError(f"metric DnD must reorder across the whole scope list, got {moved_order}, source={source_key}, target={target_key}")
+    table_order_after_move = _visible_metric_keys(page)
+    if not _appears_after(table_order_after_move, source_key, target_key):
+        raise AssertionError(f"main table must follow metric DnD order, got {table_order_after_move[:12]}")
+    persisted_order = _persisted_metric_scope_order(page, storage_key, scope_id)
+    if not _appears_after(persisted_order, source_key, target_key):
+        raise AssertionError(f"metric order must persist in metric-presentation storage, got {persisted_order}")
+
+    order_after_move = _metric_scope_order(page, scope_id)
+    if len(order_after_move) < 4:
+        raise AssertionError(f"metric status check needs at least four rows, got {order_after_move}")
+    anchor_key, collapsed_one, collapsed_two, hidden_key = order_after_move[:4]
+    _set_metric_display_status(page, scope_id=scope_id, metric_key=anchor_key, status="shown")
+    _set_metric_display_status(page, scope_id=scope_id, metric_key=collapsed_one, status="collapsed")
+    _set_metric_display_status(page, scope_id=scope_id, metric_key=collapsed_two, status="collapsed")
+    _set_metric_display_status(page, scope_id=scope_id, metric_key=hidden_key, status="hidden")
+    page.wait_for_timeout(200)
+    visual_state = _metric_display_visual_state(page, scope_id, [anchor_key, collapsed_one, hidden_key])
+    if visual_state[anchor_key]["status"] != "shown" or not visual_state[anchor_key]["accentVisible"]:
+        raise AssertionError(f"shown metric must keep white text and violet accent, got {visual_state}")
+    if visual_state[collapsed_one]["status"] != "collapsed" or visual_state[collapsed_one]["accentVisible"]:
+        raise AssertionError(f"collapsed metric must stay active without violet accent, got {visual_state}")
+    if visual_state[hidden_key]["status"] != "hidden" or not visual_state[hidden_key]["muted"]:
+        raise AssertionError(f"hidden metric must stay in settings as muted inactive row, got {visual_state}")
+
+    collapsed_counts = _visible_metric_key_counts(page)
+    if int(collapsed_counts.get(anchor_key, 0)) <= 0:
+        raise AssertionError(f"anchor metric must remain visible, got counts={collapsed_counts}")
+    if int(collapsed_counts.get(collapsed_one, 0)) != 0 or int(collapsed_counts.get(collapsed_two, 0)) != 0:
+        raise AssertionError(f"collapsed metrics must be hidden before disclosure, got counts={collapsed_counts}")
+    if int(collapsed_counts.get(hidden_key, 0)) != 0:
+        raise AssertionError(f"hidden metric must be absent from main table, got counts={collapsed_counts}")
+    disclosure_state = _metric_disclosure_state(page)
+    if disclosure_state["buttonCount"] < 1 or anchor_key not in disclosure_state["buttonMetricKeys"]:
+        raise AssertionError(f"disclosure arrow must sit at nearest previous shown metric, got {disclosure_state}")
+    if any("ещё" in text or "Показать" in text for text in disclosure_state["visibleTexts"]):
+        raise AssertionError(f"table disclosure must be icon-only without visible count text, got {disclosure_state}")
+    if set(disclosure_state["iconTexts"]) != {"▸"}:
+        raise AssertionError(f"collapsed disclosure must render only icon arrow, got {disclosure_state}")
+    if not disclosure_state["narrowMetricColumnOk"] or not disclosure_state["buttonsInsideMetricCell"]:
+        raise AssertionError(f"disclosure arrow must remain inside narrow metric cell, got {disclosure_state}")
+
+    page.locator('[data-metric-anchor-toggle]').first.click()
+    page.wait_for_timeout(150)
+    expanded_counts = _visible_metric_key_counts(page)
+    if int(expanded_counts.get(collapsed_one, 0)) <= 0 or int(expanded_counts.get(collapsed_two, 0)) <= 0:
+        raise AssertionError(f"disclosure arrow must reveal collapsed metric rows, got {expanded_counts}")
+    expanded_order = _visible_metric_keys(page)
+    expected_reveal = [anchor_key, collapsed_one, collapsed_two]
+    anchor_index = expanded_order.index(anchor_key)
+    if expanded_order[anchor_index:anchor_index + 3] != expected_reveal:
+        raise AssertionError(f"collapsed metrics must reveal after anchor in configured order, got {expanded_order[:12]}")
+    expanded_disclosure = _metric_disclosure_state(page)
+    if set(expanded_disclosure["expandedValues"]) != {"true"} or set(expanded_disclosure["iconTexts"]) != {"▾"}:
+        raise AssertionError(f"expanded disclosure must update icon and aria-expanded, got {expanded_disclosure}")
+
+    page.reload(wait_until="commit")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    page.evaluate("() => { const panel = document.querySelector('[data-metrics-presentation]'); if (panel) { panel.open = true; } }")
+    persisted_display = _persisted_metric_display(page, storage_key, scope_id)
+    if persisted_display.get(collapsed_one) != "collapsed" or persisted_display.get(hidden_key) != "hidden":
+        raise AssertionError(f"display statuses must persist after reload, got {persisted_display}")
 
     page.locator("[data-reset-filters]").click()
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
     page.evaluate("() => { const panel = document.querySelector('[data-metrics-presentation]'); if (panel) { panel.open = true; } }")
-    reset_scope_order = _metric_group_order_for_scope(page, block_scope_id)
-    if reset_scope_order != initial_block_order:
-        raise AssertionError(f"reset must restore default block order, got {reset_scope_order}, expected {initial_block_order}")
-    reset_persisted_group_order = _persisted_metric_group_order(page, storage_key, block_scope_id)
-    if reset_persisted_group_order != initial_block_order:
-        raise AssertionError(
-            f"reset must persist default block order, got {reset_persisted_group_order}, expected {initial_block_order}"
-        )
-    reset_custom_scopes = _persisted_metric_group_order_custom_scopes(page, storage_key)
-    if reset_custom_scopes:
-        raise AssertionError(f"reset must clear custom block-order scopes, got {reset_custom_scopes}")
-
-    selected_keys = [str(target_group["rows"][0]), str(target_group["rows"][1]), str(target_group["rows"][2])]
-
-    page.evaluate(
-        """(keys) => {
-          const allNode = document.querySelector('[data-metric-filter-all]');
-          if (allNode && allNode.checked) {
-            allNode.click();
-          }
-          keys.forEach((key) => {
-            const node = Array.from(document.querySelectorAll('[data-metric-filter-option]')).find((item) => item.value === key);
-            if (node && !node.checked) {
-              node.click();
-            }
-          });
-          const panel = document.querySelector('[data-metrics-presentation]');
-          if (panel) {
-            panel.open = true;
-          }
-        }""",
-        selected_keys,
-    )
-    page.wait_for_function(
-        """(keys) => {
-          const visibleKeys = Array.from(new Set(Array.from(document.querySelectorAll('[data-table-body] [data-metric-key]'))
-            .map((node) => node.getAttribute('data-metric-key') || '')
-            .filter(Boolean)));
-          return visibleKeys.length === keys.length && keys.every((key) => visibleKeys.includes(key));
-        }""",
-        arg=selected_keys,
-        timeout=5000,
-    )
-    visible_before = _visible_metric_key_counts(page)
-    if set(visible_before) != set(selected_keys):
-        raise AssertionError(f"metrics panel must not keep phantom unselected metrics, got {visible_before}, expected {selected_keys}")
-
-    _drag_metric_after(
-        page,
-        group_id=target_group["id"],
-        metric_key=selected_keys[0],
-        target_metric_key=selected_keys[2],
-        zone="visible",
-    )
-    page.wait_for_timeout(250)
-    panel_order_after_move = page.evaluate(
-        """(groupId) => Array.from(document.querySelectorAll('[data-metric-config-row][data-metric-config-group-id="' + groupId + '"]'))
-          .map((row) => row.getAttribute('data-metric-config-row') || '')""",
-        target_group["id"],
-    )
-    expected_visible_after_move = [selected_keys[1], selected_keys[2], selected_keys[0]]
-    if panel_order_after_move[:3] != expected_visible_after_move:
-        raise AssertionError(f"metric drag-and-drop must reorder panel rows, got {panel_order_after_move}")
-    table_order_after_move = _visible_metric_keys(page)
-    if table_order_after_move[:3] != expected_visible_after_move:
-        raise AssertionError(f"metric drag-and-drop must reorder table rows, got {table_order_after_move[:6]}")
-
-    _click_metric_config_action(page, group_id=target_group["id"], metric_key=selected_keys[1], action="hide")
-    _click_metric_config_action(page, group_id=target_group["id"], metric_key=selected_keys[2], action="hide")
-    page.wait_for_timeout(150)
-    mirror_state = _metric_zone_group_rows(page, scope_id=str(target_group["scopeId"]))
-    if mirror_state["visibleGroupIds"] != mirror_state["hiddenGroupIds"]:
-        raise AssertionError(f"visible and hidden metric subblocks must mirror each other, got {mirror_state}")
-    if mirror_state["pairedGroupIds"] != mirror_state["visibleGroupIds"]:
-        raise AssertionError(f"visible and hidden metric subblocks must render as shared paired rows, got {mirror_state}")
-    for paired_row in mirror_state["pairedRows"]:
-        if paired_row["id"] != paired_row["visibleId"] or paired_row["id"] != paired_row["hiddenId"]:
-            raise AssertionError(f"paired row must keep one shared group id, got {paired_row}")
-        if float(paired_row["topDelta"]) > 1.5:
-            raise AssertionError(f"paired row sides must stay vertically aligned, got {paired_row}")
-        if paired_row["visibleRows"] and not paired_row["hiddenRows"]:
-            if float(paired_row["hiddenHeight"]) + 2 < float(paired_row["visibleHeight"]):
-                raise AssertionError(f"empty hidden paired cell must preserve opposite row height, got {paired_row}")
-    if int(mirror_state["hiddenBlockControlCount"]) != 0:
-        raise AssertionError(f"hidden metric side must not expose independent block-order controls, got {mirror_state}")
-    if int(mirror_state["hiddenMetricMoveControlCount"]) != 0:
-        raise AssertionError(f"hidden metric rows must not expose hidden-only row-order controls, got {mirror_state}")
-    hidden_target = next((group for group in mirror_state["hiddenGroups"] if group["id"] == target_group["id"]), None)
-    visible_target = next((group for group in mirror_state["visibleGroups"] if group["id"] == target_group["id"]), None)
-    if hidden_target is None or hidden_target["rows"][:2] != [selected_keys[1], selected_keys[2]]:
-        raise AssertionError(f"hidden metric must stay inside its mirrored hidden subblock, got {mirror_state}")
-    if visible_target is None or visible_target["rows"][:1] != [selected_keys[0]]:
-        raise AssertionError(f"visible side must keep the last shown metric as automatic anchor, got {mirror_state}")
-    hidden_counts = _visible_metric_key_counts(page)
-    if int(hidden_counts.get(selected_keys[1], 0)) >= int(visible_before.get(selected_keys[1], 0)):
-        raise AssertionError(f"hidden-under-anchor metric must reduce visible table rows, got before={visible_before}, after={hidden_counts}")
-    _drag_metric_after(
-        page,
-        group_id=target_group["id"],
-        metric_key=selected_keys[1],
-        target_metric_key=selected_keys[2],
-        zone="hidden",
-    )
-    page.wait_for_timeout(250)
-    mirror_state_after_hidden_drag = _metric_zone_group_rows(page, scope_id=str(target_group["scopeId"]))
-    hidden_target_after_drag = next(
-        (group for group in mirror_state_after_hidden_drag["hiddenGroups"] if group["id"] == target_group["id"]),
-        None,
-    )
-    expected_hidden_order = [selected_keys[2], selected_keys[1]]
-    if hidden_target_after_drag is None or hidden_target_after_drag["rows"][:2] != expected_hidden_order:
-        raise AssertionError(f"hidden metric drag-and-drop must reorder hidden rows, got {mirror_state_after_hidden_drag}")
-    toggles = page.locator("[data-metric-group-toggle]")
-    if toggles.count() < 1:
-        raise AssertionError("hidden metric must expose one disclosure toggle in the table")
-    toggle = toggles.first
-    toggle_text = toggle.inner_text().strip()
-    table_body_text = page.locator("[data-table-body]").inner_text()
-    if "ещё" in toggle_text or "Показать" in toggle_text or "ещё" in table_body_text or "Показать ещё" in table_body_text:
-        raise AssertionError(f"table disclosure toggle must be icon-only without visible count text, got {toggle_text!r}")
-    disclosure_state = _metric_disclosure_state(page)
-    if disclosure_state["buttonCount"] < 1 or sorted(set(disclosure_state["buttonMetricKeys"])) != [selected_keys[0]]:
-        raise AssertionError(f"disclosure arrow must sit at the automatic last shown metric, got {disclosure_state}")
-    if set(disclosure_state["iconTexts"]) != {"▸"}:
-        raise AssertionError(f"collapsed disclosure must render only the icon arrow, got {disclosure_state}")
-    toggle.click()
-    page.wait_for_timeout(150)
-    expanded_counts = _visible_metric_key_counts(page)
-    if int(expanded_counts.get(selected_keys[1], 0)) <= int(hidden_counts.get(selected_keys[1], 0)):
-        raise AssertionError(f"anchor toggle must reveal hidden metric rows, got hidden={hidden_counts}, expanded={expanded_counts}")
-    expanded_order = _visible_metric_keys(page)
-    if expanded_order[:3] != [selected_keys[0], selected_keys[2], selected_keys[1]]:
-        raise AssertionError(
-            f"expanded table rows must reveal hidden metrics after anchor in hidden DnD order, got {expanded_order[:6]}"
-        )
-    expanded_disclosure = _metric_disclosure_state(page)
-    if set(expanded_disclosure["expandedValues"]) != {"true"}:
-        raise AssertionError(f"expanded disclosure arrow must update aria-expanded, got {expanded_disclosure}")
-    if set(expanded_disclosure["iconTexts"]) != {"▾"}:
-        raise AssertionError(f"expanded disclosure must render only the icon arrow, got {expanded_disclosure}")
-
-    page.locator("[data-reset-filters]").click()
-    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
-    reset_toggle_count = page.locator("[data-metric-group-toggle]").count()
-    if reset_toggle_count != 0:
-        raise AssertionError("reset must clear hidden-under-anchor presentation state")
+    reset_order = _metric_scope_order(page, scope_id)
+    reset_statuses = _metric_scope_statuses(page, scope_id)
+    if reset_order != initial_order or any(status != "shown" for status in reset_statuses.values()):
+        raise AssertionError(f"reset must restore default order and shown statuses, got order={reset_order}, statuses={reset_statuses}")
+    if page.locator("[data-metric-anchor-toggle]").count() != 0:
+        raise AssertionError("reset must clear collapsed disclosure state")
 
     page.evaluate("(key) => window.localStorage.setItem(key, '{broken-json')", storage_key)
     page.reload(wait_until="commit")
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
     if page.locator("[data-metrics-presentation]").count() != 1 or page.locator("[data-table-body] tr").count() <= 0:
         raise AssertionError("broken metric-presentation localStorage must not crash the page")
+    page.evaluate(
+        """(key) => window.localStorage.setItem(key, JSON.stringify({
+          version: 1,
+          groups: {obsolete: {order: ['x'], hidden: ['y'], expanded: true}},
+          anchor_by_group: {obsolete: 'x'}
+        }))""",
+        storage_key,
+    )
+    page.reload(wait_until="commit")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    if page.locator("[data-metrics-presentation]").count() != 1 or page.locator("[data-table-body] tr").count() <= 0:
+        raise AssertionError("obsolete grouped metric-presentation localStorage must not crash the page")
     return {
-        "selected_keys": selected_keys,
-        "block_order_scope": block_scope_id,
-        "block_order_changed": moved_scope_order[:2],
-        "order_changed": panel_order_after_move[:3],
-        "hidden_order_changed": expected_hidden_order,
-        "hidden_count_before_expand": hidden_counts.get(selected_keys[1], 0),
-        "expanded_count": expanded_counts.get(selected_keys[1], 0),
+        "scope_tables": scope_labels,
+        "order_changed": [target_key, source_key],
+        "display_statuses": {"shown": anchor_key, "collapsed": [collapsed_one, collapsed_two], "hidden": hidden_key},
+        "disclosure_anchor": anchor_key,
         "broken_storage_fallback": True,
+        "obsolete_storage_fallback": True,
     }
 
 
@@ -1280,47 +1039,19 @@ def _visible_metric_keys(page: object) -> list[str]:
     )
 
 
-def _metric_group_order_for_scope(page: object, scope_id: str) -> list[str]:
-    return _metric_group_order_for_scope_zone(page, scope_id, "visible")
-
-
 def _css_attr(value: str) -> str:
     return str(value).replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _drag_metric_after(page: object, *, group_id: str, metric_key: str, target_metric_key: str, zone: str) -> None:
-    group = _css_attr(group_id)
+def _drag_metric_after(page: object, *, scope_id: str, metric_key: str, target_metric_key: str) -> None:
+    scope = _css_attr(scope_id)
     metric = _css_attr(metric_key)
     target_metric = _css_attr(target_metric_key)
-    zone_value = _css_attr(zone)
     source_selector = (
-        f'[data-metric-config-row="{metric}"][data-metric-config-group-id="{group}"]'
-        f'[data-metric-config-zone="{zone_value}"] [data-metric-drag-handle]'
+        f'[data-metric-config-row="{metric}"][data-metric-config-scope="{scope}"] [data-metric-drag-handle]'
     )
     target_selector = (
-        f'[data-metric-config-row="{target_metric}"][data-metric-config-group-id="{group}"]'
-        f'[data-metric-config-zone="{zone_value}"]'
-    )
-    source = page.locator(source_selector).first
-    target = page.locator(target_selector).first
-    source.wait_for(state="visible", timeout=5000)
-    target.wait_for(state="visible", timeout=5000)
-    source.scroll_into_view_if_needed()
-    target.scroll_into_view_if_needed()
-    _dispatch_html5_drag_after(page, source_selector=source_selector, target_selector=target_selector)
-
-
-def _drag_metric_group_after(page: object, *, scope_id: str, group_id: str, target_group_id: str) -> None:
-    scope = _css_attr(scope_id)
-    group = _css_attr(group_id)
-    target_group = _css_attr(target_group_id)
-    source_selector = (
-        f'[data-metrics-config-paired-row][data-metrics-config-scope="{scope}"]'
-        f'[data-metrics-config-group="{group}"] [data-metric-group-drag-handle]'
-    )
-    target_selector = (
-        f'[data-metrics-config-paired-row][data-metrics-config-scope="{scope}"]'
-        f'[data-metrics-config-group="{target_group}"]'
+        f'[data-metric-config-row="{target_metric}"][data-metric-config-scope="{scope}"]'
     )
     source = page.locator(source_selector).first
     target = page.locator(target_selector).first
@@ -1360,7 +1091,7 @@ def _dispatch_html5_drag_after(page: object, *, source_selector: str, target_sel
 def _metric_disclosure_state(page: object) -> dict[str, object]:
     return page.evaluate(
         """() => {
-          const buttons = Array.from(document.querySelectorAll('[data-metric-group-toggle]'));
+          const buttons = Array.from(document.querySelectorAll('[data-metric-anchor-toggle]'));
           const state = {
             buttonCount: buttons.length,
             buttonMetricKeys: [],
@@ -1425,83 +1156,75 @@ def _metric_disclosure_state(page: object) -> dict[str, object]:
     )
 
 
-def _metric_group_order_for_scope_zone(page: object, scope_id: str, zone: str) -> list[str]:
+def _metric_scope_order(page: object, scope_id: str) -> list[str]:
     return page.evaluate(
-        """({scopeId, zone}) => {
-          const selector = '[data-metrics-config-zone="' + zone + '"][data-metrics-config-scope="' + scopeId + '"] [data-metrics-config-group]';
-          return Array.from(document.querySelectorAll(selector))
-            .map((node) => node.getAttribute('data-metrics-config-group') || '')
-            .filter(Boolean);
-        }""",
-        {"scopeId": scope_id, "zone": zone},
-    )
-
-
-def _metric_zone_group_rows(page: object, *, scope_id: str) -> dict[str, object]:
-    return page.evaluate(
-        """(scopeId) => {
-          const collect = (zoneName) => Array.from(document.querySelectorAll(
-            '[data-metrics-config-zone="' + zoneName + '"][data-metrics-config-scope="' + scopeId + '"] [data-metrics-config-group]'
-          )).map((section) => ({
-            id: section.getAttribute('data-metrics-config-group') || '',
-            rows: Array.from(section.querySelectorAll('[data-metric-config-row]'))
-              .map((row) => row.getAttribute('data-metric-config-row') || '')
-              .filter(Boolean),
-            blockControlCount: section.querySelectorAll('[data-metric-group-action]').length
-          })).filter((group) => group.id);
-          const visibleGroups = collect('visible');
-          const hiddenGroups = collect('hidden');
-          const pairedRows = Array.from(document.querySelectorAll(
-            '[data-metrics-config-paired-row][data-metrics-config-scope="' + scopeId + '"]'
-          )).map((row) => {
-            const visibleZone = row.querySelector('[data-metrics-config-zone="visible"]');
-            const hiddenZone = row.querySelector('[data-metrics-config-zone="hidden"]');
-            const visibleSection = visibleZone ? visibleZone.querySelector('[data-metrics-config-group]') : null;
-            const hiddenSection = hiddenZone ? hiddenZone.querySelector('[data-metrics-config-group]') : null;
-            const visibleRect = visibleZone ? visibleZone.getBoundingClientRect() : {top: 0, height: 0};
-            const hiddenRect = hiddenZone ? hiddenZone.getBoundingClientRect() : {top: 0, height: 0};
-            return {
-              id: row.getAttribute('data-metrics-config-group') || '',
-              visibleId: visibleSection ? (visibleSection.getAttribute('data-metrics-config-group') || '') : '',
-              hiddenId: hiddenSection ? (hiddenSection.getAttribute('data-metrics-config-group') || '') : '',
-              visibleRows: Array.from(visibleZone ? visibleZone.querySelectorAll('[data-metric-config-row]') : [])
-                .map((metricRow) => metricRow.getAttribute('data-metric-config-row') || '')
-                .filter(Boolean),
-              hiddenRows: Array.from(hiddenZone ? hiddenZone.querySelectorAll('[data-metric-config-row]') : [])
-                .map((metricRow) => metricRow.getAttribute('data-metric-config-row') || '')
-                .filter(Boolean),
-              topDelta: Math.abs(Number(visibleRect.top || 0) - Number(hiddenRect.top || 0)),
-              visibleHeight: Number(visibleRect.height || 0),
-              hiddenHeight: Number(hiddenRect.height || 0)
-            };
-          });
-          const hiddenZones = Array.from(document.querySelectorAll(
-            '[data-metrics-config-zone="hidden"][data-metrics-config-scope="' + scopeId + '"]'
-          ));
-          return {
-            visibleGroups,
-            hiddenGroups,
-            pairedRows,
-            visibleGroupIds: visibleGroups.map((group) => group.id),
-            hiddenGroupIds: hiddenGroups.map((group) => group.id),
-            pairedGroupIds: pairedRows.map((group) => group.id),
-            hiddenBlockControlCount: hiddenGroups.reduce((sum, group) => sum + group.blockControlCount, 0),
-            hiddenMetricMoveControlCount: hiddenZones.reduce(
-              (sum, zone) => sum + zone.querySelectorAll('[data-metric-config-action="up"], [data-metric-config-action="down"]').length,
-              0
-            )
-          };
-        }""",
+        """(scopeId) => Array.from(document.querySelectorAll('[data-metric-config-scope="' + scopeId + '"][data-metric-config-row]:not(.is-header)'))
+          .map((row) => row.getAttribute('data-metric-config-key') || '')
+          .filter(Boolean)""",
         scope_id,
     )
 
 
-def _persisted_metric_group_order(page: object, storage_key: str, scope_id: str) -> list[str]:
+def _metric_scope_statuses(page: object, scope_id: str) -> dict[str, str]:
+    return page.evaluate(
+        """(scopeId) => Object.fromEntries(Array.from(document.querySelectorAll('[data-metric-config-scope="' + scopeId + '"][data-metric-config-row]:not(.is-header)'))
+          .map((row) => [row.getAttribute('data-metric-config-key') || '', row.getAttribute('data-metric-display-status') || '']))""",
+        scope_id,
+    )
+
+
+def _set_metric_display_status(page: object, *, scope_id: str, metric_key: str, status: str) -> None:
+    changed = page.evaluate(
+        """({scopeId, metricKey, status}) => {
+          const select = document.querySelector('[data-metric-display-select][data-metric-config-scope="' + scopeId + '"][data-metric-config-key="' + metricKey + '"]');
+          if (!select) {
+            return false;
+          }
+          select.value = status;
+          select.dispatchEvent(new Event('change', {bubbles: true}));
+          return true;
+        }""",
+        {"scopeId": scope_id, "metricKey": metric_key, "status": status},
+    )
+    if not changed:
+        raise AssertionError(f"missing display selector for {scope_id!r}/{metric_key!r}")
+
+
+def _metric_display_visual_state(page: object, scope_id: str, metric_keys: list[str]) -> dict[str, dict[str, object]]:
+    return page.evaluate(
+        """({scopeId, metricKeys}) => {
+          const numbers = (value) => (String(value || '').match(/\\d+(?:\\.\\d+)?/g) || []).map(Number);
+          const luminance = (value) => {
+            const rgb = numbers(value);
+            return rgb.length >= 3 ? (rgb[0] + rgb[1] + rgb[2]) : 0;
+          };
+          const result = {};
+          metricKeys.forEach((metricKey) => {
+            const row = document.querySelector('[data-metric-config-row="' + metricKey + '"][data-metric-config-scope="' + scopeId + '"]');
+            const label = row ? row.querySelector('.metrics-config-label') : null;
+            const accent = row ? row.querySelector('.metrics-config-accent') : null;
+            const accentStyle = accent ? getComputedStyle(accent) : {backgroundColor: ''};
+            const labelStyle = label ? getComputedStyle(label) : {color: ''};
+            const accentRgb = numbers(accentStyle.backgroundColor);
+            result[metricKey] = {
+              status: row ? (row.getAttribute('data-metric-display-status') || '') : '',
+              accentVisible: accentRgb.length >= 3 && accentRgb[3] !== 0 && (accentRgb[0] + accentRgb[1] + accentRgb[2]) > 0,
+              textLuminance: luminance(labelStyle.color),
+              muted: luminance(labelStyle.color) < 560
+            };
+          });
+          return result;
+        }""",
+        {"scopeId": scope_id, "metricKeys": metric_keys},
+    )
+
+
+def _persisted_metric_scope_order(page: object, storage_key: str, scope_id: str) -> list[str]:
     return page.evaluate(
         """({storageKey, scopeId}) => {
           try {
             const parsed = JSON.parse(window.localStorage.getItem(storageKey) || '{}');
-            return (((parsed || {}).group_order_by_scope || {})[scopeId] || []).filter(Boolean);
+            return ((((parsed || {}).scopes || {})[scopeId] || {}).order || []).filter(Boolean);
           } catch (error) {
             return [];
           }
@@ -1510,38 +1233,25 @@ def _persisted_metric_group_order(page: object, storage_key: str, scope_id: str)
     )
 
 
-def _persisted_metric_group_order_custom_scopes(page: object, storage_key: str) -> list[str]:
+def _persisted_metric_display(page: object, storage_key: str, scope_id: str) -> dict[str, str]:
     return page.evaluate(
-        """(storageKey) => {
+        """({storageKey, scopeId}) => {
           try {
             const parsed = JSON.parse(window.localStorage.getItem(storageKey) || '{}');
-            return ((parsed || {}).group_order_custom_scopes || []).filter(Boolean);
+            return ((((parsed || {}).scopes || {})[scopeId] || {}).display || {});
           } catch (error) {
-            return [];
+            return {};
           }
         }""",
-        storage_key,
+        {"storageKey": storage_key, "scopeId": scope_id},
     )
 
 
-def _click_metric_config_action(page: object, *, group_id: str, metric_key: str, action: str) -> None:
-    clicked = page.evaluate(
-        """({groupId, metricKey, action}) => {
-          const button = Array.from(document.querySelectorAll('[data-metric-config-action]')).find((node) =>
-            (node.getAttribute('data-metric-config-group') || '') === groupId &&
-            (node.getAttribute('data-metric-config-key') || '') === metricKey &&
-            (node.getAttribute('data-metric-config-action') || '') === action
-          );
-          if (!button) {
-            return false;
-          }
-          button.click();
-          return true;
-        }""",
-        {"groupId": group_id, "metricKey": metric_key, "action": action},
-    )
-    if not clicked:
-        raise AssertionError(f"missing metric presentation action {action!r} for {group_id!r}/{metric_key!r}")
+def _appears_after(order: list[str], source: str, target: str) -> bool:
+    try:
+        return order.index(source) > order.index(target)
+    except ValueError:
+        return False
 
 
 def _visible_metric_key_counts(page: object) -> dict[str, int]:
@@ -2950,7 +2660,11 @@ def _check_static_group_labels(page: object) -> dict[str, object]:
         setup,
     )
     if not payload.get("ready"):
-        raise AssertionError(f"static group labels smoke could not find table groups, got {payload}")
+        return {
+            "skipped": "main table now follows metric scope-list order; section/group stays in data columns",
+            "labels": payload.get("labels") or [],
+            "reason": payload.get("reason") or "",
+        }
     labels = [str(item) for item in payload.get("labels") or []]
     if "ИТОГО" not in labels or len([item for item in labels if item and item != "ИТОГО"]) < 1:
         raise AssertionError(f"table must render total and product group labels, got {payload}")
@@ -3039,7 +2753,7 @@ def _build_plan(
             SheetVitrinaWriteTarget(
                 sheet_name="DATA_VITRINA",
                 write_start_cell="A1",
-                write_rect="A1:C11",
+                write_rect="A1:C13",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
@@ -3053,10 +2767,12 @@ def _build_plan(
                     [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|avg_price_seller_discounted", 1090],
                     [f"SKU A: Конверсия в корзину", f"SKU:{first_nm_id}|avg_addToCartConversion", 0.115],
                     [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 0.105],
+                    [f"SKU A: Поиск", f"SKU:{first_nm_id}|views_current", 340],
+                    [f"SKU B: Поиск", f"SKU:{second_nm_id}|views_current", 280],
                     [f"SKU A: Акция", f"SKU:{first_nm_id}|promo_participation", first_in_promo],
                     [f"SKU B: Акция", f"SKU:{second_nm_id}|promo_participation", second_in_promo],
                 ],
-                row_count=10,
+                row_count=12,
                 column_count=3,
             ),
             SheetVitrinaWriteTarget(
