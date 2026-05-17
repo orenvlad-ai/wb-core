@@ -301,18 +301,16 @@ def run_browser_checks(
             )
             initial_loading_rows = initial_unloaded_activity_surface["loading"]["rows"]
             initial_loading_groups = initial_unloaded_activity_surface["loading"]["groups"]
-            if not any(row["source_key"] == "onec_stocks" for row in initial_loading_rows):
+            if initial_loading_rows or initial_loading_groups or initial_unloaded_activity_surface["loading"]["headers"]:
                 raise AssertionError(
-                    f"initial loading shell must expose the 1C source row before click, got {initial_unloaded_activity_surface}"
-                )
-            if not any(group["group_id"] == "onec_product_capital" for group in initial_loading_groups):
-                raise AssertionError(
-                    f"initial loading shell must expose the 1C source group before click, got {initial_unloaded_activity_surface}"
+                    f"initial source-status surface must stay lazy/neutral before click, got {initial_unloaded_activity_surface}"
                 )
             if "Источники группы пока не представлены" in initial_unloaded_activity_surface["loading"].get("empty_text", ""):
                 raise AssertionError(
                     f"initial unloaded state must not look like missing status payload, got {initial_unloaded_activity_surface}"
                 )
+            if "не OK" in initial_unloaded_activity_surface["loading"].get("empty_text", ""):
+                raise AssertionError(f"initial unloaded state must not show false not_ok status, got {initial_unloaded_activity_surface}")
             if initial_unloaded_activity_surface["loading"].get("source_status_button") != "Загрузить":
                 raise AssertionError(f"source-status load button mismatch, got {initial_unloaded_activity_surface}")
             page.locator("[data-source-status-load]").click()

@@ -76,15 +76,16 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
                 })"""
             )
             if (
-                initial_payload["shell_hidden"]
-                or not initial_payload["empty_hidden"]
+                not initial_payload["shell_hidden"]
+                or initial_payload["empty_hidden"]
                 or initial_payload["load_button"] != "Загрузить"
-                or initial_payload["group_count"] != 4
-                or initial_payload["button_count"] != 4
-                or initial_payload["source_row_count"] < 1
+                or initial_payload["group_count"] != 0
+                or initial_payload["button_count"] != 0
+                or initial_payload["source_row_count"] != 0
                 or initial_payload["empty_source_rows"] != 0
+                or "не OK" in initial_payload["empty_text"]
             ):
-                raise AssertionError(f"initial source status shells must be visible but unloaded, got {initial_payload}")
+                raise AssertionError(f"initial source status surface must be lazy/neutral, got {initial_payload}")
             page.locator("[data-source-status-load]").click()
             page.wait_for_function(
                 """() => {
@@ -96,7 +97,7 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
                 }""",
                 timeout=5000,
             )
-            print("web_vitrina_source_status_lazy_empty: ok -> visible group shells collapse on empty details")
+            print("web_vitrina_source_status_lazy_empty: ok -> initial neutral, empty details collapse")
             browser.close()
 
 

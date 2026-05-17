@@ -480,6 +480,7 @@ def _normalize_loading_table(value: Any, *, upload_summary: Mapping[str, Any]) -
     today_date = str(payload.get("today_date") or "")
     yesterday_date = str(payload.get("yesterday_date") or "")
     available_dates = [str(item) for item in (payload.get("available_dates") or []) if str(item).strip()]
+    source_status_state = str(payload.get("source_status_state") or "")
     default_refresh_date = _default_loading_table_refresh_date(
         available_dates,
         preferred_date=str(payload.get("default_refresh_date") or today_date or ""),
@@ -492,16 +493,6 @@ def _normalize_loading_table(value: Any, *, upload_summary: Mapping[str, Any]) -
         for column_payload in (payload.get("columns") or [])
         if isinstance(column_payload, Mapping)
     ]
-    if not columns:
-        columns = [
-            {"id": "source", "label": "Источник"},
-            {"id": "today_status", "label": f"Сегодня: {today_date}".strip()},
-            {"id": "today_reason", "label": "Причина сегодня"},
-            {"id": "yesterday_status", "label": f"Вчера: {yesterday_date}".strip()},
-            {"id": "yesterday_reason", "label": "Причина вчера"},
-            {"id": "metrics", "label": "Метрики"},
-            {"id": "technical_endpoint", "label": "Технический endpoint"},
-        ]
     rows: list[dict[str, Any]] = []
     for row in payload.get("rows") or []:
         row_payload = dict(row or {})
@@ -518,6 +509,17 @@ def _normalize_loading_table(value: Any, *, upload_summary: Mapping[str, Any]) -
                 "technical_endpoint": str(row_payload.get("technical_endpoint") or ""),
             }
         )
+    source_status_state = source_status_state or ("loaded" if rows else "empty")
+    if not columns and source_status_state not in {"not_loaded", "missing_snapshot"}:
+        columns = [
+            {"id": "source", "label": "Источник"},
+            {"id": "today_status", "label": f"Сегодня: {today_date}".strip()},
+            {"id": "today_reason", "label": "Причина сегодня"},
+            {"id": "yesterday_status", "label": f"Вчера: {yesterday_date}".strip()},
+            {"id": "yesterday_reason", "label": "Причина вчера"},
+            {"id": "metrics", "label": "Метрики"},
+            {"id": "technical_endpoint", "label": "Технический endpoint"},
+        ]
     return {
         "title": str(payload.get("title") or "Загрузка данных"),
         "subtitle": str(payload.get("subtitle") or upload_summary.get("subtitle") or ""),
@@ -534,7 +536,7 @@ def _normalize_loading_table(value: Any, *, upload_summary: Mapping[str, Any]) -
         ),
         "columns": columns,
         "rows": rows,
-        "source_status_state": str(payload.get("source_status_state") or ("loaded" if rows else "empty")),
+        "source_status_state": source_status_state,
         "empty_message": str(
             payload.get("empty_message")
             or upload_summary.get("empty_message")

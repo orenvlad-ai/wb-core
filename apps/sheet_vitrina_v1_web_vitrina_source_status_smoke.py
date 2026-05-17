@@ -9,7 +9,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from packages.application.registry_upload_http_entrypoint import _build_web_vitrina_loading_table  # noqa: E402
+from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
+    _build_web_vitrina_loading_table,
+    _web_vitrina_source_status_not_loaded_activity_surface,
+)
 
 
 TODAY = "2026-04-25"
@@ -17,12 +20,35 @@ YESTERDAY = "2026-04-24"
 
 
 def main() -> None:
+    _assert_not_loaded_activity_surface_is_lazy_neutral()
     _assert_current_snapshot_latest_confirmed_is_ok()
     _assert_missing_current_without_fallback_is_not_ok()
     _assert_stocks_today_not_required_is_ok()
     _assert_promo_latest_confirmed_is_ok()
     _assert_fin_report_yesterday_latest_confirmed_is_ok()
     print("web_vitrina_source_aware_statuses: ok")
+
+
+def _assert_not_loaded_activity_surface_is_lazy_neutral() -> None:
+    surface = _web_vitrina_source_status_not_loaded_activity_surface(
+        snapshot_as_of_date=YESTERDAY,
+        snapshot_id="snapshot-fixture",
+        refreshed_at="2026-04-25T08:00:00Z",
+        read_model="persisted_ready_snapshot",
+        available_dates=[YESTERDAY, TODAY],
+        default_refresh_date=YESTERDAY,
+        metric_labels_by_source={"prices_snapshot": ["Цена со скидкой (₽)"]},
+        group_last_updated_at={"wb_api": "2026-04-25T08:00:00Z"},
+    )
+    loading_table = surface["loading_table"]
+    if loading_table["source_status_state"] != "not_loaded":
+        raise AssertionError(f"not_loaded source-status state mismatch, got {surface}")
+    if loading_table["rows"] or loading_table["groups"] or loading_table["columns"]:
+        raise AssertionError(f"not_loaded source-status must not expose stale rows/groups/columns, got {surface}")
+    if surface["upload_summary"]["items"]:
+        raise AssertionError(f"not_loaded source-status must not expose stale summary items, got {surface}")
+    if "не OK" in str(surface):
+        raise AssertionError(f"not_loaded source-status must not reduce missing details to not OK, got {surface}")
 
 
 def _assert_current_snapshot_latest_confirmed_is_ok() -> None:
