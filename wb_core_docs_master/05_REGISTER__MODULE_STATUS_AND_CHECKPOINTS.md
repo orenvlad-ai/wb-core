@@ -4,7 +4,7 @@ doc_id: "WB-CORE-PROJECT-05-MODULE-STATUS"
 doc_type: "register"
 status: "active"
 purpose: "Дать compact register смёрженных модулей и current checkpoints без чтения всех module docs подряд."
-scope: "Семейства модулей, диапазоны `01–32`, текущий статус `main`, главный current checkpoint и открытые хвосты."
+scope: "Семейства модулей, диапазоны `01–33`, текущий статус `main`, главный current checkpoint и открытые хвосты."
 source_basis:
   - "docs/modules/00_INDEX__MODULES.md"
   - "README.md"
@@ -20,18 +20,18 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
+built_from_commit: "2788d9abfa7db64b849b6337a3f6c02b0c726fb4"
 ---
 
 # Summary
 
-На текущем `main` main-confirmed module set уже доходит до `32`.
+На текущем `main` main-confirmed module set уже доходит до `33`.
 
 Практически это значит:
 - source/data foundation уже materialized;
 - registry upload line уже замкнута до HTTP entrypoint;
 - sheet-side line reached bounded MVP historically, but Google Sheets/GAS load/write contour is now archived/do-not-use.
-- web-vitrina line уже имеет stable route/contract seam, отдельный library-agnostic `view_model`, первый concrete grid adapter layer и real live page composition на sibling route, plus read-only feedbacks and research tabs in the same unified shell.
+- web-vitrina line уже имеет stable route/contract seam, отдельный library-agnostic `view_model`, первый concrete grid adapter layer и real live page composition на sibling route, plus read-only feedbacks, research tab and active 1C product-capital source group in the same unified shell.
 
 # Current norm
 
@@ -47,6 +47,7 @@ built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
 | `28` | `browser-capture live wiring` | смёржен в `main` как promo live source seam inside refresh/runtime/read-side |
 | `29–31` | `web-vitrina seams` | смёржены в `main` как stable read/view-model/adapter ladder plus real sibling page composition, включая read-only feedbacks tab and transient AI review flow |
 | `32` | `web/operator/research` | смёржен в `main` как read-only SKU group comparison over accepted truth / ready snapshots |
+| `33` | `external-1c-source` | active/current in repo: 1C/Soykasoft stocks+cost source, date-specific load, web-vitrina source group `onec_product_capital`, 1C товарный капитал rows and 1C profitability metrics |
 
 ## Current checkpoint ladder
 
@@ -71,6 +72,7 @@ built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
 19. `web_vitrina_gravity_table_adapter_block`
 20. `web_vitrina_page_composition_block`
 21. `research_sku_group_comparison_block`
+22. `onec_stocks_block`
 
 ## Operator-facing checkpoint
 
@@ -109,6 +111,15 @@ Current sibling cost-price flow:
 - server-side `POST /v1/cost-price/upload`
 - flow обновляет separate authoritative dataset, а existing refresh/read contour затем использует его server-side in website/operator/web-vitrina
 
+Current 1C/Soykasoft source flow:
+- source module = `onec_stocks_block`
+- source key = `onec_stocks`
+- web-vitrina source group = `onec_product_capital` / `1С / товарный капитал`
+- live path = `/hs/soykasoft/stocks_wb?account_id=<account_id>&date=<YYYY-MM-DD>&nmId=<nmId>`
+- historical/current snapshots are date-specific; requested historical load is accepted only when `payload.meta.date` equals the requested date
+- current stage buckets are `CHINA_TO_FF`, `FF_STOCK`, `FF_TO_WB`, `WB_STOCK`; aliases `CN_TO_RU_TRANSIT` and `FF_TO_WB_TRANSIT` fold into the current buckets
+- current 1C metric rows include 1C stage qty/unit-cost/capital rows, SKU/TOTAL товарный капитал, `proxy_profit_2_rub`, `proxy_margin_2_pct` and `inventory_capital_return_pct` families
+
 Current sibling local promo collector precursor flow:
 - `python3 apps/promo_xlsx_collector_live.py`
 - flow делает bounded seller-portal capture только вне repo tree, reuse-ит unchanged archived campaign artifacts и materialize-ит `metadata.json` для каждого promo plus `workbook.xlsx` для downloaded/reused current promo
@@ -126,7 +137,7 @@ Current live promo source flow:
 Current repo-owned unified web/operator surface:
 - primary route = `GET /sheet-vitrina-v1/vitrina`; first/default tab = `Витрина`, sibling tabs = `Поставки`, `Отчёты`, `Отзывы` and `Исследования`
 - compatibility route = `GET /sheet-vitrina-v1/operator`; it renders the same unified shell and is not a separate source-of-truth owner
-- page uses current read/action routes: `POST /v1/sheet-vitrina-v1/refresh`, `GET /v1/sheet-vitrina-v1/status`, `GET /v1/sheet-vitrina-v1/job`, `GET /v1/sheet-vitrina-v1/daily-report`, `GET /v1/sheet-vitrina-v1/stock-report`, `GET /v1/sheet-vitrina-v1/plan-report`, `GET /v1/sheet-vitrina-v1/feedbacks`, `feedbacks/export.xlsx`, `feedbacks/ai-prompt`, `feedbacks/ai-analyze`, `feedbacks/complaints`, `feedbacks/complaints/sync-status`, `feedbacks/complaints/submit-selected`, `feedbacks/complaints/submit-job`, `feedbacks/automation/schedules`, `feedbacks/automation/run-now`, `feedbacks/automation/runs`, `feedbacks/automation/run`, `feedbacks/automation/tick`, research SKU-group comparison routes, seller-session/recovery routes, `GET/POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules` and `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh`
+- page uses current read/action routes: `POST /v1/sheet-vitrina-v1/refresh`, `GET /v1/sheet-vitrina-v1/status`, `GET /v1/sheet-vitrina-v1/job`, `GET /v1/sheet-vitrina-v1/daily-report`, `GET /v1/sheet-vitrina-v1/stock-report`, `GET /v1/sheet-vitrina-v1/plan-report`, `GET /v1/sheet-vitrina-v1/feedbacks`, `feedbacks/export.xlsx`, `feedbacks/ai-prompt`, `feedbacks/ai-analyze`, `feedbacks/complaints`, `feedbacks/complaints/sync-status`, `feedbacks/complaints/submit-selected`, `feedbacks/complaints/submit-job`, `feedbacks/automation/schedules`, `feedbacks/automation/run-now`, `feedbacks/automation/runs`, `feedbacks/automation/run`, `feedbacks/automation/tick`, research SKU-group comparison routes, seller-session/recovery routes, `GET/POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules` and `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh`, including group id `onec_product_capital`
 - former Google Sheets `/load` stays archived/blocked and is not needed for current web-vitrina completion
 - `GET /v1/sheet-vitrina-v1/web-vitrina` stays server-owned and library-agnostic on the default path: current v1 shape is `meta + status_summary + schema + rows + capabilities`, built only from existing ready snapshot/current truth and optional `as_of_date`
 - phase-2 web-vitrina materializes repo-owned `web_vitrina_view_model` over that stable contract: current schema = `columns + rows + groups + sections + formatters + filters + sorts + state_model`
@@ -139,7 +150,7 @@ Current repo-owned unified web/operator surface:
   - `Загрузить и обновить` = canonical full refresh: `POST /v1/sheet-vitrina-v1/refresh` + ready snapshot materialize + page reread, without Google Sheets write dependency; both manual and automatic triggers use `Asia/Yekaterinburg` `today_current` / `yesterday_closed` slots and keep expected stale/missing source groups visible in semantic status/logs
   - the old cheap top-panel `Обновить`, `JSON Connect` and permanent top status badge are not rendered
   - summary keeps browser-owned `Последнее обновление страницы` separate from server-owned `Свежесть данных`, and both use readable timestamps without raw ISO `T/Z`
-  - `Загрузка данных` is lazy: initial page composition renders `not_loaded` plus `Загрузить`, then explicit `include_source_status=1` loads a grouped compact table over source truth (`WB API`, `Seller Portal / бот`, `Прочие источники`); every visible main-table metric belongs to exactly one group, with residual calculated/formula metrics assigned to `Прочие источники`
+  - `Загрузка данных` is lazy: initial page composition renders `not_loaded` plus `Загрузить`, then explicit `include_source_status=1` loads a grouped compact table over source truth (`WB API`, `1С / товарный капитал`, `Seller Portal / бот`, `Прочие источники`); every visible main-table metric belongs to exactly one group, with residual calculated/formula metrics assigned to `Прочие источники`
   - each group has one compact date control, `Обновить группу`, group-level last update timestamp, today/yesterday status columns, reason columns, Russian metric labels and secondary technical endpoint text
   - `Seller Portal / бот` additionally exposes session status and `Проверить сессию` / `Восстановить сессию` / `Скачать лаунчер`
   - `Лог` renders below the loading table and keeps existing job/log download contour
@@ -167,7 +178,7 @@ Current repo-owned unified web/operator surface:
 - server-side business timezone = `Asia/Yekaterinburg` for default `as_of_date`, `today_current` and operator-facing freshness dates
 - live daily web-vitrina auto-refresh = repo-owned due-check timer `wb-core-sheet-vitrina-refresh.timer` every 10 minutes -> `apps/sheet_vitrina_v1_auto_refresh_tick.py` -> runtime JSON schedule rows (default `11:00`, `20:00 Asia/Yekaterinburg`) -> protected `POST /v1/sheet-vitrina-v1/refresh` with session auth and `auto_refresh=true`; daily path builds server-side ready snapshot only, never loads Google Sheets, and page/API owns read/write/run-now schedule state
 - active hosted target = `wb-core-eu-root` / `89.191.226.88` / `/opt/wb-core-runtime/state`; production public endpoint is `https://api.selleros.pro`; app-level auth protects the public/operator surface; canonical probes are auth-aware and fast by default, with heavy refresh only under explicit `--include-refresh`; current-live nginx must keep `server_name 89.191.226.88 api.selleros.pro;` plus `listen 443 ssl`; old `selleros-root` / `178.72.152.177` is rollback-only and routine writes are blocked before SSH/rsync/nginx/systemd
-- source matrix is explicit: group A bot/web-source historical, group B WB API historical/date-period capable, group C WB API current-snapshot-only, group D other/manual/browser-collector overlays
+- source matrix is explicit: group A bot/web-source historical, group B WB API historical/date-period capable, group C WB API current-snapshot-only, group D other/manual/browser-collector overlays, group E 1C product-capital date-capable source
 - `seller_funnel_snapshot` materialization can receive enabled/relevant `nm_ids`; strict validation is applied after relevant-row filtering, so invalid non-relevant rows are logged as `ignored_non_relevant_invalid_rows` instead of poisoning the snapshot
 - bot-backed current-day sync probes `/opt/wb-web-bot/storage_state.json` before seller portal capture; invalidated browser state surfaces as `seller_portal_session_invalid` / human `сессия seller portal больше не действует; требуется повторный вход`
 - all Seller Portal browser runners use shared single-flight lock `/opt/wb-core-runtime/state/seller_portal_automation.lock.json`; status sync, submit/batch, auto-complaints tick/run-now, scouts/probes/dry-run/confirmation/detail/relogin and parser/export must not run in parallel, and route launches return controlled `seller_portal_automation_busy` metadata when lock is held
@@ -214,9 +225,9 @@ Current additional operator supply flow on the same page:
 
 Current main-confirmed counts для этого flow:
 - prepare/upload package = `33 / 102 / 7`
-- current truth / ready snapshot displayed metrics = `95`
+- uploaded registry displayed-metric baseline = `95`; current web-vitrina can be runtime-extended by active 1C product-capital metrics from `onec_stocks_block`
 - refresh materialize-ит date-aware ready snapshot `yesterday_closed + today_current`
-- operator-facing `DATA_VITRINA` = server-driven two-day `date_matrix` `1698` rendered rows / `95` metric keys (`1631` source rows, `34` blocks)
+- historical/operator `DATA_VITRINA` uploaded baseline = server-driven two-day `date_matrix` `1698` rendered rows / `95` uploaded metric keys (`1631` source rows, `34` blocks); these counts are not a cap on runtime-extended 1C rows
 - operator-facing `STATUS` = per-source/per-slot freshness surface; current-snapshot-only sources (`prices_snapshot`, `ads_bids`) now expose `accepted_current_rollover` semantics for `yesterday_closed` and preserve accepted truth across later invalid attempts, `stocks[yesterday_closed]` resolves through historical exact-date runtime snapshots, `stocks[today_current]` stays truthful `not_available`/blank, а failed later attempts preserve the last accepted truth instead of blank/zero overwrite
 - bot/web-source family (`seller_funnel_snapshot`, `web_source_snapshot`) uses bounded `explicit-date -> latest-if-date-matches` reads for `today_current`; exact-date runtime cache may truthfully surface previous captured day as next `yesterday_closed`, with explicit `STATUS` note instead of slot-copying
 - if exact-date `today_current` snapshot is still missing for bot/web-source family, refresh may bounded-trigger server-local same-day capture in `/opt/wb-web-bot` plus `/opt/wb-ai/run_web_source_handoff.py` before final read-side fetch

@@ -14,6 +14,7 @@ source_basis:
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/modules/32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md"
+  - "docs/modules/33_MODULE__ONEC_STOCKS_BLOCK.md"
 source_of_truth_level: "derived_secondary_project_pack"
 related_docs:
   - "docs/architecture/03_source_of_truth_policy.md"
@@ -21,11 +22,12 @@ related_docs:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
+  - "docs/modules/33_MODULE__ONEC_STOCKS_BLOCK.md"
 update_triggers:
   - "изменение migration boundary"
   - "изменение operator/runtime invariant"
   - "изменение docs governance"
-built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
+built_from_commit: "2788d9abfa7db64b849b6337a3f6c02b0c726fb4"
 ---
 
 # Summary
@@ -83,6 +85,7 @@ built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
 | `C-40` | `Загрузить и обновить` is the canonical full-refresh action for web-vitrina: manual and automatic triggers share the same source/status/materialize/reread semantics, `Asia/Yekaterinburg` date-slot resolution, and truthful warning/error status when expected visible source groups are stale or missing. |
 | `C-41` | Web-vitrina/feedbacks visual fixes stay UI-local: wide feedbacks tables must scroll inside bounded containers, and updated-cell feedback uses transient text-color emphasis rather than legacy light backgrounds or persisted styling truth. |
 | `C-42` | Reports default-read must not request a not-yet-ready business day: daily-report selects the two latest persisted ready snapshots `<= default_business_as_of_date(now)`, stock-report default selects the latest one, and explicit stock `as_of_date` remains strict exact-read with no fallback/upstream fetch. |
+| `C-43` | 1C/Soykasoft `onec_stocks` is a date-capable server-side source group, not a browser/UI truth layer: `onec_product_capital` group refresh must stay date-scoped; historical loads require matching `payload.meta.date`; current stage buckets are `CHINA_TO_FF`, `FF_STOCK`, `FF_TO_WB`, `WB_STOCK`; 1C profitability totals must remain server-side ratio-of-aggregates where documented. |
 
 # Known gaps
 

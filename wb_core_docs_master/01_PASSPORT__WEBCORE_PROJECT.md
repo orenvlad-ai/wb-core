@@ -30,6 +30,7 @@ related_modules:
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/modules/32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md"
+  - "docs/modules/33_MODULE__ONEC_STOCKS_BLOCK.md"
 related_paths:
   - "packages/"
   - "apps/"
@@ -39,7 +40,7 @@ update_triggers:
   - "изменение current main-confirmed contour"
   - "merge нового bounded модуля"
   - "смена главного project gap"
-built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
+built_from_commit: "2788d9abfa7db64b849b6337a3f6c02b0c726fb4"
 ---
 
 # Summary
@@ -55,6 +56,7 @@ built_from_commit: "e712841a7ecccb3b5283149638d402c35a43e463"
 - bounded live wiring `28` уже смёржен и переводит `promo_by_price` из blocked gap в current server-owned source seam внутри existing refresh/runtime/read-side contour, с diagnostics-only promo artifact/preflight surface и live/public current invariant guard.
 - web-vitrina line `29–31` уже смёржена и является active user-facing surface: `/sheet-vitrina-v1/vitrina` + `/v1/sheet-vitrina-v1/web-vitrina`.
 - research block `32` уже смёржен как read-only MVP вкладки `Исследования` для сравнения двух групп SKU по persisted ready snapshots.
+- module `33` / `onec_stocks_block` active в repo как 1C/Soykasoft source + web-vitrina metric wiring checkpoint: date-specific `/hs/soykasoft/stocks_wb`, source group `onec_product_capital`, 1C товарный капитал rows and runtime-extended 1C profitability metrics.
 - current operator UI unified вокруг `/sheet-vitrina-v1/vitrina`: first tab `Витрина`, sibling tabs `Поставки`, `Отчёты`, `Отзывы` и `Исследования`; `/sheet-vitrina-v1/operator` остаётся compatibility entry на тот же shell. Current visual system is dark dashboard-style with violet/indigo primary accent; green is reserved for semantic success/status, not the site primary action accent.
 - current `Отзывы` checkpoint includes strict server-side feedback filtering/export, official WB review tags/actionable resolver, transient AI review, nested `Жалобы` and nested `Авто-жалобы`: complaint journal/status sync remain runtime evidence routes, real Seller Portal submit is limited to protected selected-row operator jobs / guarded support runners with exact-match, hard-cap and confirmation/detail evidence checks, and auto-complaint schedules are runtime-owned daily jobs using the same guarded submit path rather than browser-side broad automation.
 - current hosted EU checkpoint now includes repo-owned localhost owner runtime wiring (`wb-ai-api.service` on `127.0.0.1:8000`), app-level auth/session boundary for the public/operator surface, auth-aware canonical probes and explicit deep refresh probe policy; public nginx remains product route publication, not the owner API path.
@@ -100,10 +102,18 @@ Confirmed contour на текущем `main`:
   - high-confidence ended/no-download promo evidence is path/diagnostic metadata only: it can avoid drawer/deep workbook flow and exclude expected non-materializable artifacts from fatal gating, but it does not create metric truth.
   - normalized campaign rows (`campaign_rows.jsonl` + manifest/fingerprint metadata) make historical replay possible without retaining raw workbook forever; raw XLSX/HAR/screenshots/traces remain a short-lived debug layer, not the historical truth layer.
   - hosted refresh runs bounded `promo_refresh_light_gc_v1` only after normalized promo archive and ready snapshot persistence; current/unknown/replay-critical artifacts are protected and GC summary is surfaced in refresh diagnostics/job log.
+- repo-owned bounded `onec_stocks_block`:
+  - source key = `onec_stocks`, source group = `onec_product_capital`, label = `1С / товарный капитал`;
+  - live source path = `/hs/soykasoft/stocks_wb?account_id=<account_id>&date=<YYYY-MM-DD>&nmId=<nmId>` with HTTP Basic auth + `token` header from runtime env;
+  - current/historical load is date-specific and accepts historical snapshots only when `payload.meta.date` matches the requested date;
+  - current web-vitrina stage buckets are `CHINA_TO_FF`, `FF_STOCK`, `FF_TO_WB`, `WB_STOCK`; runtime default mapping folds aliases such as `CN_TO_RU_TRANSIT -> CHINA_TO_FF` and `FF_TO_WB_TRANSIT -> FF_TO_WB`;
+  - 1C source metrics include `onec_WB_STOCK_unit_cost_rub`, `onec_total_cost_rub`, `total_onec_total_cost_rub`, and derived profitability metrics `proxy_profit_2_rub`, `total_proxy_profit_2_rub`, `proxy_margin_2_pct`, `proxy_margin_2_pct_total`, `inventory_capital_return_pct`, `inventory_capital_return_pct_total`;
+  - 1C profitability uses the existing proxy-profit coefficients with only `cost_price_rub` replaced by 1C WB unit cost, and percent totals are ratio-of-aggregates rather than row averages.
 - unified web-vitrina/operator surface:
   - primary manual action `Загрузить и обновить` is the canonical full refresh: backend resolves `today_current` / `yesterday_closed` in `Asia/Yekaterinburg`, runs the same source/status machinery as group refresh, materializes the ready snapshot, rereads the page payload and keeps stale/missing expected source groups visible as warning/error instead of false success;
   - compact table toolbar combines period/search/filter/column controls; default no-query history opens the latest three server-readable business dates ending on backend-owned `today_current_date` when available;
   - bottom `Загрузка данных` is lazy: initial state shows only `not_loaded` + `Загрузить`, then explicit read-only `surface=page_composition&include_source_status=1` loads grouped source status table (`WB API`, `Seller Portal / бот`, `Прочие источники`) with date-scoped `Обновить группу`;
+  - `1С / товарный капитал` is a first-class loading/source group with date-scoped group refresh, and its metrics stay server-owned rather than browser-local truth;
   - `Отзывы` tab is read-only over official WB feedbacks API through canonical `WB_API_TOKEN`, with bounded 62-day date picker independent from ready-snapshot dates, chunked `take/skip` loading, final server-side filters (`date_from/date_to/stars/is_answered`), diagnostic meta, Excel export, bounded internal table scroll for wide feedback columns, resizable columns, official review tags/actionable complaint resolver and transient AI-assisted review through server-side prompt+model config/OpenAI route; AI labels are not accepted truth, Seller Portal automation or Google Sheets/GAS state;
   - nested `Жалобы` under `Отзывы` exposes runtime complaint journal, read-only status sync from WB `Мои жалобы` and a protected selected-row async submit job for already loaded/analyzed feedback rows; this is not an unauthenticated public/broad submit path and still requires exact feedback/AI-row match, hard caps and read-only confirmation/detail-network probes for uncertain submit outcomes;
   - nested `Авто-жалобы` under `Отзывы` stores editable runtime schedules, supports save/run-now/log/tick surfaces, processes only bounded 1-2 star windows, reuses saved AI `yes/review` semantics and guarded selected-submit, skips existing journal/attempted ids and records sanitized run stats; schedule lifecycle fields remain server-owned.
