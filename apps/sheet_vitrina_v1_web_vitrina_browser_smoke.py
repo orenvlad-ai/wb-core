@@ -889,12 +889,17 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
           const groupsById = new Map();
           rows.forEach((row) => {
             const groupId = row.getAttribute('data-metric-config-group-id') || '';
+            const zoneNode = row.closest('[data-metrics-config-zone]');
             if (!groupsById.has(groupId)) {
-              groupsById.set(groupId, []);
+              groupsById.set(groupId, {
+                id: groupId,
+                scopeId: zoneNode ? (zoneNode.getAttribute('data-metrics-config-scope') || '') : '',
+                rows: []
+              });
             }
-            groupsById.get(groupId).push(row.getAttribute('data-metric-config-row') || '');
+            groupsById.get(groupId).rows.push(row.getAttribute('data-metric-config-row') || '');
           });
-          const groups = Array.from(groupsById.entries()).map(([id, groupRows]) => ({id, rows: groupRows}));
+          const groups = Array.from(groupsById.values());
           const scopeGroups = Array.from(panel ? panel.querySelectorAll('[data-metrics-config-zone="visible"]') : []).map((zone) => ({
             scopeId: zone.getAttribute('data-metrics-config-scope') || '',
             groups: Array.from(zone.querySelectorAll('[data-metrics-config-group]')).map((section) => {
@@ -1030,6 +1035,11 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     moved_scope_order = _metric_group_order_for_scope(page, block_scope_id)
     if moved_scope_order[:2] != [initial_block_order[1], initial_block_order[0]]:
         raise AssertionError(f"block order controls must reorder panel groups, got {moved_scope_order}")
+    moved_hidden_scope_order = _metric_group_order_for_scope_zone(page, block_scope_id, "hidden")
+    if moved_hidden_scope_order[:2] != moved_scope_order[:2]:
+        raise AssertionError(
+            f"block order must move visible+hidden sides together, visible={moved_scope_order}, hidden={moved_hidden_scope_order}"
+        )
     table_order_after_group_move = _visible_metric_keys(page)
     if table_order_after_group_move[:2] != [selected_block_keys[1], selected_block_keys[0]]:
         raise AssertionError(
@@ -1107,6 +1117,19 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
 
     _click_metric_config_action(page, group_id=target_group["id"], metric_key=selected_keys[0], action="hide")
     page.wait_for_timeout(150)
+    mirror_state = _metric_zone_group_rows(page, scope_id=str(target_group["scopeId"]))
+    if mirror_state["visibleGroupIds"] != mirror_state["hiddenGroupIds"]:
+        raise AssertionError(f"visible and hidden metric subblocks must mirror each other, got {mirror_state}")
+    if int(mirror_state["hiddenBlockControlCount"]) != 0:
+        raise AssertionError(f"hidden metric side must not expose independent block-order controls, got {mirror_state}")
+    if int(mirror_state["hiddenMetricMoveControlCount"]) != 0:
+        raise AssertionError(f"hidden metric rows must not expose hidden-only row-order controls, got {mirror_state}")
+    hidden_target = next((group for group in mirror_state["hiddenGroups"] if group["id"] == target_group["id"]), None)
+    visible_target = next((group for group in mirror_state["visibleGroups"] if group["id"] == target_group["id"]), None)
+    if hidden_target is None or selected_keys[0] not in hidden_target["rows"]:
+        raise AssertionError(f"hidden metric must stay inside its mirrored hidden subblock, got {mirror_state}")
+    if visible_target is None or selected_keys[0] in visible_target["rows"] or selected_keys[1] not in visible_target["rows"]:
+        raise AssertionError(f"visible side must keep only immediately shown metrics for the same subblock, got {mirror_state}")
     hidden_counts = _visible_metric_key_counts(page)
     if int(hidden_counts.get(selected_keys[0], 0)) >= int(visible_before.get(selected_keys[0], 0)):
         raise AssertionError(f"hidden-under-anchor metric must reduce visible table rows, got before={visible_before}, after={hidden_counts}")
@@ -1114,15 +1137,15 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     if toggle.count() != 1:
         raise AssertionError("hidden metric must expose one anchor toggle in the table")
     toggle_text = toggle.inner_text().strip()
-    if "Показать ещё" not in toggle_text:
-        raise AssertionError(f"anchor toggle must invite expansion, got {toggle_text!r}")
+    if not toggle_text.startswith("ещё ") or "Показать" in toggle_text:
+        raise AssertionError(f"anchor toggle must be compact without Показать, got {toggle_text!r}")
     toggle.click()
     page.wait_for_timeout(150)
     expanded_counts = _visible_metric_key_counts(page)
     if int(expanded_counts.get(selected_keys[0], 0)) <= int(hidden_counts.get(selected_keys[0], 0)):
         raise AssertionError(f"anchor toggle must reveal hidden metric rows, got hidden={hidden_counts}, expanded={expanded_counts}")
-    if "Скрыть" not in toggle.inner_text().strip():
-        raise AssertionError("expanded anchor toggle must switch to Скрыть")
+    if "скрыть" not in toggle.inner_text().strip().lower():
+        raise AssertionError("expanded anchor toggle must switch to hide state")
 
     page.locator("[data-reset-filters]").click()
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
@@ -1155,12 +1178,45 @@ def _visible_metric_keys(page: object) -> list[str]:
 
 
 def _metric_group_order_for_scope(page: object, scope_id: str) -> list[str]:
+    return _metric_group_order_for_scope_zone(page, scope_id, "visible")
+
+
+def _metric_group_order_for_scope_zone(page: object, scope_id: str, zone: str) -> list[str]:
     return page.evaluate(
-        """(scopeId) => {
-          const selector = '[data-metrics-config-zone="visible"][data-metrics-config-scope="' + scopeId + '"] [data-metrics-config-group]';
+        """({scopeId, zone}) => {
+          const selector = '[data-metrics-config-zone="' + zone + '"][data-metrics-config-scope="' + scopeId + '"] [data-metrics-config-group]';
           return Array.from(document.querySelectorAll(selector))
             .map((node) => node.getAttribute('data-metrics-config-group') || '')
             .filter(Boolean);
+        }""",
+        {"scopeId": scope_id, "zone": zone},
+    )
+
+
+def _metric_zone_group_rows(page: object, *, scope_id: str) -> dict[str, object]:
+    return page.evaluate(
+        """(scopeId) => {
+          const collect = (zoneName) => Array.from(document.querySelectorAll(
+            '[data-metrics-config-zone="' + zoneName + '"][data-metrics-config-scope="' + scopeId + '"] [data-metrics-config-group]'
+          )).map((section) => ({
+            id: section.getAttribute('data-metrics-config-group') || '',
+            rows: Array.from(section.querySelectorAll('[data-metric-config-row]'))
+              .map((row) => row.getAttribute('data-metric-config-row') || '')
+              .filter(Boolean),
+            blockControlCount: section.querySelectorAll('[data-metric-group-action]').length
+          })).filter((group) => group.id);
+          const visibleGroups = collect('visible');
+          const hiddenGroups = collect('hidden');
+          return {
+            visibleGroups,
+            hiddenGroups,
+            visibleGroupIds: visibleGroups.map((group) => group.id),
+            hiddenGroupIds: hiddenGroups.map((group) => group.id),
+            hiddenBlockControlCount: hiddenGroups.reduce((sum, group) => sum + group.blockControlCount, 0),
+            hiddenMetricMoveControlCount: (document.querySelector(
+              '[data-metrics-config-zone="hidden"][data-metrics-config-scope="' + scopeId + '"]'
+            ) || document.createElement('div')).querySelectorAll('[data-metric-config-action="up"], [data-metric-config-action="down"]').length
+          };
         }""",
         scope_id,
     )

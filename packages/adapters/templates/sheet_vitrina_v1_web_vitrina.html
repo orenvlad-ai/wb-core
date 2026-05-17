@@ -2096,6 +2096,12 @@
       min-width: 0;
     }
 
+    .metrics-config-section + .metrics-config-section {
+      margin-top: 3px;
+      padding-top: 5px;
+      border-top: 1px solid rgba(255, 255, 255, 0.07);
+    }
+
     .metrics-config-section-title {
       display: flex;
       align-items: center;
@@ -2112,6 +2118,14 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+
+    .metrics-config-section-empty {
+      margin: 0;
+      padding: 2px 4px;
+      color: var(--muted);
+      font-size: 10.5px;
+      line-height: 1.4;
     }
 
     .metrics-config-row {
@@ -5802,26 +5816,26 @@
     }
 
     function renderMetricConfigZone(scope, title, hiddenZone) {
-      const sections = (scope.groups || []).map(function(group, groupIndex) {
+      const displayGroups = (scope.groups || []).filter(function(group) {
+        return selectedMetricKeysForGroup(group).length > 0;
+      });
+      const sections = displayGroups.map(function(group, groupIndex) {
         const metricKeys = hiddenZone ? hiddenMetricKeysForGroup(group) : visibleMetricKeysForGroup(group);
-        if (!metricKeys.length) {
-          return "";
-        }
         const rows = metricKeys.map(function(metricKey) {
           return renderMetricConfigRow(group, metricKey, hiddenZone);
-        }).join("");
+        }).join("") || '<p class="metrics-config-section-empty">Нет метрик</p>';
         const isFirst = groupIndex === 0;
-        const isLast = groupIndex === (scope.groups || []).length - 1;
+        const isLast = groupIndex === displayGroups.length - 1;
         return [
           '<div class="metrics-config-section" data-metrics-config-group="' + escapeHtml(group.groupId) + '" data-metrics-config-section="' + escapeHtml(group.sectionId || "") + '">',
           '<div class="metrics-config-section-title" title="' + escapeHtml(group.sectionLabel || group.label || "") + '">',
           '<span class="metrics-config-section-label">' + escapeHtml(group.sectionLabel || group.label || "Без секции") + '</span>',
-          renderMetricGroupMoveControls(scope.scopeId, group.groupId, isFirst, isLast),
+          hiddenZone ? "" : renderMetricGroupMoveControls(scope.scopeId, group.groupId, isFirst, isLast),
           "</div>",
           rows,
           "</div>"
         ].join("");
-      }).filter(Boolean).join("");
+      }).join("");
       return [
         '<section class="metrics-config-zone" data-metrics-config-scope="' + escapeHtml(scope.scopeId) + '" data-metrics-config-zone="' + (hiddenZone ? "hidden" : "visible") + '">',
         '<p class="metrics-config-zone-title"><span class="metrics-config-scope-label" title="' + escapeHtml(scope.label) + '">' + escapeHtml(scope.label) + '</span><span class="metrics-config-zone-kind">' + escapeHtml(title) + '</span></p>',
@@ -5854,15 +5868,18 @@
       const label = String(option.label || metricKey);
       const actionLabel = compactMetricActionLabel(hiddenZone);
       const actionTitle = metricActionTitle(hiddenZone);
-      return [
-        '<div class="metrics-config-row' + (isAnchor ? " is-anchor" : "") + '" data-metric-config-row="' + escapeHtml(metricKey) + '" data-metric-config-group-id="' + escapeHtml(group.groupId) + '">',
-        '<input class="metrics-config-anchor" type="radio" name="metric-anchor-' + escapeHtml(group.groupId) + '" data-metric-anchor-group="' + escapeHtml(group.groupId) + '" value="' + escapeHtml(metricKey) + '"' + (isAnchor ? " checked" : "") + ' title="Главная метрика">',
-        '<span class="metrics-config-main">',
-        '<span class="metrics-config-label" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</span>',
+      const moveControls = hiddenZone ? "" : [
         '<span class="metrics-config-move">',
         '<button class="metrics-config-button metrics-config-move-button" type="button" data-metric-config-action="up" data-metric-config-group="' + escapeHtml(group.groupId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '" title="Выше">↑</button>',
         '<button class="metrics-config-button metrics-config-move-button" type="button" data-metric-config-action="down" data-metric-config-group="' + escapeHtml(group.groupId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '" title="Ниже">↓</button>',
-        "</span>",
+        "</span>"
+      ].join("");
+      return [
+        '<div class="metrics-config-row' + (isAnchor ? " is-anchor" : "") + '" data-metric-config-row="' + escapeHtml(metricKey) + '" data-metric-config-group-id="' + escapeHtml(group.groupId) + '" data-metric-config-zone="' + (hiddenZone ? "hidden" : "visible") + '">',
+        '<input class="metrics-config-anchor" type="radio" name="metric-anchor-' + escapeHtml(group.groupId) + '" data-metric-anchor-group="' + escapeHtml(group.groupId) + '" value="' + escapeHtml(metricKey) + '"' + (isAnchor ? " checked" : "") + ' title="Главная метрика">',
+        '<span class="metrics-config-main">',
+        '<span class="metrics-config-label" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</span>',
+        moveControls,
         "</span>",
         '<button class="metrics-config-button metrics-config-action-button" type="button" data-metric-config-action="' + (hiddenZone ? "show" : "hide") + '" data-metric-config-group="' + escapeHtml(group.groupId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '" title="' + escapeHtml(actionTitle) + '">' +
           escapeHtml(actionLabel) +
@@ -7999,7 +8016,7 @@
           return [
             content,
             '<button class="metric-anchor-toggle" type="button" data-metric-group-toggle="' + escapeHtml(groupId) + '">',
-            expanded ? "Скрыть" : "Показать ещё " + hiddenCount,
+            expanded ? "скрыть" : "ещё " + hiddenCount,
             "</button>"
           ].join(" ");
         }
