@@ -120,6 +120,7 @@ def main() -> None:
         "horizontal_overscroll_guard": ready_result["horizontal_overscroll_guard"],
         "operator_link": ready_result["operator_link"],
         "metric_filter_applied": ready_result["metric_filter_applied"],
+        "metric_presentation": ready_result["metric_presentation"],
         "empty_state_after_search": ready_result["empty_state_after_search"],
         "reset_restores_table": ready_result["reset_restores_table"],
         "reset_restores_default_order": ready_result["reset_restores_default_order"],
@@ -386,6 +387,9 @@ def run_browser_checks(
                 "route state",
                 "Открыт period window",
                 "Доступно snapshots",
+                "В выбранном периоде",
+                "grid library",
+                "sheet_vitrina_v1",
             ):
                 if forbidden_history_text in visible_body_text:
                     raise AssertionError(f"compact picker must not expose technical history text {forbidden_history_text!r}")
@@ -411,7 +415,7 @@ def run_browser_checks(
                 "search": page.locator("[data-filter-control='search']").count() == 1,
                 "section": page.locator("[data-filter-control='section']").count() == 1,
                 "group": page.locator("[data-filter-control='group']").count() == 1,
-                "scope_kind": page.locator("[data-filter-control='scope_kind']").count() == 1,
+                "scope_kind_absent": page.locator("[data-filter-control='scope_kind']").count() == 0,
                 "metric": page.locator("[data-metric-manager]").count() == 1
                 and page.locator("[data-metric-filter-option]").count() >= 2,
                 "sort_absent": page.locator("[data-filter-control='sort']").count() == 0,
@@ -459,7 +463,7 @@ def run_browser_checks(
                   };
                 }"""
             )
-            expected_toolbar_labels = {"Диапазон", "Поиск", "Секции", "Группа", "Тип строк", "Метрики", "Столбцы"}
+            expected_toolbar_labels = {"Диапазон", "Поиск", "Секции", "Группа", "Метрики", "Столбцы"}
             missing_toolbar_labels = expected_toolbar_labels.difference(set(table_toolbar["labels"]))
             if (
                 not table_toolbar["exists"]
@@ -469,6 +473,7 @@ def run_browser_checks(
                 or table_toolbar["oldResetTextVisible"]
                 or table_toolbar["forbiddenSortVisible"]
                 or table_toolbar["forbiddenScopeVisible"]
+                or "Тип строк" in table_toolbar["toolbarText"]
                 or table_toolbar["forbiddenSummaryVisible"]
                 or table_toolbar["resetText"] != "Сброс"
                 or table_toolbar["logoutText"] != "Выйти"
@@ -508,6 +513,7 @@ def run_browser_checks(
             )
 
             metric_filter_applied = _check_metric_multiselect_controls(page)
+            metric_presentation = _check_metric_presentation_controls(page)
 
             page.locator("[data-filter-control='search']").fill("zzzz-no-matches")
             page.wait_for_selector("[data-table-state]:not(.is-hidden)", timeout=5000)
@@ -586,7 +592,7 @@ def run_browser_checks(
                 )
                 page.wait_for_function("() => document.querySelector('[data-history-popover]').hidden", timeout=5000)
                 page.wait_for_function(
-                    "() => document.querySelector('[data-page-meta]').textContent.includes('Снимок: 20.04.2026')",
+                    "() => document.querySelector('[data-table-shell]') && !document.querySelector('[data-table-shell]').classList.contains('is-hidden')",
                     timeout=5000,
                 )
                 historical_selector_works = (
@@ -646,6 +652,7 @@ def run_browser_checks(
         "horizontal_overscroll_guard": horizontal_overscroll_guard,
         "operator_link": operator_link,
         "metric_filter_applied": metric_filter_applied,
+        "metric_presentation": metric_presentation,
         "empty_state_after_search": empty_state_after_search,
         "reset_restores_table": reset_restores_table,
         "reset_restores_default_order": reset_restores_default_order,
@@ -716,6 +723,7 @@ def _print_summary(result: dict[str, object]) -> None:
     if "table_toolbar" in result:
         print("web_vitrina_browser_table_toolbar: ok ->", result["table_toolbar"])
     print("web_vitrina_browser_metric_filter: ok ->", result["metric_filter_applied"])
+    print("web_vitrina_browser_metric_presentation: ok ->", result["metric_presentation"])
     print("web_vitrina_browser_empty_state: ok ->", result["empty_state_after_search"])
     print("web_vitrina_browser_reset: ok ->", result["reset_restores_table"])
     print("web_vitrina_browser_reset_default_order: ok ->", result["reset_restores_default_order"])
@@ -856,11 +864,166 @@ def _check_metric_multiselect_controls(page: object) -> dict[str, object]:
     }
 
 
+def _check_metric_presentation_controls(page: object) -> dict[str, object]:
+    storage_key = "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1:metric-presentation:v1"
+    panel_state = page.evaluate(
+        """() => {
+          const toolbar = document.querySelector('[data-table-toolbar]');
+          const panel = document.querySelector('[data-metrics-presentation]');
+          const table = document.querySelector('[data-table-shell]');
+          const beforeTable = !!panel && !!table && !!(panel.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING);
+          const afterToolbar = !!toolbar && !!panel && !!(toolbar.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING);
+          if (panel) {
+            panel.open = true;
+          }
+          const groups = Array.from(document.querySelectorAll('[data-metrics-config-group]')).map((group) => ({
+            id: group.getAttribute('data-metrics-config-group') || '',
+            rows: Array.from(group.querySelectorAll('[data-metric-config-row]')).map((row) => row.getAttribute('data-metric-config-row') || '')
+          }));
+          return {
+            exists: !!panel,
+            afterToolbar,
+            beforeTable,
+            summary: ((document.querySelector('[data-metrics-presentation-summary]') || {}).textContent || '').trim(),
+            groupCount: groups.length,
+            groups
+          };
+        }"""
+    )
+    if (
+        not panel_state["exists"]
+        or not panel_state["afterToolbar"]
+        or not panel_state["beforeTable"]
+        or int(panel_state["groupCount"]) <= 0
+    ):
+        raise AssertionError(f"metrics presentation panel must sit between toolbar and table, got {panel_state}")
+    target_group = next((group for group in panel_state["groups"] if len(group["rows"]) >= 2), None)
+    if target_group is None:
+        raise AssertionError(f"metrics presentation needs a group with at least two selected metrics, got {panel_state}")
+    selected_keys = [str(target_group["rows"][0]), str(target_group["rows"][1])]
+
+    page.evaluate(
+        """(keys) => {
+          const allNode = document.querySelector('[data-metric-filter-all]');
+          if (allNode && allNode.checked) {
+            allNode.click();
+          }
+          keys.forEach((key) => {
+            const node = Array.from(document.querySelectorAll('[data-metric-filter-option]')).find((item) => item.value === key);
+            if (node && !node.checked) {
+              node.click();
+            }
+          });
+          const panel = document.querySelector('[data-metrics-presentation]');
+          if (panel) {
+            panel.open = true;
+          }
+        }""",
+        selected_keys,
+    )
+    page.wait_for_function(
+        """(keys) => {
+          const visibleKeys = Array.from(new Set(Array.from(document.querySelectorAll('[data-table-body] [data-metric-key]'))
+            .map((node) => node.getAttribute('data-metric-key') || '')
+            .filter(Boolean)));
+          return visibleKeys.length === keys.length && keys.every((key) => visibleKeys.includes(key));
+        }""",
+        arg=selected_keys,
+        timeout=5000,
+    )
+    visible_before = _visible_metric_key_counts(page)
+    if set(visible_before) != set(selected_keys):
+        raise AssertionError(f"metrics panel must not keep phantom unselected metrics, got {visible_before}, expected {selected_keys}")
+
+    _click_metric_config_action(page, group_id=target_group["id"], metric_key=selected_keys[0], action="down")
+    page.wait_for_timeout(150)
+    panel_order_after_move = page.evaluate(
+        """(groupId) => Array.from(document.querySelectorAll('[data-metrics-config-group="' + groupId + '"] [data-metric-config-row]'))
+          .map((row) => row.getAttribute('data-metric-config-row') || '')""",
+        target_group["id"],
+    )
+    if panel_order_after_move[:2] != [selected_keys[1], selected_keys[0]]:
+        raise AssertionError(f"metric order controls must reorder panel rows, got {panel_order_after_move}")
+    table_order_after_move = _visible_metric_keys(page)
+    if table_order_after_move[:2] != [selected_keys[1], selected_keys[0]]:
+        raise AssertionError(f"metric order controls must reorder table rows, got {table_order_after_move[:6]}")
+
+    _click_metric_config_action(page, group_id=target_group["id"], metric_key=selected_keys[0], action="hide")
+    page.wait_for_timeout(150)
+    hidden_counts = _visible_metric_key_counts(page)
+    if int(hidden_counts.get(selected_keys[0], 0)) >= int(visible_before.get(selected_keys[0], 0)):
+        raise AssertionError(f"hidden-under-anchor metric must reduce visible table rows, got before={visible_before}, after={hidden_counts}")
+    toggle = page.locator("[data-metric-group-toggle]").first
+    if toggle.count() != 1:
+        raise AssertionError("hidden metric must expose one anchor toggle in the table")
+    toggle_text = toggle.inner_text().strip()
+    if "Показать ещё" not in toggle_text:
+        raise AssertionError(f"anchor toggle must invite expansion, got {toggle_text!r}")
+    toggle.click()
+    page.wait_for_timeout(150)
+    expanded_counts = _visible_metric_key_counts(page)
+    if int(expanded_counts.get(selected_keys[0], 0)) <= int(hidden_counts.get(selected_keys[0], 0)):
+        raise AssertionError(f"anchor toggle must reveal hidden metric rows, got hidden={hidden_counts}, expanded={expanded_counts}")
+    if "Скрыть" not in toggle.inner_text().strip():
+        raise AssertionError("expanded anchor toggle must switch to Скрыть")
+
+    page.locator("[data-reset-filters]").click()
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
+    reset_toggle_count = page.locator("[data-metric-group-toggle]").count()
+    if reset_toggle_count != 0:
+        raise AssertionError("reset must clear hidden-under-anchor presentation state")
+
+    page.evaluate("(key) => window.localStorage.setItem(key, '{broken-json')", storage_key)
+    page.reload(wait_until="commit")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    if page.locator("[data-metrics-presentation]").count() != 1 or page.locator("[data-table-body] tr").count() <= 0:
+        raise AssertionError("broken metric-presentation localStorage must not crash the page")
+    return {
+        "selected_keys": selected_keys,
+        "order_changed": panel_order_after_move[:2],
+        "hidden_count_before_expand": hidden_counts.get(selected_keys[0], 0),
+        "expanded_count": expanded_counts.get(selected_keys[0], 0),
+        "broken_storage_fallback": True,
+    }
+
+
 def _visible_metric_keys(page: object) -> list[str]:
     return page.evaluate(
         """() => Array.from(new Set(Array.from(document.querySelectorAll('[data-table-body] [data-metric-key]'))
           .map((node) => node.getAttribute('data-metric-key') || '')
           .filter(Boolean)))"""
+    )
+
+
+def _click_metric_config_action(page: object, *, group_id: str, metric_key: str, action: str) -> None:
+    clicked = page.evaluate(
+        """({groupId, metricKey, action}) => {
+          const button = Array.from(document.querySelectorAll('[data-metric-config-action]')).find((node) =>
+            (node.getAttribute('data-metric-config-group') || '') === groupId &&
+            (node.getAttribute('data-metric-config-key') || '') === metricKey &&
+            (node.getAttribute('data-metric-config-action') || '') === action
+          );
+          if (!button) {
+            return false;
+          }
+          button.click();
+          return true;
+        }""",
+        {"groupId": group_id, "metricKey": metric_key, "action": action},
+    )
+    if not clicked:
+        raise AssertionError(f"missing metric presentation action {action!r} for {group_id!r}/{metric_key!r}")
+
+
+def _visible_metric_key_counts(page: object) -> dict[str, int]:
+    return page.evaluate(
+        """() => Array.from(document.querySelectorAll('[data-table-body] [data-metric-key]'))
+          .map((node) => node.getAttribute('data-metric-key') || '')
+          .filter(Boolean)
+          .reduce((acc, key) => {
+            acc[key] = (acc[key] || 0) + 1;
+            return acc;
+          }, {})"""
     )
 
 
@@ -1058,11 +1221,18 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
           const header = document.querySelector('[data-table-header]');
           const pageMeta = header ? header.querySelector('[data-page-meta]') : null;
           const tableMeta = header ? header.querySelector('[data-table-meta]') : null;
+          const summary = header ? header.querySelector('[data-table-summary-line]') : null;
+          const loadStatus = header ? header.querySelector('[data-table-load-status]') : null;
+          const freshnessBadge = header ? header.querySelector('[data-table-freshness-indicator]') : null;
           const progress = header ? header.querySelector('[data-global-progress]') : null;
           const loadButton = header ? header.querySelector('[data-load-refresh-button]') : null;
           const source = header ? header.querySelector('.table-source-kicker') : null;
           const text = header ? (header.innerText || '') : '';
           const metaText = pageMeta ? ((pageMeta.textContent || '').trim()) : '';
+          const buttonRect = loadButton ? loadButton.getBoundingClientRect() : {left: 0, right: 0, top: 0, bottom: 0};
+          const statusRect = loadStatus ? loadStatus.getBoundingClientRect() : {left: 0, right: 0, top: 0, bottom: 0};
+          const headerRect = header ? header.getBoundingClientRect() : {left: 0, right: 0, width: 0};
+          const forbidden = ['sheet_vitrina_v1', 'Основная web-витрина', 'В выбранном периоде', 'grid library', 'rows:', 'columns:', 'Снимок:', 'Вчера:', 'Сегодня:', 'TZ:'];
           return {
             top_panel_count: document.querySelectorAll('[data-top-panel]').length,
             table_header_count: document.querySelectorAll('[data-table-header]').length,
@@ -1075,9 +1245,16 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
             source_text: source ? ((source.textContent || '').trim()) : '',
             page_meta: metaText,
             table_meta: tableMeta ? ((tableMeta.textContent || '').trim()) : '',
+            summary_text: summary ? ((summary.textContent || '').trim()) : '',
+            load_status_text: loadStatus ? ((loadStatus.textContent || '').trim()) : '',
+            load_status_hidden: loadStatus ? !!loadStatus.hidden : null,
             load_button_text: loadButton ? ((loadButton.textContent || '').trim()) : '',
+            load_button_right_aligned: !!loadButton && buttonRect.left > headerRect.left + headerRect.width / 2,
+            load_status_under_button: !!loadStatus && !loadStatus.hidden && statusRect.top >= buttonRect.bottom - 2 && statusRect.right <= buttonRect.right + 4,
             asia_yekaterinburg_in_meta: (metaText.match(/Asia\\/Yekaterinburg/g) || []).length,
-            header_text: text
+            header_text: text,
+            has_freshness_badge: !!freshnessBadge && !freshnessBadge.hidden,
+            forbidden_hits: forbidden.filter((item) => text.includes(item) || metaText.includes(item) || (tableMeta && tableMeta.textContent || '').includes(item))
           };
         }"""
     )
@@ -1088,19 +1265,20 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
     if (
         not payload["progress_inside_header"]
         or not payload["load_button_inside_header"]
-        or payload["source_text"] != "sheet_vitrina_v1"
+        or payload["source_text"] != ""
         or payload["load_button_text"] != "Загрузить"
+        or not payload["load_button_right_aligned"]
+        or not payload["load_status_under_button"]
+        or payload["load_status_hidden"]
+        or not payload["has_freshness_badge"]
     ):
         raise AssertionError(f"source/header controls must be compactly inside the table header, got {payload}")
-    for expected in ("Снимок:", "Вчера:", "Сегодня:"):
-        if expected not in payload["page_meta"]:
-            raise AssertionError(f"table header meta must expose {expected!r}, got {payload}")
-    if "Бизнес TZ:" not in payload["page_meta"] and "TZ:" not in payload["page_meta"]:
-        raise AssertionError(f"table header meta must expose timezone, got {payload}")
-    if "Ваше локальное время" in payload["page_meta"] or payload["asia_yekaterinburg_in_meta"] > 1:
-        raise AssertionError(f"table header meta must avoid duplicate Asia/Yekaterinburg text, got {payload}")
-    if "rows:" not in payload["table_meta"] or "columns:" not in payload["table_meta"]:
-        raise AssertionError(f"table header must retain grid rows/columns meta, got {payload}")
+    if payload["page_meta"] or payload["table_meta"] or payload["forbidden_hits"]:
+        raise AssertionError(f"table header must not expose old technical/source text, got {payload}")
+    if "Обновлено:" not in payload["summary_text"] or "Свежесть данных:" not in payload["summary_text"]:
+        raise AssertionError(f"table header summary must expose compact freshness timestamps, got {payload}")
+    if "Статус последней загрузки:" not in payload["load_status_text"]:
+        raise AssertionError(f"load status must be visually attached to data loading, got {payload}")
     return payload
 
 
@@ -1560,14 +1738,22 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
     )
     page.locator("[data-vitrina-auto-save]").click()
     page.wait_for_function(
-        "() => Array.from(document.querySelectorAll('[data-vitrina-auto-field=\"local_time_hhmm\"]')).filter(node => node.value).length === 3",
-        timeout=5000,
+        """() => {
+          const saveButton = document.querySelector('[data-vitrina-auto-save]');
+          const times = Array.from(document.querySelectorAll('[data-vitrina-auto-field="local_time_hhmm"]')).map(node => node.value).filter(Boolean);
+          return !!saveButton && !saveButton.disabled && (saveButton.textContent || '').trim() === 'Сохранить' && times.length === 3 && times.includes('12:00');
+        }""",
+        timeout=10000,
     )
     page.locator("[data-vitrina-auto-field=\"local_time_hhmm\"]").last.fill("12:30")
     page.locator("[data-vitrina-auto-save]").click()
     page.wait_for_function(
-        "() => Array.from(document.querySelectorAll('[data-vitrina-auto-field=\"local_time_hhmm\"]')).some(node => node.value === '12:30')",
-        timeout=5000,
+        """() => {
+          const saveButton = document.querySelector('[data-vitrina-auto-save]');
+          return !!saveButton && !saveButton.disabled && (saveButton.textContent || '').trim() === 'Сохранить' &&
+            Array.from(document.querySelectorAll('[data-vitrina-auto-field="local_time_hhmm"]')).some(node => node.value === '12:30');
+        }""",
+        timeout=10000,
     )
     page.locator("[data-vitrina-auto-reload]").click()
     page.wait_for_function(
@@ -1741,34 +1927,43 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
     ).count()
     if legacy_card_count:
         raise AssertionError("updated/status summary must live in the table header, not separate summary cards")
-    payload = page.locator("[data-table-summary-line]").evaluate(
-        """node => {
-          const updatedNode = node.querySelector('[data-table-summary-updated]');
-          const freshnessNode = node.querySelector('[data-table-summary-freshness]');
-          const statusNode = node.querySelector('[data-table-summary-status]');
-          const detailNode = node.querySelector('[data-table-summary-status-detail]');
+    payload = page.evaluate(
+        """() => {
+          const node = document.querySelector('[data-table-summary-line]');
+          const loadStatusNode = document.querySelector('[data-table-load-status]');
+          const updatedNode = node ? node.querySelector('[data-table-summary-updated]') : null;
+          const freshnessNode = node ? node.querySelector('[data-table-summary-freshness]') : null;
+          const statusNode = loadStatusNode ? loadStatusNode.querySelector('[data-table-summary-status]') : null;
+          const detailNode = loadStatusNode ? loadStatusNode.querySelector('[data-table-summary-status-detail]') : null;
           const trimPrefix = (value, prefix) => {
             const text = String(value || '').trim();
             return text.startsWith(prefix) ? text.slice(prefix.length).trim() : text;
           };
           return {
-            hidden: !!node.hidden,
-            text: String(node.textContent || '').trim(),
+            hidden: !node || !!node.hidden,
+            load_status_hidden: !loadStatusNode || !!loadStatusNode.hidden,
+            text: String((node && node.textContent) || '').trim(),
+            load_status_text: String((loadStatusNode && loadStatusNode.textContent) || '').trim(),
             updated: trimPrefix(updatedNode ? updatedNode.textContent : '', 'Обновлено:'),
             updated_at: updatedNode ? String(updatedNode.getAttribute('data-table-summary-updated-at') || '').trim() : '',
             freshness: trimPrefix(freshnessNode ? freshnessNode.textContent : '', 'Свежесть данных:'),
             freshness_at: freshnessNode ? String(freshnessNode.getAttribute('data-table-summary-freshness-at') || '').trim() : '',
             freshness_source: freshnessNode ? String(freshnessNode.getAttribute('data-table-summary-freshness-source') || '').trim() : '',
-            status: trimPrefix(statusNode ? statusNode.textContent : '', 'Статус:'),
+            status: trimPrefix(statusNode ? statusNode.textContent : '', 'Статус последней загрузки:'),
             status_detail: detailNode ? String(detailNode.textContent || '').trim() : ''
           };
         }"""
     )
     if payload.get("hidden"):
         raise AssertionError(f"table header summary line must be visible, got {payload}")
+    if payload.get("load_status_hidden"):
+        raise AssertionError(f"load status must be visible under the load button, got {payload}")
     text = str(payload.get("text") or "")
-    if "Обновлено:" not in text or "Свежесть данных:" not in text or "Статус:" not in text:
-        raise AssertionError(f"table header summary must include updated and status labels, got {payload}")
+    load_status_text = str(payload.get("load_status_text") or "")
+    if "Обновлено:" not in text or "Свежесть данных:" not in text or "Статус:" in text:
+        raise AssertionError(f"table header summary must include only updated/freshness labels, got {payload}")
+    if "Статус последней загрузки:" not in load_status_text:
+        raise AssertionError(f"load status must describe the latest load only, got {payload}")
     if text.count("Asia/Yekaterinburg") > 1:
         raise AssertionError(f"table header summary must show timezone once at most, got {text!r}")
     cards = {

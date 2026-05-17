@@ -1509,7 +1509,7 @@
     }
 
     .table-panel-top {
-      align-items: center;
+      align-items: flex-start;
       gap: 10px 14px;
     }
 
@@ -1521,12 +1521,11 @@
 
     .table-header-meta {
       display: flex;
-      flex: 1 1 520px;
-      min-width: min(100%, 360px);
-      align-items: center;
+      flex: 0 0 auto;
+      min-width: min(100%, 240px);
+      align-items: flex-start;
       justify-content: flex-end;
-      gap: 8px 12px;
-      flex-wrap: wrap;
+      gap: 8px;
     }
 
     .table-header-text {
@@ -1539,10 +1538,24 @@
 
     .table-header-actions {
       display: flex;
-      align-items: center;
+      flex-direction: column;
+      align-items: flex-end;
       justify-content: flex-end;
-      gap: 8px;
-      flex-wrap: wrap;
+      gap: 6px;
+      max-width: 380px;
+      text-align: right;
+    }
+
+    .table-load-status {
+      margin: 0;
+      max-width: 360px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .table-load-status[hidden] {
+      display: none;
     }
 
     .panel h2 {
@@ -1588,6 +1601,10 @@
 
     .table-summary-token {
       white-space: nowrap;
+    }
+
+    .table-summary-separator {
+      color: var(--muted);
     }
 
     .table-summary-freshness {
@@ -1919,6 +1936,163 @@
     .metric-checkbox-count {
       color: var(--muted);
       font-weight: 500;
+    }
+
+    .metrics-presentation-panel {
+      margin: 6px 0;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #ffffff;
+    }
+
+    .metrics-presentation-panel[hidden] {
+      display: none;
+    }
+
+    .metrics-presentation-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 38px;
+      padding: 8px 10px;
+      cursor: pointer;
+      list-style: none;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .metrics-presentation-summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .metrics-presentation-summary::after {
+      content: "▾";
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .metrics-presentation-panel[open] .metrics-presentation-summary::after {
+      content: "▴";
+    }
+
+    .metrics-presentation-count {
+      margin-left: auto;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .metrics-presentation-body {
+      display: grid;
+      gap: 10px;
+      border-top: 1px solid var(--border);
+      padding: 10px;
+    }
+
+    .metrics-presentation-empty {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .metrics-config-group {
+      border: 1px solid rgba(139, 92, 246, 0.18);
+      border-radius: 6px;
+      background: var(--panel-subtle);
+      padding: 8px;
+    }
+
+    .metrics-config-title {
+      margin: 0 0 8px;
+      font-size: 12px;
+      font-weight: 800;
+      color: var(--text);
+    }
+
+    .metrics-config-zones {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .metrics-config-zone {
+      display: grid;
+      align-content: start;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .metrics-config-zone-title {
+      margin: 0;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .metrics-config-row {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      border-radius: 6px;
+      background: #ffffff;
+      padding: 5px 6px;
+      min-width: 0;
+    }
+
+    .metrics-config-row.is-anchor {
+      border-color: rgba(34, 197, 94, 0.38);
+      background: rgba(34, 197, 94, 0.08);
+    }
+
+    .metrics-config-anchor {
+      margin: 0;
+      accent-color: var(--accent);
+    }
+
+    .metrics-config-label {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .metrics-config-button,
+    .metric-anchor-toggle {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel-subtle);
+      color: var(--text);
+      font: inherit;
+      font-size: 11px;
+      line-height: 1.2;
+      cursor: pointer;
+    }
+
+    .metrics-config-button {
+      min-height: 24px;
+      padding: 3px 6px;
+      white-space: nowrap;
+    }
+
+    .metrics-config-button:hover,
+    .metric-anchor-toggle:hover {
+      border-color: rgba(139, 92, 246, 0.44);
+      background: rgba(139, 92, 246, 0.08);
+    }
+
+    .metric-anchor-toggle {
+      display: inline-flex;
+      align-items: center;
+      margin-left: 6px;
+      padding: 2px 6px;
+      vertical-align: middle;
+      white-space: nowrap;
     }
 
     .column-checkbox-meta {
@@ -3078,26 +3252,32 @@
       <p class="panel-meta" data-filter-meta hidden>загрузка фильтров…</p>
     </section>
 
+    <details class="metrics-presentation-panel" data-metrics-presentation>
+      <summary class="metrics-presentation-summary">
+        <span>Метрики</span>
+        <span class="metrics-presentation-count" data-metrics-presentation-summary>настройки не загружены</span>
+      </summary>
+      <div class="metrics-presentation-body" data-metrics-presentation-body>
+        <p class="metrics-presentation-empty">Настройки метрик появятся после загрузки таблицы.</p>
+      </div>
+    </details>
+
     <section class="panel">
       <div class="panel-top table-panel-top" data-table-header>
         <div class="table-header-main">
           <div class="table-heading-row">
             <h2>Таблица</h2>
-            <span class="site-kicker table-source-kicker">sheet_vitrina_v1</span>
             <span class="table-freshness-indicator" data-table-freshness-indicator hidden>
               <span class="table-freshness-dot" aria-hidden="true"></span>
               <span data-table-freshness-label>актуально</span>
             </span>
-            <p class="table-summary-line" data-table-summary-line hidden></p>
           </div>
-          <p class="panel-note">
-            Основная web-витрина поверх persisted ready snapshot.
-          </p>
+          <p class="table-summary-line" data-table-summary-line hidden></p>
         </div>
         <div class="table-header-meta">
-          <div class="table-header-text">
-            <p class="meta-line table-page-meta" data-page-meta>Загрузка page composition…</p>
-            <p class="panel-meta table-grid-meta" data-table-meta>
+          <div class="table-header-text" hidden>
+            <p class="meta-line table-page-meta" data-page-meta hidden>Загрузка page composition…</p>
+            <p class="panel-meta table-grid-meta" data-table-meta hidden>
               ожидание server payload…
             </p>
           </div>
@@ -3109,6 +3289,7 @@
               <span class="top-progress-label" data-global-progress-label>Запуск…</span>
             </div>
             <button class="button primary" type="button" data-load-refresh-button>Загрузить</button>
+            <p class="table-load-status" data-table-load-status hidden>Статус последней загрузки не загружен.</p>
           </div>
         </div>
       </div>
@@ -3599,9 +3780,13 @@
     const tableBodyNode = document.querySelector("[data-table-body]");
     const tableFreshnessIndicatorNode = document.querySelector("[data-table-freshness-indicator]");
     const tableFreshnessLabelNode = document.querySelector("[data-table-freshness-label]");
+    const tableLoadStatusNode = document.querySelector("[data-table-load-status]");
     const columnManagerNoteNode = document.querySelector("[data-column-manager-note]");
     const columnVisibilityControlsNode = document.querySelector("[data-column-visibility-controls]");
     const columnVisibilityResetButton = document.querySelector("[data-columns-reset]");
+    const metricsPresentationPanelNode = document.querySelector("[data-metrics-presentation]");
+    const metricsPresentationBodyNode = document.querySelector("[data-metrics-presentation-body]");
+    const metricsPresentationSummaryNode = document.querySelector("[data-metrics-presentation-summary]");
     const openContractLink = document.querySelector("[data-open-contract]");
     const openOperatorLink = document.querySelector("[data-open-operator]");
     const loadRefreshButton = document.querySelector("[data-load-refresh-button]");
@@ -3833,6 +4018,16 @@
         mandatoryIds: [],
         visibleIds: []
       },
+      metricPresentation: {
+        storageKey: "",
+        groups: [],
+        optionByKey: new Map(),
+        groupByKey: {},
+        orderByGroup: {},
+        hiddenByGroup: {},
+        anchorByGroup: {},
+        expandedGroupIds: new Set()
+      },
       sellerSession: {
         statusLabel: "",
         tone: "neutral",
@@ -4019,6 +4214,21 @@
     sourceStatusLoadButton.addEventListener("click", function() {
       loadSourceStatusDetails();
     });
+    if (metricsPresentationBodyNode) {
+      metricsPresentationBodyNode.addEventListener("click", handleMetricPresentationClick);
+      metricsPresentationBodyNode.addEventListener("change", handleMetricPresentationChange);
+    }
+    if (tableBodyNode) {
+      tableBodyNode.addEventListener("click", function(event) {
+        const toggle = event.target.closest("[data-metric-group-toggle]");
+        if (!toggle) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        toggleMetricPresentationGroup(String(toggle.getAttribute("data-metric-group-toggle") || ""));
+      });
+    }
     historyToggleButton.addEventListener("click", function() {
       setHistoryPopoverOpen(historyPopoverNode.hidden);
     });
@@ -4283,6 +4493,7 @@
     resetFiltersButton.addEventListener("click", function() {
       resetFilterState(state.composition);
       resetMetricSelectionToAll(state.composition);
+      resetMetricPresentationToDefault(state.composition);
       syncControlValues();
       renderTable();
     });
@@ -4982,6 +5193,478 @@
       persistMetricSelection();
     }
 
+    function buildMetricPresentationStorageKey(payload) {
+      const namespace = String((payload && payload.meta && payload.meta.state_namespace) || "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1");
+      return namespace + ":metric-presentation:v1";
+    }
+
+    function metricPresentationGroupId(scopeGroupId, sectionId) {
+      return String(scopeGroupId || "sku") + "::" + String(sectionId || "section:unsectioned");
+    }
+
+    function rowMetricPresentationGroupId(row) {
+      const metricKey = String(cellValue(row, "metric_key") || "");
+      const option = state.metricPresentation.optionByKey.get(metricKey) || {};
+      const rowKind = String((row && row.row_kind) || "").toLowerCase();
+      const scopeGroupId = rowKind === "total" ? "total" : "sku";
+      return metricPresentationGroupId(scopeGroupId, String((row && row.section_id) || option.section_id || "section:unsectioned"));
+    }
+
+    function buildMetricPresentationModel(payload) {
+      const optionByKey = new Map();
+      metricFilterOptions(payload).forEach(function(option) {
+        const metricKey = String((option && option.value) || "");
+        if (!metricKey || metricKey === ALL_VALUE) {
+          return;
+        }
+        optionByKey.set(metricKey, {
+          metricKey: metricKey,
+          label: String(option.label || metricKey),
+          scopeGroupId: String(option.scope_group_id || "sku"),
+          scopeGroupLabel: String(option.scope_group_label || ""),
+          sectionId: String(option.section_id || "section:unsectioned"),
+          sectionLabel: String(option.section_label || "Без секции")
+        });
+      });
+      const groupsById = new Map();
+      function ensureGroup(groupId, option, scopeGroupId, sectionId) {
+        if (!groupsById.has(groupId)) {
+          const scopeLabel = String((option && option.scopeGroupLabel) || (scopeGroupId === "total" ? "Итого" : "SKU"));
+          const sectionLabel = String((option && option.sectionLabel) || "Без секции");
+          groupsById.set(groupId, {
+            groupId: groupId,
+            label: scopeLabel + " / " + sectionLabel,
+            metricKeys: [],
+            metricSet: new Set()
+          });
+        }
+        return groupsById.get(groupId);
+      }
+      const rows = ((payload && payload.table_surface && payload.table_surface.rows) || []);
+      rows.forEach(function(row) {
+        const metricKey = String(cellValue(row, "metric_key") || "");
+        if (!metricKey) {
+          return;
+        }
+        const option = optionByKey.get(metricKey) || {
+          metricKey: metricKey,
+          label: String(cellDisplay(row, "metric_label") || metricKey),
+          scopeGroupLabel: String(row.row_kind || "").toLowerCase() === "total" ? "Итого" : "SKU",
+          sectionLabel: String(cellDisplay(row, "section") || "Без секции")
+        };
+        const scopeGroupId = String(row.row_kind || "").toLowerCase() === "total" ? "total" : "sku";
+        const sectionId = String(row.section_id || option.sectionId || "section:unsectioned");
+        const groupId = metricPresentationGroupId(scopeGroupId, sectionId);
+        const group = ensureGroup(groupId, option, scopeGroupId, sectionId);
+        if (!group.metricSet.has(metricKey)) {
+          group.metricSet.add(metricKey);
+          group.metricKeys.push(metricKey);
+        }
+        if (!optionByKey.has(metricKey)) {
+          optionByKey.set(metricKey, {
+            metricKey: metricKey,
+            label: String(cellDisplay(row, "metric_label") || metricKey),
+            scopeGroupId: scopeGroupId,
+            scopeGroupLabel: scopeGroupId === "total" ? "Итого" : "SKU",
+            sectionId: sectionId,
+            sectionLabel: String(cellDisplay(row, "section") || "Без секции")
+          });
+        }
+      });
+      optionByKey.forEach(function(option, metricKey) {
+        const groupId = metricPresentationGroupId(option.scopeGroupId, option.sectionId);
+        const group = ensureGroup(groupId, option, option.scopeGroupId, option.sectionId);
+        if (!group.metricSet.has(metricKey)) {
+          group.metricSet.add(metricKey);
+          group.metricKeys.push(metricKey);
+        }
+      });
+      const groups = Array.from(groupsById.values()).map(function(group) {
+        return {
+          groupId: group.groupId,
+          label: group.label,
+          metricKeys: group.metricKeys.slice()
+        };
+      });
+      return {groups: groups, optionByKey: optionByKey};
+    }
+
+    function readPersistedMetricPresentation(storageKey) {
+      if (!storageKey || !window || !window.localStorage) {
+        return null;
+      }
+      try {
+        const raw = window.localStorage.getItem(storageKey);
+        if (!raw) {
+          return null;
+        }
+        const parsed = JSON.parse(raw);
+        if (!parsed || Number(parsed.version) !== 1 || !parsed.groups || typeof parsed.groups !== "object") {
+          return null;
+        }
+        return parsed;
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function sanitizeMetricOrder(candidateOrder, defaultOrder) {
+      const defaultSet = new Set(defaultOrder || []);
+      const result = [];
+      const seen = new Set();
+      (Array.isArray(candidateOrder) ? candidateOrder : []).forEach(function(metricKey) {
+        const normalized = String(metricKey || "");
+        if (defaultSet.has(normalized) && !seen.has(normalized)) {
+          result.push(normalized);
+          seen.add(normalized);
+        }
+      });
+      (defaultOrder || []).forEach(function(metricKey) {
+        if (!seen.has(metricKey)) {
+          result.push(metricKey);
+          seen.add(metricKey);
+        }
+      });
+      return result;
+    }
+
+    function initializeMetricPresentation(payload, options) {
+      const forceDefault = !!(options && options.forceDefault);
+      const model = buildMetricPresentationModel(payload);
+      const storageKey = buildMetricPresentationStorageKey(payload);
+      const persisted = forceDefault ? null : readPersistedMetricPresentation(storageKey);
+      const groups = model.groups;
+      const groupByKey = {};
+      state.metricPresentation.storageKey = storageKey;
+      state.metricPresentation.groups = groups;
+      state.metricPresentation.optionByKey = model.optionByKey;
+      state.metricPresentation.orderByGroup = {};
+      state.metricPresentation.hiddenByGroup = {};
+      state.metricPresentation.anchorByGroup = {};
+      state.metricPresentation.expandedGroupIds = new Set();
+      groups.forEach(function(group) {
+        const groupId = group.groupId;
+        const savedGroup = persisted && persisted.groups ? (persisted.groups[groupId] || {}) : {};
+        const defaultOrder = group.metricKeys.slice();
+        const order = sanitizeMetricOrder(savedGroup.order, defaultOrder);
+        const allowedSet = new Set(defaultOrder);
+        const hidden = new Set();
+        (Array.isArray(savedGroup.hidden) ? savedGroup.hidden : []).forEach(function(metricKey) {
+          const normalized = String(metricKey || "");
+          if (allowedSet.has(normalized)) {
+            hidden.add(normalized);
+          }
+        });
+        let anchor = String(savedGroup.anchor || "");
+        if (!allowedSet.has(anchor)) {
+          anchor = defaultOrder[0] || "";
+        }
+        hidden.delete(anchor);
+        state.metricPresentation.orderByGroup[groupId] = order;
+        state.metricPresentation.hiddenByGroup[groupId] = hidden;
+        state.metricPresentation.anchorByGroup[groupId] = anchor;
+        if (savedGroup.expanded === true) {
+          state.metricPresentation.expandedGroupIds.add(groupId);
+        }
+        defaultOrder.forEach(function(metricKey) {
+          groupByKey[metricKey] = groupId;
+        });
+      });
+      state.metricPresentation.groupByKey = groupByKey;
+      persistMetricPresentation();
+      renderMetricPresentationPanel(payload);
+    }
+
+    function persistMetricPresentation() {
+      const storageKey = state.metricPresentation.storageKey;
+      if (!storageKey || !window || !window.localStorage) {
+        return;
+      }
+      const groups = {};
+      (state.metricPresentation.groups || []).forEach(function(group) {
+        const groupId = group.groupId;
+        groups[groupId] = {
+          order: (state.metricPresentation.orderByGroup[groupId] || group.metricKeys || []).slice(),
+          hidden: Array.from(state.metricPresentation.hiddenByGroup[groupId] || []),
+          anchor: String(state.metricPresentation.anchorByGroup[groupId] || ""),
+          expanded: state.metricPresentation.expandedGroupIds.has(groupId)
+        };
+      });
+      try {
+        window.localStorage.setItem(storageKey, JSON.stringify({version: 1, groups: groups}));
+      } catch (error) {
+        // Browser-local presentation preferences must not block table rendering.
+      }
+    }
+
+    function resetMetricPresentationToDefault(payload) {
+      initializeMetricPresentation(payload, {forceDefault: true});
+    }
+
+    function selectedMetricKeysForGroup(group) {
+      const selected = state.filters.selectedMetricKeys || new Set();
+      const order = state.metricPresentation.orderByGroup[group.groupId] || group.metricKeys || [];
+      return order.filter(function(metricKey) {
+        return selected.has(metricKey);
+      });
+    }
+
+    function visibleMetricKeysForGroup(group) {
+      const hidden = state.metricPresentation.hiddenByGroup[group.groupId] || new Set();
+      const anchor = effectiveMetricPresentationAnchor(group);
+      return selectedMetricKeysForGroup(group).filter(function(metricKey) {
+        return metricKey === anchor || !hidden.has(metricKey);
+      });
+    }
+
+    function hiddenMetricKeysForGroup(group) {
+      const hidden = state.metricPresentation.hiddenByGroup[group.groupId] || new Set();
+      const anchor = effectiveMetricPresentationAnchor(group);
+      return selectedMetricKeysForGroup(group).filter(function(metricKey) {
+        return metricKey !== anchor && hidden.has(metricKey);
+      });
+    }
+
+    function effectiveMetricPresentationAnchor(group) {
+      const selected = selectedMetricKeysForGroup(group);
+      const savedAnchor = String(state.metricPresentation.anchorByGroup[group.groupId] || "");
+      if (selected.indexOf(savedAnchor) !== -1) {
+        return savedAnchor;
+      }
+      return selected[0] || "";
+    }
+
+    function renderMetricPresentationPanel(payload) {
+      if (!metricsPresentationPanelNode || !metricsPresentationBodyNode || !metricsPresentationSummaryNode) {
+        return;
+      }
+      const groups = (state.metricPresentation.groups || []).filter(function(group) {
+        return selectedMetricKeysForGroup(group).length > 0;
+      });
+      const selectedCount = (state.filters.selectedMetricKeys || new Set()).size;
+      metricsPresentationSummaryNode.textContent = selectedCount
+        ? "Выбрано: " + selectedCount
+        : "нет выбранных метрик";
+      if (!groups.length) {
+        metricsPresentationBodyNode.innerHTML = '<p class="metrics-presentation-empty">В toolbar `Метрики` не выбраны строки для показа.</p>';
+        return;
+      }
+      metricsPresentationBodyNode.innerHTML = groups.map(function(group) {
+        const visibleKeys = visibleMetricKeysForGroup(group);
+        const hiddenKeys = hiddenMetricKeysForGroup(group);
+        return [
+          '<section class="metrics-config-group" data-metrics-config-group="' + escapeHtml(group.groupId) + '">',
+          '<p class="metrics-config-title">' + escapeHtml(group.label) + '</p>',
+          '<div class="metrics-config-zones">',
+          renderMetricConfigZone(group, visibleKeys, "Показывать сразу", false),
+          renderMetricConfigZone(group, hiddenKeys, "Скрыто под раскрытием", true),
+          "</div>",
+          "</section>"
+        ].join("");
+      }).join("");
+    }
+
+    function renderMetricConfigZone(group, metricKeys, title, hiddenZone) {
+      const rows = metricKeys.map(function(metricKey) {
+        return renderMetricConfigRow(group, metricKey, hiddenZone);
+      }).join("");
+      return [
+        '<div class="metrics-config-zone">',
+        '<p class="metrics-config-zone-title">' + escapeHtml(title) + '</p>',
+        rows || '<p class="metrics-presentation-empty">Нет метрик.</p>',
+        "</div>"
+      ].join("");
+    }
+
+    function renderMetricConfigRow(group, metricKey, hiddenZone) {
+      const option = state.metricPresentation.optionByKey.get(metricKey) || {label: metricKey};
+      const anchor = effectiveMetricPresentationAnchor(group);
+      const isAnchor = metricKey === anchor;
+      return [
+        '<div class="metrics-config-row' + (isAnchor ? " is-anchor" : "") + '" data-metric-config-row="' + escapeHtml(metricKey) + '">',
+        '<input class="metrics-config-anchor" type="radio" name="metric-anchor-' + escapeHtml(group.groupId) + '" data-metric-anchor-group="' + escapeHtml(group.groupId) + '" value="' + escapeHtml(metricKey) + '"' + (isAnchor ? " checked" : "") + ' title="Anchor metric">',
+        '<span class="metrics-config-label" title="' + escapeHtml(option.label || metricKey) + '">' + escapeHtml(option.label || metricKey) + '</span>',
+        '<button class="metrics-config-button" type="button" data-metric-config-action="up" data-metric-config-group="' + escapeHtml(group.groupId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '">↑</button>',
+        '<button class="metrics-config-button" type="button" data-metric-config-action="down" data-metric-config-group="' + escapeHtml(group.groupId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '">↓</button>',
+        '<button class="metrics-config-button" type="button" data-metric-config-action="' + (hiddenZone ? "show" : "hide") + '" data-metric-config-group="' + escapeHtml(group.groupId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '">' +
+          (hiddenZone ? "Показывать сразу" : "Скрыть под раскрытием") +
+        "</button>",
+        "</div>"
+      ].join("");
+    }
+
+    function handleMetricPresentationClick(event) {
+      const button = event.target.closest("[data-metric-config-action]");
+      if (!button) {
+        return;
+      }
+      event.preventDefault();
+      const action = String(button.getAttribute("data-metric-config-action") || "");
+      const groupId = String(button.getAttribute("data-metric-config-group") || "");
+      const metricKey = String(button.getAttribute("data-metric-config-key") || "");
+      updateMetricPresentationAction(action, groupId, metricKey);
+    }
+
+    function handleMetricPresentationChange(event) {
+      const node = event.target.closest("[data-metric-anchor-group]");
+      if (!node) {
+        return;
+      }
+      const groupId = String(node.getAttribute("data-metric-anchor-group") || "");
+      const metricKey = String(node.value || "");
+      setMetricPresentationAnchor(groupId, metricKey);
+    }
+
+    function updateMetricPresentationAction(action, groupId, metricKey) {
+      if (!groupId || !metricKey) {
+        return;
+      }
+      if (action === "up" || action === "down") {
+        moveMetricInPresentation(groupId, metricKey, action === "up" ? -1 : 1);
+      } else if (action === "hide") {
+        hideMetricUnderAnchor(groupId, metricKey);
+      } else if (action === "show") {
+        showMetricImmediately(groupId, metricKey);
+      }
+      persistMetricPresentation();
+      renderMetricPresentationPanel(state.composition);
+      renderTable();
+    }
+
+    function moveMetricInPresentation(groupId, metricKey, delta) {
+      const order = (state.metricPresentation.orderByGroup[groupId] || []).slice();
+      const selected = selectedMetricKeysForGroup({groupId: groupId, metricKeys: order});
+      const selectedIndex = selected.indexOf(metricKey);
+      const targetMetric = selected[selectedIndex + delta];
+      if (!targetMetric) {
+        return;
+      }
+      const leftIndex = order.indexOf(metricKey);
+      const rightIndex = order.indexOf(targetMetric);
+      if (leftIndex < 0 || rightIndex < 0) {
+        return;
+      }
+      order[leftIndex] = targetMetric;
+      order[rightIndex] = metricKey;
+      state.metricPresentation.orderByGroup[groupId] = order;
+    }
+
+    function hideMetricUnderAnchor(groupId, metricKey) {
+      const order = state.metricPresentation.orderByGroup[groupId] || [];
+      if (order.length <= 1) {
+        return;
+      }
+      let anchor = state.metricPresentation.anchorByGroup[groupId] || "";
+      if (anchor === metricKey) {
+        anchor = order.find(function(candidate) {
+          return candidate !== metricKey && (state.filters.selectedMetricKeys || new Set()).has(candidate);
+        }) || "";
+        state.metricPresentation.anchorByGroup[groupId] = anchor;
+      }
+      if (!anchor) {
+        return;
+      }
+      const hidden = new Set(state.metricPresentation.hiddenByGroup[groupId] || []);
+      hidden.add(metricKey);
+      hidden.delete(anchor);
+      state.metricPresentation.hiddenByGroup[groupId] = hidden;
+      state.metricPresentation.expandedGroupIds.delete(groupId);
+    }
+
+    function showMetricImmediately(groupId, metricKey) {
+      const hidden = new Set(state.metricPresentation.hiddenByGroup[groupId] || []);
+      hidden.delete(metricKey);
+      state.metricPresentation.hiddenByGroup[groupId] = hidden;
+    }
+
+    function setMetricPresentationAnchor(groupId, metricKey) {
+      if (!groupId || !metricKey) {
+        return;
+      }
+      const order = state.metricPresentation.orderByGroup[groupId] || [];
+      if (order.indexOf(metricKey) === -1) {
+        return;
+      }
+      state.metricPresentation.anchorByGroup[groupId] = metricKey;
+      const hidden = new Set(state.metricPresentation.hiddenByGroup[groupId] || []);
+      hidden.delete(metricKey);
+      state.metricPresentation.hiddenByGroup[groupId] = hidden;
+      persistMetricPresentation();
+      renderMetricPresentationPanel(state.composition);
+      renderTable();
+    }
+
+    function toggleMetricPresentationGroup(groupId) {
+      if (!groupId) {
+        return;
+      }
+      if (state.metricPresentation.expandedGroupIds.has(groupId)) {
+        state.metricPresentation.expandedGroupIds.delete(groupId);
+      } else {
+        state.metricPresentation.expandedGroupIds.add(groupId);
+      }
+      persistMetricPresentation();
+      renderMetricPresentationPanel(state.composition);
+      renderTable();
+    }
+
+    function applyMetricPresentationToRows(rows) {
+      const sourceRows = Array.isArray(rows) ? rows : [];
+      const originalIndex = new Map(sourceRows.map(function(row, index) { return [row.row_id, index]; }));
+      return sourceRows.slice().sort(function(left, right) {
+        const leftGroup = rowMetricPresentationGroupId(left);
+        const rightGroup = rowMetricPresentationGroupId(right);
+        if (
+          leftGroup === rightGroup &&
+          String(left.section_id || "") === String(right.section_id || "") &&
+          String(left.group_id || "") === String(right.group_id || "") &&
+          skuClusterIdentity(left) === skuClusterIdentity(right)
+        ) {
+          const leftOrder = metricPresentationOrder(leftGroup, String(cellValue(left, "metric_key") || ""));
+          const rightOrder = metricPresentationOrder(rightGroup, String(cellValue(right, "metric_key") || ""));
+          if (leftOrder !== rightOrder) {
+            return leftOrder - rightOrder;
+          }
+        }
+        return (originalIndex.get(left.row_id) || 0) - (originalIndex.get(right.row_id) || 0);
+      }).filter(function(row) {
+        return !isMetricHiddenByPresentation(row);
+      });
+    }
+
+    function metricPresentationOrder(groupId, metricKey) {
+      const order = state.metricPresentation.orderByGroup[groupId] || [];
+      const index = order.indexOf(metricKey);
+      return index === -1 ? 999999 : index;
+    }
+
+    function isMetricHiddenByPresentation(row) {
+      const groupId = rowMetricPresentationGroupId(row);
+      if (state.metricPresentation.expandedGroupIds.has(groupId)) {
+        return false;
+      }
+      const metricKey = String(cellValue(row, "metric_key") || "");
+      const group = (state.metricPresentation.groups || []).find(function(item) {
+        return item.groupId === groupId;
+      }) || {groupId: groupId, metricKeys: state.metricPresentation.orderByGroup[groupId] || []};
+      const anchor = effectiveMetricPresentationAnchor(group);
+      if (metricKey === anchor) {
+        return false;
+      }
+      const hidden = state.metricPresentation.hiddenByGroup[groupId] || new Set();
+      return hidden.has(metricKey);
+    }
+
+    function metricGroupHiddenCount(groupId) {
+      const group = (state.metricPresentation.groups || []).find(function(item) {
+        return item.groupId === groupId;
+      });
+      if (!group) {
+        return 0;
+      }
+      return hiddenMetricKeysForGroup(group).length;
+    }
+
     function isColumnMandatory(column) {
       const columnId = String((column && column.id) || "");
       return columnId === "scope_label" || columnId === "metric_label" || columnId === "section" || columnId.indexOf("date:") === 0;
@@ -5168,7 +5851,7 @@
       renderTableSummaryLine(renderedCards);
       const standaloneCards = renderedCards.filter(function(card) {
         const cardId = String((card && card.card_id) || "");
-        return cardId !== "page_refresh" && cardId !== "status" && cardId !== "data_freshness";
+        return cardId !== "page_refresh" && cardId !== "status" && cardId !== "data_freshness" && cardId !== "period";
       });
       summaryGridNode.hidden = standaloneCards.length === 0;
       summaryGridNode.innerHTML = standaloneCards.map(function(card) {
@@ -5218,20 +5901,28 @@
       }
       if (statusCard) {
         const statusText = formatSummaryCardValue(statusCard);
+        const statusParts = [];
         if (statusText) {
-          parts.push(
+          statusParts.push(
             '<span class="table-summary-status tone-' + escapeHtml(normalizeTone(statusCard.tone)) + '" data-table-summary-status>' +
-              'Статус: ' + escapeHtml(statusText) +
+              'Статус последней загрузки: ' + escapeHtml(statusText) +
               '</span>'
           );
         }
         if (statusCard.detail) {
-          parts.push(
+          statusParts.push(
             '<span class="table-summary-detail" data-table-summary-status-detail>' +
               escapeHtml(statusCard.detail) +
               '</span>'
           );
         }
+        if (tableLoadStatusNode) {
+          tableLoadStatusNode.hidden = statusParts.length === 0;
+          tableLoadStatusNode.innerHTML = statusParts.join('<span class="table-summary-separator" aria-hidden="true">·</span>');
+        }
+      } else if (tableLoadStatusNode) {
+        tableLoadStatusNode.hidden = true;
+        tableLoadStatusNode.textContent = "";
       }
       tableSummaryLineNode.hidden = parts.length === 0;
       tableSummaryLineNode.innerHTML = parts.join('<span class="table-summary-separator" aria-hidden="true">·</span>');
@@ -5651,26 +6342,6 @@
       return parts[2] + "." + parts[1] + "." + parts[0];
     }
 
-    function buildPageHeaderMeta(meta) {
-      const normalizedMeta = meta || {};
-      const businessTimezone = String(normalizedMeta.business_timezone || "").trim();
-      const localTimezone = browserTimezoneLabel();
-      const timezoneParts = [];
-      if (businessTimezone && localTimezone && businessTimezone === localTimezone) {
-        timezoneParts.push("TZ: " + businessTimezone);
-      } else {
-        timezoneParts.push("Бизнес TZ: " + valueOrDash(businessTimezone));
-        if (localTimezone) {
-          timezoneParts.push("Локальная TZ: " + localTimezone);
-        }
-      }
-      return [
-        "Снимок: " + valueOrDash(formatBusinessDateDisplay(normalizedMeta.snapshot_as_of_date || normalizedMeta.as_of_date)),
-        "Вчера: " + valueOrDash(formatBusinessDateDisplay(normalizedMeta.yesterday_closed_date)),
-        "Сегодня: " + valueOrDash(formatBusinessDateDisplay(normalizedMeta.today_current_date))
-      ].concat(timezoneParts).join(" · ");
-    }
-
     function formatVisibleTimestampText(value) {
       return String(value || "").replace(
         /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g,
@@ -5726,9 +6397,6 @@
       }
       if (controlId === "group") {
         return "Группа";
-      }
-      if (controlId === "scope_kind") {
-        return "Тип строк";
       }
       if (controlId === "metric") {
         return "Метрики";
@@ -6424,6 +7092,7 @@
       state.filters.metric = ALL_VALUE;
       persistMetricSelection();
       syncMetricControlValues();
+      renderMetricPresentationPanel(state.composition);
       renderTable();
     }
 
@@ -6441,6 +7110,7 @@
       state.filters.metric = ALL_VALUE;
       persistMetricSelection();
       syncMetricControlValues();
+      renderMetricPresentationPanel(state.composition);
       renderTable();
     }
 
@@ -6540,11 +7210,13 @@
       initializeMetricSelection(payload);
       renderFilterControls(payload);
       initializeColumnVisibility(payload);
+      initializeMetricPresentation(payload);
       if (!state.filters.sort) {
         state.filters.sort = (payload.filter_surface && payload.filter_surface.default_sort_value) || "";
       }
       const meta = payload.meta || {};
-      pageMetaNode.textContent = buildPageHeaderMeta(meta);
+      pageMetaNode.textContent = "";
+      pageMetaNode.hidden = true;
       filterMetaNode.textContent =
         "state namespace: " +
         valueOrDash(payload.meta && payload.meta.state_namespace) +
@@ -6580,21 +7252,14 @@
       const allColumns = tableSurface.columns || [];
       const columns = visibleColumns(allColumns);
       const totalRows = tableSurface.total_row_count || 0;
-      tableMetaNode.textContent =
-        "grid library: " +
-        valueOrDash(payload.meta && payload.meta.grid_library_name) +
-        " · rows: " +
-        valueOrDash(totalRows) +
-        " · columns: " +
-        columns.length +
-        "/" +
-        allColumns.length;
+      tableMetaNode.textContent = "";
+      tableMetaNode.hidden = true;
       if (tableDataState === "deferred") {
         filterSummaryNode.textContent = "Загрузка таблицы…";
         setStateBox("warning", "Загрузка таблицы…", "Строки таблицы загружаются отдельным read-only запросом.");
         return;
       }
-      const filteredRows = sortRows(applyFilters(tableSurface.rows || []), payload);
+      const filteredRows = applyMetricPresentationToRows(sortRows(applyFilters(tableSurface.rows || []), payload));
       filterSummaryNode.textContent = filteredRows.length + " из " + totalRows + " строк";
       if (!columns.length) {
         setStateBox("warning", "Нет видимых столбцов", "Сбросьте настройки столбцов, чтобы вернуть полный вид таблицы.");
@@ -6864,6 +7529,26 @@
     }
 
     function formatCellContent(column, row, cell) {
+      if (column.id === "metric_label") {
+        const content = escapeHtml(formatCellValue(cell));
+        const groupId = rowMetricPresentationGroupId(row);
+        const group = (state.metricPresentation.groups || []).find(function(item) {
+          return item.groupId === groupId;
+        }) || {groupId: groupId, metricKeys: state.metricPresentation.orderByGroup[groupId] || []};
+        const anchor = effectiveMetricPresentationAnchor(group);
+        const metricKey = String(cellValue(row, "metric_key") || "");
+        const hiddenCount = metricGroupHiddenCount(groupId);
+        if (hiddenCount > 0 && metricKey === anchor) {
+          const expanded = state.metricPresentation.expandedGroupIds.has(groupId);
+          return [
+            content,
+            '<button class="metric-anchor-toggle" type="button" data-metric-group-toggle="' + escapeHtml(groupId) + '">',
+            expanded ? "Скрыть" : "Показать ещё " + hiddenCount,
+            "</button>"
+          ].join(" ");
+        }
+        return content;
+      }
       if (column.id === "scope_kind") {
         return (
           '<span class="cell-row-kind ' +

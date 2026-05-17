@@ -191,6 +191,10 @@ class SheetVitrinaV1WebVitrinaBlock:
             data_sheet_row_count = refresh_status.sheet_row_counts.get(WEB_VITRINA_SOURCE_SHEET_NAME, 0)
         auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()
         manual_state = self.runtime.load_sheet_vitrina_manual_operator_state()
+        load_window_status = _resolve_latest_load_window_status(
+            runtime=self.runtime,
+            now=now,
+        )
         data_sheet = _require_data_sheet(snapshot)
 
         config_by_nm_id = {
@@ -255,6 +259,7 @@ class SheetVitrinaV1WebVitrinaBlock:
                 source_count=len(source_temporal_policies),
                 data_sheet_row_count=data_sheet_row_count or len(rows),
                 refresh_outcome_counts=dict(period_refresh_summary["counts"]),
+                load_window_status=load_window_status,
             ),
             schema=_build_schema(snapshot),
             rows=rows,
@@ -564,6 +569,57 @@ def _resolve_period_refresh_summary(
         "reason": reason,
         "counts": {**counts, "missing": missing_count},
     }
+
+
+def _resolve_latest_load_window_status(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    now: datetime,
+) -> dict[str, Any]:
+    yesterday_closed_date = default_business_as_of_date(now)
+    today_current_date = current_business_date_iso(now)
+    window_label = (
+        f"today_current={today_current_date}; "
+        f"yesterday_closed={yesterday_closed_date}; "
+        f"tz={CANONICAL_BUSINESS_TIMEZONE_NAME}"
+    )
+    try:
+        refresh_status = runtime.load_sheet_vitrina_refresh_status(as_of_date=yesterday_closed_date)
+    except ValueError as exc:
+        return {
+            "status": "warning",
+            "label": "Нужно загрузить",
+            "tone": "warning",
+            "reason": f"Последняя загрузка для окна {window_label} ещё не materialized: {exc}",
+            "refreshed_at": "",
+            "snapshot_as_of_date": yesterday_closed_date,
+            "today_current_date": today_current_date,
+            "yesterday_closed_date": yesterday_closed_date,
+            "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
+            "counts": {"success": 0, "warning": 1, "error": 0},
+        }
+    slot_today = _refresh_status_temporal_slot_date(refresh_status, "today_current") or today_current_date
+    slot_yesterday = _refresh_status_temporal_slot_date(refresh_status, "yesterday_closed") or yesterday_closed_date
+    reason = str(refresh_status.semantic_reason or "").strip()
+    return {
+        "status": str(refresh_status.semantic_status or "warning"),
+        "label": str(refresh_status.semantic_label or ""),
+        "tone": str(refresh_status.semantic_tone or refresh_status.semantic_status or "warning"),
+        "reason": f"Последняя загрузка для окна {window_label}: {reason}" if reason else f"Последняя загрузка для окна {window_label}.",
+        "refreshed_at": str(refresh_status.refreshed_at or ""),
+        "snapshot_as_of_date": str(refresh_status.as_of_date or yesterday_closed_date),
+        "today_current_date": slot_today,
+        "yesterday_closed_date": slot_yesterday,
+        "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
+        "counts": dict(refresh_status.source_outcome_counts),
+    }
+
+
+def _refresh_status_temporal_slot_date(refresh_status: Any, slot_key: str) -> str:
+    for slot in getattr(refresh_status, "temporal_slots", []) or []:
+        if str(getattr(slot, "slot_key", "") or "") == slot_key:
+            return str(getattr(slot, "column_date", "") or "")
+    return ""
 
 
 def _load_default_visible_snapshot(
