@@ -2043,15 +2043,39 @@
     }
 
     .metrics-config-grid.scope-count-1 {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: minmax(0, 1fr);
     }
 
     .metrics-config-grid.scope-count-2 {
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
     .metrics-config-grid.scope-count-many {
-      grid-template-columns: repeat(auto-fit, minmax(176px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    }
+
+    .metrics-config-scope-pair {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      align-content: start;
+      gap: 4px 6px;
+      min-width: 0;
+    }
+
+    .metrics-config-paired-row {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      align-items: stretch;
+      gap: 6px;
+      min-width: 0;
+      padding-top: 5px;
+      border-top: 1px solid rgba(255, 255, 255, 0.07);
+    }
+
+    .metrics-config-paired-row.is-first {
+      padding-top: 0;
+      border-top: 0;
     }
 
     .metrics-config-zone {
@@ -2059,6 +2083,7 @@
       align-content: start;
       gap: 4px;
       min-width: 0;
+      height: 100%;
       border: 1px solid rgba(255, 255, 255, 0.06);
       border-radius: 5px;
       background: rgba(255, 255, 255, 0.025);
@@ -2094,12 +2119,6 @@
       display: grid;
       gap: 3px;
       min-width: 0;
-    }
-
-    .metrics-config-section + .metrics-config-section {
-      margin-top: 3px;
-      padding-top: 5px;
-      border-top: 1px solid rgba(255, 255, 255, 0.07);
     }
 
     .metrics-config-section-title {
@@ -3175,7 +3194,7 @@
 
       .metrics-config-grid.scope-count-2,
       .metrics-config-grid.scope-count-many {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-columns: 1fr;
       }
 
       .table-control-toolbar {
@@ -3300,6 +3319,11 @@
       .metrics-config-grid.scope-count-1,
       .metrics-config-grid.scope-count-2,
       .metrics-config-grid.scope-count-many {
+        grid-template-columns: 1fr;
+      }
+
+      .metrics-config-scope-pair,
+      .metrics-config-paired-row {
         grid-template-columns: 1fr;
       }
 
@@ -5757,14 +5781,9 @@
       }
       const scopes = metricPresentationScopes(groups);
       const scopeCountClass = scopes.length === 1 ? "scope-count-1" : (scopes.length === 2 ? "scope-count-2" : "scope-count-many");
-      const columns = [];
-      scopes.forEach(function(scope) {
-        columns.push(renderMetricConfigZone(scope, "Показано", false));
-        columns.push(renderMetricConfigZone(scope, "Скрыто", true));
-      });
       metricsPresentationBodyNode.innerHTML = [
         '<div class="metrics-config-grid ' + scopeCountClass + '" data-metrics-config-grid data-metrics-config-scope-count="' + escapeHtml(String(scopes.length)) + '">',
-        columns.join(""),
+        scopes.map(renderMetricConfigScopePair).join(""),
         "</div>"
       ].join("");
     }
@@ -5815,31 +5834,56 @@
       });
     }
 
-    function renderMetricConfigZone(scope, title, hiddenZone) {
+    function renderMetricConfigScopePair(scope) {
       const displayGroups = (scope.groups || []).filter(function(group) {
         return selectedMetricKeysForGroup(group).length > 0;
       });
-      const sections = displayGroups.map(function(group, groupIndex) {
-        const metricKeys = hiddenZone ? hiddenMetricKeysForGroup(group) : visibleMetricKeysForGroup(group);
-        const rows = metricKeys.map(function(metricKey) {
-          return renderMetricConfigRow(group, metricKey, hiddenZone);
-        }).join("") || '<p class="metrics-config-section-empty">Нет метрик</p>';
-        const isFirst = groupIndex === 0;
-        const isLast = groupIndex === displayGroups.length - 1;
-        return [
-          '<div class="metrics-config-section" data-metrics-config-group="' + escapeHtml(group.groupId) + '" data-metrics-config-section="' + escapeHtml(group.sectionId || "") + '">',
-          '<div class="metrics-config-section-title" title="' + escapeHtml(group.sectionLabel || group.label || "") + '">',
-          '<span class="metrics-config-section-label">' + escapeHtml(group.sectionLabel || group.label || "Без секции") + '</span>',
-          hiddenZone ? "" : renderMetricGroupMoveControls(scope.scopeId, group.groupId, isFirst, isLast),
-          "</div>",
-          rows,
-          "</div>"
-        ].join("");
+      const rows = displayGroups.map(function(group, groupIndex) {
+        return renderMetricConfigPairedRow(scope, group, groupIndex, displayGroups.length);
       }).join("");
       return [
+        '<section class="metrics-config-scope-pair" data-metrics-config-scope-pair data-metrics-config-scope="' + escapeHtml(scope.scopeId) + '">',
+        renderMetricConfigZoneTitle(scope, "Показано", false),
+        renderMetricConfigZoneTitle(scope, "Скрыто", true),
+        rows || '<p class="metrics-presentation-empty">Нет метрик.</p>',
+        "</section>"
+      ].join("");
+    }
+
+    function renderMetricConfigZoneTitle(scope, title, hiddenZone) {
+      return [
+        '<p class="metrics-config-zone-title" data-metrics-config-scope="' + escapeHtml(scope.scopeId) + '" data-metrics-config-zone="' + (hiddenZone ? "hidden" : "visible") + '">',
+        '<span class="metrics-config-scope-label" title="' + escapeHtml(scope.label) + '">' + escapeHtml(scope.label) + '</span>',
+        '<span class="metrics-config-zone-kind">' + escapeHtml(title) + '</span>',
+        "</p>"
+      ].join("");
+    }
+
+    function renderMetricConfigPairedRow(scope, group, groupIndex, groupCount) {
+      const isFirst = groupIndex === 0;
+      const isLast = groupIndex === groupCount - 1;
+      return [
+        '<div class="metrics-config-paired-row' + (isFirst ? " is-first" : "") + '" data-metrics-config-paired-row data-metrics-config-scope="' + escapeHtml(scope.scopeId) + '" data-metrics-config-group="' + escapeHtml(group.groupId) + '" data-metrics-config-section="' + escapeHtml(group.sectionId || "") + '">',
+        renderMetricConfigZoneCell(scope, group, false, isFirst, isLast),
+        renderMetricConfigZoneCell(scope, group, true, isFirst, isLast),
+        "</div>"
+      ].join("");
+    }
+
+    function renderMetricConfigZoneCell(scope, group, hiddenZone, isFirst, isLast) {
+      const metricKeys = hiddenZone ? hiddenMetricKeysForGroup(group) : visibleMetricKeysForGroup(group);
+      const rows = metricKeys.map(function(metricKey) {
+        return renderMetricConfigRow(group, metricKey, hiddenZone);
+      }).join("") || '<p class="metrics-config-section-empty">Нет метрик</p>';
+      return [
         '<section class="metrics-config-zone" data-metrics-config-scope="' + escapeHtml(scope.scopeId) + '" data-metrics-config-zone="' + (hiddenZone ? "hidden" : "visible") + '">',
-        '<p class="metrics-config-zone-title"><span class="metrics-config-scope-label" title="' + escapeHtml(scope.label) + '">' + escapeHtml(scope.label) + '</span><span class="metrics-config-zone-kind">' + escapeHtml(title) + '</span></p>',
-        sections || '<p class="metrics-presentation-empty">Нет метрик.</p>',
+        '<div class="metrics-config-section" data-metrics-config-group="' + escapeHtml(group.groupId) + '" data-metrics-config-section="' + escapeHtml(group.sectionId || "") + '">',
+        '<div class="metrics-config-section-title" title="' + escapeHtml(group.sectionLabel || group.label || "") + '">',
+        '<span class="metrics-config-section-label">' + escapeHtml(group.sectionLabel || group.label || "Без секции") + '</span>',
+        hiddenZone ? "" : renderMetricGroupMoveControls(scope.scopeId, group.groupId, isFirst, isLast),
+        "</div>",
+        rows,
+        "</div>",
         "</section>"
       ].join("");
     }
