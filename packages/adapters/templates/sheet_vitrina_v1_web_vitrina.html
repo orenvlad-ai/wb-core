@@ -1522,7 +1522,7 @@
     .table-header-meta {
       display: flex;
       flex: 0 0 auto;
-      min-width: min(100%, 240px);
+      min-width: min(100%, 380px);
       align-items: flex-start;
       justify-content: flex-end;
       gap: 8px;
@@ -1538,20 +1538,56 @@
 
     .table-header-actions {
       display: flex;
-      flex-direction: column;
-      align-items: flex-end;
+      flex-direction: row;
+      align-items: center;
       justify-content: flex-end;
-      gap: 6px;
-      max-width: 380px;
+      gap: 8px;
+      flex-wrap: wrap;
+      min-width: min(100%, 360px);
+      max-width: min(100%, 520px);
       text-align: right;
     }
 
     .table-load-status {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
       margin: 0;
-      max-width: 360px;
-      color: var(--muted);
+      max-width: 270px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--panel-subtle);
+      color: var(--muted-strong);
+      padding: 4px 8px;
       font-size: 11px;
-      line-height: 1.35;
+      font-weight: 800;
+      line-height: 1.2;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .table-load-status.tone-success {
+      border-color: rgba(34, 197, 94, 0.32);
+      background: var(--success-bg);
+      color: var(--success-text);
+    }
+
+    .table-load-status.tone-warning {
+      border-color: rgba(245, 158, 11, 0.34);
+      background: var(--warning-bg);
+      color: var(--warning-text);
+    }
+
+    .table-load-status.tone-error {
+      border-color: rgba(248, 113, 113, 0.38);
+      background: var(--error-bg);
+      color: var(--error-text);
+    }
+
+    .table-header-actions .top-progress {
+      flex: 1 0 100%;
+      order: -1;
     }
 
     .table-load-status[hidden] {
@@ -1942,7 +1978,8 @@
       margin: 6px 0;
       border: 1px solid var(--border);
       border-radius: 6px;
-      background: #ffffff;
+      background: var(--panel-bg);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
     }
 
     .metrics-presentation-panel[hidden] {
@@ -1960,6 +1997,7 @@
       list-style: none;
       font-size: 13px;
       font-weight: 800;
+      color: var(--text);
     }
 
     .metrics-presentation-summary::-webkit-details-marker {
@@ -1985,9 +2023,10 @@
 
     .metrics-presentation-body {
       display: grid;
-      gap: 10px;
+      gap: 6px;
       border-top: 1px solid var(--border);
-      padding: 10px;
+      background: var(--control-bg);
+      padding: 8px;
     }
 
     .metrics-presentation-empty {
@@ -1997,24 +2036,22 @@
       line-height: 1.45;
     }
 
-    .metrics-config-group {
-      border: 1px solid rgba(139, 92, 246, 0.18);
-      border-radius: 6px;
-      background: var(--panel-subtle);
-      padding: 8px;
-    }
-
-    .metrics-config-title {
-      margin: 0 0 8px;
-      font-size: 12px;
-      font-weight: 800;
-      color: var(--text);
-    }
-
-    .metrics-config-zones {
+    .metrics-config-grid {
       display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .metrics-config-grid.scope-count-1 {
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 8px;
+    }
+
+    .metrics-config-grid.scope-count-2 {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .metrics-config-grid.scope-count-many {
+      grid-template-columns: repeat(auto-fit, minmax(176px, 1fr));
     }
 
     .metrics-config-zone {
@@ -2022,25 +2059,69 @@
       align-content: start;
       gap: 4px;
       min-width: 0;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.025);
+      padding: 5px;
     }
 
     .metrics-config-zone-title {
-      margin: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      margin: 0 0 2px;
       color: var(--muted);
-      font-size: 11px;
+      font-size: 10.5px;
       font-weight: 800;
+      letter-spacing: 0;
+      text-transform: none;
+    }
+
+    .metrics-config-scope-label {
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .metrics-config-zone-kind {
+      flex: 0 0 auto;
+      color: var(--muted);
+    }
+
+    .metrics-config-section {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+
+    .metrics-config-section-title {
+      margin: 2px 0 0;
+      color: var(--muted);
+      font-size: 10.5px;
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .metrics-config-row {
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+      grid-template-columns: 14px minmax(0, 1fr) auto;
       align-items: center;
-      gap: 6px;
-      border: 1px solid rgba(15, 23, 42, 0.08);
-      border-radius: 6px;
-      background: #ffffff;
-      padding: 5px 6px;
+      gap: 4px;
+      min-height: 24px;
+      border: 1px solid rgba(255, 255, 255, 0.055);
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.018);
+      padding: 3px 4px;
       min-width: 0;
+    }
+
+    .metrics-config-row:hover {
+      border-color: rgba(139, 92, 246, 0.22);
+      background: rgba(139, 92, 246, 0.075);
     }
 
     .metrics-config-row.is-anchor {
@@ -2049,8 +2130,22 @@
     }
 
     .metrics-config-anchor {
+      width: 13px;
+      height: 13px;
       margin: 0;
       accent-color: var(--accent);
+    }
+
+    .metrics-config-anchor:focus-visible {
+      outline: 2px solid var(--accent-focus);
+      outline-offset: 2px;
+    }
+
+    .metrics-config-main {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      min-width: 0;
     }
 
     .metrics-config-label {
@@ -2060,6 +2155,13 @@
       white-space: nowrap;
       font-size: 12px;
       font-weight: 600;
+      color: var(--text);
+    }
+
+    .metrics-config-move {
+      display: inline-flex;
+      flex: 0 0 auto;
+      gap: 2px;
     }
 
     .metrics-config-button,
@@ -2075,15 +2177,30 @@
     }
 
     .metrics-config-button {
-      min-height: 24px;
-      padding: 3px 6px;
+      min-height: 20px;
+      padding: 1px 6px;
       white-space: nowrap;
+    }
+
+    .metrics-config-move-button {
+      width: 21px;
+      padding: 1px 0;
+    }
+
+    .metrics-config-action-button {
+      min-width: 52px;
     }
 
     .metrics-config-button:hover,
     .metric-anchor-toggle:hover {
       border-color: rgba(139, 92, 246, 0.44);
       background: rgba(139, 92, 246, 0.08);
+    }
+
+    .metrics-config-button:focus-visible,
+    .metric-anchor-toggle:focus-visible {
+      outline: 2px solid var(--accent-focus);
+      outline-offset: 2px;
     }
 
     .metric-anchor-toggle {
@@ -2997,8 +3114,23 @@
         justify-content: stretch;
       }
 
+      .table-header-actions {
+        width: 100%;
+      }
+
+      .table-load-status {
+        flex: 1 1 160px;
+        max-width: none;
+        justify-content: center;
+      }
+
       .table-header-actions .button {
-        flex: 1 1 100%;
+        flex: 0 0 auto;
+      }
+
+      .metrics-config-grid.scope-count-2,
+      .metrics-config-grid.scope-count-many {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
       .table-control-toolbar {
@@ -3116,6 +3248,18 @@
       .history-actions .button,
       .history-preset-button {
         flex: 1 1 100%;
+      }
+    }
+
+    @media (max-width: 620px) {
+      .metrics-config-grid.scope-count-1,
+      .metrics-config-grid.scope-count-2,
+      .metrics-config-grid.scope-count-many {
+        grid-template-columns: 1fr;
+      }
+
+      .table-header-actions {
+        justify-content: flex-start;
       }
     }
   </style>
@@ -3288,8 +3432,8 @@
               </div>
               <span class="top-progress-label" data-global-progress-label>Запуск…</span>
             </div>
+            <p class="table-load-status" data-table-load-status hidden>Последняя загрузка: нет данных</p>
             <button class="button primary" type="button" data-load-refresh-button>Загрузить</button>
-            <p class="table-load-status" data-table-load-status hidden>Статус последней загрузки не загружен.</p>
           </div>
         </div>
       </div>
@@ -5025,6 +5169,34 @@
       return "neutral";
     }
 
+    function compactLoadStatusText(card) {
+      if (!card) {
+        return "нет данных";
+      }
+      const rawLabel = String(formatSummaryCardValue(card) || "").trim().toLowerCase();
+      if (!rawLabel || rawLabel.indexOf("нужно загруз") !== -1 || rawLabel.indexOf("нет данных") !== -1) {
+        return "нет данных";
+      }
+      const tone = normalizeTone(card.tone);
+      if (tone === "success") {
+        return "успешно";
+      }
+      if (tone === "error") {
+        return "ошибка";
+      }
+      if (tone === "warning") {
+        return "предупреждение";
+      }
+      return "нет данных";
+    }
+
+    function compactLoadStatusTone(card, label) {
+      if (label === "нет данных") {
+        return "neutral";
+      }
+      return normalizeTone(card && card.tone);
+    }
+
     function setActionButtonsDisabled(disabled) {
       loadRefreshButton.disabled = !!disabled;
       sourceStatusLoadButton.disabled = !!disabled;
@@ -5233,6 +5405,10 @@
           const sectionLabel = String((option && option.sectionLabel) || "Без секции");
           groupsById.set(groupId, {
             groupId: groupId,
+            scopeGroupId: String(scopeGroupId || "sku"),
+            scopeGroupLabel: scopeLabel,
+            sectionId: String(sectionId || "section:unsectioned"),
+            sectionLabel: sectionLabel,
             label: scopeLabel + " / " + sectionLabel,
             metricKeys: [],
             metricSet: new Set()
@@ -5282,6 +5458,10 @@
       const groups = Array.from(groupsById.values()).map(function(group) {
         return {
           groupId: group.groupId,
+          scopeGroupId: group.scopeGroupId,
+          scopeGroupLabel: group.scopeGroupLabel,
+          sectionId: group.sectionId,
+          sectionLabel: group.sectionLabel,
           label: group.label,
           metricKeys: group.metricKeys.slice()
         };
@@ -5449,45 +5629,96 @@
         metricsPresentationBodyNode.innerHTML = '<p class="metrics-presentation-empty">В toolbar `Метрики` не выбраны строки для показа.</p>';
         return;
       }
-      metricsPresentationBodyNode.innerHTML = groups.map(function(group) {
-        const visibleKeys = visibleMetricKeysForGroup(group);
-        const hiddenKeys = hiddenMetricKeysForGroup(group);
-        return [
-          '<section class="metrics-config-group" data-metrics-config-group="' + escapeHtml(group.groupId) + '">',
-          '<p class="metrics-config-title">' + escapeHtml(group.label) + '</p>',
-          '<div class="metrics-config-zones">',
-          renderMetricConfigZone(group, visibleKeys, "Показывать сразу", false),
-          renderMetricConfigZone(group, hiddenKeys, "Скрыто под раскрытием", true),
-          "</div>",
-          "</section>"
-        ].join("");
-      }).join("");
-    }
-
-    function renderMetricConfigZone(group, metricKeys, title, hiddenZone) {
-      const rows = metricKeys.map(function(metricKey) {
-        return renderMetricConfigRow(group, metricKey, hiddenZone);
-      }).join("");
-      return [
-        '<div class="metrics-config-zone">',
-        '<p class="metrics-config-zone-title">' + escapeHtml(title) + '</p>',
-        rows || '<p class="metrics-presentation-empty">Нет метрик.</p>',
+      const scopes = metricPresentationScopes(groups);
+      const scopeCountClass = scopes.length === 1 ? "scope-count-1" : (scopes.length === 2 ? "scope-count-2" : "scope-count-many");
+      const columns = [];
+      scopes.forEach(function(scope) {
+        columns.push(renderMetricConfigZone(scope, "Показано", false));
+        columns.push(renderMetricConfigZone(scope, "Скрыто", true));
+      });
+      metricsPresentationBodyNode.innerHTML = [
+        '<div class="metrics-config-grid ' + scopeCountClass + '" data-metrics-config-grid data-metrics-config-scope-count="' + escapeHtml(String(scopes.length)) + '">',
+        columns.join(""),
         "</div>"
       ].join("");
+    }
+
+    function metricPresentationScopes(groups) {
+      const scopesById = new Map();
+      (groups || []).forEach(function(group) {
+        const scopeId = String(group.scopeGroupId || String(group.groupId || "").split("::")[0] || "sku");
+        const scopeLabel = String(group.scopeGroupLabel || (scopeId === "total" ? "Итого" : (scopeId === "sku" ? "SKU" : scopeId)));
+        if (!scopesById.has(scopeId)) {
+          scopesById.set(scopeId, {
+            scopeId: scopeId,
+            label: scopeLabel,
+            groups: []
+          });
+        }
+        scopesById.get(scopeId).groups.push(group);
+      });
+      return Array.from(scopesById.values()).sort(function(left, right) {
+        const rank = {total: 0, sku: 1};
+        const leftRank = Object.prototype.hasOwnProperty.call(rank, left.scopeId) ? rank[left.scopeId] : 10;
+        const rightRank = Object.prototype.hasOwnProperty.call(rank, right.scopeId) ? rank[right.scopeId] : 10;
+        if (leftRank !== rightRank) {
+          return leftRank - rightRank;
+        }
+        return left.label.localeCompare(right.label, "ru");
+      });
+    }
+
+    function renderMetricConfigZone(scope, title, hiddenZone) {
+      const sections = (scope.groups || []).map(function(group) {
+        const metricKeys = hiddenZone ? hiddenMetricKeysForGroup(group) : visibleMetricKeysForGroup(group);
+        if (!metricKeys.length) {
+          return "";
+        }
+        const rows = metricKeys.map(function(metricKey) {
+          return renderMetricConfigRow(group, metricKey, hiddenZone);
+        }).join("");
+        return [
+          '<div class="metrics-config-section" data-metrics-config-group="' + escapeHtml(group.groupId) + '" data-metrics-config-section="' + escapeHtml(group.sectionId || "") + '">',
+          '<p class="metrics-config-section-title" title="' + escapeHtml(group.sectionLabel || group.label || "") + '">' + escapeHtml(group.sectionLabel || group.label || "Без секции") + '</p>',
+          rows,
+          "</div>"
+        ].join("");
+      }).filter(Boolean).join("");
+      return [
+        '<section class="metrics-config-zone" data-metrics-config-scope="' + escapeHtml(scope.scopeId) + '" data-metrics-config-zone="' + (hiddenZone ? "hidden" : "visible") + '">',
+        '<p class="metrics-config-zone-title"><span class="metrics-config-scope-label" title="' + escapeHtml(scope.label) + '">' + escapeHtml(scope.label) + '</span><span class="metrics-config-zone-kind">' + escapeHtml(title) + '</span></p>',
+        sections || '<p class="metrics-presentation-empty">Нет метрик.</p>',
+        "</section>"
+      ].join("");
+    }
+
+    function compactMetricActionLabel(hiddenZone) {
+      return hiddenZone ? "Показать" : "Скрыть";
+    }
+
+    function metricActionTitle(hiddenZone) {
+      return hiddenZone ? "Показать" : "Скрыть";
     }
 
     function renderMetricConfigRow(group, metricKey, hiddenZone) {
       const option = state.metricPresentation.optionByKey.get(metricKey) || {label: metricKey};
       const anchor = effectiveMetricPresentationAnchor(group);
       const isAnchor = metricKey === anchor;
+      const label = String(option.label || metricKey);
+      const actionLabel = compactMetricActionLabel(hiddenZone);
+      const actionTitle = metricActionTitle(hiddenZone);
       return [
-        '<div class="metrics-config-row' + (isAnchor ? " is-anchor" : "") + '" data-metric-config-row="' + escapeHtml(metricKey) + '">',
-        '<input class="metrics-config-anchor" type="radio" name="metric-anchor-' + escapeHtml(group.groupId) + '" data-metric-anchor-group="' + escapeHtml(group.groupId) + '" value="' + escapeHtml(metricKey) + '"' + (isAnchor ? " checked" : "") + ' title="Anchor metric">',
-        '<span class="metrics-config-label" title="' + escapeHtml(option.label || metricKey) + '">' + escapeHtml(option.label || metricKey) + '</span>',
-        '<button class="metrics-config-button" type="button" data-metric-config-action="up" data-metric-config-group="' + escapeHtml(group.groupId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '">↑</button>',
-        '<button class="metrics-config-button" type="button" data-metric-config-action="down" data-metric-config-group="' + escapeHtml(group.groupId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '">↓</button>',
-        '<button class="metrics-config-button" type="button" data-metric-config-action="' + (hiddenZone ? "show" : "hide") + '" data-metric-config-group="' + escapeHtml(group.groupId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '">' +
-          (hiddenZone ? "Показывать сразу" : "Скрыть под раскрытием") +
+        '<div class="metrics-config-row' + (isAnchor ? " is-anchor" : "") + '" data-metric-config-row="' + escapeHtml(metricKey) + '" data-metric-config-group-id="' + escapeHtml(group.groupId) + '">',
+        '<input class="metrics-config-anchor" type="radio" name="metric-anchor-' + escapeHtml(group.groupId) + '" data-metric-anchor-group="' + escapeHtml(group.groupId) + '" value="' + escapeHtml(metricKey) + '"' + (isAnchor ? " checked" : "") + ' title="Главная метрика">',
+        '<span class="metrics-config-main">',
+        '<span class="metrics-config-label" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</span>',
+        '<span class="metrics-config-move">',
+        '<button class="metrics-config-button metrics-config-move-button" type="button" data-metric-config-action="up" data-metric-config-group="' + escapeHtml(group.groupId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '" title="Выше">↑</button>',
+        '<button class="metrics-config-button metrics-config-move-button" type="button" data-metric-config-action="down" data-metric-config-group="' + escapeHtml(group.groupId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '" title="Ниже">↓</button>',
+        "</span>",
+        "</span>",
+        '<button class="metrics-config-button metrics-config-action-button" type="button" data-metric-config-action="' + (hiddenZone ? "show" : "hide") + '" data-metric-config-group="' + escapeHtml(group.groupId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '" title="' + escapeHtml(actionTitle) + '">' +
+          escapeHtml(actionLabel) +
         "</button>",
         "</div>"
       ].join("");
@@ -5900,28 +6131,16 @@
         );
       }
       if (statusCard) {
-        const statusText = formatSummaryCardValue(statusCard);
-        const statusParts = [];
-        if (statusText) {
-          statusParts.push(
-            '<span class="table-summary-status tone-' + escapeHtml(normalizeTone(statusCard.tone)) + '" data-table-summary-status>' +
-              'Статус последней загрузки: ' + escapeHtml(statusText) +
-              '</span>'
-          );
-        }
-        if (statusCard.detail) {
-          statusParts.push(
-            '<span class="table-summary-detail" data-table-summary-status-detail>' +
-              escapeHtml(statusCard.detail) +
-              '</span>'
-          );
-        }
+        const statusText = compactLoadStatusText(statusCard);
+        const statusTone = compactLoadStatusTone(statusCard, statusText);
         if (tableLoadStatusNode) {
-          tableLoadStatusNode.hidden = statusParts.length === 0;
-          tableLoadStatusNode.innerHTML = statusParts.join('<span class="table-summary-separator" aria-hidden="true">·</span>');
+          tableLoadStatusNode.hidden = false;
+          tableLoadStatusNode.className = "table-load-status tone-" + statusTone;
+          tableLoadStatusNode.textContent = "Последняя загрузка: " + statusText;
         }
       } else if (tableLoadStatusNode) {
         tableLoadStatusNode.hidden = true;
+        tableLoadStatusNode.className = "table-load-status tone-neutral";
         tableLoadStatusNode.textContent = "";
       }
       tableSummaryLineNode.hidden = parts.length === 0;
