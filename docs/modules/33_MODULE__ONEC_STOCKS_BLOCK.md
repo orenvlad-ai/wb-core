@@ -43,7 +43,7 @@ update_note: "1C source теперь date-specific для истории и по
 - `family`: `external-1c-source`
 - `status_transfer`: bounded source path и web-vitrina metric wiring добавлены в `wb-core`
 - `status_verification`: fixture-backed source smoke, wiring smoke и group-coverage smoke подтверждают parser/normalizer, date-specific snapshots, source group wiring и расчётные метрики; live smoke optional и env-guarded
-- `status_main`: active после production-lane gates
+- `status_main`: active/current in repo; optional live smoke remains env-guarded
 
 # 2. Runtime contract
 
@@ -88,15 +88,26 @@ Parser supports:
 
 `items[].stages` keys are dynamic 1C section names, not a fixed enum. Parser preserves any non-empty stage name from the response.
 
-Canonical mapping is only a boundary for future acceptance config. Supported canonical codes are:
+Canonical mapping is only a boundary for future acceptance config. Contract-supported canonical codes are:
 
+- `CHINA_TO_FF`
 - `CN_TO_RU_TRANSIT`
+- `FF_TO_WB`
 - `FF_TO_WB_TRANSIT`
 - `FF_STOCK`
 - `WB_STOCK`
 - `CN_PRODUCTION_PAID`
 
 Current normalization flattens source stage rows and may annotate a row with `canonical_stage_code` if explicit mapping config is supplied. It does not aggregate rows by canonical code and does not infer canonical stages from Russian stage text. This prevents silently combining distinct operational stages or warehouses when 1C section names are reused.
+
+Current web-vitrina metric wiring uses four stage buckets:
+
+- `CHINA_TO_FF`
+- `FF_STOCK`
+- `FF_TO_WB`
+- `WB_STOCK`
+
+Runtime default mapping folds source/contract aliases such as `CN_TO_RU_TRANSIT` into `CHINA_TO_FF` and `FF_TO_WB_TRANSIT` into `FF_TO_WB`.
 
 # 5. Code parts
 
@@ -107,9 +118,9 @@ Current normalization flattens source stage rows and may annotate a row with `ca
 - offline smoke: `apps/onec_stocks_block_smoke.py`
 - optional live smoke: `apps/onec_stocks_block_live_smoke.py`
 
-# 6. What is not wired
+# 6. Current boundaries
 
-This module still does not:
+This module is wired into current web-vitrina metrics, but it still does not:
 
 - replace existing WB official `stocks_block`;
 - replace or feed `cogs_by_group_block`;
