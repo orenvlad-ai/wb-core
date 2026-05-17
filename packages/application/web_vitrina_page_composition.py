@@ -159,13 +159,6 @@ def build_web_vitrina_page_composition(
                     ),
                 },
                 {
-                    "control_id": "scope_kind",
-                    "kind": "select",
-                    "label": "Scope",
-                    "default_value": _ALL_OPTION_VALUE,
-                    "options": _build_scope_kind_options(row_kind_counts),
-                },
-                {
                     "control_id": "metric",
                     "kind": "select",
                     "label": "Метрика",
@@ -985,11 +978,22 @@ def _build_data_freshness_card(status_summary: Mapping[str, Any]) -> dict[str, A
 
 def _build_status_badge(*, current_state: str, status_summary: Mapping[str, Any]) -> dict[str, str]:
     if current_state == "ready":
-        status = str(status_summary.get("refresh_status") or "").strip().lower()
-        tone = str(status_summary.get("refresh_status_tone") or status or "warning").strip().lower()
-        label = str(status_summary.get("refresh_status_label") or "").strip() or _semantic_label(tone)
+        load_window_status = status_summary.get("load_window_status")
+        status_source = (
+            dict(load_window_status)
+            if isinstance(load_window_status, Mapping)
+            else {
+                "status": status_summary.get("refresh_status"),
+                "tone": status_summary.get("refresh_status_tone"),
+                "label": status_summary.get("refresh_status_label"),
+                "reason": status_summary.get("refresh_status_reason"),
+            }
+        )
+        status = str(status_source.get("status") or "").strip().lower()
+        tone = str(status_source.get("tone") or status or "warning").strip().lower()
+        label = str(status_source.get("label") or "").strip() or _semantic_label(tone)
         detail_parts = [
-            str(status_summary.get("refresh_status_reason") or "").strip(),
+            str(status_source.get("reason") or "").strip(),
         ]
         return {
             "label": label,

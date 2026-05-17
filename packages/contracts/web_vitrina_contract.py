@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1TemporalSlot
@@ -46,6 +46,7 @@ class WebVitrinaContractStatusSummary:
     source_count: int
     data_sheet_row_count: int
     refresh_outcome_counts: dict[str, int]
+    load_window_status: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

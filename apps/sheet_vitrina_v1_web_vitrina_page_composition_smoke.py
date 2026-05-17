@@ -163,9 +163,11 @@ def main() -> None:
             raise AssertionError(f"historical preset options mismatch, got {historical_access}")
 
         controls = {item["control_id"]: item for item in composition["filter_surface"]["controls"]}
-        for required in ("search", "section", "group", "scope_kind", "metric"):
+        for required in ("search", "section", "group", "metric"):
             if required not in controls:
                 raise AssertionError(f"missing filter control {required!r}: {controls}")
+        if "scope_kind" in controls:
+            raise AssertionError(f"scope_kind row-type toolbar control must not be rendered: {controls}")
         metric_control = controls["metric"]
         metric_options_by_value = {
             str(item["value"]): item
