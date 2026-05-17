@@ -221,13 +221,20 @@ def main() -> None:
             initial_loading_table = initial_activity_surface.get("loading_table") or {}
             if initial_loading_table.get("source_status_state") != "not_loaded":
                 raise AssertionError(f"initial page composition must not auto-load source details, got {initial_activity_surface}")
-            initial_groups = {item.get("group_id"): item for item in initial_loading_table.get("groups") or []}
-            initial_rows = initial_loading_table.get("rows") or []
-            initial_onec_row = next((row for row in initial_rows if row.get("source_key") == "onec_stocks"), None)
-            if initial_groups.get("onec_product_capital", {}).get("label") != "1С / товарный капитал":
-                raise AssertionError(f"initial page composition must expose 1C source group shell, got {initial_loading_table}")
-            if not initial_onec_row or "1С WB: капитал, руб" not in (initial_onec_row.get("metric_labels") or []):
-                raise AssertionError(f"initial page composition must expose 1C source metrics before status load, got {initial_loading_table}")
+            if (
+                initial_loading_table.get("rows")
+                or initial_loading_table.get("groups")
+                or initial_loading_table.get("columns")
+            ):
+                raise AssertionError(
+                    f"initial page composition must keep source-status details lazy/neutral, got {initial_loading_table}"
+                )
+            if initial_activity_surface.get("upload_summary", {}).get("items"):
+                raise AssertionError(
+                    f"initial page composition must not expose stale source-status summary items, got {initial_activity_surface}"
+                )
+            if "не OK" in json.dumps(initial_loading_table, ensure_ascii=False):
+                raise AssertionError(f"initial source-status state must not contain false not_ok rows, got {initial_loading_table}")
 
             full_table_status, full_table_payload = _get_json(
                 f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&include_table_data=1"

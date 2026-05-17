@@ -5287,33 +5287,43 @@ def _web_vitrina_source_status_not_loaded_activity_surface(
 ) -> dict[str, Any]:
     current_business_date = current_business_date_iso()
     previous_business_date = default_business_as_of_date()
+    detail = f"snapshot {snapshot_id} · as_of_date {snapshot_as_of_date} · {read_model}"
     upload_summary = _build_web_vitrina_endpoint_summary_block(
         title="Загрузка данных",
         subtitle="Статусы источников не загружены.",
         records={},
-        ordered_source_keys=_collect_activity_source_keys({}, {}),
+        ordered_source_keys=[],
         empty_message="Статусы источников не загружены. Нажмите «Загрузить», чтобы посмотреть детали.",
         block_updated_at=refreshed_at,
-        block_detail=f"snapshot {snapshot_id} · as_of_date {snapshot_as_of_date} · {read_model}",
+        block_detail=detail,
     )
-    loading_table = _build_web_vitrina_loading_table(
-        upload_summary=upload_summary,
-        today_date=current_business_date,
-        yesterday_date=previous_business_date,
-        available_dates=available_dates,
-        default_refresh_date=default_refresh_date,
-        metric_labels_by_source=metric_labels_by_source or {},
-        group_last_updated_at=group_last_updated_at or {},
-    )
-    loading_table["source_status_state"] = "not_loaded"
-    loading_table["empty_message"] = "Статусы источников не загружены. Нажмите «Загрузить», чтобы посмотреть детали."
+    loading_table = {
+        "title": "Загрузка данных",
+        "subtitle": "Статусы источников не загружены.",
+        "detail": detail,
+        "updated_at": refreshed_at,
+        "today_date": current_business_date,
+        "yesterday_date": previous_business_date,
+        "available_dates": _normalize_available_refresh_dates(
+            available_dates,
+            default_refresh_date=default_refresh_date,
+        ),
+        "default_refresh_date": default_refresh_date,
+        "groups": [],
+        "columns": [],
+        "rows": [],
+        "source_status_state": "not_loaded",
+        "snapshot_as_of_date": snapshot_as_of_date,
+        "snapshot_id": snapshot_id,
+        "empty_message": "Статусы источников не загружены. Нажмите «Загрузить», чтобы посмотреть детали.",
+    }
     return {
         "log_block": {
             "title": "Лог",
             "subtitle": "Лог не загружается вместе с первичным открытием страницы",
             "status_label": "Не загружено",
             "tone": "neutral",
-            "detail": f"snapshot {snapshot_id} · as_of_date {snapshot_as_of_date} · {read_model}",
+            "detail": detail,
             "preview_lines": [],
             "line_count": 0,
             "download_path": "",
