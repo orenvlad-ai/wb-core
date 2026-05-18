@@ -223,6 +223,17 @@ class LocalWebVitrinaFixtureServer:
         return refreshed_at.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _trigger_hidden_reset(page: object) -> None:
+    page.evaluate(
+        """() => {
+          const reset = document.querySelector('[data-reset-filters]');
+          if (reset) {
+            reset.click();
+          }
+        }"""
+    )
+
+
 def run_browser_checks(
     base_url: str,
     *,
@@ -398,7 +409,7 @@ def run_browser_checks(
             if page.locator("[data-history-mode-badge]").count() != 0:
                 raise AssertionError("history panel must not keep the extra Период badge")
             initial_meta = page.locator("[data-page-meta]").inner_text().strip()
-            page.locator("[data-reset-filters]").click()
+            _trigger_hidden_reset(page)
             page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
             initial_order = _extract_visible_row_order(page)
             if not initial_order:
@@ -414,7 +425,7 @@ def run_browser_checks(
             static_group_labels = _check_static_group_labels(page)
 
             filter_controls = {
-                "search": page.locator("[data-filter-control='search']").count() == 1,
+                "search_absent": page.locator("[data-filter-control='search']").count() == 0,
                 "section": page.locator("[data-filter-control='section']").count() == 1,
                 "group": page.locator("[data-filter-control='group']").count() == 1,
                 "scope_kind_absent": page.locator("[data-filter-control='scope_kind']").count() == 0,
@@ -427,74 +438,75 @@ def run_browser_checks(
             table_toolbar = page.evaluate(
                 """() => {
                   const toolbar = document.querySelector('[data-table-toolbar]');
+                  const header = document.querySelector('[data-table-header]');
                   const tableShell = document.querySelector('[data-table-shell]');
-                  const labels = toolbar ? Array.from(toolbar.querySelectorAll('.filter-label')).map((node) => (node.textContent || '').trim()).filter(Boolean) : [];
-                  const fieldWidths = toolbar ? Object.fromEntries(Array.from(toolbar.querySelectorAll('.toolbar-field')).map((node) => [
+                  const labels = header ? Array.from(header.querySelectorAll('.filter-label')).map((node) => (node.textContent || '').trim()).filter(Boolean) : [];
+                  const fieldWidths = header ? Object.fromEntries(Array.from(header.querySelectorAll('.toolbar-field')).map((node) => [
                     (node.querySelector('.filter-label') || {}).textContent ? (node.querySelector('.filter-label').textContent || '').trim() : 'unknown',
                     Math.round(node.getBoundingClientRect().width)
                   ])) : {};
-                  const toolbarText = toolbar ? (toolbar.innerText || '') : '';
-                  const resetText = toolbar ? ((toolbar.querySelector('[data-reset-filters]') || {}).textContent || '').trim() : '';
-                  const rect = toolbar ? toolbar.getBoundingClientRect() : {height: 0};
-                  const toolbarStyle = toolbar ? getComputedStyle(toolbar) : {overflowX: '', overflowY: ''};
-                  const beforeTable = !!toolbar && !!tableShell && !!(toolbar.compareDocumentPosition(tableShell) & Node.DOCUMENT_POSITION_FOLLOWING);
+                  const headerText = header ? (header.innerText || '') : '';
+                  const rect = header ? header.getBoundingClientRect() : {height: 0};
+                  const headerStyle = header ? getComputedStyle(header) : {overflowX: '', overflowY: ''};
+                  const beforeTable = !!header && !!tableShell && !!(header.compareDocumentPosition(tableShell) & Node.DOCUMENT_POSITION_FOLLOWING);
                   const logoutLink = document.querySelector('[data-logout-link]');
                   const tablist = document.querySelector('[role="tablist"]');
                   return {
-                    exists: !!toolbar,
+                    oldToolbarCount: document.querySelectorAll('[data-table-toolbar]').length,
+                    exists: !!header,
                     beforeTable: beforeTable,
                     labels: labels,
                     fieldWidths: fieldWidths,
-                    toolbarText: toolbarText,
-                    resetText: resetText,
+                    headerText: headerText,
                     height: Math.round(rect.height),
-                    overflowX: toolbarStyle.overflowX,
-                    overflowY: toolbarStyle.overflowY,
+                    overflowX: headerStyle.overflowX,
+                    overflowY: headerStyle.overflowY,
                     oldHeadingCount: Array.from(document.querySelectorAll('h2')).filter((node) => (node.textContent || '').trim() === 'Фильтры и настройки').length,
                     oldPanelTextVisible: (document.body.innerText || '').includes('Search/select/sort и выбор видимых столбцов'),
                     oldResetTextVisible: (document.body.innerText || '').includes('Сбросить фильтры'),
-                    forbiddenSortVisible: toolbarText.includes('Сортировка'),
-                    forbiddenScopeVisible: toolbarText.includes('Scope'),
-                    forbiddenSummaryVisible: labels.includes('Итог') || /\\b\\d+\\s+из\\s+\\d+\\s+строк\\b/.test(toolbarText),
+                    forbiddenSortVisible: headerText.includes('Сортировка'),
+                    forbiddenScopeVisible: headerText.includes('Scope'),
+                    forbiddenSummaryVisible: labels.includes('Итог') || /\\b\\d+\\s+из\\s+\\d+\\s+строк\\b/.test(headerText),
                     logoutText: logoutLink ? (logoutLink.textContent || '').trim() : '',
                     logoutHref: logoutLink ? (logoutLink.getAttribute('href') || '') : '',
                     logoutInTablist: !!(logoutLink && tablist && tablist.contains(logoutLink)),
                     logoutLooksLikeTab: !!(logoutLink && (logoutLink.getAttribute('class') || '').includes('unified-tab-button')),
-                    columnManagerCount: document.querySelectorAll('[data-column-manager]').length,
-                    columnResetCount: document.querySelectorAll('[data-columns-reset]').length
+                    columnManagerVisibleCount: Array.from(document.querySelectorAll('[data-column-manager]')).filter((node) => node.offsetParent !== null).length,
+                    columnResetVisibleCount: Array.from(document.querySelectorAll('[data-columns-reset]')).filter((node) => node.offsetParent !== null).length
                   };
                 }"""
             )
-            expected_toolbar_labels = {"Диапазон", "Поиск", "Секции", "Группа", "Столбцы"}
+            expected_toolbar_labels = {"Диапазон", "Секции", "Группа"}
+            forbidden_toolbar_labels = {"Поиск", "Столбцы", "Сброс"}
             missing_toolbar_labels = expected_toolbar_labels.difference(set(table_toolbar["labels"]))
             if (
-                not table_toolbar["exists"]
+                int(table_toolbar["oldToolbarCount"]) != 0
+                or not table_toolbar["exists"]
                 or not table_toolbar["beforeTable"]
                 or table_toolbar["oldHeadingCount"]
                 or table_toolbar["oldPanelTextVisible"]
                 or table_toolbar["oldResetTextVisible"]
                 or table_toolbar["forbiddenSortVisible"]
                 or table_toolbar["forbiddenScopeVisible"]
-                or "Тип строк" in table_toolbar["toolbarText"]
-                or "Метрики" in table_toolbar["toolbarText"]
+                or "Тип строк" in table_toolbar["headerText"]
+                or "Метрики" in table_toolbar["headerText"]
+                or forbidden_toolbar_labels.intersection(set(table_toolbar["labels"]))
                 or table_toolbar["forbiddenSummaryVisible"]
-                or table_toolbar["resetText"] != "Сброс"
                 or table_toolbar["logoutText"] != "Выйти"
                 or table_toolbar["logoutHref"] != "/logout"
                 or table_toolbar["logoutInTablist"]
                 or table_toolbar["logoutLooksLikeTab"]
                 or table_toolbar["overflowX"] != "visible"
                 or table_toolbar["overflowY"] != "visible"
-                or int(table_toolbar["fieldWidths"].get("Поиск") or 0) > 180
-                or table_toolbar["columnManagerCount"] != 1
-                or table_toolbar["columnResetCount"] != 1
+                or table_toolbar["columnManagerVisibleCount"] != 0
+                or table_toolbar["columnResetVisibleCount"] != 0
                 or missing_toolbar_labels
             ):
                 raise AssertionError(
-                    f"table controls must live in one compact toolbar above the table, got {table_toolbar}, missing={missing_toolbar_labels}"
+                    f"table controls must live in compact header without the old toolbar, got {table_toolbar}, missing={missing_toolbar_labels}"
                 )
             if table_toolbar["height"] > 78:
-                raise AssertionError(f"table toolbar must stay compact, got {table_toolbar}")
+                raise AssertionError(f"table compact header must stay compact, got {table_toolbar}")
             compact_widths = _measure_compact_widths(page, strict=expected_percent_rows is not None)
             sticky_section_offsets = _check_sticky_section_offsets(page)
             percent_formatting = _check_percent_formatting(page, expected_rows=expected_percent_rows)
@@ -518,11 +530,9 @@ def run_browser_checks(
             metric_toolbar_removed = _check_metric_toolbar_removed(page)
             metric_presentation = _check_metric_presentation_controls(page)
 
-            page.locator("[data-filter-control='search']").fill("zzzz-no-matches")
-            page.wait_for_selector("[data-table-state]:not(.is-hidden)", timeout=5000)
-            empty_state_after_search = "Пустой результат" in page.locator("[data-state-title]").inner_text()
+            empty_state_after_search = page.locator("[data-filter-control='search']").count() == 0
 
-            page.locator("[data-reset-filters]").click()
+            _trigger_hidden_reset(page)
             page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
             reset_restores_table = page.locator("[data-table-body] tr").count() > 0
             reset_order = _extract_visible_row_order(page)
@@ -820,15 +830,14 @@ def _check_metric_toolbar_removed(page: object) -> dict[str, object]:
 
 def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     storage_key = "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1:metric-presentation:v1"
-    page.locator("[data-reset-filters]").click()
+    _trigger_hidden_reset(page)
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
     panel_state = page.evaluate(
         """() => {
-          const toolbar = document.querySelector('[data-table-toolbar]');
           const panel = document.querySelector('[data-metrics-presentation]');
           const table = document.querySelector('[data-table-shell]');
           const beforeTable = !!panel && !!table && !!(panel.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING);
-          const afterToolbar = !!toolbar && !!panel && !!(toolbar.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING);
+          const oldToolbarCount = document.querySelectorAll('[data-table-toolbar]').length;
           if (panel) {
             panel.open = true;
           }
@@ -873,7 +882,7 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
           ].join(',')) : []).filter((node) => isNearWhite(getComputedStyle(node).backgroundColor));
           return {
             exists: !!panel,
-            afterToolbar,
+            oldToolbarCount,
             beforeTable,
             summary: ((document.querySelector('[data-metrics-presentation-summary]') || {}).textContent || '').trim(),
             scopeTables,
@@ -893,11 +902,11 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     )
     if (
         not panel_state["exists"]
-        or not panel_state["afterToolbar"]
+        or int(panel_state["oldToolbarCount"]) != 0
         or not panel_state["beforeTable"]
         or int(panel_state["scopeCount"]) < 2
     ):
-        raise AssertionError(f"metrics presentation panel must sit between toolbar and table, got {panel_state}")
+        raise AssertionError(f"metrics presentation panel must sit before the table without the old toolbar, got {panel_state}")
     if int(panel_state["groupMoveButtonCount"]) != 0 or int(panel_state["metricMoveButtonCount"]) != 0:
         raise AssertionError(f"metrics presentation must remove arrow move buttons, got {panel_state}")
     if int(panel_state["anchorControlCount"]) != 0:
@@ -913,6 +922,8 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         raise AssertionError(f"metrics presentation must render two scope tables Итого/SKU, got {panel_state}")
     if int(panel_state["gridColumns"]) != 2:
         raise AssertionError(f"metrics presentation must use two compact desktop tables, got {panel_state}")
+    if "Настроено:" not in str(panel_state["summary"]):
+        raise AssertionError(f"metrics presentation header must expose compact configured count, got {panel_state}")
     for scope in panel_state["scopeTables"]:
         if scope["headers"] != ["Метрика", "Группа", "Отображение"]:
             raise AssertionError(f"metric settings table headers mismatch, got {scope}")
@@ -1012,6 +1023,41 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     expanded_disclosure = _metric_disclosure_state(page)
     if set(expanded_disclosure["expandedValues"]) != {"true"} or set(expanded_disclosure["iconTexts"]) != {"▾"}:
         raise AssertionError(f"expanded disclosure must update icon and aria-expanded, got {expanded_disclosure}")
+    hierarchy_state = page.evaluate(
+        """(keys) => {
+          const childRows = keys.map((metricKey) => {
+            const row = Array.from(document.querySelectorAll('[data-table-body] tr.metric-child-row')).find((candidate) => {
+              const metricCell = candidate.querySelector('td[data-col-id="metric_label"]');
+              return metricCell && (metricCell.getAttribute('data-metric-key') || '') === metricKey;
+            });
+            const guide = row ? row.querySelector('[data-metric-child-guide="true"] .metric-hierarchy-guide') : null;
+            const cell = row ? row.querySelector('td[data-col-id="metric_label"]') : null;
+            const label = row ? row.querySelector('.metric-label-text') : null;
+            return {
+              metricKey,
+              rowExists: !!row,
+              guideExists: !!guide,
+              guideLeft: guide ? Math.round(guide.getBoundingClientRect().left) : 0,
+              labelLeft: label ? Math.round(label.getBoundingClientRect().left) : 0,
+              cellLeft: cell ? Math.round(cell.getBoundingClientRect().left) : 0
+            };
+          });
+          return {
+            childRows,
+            guideCount: document.querySelectorAll('[data-metric-child-guide="true"] .metric-hierarchy-guide').length,
+            visibleCountText: Array.from(document.querySelectorAll('[data-table-body] td[data-col-id="metric_label"]'))
+              .map((node) => (node.textContent || '').trim())
+              .filter((text) => text.includes('ещё') || text.includes('Показать ещё'))
+          };
+        }""",
+        [collapsed_one, collapsed_two],
+    )
+    if (
+        any(not row["rowExists"] or not row["guideExists"] for row in hierarchy_state["childRows"])
+        or any(row["labelLeft"] <= row["cellLeft"] + 18 for row in hierarchy_state["childRows"])
+        or hierarchy_state["visibleCountText"]
+    ):
+        raise AssertionError(f"expanded child metrics must show hierarchy guides without visible count text, got {hierarchy_state}")
 
     page.reload(wait_until="commit")
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
@@ -1020,7 +1066,7 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     if persisted_display.get(collapsed_one) != "collapsed" or persisted_display.get(hidden_key) != "hidden":
         raise AssertionError(f"display statuses must persist after reload, got {persisted_display}")
 
-    page.locator("[data-reset-filters]").click()
+    _trigger_hidden_reset(page)
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
     page.evaluate("() => { const panel = document.querySelector('[data-metrics-presentation]'); if (panel) { panel.open = true; } }")
     reset_order = _metric_scope_order(page, scope_id)
@@ -1054,6 +1100,7 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         "bulk_selection": bulk_selection,
         "order_changed": [target_key, source_key],
         "display_statuses": {"shown": anchor_key, "collapsed": [collapsed_one, collapsed_two], "hidden": hidden_key},
+        "hierarchy_guides": hierarchy_state,
         "disclosure_anchor": anchor_key,
         "broken_storage_fallback": True,
         "obsolete_storage_fallback": True,
@@ -1176,7 +1223,7 @@ def _seed_metric_presentation_storage(
 
 
 def _check_sku_sync_from_total(page: object, *, storage_key: str) -> dict[str, object]:
-    page.locator("[data-reset-filters]").click()
+    _trigger_hidden_reset(page)
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
     page.evaluate("() => { const panel = document.querySelector('[data-metrics-presentation]'); if (panel) { panel.open = true; } }")
     pairs = _metric_analog_pairs(page)
@@ -1228,7 +1275,7 @@ def _check_sku_sync_from_total(page: object, *, storage_key: str) -> dict[str, o
     if persisted_sku_order[:2] != expected_sku_prefix or persisted_sku_display.get(pair_b["skuKey"]) != "collapsed":
         raise AssertionError(f"explicit SKU sync must persist SKU-only order/status, got order={persisted_sku_order[:6]}, display={persisted_sku_display}")
 
-    page.locator("[data-reset-filters]").click()
+    _trigger_hidden_reset(page)
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
     page.evaluate("() => { const panel = document.querySelector('[data-metrics-presentation]'); if (panel) { panel.open = true; } }")
     if _metric_scope_order(page, "total") != total_initial_order or _metric_scope_order(page, "sku") != sku_initial_order:
@@ -1324,7 +1371,7 @@ def _check_metric_bulk_selection(page: object, *, scope_id: str, initial_order: 
     if after_reload_display.get(selected_a) != "collapsed" or after_reload_display.get(selected_b) != "collapsed":
         raise AssertionError(f"bulk display status must survive reload, got {after_reload_display}")
 
-    page.locator("[data-reset-filters]").click()
+    _trigger_hidden_reset(page)
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
     page.evaluate("() => { const panel = document.querySelector('[data-metrics-presentation]'); if (panel) { panel.open = true; } }")
     reset_order = _metric_scope_order(page, scope_id)
@@ -1662,27 +1709,13 @@ def _assert_details_open(locator: object, expected: bool, label: str) -> None:
 
 
 def _check_column_visibility_controls(page: object) -> dict[str, object]:
-    manager = page.locator("[data-column-manager]")
-    if manager.count() != 1:
-        raise AssertionError("column visibility manager must be rendered once")
-    page.evaluate("() => { const node = document.querySelector('[data-column-manager]'); if (node) { node.open = true; } }")
     visual_state = page.evaluate(
         """() => {
-          const rows = Array.from(document.querySelectorAll('[data-column-visibility-controls] .column-checkbox'));
-          const rects = rows.map((node) => Math.round(node.getBoundingClientRect().height));
-          const styles = rows.map((node) => {
-            const style = getComputedStyle(node);
-            return {
-              borderLeft: style.borderLeftWidth,
-              borderRight: style.borderRightWidth,
-              borderRadius: style.borderRadius,
-              background: style.backgroundColor
-            };
-          });
           return {
-            rowCount: rows.length,
-            maxHeight: rects.length ? Math.max(...rects) : 0,
-            cardLikeRows: styles.filter((style) => style.borderLeft !== '0px' || style.borderRight !== '0px').length,
+            managerCount: document.querySelectorAll('[data-column-manager]').length,
+            visibleManagerCount: Array.from(document.querySelectorAll('[data-column-manager]')).filter((node) => node.offsetParent !== null).length,
+            visibleResetCount: Array.from(document.querySelectorAll('[data-columns-reset]')).filter((node) => node.offsetParent !== null).length,
+            visibleColumnsLabel: Array.from(document.querySelectorAll('.filter-label')).some((node) => (node.textContent || '').trim() === 'Столбцы'),
             missingMetricLabelToggle: document.querySelectorAll('[data-column-visibility-id="metric_label"]').length === 0,
             missingScopeLabelToggle: document.querySelectorAll('[data-column-visibility-id="scope_label"]').length === 0,
             missingMetricKeyToggle: document.querySelectorAll('[data-column-visibility-id="metric_key"]').length === 0,
@@ -1693,9 +1726,10 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
         }"""
     )
     if (
-        visual_state["rowCount"] <= 0
-        or visual_state["maxHeight"] > 48
-        or visual_state["cardLikeRows"] != 0
+        int(visual_state["managerCount"]) > 1
+        or int(visual_state["visibleManagerCount"]) != 0
+        or int(visual_state["visibleResetCount"]) != 0
+        or visual_state["visibleColumnsLabel"]
         or not visual_state["missingMetricLabelToggle"]
         or not visual_state["missingScopeLabelToggle"]
         or not visual_state["missingMetricKeyToggle"]
@@ -1703,35 +1737,11 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
         or not visual_state["missingSectionToggle"]
         or visual_state["dateToggleCount"] != 0
     ):
-        raise AssertionError(f"column manager must render a compact checklist without mandatory/date toggles, got {visual_state}")
-    page.locator('[data-column-visibility-id="row_last_updated_at"]').uncheck()
-    page.wait_for_function(
-        """() =>
-          document.querySelectorAll('[data-table-head] [data-col-id="row_last_updated_at"]').length === 0
-        """,
-        timeout=5000,
-    )
-    page.reload(wait_until="commit")
-    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
-    page.evaluate("() => { const node = document.querySelector('[data-column-manager]'); if (node) { node.open = true; } }")
-    updated_hidden_after_reload = page.locator('[data-table-head] [data-col-id="row_last_updated_at"]').count() == 0
-    if not updated_hidden_after_reload:
-        raise AssertionError("column visibility must persist across reload for optional columns")
-    page.locator("[data-columns-reset]").click()
-    page.wait_for_function(
-        """() =>
-          document.querySelectorAll('[data-table-head] [data-col-id="row_last_updated_at"]').length === 1
-        """,
-        timeout=5000,
-    )
-    updated_checkbox_checked = page.locator('[data-column-visibility-id="row_last_updated_at"]').is_checked()
-    if not updated_checkbox_checked:
-        raise AssertionError("column visibility reset must restore optional column checkboxes")
+        raise AssertionError(f"old visible column manager must be removed while forced-hidden columns stay non-restorable, got {visual_state}")
     return {
-        "persisted_hidden_columns": ["row_last_updated_at"],
-        "updated_hidden_after_reload": updated_hidden_after_reload,
-        "updated_checkbox_checked_after_reset": updated_checkbox_checked,
-        "compact_checklist": visual_state,
+        "visible_column_manager_removed": True,
+        "forced_hidden_columns_non_restorable": True,
+        "state": visual_state,
     }
 
 
@@ -1852,6 +1862,7 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
           const objectLabel = header ? header.querySelector('[data-table-object-label]') : null;
           const progress = header ? header.querySelector('[data-global-progress]') : null;
           const loadButton = header ? header.querySelector('[data-load-refresh-button]') : null;
+          const headerControls = header ? header.querySelector('[data-table-header-controls]') : null;
           const source = header ? header.querySelector('.table-source-kicker') : null;
           const text = header ? (header.innerText || '') : '';
           const metaText = pageMeta ? ((pageMeta.textContent || '').trim()) : '';
@@ -1868,6 +1879,11 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
               .filter(node => !node.closest('[data-table-header]')).length,
             progress_inside_header: !!progress,
             load_button_inside_header: !!loadButton,
+            controls_inside_header: !!headerControls,
+            old_toolbar_count: document.querySelectorAll('[data-table-toolbar]').length,
+            search_count: document.querySelectorAll('[data-filter-control="search"]').length,
+            columns_visible_count: Array.from(document.querySelectorAll('[data-column-manager]')).filter((node) => node.offsetParent !== null).length,
+            reset_visible_count: Array.from(document.querySelectorAll('[data-reset-filters]')).filter((node) => node.offsetParent !== null).length,
             source_text: source ? ((source.textContent || '').trim()) : '',
             page_meta: metaText,
             table_meta: tableMeta ? ((tableMeta.textContent || '').trim()) : '',
@@ -1883,7 +1899,7 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
             load_button_text: loadButton ? ((loadButton.textContent || '').trim()) : '',
             load_button_right_aligned: !!loadButton && buttonRect.left > headerRect.left + headerRect.width / 2,
             load_status_inline_left_of_button: !!loadStatus && !loadStatus.hidden && statusRect.right <= buttonRect.left + 2 && Math.abs(((statusRect.top + statusRect.bottom) / 2) - ((buttonRect.top + buttonRect.bottom) / 2)) <= 8,
-            asia_yekaterinburg_in_meta: (metaText.match(/Asia\\/Yekaterinburg/g) || []).length,
+            asia_yekaterinburg_in_summary: ((summary ? summary.textContent : '').match(/Asia\\/Yekaterinburg/g) || []).length,
             header_text: text,
             has_freshness_badge: !!freshnessBadge && !freshnessBadge.hidden,
             forbidden_hits: forbidden.filter((item) => text.includes(item) || metaText.includes(item) || (tableMeta && tableMeta.textContent || '').includes(item))
@@ -1897,6 +1913,11 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
     if (
         not payload["progress_inside_header"]
         or not payload["load_button_inside_header"]
+        or not payload["controls_inside_header"]
+        or int(payload["old_toolbar_count"]) != 0
+        or int(payload["search_count"]) != 0
+        or int(payload["columns_visible_count"]) != 0
+        or int(payload["reset_visible_count"]) != 0
         or payload["source_text"] != ""
         or payload["load_button_text"] != "Загрузить"
         or not payload["load_button_right_aligned"]
@@ -1911,11 +1932,13 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         raise AssertionError(f"source/header controls must be compactly inside the table header, got {payload}")
     if payload["page_meta"] or payload["table_meta"] or payload["forbidden_hits"]:
         raise AssertionError(f"table header must not expose old technical/source text, got {payload}")
-    if "Обновлено:" not in payload["summary_text"] or "Свежесть данных:" not in payload["summary_text"]:
+    if "Обновлено:" not in payload["summary_text"] or "Свежесть:" not in payload["summary_text"] or "Свежесть данных:" in payload["summary_text"]:
         raise AssertionError(f"table header summary must expose compact freshness timestamps, got {payload}")
-    if not str(payload["load_status_text"]).startswith("Последняя загрузка: "):
+    if int(payload["asia_yekaterinburg_in_summary"]) != 0:
+        raise AssertionError(f"updated summary must not expose visible timezone, got {payload}")
+    if not str(payload["load_status_text"]).startswith("Загрузка: "):
         raise AssertionError(f"load status must use compact latest-load wording, got {payload}")
-    if str(payload["load_status_text"]).removeprefix("Последняя загрузка: ") not in {
+    if str(payload["load_status_text"]).removeprefix("Загрузка: ") not in {
         "успешно",
         "ошибка",
         "предупреждение",
@@ -1983,7 +2006,8 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
             headers,
             order: {
               summary: nodeIndex('[data-summary-grid]'),
-              toolbar: nodeIndex('[data-table-toolbar]'),
+              metrics: nodeIndex('[data-metrics-presentation]'),
+              oldToolbar: nodeIndex('[data-table-toolbar]'),
               history: nodeIndex('[data-history-panel]'),
               table: nodeIndex('[data-table-shell]'),
               filters: nodeIndex('[data-filter-controls]'),
@@ -2024,11 +2048,13 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
         if expected not in payload["headers"]:
             raise AssertionError(f"main table must expose header {expected!r}, got {payload['headers']}")
     order_values = payload["order"]
-    expected_order = [order_values[key] for key in ("summary", "toolbar", "table", "actions")]
+    expected_order = [order_values[key] for key in ("summary", "metrics", "table", "actions")]
     if any(value < 0 for value in expected_order) or expected_order != sorted(expected_order):
         raise AssertionError(f"web-vitrina blocks must follow the operator screen order, got {payload}")
-    if order_values["history"] != order_values["toolbar"] or order_values["filters"] != order_values["toolbar"]:
-        raise AssertionError(f"history and filters must share the compact table toolbar, got {payload}")
+    if order_values["oldToolbar"] != -1:
+        raise AssertionError(f"old separate filter toolbar must be absent, got {payload}")
+    if order_values["history"] != order_values["table"] or order_values["filters"] != order_values["table"]:
+        raise AssertionError(f"history and filters must share the compact table header, got {payload}")
     return payload
 
 
@@ -2296,13 +2322,14 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
           return {
             open: !!(panel && panel.open),
             summaryText: summary ? (summary.textContent || '').trim() : '',
-            disclosureVisible: !!(disclosure && disclosure.getBoundingClientRect().width > 0)
+            disclosureVisible: !!(disclosure && disclosure.getBoundingClientRect().width > 0),
+            disclosureLeftOfTitle: !!(disclosure && summary && (disclosure.compareDocumentPosition(summary.querySelector('.auto-schedule-title')) & Node.DOCUMENT_POSITION_FOLLOWING))
           };
         }"""
     )
     if collapsed_state["open"]:
         raise AssertionError(f"auto schedule block must be collapsed on page load, got {collapsed_state}")
-    if "Автообновления" not in collapsed_state["summaryText"] or not collapsed_state["disclosureVisible"]:
+    if "Автообновления" not in collapsed_state["summaryText"] or not collapsed_state["disclosureVisible"] or not collapsed_state["disclosureLeftOfTitle"]:
         raise AssertionError(f"auto schedule collapsed header must expose title and disclosure arrow, got {collapsed_state}")
     page.locator("[data-vitrina-auto-summary]").click()
     page.wait_for_function(
@@ -2358,8 +2385,13 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
     times = [row["time"] for row in payload["rows"] if row.get("time")]
     if payload["title"].strip() != "Автообновления":
         raise AssertionError(f"auto schedule block title mismatch: {payload}")
-    if "Asia/Yekaterinburg" not in payload["meta"]:
-        raise AssertionError(f"auto schedule block must expose business timezone, got {payload}")
+    if (
+        "Часовой пояс: Asia/Yekaterinburg" not in payload["meta"]
+        or "Следующий запуск:" not in payload["meta"]
+        or "runtime_managed_json_schedule" in payload["meta"]
+        or payload["meta"].count("Asia/Yekaterinburg") != 1
+    ):
+        raise AssertionError(f"auto schedule header must expose operator-readable summary without runtime noise, got {payload}")
     if sorted(times) != ["11:00", "20:00"]:
         raise AssertionError(f"auto schedule block must read current runtime schedule, got {payload}")
     if payload["addCount"] != 1 or payload["saveCount"] != 1 or payload["reloadCount"] != 1:
@@ -2517,8 +2549,13 @@ def _check_load_refresh_action(
     page.wait_for_function(
         """() => {
           const progress = document.querySelector('[data-global-progress]');
-          const bar = document.querySelector('[data-global-progress-bar]');
-          return !!progress && !!bar && !progress.hidden && parseFloat(bar.style.width || '0') >= 10;
+          const pulse = progress ? progress.querySelector('.top-progress-pulse') : null;
+          const trackVisible = Array.from(document.querySelectorAll('.top-progress-track, [data-global-progress-bar]'))
+            .some((node) => {
+              const style = getComputedStyle(node);
+              return style.display !== 'none' && style.visibility !== 'hidden' && node.getBoundingClientRect().width > 0;
+            });
+          return !!progress && !!pulse && !progress.hidden && !trackVisible && (progress.textContent || '').trim().length > 0;
         }""",
         timeout=5000,
     )
@@ -2587,10 +2624,10 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
             load_status_text: String((loadStatusNode && loadStatusNode.textContent) || '').trim(),
             updated: trimPrefix(updatedNode ? updatedNode.textContent : '', 'Обновлено:'),
             updated_at: updatedNode ? String(updatedNode.getAttribute('data-table-summary-updated-at') || '').trim() : '',
-            freshness: trimPrefix(freshnessNode ? freshnessNode.textContent : '', 'Свежесть данных:'),
+            freshness: trimPrefix(freshnessNode ? freshnessNode.textContent : '', 'Свежесть:'),
             freshness_at: freshnessNode ? String(freshnessNode.getAttribute('data-table-summary-freshness-at') || '').trim() : '',
             freshness_source: freshnessNode ? String(freshnessNode.getAttribute('data-table-summary-freshness-source') || '').trim() : '',
-            status: trimPrefix(loadStatusNode ? loadStatusNode.textContent : '', 'Последняя загрузка:'),
+            status: trimPrefix(loadStatusNode ? loadStatusNode.textContent : '', 'Загрузка:'),
             status_detail: ''
           };
         }"""
@@ -2601,14 +2638,14 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
         raise AssertionError(f"load status must be visible inline with the load button, got {payload}")
     text = str(payload.get("text") or "")
     load_status_text = str(payload.get("load_status_text") or "")
-    if "Обновлено:" not in text or "Свежесть данных:" not in text or "Статус:" in text:
+    if "Обновлено:" not in text or "Свежесть:" not in text or "Свежесть данных:" in text or "Статус:" in text:
         raise AssertionError(f"table header summary must include only updated/freshness labels, got {payload}")
-    if not load_status_text.startswith("Последняя загрузка: "):
+    if not load_status_text.startswith("Загрузка: "):
         raise AssertionError(f"load status must describe the latest load only with compact wording, got {payload}")
     if "Статус последней загрузки" in load_status_text or "today_current" in load_status_text or "yesterday_closed" in load_status_text:
         raise AssertionError(f"load status must not expose technical/latest-window wording, got {payload}")
-    if text.count("Asia/Yekaterinburg") > 1:
-        raise AssertionError(f"table header summary must show timezone once at most, got {text!r}")
+    if text.count("Asia/Yekaterinburg") != 0:
+        raise AssertionError(f"table header summary must not show visible timezone, got {text!r}")
     cards = {
         "page_refresh": {
             "label": "Обновлено",
@@ -2617,7 +2654,7 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
             "updated_at": str(payload.get("updated_at") or ""),
         },
         "data_freshness": {
-            "label": "Свежесть данных",
+            "label": "Свежесть",
             "value": str(payload.get("freshness") or ""),
             "detail": str(payload.get("freshness_source") or ""),
             "updated_at": str(payload.get("freshness_at") or ""),
@@ -2631,7 +2668,7 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
     }
     for required_card_id, required_label in {
         "page_refresh": "Обновлено",
-        "data_freshness": "Свежесть данных",
+        "data_freshness": "Свежесть",
         "status": "Статус",
     }.items():
         card = cards.get(required_card_id)
@@ -3100,11 +3137,35 @@ def _check_static_group_labels(page: object) -> dict[str, object]:
 
 
 def _check_sku_separators(page: object) -> dict[str, int]:
-    separator_count = page.locator(".sku-separator-row").count()
-    if separator_count <= 0:
-        raise AssertionError("table must render gray separator rows between adjacent SKU clusters")
+    state = page.evaluate(
+        """() => {
+          const separators = Array.from(document.querySelectorAll('.sku-separator-row'));
+          const heights = separators.map((row) => Math.round(row.getBoundingClientRect().height));
+          const first = separators[0] || null;
+          const previousKind = first && first.previousElementSibling ? first.previousElementSibling.getAttribute('data-row-kind') : '';
+          const nextKind = first && first.nextElementSibling ? first.nextElementSibling.getAttribute('data-row-kind') : '';
+          const skuSkuSeparatorCount = separators.filter((row) =>
+            row.previousElementSibling &&
+            row.nextElementSibling &&
+            row.previousElementSibling.getAttribute('data-row-kind') === 'sku' &&
+            row.nextElementSibling.getAttribute('data-row-kind') === 'sku' &&
+            row.previousElementSibling.getAttribute('data-row-scope-label') !== row.nextElementSibling.getAttribute('data-row-scope-label')
+          ).length;
+          return {
+            count: separators.length,
+            minHeight: heights.length ? Math.min(...heights) : 0,
+            firstBoundary: previousKind + '->' + nextKind,
+            skuSkuSeparatorCount
+          };
+        }"""
+    )
+    if int(state["count"]) <= 0 or int(state["minHeight"]) < 24 or state["firstBoundary"] != "total->sku":
+        raise AssertionError(f"table must render tall object separator rows from total to SKU and between SKU blocks, got {state}")
     return {
-        "separator_count": separator_count,
+        "separator_count": int(state["count"]),
+        "min_height": int(state["minHeight"]),
+        "first_boundary": str(state["firstBoundary"]),
+        "sku_sku_separator_count": int(state["skuSkuSeparatorCount"]),
     }
 
 
