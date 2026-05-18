@@ -46,6 +46,9 @@ SUCCESS_RUN_STATUSES = {"completed", "no_new_feedbacks", "no_low_rating_feedback
 NON_RETRYABLE_ATTEMPT_ACTIONS = {"submitted_confirmed"}
 RETRYABLE_ATTEMPT_ACTIONS = {"submit_unconfirmed", "safety_rejected", "error"}
 AI_CANDIDATE_VALUES = {"yes", "да", "review", "проверить"}
+CONFIRMED_JOURNAL_STATUSES = {"waiting_response", "satisfied", "rejected"}
+FINAL_JOURNAL_STATUSES = {"satisfied", "rejected"}
+UNCONFIRMED_JOURNAL_STATUS = "journal_unconfirmed_requires_probe"
 SCHEDULE_RUNTIME_FIELDS = {
     "created_at",
     "enabled_since_at",
@@ -594,27 +597,82 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
         ]
         reason_counts: Counter[str] = Counter()
         attempts: list[dict[str, Any]] = []
-        journal_ids = {str(record.get("feedback_id") or "") for record in self.complaints_block.journal.list_records()}
+        journal_by_id = {
+            str(record.get("feedback_id") or "").strip(): record
+            for record in self.complaints_block.journal.list_records()
+            if isinstance(record, Mapping) and str(record.get("feedback_id") or "").strip()
+        }
         prior_non_retryable_ids = self.store.non_retryable_attempt_feedback_ids()
         prior_retryable_ids = self.store.retryable_attempt_feedback_ids()
         diagnostic_events: list[dict[str, Any]] = []
         selected_ids: list[str] = []
+        retry_errors_for_selected = False
+        unconfirmed_existing_count = 0
         for feedback_id in candidate_ids:
             if not feedback_id:
                 continue
-            if feedback_id in journal_ids:
-                attempts.append(_attempt(run_id, feedback_id, action="already_journaled", reason="existing_journal_feedback_id", ai=ai_by_id.get(feedback_id)))
-                diagnostic_events.append(_event("candidate_skipped", f"Skipped feedback_id={feedback_id} reason=existing_journal_feedback_id", status="skipped"))
-                continue
+            journal_record = journal_by_id.get(feedback_id)
+            if journal_record is not None:
+                existing = _classify_journal_record(journal_record)
+                if existing["terminal_confirmed"]:
+                    attempts.append(
+                        _attempt(
+                            run_id,
+                            feedback_id,
+                            action=str(existing["action"]),
+                            reason=str(existing["reason"]),
+                            ai=ai_by_id.get(feedback_id),
+                            complaint_journal_ref=str(existing["complaint_journal_ref"]),
+                            evidence_refs=list(existing["evidence_refs"]),
+                        )
+                    )
+                    diagnostic_events.append(
+                        _event(
+                            "candidate_already_confirmed",
+                            f"Already confirmed feedback_id={feedback_id} reason={existing['reason']}",
+                            status="skipped",
+                        )
+                    )
+                    continue
+                if existing["retryable"]:
+                    retry_errors_for_selected = True
+                    diagnostic_events.append(
+                        _event(
+                            "candidate_retry",
+                            f"Retrying feedback_id={feedback_id} after non-terminal journal status={existing['journal_status']}",
+                            status="running",
+                        )
+                    )
+                else:
+                    unconfirmed_existing_count += 1
+                    attempts.append(
+                        _attempt(
+                            run_id,
+                            feedback_id,
+                            action=str(existing["action"]),
+                            reason=str(existing["reason"]),
+                            ai=ai_by_id.get(feedback_id),
+                            complaint_journal_ref=str(existing["complaint_journal_ref"]),
+                            evidence_refs=list(existing["evidence_refs"]),
+                        )
+                    )
+                    diagnostic_events.append(
+                        _event(
+                            "candidate_requires_confirmation_probe",
+                            f"Skipped feedback_id={feedback_id} reason={existing['reason']}",
+                            status="error",
+                        )
+                    )
+                    continue
             if feedback_id in prior_non_retryable_ids:
-                attempts.append(_attempt(run_id, feedback_id, action="skipped", reason="already_attempted_feedback_id", ai=ai_by_id.get(feedback_id)))
-                diagnostic_events.append(_event("candidate_skipped", f"Skipped feedback_id={feedback_id} reason=already_attempted_feedback_id", status="skipped"))
+                attempts.append(_attempt(run_id, feedback_id, action="already_confirmed_in_prior_run", reason="already_confirmed_in_prior_run", ai=ai_by_id.get(feedback_id)))
+                diagnostic_events.append(_event("candidate_already_confirmed", f"Skipped feedback_id={feedback_id} reason=already_confirmed_in_prior_run", status="skipped"))
                 continue
             if feedback_id in prior_retryable_ids:
                 diagnostic_events.append(_event("candidate_retry", f"Retrying feedback_id={feedback_id} after retryable prior attempt", status="running"))
             if len(selected_ids) >= hard_cap or len(selected_ids) >= SUBMIT_JOB_MAX_SELECTED_IDS:
-                attempts.append(_attempt(run_id, feedback_id, action="skipped", reason="hard_cap_reached", ai=ai_by_id.get(feedback_id)))
-                diagnostic_events.append(_event("candidate_skipped", f"Skipped feedback_id={feedback_id} reason=hard_cap_reached", status="skipped"))
+                attempts.append(_attempt(run_id, feedback_id, action="skipped_due_to_hard_cap", reason="skipped_due_to_hard_cap", ai=ai_by_id.get(feedback_id)))
+                diagnostic_events.append(_event("candidate_skipped", f"Skipped feedback_id={feedback_id} reason=skipped_due_to_hard_cap", status="skipped"))
                 continue
             selected_ids.append(feedback_id)
             diagnostic_events.append(_event("candidate_selected", f"Selected feedback_id={feedback_id} for guarded submit", status="running"))
@@ -633,6 +691,7 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
                     session={"storage_state_path": storage_state_path, "route_specific_checks": "deferred_to_guarded_submit_if_candidates"},
                 ),
             )
+        pre_submit_attempt_count = len(attempts)
         submit_report: dict[str, Any] = {}
         if selected_ids:
             submit_report = self.complaints_block.run_submit_selected_inline(
@@ -645,28 +704,34 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
                     "is_answered": "all",
                     "max_api_rows": max(100, len(low_rating_rows)),
                     "max_submit": min(hard_cap, len(selected_ids)),
+                    "retry_errors": retry_errors_for_selected,
                     "requested_by": "auto_complaints",
                 }
             )
             attempts.extend(_attempts_from_submit_report(run_id, submit_report, ai_by_id=ai_by_id))
         submitted_count = _safe_int(((submit_report.get("aggregate") or {}) if isinstance(submit_report.get("aggregate"), Mapping) else {}).get("submitted_count"))
-        skipped_count = _safe_int(((submit_report.get("aggregate") or {}) if isinstance(submit_report.get("aggregate"), Mapping) else {}).get("skipped_count")) + sum(1 for item in attempts if item.get("reason") in {"existing_journal_feedback_id", "already_attempted_feedback_id", "hard_cap_reached"})
+        pre_submit_attempts = attempts[:pre_submit_attempt_count]
+        skipped_count = _safe_int(((submit_report.get("aggregate") or {}) if isinstance(submit_report.get("aggregate"), Mapping) else {}).get("skipped_count")) + sum(1 for item in pre_submit_attempts if str(item.get("action") or "").startswith(("already_", "skipped_", "journal_")))
         error_count = _safe_int(((submit_report.get("aggregate") or {}) if isinstance(submit_report.get("aggregate"), Mapping) else {}).get("error_count"))
         for attempt in attempts:
             reason = str(attempt.get("reason") or "")
             if reason and reason != "submitted_confirmed":
                 reason_counts[reason] += 1
+        derived_counts = _attempt_counters(attempts, selected_count=len(selected_ids), submit_report=submit_report)
         status_sync_result = submit_report.get("status_sync") if isinstance(submit_report.get("status_sync"), Mapping) else {}
         status = "completed"
         blocker = ""
-        if error_count:
-            if any(str(item.get("action") or "") == "submit_unconfirmed" for item in attempts):
+        if unconfirmed_existing_count:
+            status = UNCONFIRMED_JOURNAL_STATUS
+            blocker = UNCONFIRMED_JOURNAL_STATUS
+        elif error_count:
+            if any(str(item.get("action") or "") == "submitted_attempted_unconfirmed" for item in attempts):
                 status = "submit_unconfirmed"
                 blocker = "submit_unconfirmed"
             else:
                 status = "error"
                 blocker = str((submit_report.get("errors") or [{}])[0].get("message") if isinstance(submit_report.get("errors"), list) and submit_report.get("errors") else "submit error")
-        elif reason_counts.get("hard_cap_reached"):
+        elif reason_counts.get("skipped_due_to_hard_cap"):
             status = "hard_cap_reached"
         if isinstance(status_sync_result, Mapping) and submitted_count and (status_sync_result.get("error") or status_sync_result.get("errors")):
             status = "status_sync_failed"
@@ -682,10 +747,11 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
                 ai_candidates_count=len(candidate_ids),
                 submitted_count=submitted_count,
                 skipped_count=skipped_count,
-                hard_cap_reached=bool(reason_counts.get("hard_cap_reached")),
+                hard_cap_reached=bool(reason_counts.get("skipped_due_to_hard_cap")),
                 status_sync_result=status_sync_result,
                 reason_counts=dict(reason_counts),
                 attempts=attempts,
+                **derived_counts,
                 session={"storage_state_path": storage_state_path, "route_specific_checks": "guarded_submit_and_status_sync"},
                 events=[*diagnostic_events, _event("run_finished", f"Auto complaints run finished with status {status}", status="success" if status in SUCCESS_RUN_STATUSES else "error")],
             ),
@@ -817,6 +883,15 @@ def _normalize_run(run: Mapping[str, Any]) -> dict[str, Any]:
         "loaded_feedbacks_count": _safe_int(run.get("loaded_feedbacks_count")),
         "low_rating_feedbacks_count": _safe_int(run.get("low_rating_feedbacks_count")),
         "ai_candidates_count": _safe_int(run.get("ai_candidates_count")),
+        "eligible_for_submit_count": _safe_int(run.get("eligible_for_submit_count")),
+        "submit_attempted_count": _safe_int(run.get("submit_attempted_count")),
+        "submit_confirmed_count": _safe_int(run.get("submit_confirmed_count")),
+        "already_confirmed_count": _safe_int(run.get("already_confirmed_count")),
+        "skipped_existing_confirmed_count": _safe_int(run.get("skipped_existing_confirmed_count")),
+        "skipped_existing_unconfirmed_count": _safe_int(run.get("skipped_existing_unconfirmed_count")),
+        "skipped_hard_cap_count": _safe_int(run.get("skipped_hard_cap_count")),
+        "skipped_other_count": _safe_int(run.get("skipped_other_count")),
+        "error_count": _safe_int(run.get("error_count")),
         "submitted_count": _safe_int(run.get("submitted_count")),
         "skipped_count": _safe_int(run.get("skipped_count")),
         "hard_cap_reached": bool(run.get("hard_cap_reached")),
@@ -840,6 +915,7 @@ def _normalize_attempt(attempt: Mapping[str, Any]) -> dict[str, Any]:
         "candidate": bool(attempt.get("candidate")),
         "action": _safe_text(attempt.get("action"), 80),
         "reason": _safe_text(attempt.get("reason"), 240),
+        "reason_label": _safe_text(attempt.get("reason_label"), 240),
         "complaint_journal_ref": _safe_text(attempt.get("complaint_journal_ref"), 160),
         "created_at": _safe_text(attempt.get("created_at"), 80),
         "updated_at": _safe_text(attempt.get("updated_at"), 80),
@@ -947,6 +1023,15 @@ def _finish_patch(status: str, *, now_factory: Callable[[], datetime], **kwargs:
         "loaded_feedbacks_count": _safe_int(kwargs.pop("loaded_feedbacks_count", 0)),
         "low_rating_feedbacks_count": _safe_int(kwargs.pop("low_rating_feedbacks_count", 0)),
         "ai_candidates_count": _safe_int(kwargs.pop("ai_candidates_count", 0)),
+        "eligible_for_submit_count": _safe_int(kwargs.pop("eligible_for_submit_count", 0)),
+        "submit_attempted_count": _safe_int(kwargs.pop("submit_attempted_count", 0)),
+        "submit_confirmed_count": _safe_int(kwargs.pop("submit_confirmed_count", 0)),
+        "already_confirmed_count": _safe_int(kwargs.pop("already_confirmed_count", 0)),
+        "skipped_existing_confirmed_count": _safe_int(kwargs.pop("skipped_existing_confirmed_count", 0)),
+        "skipped_existing_unconfirmed_count": _safe_int(kwargs.pop("skipped_existing_unconfirmed_count", 0)),
+        "skipped_hard_cap_count": _safe_int(kwargs.pop("skipped_hard_cap_count", 0)),
+        "skipped_other_count": _safe_int(kwargs.pop("skipped_other_count", 0)),
+        "error_count": _safe_int(kwargs.pop("error_count", 0)),
         "submitted_count": _safe_int(kwargs.pop("submitted_count", 0)),
         "skipped_count": _safe_int(kwargs.pop("skipped_count", 0)),
         "hard_cap_reached": bool(kwargs.pop("hard_cap_reached", False)),
@@ -960,7 +1045,17 @@ def _finish_patch(status: str, *, now_factory: Callable[[], datetime], **kwargs:
     return patch
 
 
-def _attempt(run_id: str, feedback_id: str, *, action: str, reason: str, ai: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def _attempt(
+    run_id: str,
+    feedback_id: str,
+    *,
+    action: str,
+    reason: str,
+    ai: Mapping[str, Any] | None = None,
+    reason_label: str = "",
+    complaint_journal_ref: str = "",
+    evidence_refs: list[Any] | None = None,
+) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     ai = ai if isinstance(ai, Mapping) else {}
     return {
@@ -971,9 +1066,11 @@ def _attempt(run_id: str, feedback_id: str, *, action: str, reason: str, ai: Map
         "candidate": True,
         "action": action,
         "reason": reason,
+        "reason_label": reason_label,
+        "complaint_journal_ref": complaint_journal_ref,
         "created_at": now,
         "updated_at": now,
-        "evidence_refs": [],
+        "evidence_refs": [_safe_text(item, 260) for item in (evidence_refs or [])],
     }
 
 
@@ -990,13 +1087,131 @@ def _attempts_from_submit_report(run_id: str, submit_report: Mapping[str, Any], 
             action = "submitted_confirmed"
             reason = "submitted_confirmed"
         elif row.get("submit_clicked"):
-            action = "submit_unconfirmed"
-            reason = "submit_unconfirmed"
+            action = "submitted_attempted_unconfirmed"
+            reason = "submitted_attempted_unconfirmed"
         else:
-            action = "safety_rejected"
-            reason = _safe_text(row.get("skip_reason") or row.get("block_reason") or "safety_rejected", 240)
+            raw_reason = _safe_text(row.get("skip_reason") or row.get("block_reason") or "safety_rejected", 240)
+            action, reason = _classify_submit_skip(raw_reason)
         attempts.append(_attempt(run_id, feedback_id, action=action, reason=reason, ai=ai_by_id.get(feedback_id)))
     return attempts
+
+
+def _classify_submit_skip(raw_reason: str) -> tuple[str, str]:
+    normalized = raw_reason.lower()
+    if "already_complained_in_wb" in normalized or "уже пожал" in normalized or "жалоба уже" in normalized:
+        return "already_confirmed_in_wb", "already_confirmed_in_wb"
+    if "hard_cap" in normalized:
+        return "skipped_due_to_hard_cap", "skipped_due_to_hard_cap"
+    if "session_invalid" in normalized or "automation_busy" in normalized or "storage_state" in normalized:
+        return "skipped_due_to_session_or_capability_blocker", raw_reason or "skipped_due_to_session_or_capability_blocker"
+    if (
+        "not actionable" in normalized
+        or "not found" in normalized
+        or "safe row menu" in normalized
+        or "complaint action is disabled" in normalized
+        or "complaint_action_disabled" in normalized
+    ):
+        return "skipped_due_to_wb_ui_unavailable_or_not_actionable", raw_reason
+    return "safety_rejected", raw_reason or "safety_rejected"
+
+
+def _classify_journal_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    status = str(record.get("complaint_status") or "").strip()
+    feedback_id = _safe_text(record.get("feedback_id"), 160)
+    evidence_refs = _journal_evidence_refs(record)
+    confirmed = _journal_record_has_confirmation(record)
+    if confirmed:
+        return {
+            "feedback_id": feedback_id,
+            "terminal_confirmed": True,
+            "retryable": False,
+            "journal_status": status,
+            "action": "already_journaled_confirmed",
+            "reason": "already_journaled_confirmed",
+            "complaint_journal_ref": _safe_text(record.get("complaint_id"), 160),
+            "evidence_refs": evidence_refs,
+        }
+    if status == "error":
+        return {
+            "feedback_id": feedback_id,
+            "terminal_confirmed": False,
+            "retryable": True,
+            "journal_status": status,
+            "action": "journal_error_retry_allowed",
+            "reason": "journal_error_retry_allowed",
+            "complaint_journal_ref": _safe_text(record.get("complaint_id"), 160),
+            "evidence_refs": evidence_refs,
+        }
+    reason = "journal_only_unconfirmed" if not str(record.get("submit_run_id") or record.get("status_sync_run_id") or "").strip() else "skipped_existing_unconfirmed"
+    return {
+        "feedback_id": feedback_id,
+        "terminal_confirmed": False,
+        "retryable": False,
+        "journal_status": status,
+        "action": "skipped_existing_unconfirmed",
+        "reason": reason,
+        "complaint_journal_ref": _safe_text(record.get("complaint_id"), 160),
+        "evidence_refs": evidence_refs,
+    }
+
+
+def _journal_record_has_confirmation(record: Mapping[str, Any]) -> bool:
+    status = str(record.get("complaint_status") or "").strip()
+    if status not in CONFIRMED_JOURNAL_STATUSES:
+        return False
+    submit_result = str(record.get("submit_result") or "").strip()
+    if submit_result == "confirmed_success":
+        return True
+    if status in FINAL_JOURNAL_STATUSES and str(record.get("status_sync_run_id") or "").strip() and str(record.get("last_status_checked_at") or "").strip():
+        return True
+    if status == "waiting_response" and str(record.get("submitted_at") or "").strip() and str(record.get("submit_run_id") or "").strip():
+        return True
+    return False
+
+
+def _journal_evidence_refs(record: Mapping[str, Any]) -> list[str]:
+    refs: list[str] = []
+    for key, prefix in (
+        ("complaint_id", "journal"),
+        ("submit_run_id", "submit"),
+        ("status_sync_run_id", "status_sync"),
+    ):
+        value = _safe_text(record.get(key), 160)
+        if value:
+            refs.append(f"{prefix}:{value}")
+    return refs
+
+
+def _attempt_counters(attempts: list[Mapping[str, Any]], *, selected_count: int, submit_report: Mapping[str, Any]) -> dict[str, int]:
+    actions = Counter(str(item.get("action") or "") for item in attempts if isinstance(item, Mapping))
+    aggregate = submit_report.get("aggregate") if isinstance(submit_report.get("aggregate"), Mapping) else {}
+    error_count = _safe_int(aggregate.get("error_count"))
+    submit_attempted = actions.get("submitted_confirmed", 0) + actions.get("submitted_attempted_unconfirmed", 0)
+    already_confirmed = (
+        actions.get("already_journaled_confirmed", 0)
+        + actions.get("already_confirmed_in_wb", 0)
+        + actions.get("already_confirmed_in_prior_run", 0)
+    )
+    skipped_existing_confirmed = (
+        actions.get("already_journaled_confirmed", 0)
+        + actions.get("already_confirmed_in_prior_run", 0)
+        + actions.get("already_confirmed_in_wb", 0)
+    )
+    skipped_existing_unconfirmed = actions.get("skipped_existing_unconfirmed", 0)
+    skipped_hard_cap = actions.get("skipped_due_to_hard_cap", 0)
+    skipped_known = skipped_existing_confirmed + skipped_existing_unconfirmed + skipped_hard_cap + already_confirmed
+    skipped_other = max(0, sum(1 for item in attempts if str(item.get("action") or "").startswith(("skipped_", "safety_"))) - skipped_known)
+    return {
+        "eligible_for_submit_count": selected_count,
+        "submit_attempted_count": submit_attempted,
+        "submit_confirmed_count": actions.get("submitted_confirmed", 0),
+        "already_confirmed_count": already_confirmed,
+        "skipped_existing_confirmed_count": skipped_existing_confirmed,
+        "skipped_existing_unconfirmed_count": skipped_existing_unconfirmed,
+        "skipped_hard_cap_count": skipped_hard_cap,
+        "skipped_other_count": skipped_other,
+        "error_count": error_count,
+    }
 
 
 def _run_stats(run: Mapping[str, Any]) -> dict[str, Any]:
@@ -1004,6 +1219,15 @@ def _run_stats(run: Mapping[str, Any]) -> dict[str, Any]:
         "loaded_feedbacks_count": _safe_int(run.get("loaded_feedbacks_count")),
         "low_rating_feedbacks_count": _safe_int(run.get("low_rating_feedbacks_count")),
         "ai_candidates_count": _safe_int(run.get("ai_candidates_count")),
+        "eligible_for_submit_count": _safe_int(run.get("eligible_for_submit_count")),
+        "submit_attempted_count": _safe_int(run.get("submit_attempted_count")),
+        "submit_confirmed_count": _safe_int(run.get("submit_confirmed_count")),
+        "already_confirmed_count": _safe_int(run.get("already_confirmed_count")),
+        "skipped_existing_confirmed_count": _safe_int(run.get("skipped_existing_confirmed_count")),
+        "skipped_existing_unconfirmed_count": _safe_int(run.get("skipped_existing_unconfirmed_count")),
+        "skipped_hard_cap_count": _safe_int(run.get("skipped_hard_cap_count")),
+        "skipped_other_count": _safe_int(run.get("skipped_other_count")),
+        "error_count": _safe_int(run.get("error_count")),
         "submitted_count": _safe_int(run.get("submitted_count")),
         "skipped_count": _safe_int(run.get("skipped_count")),
         "hard_cap_reached": bool(run.get("hard_cap_reached")),

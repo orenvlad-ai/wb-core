@@ -10918,7 +10918,7 @@
           "<td>" + escapeHtml(formatTimestampDisplay(schedule.last_success_at || "")) + "</td>",
           "<td>" + escapeHtml(formatTimestampDisplay(schedule.next_run_at || "")) + "</td>",
           "<td>" + escapeHtml(schedule.last_status || "—") + "</td>",
-          '<td><span>' + escapeHtml("AI " + (stats.ai_candidates_count || 0) + " · подано " + (stats.submitted_count || 0) + " · пропущено " + (stats.skipped_count || 0)) + '</span><br><span class="research-result-note" data-feedbacks-auto-window-hint="' + escapeHtml(id) + '">' + escapeHtml(windowHint) + "</span></td>",
+          '<td><span>' + escapeHtml("AI " + (stats.ai_candidates_count || 0) + " · к отправке " + (stats.eligible_for_submit_count || 0) + " · подтверждено " + (stats.submit_confirmed_count || stats.submitted_count || 0) + " · уже было " + (stats.already_confirmed_count || 0)) + '</span><br><span class="research-result-note" data-feedbacks-auto-window-hint="' + escapeHtml(id) + '">' + escapeHtml(windowHint) + "</span></td>",
           '<td><div class="feedbacks-action-group"><button class="button secondary" type="button" data-feedbacks-auto-log-schedule="' + escapeHtml(id) + '">Посмотреть лог</button><button class="button ghost" type="button" data-feedbacks-auto-delete="' + escapeHtml(id) + '">Удалить</button></div></td>',
           "</tr>"
         ].join("");
@@ -10960,7 +10960,8 @@
         '<div>Начало: ' + escapeHtml(formatTimestampDisplay(run.started_at || run.created_at || "")) + " · Конец: " + escapeHtml(formatTimestampDisplay(run.finished_at || "")) + "</div>",
         '<div>Окно: ' + escapeHtml(formatTimestampDisplay(run.window_base_from || "")) + " → " + escapeHtml(formatTimestampDisplay(run.window_to || "")) + " · fetch: " + escapeHtml(formatTimestampDisplay(run.window_fetch_from || "")) + "</div>",
         '<div>Отзывов: ' + escapeHtml(run.loaded_feedbacks_count || 0) + " · 1–2★: " + escapeHtml(run.low_rating_feedbacks_count || 0) + " · AI: " + escapeHtml(run.ai_candidates_count || 0) + "</div>",
-        '<div>Подано: ' + escapeHtml(run.submitted_count || 0) + " · Пропущено: " + escapeHtml(run.skipped_count || 0) + "</div>",
+        '<div>К отправке: ' + escapeHtml(run.eligible_for_submit_count || 0) + " · попыток: " + escapeHtml(run.submit_attempted_count || 0) + " · подтверждено: " + escapeHtml(run.submit_confirmed_count || run.submitted_count || 0) + " · уже было: " + escapeHtml(run.already_confirmed_count || 0) + "</div>",
+        '<div>Пропущено: ' + escapeHtml(run.skipped_count || 0) + " · существующие подтверждённые: " + escapeHtml(run.skipped_existing_confirmed_count || 0) + " · существующие без подтверждения: " + escapeHtml(run.skipped_existing_unconfirmed_count || 0) + " · hard cap: " + escapeHtml(run.skipped_hard_cap_count || 0) + " · другое: " + escapeHtml(run.skipped_other_count || 0) + "</div>",
         run.blocker_reason ? '<div>Blocker: ' + escapeHtml(run.blocker_reason) + "</div>" : "",
         run.sanitized_error_message ? '<div>Ошибка: ' + escapeHtml(run.sanitized_error_message) + "</div>" : "",
         reasonText ? '<div>' + escapeHtml(reasonText) + "</div>" : "",
