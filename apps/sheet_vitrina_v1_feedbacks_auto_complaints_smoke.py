@@ -520,13 +520,20 @@ def _assert_legacy_existing_journal_run_reconciles_on_read() -> None:
                 "status": "completed",
                 "created_at": "2026-05-08T07:00:00Z",
                 "finished_at": "2026-05-08T07:05:00Z",
-                "loaded_feedbacks_count": 2,
-                "low_rating_feedbacks_count": 2,
-                "ai_candidates_count": 2,
+                "loaded_feedbacks_count": 3,
+                "low_rating_feedbacks_count": 3,
+                "ai_candidates_count": 3,
                 "submitted_count": 0,
                 "skipped_count": 2,
                 "reason_counts": {"existing_journal_feedback_id": 2},
                 "attempts": [
+                    {
+                        "feedback_id": "legacy-submitted",
+                        "rating": 1,
+                        "candidate": True,
+                        "action": "submitted_confirmed",
+                        "reason": "submitted_confirmed",
+                    },
                     {
                         "feedback_id": "legacy-confirmed",
                         "rating": 1,
@@ -558,9 +565,11 @@ def _assert_legacy_existing_journal_run_reconciles_on_read() -> None:
             raise AssertionError(f"legacy generic reason must not leak after read reconciliation: {detail}")
         if reasons.get("already_journaled_confirmed") != 1 or reasons.get("journal_only_unconfirmed") != 1:
             raise AssertionError(f"legacy reasons must be reconciled with journal evidence: {detail}")
-        if detail["attempts"][0]["action"] != "already_journaled_confirmed":
+        if detail["submitted_count"] != 1 or detail["submit_attempted_count"] != 1 or detail["eligible_for_submit_count"] != 1:
+            raise AssertionError(f"legacy submitted attempt must backfill submitted/attempted/eligible counters: {detail}")
+        if detail["attempts"][1]["action"] != "already_journaled_confirmed":
             raise AssertionError(f"confirmed journal record must become already-confirmed: {detail}")
-        if detail["attempts"][1]["action"] != "skipped_existing_unconfirmed":
+        if detail["attempts"][2]["action"] != "skipped_existing_unconfirmed":
             raise AssertionError(f"journal-only record must not look terminal: {detail}")
         if detail["already_confirmed_count"] != 1 or detail["skipped_existing_unconfirmed_count"] != 1:
             raise AssertionError(f"detailed counters must be reconciled for legacy run: {detail}")
