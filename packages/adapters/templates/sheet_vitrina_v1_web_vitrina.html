@@ -5650,13 +5650,20 @@
       }
     }
 
-    function sanitizeMetricOrder(candidateOrder, defaultOrder) {
+    function sanitizeMetricOrder(candidateOrder, defaultOrder, extraAllowedKeys) {
       const defaultSet = new Set(defaultOrder || []);
+      const allowedSet = new Set(defaultOrder || []);
+      (Array.isArray(extraAllowedKeys) ? extraAllowedKeys : []).forEach(function(metricKey) {
+        const normalized = String(metricKey || "");
+        if (normalized) {
+          allowedSet.add(normalized);
+        }
+      });
       const result = [];
       const seen = new Set();
       (Array.isArray(candidateOrder) ? candidateOrder : []).forEach(function(metricKey) {
         const normalized = String(metricKey || "");
-        if (defaultSet.has(normalized) && !seen.has(normalized)) {
+        if (allowedSet.has(normalized) && !seen.has(normalized)) {
           result.push(normalized);
           seen.add(normalized);
         }
@@ -5710,12 +5717,13 @@
       state.metricPresentation.expandedAnchors = new Set();
       state.metricPresentation.selectionModeByScope = {};
       state.metricPresentation.selectionByScope = {};
+      const knownMetricKeys = Array.from(model.optionByKey.keys());
 
       model.scopes.forEach(function(scope) {
         const scopeId = scope.scopeId;
         const savedScope = persisted && persisted.scopes ? (persisted.scopes[scopeId] || {}) : {};
         const defaultOrder = scope.metricKeys.slice();
-        const order = sanitizeMetricOrder(savedScope.order, defaultOrder);
+        const order = sanitizeMetricOrder(savedScope.order, defaultOrder, knownMetricKeys);
         state.metricPresentation.orderByScope[scopeId] = order;
         defaultOrder.forEach(function(metricKey) {
           scopeByKey[metricKey] = scopeId;
