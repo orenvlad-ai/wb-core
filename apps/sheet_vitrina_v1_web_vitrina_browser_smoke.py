@@ -305,6 +305,7 @@ def run_browser_checks(
             if total_rows <= 0:
                 raise AssertionError("web-vitrina table must render at least one row")
             auto_schedule_block = _check_auto_schedule_block(page)
+            activity_collapsible = _check_activity_collapsible_block(page)
             initial_summary_cards = _read_summary_cards(page)
             status_summary = initial_summary_cards.get("status", {})
             initial_unloaded_activity_surface = _read_activity_surface(
@@ -653,6 +654,7 @@ def run_browser_checks(
         "table_toolbar": table_toolbar,
         "status_summary": status_summary,
         "auto_schedule_block": auto_schedule_block,
+        "activity_collapsible": activity_collapsible,
         "summary_cards": initial_summary_cards,
         "activity_surface": initial_activity_surface,
         "compact_widths": compact_widths,
@@ -947,6 +949,10 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         raise AssertionError(f"metrics rows must remain compact, got {panel_state}")
     sticky_controls = _check_metric_settings_sticky_controls(page)
     sku_sync = _check_sku_sync_from_total(page, storage_key=storage_key)
+    scroll_preservation = _check_metric_settings_scroll_preserved(page)
+    _trigger_hidden_reset(page)
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
+    page.evaluate("() => { const panel = document.querySelector('[data-metrics-presentation]'); if (panel) { panel.open = true; } }")
 
     target_scope = next(
         (
@@ -1097,6 +1103,7 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         "scope_tables": scope_labels,
         "sticky_controls": sticky_controls,
         "sku_sync_from_total": sku_sync,
+        "scroll_preservation": scroll_preservation,
         "bulk_selection": bulk_selection,
         "order_changed": [target_key, source_key],
         "display_statuses": {"shown": anchor_key, "collapsed": [collapsed_one, collapsed_two], "hidden": hidden_key},
@@ -1144,6 +1151,117 @@ def _check_metric_settings_sticky_controls(page: object) -> dict[str, object]:
         raise AssertionError(f"metric settings controls must stay sticky inside the settings scroll container, got {state}")
     if not state.get("selectionVisible") or not state.get("bulkVisible") or not state.get("syncVisible"):
         raise AssertionError(f"metric settings sticky head must keep actions visible, got {state}")
+    page.evaluate(
+        """() => {
+          document.querySelectorAll('[data-metrics-config-scope-table]').forEach((node) => { node.scrollTop = 0; });
+        }"""
+    )
+    return state
+
+
+def _check_metric_settings_scroll_preserved(page: object) -> list[dict[str, object]]:
+    state = page.evaluate(
+        """async () => {
+          const waitForPaint = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const getTable = (scopeId) => document.querySelector('[data-metrics-config-scope-table][data-metrics-config-scope="' + scopeId + '"]');
+          const getScroll = (scopeId) => {
+            const table = getTable(scopeId);
+            return table ? Math.round(table.scrollTop) : 0;
+          };
+          const setScroll = (scopeId) => {
+            const table = getTable(scopeId);
+            if (!table) {
+              return 0;
+            }
+            table.style.maxHeight = '180px';
+            const maxScroll = Math.max(0, table.scrollHeight - table.clientHeight);
+            table.scrollTop = Math.min(140, maxScroll);
+            return Math.round(table.scrollTop);
+          };
+          const dispatchDragAfter = (source, target) => {
+            const rect = target.getBoundingClientRect();
+            const data = new DataTransfer();
+            const eventInit = {
+              bubbles: true,
+              cancelable: true,
+              dataTransfer: data,
+              clientX: rect.left + Math.max(8, Math.min(rect.width / 2, rect.width - 4)),
+              clientY: rect.top + Math.max(4, rect.height * 0.75)
+            };
+            source.dispatchEvent(new DragEvent('dragstart', eventInit));
+            target.dispatchEvent(new DragEvent('dragover', eventInit));
+            target.dispatchEvent(new DragEvent('drop', eventInit));
+            source.dispatchEvent(new DragEvent('dragend', eventInit));
+          };
+          const result = [];
+          for (const scopeId of ['total', 'sku']) {
+            let table = getTable(scopeId);
+            if (!table) {
+              result.push({scopeId, ok: false, reason: 'missing table'});
+              continue;
+            }
+            const beforeToggle = setScroll(scopeId);
+            const toggle = table.querySelector('[data-metric-selection-toggle]');
+            if (!toggle) {
+              result.push({scopeId, ok: false, reason: 'missing toggle'});
+              continue;
+            }
+            toggle.click();
+            await waitForPaint();
+            const afterToggle = getScroll(scopeId);
+            table = getTable(scopeId);
+            const checkbox = table ? table.querySelector('[data-metric-selection-checkbox]') : null;
+            if (!checkbox) {
+              result.push({scopeId, ok: false, reason: 'missing checkbox', beforeToggle, afterToggle});
+              continue;
+            }
+            checkbox.click();
+            await waitForPaint();
+            const afterCheckbox = getScroll(scopeId);
+            const beforeDrop = setScroll(scopeId);
+            table = getTable(scopeId);
+            const rows = table ? Array.from(table.querySelectorAll('[data-metric-config-row]:not(.is-header)')) : [];
+            const sourceHandle = rows[0] ? rows[0].querySelector('[data-metric-drag-handle]') : null;
+            const targetRow = rows.length > 3 ? rows[3] : rows[rows.length - 1];
+            if (!sourceHandle || !targetRow || targetRow === rows[0]) {
+              result.push({scopeId, ok: false, reason: 'missing drag rows', beforeToggle, afterToggle, afterCheckbox, beforeDrop});
+              continue;
+            }
+            dispatchDragAfter(sourceHandle, targetRow);
+            await waitForPaint();
+            const afterDrop = getScroll(scopeId);
+            table = getTable(scopeId);
+            const closeToggle = table ? table.querySelector('[data-metric-selection-toggle]') : null;
+            if (closeToggle) {
+              closeToggle.click();
+              await waitForPaint();
+            }
+            result.push({
+              scopeId,
+              ok: true,
+              beforeToggle,
+              afterToggle,
+              afterCheckbox,
+              beforeDrop,
+              afterDrop,
+              togglePreserved: afterToggle >= Math.max(0, beforeToggle - 6),
+              checkboxPreserved: afterCheckbox >= Math.max(0, beforeToggle - 6),
+              dropPreserved: afterDrop >= Math.max(0, beforeDrop - 6)
+            });
+          }
+          return result;
+        }"""
+    )
+    bad = [
+        item
+        for item in state
+        if not item.get("ok")
+        or not item.get("togglePreserved")
+        or not item.get("checkboxPreserved")
+        or not item.get("dropPreserved")
+    ]
+    if bad:
+        raise AssertionError(f"metric settings scroll must survive select/checkbox/drop per scope, got {state}")
     page.evaluate(
         """() => {
           document.querySelectorAll('[data-metrics-config-scope-table]').forEach((node) => { node.scrollTop = 0; });
@@ -1869,7 +1987,15 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
           const buttonRect = loadButton ? loadButton.getBoundingClientRect() : {left: 0, right: 0, top: 0, bottom: 0};
           const statusRect = loadStatus ? loadStatus.getBoundingClientRect() : {left: 0, right: 0, top: 0, bottom: 0};
           const headerRect = header ? header.getBoundingClientRect() : {left: 0, right: 0, width: 0};
-          const forbidden = ['sheet_vitrina_v1', 'Основная web-витрина', 'В выбранном периоде', 'grid library', 'rows:', 'columns:', 'Снимок:', 'Вчера:', 'Сегодня:', 'TZ:', 'Статус последней загрузки', 'today_current', 'yesterday_closed', 'load window'];
+          const forbidden = ['sheet_vitrina_v1', 'Основная web-витрина', 'В выбранном периоде', 'grid library', 'rows:', 'columns:', 'Снимок:', 'Вчера:', 'Сегодня:', 'TZ:', 'Статус последней загрузки', 'Последняя загрузка', 'Обновлено:', 'Свежесть данных', 'today_current', 'yesterday_closed', 'load window'];
+          const visibleFilterLabels = Array.from(header ? header.querySelectorAll('.filter-label') : [])
+            .filter((node) => {
+              const rect = node.getBoundingClientRect();
+              const styles = getComputedStyle(node);
+              return rect.width > 2 && rect.height > 2 && styles.visibility !== 'hidden' && styles.display !== 'none';
+            })
+            .map((node) => (node.textContent || '').trim())
+            .filter(Boolean);
           return {
             top_panel_count: document.querySelectorAll('[data-top-panel]').length,
             table_header_count: document.querySelectorAll('[data-table-header]').length,
@@ -1894,12 +2020,18 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
             heading_line_order_ok: !!(objectLabel && freshnessBadge && summary &&
               ((objectLabel.compareDocumentPosition(freshnessBadge) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0) &&
               ((freshnessBadge.compareDocumentPosition(summary) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0)),
-            load_status_text: loadStatus ? ((loadStatus.textContent || '').trim()) : '',
+            visible_filter_labels: visibleFilterLabels,
+            load_status_text: loadStatus ? (loadStatus.getAttribute('data-load-status-text') || '') : '',
+            load_status_title: loadStatus ? (loadStatus.getAttribute('title') || '') : '',
+            load_status_visible_text: loadStatus ? ((loadStatus.textContent || '').trim()) : '',
+            load_status_dot_count: loadStatus ? loadStatus.querySelectorAll('.table-load-status-dot').length : 0,
+            load_status_width: loadStatus ? Math.round(statusRect.width) : 0,
             load_status_hidden: loadStatus ? !!loadStatus.hidden : null,
             load_button_text: loadButton ? ((loadButton.textContent || '').trim()) : '',
             load_button_right_aligned: !!loadButton && buttonRect.left > headerRect.left + headerRect.width / 2,
             load_status_inline_left_of_button: !!loadStatus && !loadStatus.hidden && statusRect.right <= buttonRect.left + 2 && Math.abs(((statusRect.top + statusRect.bottom) / 2) - ((buttonRect.top + buttonRect.bottom) / 2)) <= 8,
             asia_yekaterinburg_in_summary: ((summary ? summary.textContent : '').match(/Asia\\/Yekaterinburg/g) || []).length,
+            seconds_in_summary: /\\d{1,2}:\\d{2}:\\d{2}/.test(summary ? (summary.textContent || '') : ''),
             header_text: text,
             has_freshness_badge: !!freshnessBadge && !freshnessBadge.hidden,
             forbidden_hits: forbidden.filter((item) => text.includes(item) || metaText.includes(item) || (tableMeta && tableMeta.textContent || '').includes(item))
@@ -1932,13 +2064,17 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         raise AssertionError(f"source/header controls must be compactly inside the table header, got {payload}")
     if payload["page_meta"] or payload["table_meta"] or payload["forbidden_hits"]:
         raise AssertionError(f"table header must not expose old technical/source text, got {payload}")
-    if "Обновлено:" not in payload["summary_text"] or "Свежесть:" not in payload["summary_text"] or "Свежесть данных:" in payload["summary_text"]:
-        raise AssertionError(f"table header summary must expose compact freshness timestamps, got {payload}")
-    if int(payload["asia_yekaterinburg_in_summary"]) != 0:
-        raise AssertionError(f"updated summary must not expose visible timezone, got {payload}")
-    if not str(payload["load_status_text"]).startswith("Загрузка: "):
-        raise AssertionError(f"load status must use compact latest-load wording, got {payload}")
-    if str(payload["load_status_text"]).removeprefix("Загрузка: ") not in {
+    if payload["visible_filter_labels"]:
+        raise AssertionError(f"compact header controls must not show field labels, got {payload}")
+    if "обн:" not in payload["summary_text"] or "свеж:" not in payload["summary_text"]:
+        raise AssertionError(f"table header summary must expose short ob/fresh timestamps, got {payload}")
+    if int(payload["asia_yekaterinburg_in_summary"]) != 0 or payload["seconds_in_summary"]:
+        raise AssertionError(f"compact header timestamps must omit visible timezone and seconds, got {payload}")
+    if payload["load_status_visible_text"] or int(payload["load_status_dot_count"]) != 1 or int(payload["load_status_width"]) > 32:
+        raise AssertionError(f"load status must render as compact icon/lamp without visible text, got {payload}")
+    if not str(payload["load_status_title"]).startswith("Загрузка: "):
+        raise AssertionError(f"load status lamp must keep textual status in title/aria, got {payload}")
+    if str(payload["load_status_text"]) not in {
         "успешно",
         "ошибка",
         "предупреждение",
@@ -2323,13 +2459,14 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
             open: !!(panel && panel.open),
             summaryText: summary ? (summary.textContent || '').trim() : '',
             disclosureVisible: !!(disclosure && disclosure.getBoundingClientRect().width > 0),
-            disclosureLeftOfTitle: !!(disclosure && summary && (disclosure.compareDocumentPosition(summary.querySelector('.auto-schedule-title')) & Node.DOCUMENT_POSITION_FOLLOWING))
+            disclosureLeftOfTitle: !!(disclosure && summary && (disclosure.compareDocumentPosition(summary.querySelector('.auto-schedule-title')) & Node.DOCUMENT_POSITION_FOLLOWING)),
+            sameLine: !!(summary && summary.getBoundingClientRect().height <= 44)
           };
         }"""
     )
     if collapsed_state["open"]:
         raise AssertionError(f"auto schedule block must be collapsed on page load, got {collapsed_state}")
-    if "Автообновления" not in collapsed_state["summaryText"] or not collapsed_state["disclosureVisible"] or not collapsed_state["disclosureLeftOfTitle"]:
+    if "Автообновления" not in collapsed_state["summaryText"] or not collapsed_state["disclosureVisible"] or not collapsed_state["disclosureLeftOfTitle"] or not collapsed_state["sameLine"]:
         raise AssertionError(f"auto schedule collapsed header must expose title and disclosure arrow, got {collapsed_state}")
     page.locator("[data-vitrina-auto-summary]").click()
     page.wait_for_function(
@@ -2364,6 +2501,7 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
           return {
             title: (document.querySelector('[data-vitrina-auto-schedule] .auto-schedule-title') || {}).textContent || '',
             meta: (document.querySelector('[data-vitrina-auto-schedule-meta]') || {}).textContent || '',
+            secondsInMeta: /\\d{1,2}:\\d{2}:\\d{2}/.test((document.querySelector('[data-vitrina-auto-schedule-meta]') || {}).textContent || ''),
             status: (document.querySelector('[data-vitrina-auto-status]') || {}).textContent || '',
             error: (document.querySelector('[data-vitrina-auto-error]') || {}).textContent || '',
             warning: warningNode ? {
@@ -2390,6 +2528,7 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
         or "Следующий запуск:" not in payload["meta"]
         or "runtime_managed_json_schedule" in payload["meta"]
         or payload["meta"].count("Asia/Yekaterinburg") != 1
+        or payload["secondsInMeta"]
     ):
         raise AssertionError(f"auto schedule header must expose operator-readable summary without runtime noise, got {payload}")
     if sorted(times) != ["11:00", "20:00"]:
@@ -2529,6 +2668,56 @@ def _check_embedded_operator_dark_layout(page: object, embedded_tab: str) -> dic
     return payload
 
 
+def _check_activity_collapsible_block(page: object) -> dict[str, object]:
+    page.wait_for_selector("[data-activity-block]", timeout=10000)
+    collapsed = page.evaluate(
+        """() => {
+          const panel = document.querySelector('[data-activity-block]');
+          const summary = document.querySelector('[data-activity-summary]');
+          const disclosure = panel ? panel.querySelector('.activity-disclosure') : null;
+          const body = panel ? panel.querySelector('.activity-panel-body') : null;
+          const bodyRect = body ? body.getBoundingClientRect() : {width: 0, height: 0};
+          const summaryText = summary ? (summary.textContent || '').trim() : '';
+          return {
+            open: !!(panel && panel.open),
+            titleOnly: summaryText === 'Действия и состояния',
+            disclosureVisible: !!(disclosure && disclosure.getBoundingClientRect().width > 0),
+            bodyVisible: !!(body && bodyRect.width > 1 && bodyRect.height > 1),
+            technicalInHeader: ['ground', 'manual', 'action', 'update summary', 'runtime', 'Grouped manual actions']
+              .some((item) => summaryText.includes(item))
+          };
+        }"""
+    )
+    if (
+        collapsed["open"]
+        or not collapsed["titleOnly"]
+        or not collapsed["disclosureVisible"]
+        or collapsed["bodyVisible"]
+        or collapsed["technicalInHeader"]
+    ):
+        raise AssertionError(f"activity block must be collapsed by default with title-only shared header, got {collapsed}")
+    page.locator("[data-activity-summary]").click()
+    page.wait_for_function(
+        "() => !!(document.querySelector('[data-activity-block]') || {}).open",
+        timeout=5000,
+    )
+    opened = page.evaluate(
+        """() => {
+          const panel = document.querySelector('[data-activity-block]');
+          const body = panel ? panel.querySelector('.activity-panel-body') : null;
+          const bodyRect = body ? body.getBoundingClientRect() : {width: 0, height: 0};
+          return {
+            open: !!(panel && panel.open),
+            bodyVisible: !!(body && bodyRect.width > 1 && bodyRect.height > 1),
+            sourceStatusButton: ((document.querySelector('[data-source-status-load]') || {}).textContent || '').trim()
+          };
+        }"""
+    )
+    if not opened["open"] or not opened["bodyVisible"] or opened["sourceStatusButton"] != "Загрузить":
+        raise AssertionError(f"activity block body must open without losing existing content, got {opened}")
+    return {"collapsed": collapsed, "opened": opened}
+
+
 def _check_load_refresh_action(
     page: object,
     *,
@@ -2550,12 +2739,13 @@ def _check_load_refresh_action(
         """() => {
           const progress = document.querySelector('[data-global-progress]');
           const pulse = progress ? progress.querySelector('.top-progress-pulse') : null;
+          const rect = progress ? progress.getBoundingClientRect() : {width: 0};
           const trackVisible = Array.from(document.querySelectorAll('.top-progress-track, [data-global-progress-bar]'))
             .some((node) => {
               const style = getComputedStyle(node);
               return style.display !== 'none' && style.visibility !== 'hidden' && node.getBoundingClientRect().width > 0;
             });
-          return !!progress && !!pulse && !progress.hidden && !trackVisible && (progress.textContent || '').trim().length > 0;
+          return !!progress && !!pulse && !progress.hidden && !trackVisible && rect.width <= 32 && !!progress.getAttribute('aria-label');
         }""",
         timeout=5000,
     )
@@ -2621,13 +2811,16 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
             hidden: !node || !!node.hidden,
             load_status_hidden: !loadStatusNode || !!loadStatusNode.hidden,
             text: String((node && node.textContent) || '').trim(),
-            load_status_text: String((loadStatusNode && loadStatusNode.textContent) || '').trim(),
-            updated: trimPrefix(updatedNode ? updatedNode.textContent : '', 'Обновлено:'),
+            load_status_text: String((loadStatusNode && loadStatusNode.getAttribute('data-load-status-text')) || '').trim(),
+            load_status_title: String((loadStatusNode && loadStatusNode.getAttribute('title')) || '').trim(),
+            load_status_visible_text: String((loadStatusNode && loadStatusNode.textContent) || '').trim(),
+            load_status_dot_count: loadStatusNode ? loadStatusNode.querySelectorAll('.table-load-status-dot').length : 0,
+            updated: trimPrefix(updatedNode ? updatedNode.textContent : '', 'обн:'),
             updated_at: updatedNode ? String(updatedNode.getAttribute('data-table-summary-updated-at') || '').trim() : '',
-            freshness: trimPrefix(freshnessNode ? freshnessNode.textContent : '', 'Свежесть:'),
+            freshness: trimPrefix(freshnessNode ? freshnessNode.textContent : '', 'свеж:'),
             freshness_at: freshnessNode ? String(freshnessNode.getAttribute('data-table-summary-freshness-at') || '').trim() : '',
             freshness_source: freshnessNode ? String(freshnessNode.getAttribute('data-table-summary-freshness-source') || '').trim() : '',
-            status: trimPrefix(loadStatusNode ? loadStatusNode.textContent : '', 'Загрузка:'),
+            status: String((loadStatusNode && loadStatusNode.getAttribute('data-load-status-text')) || '').trim(),
             status_detail: ''
           };
         }"""
@@ -2638,10 +2831,12 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
         raise AssertionError(f"load status must be visible inline with the load button, got {payload}")
     text = str(payload.get("text") or "")
     load_status_text = str(payload.get("load_status_text") or "")
-    if "Обновлено:" not in text or "Свежесть:" not in text or "Свежесть данных:" in text or "Статус:" in text:
-        raise AssertionError(f"table header summary must include only updated/freshness labels, got {payload}")
-    if not load_status_text.startswith("Загрузка: "):
-        raise AssertionError(f"load status must describe the latest load only with compact wording, got {payload}")
+    if "обн:" not in text or "свеж:" not in text or "Обновлено:" in text or "Свежесть данных:" in text or "Статус:" in text:
+        raise AssertionError(f"table header summary must include only short updated/freshness labels, got {payload}")
+    if payload.get("load_status_visible_text") or int(payload.get("load_status_dot_count") or 0) != 1:
+        raise AssertionError(f"load status must be an icon-only lamp, got {payload}")
+    if not str(payload.get("load_status_title") or "").startswith("Загрузка: "):
+        raise AssertionError(f"load status lamp must keep textual status in title/aria, got {payload}")
     if "Статус последней загрузки" in load_status_text or "today_current" in load_status_text or "yesterday_closed" in load_status_text:
         raise AssertionError(f"load status must not expose technical/latest-window wording, got {payload}")
     if text.count("Asia/Yekaterinburg") != 0:
@@ -3141,6 +3336,7 @@ def _check_sku_separators(page: object) -> dict[str, int]:
         """() => {
           const separators = Array.from(document.querySelectorAll('.sku-separator-row'));
           const heights = separators.map((row) => Math.round(row.getBoundingClientRect().height));
+          const labels = separators.map((row) => ((row.querySelector('.sku-separator-label') || {}).textContent || '').trim()).filter(Boolean);
           const first = separators[0] || null;
           const previousKind = first && first.previousElementSibling ? first.previousElementSibling.getAttribute('data-row-kind') : '';
           const nextKind = first && first.nextElementSibling ? first.nextElementSibling.getAttribute('data-row-kind') : '';
@@ -3154,18 +3350,28 @@ def _check_sku_separators(page: object) -> dict[str, int]:
           return {
             count: separators.length,
             minHeight: heights.length ? Math.min(...heights) : 0,
+            labels,
+            labeledCount: labels.length,
+            firstLabel: labels[0] || '',
             firstBoundary: previousKind + '->' + nextKind,
             skuSkuSeparatorCount
           };
         }"""
     )
-    if int(state["count"]) <= 0 or int(state["minHeight"]) < 24 or state["firstBoundary"] != "total->sku":
-        raise AssertionError(f"table must render tall object separator rows from total to SKU and between SKU blocks, got {state}")
+    if (
+        int(state["count"]) <= 0
+        or int(state["minHeight"]) < 24
+        or state["firstBoundary"] != "total->sku"
+        or int(state["labeledCount"]) != int(state["count"])
+        or not state["firstLabel"]
+    ):
+        raise AssertionError(f"table must render labeled object separator rows from total to SKU and between SKU blocks, got {state}")
     return {
         "separator_count": int(state["count"]),
         "min_height": int(state["minHeight"]),
         "first_boundary": str(state["firstBoundary"]),
         "sku_sku_separator_count": int(state["skuSkuSeparatorCount"]),
+        "first_label": str(state["firstLabel"]),
     }
 
 

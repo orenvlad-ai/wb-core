@@ -43,7 +43,7 @@
     }
 
     body {
-      margin: 0;
+      margin: 0 0 0 auto;
       min-height: 100vh;
       background:
         radial-gradient(circle at 50% -24%, rgba(255, 255, 255, 0.06), transparent 32rem),
@@ -964,17 +964,16 @@
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 8px;
-      min-height: 28px;
+      flex: 0 0 auto;
+      width: 24px;
+      height: 24px;
+      min-height: 24px;
       border: 1px solid rgba(139, 92, 246, 0.34);
       border-radius: 999px;
       background: rgba(139, 92, 246, 0.1);
       color: #ddd6fe;
-      padding: 4px 9px;
-      font-size: 11px;
-      font-weight: 800;
-      line-height: 1.2;
-      white-space: nowrap;
+      padding: 0;
+      overflow: hidden;
     }
 
     .top-progress[hidden] {
@@ -1003,13 +1002,19 @@
     }
 
     .top-progress-label {
-      font-size: 11px;
-      line-height: 1.35;
-      color: currentColor;
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
       white-space: nowrap;
+      border: 0;
     }
 
-    .auto-schedule-panel {
+    .auto-schedule-panel,
+    .activity-panel {
       margin: 0 0 8px;
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -1018,7 +1023,8 @@
       overflow: hidden;
     }
 
-    .auto-schedule-summary {
+    .auto-schedule-summary,
+    .activity-summary {
       display: flex;
       align-items: center;
       gap: 8px;
@@ -1029,11 +1035,13 @@
       user-select: none;
     }
 
-    .auto-schedule-summary::-webkit-details-marker {
+    .auto-schedule-summary::-webkit-details-marker,
+    .activity-summary::-webkit-details-marker {
       display: none;
     }
 
-    .auto-schedule-disclosure {
+    .auto-schedule-disclosure,
+    .activity-disclosure {
       display: grid;
       flex: 0 0 22px;
       width: 22px;
@@ -1045,7 +1053,8 @@
       background: var(--panel-subtle);
     }
 
-    .auto-schedule-disclosure::before {
+    .auto-schedule-disclosure::before,
+    .activity-disclosure::before {
       content: ">";
       font-size: 12px;
       line-height: 1;
@@ -1053,18 +1062,22 @@
       transition: transform 150ms ease;
     }
 
-    .auto-schedule-panel[open] .auto-schedule-disclosure::before {
+    .auto-schedule-panel[open] .auto-schedule-disclosure::before,
+    .activity-panel[open] .activity-disclosure::before {
       transform: rotate(90deg) translateX(1px);
     }
 
-    .auto-schedule-summary:hover .auto-schedule-disclosure {
+    .auto-schedule-summary:hover .auto-schedule-disclosure,
+    .activity-summary:hover .activity-disclosure {
       border-color: rgba(37, 99, 235, 0.32);
       color: var(--accent);
     }
 
     .auto-schedule-summary-text {
-      display: grid;
-      gap: 2px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1 1 auto;
       min-width: 0;
     }
 
@@ -1098,6 +1111,31 @@
       color: var(--muted);
       font-size: 11px;
       line-height: 1.4;
+    }
+
+    .auto-schedule-meta {
+      margin-left: auto;
+      max-width: min(560px, 58vw);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      text-align: right;
+    }
+
+    .activity-summary-title {
+      font-size: 13px;
+      font-weight: 800;
+      line-height: 1.3;
+      color: var(--text);
+    }
+
+    .activity-panel-body {
+      border-top: 1px solid var(--border);
+      padding: 10px;
+    }
+
+    .activity-panel:not([open]) .activity-panel-body {
+      display: none;
     }
 
     .auto-schedule-table-wrap {
@@ -1560,6 +1598,59 @@
     .table-load-status {
       display: inline-flex;
       align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+      width: 24px;
+      height: 24px;
+      min-width: 24px;
+      min-height: 24px;
+      margin: 0;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--panel-subtle);
+      color: var(--muted-strong);
+      padding: 0;
+    }
+
+    .table-load-status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: currentColor;
+      box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 16%, transparent);
+    }
+
+    .table-load-status.tone-success {
+      border-color: rgba(34, 197, 94, 0.34);
+      background: rgba(34, 197, 94, 0.12);
+      color: #4ade80;
+    }
+
+    .table-load-status.tone-warning {
+      border-color: rgba(245, 158, 11, 0.36);
+      background: rgba(245, 158, 11, 0.12);
+      color: #fbbf24;
+    }
+
+    .table-load-status.tone-error {
+      border-color: rgba(248, 113, 113, 0.4);
+      background: rgba(248, 113, 113, 0.12);
+      color: #f87171;
+    }
+
+    .table-load-status.tone-neutral {
+      border-color: rgba(148, 163, 184, 0.28);
+      background: rgba(148, 163, 184, 0.12);
+      color: #94a3b8;
+    }
+
+    .table-load-status[hidden] {
+      display: none;
+    }
+
+    .table-load-status-legacy {
+      display: inline-flex;
+      align-items: center;
       min-height: 28px;
       margin: 0;
       max-width: 270px;
@@ -1576,19 +1667,19 @@
       white-space: nowrap;
     }
 
-    .table-load-status.tone-success {
+    .table-load-status-legacy.tone-success {
       border-color: rgba(34, 197, 94, 0.32);
       background: var(--success-bg);
       color: var(--success-text);
     }
 
-    .table-load-status.tone-warning {
+    .table-load-status-legacy.tone-warning {
       border-color: rgba(245, 158, 11, 0.34);
       background: var(--warning-bg);
       color: var(--warning-text);
     }
 
-    .table-load-status.tone-error {
+    .table-load-status-legacy.tone-error {
       border-color: rgba(248, 113, 113, 0.38);
       background: var(--error-bg);
       color: var(--error-text);
@@ -1598,8 +1689,13 @@
       flex: 0 0 auto;
     }
 
-    .table-load-status[hidden] {
-      display: none;
+    .table-load-action-cluster {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex: 0 0 auto;
+      margin-left: auto;
+      white-space: nowrap;
     }
 
     .panel h2 {
@@ -1618,7 +1714,7 @@
     }
 
     .table-heading-row > [data-load-refresh-button] {
-      margin-left: auto;
+      margin-left: 0;
     }
 
     .table-source-kicker {
@@ -1842,9 +1938,9 @@
     }
 
     .table-header-controls .toolbar-field {
-      flex: 0 1 122px;
-      min-width: 104px;
-      max-width: 136px;
+      flex: 0 1 132px;
+      min-width: 112px;
+      max-width: 148px;
       flex-direction: row;
       align-items: center;
       gap: 4px;
@@ -1857,9 +1953,15 @@
     }
 
     .table-header-controls .filter-label {
-      flex: 0 0 auto;
-      font-size: 9px;
-      letter-spacing: 0.04em;
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
     }
 
     .toolbar-field-search {
@@ -2055,7 +2157,8 @@
     }
 
     .metrics-presentation-summary,
-    .auto-schedule-summary {
+    .auto-schedule-summary,
+    .activity-summary {
       display: flex;
       align-items: center;
       justify-content: flex-start;
@@ -2071,12 +2174,14 @@
     }
 
     .metrics-presentation-summary::-webkit-details-marker,
-    .auto-schedule-summary::-webkit-details-marker {
+    .auto-schedule-summary::-webkit-details-marker,
+    .activity-summary::-webkit-details-marker {
       display: none;
     }
 
     .collapsible-disclosure,
-    .auto-schedule-disclosure {
+    .auto-schedule-disclosure,
+    .activity-disclosure {
       display: grid;
       flex: 0 0 22px;
       width: 22px;
@@ -2089,7 +2194,8 @@
     }
 
     .collapsible-disclosure::before,
-    .auto-schedule-disclosure::before {
+    .auto-schedule-disclosure::before,
+    .activity-disclosure::before {
       content: ">";
       font-size: 12px;
       line-height: 1;
@@ -2098,12 +2204,14 @@
     }
 
     .metrics-presentation-panel[open] .collapsible-disclosure::before,
-    .auto-schedule-panel[open] .auto-schedule-disclosure::before {
+    .auto-schedule-panel[open] .auto-schedule-disclosure::before,
+    .activity-panel[open] .activity-disclosure::before {
       transform: rotate(90deg) translateX(1px);
     }
 
     .metrics-presentation-summary:hover .collapsible-disclosure,
-    .auto-schedule-summary:hover .auto-schedule-disclosure {
+    .auto-schedule-summary:hover .auto-schedule-disclosure,
+    .activity-summary:hover .activity-disclosure {
       border-color: rgba(139, 92, 246, 0.44);
       color: var(--accent);
     }
@@ -2799,8 +2907,21 @@
     .table-header-controls .select,
     .table-header-controls .history-compact-control {
       min-height: 28px;
-      padding-right: 30px;
+      padding-left: 9px;
+      padding-right: 36px;
       font-size: 11px;
+    }
+
+    .table-header-controls .select {
+      appearance: none;
+      background-image:
+        linear-gradient(45deg, transparent 50%, currentColor 50%),
+        linear-gradient(135deg, currentColor 50%, transparent 50%);
+      background-position:
+        calc(100% - 16px) 50%,
+        calc(100% - 11px) 50%;
+      background-size: 5px 5px, 5px 5px;
+      background-repeat: no-repeat;
     }
 
     .table-header-controls .history-compact-panel {
@@ -3056,6 +3177,26 @@
       background: linear-gradient(180deg, rgba(139, 92, 246, 0.08), rgba(139, 92, 246, 0.02));
       border-top: 1px solid rgba(139, 92, 246, 0.18);
       border-bottom: 1px solid rgba(255, 255, 255, 0.035);
+      vertical-align: middle;
+    }
+
+    .sku-separator-label {
+      display: inline-flex;
+      align-items: center;
+      max-width: min(420px, 52vw);
+      min-height: 22px;
+      margin-left: 10px;
+      border: 1px solid rgba(139, 92, 246, 0.32);
+      border-radius: 999px;
+      background: rgba(139, 92, 246, 0.12);
+      color: #ddd6fe;
+      padding: 2px 9px;
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 1.2;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .state-box {
@@ -3444,8 +3585,8 @@
       }
 
       .table-load-status {
-        flex: 1 1 160px;
-        max-width: none;
+        flex: 0 0 24px;
+        max-width: 24px;
         justify-content: center;
       }
 
@@ -3676,7 +3817,7 @@
               <div class="toolbar-field toolbar-field-range">
                 <span class="filter-label">Диапазон</span>
                 <div class="history-compact-panel" data-history-panel>
-                  <button class="history-compact-control" type="button" data-history-toggle aria-expanded="false" aria-controls="history-popover">
+                  <button class="history-compact-control" type="button" data-history-toggle aria-label="Выбрать диапазон" aria-expanded="false" aria-controls="history-popover">
                     <span class="history-control-label" data-history-label>загрузка периода…</span>
                     <svg class="history-control-icon" viewBox="0 0 24 24" aria-hidden="true">
                       <rect x="4" y="5" width="16" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="2"></rect>
@@ -3723,12 +3864,14 @@
               </div>
               <div class="filters-grid table-filter-controls" data-filter-controls></div>
             </div>
-            <p class="table-load-status" data-table-load-status hidden>Загрузка: нет данных</p>
-            <div class="top-progress" data-global-progress hidden>
-              <span class="top-progress-pulse" aria-hidden="true"></span>
-              <span class="top-progress-label" data-global-progress-label>Загрузка…</span>
-            </div>
-            <button class="button primary" type="button" data-load-refresh-button>Загрузить</button>
+            <span class="table-load-action-cluster">
+              <p class="table-load-status tone-neutral" data-table-load-status data-load-status-text="нет данных" title="Загрузка: нет данных" aria-label="Загрузка: нет данных" hidden><span class="table-load-status-dot" aria-hidden="true"></span></p>
+              <div class="top-progress" data-global-progress hidden>
+                <span class="top-progress-pulse" aria-hidden="true"></span>
+                <span class="top-progress-label" data-global-progress-label>Загрузка…</span>
+              </div>
+              <button class="button primary" type="button" data-load-refresh-button>Загрузить</button>
+            </span>
           </div>
         </div>
         <div class="table-header-meta">
@@ -3772,15 +3915,12 @@
       </div>
     </section>
 
-    <section class="panel" data-activity-block>
-      <div class="panel-top">
-        <div>
-          <h2>Действия и состояния</h2>
-          <p class="panel-note">
-            Grouped manual actions reuse existing refresh/status/job/log seams. Отдельный update-summary блок не используется.
-          </p>
-        </div>
-      </div>
+    <details class="activity-panel" data-activity-block>
+      <summary class="activity-summary" data-activity-summary>
+        <span class="activity-disclosure" aria-hidden="true"></span>
+        <span class="activity-summary-title" role="heading" aria-level="2">Действия и состояния</span>
+      </summary>
+      <div class="activity-panel-body">
       <div class="activity-layout">
         <section class="activity-card">
           <div class="activity-card-header">
@@ -3816,7 +3956,8 @@
           </div>
         </section>
       </div>
-    </section>
+      </div>
+    </details>
     </section>
 
     <section class="unified-tab-panel operator-embed-panel" data-unified-tab-panel="factory-order" hidden>
@@ -5428,6 +5569,8 @@
       const normalizedPercent = Math.max(0, Math.min(100, Number(percent) || 0));
       globalProgressNode.hidden = false;
       globalProgressNode.setAttribute("data-progress-percent", String(normalizedPercent));
+      globalProgressNode.setAttribute("title", String(label || "Загрузка…"));
+      globalProgressNode.setAttribute("aria-label", String(label || "Загрузка…"));
       if (globalProgressBarNode) {
         globalProgressBarNode.style.width = normalizedPercent + "%";
       }
@@ -6213,10 +6356,45 @@
       return derived;
     }
 
+    function captureMetricPresentationScrollState() {
+      if (!metricsPresentationBodyNode) {
+        return {};
+      }
+      const result = {};
+      metricsPresentationBodyNode.querySelectorAll("[data-metrics-config-scope-table]").forEach(function(node) {
+        const scopeId = String(node.getAttribute("data-metrics-config-scope") || "");
+        if (scopeId) {
+          result[scopeId] = {
+            scrollTop: node.scrollTop || 0,
+            maxHeight: node.style.maxHeight || ""
+          };
+        }
+      });
+      return result;
+    }
+
+    function restoreMetricPresentationScrollState(scrollState) {
+      if (!metricsPresentationBodyNode || !scrollState) {
+        return;
+      }
+      Object.keys(scrollState).forEach(function(scopeId) {
+        const selector = '[data-metrics-config-scope-table][data-metrics-config-scope="' + cssEscape(scopeId) + '"]';
+        const node = metricsPresentationBodyNode.querySelector(selector);
+        if (node) {
+          const scopeState = scrollState[scopeId] || {};
+          if (scopeState.maxHeight) {
+            node.style.maxHeight = scopeState.maxHeight;
+          }
+          node.scrollTop = scopeState.scrollTop || 0;
+        }
+      });
+    }
+
     function renderMetricPresentationPanel(payload) {
       if (!metricsPresentationPanelNode || !metricsPresentationBodyNode || !metricsPresentationSummaryNode) {
         return;
       }
+      const scrollState = captureMetricPresentationScrollState();
       const scopes = metricPresentationScopes();
       const totalCount = scopes.reduce(function(count, scope) {
         return count + scope.metricKeys.length;
@@ -6250,6 +6428,10 @@
         scopes.map(renderMetricConfigScopeTable).join(""),
         "</div>"
       ].join("");
+      restoreMetricPresentationScrollState(scrollState);
+      requestAnimationFrame(function() {
+        restoreMetricPresentationScrollState(scrollState);
+      });
     }
 
     function renderMetricConfigScopeTable(scope) {
@@ -6926,6 +7108,21 @@
       }).join("");
     }
 
+    function setLoadStatusLamp(statusText, statusTone) {
+      if (!tableLoadStatusNode) {
+        return;
+      }
+      const normalizedText = String(statusText || "нет данных");
+      const normalizedTone = normalizeTone(statusTone || "neutral");
+      const label = "Загрузка: " + normalizedText;
+      tableLoadStatusNode.hidden = !!(globalProgressNode && !globalProgressNode.hidden);
+      tableLoadStatusNode.className = "table-load-status tone-" + normalizedTone;
+      tableLoadStatusNode.setAttribute("title", label);
+      tableLoadStatusNode.setAttribute("aria-label", label);
+      tableLoadStatusNode.setAttribute("data-load-status-text", normalizedText);
+      tableLoadStatusNode.innerHTML = '<span class="table-load-status-dot" aria-hidden="true"></span>';
+    }
+
     function renderTableSummaryLine(cards) {
       const sourceCards = Array.isArray(cards) ? cards : [];
       const pageRefreshCard = sourceCards.find(function(card) {
@@ -6939,36 +7136,30 @@
       });
       const parts = [];
       if (pageRefreshCard) {
-        const updatedText = formatSummaryCardValue(pageRefreshCard, {suppressTimezone: true});
+        const updatedText = formatSummaryCardValue(pageRefreshCard, {suppressTimezone: true, noSeconds: true});
         if (updatedText) {
           parts.push(
             '<span class="table-summary-token" data-table-summary-updated' +
               (pageRefreshCard.updated_at ? ' data-table-summary-updated-at="' + escapeHtml(pageRefreshCard.updated_at) + '"' : "") +
-              '>Обновлено: ' + escapeHtml(updatedText) + '</span>'
+              '>обн: ' + escapeHtml(updatedText) + '</span>'
           );
         }
       }
       if (dataFreshnessCard) {
-        const freshnessText = formatSummaryCardValue(dataFreshnessCard, {suppressTimezone: true}) || "нет данных";
+        const freshnessText = formatSummaryCardValue(dataFreshnessCard, {suppressTimezone: true, noSeconds: true}) || "нет данных";
         parts.push(
           '<span class="table-summary-token table-summary-freshness" data-table-summary-freshness' +
             (dataFreshnessCard.updated_at ? ' data-table-summary-freshness-at="' + escapeHtml(dataFreshnessCard.updated_at) + '"' : "") +
             (dataFreshnessCard.source ? ' data-table-summary-freshness-source="' + escapeHtml(dataFreshnessCard.source) + '"' : "") +
-            '>Свежесть: ' + escapeHtml(freshnessText) + '</span>'
+            '>свеж: ' + escapeHtml(freshnessText) + '</span>'
         );
       }
       if (statusCard) {
         const statusText = compactLoadStatusText(statusCard);
         const statusTone = compactLoadStatusTone(statusCard, statusText);
-        if (tableLoadStatusNode) {
-          tableLoadStatusNode.hidden = !!(globalProgressNode && !globalProgressNode.hidden);
-          tableLoadStatusNode.className = "table-load-status tone-" + statusTone;
-          tableLoadStatusNode.textContent = "Загрузка: " + statusText;
-        }
-      } else if (tableLoadStatusNode) {
-        tableLoadStatusNode.hidden = !!(globalProgressNode && !globalProgressNode.hidden);
-        tableLoadStatusNode.className = "table-load-status tone-neutral";
-        tableLoadStatusNode.textContent = "Загрузка: нет данных";
+        setLoadStatusLamp(statusText, statusTone);
+      } else {
+        setLoadStatusLamp("нет данных", "neutral");
       }
       tableSummaryLineNode.hidden = parts.length === 0;
       tableSummaryLineNode.innerHTML = parts.join('<span class="table-summary-separator" aria-hidden="true">·</span>');
@@ -7338,8 +7529,9 @@
     function formatTimestampDisplay(value, options) {
       const timezone = options && options.timezone ? String(options.timezone) : "";
       const suppressTimezone = !!(options && options.suppressTimezone);
+      const noSeconds = !!(options && options.noSeconds);
       if (value instanceof Date && !Number.isNaN(value.getTime())) {
-        return formatClientTimestamp(value, timezone, {suppressTimezone: suppressTimezone});
+        return formatClientTimestamp(value, timezone, {suppressTimezone: suppressTimezone, noSeconds: noSeconds});
       }
       const text = String(value || "").trim();
       if (!text) {
@@ -7349,15 +7541,16 @@
       if (Number.isNaN(parsed.getTime())) {
         return text;
       }
-      return formatClientTimestamp(parsed, timezone, {suppressTimezone: suppressTimezone});
+      return formatClientTimestamp(parsed, timezone, {suppressTimezone: suppressTimezone, noSeconds: noSeconds});
     }
 
     function formatClientTimestamp(dateValue, timezoneOverride, options) {
       const timezone = String(timezoneOverride || "").trim();
       const suppressTimezone = !!(options && options.suppressTimezone);
+      const noSeconds = !!(options && options.noSeconds);
       const formatOptions = {
         dateStyle: "short",
-        timeStyle: "medium"
+        timeStyle: noSeconds ? "short" : "medium"
       };
       if (timezone) {
         formatOptions.timeZone = timezone;
@@ -7367,8 +7560,12 @@
       return label ? formatted + " (" + label + ")" : formatted;
     }
 
-    function formatScheduleTimestampDisplay(value, timezone) {
-      return formatTimestampDisplay(value, {timezone: timezone || "Asia/Yekaterinburg"});
+    function formatScheduleTimestampDisplay(value, timezone, options) {
+      return formatTimestampDisplay(value, {
+        timezone: timezone || "Asia/Yekaterinburg",
+        suppressTimezone: !!(options && options.suppressTimezone),
+        noSeconds: !!(options && options.noSeconds)
+      });
     }
 
     function browserTimezoneLabel() {
@@ -8012,8 +8209,9 @@
       if (String(control.control_id || "") === "metric") {
         return '<input type="hidden" data-filter-control="metric" value="' + escapeHtml(ALL_VALUE) + '">';
       }
+      const label = toolbarControlLabel(control);
       return [
-        '<select class="select" data-filter-control="' + escapeHtml(control.control_id) + '">',
+        '<select class="select" data-filter-control="' + escapeHtml(control.control_id) + '" aria-label="' + escapeHtml(label) + '" title="' + escapeHtml(label) + '">',
         (control.options || []).map(function(option) {
           const suffix = typeof option.count === "number" ? " (" + option.count + ")" : "";
           return (
@@ -8275,7 +8473,7 @@
       let previousRow = null;
       visibleRows.forEach(function(row) {
         if (shouldInsertSkuSeparator(previousRow, row)) {
-          bodyParts.push(buildSkuSeparatorRow(tableColumnCount));
+          bodyParts.push(buildSkuSeparatorRow(tableColumnCount, row));
         }
         bodyParts.push(buildDataRow(row, columns, stickyOffsets));
         previousRow = row;
@@ -8292,8 +8490,15 @@
       return '<td class="table-spacer-cell" data-table-spacer-cell="body" aria-hidden="true"></td>';
     }
 
-    function buildSkuSeparatorRow(columnCount) {
-      return '<tr class="sku-separator-row" aria-hidden="true"><td colspan="' + columnCount + '"></td></tr>';
+    function buildSkuSeparatorRow(columnCount, nextRow) {
+      const label = tableObjectLabelForRow(nextRow);
+      return [
+        '<tr class="sku-separator-row" data-row-kind="separator" data-separator-next-label="' + escapeHtml(label) + '">',
+        '<td colspan="' + columnCount + '">',
+        '<span class="sku-separator-label" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</span>',
+        "</td>",
+        "</tr>"
+      ].join("");
     }
 
     function shouldInsertSkuSeparator(previousRow, row) {
@@ -10306,7 +10511,7 @@
       if (vitrinaAutoMetaNode) {
         const parts = [
           "Часовой пояс: " + scheduleTimezone,
-          model.nextAutoRunAt ? ("Следующий запуск: " + formatTimestampDisplay(model.nextAutoRunAt, {timezone: scheduleTimezone, suppressTimezone: true})) : ""
+          model.nextAutoRunAt ? ("Следующий запуск: " + formatTimestampDisplay(model.nextAutoRunAt, {timezone: scheduleTimezone, suppressTimezone: true, noSeconds: true})) : ""
         ];
         vitrinaAutoMetaNode.textContent = model.loading ? "Расписание загружается…" : parts.filter(Boolean).join(" · ");
       }
