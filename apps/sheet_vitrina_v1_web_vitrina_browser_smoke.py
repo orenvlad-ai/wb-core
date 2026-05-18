@@ -839,6 +839,10 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
           const scopeTables = Array.from(panel ? panel.querySelectorAll('[data-metrics-config-scope-table]') : []).map((tableNode) => ({
             scopeId: tableNode.getAttribute('data-metrics-config-scope') || '',
             label: ((tableNode.querySelector('.metrics-config-scope-title') || {}).textContent || '').trim(),
+            selectionButtonText: ((tableNode.querySelector('[data-metric-selection-toggle]') || {}).textContent || '').trim(),
+            bulkOptions: Array.from(tableNode.querySelectorAll('[data-metric-bulk-display] option')).map((node) => (node.textContent || '').trim()),
+            bulkDisabled: !!((tableNode.querySelector('[data-metric-bulk-display]') || {}).disabled),
+            checkboxCount: tableNode.querySelectorAll('[data-metric-selection-checkbox]').length,
             headers: Array.from(tableNode.querySelectorAll('.metrics-config-row.is-header [role="columnheader"]')).map((node) => (node.textContent || '').trim()),
             rows: Array.from(tableNode.querySelectorAll('[data-metric-config-row]:not(.is-header)')).map((row) => ({
               metricKey: row.getAttribute('data-metric-config-key') || '',
@@ -907,6 +911,12 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
             raise AssertionError(f"each metric row must expose exactly one drag handle, got {scope}")
         if any(row["selectOptions"] != ["Показано", "Свернуто", "Скрыто"] for row in scope["rows"]):
             raise AssertionError(f"display selector options mismatch, got {scope}")
+        if scope["selectionButtonText"] != "Выбрать":
+            raise AssertionError(f"each scope table must expose selection mode button, got {scope}")
+        if scope["bulkOptions"] != ["Отображение", "Показано", "Свернуто", "Скрыто"] or not scope["bulkDisabled"]:
+            raise AssertionError(f"bulk display selector must start disabled with canonical options, got {scope}")
+        if int(scope["checkboxCount"]) != 0:
+            raise AssertionError(f"selection checkboxes must be hidden outside selection mode, got {scope}")
     if int(panel_state["whiteNodeCount"]) != 0 or panel_state["oldLabelHits"]:
         raise AssertionError(f"metrics presentation must use compact dark two-table layout with no old wording, got {panel_state}")
     if float(panel_state["maxRowHeight"]) > 34:
@@ -923,6 +933,7 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         raise AssertionError(f"metrics presentation needs a scope with at least four metrics from multiple groups, got {panel_state}")
     scope_id = str(target_scope["scopeId"])
     initial_order = [str(row["metricKey"]) for row in target_scope["rows"]]
+    bulk_selection = _check_metric_bulk_selection(page, scope_id=scope_id, initial_order=initial_order, storage_key=storage_key)
     source_row = target_scope["rows"][0]
     target_row = next((row for row in target_scope["rows"][1:] if row["group"] != source_row["group"]), target_scope["rows"][2])
     source_key = str(source_row["metricKey"])
@@ -1023,11 +1034,113 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         raise AssertionError("obsolete grouped metric-presentation localStorage must not crash the page")
     return {
         "scope_tables": scope_labels,
+        "bulk_selection": bulk_selection,
         "order_changed": [target_key, source_key],
         "display_statuses": {"shown": anchor_key, "collapsed": [collapsed_one, collapsed_two], "hidden": hidden_key},
         "disclosure_anchor": anchor_key,
         "broken_storage_fallback": True,
         "obsolete_storage_fallback": True,
+    }
+
+
+def _check_metric_bulk_selection(page: object, *, scope_id: str, initial_order: list[str], storage_key: str) -> dict[str, object]:
+    if len(initial_order) < 4:
+        raise AssertionError(f"bulk selection check needs at least four metrics, got {initial_order}")
+    other_scope_id = "sku" if scope_id == "total" else "total"
+    selected_a, unselected_key, selected_b, unselected_target = initial_order[:4]
+    multi_target = unselected_key
+
+    _toggle_metric_selection_mode(page, scope_id)
+    selection_open = _metric_selection_state(page, scope_id=scope_id, other_scope_id=other_scope_id)
+    if (
+        selection_open["buttonText"] != "Готово"
+        or selection_open["checkboxCount"] != len(initial_order)
+        or selection_open["otherCheckboxCount"] != 0
+        or not selection_open["bulkDisabled"]
+    ):
+        raise AssertionError(f"selection mode must be isolated per scope and bulk-disabled while empty, got {selection_open}")
+
+    _set_metric_selected(page, scope_id=scope_id, metric_key=selected_a, selected=True)
+    _set_metric_selected(page, scope_id=scope_id, metric_key=selected_b, selected=True)
+    selection_filled = _metric_selection_state(page, scope_id=scope_id, other_scope_id=other_scope_id)
+    if (
+        selection_filled["selectedKeys"] != [selected_a, selected_b]
+        or selection_filled["bulkDisabled"]
+        or selection_filled["selectedRowCount"] != 2
+        or selection_filled["otherCheckboxCount"] != 0
+    ):
+        raise AssertionError(f"selected metrics must stay ordered and isolated, got {selection_filled}")
+
+    _drag_metric_after(page, scope_id=scope_id, metric_key=unselected_key, target_metric_key=unselected_target)
+    page.wait_for_timeout(200)
+    after_unselected_drag = _metric_scope_order(page, scope_id)
+    selected_after_unselected_drag = _metric_selection_state(page, scope_id=scope_id, other_scope_id=other_scope_id)["selectedKeys"]
+    if not _appears_after(after_unselected_drag, unselected_key, unselected_target) or selected_after_unselected_drag != [selected_a, selected_b]:
+        raise AssertionError(
+            f"unselected drag must move only that metric and preserve selected rows, "
+            f"order={after_unselected_drag}, selected={selected_after_unselected_drag}"
+        )
+
+    _set_bulk_metric_display_status(page, scope_id=scope_id, status="hidden")
+    hidden_statuses = _metric_scope_statuses(page, scope_id)
+    hidden_counts = _visible_metric_key_counts(page)
+    if hidden_statuses.get(selected_a) != "hidden" or hidden_statuses.get(selected_b) != "hidden":
+        raise AssertionError(f"bulk display selector must hide selected rows, got {hidden_statuses}")
+    if int(hidden_counts.get(selected_a, 0)) != 0 or int(hidden_counts.get(selected_b, 0)) != 0:
+        raise AssertionError(f"bulk-hidden metrics must leave main table but remain in settings, got counts={hidden_counts}")
+
+    _set_bulk_metric_display_status(page, scope_id=scope_id, status="shown")
+    page.wait_for_timeout(150)
+    _drag_metric_after(page, scope_id=scope_id, metric_key=selected_a, target_metric_key=multi_target)
+    page.wait_for_timeout(250)
+    after_multi_drag = _metric_scope_order(page, scope_id)
+    if len(after_multi_drag) != len(set(after_multi_drag)) or set(after_multi_drag) != set(initial_order):
+        raise AssertionError(f"multi-drag must not duplicate or lose metrics, got {after_multi_drag}")
+    target_index = after_multi_drag.index(multi_target)
+    if after_multi_drag[target_index + 1:target_index + 3] != [selected_a, selected_b]:
+        raise AssertionError(f"multi-drag must move selected metrics as an ordered batch, got {after_multi_drag}")
+    table_order_after_multi_drag = _visible_metric_keys(page)
+    if not _appears_after(table_order_after_multi_drag, selected_a, multi_target) or not _appears_after(table_order_after_multi_drag, selected_b, selected_a):
+        raise AssertionError(f"main table must follow multi-drag order, got {table_order_after_multi_drag[:16]}")
+
+    _set_bulk_metric_display_status(page, scope_id=scope_id, status="collapsed")
+    page.wait_for_timeout(150)
+    persisted_order = _persisted_metric_scope_order(page, storage_key, scope_id)
+    persisted_display = _persisted_metric_display(page, storage_key, scope_id)
+    persisted_target_index = persisted_order.index(multi_target)
+    if persisted_order[persisted_target_index + 1:persisted_target_index + 3] != [selected_a, selected_b]:
+        raise AssertionError(f"multi-drag order must persist, got {persisted_order}")
+    if persisted_display.get(selected_a) != "collapsed" or persisted_display.get(selected_b) != "collapsed":
+        raise AssertionError(f"bulk display statuses must persist, got {persisted_display}")
+
+    page.reload(wait_until="commit")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    page.evaluate("() => { const panel = document.querySelector('[data-metrics-presentation]'); if (panel) { panel.open = true; } }")
+    after_reload_state = _metric_selection_state(page, scope_id=scope_id, other_scope_id=other_scope_id)
+    after_reload_order = _metric_scope_order(page, scope_id)
+    after_reload_display = _metric_scope_statuses(page, scope_id)
+    if after_reload_state["checkboxCount"] != 0 or after_reload_state["buttonText"] != "Выбрать":
+        raise AssertionError(f"selection must be transient and cleared after reload, got {after_reload_state}")
+    if after_reload_order != persisted_order:
+        raise AssertionError(f"multi-drag order must survive reload, got {after_reload_order}, expected {persisted_order}")
+    if after_reload_display.get(selected_a) != "collapsed" or after_reload_display.get(selected_b) != "collapsed":
+        raise AssertionError(f"bulk display status must survive reload, got {after_reload_display}")
+
+    page.locator("[data-reset-filters]").click()
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
+    page.evaluate("() => { const panel = document.querySelector('[data-metrics-presentation]'); if (panel) { panel.open = true; } }")
+    reset_order = _metric_scope_order(page, scope_id)
+    reset_statuses = _metric_scope_statuses(page, scope_id)
+    if reset_order != initial_order or any(status != "shown" for status in reset_statuses.values()):
+        raise AssertionError(f"reset must clear bulk order/status changes, got order={reset_order}, statuses={reset_statuses}")
+    return {
+        "scope": scope_id,
+        "selected": [selected_a, selected_b],
+        "unselected_drag": unselected_key,
+        "multi_target": multi_target,
+        "batch_order_after_target": after_multi_drag[target_index + 1:target_index + 3],
+        "persisted_after_reload": True,
+        "selection_transient": True,
     }
 
 
@@ -1085,6 +1198,84 @@ def _dispatch_html5_drag_after(page: object, *, source_selector: str, target_sel
           source.dispatchEvent(new DragEvent('dragend', eventInit));
         }""",
         {"sourceSelector": source_selector, "targetSelector": target_selector},
+    )
+
+
+def _toggle_metric_selection_mode(page: object, scope_id: str) -> None:
+    clicked = page.evaluate(
+        """(scopeId) => {
+          const button = document.querySelector('[data-metrics-config-scope-table][data-metrics-config-scope="' + scopeId + '"] [data-metric-selection-toggle]');
+          if (!button) {
+            return false;
+          }
+          button.click();
+          return true;
+        }""",
+        scope_id,
+    )
+    if not clicked:
+        raise AssertionError(f"missing selection toggle for {scope_id!r}")
+    page.wait_for_timeout(120)
+
+
+def _set_metric_selected(page: object, *, scope_id: str, metric_key: str, selected: bool) -> None:
+    scope = _css_attr(scope_id)
+    metric = _css_attr(metric_key)
+    checkbox = page.locator(
+        f'[data-metric-selection-checkbox][data-metric-config-scope="{scope}"][data-metric-config-key="{metric}"]'
+    ).first
+    try:
+        checkbox.wait_for(state="attached", timeout=5000)
+    except Exception as exc:
+        current = _metric_selection_state(page, scope_id=scope_id, other_scope_id=("sku" if scope_id == "total" else "total"))
+        current_keys = page.evaluate(
+            """(scopeId) => Array.from(document.querySelectorAll('[data-metrics-config-scope-table][data-metrics-config-scope="' + scopeId + '"] [data-metric-selection-checkbox]'))
+              .map((node) => node.getAttribute('data-metric-config-key') || '')""",
+            scope_id,
+        )
+        raise AssertionError(
+            f"missing selection checkbox for {scope_id!r}/{metric_key!r}; state={current}; keys={current_keys}"
+        ) from exc
+    checkbox.set_checked(selected)
+    page.wait_for_timeout(80)
+
+
+def _set_bulk_metric_display_status(page: object, *, scope_id: str, status: str) -> None:
+    changed = page.evaluate(
+        """({scopeId, status}) => {
+          const select = document.querySelector('[data-metric-bulk-display][data-metric-config-scope="' + scopeId + '"]');
+          if (!select || select.disabled) {
+            return false;
+          }
+          select.value = status;
+          select.dispatchEvent(new Event('change', {bubbles: true}));
+          return true;
+        }""",
+        {"scopeId": scope_id, "status": status},
+    )
+    if not changed:
+        raise AssertionError(f"missing or disabled bulk display selector for {scope_id!r}")
+    page.wait_for_timeout(150)
+
+
+def _metric_selection_state(page: object, *, scope_id: str, other_scope_id: str) -> dict[str, object]:
+    return page.evaluate(
+        """({scopeId, otherScopeId}) => {
+          const scopeTable = document.querySelector('[data-metrics-config-scope-table][data-metrics-config-scope="' + scopeId + '"]');
+          const otherScopeTable = document.querySelector('[data-metrics-config-scope-table][data-metrics-config-scope="' + otherScopeId + '"]');
+          const bulk = scopeTable ? scopeTable.querySelector('[data-metric-bulk-display]') : null;
+          return {
+            buttonText: scopeTable ? ((scopeTable.querySelector('[data-metric-selection-toggle]') || {}).textContent || '').trim() : '',
+            checkboxCount: scopeTable ? scopeTable.querySelectorAll('[data-metric-selection-checkbox]').length : 0,
+            otherCheckboxCount: otherScopeTable ? otherScopeTable.querySelectorAll('[data-metric-selection-checkbox]').length : 0,
+            bulkDisabled: bulk ? !!bulk.disabled : true,
+            selectedKeys: scopeTable ? Array.from(scopeTable.querySelectorAll('[data-metric-selection-checkbox]:checked'))
+              .map((node) => node.getAttribute('data-metric-config-key') || '')
+              .filter(Boolean) : [],
+            selectedRowCount: scopeTable ? scopeTable.querySelectorAll('[data-metric-config-row].is-selected').length : 0
+          };
+        }""",
+        {"scopeId": scope_id, "otherScopeId": other_scope_id},
     )
 
 
