@@ -1977,16 +1977,61 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
           const summary = header ? header.querySelector('[data-table-summary-line]') : null;
           const loadStatus = header ? header.querySelector('[data-table-load-status]') : null;
           const freshnessBadge = header ? header.querySelector('[data-table-freshness-indicator]') : null;
+          const freshnessLabel = freshnessBadge ? freshnessBadge.querySelector('[data-table-freshness-label]') : null;
           const objectLabel = header ? header.querySelector('[data-table-object-label]') : null;
           const progress = header ? header.querySelector('[data-global-progress]') : null;
           const loadButton = header ? header.querySelector('[data-load-refresh-button]') : null;
           const headerControls = header ? header.querySelector('[data-table-header-controls]') : null;
+          const leftZone = header ? header.querySelector('.table-heading-left') : null;
+          const rightZone = header ? header.querySelector('[data-table-heading-right]') : null;
           const source = header ? header.querySelector('.table-source-kicker') : null;
           const text = header ? (header.innerText || '') : '';
           const metaText = pageMeta ? ((pageMeta.textContent || '').trim()) : '';
           const buttonRect = loadButton ? loadButton.getBoundingClientRect() : {left: 0, right: 0, top: 0, bottom: 0};
           const statusRect = loadStatus ? loadStatus.getBoundingClientRect() : {left: 0, right: 0, top: 0, bottom: 0};
           const headerRect = header ? header.getBoundingClientRect() : {left: 0, right: 0, width: 0};
+          const rightRect = rightZone ? rightZone.getBoundingClientRect() : {left: 0, right: 0, width: 0};
+          const historyButton = header ? header.querySelector('[data-history-toggle]') : null;
+          const historyLabel = header ? header.querySelector('[data-history-label]') : null;
+          const historyIcon = header ? header.querySelector('.history-control-icon') : null;
+          const sectionSelect = header ? header.querySelector('[data-filter-control="section"]') : null;
+          const groupSelect = header ? header.querySelector('[data-filter-control="group"]') : null;
+          const measureText = (node, value) => {
+            if (!node) {
+              return 0;
+            }
+            const probe = document.createElement('span');
+            const styles = getComputedStyle(node);
+            probe.style.position = 'fixed';
+            probe.style.left = '-9999px';
+            probe.style.top = '-9999px';
+            probe.style.whiteSpace = 'nowrap';
+            probe.style.font = styles.font;
+            probe.textContent = value;
+            document.body.appendChild(probe);
+            const width = probe.getBoundingClientRect().width;
+            probe.remove();
+            return Math.ceil(width);
+          };
+          const selectState = (node) => {
+            if (!node) {
+              return {exists: false};
+            }
+            const rect = node.getBoundingClientRect();
+            const styles = getComputedStyle(node);
+            const selectedText = node.options && node.selectedIndex >= 0 ? (node.options[node.selectedIndex].text || '') : '';
+            return {
+              exists: true,
+              text: selectedText,
+              width: Math.round(rect.width),
+              textWidth: measureText(node, selectedText),
+              paddingLeft: Math.round(parseFloat(styles.paddingLeft || '0')),
+              paddingRight: Math.round(parseFloat(styles.paddingRight || '0')),
+            };
+          };
+          const historyRect = historyButton ? historyButton.getBoundingClientRect() : {width: 0, right: 0};
+          const historyLabelRect = historyLabel ? historyLabel.getBoundingClientRect() : {width: 0, right: 0};
+          const historyIconRect = historyIcon ? historyIcon.getBoundingClientRect() : {left: 0, right: 0};
           const forbidden = ['sheet_vitrina_v1', 'Основная web-витрина', 'В выбранном периоде', 'grid library', 'rows:', 'columns:', 'Снимок:', 'Вчера:', 'Сегодня:', 'TZ:', 'Статус последней загрузки', 'Последняя загрузка', 'Обновлено:', 'Свежесть данных', 'today_current', 'yesterday_closed', 'load window'];
           const visibleFilterLabels = Array.from(header ? header.querySelectorAll('.filter-label') : [])
             .filter((node) => {
@@ -2006,6 +2051,10 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
             progress_inside_header: !!progress,
             load_button_inside_header: !!loadButton,
             controls_inside_header: !!headerControls,
+            left_zone_exists: !!leftZone,
+            right_zone_exists: !!rightZone,
+            right_zone_anchored: !!rightZone && Math.abs(headerRect.right - rightRect.right) <= 16,
+            right_zone_near_button: !!rightZone && !!loadButton && Math.abs(rightRect.right - buttonRect.right) <= 4,
             old_toolbar_count: document.querySelectorAll('[data-table-toolbar]').length,
             search_count: document.querySelectorAll('[data-filter-control="search"]').length,
             columns_visible_count: Array.from(document.querySelectorAll('[data-column-manager]')).filter((node) => node.offsetParent !== null).length,
@@ -2030,8 +2079,20 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
             load_button_text: loadButton ? ((loadButton.textContent || '').trim()) : '',
             load_button_right_aligned: !!loadButton && buttonRect.left > headerRect.left + headerRect.width / 2,
             load_status_inline_left_of_button: !!loadStatus && !loadStatus.hidden && statusRect.right <= buttonRect.left + 2 && Math.abs(((statusRect.top + statusRect.bottom) / 2) - ((buttonRect.top + buttonRect.bottom) / 2)) <= 8,
+            freshness_label_text: freshnessLabel ? ((freshnessLabel.textContent || '').trim()) : '',
+            freshness_title: freshnessBadge ? (freshnessBadge.getAttribute('title') || '') : '',
             asia_yekaterinburg_in_summary: ((summary ? summary.textContent : '').match(/Asia\\/Yekaterinburg/g) || []).length,
             seconds_in_summary: /\\d{1,2}:\\d{2}:\\d{2}/.test(summary ? (summary.textContent || '') : ''),
+            history_control: {
+              text: historyLabel ? ((historyLabel.textContent || '').trim()) : '',
+              width: Math.round(historyRect.width),
+              labelWidth: Math.round(historyLabelRect.width),
+              labelScrollWidth: historyLabel ? Math.round(historyLabel.scrollWidth) : 0,
+              iconGap: historyIcon ? Math.round(historyIconRect.left - historyLabelRect.right) : 0,
+              iconRightInset: historyIcon ? Math.round(historyRect.right - historyIconRect.right) : 0,
+            },
+            section_control: selectState(sectionSelect),
+            group_control: selectState(groupSelect),
             header_text: text,
             has_freshness_badge: !!freshnessBadge && !freshnessBadge.hidden,
             forbidden_hits: forbidden.filter((item) => text.includes(item) || metaText.includes(item) || (tableMeta && tableMeta.textContent || '').includes(item))
@@ -2046,6 +2107,10 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         not payload["progress_inside_header"]
         or not payload["load_button_inside_header"]
         or not payload["controls_inside_header"]
+        or not payload["left_zone_exists"]
+        or not payload["right_zone_exists"]
+        or not payload["right_zone_anchored"]
+        or not payload["right_zone_near_button"]
         or int(payload["old_toolbar_count"]) != 0
         or int(payload["search_count"]) != 0
         or int(payload["columns_visible_count"]) != 0
@@ -2070,6 +2135,8 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         raise AssertionError(f"table header summary must expose short ob/fresh timestamps, got {payload}")
     if int(payload["asia_yekaterinburg_in_summary"]) != 0 or payload["seconds_in_summary"]:
         raise AssertionError(f"compact header timestamps must omit visible timezone and seconds, got {payload}")
+    if payload["freshness_label_text"] != "акт" or "актуально" not in str(payload["freshness_title"]):
+        raise AssertionError(f"actuality badge must be visibly compact while preserving semantic title, got {payload}")
     if payload["load_status_visible_text"] or int(payload["load_status_dot_count"]) != 1 or int(payload["load_status_width"]) > 32:
         raise AssertionError(f"load status must render as compact icon/lamp without visible text, got {payload}")
     if not str(payload["load_status_title"]).startswith("Загрузка: "):
@@ -2081,6 +2148,24 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         "нет данных",
     }:
         raise AssertionError(f"load status must use a short semantic value, got {payload}")
+    history_control = payload["history_control"]
+    if (
+        history_control["text"] != "15.04.2026 - 21.04.2026"
+        or int(history_control["labelScrollWidth"]) > int(history_control["labelWidth"]) + 2
+        or int(history_control["iconGap"]) < 4
+        or int(history_control["iconRightInset"]) < 7
+    ):
+        raise AssertionError(f"date range control must show the full value with balanced icon spacing, got {payload}")
+    for control_name in ("section_control", "group_control"):
+        control = payload[control_name]
+        available_text_width = int(control["width"]) - int(control["paddingLeft"]) - int(control["paddingRight"])
+        if (
+            not control.get("exists")
+            or not str(control.get("text") or "").startswith("Все ")
+            or int(control["textWidth"]) > available_text_width + 2
+            or int(control["paddingRight"]) < 22
+        ):
+            raise AssertionError(f"{control_name} must show its full selected label with chevron padding, got {payload}")
     return payload
 
 
@@ -3331,7 +3416,7 @@ def _check_static_group_labels(page: object) -> dict[str, object]:
     return payload
 
 
-def _check_sku_separators(page: object) -> dict[str, int]:
+def _check_sku_separators(page: object) -> dict[str, object]:
     state = page.evaluate(
         """() => {
           const separators = Array.from(document.querySelectorAll('.sku-separator-row'));
@@ -3366,12 +3451,78 @@ def _check_sku_separators(page: object) -> dict[str, int]:
         or not state["firstLabel"]
     ):
         raise AssertionError(f"table must render labeled object separator rows from total to SKU and between SKU blocks, got {state}")
+    sticky_state = page.evaluate(
+        """() => {
+          const scroll = document.querySelector('[data-table-scroll]');
+          const metricHeader = document.querySelector('[data-table-head] th[data-col-id="metric_label"]');
+          const separator = document.querySelector('.sku-separator-row');
+          const label = separator ? separator.querySelector('.sku-separator-label') : null;
+          if (!scroll || !metricHeader || !separator || !label) {
+            return {ok: false, reason: 'missing nodes'};
+          }
+          const previousWidth = scroll.style.width || '';
+          scroll.style.maxHeight = '180px';
+          scroll.style.width = '420px';
+          const headHeight = document.querySelector('[data-table-head]') ? document.querySelector('[data-table-head]').getBoundingClientRect().height : 0;
+          scroll.scrollTop = Math.max(0, separator.offsetTop - headHeight - 4);
+          scroll.scrollLeft = 0;
+          scroll.dispatchEvent(new Event('scroll'));
+          const metricBefore = metricHeader.getBoundingClientRect();
+          const labelBefore = label.getBoundingClientRect();
+          const beforeLeft = Math.round(labelBefore.left);
+          const maxScrollLeft = Math.max(0, scroll.scrollWidth - scroll.clientWidth);
+          scroll.scrollLeft = maxScrollLeft;
+          scroll.dispatchEvent(new Event('scroll'));
+          const metricAfter = metricHeader.getBoundingClientRect();
+          const labelAfter = label.getBoundingClientRect();
+          const originalText = label.textContent || '';
+          const originalTitle = label.getAttribute('title') || '';
+          label.textContent = 'SKU ' + 'длинное название '.repeat(12).trim();
+          label.title = label.textContent;
+          const longClientWidth = label.clientWidth;
+          const longScrollWidth = label.scrollWidth;
+          const longTitle = label.getAttribute('title') || '';
+          label.textContent = originalText;
+          label.title = originalTitle;
+          scroll.style.maxHeight = '';
+          scroll.style.width = previousWidth;
+          return {
+            ok: true,
+            maxScrollLeft: Math.round(maxScrollLeft),
+            beforeLeft,
+            afterLeft: Math.round(labelAfter.left),
+            afterRight: Math.round(labelAfter.right),
+            metricLeft: Math.round(metricAfter.left),
+            metricRight: Math.round(metricAfter.right),
+            labelWidth: Math.round(labelAfter.width),
+            metricWidth: Math.round(metricAfter.width),
+            longClientWidth: Math.round(longClientWidth),
+            longScrollWidth: Math.round(longScrollWidth),
+            longTitle,
+            stickyPosition: getComputedStyle(label).position,
+            beforeMetricLeft: Math.round(metricBefore.left)
+          };
+        }"""
+    )
+    if (
+        not sticky_state.get("ok")
+        or int(sticky_state["maxScrollLeft"]) <= 0
+        or sticky_state["stickyPosition"] != "sticky"
+        or abs(int(sticky_state["beforeLeft"]) - int(sticky_state["afterLeft"])) > 2
+        or int(sticky_state["afterLeft"]) < int(sticky_state["metricLeft"]) - 1
+        or int(sticky_state["afterRight"]) > int(sticky_state["metricRight"]) + 2
+        or int(sticky_state["longScrollWidth"]) <= int(sticky_state["longClientWidth"]) + 2
+        or not str(sticky_state["longTitle"]).startswith("SKU ")
+    ):
+        raise AssertionError(f"SKU separator label must stay sticky inside the metric column and truncate long text, got {sticky_state}")
+    page.evaluate("() => { const scroll = document.querySelector('[data-table-scroll]'); if (scroll) { scroll.scrollTop = 0; scroll.scrollLeft = 0; scroll.dispatchEvent(new Event('scroll')); } }")
     return {
         "separator_count": int(state["count"]),
         "min_height": int(state["minHeight"]),
         "first_boundary": str(state["firstBoundary"]),
         "sku_sku_separator_count": int(state["skuSkuSeparatorCount"]),
         "first_label": str(state["firstLabel"]),
+        "sticky_after_horizontal_scroll": sticky_state,
     }
 
 
@@ -3539,16 +3690,22 @@ def _check_dynamic_object_label(page: object) -> dict[str, object]:
     initial = page.evaluate(
         """() => {
           const label = document.querySelector('[data-table-object-label]');
+          const right = document.querySelector('[data-table-heading-right]');
           const metricHeader = document.querySelector('[data-table-head] th[data-col-id="metric_label"]');
           const objectHeader = document.querySelector('[data-table-head] th[data-col-id="scope_label"]');
           const headers = Array.from(document.querySelectorAll('[data-table-head] th[data-col-id]')).map((node) => node.getAttribute('data-col-id'));
+          const rightRect = right ? right.getBoundingClientRect() : {left: 0, right: 0};
+          const labelRect = label ? label.getBoundingClientRect() : {width: 0};
           return {
             text: label ? (label.textContent || '').trim() : '',
             hidden: label ? !!label.hidden : true,
             title: label ? (label.getAttribute('title') || '') : '',
             firstHeader: headers[0] || '',
             objectHeaderCount: objectHeader ? 1 : 0,
-            metricHeaderLeft: metricHeader ? Math.round(parseFloat(getComputedStyle(metricHeader).left || '0')) : -1
+            metricHeaderLeft: metricHeader ? Math.round(parseFloat(getComputedStyle(metricHeader).left || '0')) : -1,
+            rightLeft: Math.round(rightRect.left),
+            rightRight: Math.round(rightRect.right),
+            labelWidth: Math.round(labelRect.width)
           };
         }"""
     )
@@ -3560,23 +3717,66 @@ def _check_dynamic_object_label(page: object) -> dict[str, object]:
         or int(initial["metricHeaderLeft"]) != 0
     ):
         raise AssertionError(f"dynamic object label must replace the visible object column, got {initial}")
+    long_label_layout = page.evaluate(
+        """() => {
+          const label = document.querySelector('[data-table-object-label]');
+          const right = document.querySelector('[data-table-heading-right]');
+          if (!label || !right) {
+            return {ok: false, reason: 'missing nodes'};
+          }
+          const before = right.getBoundingClientRect();
+          const originalText = label.textContent || '';
+          const originalTitle = label.getAttribute('title') || '';
+          label.textContent = 'SKU ' + 'очень длинное название товара '.repeat(8).trim();
+          label.title = label.textContent;
+          const after = right.getBoundingClientRect();
+          const labelClientWidth = label.clientWidth;
+          const labelScrollWidth = label.scrollWidth;
+          label.textContent = originalText;
+          label.title = originalTitle;
+          return {
+            ok: true,
+            beforeLeft: Math.round(before.left),
+            afterLeft: Math.round(after.left),
+            beforeRight: Math.round(before.right),
+            afterRight: Math.round(after.right),
+            labelClientWidth: Math.round(labelClientWidth),
+            labelScrollWidth: Math.round(labelScrollWidth),
+            truncated: labelScrollWidth > labelClientWidth + 2
+          };
+        }"""
+    )
+    if (
+        not long_label_layout.get("ok")
+        or abs(int(long_label_layout["beforeLeft"]) - int(long_label_layout["afterLeft"])) > 2
+        or abs(int(long_label_layout["beforeRight"]) - int(long_label_layout["afterRight"])) > 2
+        or not long_label_layout.get("truncated")
+    ):
+        raise AssertionError(f"dynamic object label width must not move the right header area, got {long_label_layout}")
     scrolled = page.evaluate(
         """() => {
           const scroll = document.querySelector('[data-table-scroll]');
           const label = document.querySelector('[data-table-object-label]');
+          const right = document.querySelector('[data-table-heading-right]');
           const firstSku = Array.from(document.querySelectorAll('[data-table-body] tr[data-row-kind="sku"]'))[0];
           if (!scroll || !label || !firstSku) {
             return {ok: false, reason: 'missing nodes'};
           }
+          const rightBefore = right ? right.getBoundingClientRect() : {left: 0, right: 0};
           scroll.style.maxHeight = '180px';
           scroll.scrollTop = Math.max(0, firstSku.offsetTop + 2);
           scroll.dispatchEvent(new Event('scroll'));
+          const rightAfter = right ? right.getBoundingClientRect() : {left: 0, right: 0};
           return {
             ok: true,
             text: (label.textContent || '').trim(),
             title: label.getAttribute('title') || '',
             firstSku: firstSku.getAttribute('data-row-scope-label') || '',
-            scrollLeftBefore: scroll.scrollLeft
+            scrollLeftBefore: scroll.scrollLeft,
+            rightBeforeLeft: Math.round(rightBefore.left),
+            rightAfterLeft: Math.round(rightAfter.left),
+            rightBeforeRight: Math.round(rightBefore.right),
+            rightAfterRight: Math.round(rightAfter.right)
           };
         }"""
     )
@@ -3603,10 +3803,17 @@ def _check_dynamic_object_label(page: object) -> dict[str, object]:
         or scrolled_after["text"] != scrolled["firstSku"]
         or scrolled_after["text"] == "Итого"
         or scrolled_after["title"] != scrolled_after["text"]
+        or abs(int(scrolled["rightBeforeLeft"]) - int(scrolled["rightAfterLeft"])) > 2
+        or abs(int(scrolled["rightBeforeRight"]) - int(scrolled["rightAfterRight"])) > 2
     ):
         raise AssertionError(f"dynamic object label must update to the top visible SKU and ignore horizontal scroll, got {scrolled} / {scrolled_after}")
     page.evaluate("() => { const scroll = document.querySelector('[data-table-scroll]'); if (scroll) { scroll.style.maxHeight = ''; scroll.scrollTop = 0; scroll.scrollLeft = 0; scroll.dispatchEvent(new Event('scroll')); } }")
-    return {"initial": initial["text"], "scrolled": scrolled_after["text"], "object_column_absent": True}
+    return {
+        "initial": initial["text"],
+        "scrolled": scrolled_after["text"],
+        "right_zone_stable_with_long_label": long_label_layout,
+        "object_column_absent": True,
+    }
 
 
 def _stub_sheet_load_runner(plan, emit):

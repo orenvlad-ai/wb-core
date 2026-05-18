@@ -1707,10 +1707,31 @@
     .table-heading-row {
       display: flex;
       align-items: center;
-      gap: 6px;
-      flex-wrap: wrap;
+      gap: 10px;
+      flex-wrap: nowrap;
       min-width: 0;
       width: 100%;
+    }
+
+    .table-heading-left {
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      flex: 1 1 0;
+      min-width: 0;
+    }
+
+    .table-heading-right {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 6px;
+      flex: 0 1 auto;
+      min-width: 0;
+      max-width: 100%;
+      margin-left: auto;
+      flex-wrap: nowrap;
+      text-align: right;
     }
 
     .table-heading-row > [data-load-refresh-button] {
@@ -1733,7 +1754,7 @@
     .table-object-indicator {
       display: inline-flex;
       align-items: center;
-      max-width: min(380px, 42vw);
+      max-width: min(380px, 100%);
       min-height: 22px;
       border: 1px solid rgba(139, 92, 246, 0.42);
       border-radius: 999px;
@@ -1755,14 +1776,14 @@
     .table-summary-line {
       display: inline-flex;
       align-items: center;
-      gap: 6px;
+      gap: 5px;
       min-width: 0;
       margin: 0;
       color: var(--muted);
       font-size: 11px;
       line-height: 1.35;
-      flex-wrap: wrap;
-      flex: 0 1 320px;
+      flex-wrap: nowrap;
+      flex: 0 0 auto;
     }
 
     .table-summary-line[hidden] {
@@ -1907,17 +1928,18 @@
     .table-header-controls {
       display: inline-flex;
       align-items: flex-end;
-      gap: 4px;
+      justify-content: flex-end;
+      gap: 5px;
       flex: 0 1 auto;
       min-width: 0;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
     }
 
     .table-filter-controls {
       display: flex;
       align-items: flex-end;
-      gap: 6px;
-      flex: 1 1 auto;
+      gap: 5px;
+      flex: 0 1 auto;
       min-width: 0;
       flex-wrap: nowrap;
     }
@@ -1938,18 +1960,30 @@
     }
 
     .table-header-controls .toolbar-field {
-      flex: 0 1 132px;
-      min-width: 112px;
-      max-width: 148px;
+      flex: 0 1 176px;
+      min-width: 156px;
+      max-width: 240px;
       flex-direction: row;
       align-items: center;
       gap: 4px;
     }
 
     .table-header-controls .toolbar-field-range {
-      flex: 0 1 174px;
-      min-width: 154px;
-      max-width: 184px;
+      flex: 0 0 222px;
+      min-width: 222px;
+      max-width: 232px;
+    }
+
+    .table-header-controls .toolbar-field[data-filter-card="section"] {
+      flex-basis: 184px;
+      min-width: 170px;
+      max-width: 260px;
+    }
+
+    .table-header-controls .toolbar-field[data-filter-card="group"] {
+      flex-basis: 176px;
+      min-width: 162px;
+      max-width: 260px;
     }
 
     .table-header-controls .filter-label {
@@ -2908,7 +2942,7 @@
     .table-header-controls .history-compact-control {
       min-height: 28px;
       padding-left: 9px;
-      padding-right: 36px;
+      padding-right: 28px;
       font-size: 11px;
     }
 
@@ -2918,10 +2952,15 @@
         linear-gradient(45deg, transparent 50%, currentColor 50%),
         linear-gradient(135deg, currentColor 50%, transparent 50%);
       background-position:
-        calc(100% - 16px) 50%,
-        calc(100% - 11px) 50%;
+        calc(100% - 15px) 50%,
+        calc(100% - 10px) 50%;
       background-size: 5px 5px, 5px 5px;
       background-repeat: no-repeat;
+    }
+
+    .table-header-controls .history-compact-control {
+      padding-right: 9px;
+      gap: 6px;
     }
 
     .table-header-controls .history-compact-panel {
@@ -2933,6 +2972,11 @@
     .table-header-controls .history-control-icon {
       margin-right: 0;
       pointer-events: none;
+    }
+
+    .table-header-controls .history-control-label {
+      flex: 1 1 auto;
+      min-width: 0;
     }
 
     .input:focus,
@@ -3178,14 +3222,20 @@
       border-top: 1px solid rgba(139, 92, 246, 0.18);
       border-bottom: 1px solid rgba(255, 255, 255, 0.035);
       vertical-align: middle;
+      overflow: visible;
     }
 
     .sku-separator-label {
       display: inline-flex;
       align-items: center;
-      max-width: min(420px, 52vw);
+      position: sticky;
+      left: 8px;
+      z-index: 4;
+      box-sizing: border-box;
+      width: max-content;
+      max-width: min(146px, calc(100vw - 48px));
       min-height: 22px;
-      margin-left: 10px;
+      margin-left: 0;
       border: 1px solid rgba(139, 92, 246, 0.32);
       border-radius: 999px;
       background: rgba(139, 92, 246, 0.12);
@@ -3584,6 +3634,29 @@
         width: 100%;
       }
 
+      .table-heading-row {
+        flex-wrap: wrap;
+      }
+
+      .table-heading-left,
+      .table-heading-right {
+        width: 100%;
+      }
+
+      .table-heading-right,
+      .table-header-controls,
+      .table-filter-controls {
+        flex-wrap: wrap;
+      }
+
+      .table-header-controls .toolbar-field,
+      .table-header-controls .toolbar-field[data-filter-card="section"],
+      .table-header-controls .toolbar-field[data-filter-card="group"] {
+        flex: 1 1 160px;
+        min-width: 140px;
+        max-width: none;
+      }
+
       .table-load-status {
         flex: 0 0 24px;
         max-width: 24px;
@@ -3807,71 +3880,75 @@
       <div class="panel-top table-panel-top" data-table-header>
         <div class="table-header-main">
           <div class="table-heading-row">
-            <span class="table-object-indicator" data-table-object-label hidden>Итого</span>
-            <span class="table-freshness-indicator" data-table-freshness-indicator hidden>
-              <span class="table-freshness-dot" aria-hidden="true"></span>
-              <span data-table-freshness-label>актуально</span>
-            </span>
-            <p class="table-summary-line" data-table-summary-line hidden></p>
-            <div class="table-header-controls" data-table-header-controls>
-              <div class="toolbar-field toolbar-field-range">
-                <span class="filter-label">Диапазон</span>
-                <div class="history-compact-panel" data-history-panel>
-                  <button class="history-compact-control" type="button" data-history-toggle aria-label="Выбрать диапазон" aria-expanded="false" aria-controls="history-popover">
-                    <span class="history-control-label" data-history-label>загрузка периода…</span>
-                    <svg class="history-control-icon" viewBox="0 0 24 24" aria-hidden="true">
-                      <rect x="4" y="5" width="16" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="2"></rect>
-                      <path d="M8 3v4M16 3v4M4 10h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
-                    </svg>
-                  </button>
-                  <div class="history-popover" id="history-popover" data-history-popover hidden>
-                    <div class="history-picker-head">
-                      <button class="history-month-nav" type="button" data-history-prev-month aria-label="Предыдущий месяц">&lt;</button>
-                      <p class="history-month-label" data-history-month-label>месяц</p>
-                      <button class="history-month-nav" type="button" data-history-next-month aria-label="Следующий месяц">&gt;</button>
-                    </div>
-                    <p data-history-meta hidden></p>
-                    <p data-history-calendar-detail hidden></p>
-                    <section class="history-calendar-panel">
-                      <div class="history-months" data-history-calendar>
-                        загрузка календаря…
+            <div class="table-heading-left">
+              <span class="table-object-indicator" data-table-object-label hidden>Итого</span>
+            </div>
+            <div class="table-heading-right" data-table-heading-right>
+              <span class="table-freshness-indicator" data-table-freshness-indicator hidden>
+                <span class="table-freshness-dot" aria-hidden="true"></span>
+                <span data-table-freshness-label>акт</span>
+              </span>
+              <p class="table-summary-line" data-table-summary-line hidden></p>
+              <div class="table-header-controls" data-table-header-controls>
+                <div class="toolbar-field toolbar-field-range">
+                  <span class="filter-label">Диапазон</span>
+                  <div class="history-compact-panel" data-history-panel>
+                    <button class="history-compact-control" type="button" data-history-toggle aria-label="Выбрать диапазон" aria-expanded="false" aria-controls="history-popover">
+                      <span class="history-control-label" data-history-label>загрузка периода…</span>
+                      <svg class="history-control-icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <rect x="4" y="5" width="16" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="2"></rect>
+                        <path d="M8 3v4M16 3v4M4 10h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+                      </svg>
+                    </button>
+                    <div class="history-popover" id="history-popover" data-history-popover hidden>
+                      <div class="history-picker-head">
+                        <button class="history-month-nav" type="button" data-history-prev-month aria-label="Предыдущий месяц">&lt;</button>
+                        <p class="history-month-label" data-history-month-label>месяц</p>
+                        <button class="history-month-nav" type="button" data-history-next-month aria-label="Следующий месяц">&gt;</button>
                       </div>
-                    </section>
-                    <div class="history-presets-panel">
-                      <div class="history-preset-list" data-history-presets>
-                        загрузка пресетов…
+                      <p data-history-meta hidden></p>
+                      <p data-history-calendar-detail hidden></p>
+                      <section class="history-calendar-panel">
+                        <div class="history-months" data-history-calendar>
+                          загрузка календаря…
+                        </div>
+                      </section>
+                      <div class="history-presets-panel">
+                        <div class="history-preset-list" data-history-presets>
+                          загрузка пресетов…
+                        </div>
                       </div>
-                    </div>
-                    <div class="history-fields">
-                      <label class="filter-card">
-                        <span class="filter-label">Начало периода</span>
-                        <input class="input" type="date" data-history-date-from>
-                      </label>
-                      <label class="filter-card">
-                        <span class="filter-label">Конец периода</span>
-                        <input class="input" type="date" data-history-date-to>
-                      </label>
-                    </div>
-                    <div class="filters-footer">
-                      <p class="filter-summary" data-history-summary>Загрузка…</p>
-                      <div class="history-actions">
-                        <button class="button secondary" type="button" data-history-reset>Сбросить</button>
-                        <button class="button secondary" type="button" data-history-save>Сохранить</button>
+                      <div class="history-fields">
+                        <label class="filter-card">
+                          <span class="filter-label">Начало периода</span>
+                          <input class="input" type="date" data-history-date-from>
+                        </label>
+                        <label class="filter-card">
+                          <span class="filter-label">Конец периода</span>
+                          <input class="input" type="date" data-history-date-to>
+                        </label>
+                      </div>
+                      <div class="filters-footer">
+                        <p class="filter-summary" data-history-summary>Загрузка…</p>
+                        <div class="history-actions">
+                          <button class="button secondary" type="button" data-history-reset>Сбросить</button>
+                          <button class="button secondary" type="button" data-history-save>Сохранить</button>
+                        </div>
                       </div>
                     </div>
                   </div>
                 </div>
+                <div class="filters-grid table-filter-controls" data-filter-controls></div>
               </div>
-              <div class="filters-grid table-filter-controls" data-filter-controls></div>
+              <span class="table-load-action-cluster">
+                <p class="table-load-status tone-neutral" data-table-load-status data-load-status-text="нет данных" title="Загрузка: нет данных" aria-label="Загрузка: нет данных" hidden><span class="table-load-status-dot" aria-hidden="true"></span></p>
+                <div class="top-progress" data-global-progress hidden>
+                  <span class="top-progress-pulse" aria-hidden="true"></span>
+                  <span class="top-progress-label" data-global-progress-label>Загрузка…</span>
+                </div>
+                <button class="button primary" type="button" data-load-refresh-button>Загрузить</button>
+              </span>
             </div>
-            <span class="table-load-action-cluster">
-              <p class="table-load-status tone-neutral" data-table-load-status data-load-status-text="нет данных" title="Загрузка: нет данных" aria-label="Загрузка: нет данных" hidden><span class="table-load-status-dot" aria-hidden="true"></span></p>
-              <div class="top-progress" data-global-progress hidden>
-                <span class="top-progress-pulse" aria-hidden="true"></span>
-                <span class="top-progress-label" data-global-progress-label>Загрузка…</span>
-              </div>
-              <button class="button primary" type="button" data-load-refresh-button>Загрузить</button>
-            </span>
           </div>
         </div>
         <div class="table-header-meta">
@@ -5284,25 +5361,32 @@
       if (tableFreshnessIndicatorNode.hidden) {
         tableFreshnessLabelNode.textContent = "";
         tableFreshnessIndicatorNode.removeAttribute("title");
+        tableFreshnessIndicatorNode.removeAttribute("aria-label");
         return;
       }
       if (normalizedMode === "stale_loading") {
         tableFreshnessIndicatorNode.classList.add("is-stale-loading");
-        tableFreshnessLabelNode.textContent = "старый снимок";
+        tableFreshnessLabelNode.textContent = "стар";
         const savedAt = state.tableSnapshot.displayedSavedAt ? formatTimestampDisplay(state.tableSnapshot.displayedSavedAt) : "";
-        tableFreshnessIndicatorNode.title = "Показан последний успешный снимок" + (savedAt ? " от " + savedAt : "") + "; свежая таблица загружается.";
+        const staleLoadingTitle = "Показан последний успешный снимок" + (savedAt ? " от " + savedAt : "") + "; свежая таблица загружается.";
+        tableFreshnessIndicatorNode.title = staleLoadingTitle;
+        tableFreshnessIndicatorNode.setAttribute("aria-label", staleLoadingTitle);
         return;
       }
       if (normalizedMode === "stale_error") {
         tableFreshnessIndicatorNode.classList.add("is-stale-error");
-        tableFreshnessLabelNode.textContent = "старый снимок";
-        tableFreshnessIndicatorNode.title = "Показан последний успешный снимок; свежую таблицу не удалось загрузить.";
+        tableFreshnessLabelNode.textContent = "стар";
+        const staleErrorTitle = "Показан последний успешный снимок; свежую таблицу не удалось загрузить.";
+        tableFreshnessIndicatorNode.title = staleErrorTitle;
+        tableFreshnessIndicatorNode.setAttribute("aria-label", staleErrorTitle);
         return;
       }
       tableFreshnessIndicatorNode.classList.add("is-fresh");
-      tableFreshnessLabelNode.textContent = "актуально";
+      tableFreshnessLabelNode.textContent = "акт";
       const meta = (payload && payload.meta) || {};
-      tableFreshnessIndicatorNode.title = "Показана свежая таблица" + (meta.snapshot_id ? ": " + meta.snapshot_id : "") + ".";
+      const freshTitle = "актуально" + (meta.snapshot_id ? ": " + meta.snapshot_id : "");
+      tableFreshnessIndicatorNode.title = freshTitle;
+      tableFreshnessIndicatorNode.setAttribute("aria-label", freshTitle);
     }
 
     function normalizeIsoDate(value) {
