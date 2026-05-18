@@ -1859,7 +1859,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Отчёты",
             "Отзывы",
             "Загрузить",
-            "Свежесть данных",
+            "Свежесть",
             "Загрузка данных",
             "Действия и состояния",
             "Проверить сессию",
@@ -1953,7 +1953,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         tokens = [
             "Web-витрина",
             "Загрузить",
-            "Свежесть данных",
+            "Свежесть",
             DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
             route_paths["SHEET_VITRINA_OPERATOR_UI_PATH"],
             "surface=page_composition",
