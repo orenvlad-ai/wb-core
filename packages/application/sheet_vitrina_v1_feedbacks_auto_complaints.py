@@ -1020,13 +1020,16 @@ def _reconcile_run_with_journal(run: Mapping[str, Any], journal_by_id: Mapping[s
         reason = str(attempt.get("reason") or "")
         if reason and reason != "submitted_confirmed":
             reason_counts[reason] += 1
-    selected_count = _safe_int(normalized.get("eligible_for_submit_count"))
+    submitted_from_attempts = sum(1 for attempt in attempts if str(attempt.get("action") or "") == "submitted_confirmed")
+    submit_attempted_from_attempts = submitted_from_attempts + sum(
+        1 for attempt in attempts if str(attempt.get("action") or "") == "submitted_attempted_unconfirmed"
+    )
+    selected_count = max(_safe_int(normalized.get("eligible_for_submit_count")), submit_attempted_from_attempts)
     counters = _attempt_counters(
         attempts,
         selected_count=selected_count,
         submit_report={"aggregate": {"error_count": _safe_int(normalized.get("error_count"))}},
     )
-    submitted_from_attempts = sum(1 for attempt in attempts if str(attempt.get("action") or "") == "submitted_confirmed")
     skipped_from_attempts = sum(
         1
         for attempt in attempts
