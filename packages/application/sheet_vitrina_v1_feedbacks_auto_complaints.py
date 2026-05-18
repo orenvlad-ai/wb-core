@@ -303,6 +303,7 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
     def build_schedules(self) -> dict[str, Any]:
         payload = self.store.read()
         now = self.now_factory()
+        journal_by_id = self._journal_by_feedback_id()
         schedules = [
             _public_schedule({**schedule, "next_run_at": schedule.get("next_run_at") or _next_run_at(schedule, now)})
             for schedule in payload.get("schedules", [])
@@ -318,7 +319,11 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
                 "generated_at": _iso_now(self.now_factory),
             },
             "schedules": schedules,
-            "recent_runs": [_public_run(run) for run in reversed(payload.get("runs", [])[-10:])],
+            "recent_runs": [
+                _public_run(_reconcile_run_with_journal(run, journal_by_id))
+                for run in reversed(payload.get("runs", [])[-10:])
+                if isinstance(run, Mapping)
+            ],
         }
 
     def save_schedules(self, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -330,14 +335,24 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
 
     def list_runs(self) -> dict[str, Any]:
         payload = self.store.read()
+        journal_by_id = self._journal_by_feedback_id()
         return {
             "contract_name": RUNS_CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
-            "runs": [_public_run(run) for run in reversed(payload.get("runs", [])[-50:])],
+            "runs": [
+                _public_run(_reconcile_run_with_journal(run, journal_by_id))
+                for run in reversed(payload.get("runs", [])[-50:])
+                if isinstance(run, Mapping)
+            ],
         }
 
     def get_run(self, run_id: str) -> dict[str, Any]:
-        return {"contract_name": RUN_CONTRACT_NAME, "contract_version": CONTRACT_VERSION, "run": _public_run(self.store.get_run(run_id), details=True)}
+        journal_by_id = self._journal_by_feedback_id()
+        return {
+            "contract_name": RUN_CONTRACT_NAME,
+            "contract_version": CONTRACT_VERSION,
+            "run": _public_run(_reconcile_run_with_journal(self.store.get_run(run_id), journal_by_id), details=True),
+        }
 
     def run_now(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
@@ -362,7 +377,7 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
         except Exception:
             current_run = run
         schedules_payload = self.build_schedules()
-        public_run = _public_run(current_run)
+        public_run = _public_run(_reconcile_run_with_journal(current_run, self._journal_by_feedback_id()))
         return {
             "contract_name": RUN_CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
@@ -386,7 +401,7 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
                 "contract_version": CONTRACT_VERSION,
                 "status": "already_running",
                 "started_runs": [],
-                "active_run": _public_run(active),
+                "active_run": _public_run(_reconcile_run_with_journal(active, self._journal_by_feedback_id())),
             }
         due = self._due_schedules(now)
         if not due:
@@ -400,7 +415,7 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
         started: list[dict[str, Any]] = []
         schedule, due_at = due[0]
         started_run = self._start_run(schedule, trigger_source="scheduled", due_at=due_at, async_run=async_run)
-        started.append(_public_run(started_run))
+        started.append(_public_run(_reconcile_run_with_journal(started_run, self._journal_by_feedback_id())))
         return {
             "contract_name": TICK_CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
@@ -768,6 +783,13 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
             results.extend([dict(item) for item in batch_results if isinstance(item, Mapping)])
         return results
 
+    def _journal_by_feedback_id(self) -> dict[str, Mapping[str, Any]]:
+        return {
+            str(record.get("feedback_id") or "").strip(): record
+            for record in self.complaints_block.journal.list_records()
+            if isinstance(record, Mapping) and str(record.get("feedback_id") or "").strip()
+        }
+
     def _schedule_by_id(self, schedule_id: str) -> dict[str, Any]:
         for schedule in self.store.read().get("schedules", []):
             if str(schedule.get("id") or "") == schedule_id:
@@ -944,6 +966,88 @@ def _public_run(run: Mapping[str, Any], *, details: bool = False) -> dict[str, A
     compact["attempts"] = compact["attempts"][-20:]
     compact["events"] = compact["events"][-20:]
     return compact
+
+
+def _reconcile_run_with_journal(run: Mapping[str, Any], journal_by_id: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """Upgrade legacy skip reasons using current journal evidence without mutating runtime state."""
+
+    normalized = _normalize_run(run)
+    attempts: list[dict[str, Any]] = []
+    changed = False
+    for attempt in normalized["attempts"]:
+        action = str(attempt.get("action") or "")
+        reason = str(attempt.get("reason") or "")
+        feedback_id = str(attempt.get("feedback_id") or "").strip()
+        patch: dict[str, Any] = {}
+        if feedback_id and (action == "already_journaled" or reason == "existing_journal_feedback_id"):
+            record = journal_by_id.get(feedback_id)
+            if isinstance(record, Mapping):
+                existing = _classify_journal_record(record)
+                if existing.get("terminal_confirmed"):
+                    patch = {
+                        "action": str(existing.get("action") or "already_journaled_confirmed"),
+                        "reason": str(existing.get("reason") or "already_journaled_confirmed"),
+                        "complaint_journal_ref": str(existing.get("complaint_journal_ref") or ""),
+                        "evidence_refs": list(existing.get("evidence_refs") or []),
+                    }
+                else:
+                    patch = {
+                        "action": "skipped_existing_unconfirmed",
+                        "reason": str(existing.get("reason") or "skipped_existing_unconfirmed"),
+                        "complaint_journal_ref": str(existing.get("complaint_journal_ref") or ""),
+                        "evidence_refs": list(existing.get("evidence_refs") or []),
+                    }
+            else:
+                patch = {
+                    "action": "skipped_existing_unconfirmed",
+                    "reason": "journal_reference_missing",
+                    "evidence_refs": [],
+                }
+        elif reason == "already_attempted_feedback_id":
+            patch = {"action": "already_confirmed_in_prior_run", "reason": "already_confirmed_in_prior_run"}
+        elif reason == "hard_cap_reached":
+            patch = {"action": "skipped_due_to_hard_cap", "reason": "skipped_due_to_hard_cap"}
+        if patch:
+            changed = True
+            attempts.append(_normalize_attempt({**attempt, **patch}))
+        else:
+            attempts.append(_normalize_attempt(attempt))
+    if not changed:
+        return normalized
+
+    reason_counts: Counter[str] = Counter()
+    for attempt in attempts:
+        reason = str(attempt.get("reason") or "")
+        if reason and reason != "submitted_confirmed":
+            reason_counts[reason] += 1
+    selected_count = _safe_int(normalized.get("eligible_for_submit_count"))
+    counters = _attempt_counters(
+        attempts,
+        selected_count=selected_count,
+        submit_report={"aggregate": {"error_count": _safe_int(normalized.get("error_count"))}},
+    )
+    submitted_from_attempts = sum(1 for attempt in attempts if str(attempt.get("action") or "") == "submitted_confirmed")
+    skipped_from_attempts = sum(
+        1
+        for attempt in attempts
+        if str(attempt.get("action") or "").startswith(("already_", "skipped_", "safety_"))
+    )
+    normalized.update(
+        {
+            "attempts": attempts,
+            "reason_counts": dict(reason_counts),
+            "submitted_count": max(_safe_int(normalized.get("submitted_count")), submitted_from_attempts),
+            "skipped_count": max(_safe_int(normalized.get("skipped_count")), skipped_from_attempts),
+            "hard_cap_reached": bool(normalized.get("hard_cap_reached") or reason_counts.get("skipped_due_to_hard_cap")),
+            **counters,
+        }
+    )
+    if counters.get("skipped_existing_unconfirmed_count") and normalized.get("status") == "completed":
+        normalized["status"] = UNCONFIRMED_JOURNAL_STATUS
+        normalized["blocker_reason"] = UNCONFIRMED_JOURNAL_STATUS
+    elif reason_counts.get("skipped_due_to_hard_cap") and normalized.get("status") == "completed":
+        normalized["status"] = "hard_cap_reached"
+    return normalized
 
 
 def _sanitize_report_mapping(value: Any, *, depth: int = 0) -> dict[str, Any]:

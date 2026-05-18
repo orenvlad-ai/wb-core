@@ -66,6 +66,7 @@ def main() -> None:
     _assert_retryable_prior_attempt_is_submitted()
     _assert_confirmed_prior_attempt_is_not_resubmitted()
     _assert_journal_only_unconfirmed_is_explicit_probe_blocker()
+    _assert_legacy_existing_journal_run_reconciles_on_read()
     _assert_error_journal_record_is_retryable()
     _assert_noop_advances_last_success()
     _assert_busy_lock_is_controlled()
@@ -490,6 +491,82 @@ def _assert_journal_only_unconfirmed_is_explicit_probe_blocker() -> None:
             raise AssertionError(f"journal-only reason must be explicit: {run}")
         if run["skipped_existing_unconfirmed_count"] != 1 or submitted_payloads:
             raise AssertionError(f"journal-only record must not be submitted without probe: {run} {submitted_payloads}")
+
+
+def _assert_legacy_existing_journal_run_reconciles_on_read() -> None:
+    now = datetime(2026, 5, 8, 8, 0, tzinfo=timezone.utc)
+    with TemporaryDirectory(prefix="auto-complaints-read-reconcile-") as tmp:
+        runtime_dir = Path(tmp)
+        journal = JsonFileFeedbacksComplaintJournal(runtime_dir)
+        journal.create_or_update(
+            {
+                "feedback_id": "legacy-confirmed",
+                "complaint_id": "complaint-1",
+                "complaint_status": "satisfied",
+                "submitted_at": "2026-05-07T07:00:00Z",
+                "submit_run_id": "submit-1",
+                "submit_result": "confirmed_success",
+                "status_sync_run_id": "sync-1",
+                "last_status_checked_at": "2026-05-08T07:00:00Z",
+            }
+        )
+        journal.create_or_update({"feedback_id": "legacy-journal-only", "complaint_status": "waiting_response"})
+        store = JsonFileFeedbacksAutoComplaintsStore(runtime_dir, now_factory=lambda: now)
+        store.add_run(
+            {
+                "run_id": "legacy-run",
+                "schedule_id": "daily-noon",
+                "trigger_source": "scheduled",
+                "status": "completed",
+                "created_at": "2026-05-08T07:00:00Z",
+                "finished_at": "2026-05-08T07:05:00Z",
+                "loaded_feedbacks_count": 2,
+                "low_rating_feedbacks_count": 2,
+                "ai_candidates_count": 2,
+                "submitted_count": 0,
+                "skipped_count": 2,
+                "reason_counts": {"existing_journal_feedback_id": 2},
+                "attempts": [
+                    {
+                        "feedback_id": "legacy-confirmed",
+                        "rating": 1,
+                        "candidate": True,
+                        "action": "already_journaled",
+                        "reason": "existing_journal_feedback_id",
+                    },
+                    {
+                        "feedback_id": "legacy-journal-only",
+                        "rating": 1,
+                        "candidate": True,
+                        "action": "already_journaled",
+                        "reason": "existing_journal_feedback_id",
+                    },
+                ],
+            }
+        )
+        block = SheetVitrinaV1FeedbacksAutoComplaintsBlock(
+            runtime_dir=runtime_dir,
+            feedbacks_block=FakeFeedbacksBlock([]),  # type: ignore[arg-type]
+            feedbacks_ai_block=FakeAiBlock({}),  # type: ignore[arg-type]
+            complaints_block=SheetVitrinaV1FeedbacksComplaintsBlock(runtime_dir=runtime_dir, journal=journal),
+            store=store,
+            now_factory=lambda: now,
+        )
+        detail = block.get_run("legacy-run")["run"]
+        reasons = detail["reason_counts"]
+        if reasons.get("existing_journal_feedback_id"):
+            raise AssertionError(f"legacy generic reason must not leak after read reconciliation: {detail}")
+        if reasons.get("already_journaled_confirmed") != 1 or reasons.get("journal_only_unconfirmed") != 1:
+            raise AssertionError(f"legacy reasons must be reconciled with journal evidence: {detail}")
+        if detail["attempts"][0]["action"] != "already_journaled_confirmed":
+            raise AssertionError(f"confirmed journal record must become already-confirmed: {detail}")
+        if detail["attempts"][1]["action"] != "skipped_existing_unconfirmed":
+            raise AssertionError(f"journal-only record must not look terminal: {detail}")
+        if detail["already_confirmed_count"] != 1 or detail["skipped_existing_unconfirmed_count"] != 1:
+            raise AssertionError(f"detailed counters must be reconciled for legacy run: {detail}")
+        listed = block.list_runs()["runs"][0]
+        if listed["reason_counts"] != detail["reason_counts"]:
+            raise AssertionError(f"list and detail must expose the same reconciled reasons: {listed} {detail}")
 
 
 def _assert_error_journal_record_is_retryable() -> None:
