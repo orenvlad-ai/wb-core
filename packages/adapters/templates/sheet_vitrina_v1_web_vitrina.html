@@ -2053,11 +2053,17 @@
 
     .metrics-config-scope-head {
       display: flex;
-      align-items: baseline;
+      align-items: center;
       justify-content: space-between;
-      gap: 10px;
+      gap: 8px;
       padding: 7px 8px;
       border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    }
+
+    .metrics-config-scope-title-group {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
     }
 
     .metrics-config-scope-title {
@@ -2071,6 +2077,54 @@
       color: var(--muted);
       font-size: 11px;
       white-space: nowrap;
+    }
+
+    .metrics-config-scope-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex: 0 0 auto;
+    }
+
+    .metrics-config-selection-toggle,
+    .metrics-config-bulk-select {
+      min-height: 24px;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--panel-subtle);
+      color: var(--text);
+      font: inherit;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+
+    .metrics-config-selection-toggle {
+      padding: 3px 8px;
+      cursor: pointer;
+    }
+
+    .metrics-config-selection-toggle:hover,
+    .metrics-config-bulk-select:hover:not(:disabled) {
+      border-color: rgba(139, 92, 246, 0.44);
+      background: rgba(139, 92, 246, 0.08);
+    }
+
+    .metrics-config-selection-toggle:focus-visible,
+    .metrics-config-bulk-select:focus-visible {
+      outline: 2px solid var(--accent-focus);
+      outline-offset: 2px;
+    }
+
+    .metrics-config-bulk-select {
+      width: 118px;
+      padding: 2px 6px;
+    }
+
+    .metrics-config-bulk-select:disabled {
+      color: var(--muted);
+      cursor: not-allowed;
+      opacity: 0.62;
     }
 
     .metrics-config-table {
@@ -2125,6 +2179,10 @@
       opacity: 0.58;
     }
 
+    .metrics-config-row.is-selected {
+      background: rgba(139, 92, 246, 0.105);
+    }
+
     .metrics-config-row.is-drop-before {
       box-shadow: inset 0 2px 0 var(--accent-hover);
     }
@@ -2134,14 +2192,22 @@
     }
 
     .metrics-config-main {
-      display: inline-grid;
-      grid-template-columns: 16px 4px minmax(0, 1fr);
+      display: flex;
       align-items: center;
       gap: 5px;
       min-width: 0;
     }
 
+    .metrics-config-select-checkbox {
+      flex: 0 0 auto;
+      width: 14px;
+      height: 14px;
+      margin: 0;
+      accent-color: var(--accent);
+    }
+
     .metrics-config-accent {
+      flex: 0 0 auto;
       width: 3px;
       height: 18px;
       border-radius: 999px;
@@ -2154,6 +2220,7 @@
     }
 
     .metrics-config-label {
+      flex: 1 1 auto;
       min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -4242,7 +4309,9 @@
         scopeByKey: {},
         orderByScope: {},
         displayByMetric: {},
-        expandedAnchors: new Set()
+        expandedAnchors: new Set(),
+        selectionModeByScope: {},
+        selectionByScope: {}
       },
       sellerSession: {
         statusLabel: "",
@@ -5630,6 +5699,8 @@
       const model = buildMetricPresentationModel(payload);
       const storageKey = buildMetricPresentationStorageKey(payload);
       const persisted = forceDefault ? null : readPersistedMetricPresentation(storageKey);
+      const previousSelectionModeByScope = state.metricPresentation.selectionModeByScope || {};
+      const previousSelectionByScope = state.metricPresentation.selectionByScope || {};
       const scopeByKey = {};
       state.metricPresentation.storageKey = storageKey;
       state.metricPresentation.scopes = model.scopes;
@@ -5637,6 +5708,8 @@
       state.metricPresentation.orderByScope = {};
       state.metricPresentation.displayByMetric = {};
       state.metricPresentation.expandedAnchors = new Set();
+      state.metricPresentation.selectionModeByScope = {};
+      state.metricPresentation.selectionByScope = {};
 
       model.scopes.forEach(function(scope) {
         const scopeId = scope.scopeId;
@@ -5651,6 +5724,18 @@
             : "shown";
           state.metricPresentation.displayByMetric[metricKey] = normalizeMetricDisplayStatus(savedDisplay);
         });
+        if (!forceDefault && previousSelectionModeByScope[scopeId]) {
+          const previousSelection = previousSelectionByScope[scopeId] instanceof Set
+            ? previousSelectionByScope[scopeId]
+            : new Set();
+          const allowed = new Set(defaultOrder);
+          state.metricPresentation.selectionModeByScope[scopeId] = true;
+          state.metricPresentation.selectionByScope[scopeId] = new Set(
+            Array.from(previousSelection).filter(function(metricKey) {
+              return allowed.has(metricKey);
+            })
+          );
+        }
       });
       state.metricPresentation.scopeByKey = scopeByKey;
 
@@ -5752,11 +5837,24 @@
       const rows = (scope.metricKeys || []).map(function(metricKey) {
         return renderMetricConfigRow(scope, metricKey);
       }).join("");
+      const selectionActive = metricPresentationSelectionMode(scope.scopeId);
+      const selectedCount = metricPresentationSelectedKeys(scope.scopeId).length;
       return [
         '<section class="metrics-config-scope-table" data-metrics-config-scope-table data-metrics-config-scope="' + escapeHtml(scope.scopeId) + '">',
         '<div class="metrics-config-scope-head">',
+        '<div class="metrics-config-scope-title-group">',
         '<h3 class="metrics-config-scope-title">' + escapeHtml(scope.label) + '</h3>',
-        '<span class="metrics-config-scope-meta">' + escapeHtml(String((scope.metricKeys || []).length)) + ' метрик</span>',
+        '<span class="metrics-config-scope-meta">' + escapeHtml(String((scope.metricKeys || []).length)) + ' метрик' + (selectionActive ? " · выбрано " + String(selectedCount) : "") + '</span>',
+        "</div>",
+        '<div class="metrics-config-scope-actions">',
+        '<button class="metrics-config-selection-toggle" type="button" data-metric-selection-toggle data-metric-config-scope="' + escapeHtml(scope.scopeId) + '" aria-pressed="' + (selectionActive ? "true" : "false") + '">' + (selectionActive ? "Готово" : "Выбрать") + "</button>",
+        '<select class="metrics-config-bulk-select" data-metric-bulk-display data-metric-config-scope="' + escapeHtml(scope.scopeId) + '" aria-label="' + escapeHtml("Массовое отображение: " + scope.label) + '"' + (!selectionActive || selectedCount <= 0 ? " disabled" : "") + '>',
+        '<option value="">Отображение</option>',
+        ["shown", "collapsed", "hidden"].map(function(candidate) {
+          return '<option value="' + escapeHtml(candidate) + '">' + escapeHtml(metricDisplayStatusLabel(candidate)) + "</option>";
+        }).join(""),
+        "</select>",
+        "</div>",
         "</div>",
         '<div class="metrics-config-table" role="table" aria-label="' + escapeHtml("Метрики " + scope.label) + '">',
         '<div class="metrics-config-row is-header" role="row">',
@@ -5775,9 +5873,12 @@
       const label = String(option.label || metricKey);
       const groupLabel = String(option.sectionLabel || "Без секции");
       const status = metricDisplayStatus(metricKey);
+      const selectionActive = metricPresentationSelectionMode(scope.scopeId);
+      const selected = metricPresentationSelectionSet(scope.scopeId).has(metricKey);
       return [
-        '<div class="metrics-config-row" role="row" data-metric-config-row="' + escapeHtml(metricKey) + '" data-metric-config-scope="' + escapeHtml(scope.scopeId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '" data-metric-display-status="' + escapeHtml(status) + '">',
+        '<div class="metrics-config-row' + (selected ? " is-selected" : "") + '" role="row" data-metric-config-row="' + escapeHtml(metricKey) + '" data-metric-config-scope="' + escapeHtml(scope.scopeId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '" data-metric-display-status="' + escapeHtml(status) + '" data-metric-selection-active="' + (selectionActive ? "true" : "false") + '" data-metric-selected="' + (selected ? "true" : "false") + '">',
         '<span class="metrics-config-main" role="cell">',
+        selectionActive ? '<input class="metrics-config-select-checkbox" type="checkbox" data-metric-selection-checkbox data-metric-config-scope="' + escapeHtml(scope.scopeId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '" aria-label="' + escapeHtml("Выбрать: " + label) + '"' + (selected ? " checked" : "") + ">" : "",
         '<span class="metrics-config-drag-handle" draggable="true" role="button" tabindex="0" aria-label="Перетащить метрику" data-metric-drag-handle data-metric-config-scope="' + escapeHtml(scope.scopeId) + '" data-metric-config-key="' + escapeHtml(metricKey) + '" title="Перетащить метрику">⋮⋮</span>',
         '<span class="metrics-config-accent" aria-hidden="true"></span>',
         '<span class="metrics-config-label" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</span>',
@@ -5793,13 +5894,32 @@
     }
 
     function handleMetricPresentationClick(event) {
-      const handle = event.target.closest("[data-metric-drag-handle]");
-      if (!handle) {
+      const toggle = event.target.closest("[data-metric-selection-toggle]");
+      if (!toggle) {
         return;
       }
+      event.preventDefault();
+      toggleMetricPresentationSelectionMode(String(toggle.getAttribute("data-metric-config-scope") || ""));
     }
 
     function handleMetricPresentationChange(event) {
+      const checkbox = event.target.closest("[data-metric-selection-checkbox]");
+      if (checkbox) {
+        updateMetricPresentationSelection(
+          String(checkbox.getAttribute("data-metric-config-scope") || ""),
+          String(checkbox.getAttribute("data-metric-config-key") || ""),
+          !!checkbox.checked
+        );
+        return;
+      }
+      const bulkSelect = event.target.closest("[data-metric-bulk-display]");
+      if (bulkSelect) {
+        applyBulkMetricDisplayStatus(
+          String(bulkSelect.getAttribute("data-metric-config-scope") || ""),
+          String(bulkSelect.value || "")
+        );
+        return;
+      }
       const select = event.target.closest("[data-metric-display-select]");
       if (!select) {
         return;
@@ -5820,12 +5940,24 @@
       if (!row) {
         return;
       }
+      const scopeId = String(row.getAttribute("data-metric-config-scope") || "");
+      const metricKey = String(row.getAttribute("data-metric-config-key") || "");
+      const selectedKeys = metricPresentationSelectedKeys(scopeId);
+      const draggedKeys = selectedKeys.indexOf(metricKey) !== -1 ? selectedKeys : [metricKey];
       metricPresentationDragState = {
         type: "metric",
-        scopeId: String(row.getAttribute("data-metric-config-scope") || ""),
-        metricKey: String(row.getAttribute("data-metric-config-key") || "")
+        scopeId: scopeId,
+        metricKey: metricKey,
+        metricKeys: draggedKeys
       };
-      row.classList.add("is-dragging");
+      if (metricsPresentationBodyNode) {
+        draggedKeys.forEach(function(key) {
+          const draggedRow = metricsPresentationBodyNode.querySelector('[data-metric-config-row="' + cssEscape(key) + '"][data-metric-config-scope="' + cssEscape(scopeId) + '"]');
+          if (draggedRow) {
+            draggedRow.classList.add("is-dragging");
+          }
+        });
+      }
       if (event.dataTransfer) {
         event.dataTransfer.effectAllowed = "move";
         event.dataTransfer.setData("text/plain", metricPresentationDragState.metricKey);
@@ -5853,9 +5985,9 @@
         return;
       }
       event.preventDefault();
-      moveMetricInPresentationByDrag(
+      moveMetricsInPresentationByDrag(
         metricPresentationDragState.scopeId,
-        metricPresentationDragState.metricKey,
+        metricPresentationDragState.metricKeys,
         target.metricKey,
         target.placement
       );
@@ -5886,9 +6018,10 @@
       }
       const scopeId = String(row.getAttribute("data-metric-config-scope") || "");
       const metricKey = String(row.getAttribute("data-metric-config-key") || "");
+      const dragKeys = metricPresentationDragState.metricKeys || [metricPresentationDragState.metricKey];
       if (
         !metricKey ||
-        metricKey === metricPresentationDragState.metricKey ||
+        dragKeys.indexOf(metricKey) !== -1 ||
         scopeId !== metricPresentationDragState.scopeId
       ) {
         return null;
@@ -5901,6 +6034,76 @@
         metricKey: metricKey,
         placement: event.clientY < rect.top + rect.height / 2 ? "before" : "after"
       };
+    }
+
+    function metricPresentationSelectionMode(scopeId) {
+      return !!state.metricPresentation.selectionModeByScope[String(scopeId || "")];
+    }
+
+    function metricPresentationSelectionSet(scopeId) {
+      const normalizedScopeId = String(scopeId || "");
+      if (!state.metricPresentation.selectionByScope[normalizedScopeId]) {
+        state.metricPresentation.selectionByScope[normalizedScopeId] = new Set();
+      }
+      return state.metricPresentation.selectionByScope[normalizedScopeId];
+    }
+
+    function metricPresentationSelectedKeys(scopeId) {
+      const selected = metricPresentationSelectionSet(scopeId);
+      const order = metricPresentationScopeOrder(scopeId);
+      return order.filter(function(metricKey) {
+        return selected.has(metricKey);
+      });
+    }
+
+    function toggleMetricPresentationSelectionMode(scopeId) {
+      const normalizedScopeId = String(scopeId || "");
+      if (!normalizedScopeId) {
+        return;
+      }
+      const nextValue = !metricPresentationSelectionMode(normalizedScopeId);
+      state.metricPresentation.selectionModeByScope[normalizedScopeId] = nextValue;
+      if (!nextValue) {
+        state.metricPresentation.selectionByScope[normalizedScopeId] = new Set();
+      } else {
+        metricPresentationSelectionSet(normalizedScopeId);
+      }
+      renderMetricPresentationPanel(state.composition);
+    }
+
+    function updateMetricPresentationSelection(scopeId, metricKey, selected) {
+      const normalizedScopeId = String(scopeId || "");
+      const normalizedMetricKey = String(metricKey || "");
+      if (!metricPresentationSelectionMode(normalizedScopeId) || metricPresentationScopeOrder(normalizedScopeId).indexOf(normalizedMetricKey) === -1) {
+        return;
+      }
+      const selection = metricPresentationSelectionSet(normalizedScopeId);
+      if (selected) {
+        selection.add(normalizedMetricKey);
+      } else {
+        selection.delete(normalizedMetricKey);
+      }
+      renderMetricPresentationPanel(state.composition);
+    }
+
+    function applyBulkMetricDisplayStatus(scopeId, status) {
+      const normalizedStatus = normalizeMetricDisplayStatus(status);
+      if (!status || !metricPresentationSelectionMode(scopeId)) {
+        renderMetricPresentationPanel(state.composition);
+        return;
+      }
+      const selectedKeys = metricPresentationSelectedKeys(scopeId);
+      if (!selectedKeys.length) {
+        renderMetricPresentationPanel(state.composition);
+        return;
+      }
+      selectedKeys.forEach(function(metricKey) {
+        state.metricPresentation.displayByMetric[metricKey] = normalizedStatus;
+      });
+      pruneExpandedMetricPresentationAnchors();
+      persistMetricPresentation();
+      renderMetricPresentationPanel(state.composition);
+      renderTable();
     }
 
     function updateMetricDisplayStatus(scopeId, metricKey, status) {
@@ -5919,25 +6122,37 @@
     }
 
     function moveMetricInPresentationByDrag(scopeId, metricKey, targetMetricKey, placement) {
-      if (!scopeId || !metricKey || !targetMetricKey || metricKey === targetMetricKey) {
+      moveMetricsInPresentationByDrag(scopeId, [metricKey], targetMetricKey, placement);
+    }
+
+    function moveMetricsInPresentationByDrag(scopeId, metricKeys, targetMetricKey, placement) {
+      const movingKeys = Array.isArray(metricKeys) ? metricKeys.map(function(metricKey) {
+        return String(metricKey || "");
+      }).filter(Boolean) : [];
+      if (!scopeId || !movingKeys.length || !targetMetricKey || movingKeys.indexOf(targetMetricKey) !== -1) {
         return;
       }
       const order = metricPresentationScopeOrder(scopeId);
-      const sourceIndex = order.indexOf(metricKey);
+      const movingSet = new Set(movingKeys);
+      const sourceMetrics = order.filter(function(metricKey) {
+        return movingSet.has(metricKey);
+      });
       const targetIndex = order.indexOf(targetMetricKey);
-      if (sourceIndex < 0 || targetIndex < 0) {
+      if (!sourceMetrics.length || targetIndex < 0) {
         return;
       }
-      order.splice(sourceIndex, 1);
-      let insertIndex = order.indexOf(targetMetricKey);
+      const remaining = order.filter(function(metricKey) {
+        return !movingSet.has(metricKey);
+      });
+      let insertIndex = remaining.indexOf(targetMetricKey);
       if (insertIndex < 0) {
         return;
       }
       if (placement === "after") {
         insertIndex += 1;
       }
-      order.splice(insertIndex, 0, metricKey);
-      state.metricPresentation.orderByScope[scopeId] = order;
+      remaining.splice.apply(remaining, [insertIndex, 0].concat(sourceMetrics));
+      state.metricPresentation.orderByScope[scopeId] = remaining;
       pruneExpandedMetricPresentationAnchors();
       persistMetricPresentation();
       renderMetricPresentationPanel(state.composition);
