@@ -103,6 +103,7 @@ def main() -> None:
         "table_header": ready_result["table_header"],
         "default_total_first": ready_result["default_total_first"],
         "default_sku_metric_cluster": ready_result["default_sku_metric_cluster"],
+        "dynamic_object_label": ready_result["dynamic_object_label"],
         "sku_separators": ready_result["sku_separators"],
         "filter_controls": ready_result["filter_controls"],
         "status_summary": ready_result["status_summary"],
@@ -402,11 +403,12 @@ def run_browser_checks(
             initial_order = _extract_visible_row_order(page)
             if not initial_order:
                 raise AssertionError("web-vitrina must expose visible data rows")
-            if initial_order[0]["scope_label"] != "ИТОГО":
+            if initial_order[0]["scope_label"].lower() != "итого":
                 raise AssertionError(f"default order must start with TOTAL block, got {initial_order[0]}")
             sku_cluster_ok = _has_sku_metric_cluster(initial_order)
             if not sku_cluster_ok:
                 raise AssertionError(f"default order must switch to sku->metrics clustering, got {initial_order[:8]}")
+            dynamic_object_label = _check_dynamic_object_label(page)
             sku_separators = _check_sku_separators(page)
             right_edge_spacer = _check_right_edge_spacer(page)
             static_group_labels = _check_static_group_labels(page)
@@ -631,8 +633,9 @@ def run_browser_checks(
         "table_rendered": total_rows > 0,
         "top_panel": top_panel_state,
         "table_header": table_header_layout,
-        "default_total_first": initial_order[0]["scope_label"] == "ИТОГО",
+        "default_total_first": initial_order[0]["scope_label"].lower() == "итого",
         "default_sku_metric_cluster": sku_cluster_ok,
+        "dynamic_object_label": dynamic_object_label,
         "sku_separators": sku_separators,
         "right_edge_spacer": right_edge_spacer,
         "static_group_labels": static_group_labels,
@@ -720,6 +723,8 @@ def _print_summary(result: dict[str, object]) -> None:
     print("web_vitrina_browser_operator_link: ok ->", result["operator_link"])
     print("web_vitrina_browser_default_total_first: ok ->", result["default_total_first"])
     print("web_vitrina_browser_default_sku_metric_cluster: ok ->", result["default_sku_metric_cluster"])
+    if "dynamic_object_label" in result:
+        print("web_vitrina_browser_dynamic_object_label: ok ->", result["dynamic_object_label"])
     print("web_vitrina_browser_filters: ok ->", result["filter_controls"])
     if "table_toolbar" in result:
         print("web_vitrina_browser_table_toolbar: ok ->", result["table_toolbar"])
@@ -840,6 +845,10 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
             scopeId: tableNode.getAttribute('data-metrics-config-scope') || '',
             label: ((tableNode.querySelector('.metrics-config-scope-title') || {}).textContent || '').trim(),
             selectionButtonText: ((tableNode.querySelector('[data-metric-selection-toggle]') || {}).textContent || '').trim(),
+            syncButtonText: ((tableNode.querySelector('[data-metric-sync-from-total]') || {}).textContent || '').trim(),
+            scrollBoxHeight: Math.round(tableNode.getBoundingClientRect().height),
+            scrollHeight: Math.round(tableNode.scrollHeight),
+            headTopBefore: Math.round(((tableNode.querySelector('.metrics-config-scope-head') || {}).getBoundingClientRect ? tableNode.querySelector('.metrics-config-scope-head').getBoundingClientRect().top : 0)),
             bulkOptions: Array.from(tableNode.querySelectorAll('[data-metric-bulk-display] option')).map((node) => (node.textContent || '').trim()),
             bulkDisabled: !!((tableNode.querySelector('[data-metric-bulk-display]') || {}).disabled),
             checkboxCount: tableNode.querySelectorAll('[data-metric-selection-checkbox]').length,
@@ -913,6 +922,10 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
             raise AssertionError(f"display selector options mismatch, got {scope}")
         if scope["selectionButtonText"] != "Выбрать":
             raise AssertionError(f"each scope table must expose selection mode button, got {scope}")
+        if scope["scopeId"] == "sku" and scope["syncButtonText"] != "Как Итого":
+            raise AssertionError(f"SKU table must expose compact sync-from-total action, got {scope}")
+        if scope["scopeId"] != "sku" and scope["syncButtonText"]:
+            raise AssertionError(f"sync-from-total action must not render for non-SKU scopes, got {scope}")
         if scope["bulkOptions"] != ["Отображение", "Показано", "Свернуто", "Скрыто"] or not scope["bulkDisabled"]:
             raise AssertionError(f"bulk display selector must start disabled with canonical options, got {scope}")
         if int(scope["checkboxCount"]) != 0:
@@ -921,6 +934,8 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         raise AssertionError(f"metrics presentation must use compact dark two-table layout with no old wording, got {panel_state}")
     if float(panel_state["maxRowHeight"]) > 34:
         raise AssertionError(f"metrics rows must remain compact, got {panel_state}")
+    sticky_controls = _check_metric_settings_sticky_controls(page)
+    sku_sync = _check_sku_sync_from_total(page, storage_key=storage_key)
 
     target_scope = next(
         (
@@ -1034,12 +1049,195 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         raise AssertionError("obsolete grouped metric-presentation localStorage must not crash the page")
     return {
         "scope_tables": scope_labels,
+        "sticky_controls": sticky_controls,
+        "sku_sync_from_total": sku_sync,
         "bulk_selection": bulk_selection,
         "order_changed": [target_key, source_key],
         "display_statuses": {"shown": anchor_key, "collapsed": [collapsed_one, collapsed_two], "hidden": hidden_key},
         "disclosure_anchor": anchor_key,
         "broken_storage_fallback": True,
         "obsolete_storage_fallback": True,
+    }
+
+
+def _check_metric_settings_sticky_controls(page: object) -> dict[str, object]:
+    state = page.evaluate(
+        """() => {
+          const table = document.querySelector('[data-metrics-config-scope-table][data-metrics-config-scope="sku"]');
+          const head = table ? table.querySelector('.metrics-config-scope-head') : null;
+          const selectButton = table ? table.querySelector('[data-metric-selection-toggle]') : null;
+          const bulkSelect = table ? table.querySelector('[data-metric-bulk-display]') : null;
+          const syncButton = table ? table.querySelector('[data-metric-sync-from-total]') : null;
+          if (!table || !head || !selectButton || !bulkSelect || !syncButton) {
+            return {ok: false, reason: 'missing controls'};
+          }
+          table.style.maxHeight = '180px';
+          const beforeTop = Math.round(head.getBoundingClientRect().top);
+          const canScroll = table.scrollHeight > table.clientHeight + 20;
+          table.scrollTop = Math.max(0, table.scrollHeight - table.clientHeight);
+          table.dispatchEvent(new Event('scroll'));
+          const afterTop = Math.round(head.getBoundingClientRect().top);
+          const tableRect = table.getBoundingClientRect();
+          const headRect = head.getBoundingClientRect();
+          return {
+            ok: true,
+            canScroll,
+            beforeTop,
+            afterTop,
+            topStable: Math.abs(afterTop - beforeTop) <= 2,
+            headInsideTable: headRect.top >= tableRect.top - 2 && headRect.bottom <= tableRect.bottom + 2,
+            selectionVisible: !!selectButton.offsetParent,
+            bulkVisible: !!bulkSelect.offsetParent,
+            syncVisible: !!syncButton.offsetParent,
+            scrollTop: Math.round(table.scrollTop)
+          };
+        }"""
+    )
+    if not state.get("ok") or not state.get("canScroll") or not state.get("topStable") or not state.get("headInsideTable"):
+        raise AssertionError(f"metric settings controls must stay sticky inside the settings scroll container, got {state}")
+    if not state.get("selectionVisible") or not state.get("bulkVisible") or not state.get("syncVisible"):
+        raise AssertionError(f"metric settings sticky head must keep actions visible, got {state}")
+    page.evaluate(
+        """() => {
+          document.querySelectorAll('[data-metrics-config-scope-table]').forEach((node) => { node.scrollTop = 0; });
+        }"""
+    )
+    return state
+
+
+def _metric_analog_pairs(page: object) -> list[dict[str, str]]:
+    return page.evaluate(
+        """() => {
+          const order = (scopeId) => Array.from(document.querySelectorAll('[data-metric-config-row][data-metric-config-scope="' + scopeId + '"]:not(.is-header)'))
+            .map((row) => row.getAttribute('data-metric-config-key') || '')
+            .filter(Boolean);
+          const candidates = (key) => {
+            const result = [];
+            const add = (value) => {
+              if (value && !result.includes(value)) {
+                result.push(value);
+              }
+            };
+            add(key);
+            if (key.startsWith('total_')) {
+              add(key.slice('total_'.length));
+            }
+            if (key.endsWith('_total')) {
+              add(key.slice(0, -'_total'.length));
+            }
+            if (key.startsWith('total_') && key.endsWith('_total')) {
+              add(key.slice('total_'.length, -'_total'.length));
+            }
+            return result;
+          };
+          const totalOrder = order('total');
+          const skuOrder = order('sku');
+          const skuSet = new Set(skuOrder);
+          const used = new Set();
+          const pairs = [];
+          totalOrder.forEach((totalKey) => {
+            const skuKey = candidates(totalKey).find((candidate) => skuSet.has(candidate) && !used.has(candidate));
+            if (skuKey) {
+              used.add(skuKey);
+              pairs.push({totalKey, skuKey});
+            }
+          });
+          return pairs;
+        }"""
+    )
+
+
+def _seed_metric_presentation_storage(
+    page: object,
+    *,
+    storage_key: str,
+    total_order: list[str],
+    sku_order: list[str],
+    total_display: dict[str, str],
+) -> None:
+    page.evaluate(
+        """({storageKey, totalOrder, skuOrder, totalDisplay}) => {
+          window.localStorage.setItem(storageKey, JSON.stringify({
+            version: 2,
+            scopes: {
+              total: {order: totalOrder, display: totalDisplay, manual: true},
+              sku: {order: skuOrder, display: {}, manual: false}
+            },
+            expanded_anchors: []
+          }));
+        }""",
+        {
+            "storageKey": storage_key,
+            "totalOrder": total_order,
+            "skuOrder": sku_order,
+            "totalDisplay": total_display,
+        },
+    )
+
+
+def _check_sku_sync_from_total(page: object, *, storage_key: str) -> dict[str, object]:
+    page.locator("[data-reset-filters]").click()
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
+    page.evaluate("() => { const panel = document.querySelector('[data-metrics-presentation]'); if (panel) { panel.open = true; } }")
+    pairs = _metric_analog_pairs(page)
+    if len(pairs) < 2:
+        raise AssertionError(f"SKU sync check needs at least two total/SKU analog pairs, got {pairs}")
+    total_initial_order = _metric_scope_order(page, "total")
+    sku_initial_order = _metric_scope_order(page, "sku")
+    pair_a, pair_b = pairs[0], pairs[1]
+    custom_total_order = [pair_b["totalKey"], pair_a["totalKey"]] + [
+        key for key in total_initial_order if key not in {pair_a["totalKey"], pair_b["totalKey"]}
+    ]
+    total_display = {pair_b["totalKey"]: "collapsed", pair_a["totalKey"]: "hidden"}
+    _seed_metric_presentation_storage(
+        page,
+        storage_key=storage_key,
+        total_order=custom_total_order,
+        sku_order=sku_initial_order,
+        total_display=total_display,
+    )
+    page.reload(wait_until="commit")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    page.evaluate("() => { const panel = document.querySelector('[data-metrics-presentation]'); if (panel) { panel.open = true; } }")
+    total_after_auto = _metric_scope_order(page, "total")
+    sku_after_auto = _metric_scope_order(page, "sku")
+    total_status_after_auto = _metric_scope_statuses(page, "total")
+    sku_status_after_auto = _metric_scope_statuses(page, "sku")
+    expected_sku_prefix = [pair_b["skuKey"], pair_a["skuKey"]]
+    if total_after_auto[:2] != custom_total_order[:2]:
+        raise AssertionError(f"auto SKU sync must not rewrite total order, got {total_after_auto[:4]}")
+    if total_status_after_auto.get(pair_b["totalKey"]) != "collapsed" or total_status_after_auto.get(pair_a["totalKey"]) != "hidden":
+        raise AssertionError(f"auto SKU sync must preserve total display statuses, got {total_status_after_auto}")
+    if sku_after_auto[:2] != expected_sku_prefix:
+        raise AssertionError(f"auto SKU sync must derive SKU order from total analogs, got {sku_after_auto[:6]}, expected {expected_sku_prefix}")
+    if sku_status_after_auto.get(pair_b["skuKey"]) != "collapsed" or sku_status_after_auto.get(pair_a["skuKey"]) != "hidden":
+        raise AssertionError(f"auto SKU sync must derive SKU statuses from total analogs, got {sku_status_after_auto}")
+    if len(sku_after_auto) != len(set(sku_after_auto)) or set(sku_after_auto) != set(sku_initial_order):
+        raise AssertionError(f"auto SKU sync must not duplicate or lose SKU metrics, got {sku_after_auto}")
+
+    before_explicit_total_order = _metric_scope_order(page, "total")
+    before_explicit_total_statuses = _metric_scope_statuses(page, "total")
+    page.locator('[data-metric-sync-from-total][data-metric-config-scope="sku"]').click()
+    page.wait_for_timeout(200)
+    explicit_total_order = _metric_scope_order(page, "total")
+    explicit_total_statuses = _metric_scope_statuses(page, "total")
+    if explicit_total_order != before_explicit_total_order or explicit_total_statuses != before_explicit_total_statuses:
+        raise AssertionError("explicit SKU sync must not mutate total scope state")
+    persisted_sku_order = _persisted_metric_scope_order(page, storage_key, "sku")
+    persisted_sku_display = _persisted_metric_display(page, storage_key, "sku")
+    if persisted_sku_order[:2] != expected_sku_prefix or persisted_sku_display.get(pair_b["skuKey"]) != "collapsed":
+        raise AssertionError(f"explicit SKU sync must persist SKU-only order/status, got order={persisted_sku_order[:6]}, display={persisted_sku_display}")
+
+    page.locator("[data-reset-filters]").click()
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
+    page.evaluate("() => { const panel = document.querySelector('[data-metrics-presentation]'); if (panel) { panel.open = true; } }")
+    if _metric_scope_order(page, "total") != total_initial_order or _metric_scope_order(page, "sku") != sku_initial_order:
+        raise AssertionError("reset must restore default total/SKU metric presentation after sync check")
+    return {
+        "pairs": [pair_a, pair_b],
+        "auto_prefix": expected_sku_prefix,
+        "explicit_persisted": True,
+        "total_untouched": True,
     }
 
 
@@ -1487,6 +1685,8 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
             cardLikeRows: styles.filter((style) => style.borderLeft !== '0px' || style.borderRight !== '0px').length,
             missingMetricLabelToggle: document.querySelectorAll('[data-column-visibility-id="metric_label"]').length === 0,
             missingScopeLabelToggle: document.querySelectorAll('[data-column-visibility-id="scope_label"]').length === 0,
+            missingMetricKeyToggle: document.querySelectorAll('[data-column-visibility-id="metric_key"]').length === 0,
+            missingScopeKindToggle: document.querySelectorAll('[data-column-visibility-id="scope_kind"]').length === 0,
             missingSectionToggle: document.querySelectorAll('[data-column-visibility-id="section"]').length === 0,
             dateToggleCount: document.querySelectorAll('[data-column-visibility-id^="date:"]').length
           };
@@ -1498,44 +1698,39 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
         or visual_state["cardLikeRows"] != 0
         or not visual_state["missingMetricLabelToggle"]
         or not visual_state["missingScopeLabelToggle"]
+        or not visual_state["missingMetricKeyToggle"]
+        or not visual_state["missingScopeKindToggle"]
         or not visual_state["missingSectionToggle"]
         or visual_state["dateToggleCount"] != 0
     ):
         raise AssertionError(f"column manager must render a compact checklist without mandatory/date toggles, got {visual_state}")
-    page.locator('[data-column-visibility-id="metric_key"]').uncheck()
-    page.locator('[data-column-visibility-id="scope_kind"]').uncheck()
+    page.locator('[data-column-visibility-id="row_last_updated_at"]').uncheck()
     page.wait_for_function(
         """() =>
-          document.querySelectorAll('[data-table-head] [data-col-id="metric_key"]').length === 0 &&
-          document.querySelectorAll('[data-table-head] [data-col-id="scope_kind"]').length === 0
+          document.querySelectorAll('[data-table-head] [data-col-id="row_last_updated_at"]').length === 0
         """,
         timeout=5000,
     )
     page.reload(wait_until="commit")
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
     page.evaluate("() => { const node = document.querySelector('[data-column-manager]'); if (node) { node.open = true; } }")
-    metric_hidden_after_reload = page.locator('[data-table-head] [data-col-id="metric_key"]').count() == 0
-    scope_kind_hidden_after_reload = page.locator('[data-table-head] [data-col-id="scope_kind"]').count() == 0
-    if not metric_hidden_after_reload or not scope_kind_hidden_after_reload:
+    updated_hidden_after_reload = page.locator('[data-table-head] [data-col-id="row_last_updated_at"]').count() == 0
+    if not updated_hidden_after_reload:
         raise AssertionError("column visibility must persist across reload for optional columns")
     page.locator("[data-columns-reset]").click()
     page.wait_for_function(
         """() =>
-          document.querySelectorAll('[data-table-head] [data-col-id="metric_key"]').length === 1 &&
-          document.querySelectorAll('[data-table-head] [data-col-id="scope_kind"]').length === 1
+          document.querySelectorAll('[data-table-head] [data-col-id="row_last_updated_at"]').length === 1
         """,
         timeout=5000,
     )
-    metric_checkbox_checked = page.locator('[data-column-visibility-id="metric_key"]').is_checked()
-    scope_checkbox_checked = page.locator('[data-column-visibility-id="scope_kind"]').is_checked()
-    if not metric_checkbox_checked or not scope_checkbox_checked:
+    updated_checkbox_checked = page.locator('[data-column-visibility-id="row_last_updated_at"]').is_checked()
+    if not updated_checkbox_checked:
         raise AssertionError("column visibility reset must restore optional column checkboxes")
     return {
-        "persisted_hidden_columns": ["metric_key", "scope_kind"],
-        "metric_hidden_after_reload": metric_hidden_after_reload,
-        "scope_kind_hidden_after_reload": scope_kind_hidden_after_reload,
-        "metric_checkbox_checked_after_reset": metric_checkbox_checked,
-        "scope_checkbox_checked_after_reset": scope_checkbox_checked,
+        "persisted_hidden_columns": ["row_last_updated_at"],
+        "updated_hidden_after_reload": updated_hidden_after_reload,
+        "updated_checkbox_checked_after_reset": updated_checkbox_checked,
         "compact_checklist": visual_state,
     }
 
@@ -1654,6 +1849,7 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
           const summary = header ? header.querySelector('[data-table-summary-line]') : null;
           const loadStatus = header ? header.querySelector('[data-table-load-status]') : null;
           const freshnessBadge = header ? header.querySelector('[data-table-freshness-indicator]') : null;
+          const objectLabel = header ? header.querySelector('[data-table-object-label]') : null;
           const progress = header ? header.querySelector('[data-global-progress]') : null;
           const loadButton = header ? header.querySelector('[data-load-refresh-button]') : null;
           const source = header ? header.querySelector('.table-source-kicker') : null;
@@ -1676,6 +1872,12 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
             page_meta: metaText,
             table_meta: tableMeta ? ((tableMeta.textContent || '').trim()) : '',
             summary_text: summary ? ((summary.textContent || '').trim()) : '',
+            object_label_text: objectLabel ? ((objectLabel.textContent || '').trim()) : '',
+            object_label_hidden: objectLabel ? !!objectLabel.hidden : null,
+            title_table_count: Array.from(document.querySelectorAll('h1,h2,h3')).filter((node) => (node.textContent || '').trim() === 'Таблица').length,
+            heading_line_order_ok: !!(objectLabel && freshnessBadge && summary &&
+              ((objectLabel.compareDocumentPosition(freshnessBadge) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0) &&
+              ((freshnessBadge.compareDocumentPosition(summary) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0)),
             load_status_text: loadStatus ? ((loadStatus.textContent || '').trim()) : '',
             load_status_hidden: loadStatus ? !!loadStatus.hidden : null,
             load_button_text: loadButton ? ((loadButton.textContent || '').trim()) : '',
@@ -1701,6 +1903,10 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         or not payload["load_status_inline_left_of_button"]
         or payload["load_status_hidden"]
         or not payload["has_freshness_badge"]
+        or payload["object_label_hidden"]
+        or payload["object_label_text"] != "Итого"
+        or payload["title_table_count"] != 0
+        or not payload["heading_line_order_ok"]
     ):
         raise AssertionError(f"source/header controls must be compactly inside the table header, got {payload}")
     if payload["page_meta"] or payload["table_meta"] or payload["forbidden_hits"]:
@@ -2606,12 +2812,12 @@ def _measure_compact_widths(page: object, *, strict: bool) -> dict[str, int]:
         ]).filter(item => item[0]))"""
     )
     required = {
-        "row_order": 52,
-        "scope_label": 145,
-        "metric_key": 160,
         "metric_label": 156,
         "section": 98,
     }
+    for hidden_id in ("row_order", "scope_kind", "scope_key", "scope_label", "group", "nm_id", "metric_key"):
+        if hidden_id in widths:
+            raise AssertionError(f"{hidden_id} must be hidden from main table render, got {widths}")
     for column_id, max_width in required.items():
         if int(widths.get(column_id, 0)) <= 0:
             raise AssertionError(f"missing width measurement for {column_id!r}: {widths}")
@@ -2620,10 +2826,10 @@ def _measure_compact_widths(page: object, *, strict: bool) -> dict[str, int]:
     for column_id in [key for key in widths if key.startswith("date:")]:
         if strict and int(widths[column_id]) > 94:
             raise AssertionError(f"date column must stay narrow in browser render, got {widths}")
+    first_visible = next((key for key in widths if key != "header"), "")
+    if first_visible != "metric_label":
+        raise AssertionError(f"metric_label must be the first visible column, got {widths}")
     return {
-        "row_order": int(widths["row_order"]),
-        "scope_label": int(widths["scope_label"]),
-        "metric_key": int(widths["metric_key"]),
         "metric_label": int(widths["metric_label"]),
         "section": int(widths["section"]),
         "date": int(next(widths[key] for key in widths if key.startswith("date:"))),
@@ -2633,7 +2839,7 @@ def _measure_compact_widths(page: object, *, strict: bool) -> dict[str, int]:
 def _check_sticky_section_offsets(page: object) -> dict[str, object]:
     payload = page.evaluate(
         """() => {
-          const ids = ['row_order', 'scope_label', 'metric_label', 'section'];
+          const ids = ['metric_label', 'section'];
           const headers = Object.fromEntries(ids.map((id) => {
             const node = document.querySelector('[data-table-head] th[data-col-id="' + id + '"]');
             const style = node ? getComputedStyle(node) : null;
@@ -2652,6 +2858,7 @@ def _check_sticky_section_offsets(page: object) -> dict[str, object]:
           const dateHeaderStyle = dateHeader ? getComputedStyle(dateHeader) : null;
           return {
             headers,
+            hiddenObjectHeaderCount: document.querySelectorAll('[data-table-head] th[data-col-id="scope_label"]').length,
             sectionCell: {
               exists: !!sectionCell,
               position: sectionCellStyle ? sectionCellStyle.position : '',
@@ -2664,14 +2871,16 @@ def _check_sticky_section_offsets(page: object) -> dict[str, object]:
         }"""
     )
     headers = payload["headers"]
-    for column_id in ("scope_label", "metric_label", "section"):
+    if int(payload["hiddenObjectHeaderCount"]) != 0:
+        raise AssertionError(f"object column must not render as a visible header, got {payload}")
+    for column_id in ("metric_label", "section"):
         header = headers[column_id]
         if not header["exists"] or header["position"] != "sticky":
             raise AssertionError(f"{column_id} header must be sticky, got {payload}")
     if not payload["sectionCell"]["exists"] or payload["sectionCell"]["position"] != "sticky":
         raise AssertionError(f"section body cells must be sticky, got {payload}")
-    if not (int(headers["scope_label"]["left"]) < int(headers["metric_label"]["left"]) < int(headers["section"]["left"])):
-        raise AssertionError(f"sticky left offsets must increase through object/metric/section, got {payload}")
+    if int(headers["metric_label"]["left"]) != 0 or int(headers["section"]["left"]) <= int(headers["metric_label"]["left"]):
+        raise AssertionError(f"metric must be the first sticky column and section must follow it, got {payload}")
     if int(headers["section"]["zIndex"]) <= int(payload["dateHeaderZIndex"]):
         raise AssertionError(f"section sticky header must render above date headers, got {payload}")
     if payload["sectionCell"]["background"] == "rgba(0, 0, 0, 0)":
@@ -2683,13 +2892,12 @@ def _check_percent_formatting(page: object, *, expected_rows: dict[str, str] | N
     percent_rows = page.locator("[data-table-body] tr").evaluate_all(
         """rows => rows
           .map(row => {
-            const metricNode = row.querySelector('td[data-col-id="metric_key"]');
             const valueNode = row.querySelector('td[data-col-id^="date:"]');
-            if (!metricNode || !valueNode) {
+            if (!valueNode) {
               return null;
             }
             return {
-              metric_key: (metricNode.getAttribute('title') || metricNode.textContent || '').trim(),
+              metric_key: (valueNode.getAttribute('data-metric-key') || '').trim(),
               value: (valueNode.getAttribute('title') || valueNode.textContent || '').trim()
             };
           })
@@ -2944,7 +3152,7 @@ def _build_plan(
             SheetVitrinaWriteTarget(
                 sheet_name="DATA_VITRINA",
                 write_start_cell="A1",
-                write_rect="A1:C13",
+                write_rect="A1:C17",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
@@ -2954,6 +3162,10 @@ def _build_plan(
                     ["Итого: Заказы", "TOTAL|total_orderCount", 12],
                     ["Итого: Сумма заказов", "TOTAL|total_orderSum", 1000],
                     ["Итого: В корзину", "TOTAL|total_cartCount", 18],
+                    [f"SKU A: Показы в воронке", f"SKU:{first_nm_id}|view_count", 60],
+                    [f"SKU B: Показы в воронке", f"SKU:{second_nm_id}|view_count", 40],
+                    [f"SKU A: Заказы", f"SKU:{first_nm_id}|orderCount", 7],
+                    [f"SKU B: Заказы", f"SKU:{second_nm_id}|orderCount", 5],
                     [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|avg_price_seller_discounted", 990],
                     [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|avg_price_seller_discounted", 1090],
                     [f"SKU A: Конверсия в корзину", f"SKU:{first_nm_id}|avg_addToCartConversion", 0.115],
@@ -2963,7 +3175,7 @@ def _build_plan(
                     [f"SKU A: Акция", f"SKU:{first_nm_id}|promo_participation", first_in_promo],
                     [f"SKU B: Акция", f"SKU:{second_nm_id}|promo_participation", second_in_promo],
                 ],
-                row_count=12,
+                row_count=16,
                 column_count=3,
             ),
             SheetVitrinaWriteTarget(
@@ -3032,16 +3244,14 @@ def _extract_visible_row_order(page: object) -> list[dict[str, str]]:
     return page.locator("[data-table-body] tr").evaluate_all(
         """rows => rows
           .map(row => {
-            const scopeLabelNode = row.querySelector('td[data-col-id="scope_label"]');
-            const metricKeyNode = row.querySelector('td[data-col-id="metric_key"]');
-            const scopeKindNode = row.querySelector('td[data-col-id="scope_kind"]');
-            if (!scopeLabelNode || !metricKeyNode || !scopeKindNode) {
+            const metricNode = row.querySelector('td[data-col-id="metric_label"]');
+            if (!metricNode || !row.hasAttribute('data-row-scope-label')) {
               return null;
             }
             return {
-              scope_label: (scopeLabelNode.getAttribute('title') || scopeLabelNode.textContent || '').trim(),
-              metric_key: (metricKeyNode.getAttribute('title') || metricKeyNode.textContent || '').trim(),
-              scope_kind: (scopeKindNode.getAttribute('title') || scopeKindNode.textContent || '').trim(),
+              scope_label: (row.getAttribute('data-row-scope-label') || '').trim(),
+              metric_key: (metricNode.getAttribute('data-metric-key') || '').trim(),
+              scope_kind: ((row.getAttribute('data-row-kind') || '').toLowerCase() === 'total' ? 'TOTAL' : 'SKU'),
             };
           })
           .filter(Boolean)"""
@@ -3056,6 +3266,80 @@ def _has_sku_metric_cluster(rows: list[dict[str, str]]) -> bool:
         sku_rows[0].get("scope_label") == sku_rows[1].get("scope_label")
         and sku_rows[0].get("metric_key") != sku_rows[1].get("metric_key")
     )
+
+
+def _check_dynamic_object_label(page: object) -> dict[str, object]:
+    initial = page.evaluate(
+        """() => {
+          const label = document.querySelector('[data-table-object-label]');
+          const metricHeader = document.querySelector('[data-table-head] th[data-col-id="metric_label"]');
+          const objectHeader = document.querySelector('[data-table-head] th[data-col-id="scope_label"]');
+          const headers = Array.from(document.querySelectorAll('[data-table-head] th[data-col-id]')).map((node) => node.getAttribute('data-col-id'));
+          return {
+            text: label ? (label.textContent || '').trim() : '',
+            hidden: label ? !!label.hidden : true,
+            title: label ? (label.getAttribute('title') || '') : '',
+            firstHeader: headers[0] || '',
+            objectHeaderCount: objectHeader ? 1 : 0,
+            metricHeaderLeft: metricHeader ? Math.round(parseFloat(getComputedStyle(metricHeader).left || '0')) : -1
+          };
+        }"""
+    )
+    if (
+        initial["hidden"]
+        or initial["text"] != "Итого"
+        or initial["firstHeader"] != "metric_label"
+        or int(initial["objectHeaderCount"]) != 0
+        or int(initial["metricHeaderLeft"]) != 0
+    ):
+        raise AssertionError(f"dynamic object label must replace the visible object column, got {initial}")
+    scrolled = page.evaluate(
+        """() => {
+          const scroll = document.querySelector('[data-table-scroll]');
+          const label = document.querySelector('[data-table-object-label]');
+          const firstSku = Array.from(document.querySelectorAll('[data-table-body] tr[data-row-kind="sku"]'))[0];
+          if (!scroll || !label || !firstSku) {
+            return {ok: false, reason: 'missing nodes'};
+          }
+          scroll.style.maxHeight = '180px';
+          scroll.scrollTop = Math.max(0, firstSku.offsetTop + 2);
+          scroll.dispatchEvent(new Event('scroll'));
+          return {
+            ok: true,
+            text: (label.textContent || '').trim(),
+            title: label.getAttribute('title') || '',
+            firstSku: firstSku.getAttribute('data-row-scope-label') || '',
+            scrollLeftBefore: scroll.scrollLeft
+          };
+        }"""
+    )
+    page.wait_for_timeout(100)
+    scrolled_after = page.evaluate(
+        """() => {
+          const scroll = document.querySelector('[data-table-scroll]');
+          const label = document.querySelector('[data-table-object-label]');
+          const beforeText = label ? (label.textContent || '').trim() : '';
+          if (scroll) {
+            scroll.scrollLeft = 160;
+            scroll.dispatchEvent(new Event('scroll'));
+          }
+          return {
+            text: label ? (label.textContent || '').trim() : '',
+            title: label ? (label.getAttribute('title') || '') : '',
+            beforeText
+          };
+        }"""
+    )
+    if (
+        not scrolled.get("ok")
+        or not scrolled.get("firstSku")
+        or scrolled_after["text"] != scrolled["firstSku"]
+        or scrolled_after["text"] == "Итого"
+        or scrolled_after["title"] != scrolled_after["text"]
+    ):
+        raise AssertionError(f"dynamic object label must update to the top visible SKU and ignore horizontal scroll, got {scrolled} / {scrolled_after}")
+    page.evaluate("() => { const scroll = document.querySelector('[data-table-scroll]'); if (scroll) { scroll.style.maxHeight = ''; scroll.scrollTop = 0; scroll.scrollLeft = 0; scroll.dispatchEvent(new Event('scroll')); } }")
+    return {"initial": initial["text"], "scrolled": scrolled_after["text"], "object_column_absent": True}
 
 
 def _stub_sheet_load_runner(plan, emit):

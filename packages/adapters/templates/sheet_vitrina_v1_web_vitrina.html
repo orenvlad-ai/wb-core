@@ -1515,14 +1515,16 @@
 
     .table-header-main {
       display: grid;
+      flex: 1 1 560px;
       gap: 4px;
-      min-width: min(100%, 420px);
+      min-width: 0;
     }
 
     .table-header-meta {
       display: flex;
       flex: 0 0 auto;
       min-width: min(100%, 380px);
+      margin-left: auto;
       align-items: flex-start;
       justify-content: flex-end;
       gap: 8px;
@@ -1605,6 +1607,7 @@
       align-items: center;
       gap: 8px;
       flex-wrap: wrap;
+      min-width: 0;
     }
 
     .table-source-kicker {
@@ -1620,6 +1623,28 @@
       white-space: nowrap;
     }
 
+    .table-object-indicator {
+      display: inline-flex;
+      align-items: center;
+      max-width: min(380px, 42vw);
+      min-height: 22px;
+      border: 1px solid rgba(139, 92, 246, 0.42);
+      border-radius: 999px;
+      background: rgba(139, 92, 246, 0.11);
+      color: var(--text);
+      padding: 3px 9px;
+      font-size: 12px;
+      font-weight: 800;
+      line-height: 1.15;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .table-object-indicator[hidden] {
+      display: none;
+    }
+
     .table-summary-line {
       display: inline-flex;
       align-items: center;
@@ -1629,6 +1654,7 @@
       color: var(--muted);
       font-size: 11px;
       line-height: 1.35;
+      flex-wrap: wrap;
     }
 
     .table-summary-line[hidden] {
@@ -2044,11 +2070,15 @@
     }
 
     .metrics-config-scope-table {
+      display: flex;
+      flex-direction: column;
       min-width: 0;
+      max-height: min(66vh, 620px);
       border: 1px solid rgba(255, 255, 255, 0.07);
       border-radius: 6px;
       background: rgba(255, 255, 255, 0.018);
-      overflow: hidden;
+      overflow: auto;
+      overscroll-behavior: contain;
     }
 
     .metrics-config-scope-head {
@@ -2058,6 +2088,11 @@
       gap: 8px;
       padding: 7px 8px;
       border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      flex: 0 0 auto;
+      background: var(--panel-subtle);
+      position: sticky;
+      top: 0;
+      z-index: 2;
     }
 
     .metrics-config-scope-title-group {
@@ -2087,7 +2122,8 @@
     }
 
     .metrics-config-selection-toggle,
-    .metrics-config-bulk-select {
+    .metrics-config-bulk-select,
+    .metrics-config-sync-total {
       min-height: 24px;
       border: 1px solid var(--border);
       border-radius: 5px;
@@ -2104,16 +2140,30 @@
       cursor: pointer;
     }
 
+    .metrics-config-sync-total {
+      padding: 3px 8px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
     .metrics-config-selection-toggle:hover,
-    .metrics-config-bulk-select:hover:not(:disabled) {
+    .metrics-config-bulk-select:hover:not(:disabled),
+    .metrics-config-sync-total:hover:not(:disabled) {
       border-color: rgba(139, 92, 246, 0.44);
       background: rgba(139, 92, 246, 0.08);
     }
 
     .metrics-config-selection-toggle:focus-visible,
-    .metrics-config-bulk-select:focus-visible {
+    .metrics-config-bulk-select:focus-visible,
+    .metrics-config-sync-total:focus-visible {
       outline: 2px solid var(--accent-focus);
       outline-offset: 2px;
+    }
+
+    .metrics-config-sync-total:disabled {
+      color: var(--muted);
+      cursor: not-allowed;
+      opacity: 0.62;
     }
 
     .metrics-config-bulk-select {
@@ -3397,6 +3447,10 @@
         grid-template-columns: minmax(150px, 1fr) minmax(76px, 0.5fr) minmax(96px, 0.5fr);
       }
 
+      .table-object-indicator {
+        max-width: min(100%, 78vw);
+      }
+
       .table-header-actions {
         justify-content: flex-start;
       }
@@ -3549,13 +3603,13 @@
       <div class="panel-top table-panel-top" data-table-header>
         <div class="table-header-main">
           <div class="table-heading-row">
-            <h2>Таблица</h2>
+            <span class="table-object-indicator" data-table-object-label hidden>Итого</span>
             <span class="table-freshness-indicator" data-table-freshness-indicator hidden>
               <span class="table-freshness-dot" aria-hidden="true"></span>
               <span data-table-freshness-label>актуально</span>
             </span>
+            <p class="table-summary-line" data-table-summary-line hidden></p>
           </div>
-          <p class="table-summary-line" data-table-summary-line hidden></p>
         </div>
         <div class="table-header-meta">
           <div class="table-header-text" hidden>
@@ -4061,6 +4115,7 @@
     const tableScrollNode = document.querySelector("[data-table-scroll]");
     const tableHeadNode = document.querySelector("[data-table-head]");
     const tableBodyNode = document.querySelector("[data-table-body]");
+    const tableObjectLabelNode = document.querySelector("[data-table-object-label]");
     const tableFreshnessIndicatorNode = document.querySelector("[data-table-freshness-indicator]");
     const tableFreshnessLabelNode = document.querySelector("[data-table-freshness-label]");
     const tableLoadStatusNode = document.querySelector("[data-table-load-status]");
@@ -4150,6 +4205,15 @@
 
     const ALL_VALUE = "__all__";
     const METRIC_DISPLAY_STATUSES = new Set(["shown", "collapsed", "hidden"]);
+    const TABLE_FORCED_HIDDEN_COLUMN_IDS = new Set([
+      "row_order",
+      "scope_kind",
+      "scope_key",
+      "scope_label",
+      "group",
+      "nm_id",
+      "metric_key"
+    ]);
     const DEFAULT_UNIFIED_TAB = "vitrina";
     const FEEDBACKS_UNIFIED_TAB = "feedbacks";
     const FEEDBACKS_AI_MAX_QUEUE_ROWS = 25;
@@ -4308,7 +4372,8 @@
         optionByKey: new Map(),
         scopeByKey: {},
         orderByScope: {},
-        displayByMetric: {},
+        displayByScope: {},
+        manualByScope: {},
         expandedAnchors: new Set(),
         selectionModeByScope: {},
         selectionByScope: {}
@@ -4804,6 +4869,10 @@
         event.preventDefault();
       }
     }, {passive: false});
+
+    tableScrollNode.addEventListener("scroll", function() {
+      updateTableObjectIndicator();
+    }, {passive: true});
 
     function buildReadUrl(surface, options) {
       const url = new URL(WEB_VITRINA_CONFIG.read_path, window.location.origin);
@@ -5682,8 +5751,30 @@
       return METRIC_DISPLAY_STATUSES.has(normalized) ? normalized : "shown";
     }
 
-    function metricDisplayStatus(metricKey) {
-      return normalizeMetricDisplayStatus(state.metricPresentation.displayByMetric[String(metricKey || "")] || "shown");
+    function metricDisplayStatusForScope(scopeId, metricKey) {
+      const normalizedScopeId = String(scopeId || "");
+      const normalizedMetricKey = String(metricKey || "");
+      const scopeDisplay = state.metricPresentation.displayByScope[normalizedScopeId] || {};
+      return normalizeMetricDisplayStatus(scopeDisplay[normalizedMetricKey] || "shown");
+    }
+
+    function setMetricDisplayStatusForScope(scopeId, metricKey, status) {
+      const normalizedScopeId = String(scopeId || "");
+      const normalizedMetricKey = String(metricKey || "");
+      if (!normalizedScopeId || !normalizedMetricKey) {
+        return;
+      }
+      if (!state.metricPresentation.displayByScope[normalizedScopeId]) {
+        state.metricPresentation.displayByScope[normalizedScopeId] = {};
+      }
+      state.metricPresentation.displayByScope[normalizedScopeId][normalizedMetricKey] = normalizeMetricDisplayStatus(status);
+    }
+
+    function markMetricPresentationScopeManual(scopeId) {
+      const normalizedScopeId = String(scopeId || "");
+      if (normalizedScopeId) {
+        state.metricPresentation.manualByScope[normalizedScopeId] = true;
+      }
     }
 
     function metricDisplayStatusLabel(status) {
@@ -5713,7 +5804,8 @@
       state.metricPresentation.scopes = model.scopes;
       state.metricPresentation.optionByKey = model.optionByKey;
       state.metricPresentation.orderByScope = {};
-      state.metricPresentation.displayByMetric = {};
+      state.metricPresentation.displayByScope = {};
+      state.metricPresentation.manualByScope = {};
       state.metricPresentation.expandedAnchors = new Set();
       state.metricPresentation.selectionModeByScope = {};
       state.metricPresentation.selectionByScope = {};
@@ -5725,12 +5817,14 @@
         const defaultOrder = scope.metricKeys.slice();
         const order = sanitizeMetricOrder(savedScope.order, defaultOrder, knownMetricKeys);
         state.metricPresentation.orderByScope[scopeId] = order;
+        state.metricPresentation.displayByScope[scopeId] = {};
+        state.metricPresentation.manualByScope[scopeId] = !!(savedScope && savedScope.manual);
         defaultOrder.forEach(function(metricKey) {
           scopeByKey[metricKey] = scopeId;
           const savedDisplay = savedScope.display && Object.prototype.hasOwnProperty.call(savedScope.display, metricKey)
             ? savedScope.display[metricKey]
             : "shown";
-          state.metricPresentation.displayByMetric[metricKey] = normalizeMetricDisplayStatus(savedDisplay);
+          setMetricDisplayStatusForScope(scopeId, metricKey, savedDisplay);
         });
         if (!forceDefault && previousSelectionModeByScope[scopeId]) {
           const previousSelection = previousSelectionByScope[scopeId] instanceof Set
@@ -5746,6 +5840,9 @@
         }
       });
       state.metricPresentation.scopeByKey = scopeByKey;
+      if (!forceDefault && shouldAutoSyncSkuPresentationFromTotal(persisted)) {
+        applySkuMetricPresentationFromTotal({manual: false, render: false, persist: false});
+      }
 
       const allowedAnchors = new Set();
       model.scopes.forEach(function(scope) {
@@ -5773,14 +5870,15 @@
       (state.metricPresentation.scopes || []).forEach(function(scope) {
         const display = {};
         (scope.metricKeys || []).forEach(function(metricKey) {
-          const status = metricDisplayStatus(metricKey);
+          const status = metricDisplayStatusForScope(scope.scopeId, metricKey);
           if (status !== "shown") {
             display[metricKey] = status;
           }
         });
         scopes[scope.scopeId] = {
           order: (state.metricPresentation.orderByScope[scope.scopeId] || scope.metricKeys || []).slice(),
-          display: display
+          display: display,
+          manual: !!(state.metricPresentation.manualByScope || {})[scope.scopeId]
         };
       });
       try {
@@ -5819,6 +5917,169 @@
       return sanitizeMetricOrder(state.metricPresentation.orderByScope[scopeId] || defaultOrder, defaultOrder);
     }
 
+    function metricPresentationDefaultOrder(scopeId) {
+      const scope = (state.metricPresentation.scopes || []).find(function(item) {
+        return item.scopeId === scopeId;
+      });
+      return scope ? (scope.metricKeys || []).slice() : [];
+    }
+
+    function persistedScopeHasCustomPresentation(savedScope, defaultOrder) {
+      if (!savedScope || typeof savedScope !== "object") {
+        return false;
+      }
+      const savedOrder = sanitizeMetricOrder(savedScope.order, defaultOrder);
+      const display = savedScope.display && typeof savedScope.display === "object" ? savedScope.display : {};
+      const hasDisplayOverride = Object.keys(display).some(function(metricKey) {
+        return normalizeMetricDisplayStatus(display[metricKey]) !== "shown";
+      });
+      return !!savedScope.manual || hasDisplayOverride || !sameColumnList(savedOrder, defaultOrder);
+    }
+
+    function shouldAutoSyncSkuPresentationFromTotal(persisted) {
+      const totalDefaultOrder = metricPresentationDefaultOrder("total");
+      const skuDefaultOrder = metricPresentationDefaultOrder("sku");
+      if (!totalDefaultOrder.length || !skuDefaultOrder.length) {
+        return false;
+      }
+      const scopes = persisted && persisted.scopes && typeof persisted.scopes === "object" ? persisted.scopes : {};
+      const totalIsCustom = persistedScopeHasCustomPresentation(scopes.total, totalDefaultOrder);
+      const skuIsCustom = persistedScopeHasCustomPresentation(scopes.sku, skuDefaultOrder);
+      return totalIsCustom && !skuIsCustom;
+    }
+
+    function normalizedMetricAnalogText(value) {
+      return String(value || "")
+        .toLowerCase()
+        .replace(/ё/g, "е")
+        .replace(/\btotal\b/g, " ")
+        .replace(/\bavg\b/g, " ")
+        .replace(/\bвсего\b/g, " ")
+        .replace(/\bсредн(яя|ий|ее|ие|их|юю|его|ему)?\b/g, " ")
+        .replace(/[₽%()/:,;.\[\]{}<>_+\-–—→]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    function metricAnalogKeyCandidates(metricKey) {
+      const key = String(metricKey || "");
+      const candidates = [];
+      function add(candidate) {
+        const normalized = String(candidate || "");
+        if (normalized && candidates.indexOf(normalized) === -1) {
+          candidates.push(normalized);
+        }
+      }
+      add(key);
+      if (key.indexOf("total_") === 0) {
+        add(key.slice("total_".length));
+      }
+      if (key.endsWith("_total")) {
+        add(key.slice(0, -"_total".length));
+      }
+      if (key.indexOf("total_") === 0 && key.endsWith("_total")) {
+        add(key.slice("total_".length, -"_total".length));
+      }
+      return candidates;
+    }
+
+    function buildSkuMetricAnalogMapFromTotal() {
+      const totalOrder = metricPresentationScopeOrder("total");
+      const skuOrder = metricPresentationScopeOrder("sku");
+      const skuSet = new Set(skuOrder);
+      const usedSku = new Set();
+      const skuBySectionSignature = new Map();
+      skuOrder.forEach(function(metricKey) {
+        const option = state.metricPresentation.optionByKey.get(metricKey) || {};
+        const signature = String(option.sectionId || "") + "::" + normalizedMetricAnalogText(option.label || metricKey);
+        if (!skuBySectionSignature.has(signature)) {
+          skuBySectionSignature.set(signature, []);
+        }
+        skuBySectionSignature.get(signature).push(metricKey);
+      });
+      const result = {};
+      totalOrder.forEach(function(totalMetricKey) {
+        let matched = "";
+        const keyCandidates = metricAnalogKeyCandidates(totalMetricKey);
+        for (let index = 0; index < keyCandidates.length; index += 1) {
+          const candidate = keyCandidates[index];
+          if (skuSet.has(candidate) && !usedSku.has(candidate)) {
+            matched = candidate;
+            break;
+          }
+        }
+        if (!matched) {
+          const option = state.metricPresentation.optionByKey.get(totalMetricKey) || {};
+          const signature = String(option.sectionId || "") + "::" + normalizedMetricAnalogText(option.label || totalMetricKey);
+          const possible = (skuBySectionSignature.get(signature) || []).filter(function(metricKey) {
+            return !usedSku.has(metricKey);
+          });
+          if (possible.length === 1) {
+            matched = possible[0];
+          }
+        }
+        if (matched) {
+          result[totalMetricKey] = matched;
+          usedSku.add(matched);
+        }
+      });
+      return result;
+    }
+
+    function deriveSkuPresentationFromTotal() {
+      const totalOrder = metricPresentationScopeOrder("total");
+      const skuOrder = metricPresentationScopeOrder("sku");
+      const analogByTotal = buildSkuMetricAnalogMapFromTotal();
+      const usedSku = new Set();
+      const nextOrder = [];
+      const displayUpdates = {};
+      totalOrder.forEach(function(totalMetricKey) {
+        const skuMetricKey = analogByTotal[totalMetricKey];
+        if (!skuMetricKey || usedSku.has(skuMetricKey)) {
+          return;
+        }
+        usedSku.add(skuMetricKey);
+        nextOrder.push(skuMetricKey);
+        displayUpdates[skuMetricKey] = metricDisplayStatusForScope("total", totalMetricKey);
+      });
+      skuOrder.forEach(function(metricKey) {
+        if (!usedSku.has(metricKey)) {
+          usedSku.add(metricKey);
+          nextOrder.push(metricKey);
+        }
+      });
+      return {
+        order: nextOrder,
+        displayUpdates: displayUpdates,
+        matchedCount: Object.keys(displayUpdates).length,
+        unmatchedCount: skuOrder.length - Object.keys(displayUpdates).length
+      };
+    }
+
+    function applySkuMetricPresentationFromTotal(options) {
+      const normalizedOptions = options || {};
+      const derived = deriveSkuPresentationFromTotal();
+      if (!derived.order.length) {
+        return derived;
+      }
+      state.metricPresentation.orderByScope.sku = derived.order;
+      Object.keys(derived.displayUpdates).forEach(function(metricKey) {
+        setMetricDisplayStatusForScope("sku", metricKey, derived.displayUpdates[metricKey]);
+      });
+      if (normalizedOptions.manual) {
+        markMetricPresentationScopeManual("sku");
+      }
+      pruneExpandedMetricPresentationAnchors();
+      if (normalizedOptions.persist !== false) {
+        persistMetricPresentation();
+      }
+      if (normalizedOptions.render) {
+        renderMetricPresentationPanel(state.composition);
+        renderTable();
+      }
+      return derived;
+    }
+
     function renderMetricPresentationPanel(payload) {
       if (!metricsPresentationPanelNode || !metricsPresentationBodyNode || !metricsPresentationSummaryNode) {
         return;
@@ -5855,6 +6116,7 @@
         '<span class="metrics-config-scope-meta">' + escapeHtml(String((scope.metricKeys || []).length)) + ' метрик' + (selectionActive ? " · выбрано " + String(selectedCount) : "") + '</span>',
         "</div>",
         '<div class="metrics-config-scope-actions">',
+        scope.scopeId === "sku" ? '<button class="metrics-config-sync-total" type="button" data-metric-sync-from-total data-metric-config-scope="sku" title="Скопировать порядок и отображение из Итого только для SKU">Как Итого</button>' : "",
         '<button class="metrics-config-selection-toggle" type="button" data-metric-selection-toggle data-metric-config-scope="' + escapeHtml(scope.scopeId) + '" aria-pressed="' + (selectionActive ? "true" : "false") + '">' + (selectionActive ? "Готово" : "Выбрать") + "</button>",
         '<select class="metrics-config-bulk-select" data-metric-bulk-display data-metric-config-scope="' + escapeHtml(scope.scopeId) + '" aria-label="' + escapeHtml("Массовое отображение: " + scope.label) + '"' + (!selectionActive || selectedCount <= 0 ? " disabled" : "") + '>',
         '<option value="">Отображение</option>',
@@ -5880,7 +6142,7 @@
       const option = state.metricPresentation.optionByKey.get(metricKey) || {label: metricKey, sectionLabel: "Без секции"};
       const label = String(option.label || metricKey);
       const groupLabel = String(option.sectionLabel || "Без секции");
-      const status = metricDisplayStatus(metricKey);
+      const status = metricDisplayStatusForScope(scope.scopeId, metricKey);
       const selectionActive = metricPresentationSelectionMode(scope.scopeId);
       const selected = metricPresentationSelectionSet(scope.scopeId).has(metricKey);
       return [
@@ -5902,6 +6164,12 @@
     }
 
     function handleMetricPresentationClick(event) {
+      const syncFromTotal = event.target.closest("[data-metric-sync-from-total]");
+      if (syncFromTotal) {
+        event.preventDefault();
+        applySkuMetricPresentationFromTotal({manual: true, render: true, persist: true});
+        return;
+      }
       const toggle = event.target.closest("[data-metric-selection-toggle]");
       if (!toggle) {
         return;
@@ -6106,8 +6374,9 @@
         return;
       }
       selectedKeys.forEach(function(metricKey) {
-        state.metricPresentation.displayByMetric[metricKey] = normalizedStatus;
+        setMetricDisplayStatusForScope(scopeId, metricKey, normalizedStatus);
       });
+      markMetricPresentationScopeManual(scopeId);
       pruneExpandedMetricPresentationAnchors();
       persistMetricPresentation();
       renderMetricPresentationPanel(state.composition);
@@ -6122,7 +6391,8 @@
       if (order.indexOf(metricKey) === -1) {
         return;
       }
-      state.metricPresentation.displayByMetric[metricKey] = normalizeMetricDisplayStatus(status);
+      setMetricDisplayStatusForScope(scopeId, metricKey, status);
+      markMetricPresentationScopeManual(scopeId);
       pruneExpandedMetricPresentationAnchors();
       persistMetricPresentation();
       renderMetricPresentationPanel(state.composition);
@@ -6161,6 +6431,7 @@
       }
       remaining.splice.apply(remaining, [insertIndex, 0].concat(sourceMetrics));
       state.metricPresentation.orderByScope[scopeId] = remaining;
+      markMetricPresentationScopeManual(scopeId);
       pruneExpandedMetricPresentationAnchors();
       persistMetricPresentation();
       renderMetricPresentationPanel(state.composition);
@@ -6239,7 +6510,7 @@
     function isMetricHiddenByPresentation(row) {
       const scopeId = rowMetricPresentationScopeId(row);
       const metricKey = String(cellValue(row, "metric_key") || "");
-      const status = metricDisplayStatus(metricKey);
+      const status = metricDisplayStatusForScope(scopeId, metricKey);
       if (status === "hidden") {
         return true;
       }
@@ -6256,13 +6527,13 @@
     function metricCollapsedAnchorMetricKey(scopeId, metricKey) {
       const order = metricPresentationScopeOrder(scopeId);
       const metricIndex = order.indexOf(metricKey);
-      if (metricIndex <= 0 || metricDisplayStatus(metricKey) !== "collapsed") {
+      if (metricIndex <= 0 || metricDisplayStatusForScope(scopeId, metricKey) !== "collapsed") {
         return "";
       }
       let anchor = "";
       for (let index = 0; index < metricIndex; index += 1) {
         const candidate = order[index];
-        if (metricDisplayStatus(candidate) === "shown") {
+        if (metricDisplayStatusForScope(scopeId, candidate) === "shown") {
           anchor = candidate;
         }
       }
@@ -6272,13 +6543,13 @@
     function metricAnchorCollapsedMetricKeys(scopeId, anchorMetricKey) {
       const order = metricPresentationScopeOrder(scopeId);
       const anchorIndex = order.indexOf(anchorMetricKey);
-      if (anchorIndex < 0 || metricDisplayStatus(anchorMetricKey) !== "shown") {
+      if (anchorIndex < 0 || metricDisplayStatusForScope(scopeId, anchorMetricKey) !== "shown") {
         return [];
       }
       const result = [];
       for (let index = anchorIndex + 1; index < order.length; index += 1) {
         const metricKey = order[index];
-        const status = metricDisplayStatus(metricKey);
+        const status = metricDisplayStatusForScope(scopeId, metricKey);
         if (status === "shown") {
           break;
         }
@@ -6291,7 +6562,11 @@
 
     function isColumnMandatory(column) {
       const columnId = String((column && column.id) || "");
-      return columnId === "scope_label" || columnId === "metric_label" || columnId === "section" || columnId.indexOf("date:") === 0;
+      return !isColumnForcedHidden(columnId) && (columnId === "metric_label" || columnId === "section" || columnId.indexOf("date:") === 0);
+    }
+
+    function isColumnForcedHidden(columnId) {
+      return TABLE_FORCED_HIDDEN_COLUMN_IDS.has(String(columnId || ""));
     }
 
     function sanitizeVisibleColumnIds(candidateIds, defaultIds, mandatoryIds) {
@@ -6354,13 +6629,13 @@
 
     function visibleColumns(columns) {
       return (columns || []).filter(function(column) {
-        return isColumnVisible(column.id);
+        return !isColumnForcedHidden(column.id) && isColumnVisible(column.id);
       });
     }
 
     function renderColumnVisibilityControls(columns) {
       const optionalColumns = (columns || []).filter(function(column) {
-        return !isColumnMandatory(column);
+        return !isColumnForcedHidden(column.id) && !isColumnMandatory(column);
       });
       columnManagerNoteNode.textContent = optionalColumns.length
         ? "Основные колонки и даты остаются видимыми. Остальные можно скрывать и вернуть обратно в этом браузере."
@@ -6414,9 +6689,11 @@
       const columns = (payload && payload.table_surface && payload.table_surface.columns) || [];
       const defaultVisibleIds = columns.map(function(column) {
         return String(column.id || "");
-      }).filter(Boolean);
+      }).filter(function(columnId) {
+        return columnId && !isColumnForcedHidden(columnId);
+      });
       const mandatoryIds = columns.filter(function(column) {
-        return isColumnMandatory(column);
+        return !isColumnForcedHidden(column.id) && isColumnMandatory(column);
       }).map(function(column) {
         return String(column.id || "");
       });
@@ -7672,6 +7949,7 @@
     function setStateBox(kind, title, body) {
       tableStateNode.classList.remove("is-hidden");
       tableShellNode.classList.add("is-hidden");
+      updateTableObjectIndicator();
       stateTitleNode.textContent = title;
       stateBodyNode.innerHTML = body;
       tableStateNode.className = "state-box";
@@ -7772,6 +8050,7 @@
       renderTableMarkup(payload, filteredRows);
       tableStateNode.classList.add("is-hidden");
       tableShellNode.classList.remove("is-hidden");
+      updateTableObjectIndicator();
     }
 
     function applyFilters(rows) {
@@ -7914,8 +8193,9 @@
     }
 
     function buildDataRow(row, columns, stickyOffsets) {
+      const scopeLabel = tableObjectLabelForRow(row);
       return [
-        "<tr>",
+        '<tr data-row-kind="' + escapeHtml(String(row.row_kind || "")) + '" data-row-scope-label="' + escapeHtml(scopeLabel) + '" data-row-scope-key="' + escapeHtml(String(cellValue(row, "scope_key") || "")) + '">',
         columns.map(function(column) {
           const cell = ((row.values || {})[column.id]) || {
             value: null,
@@ -7929,6 +8209,44 @@
         buildSpacerBodyCell(),
         "</tr>"
       ].join("");
+    }
+
+    function tableObjectLabelForRow(row) {
+      if (String((row && row.row_kind) || "").toLowerCase() === "total") {
+        return "Итого";
+      }
+      const label = String(cellDisplay(row, "scope_label") || cellValue(row, "scope_label") || "");
+      return label || "SKU";
+    }
+
+    function updateTableObjectIndicator() {
+      if (!tableObjectLabelNode) {
+        return;
+      }
+      if (!tableScrollNode || tableShellNode.classList.contains("is-hidden")) {
+        tableObjectLabelNode.hidden = true;
+        return;
+      }
+      const rows = Array.from(tableBodyNode.querySelectorAll('tr[data-row-scope-label]:not(.sku-separator-row)'));
+      if (!rows.length) {
+        tableObjectLabelNode.hidden = true;
+        return;
+      }
+      const scrollRect = tableScrollNode.getBoundingClientRect();
+      const headRect = tableHeadNode ? tableHeadNode.getBoundingClientRect() : {height: 0};
+      const threshold = scrollRect.top + Math.max(0, Number(headRect.height || 0)) + 1;
+      let activeRow = rows[0];
+      for (let index = 0; index < rows.length; index += 1) {
+        const rect = rows[index].getBoundingClientRect();
+        if (rect.bottom > threshold) {
+          activeRow = rows[index];
+          break;
+        }
+      }
+      const label = String(activeRow.getAttribute("data-row-scope-label") || "").trim() || "Итого";
+      tableObjectLabelNode.hidden = false;
+      tableObjectLabelNode.textContent = label;
+      tableObjectLabelNode.title = label;
     }
 
     function buildDataCell(column, row, cell, stickyLeft) {
