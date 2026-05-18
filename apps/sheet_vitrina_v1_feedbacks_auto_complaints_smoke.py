@@ -65,6 +65,8 @@ def main() -> None:
     _assert_run_filters_ai_and_skips_existing_journal()
     _assert_retryable_prior_attempt_is_submitted()
     _assert_confirmed_prior_attempt_is_not_resubmitted()
+    _assert_journal_only_unconfirmed_is_explicit_probe_blocker()
+    _assert_error_journal_record_is_retryable()
     _assert_noop_advances_last_success()
     _assert_busy_lock_is_controlled()
     print("sheet_vitrina_v1_feedbacks_auto_complaints_smoke: OK")
@@ -272,7 +274,15 @@ def _assert_run_filters_ai_and_skips_existing_journal() -> None:
     with TemporaryDirectory(prefix="auto-complaints-run-") as tmp:
         runtime_dir = Path(tmp)
         journal = JsonFileFeedbacksComplaintJournal(runtime_dir)
-        journal.create_or_update({"feedback_id": "existing", "complaint_status": "waiting_response"})
+        journal.create_or_update(
+            {
+                "feedback_id": "existing",
+                "complaint_status": "waiting_response",
+                "submitted_at": "2026-05-07T07:00:00Z",
+                "submit_run_id": "previous-submit",
+                "submit_result": "confirmed_success",
+            }
+        )
         submitted_payloads: list[dict[str, object]] = []
 
         def fake_submit(payload: object) -> dict[str, object]:
@@ -322,8 +332,10 @@ def _assert_run_filters_ai_and_skips_existing_journal() -> None:
         if run["submitted_count"] != 2:
             raise AssertionError(f"fake submit must count submitted rows: {run}")
         reasons = run["reason_counts"]
-        if reasons.get("existing_journal_feedback_id") != 1 or reasons.get("hard_cap_reached") != 1:
+        if reasons.get("already_journaled_confirmed") != 1 or reasons.get("skipped_due_to_hard_cap") != 1:
             raise AssertionError(f"existing journal and cap skips must be counted: {reasons}")
+        if run["already_confirmed_count"] != 1 or run["skipped_hard_cap_count"] != 1:
+            raise AssertionError(f"detailed counters must split already-confirmed and hard cap: {run}")
         if not submitted_payloads or submitted_payloads[0]["feedback_ids"] != ["new-yes", "new-review"]:
             raise AssertionError(f"auto job must submit only safe selected ids through guarded submit: {submitted_payloads}")
         schedules = block.build_schedules()["schedules"]
@@ -442,10 +454,79 @@ def _assert_confirmed_prior_attempt_is_not_resubmitted() -> None:
         run = block.list_runs()["runs"][0]
         if run["submitted_count"] != 0 or run["skipped_count"] != 1:
             raise AssertionError(f"confirmed prior submit must remain idempotent: {run}")
-        if run["reason_counts"].get("already_attempted_feedback_id") != 1:
-            raise AssertionError(f"confirmed prior submit must be counted as already_attempted skip: {run}")
+        if run["reason_counts"].get("already_confirmed_in_prior_run") != 1:
+            raise AssertionError(f"confirmed prior submit must be counted as already-confirmed skip: {run}")
         if submitted_payloads:
             raise AssertionError(f"confirmed prior submit must not reach guarded submit again: {submitted_payloads}")
+
+
+def _assert_journal_only_unconfirmed_is_explicit_probe_blocker() -> None:
+    now = datetime(2026, 5, 8, 8, 0, tzinfo=timezone.utc)
+    current_now = [datetime(2026, 5, 8, 6, 0, tzinfo=timezone.utc)]
+    with TemporaryDirectory(prefix="auto-complaints-journal-only-") as tmp:
+        runtime_dir = Path(tmp)
+        journal = JsonFileFeedbacksComplaintJournal(runtime_dir)
+        journal.create_or_update({"feedback_id": "journal-only", "complaint_status": "waiting_response"})
+        submitted_payloads: list[dict[str, object]] = []
+        complaints = SheetVitrinaV1FeedbacksComplaintsBlock(
+            runtime_dir=runtime_dir,
+            journal=journal,
+            submit_runner=lambda payload: submitted_payloads.append(dict(payload or {})) or {},
+        )
+        block = SheetVitrinaV1FeedbacksAutoComplaintsBlock(
+            runtime_dir=runtime_dir,
+            feedbacks_block=FakeFeedbacksBlock([_row("journal-only", "2026-05-08T06:30:00Z", 1)]),  # type: ignore[arg-type]
+            feedbacks_ai_block=FakeAiBlock({"journal-only": "yes"}),  # type: ignore[arg-type]
+            complaints_block=complaints,
+            now_factory=lambda: current_now[0],
+        )
+        block.save_schedules({"schedules": [{"id": "daily-noon", "enabled": True, "local_time_hhmm": "12:00"}]})
+        current_now[0] = now
+        block.run_due_schedules_sync()
+        run = block.list_runs()["runs"][0]
+        if run["status"] != "journal_unconfirmed_requires_probe":
+            raise AssertionError(f"journal-only record must require probe, not silent completed skip: {run}")
+        if run["reason_counts"].get("journal_only_unconfirmed") != 1:
+            raise AssertionError(f"journal-only reason must be explicit: {run}")
+        if run["skipped_existing_unconfirmed_count"] != 1 or submitted_payloads:
+            raise AssertionError(f"journal-only record must not be submitted without probe: {run} {submitted_payloads}")
+
+
+def _assert_error_journal_record_is_retryable() -> None:
+    now = datetime(2026, 5, 8, 8, 0, tzinfo=timezone.utc)
+    current_now = [datetime(2026, 5, 8, 6, 0, tzinfo=timezone.utc)]
+    with TemporaryDirectory(prefix="auto-complaints-error-retry-") as tmp:
+        runtime_dir = Path(tmp)
+        journal = JsonFileFeedbacksComplaintJournal(runtime_dir)
+        journal.create_or_update({"feedback_id": "retry-error", "complaint_status": "error", "last_error": "submit unconfirmed"})
+        submitted_payloads: list[dict[str, object]] = []
+
+        def fake_submit(payload: object) -> dict[str, object]:
+            data = dict(payload or {})
+            submitted_payloads.append(data)
+            return {
+                "contract_name": "sheet_vitrina_v1_feedbacks_complaints_submit_job",
+                "aggregate": {"submitted_count": 1, "skipped_count": 0, "error_count": 0},
+                "rows": [{"feedback_id": "retry-error", "submitted": True, "submit_clicked": True}],
+                "status_sync": {"aggregate": {"statuses_updated": 0}},
+            }
+
+        complaints = SheetVitrinaV1FeedbacksComplaintsBlock(runtime_dir=runtime_dir, journal=journal, submit_runner=fake_submit)
+        block = SheetVitrinaV1FeedbacksAutoComplaintsBlock(
+            runtime_dir=runtime_dir,
+            feedbacks_block=FakeFeedbacksBlock([_row("retry-error", "2026-05-08T06:30:00Z", 1)]),  # type: ignore[arg-type]
+            feedbacks_ai_block=FakeAiBlock({"retry-error": "yes"}),  # type: ignore[arg-type]
+            complaints_block=complaints,
+            now_factory=lambda: current_now[0],
+        )
+        block.save_schedules({"schedules": [{"id": "daily-noon", "enabled": True, "local_time_hhmm": "12:00"}]})
+        current_now[0] = now
+        block.run_due_schedules_sync()
+        run = block.list_runs()["runs"][0]
+        if run["submitted_count"] != 1 or run["skipped_existing_unconfirmed_count"]:
+            raise AssertionError(f"error journal record must retry through guarded submit: {run}")
+        if not submitted_payloads or submitted_payloads[0].get("retry_errors") is not True:
+            raise AssertionError(f"retry submit must carry retry_errors: {submitted_payloads}")
 
 
 def _assert_noop_advances_last_success() -> None:

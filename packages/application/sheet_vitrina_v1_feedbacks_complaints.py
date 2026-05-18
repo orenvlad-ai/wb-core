@@ -1038,6 +1038,7 @@ def _run_guarded_submit_selected_for_runtime(
     run_id = str(request_payload.get("run_id") or _new_submit_run_id(now_factory)).strip()
     selected_ids = list(request_payload.get("feedback_ids") or [])
     max_submit = min(SUBMIT_JOB_MAX_SUBMIT_HARD_CAP, _safe_int(request_payload.get("max_submit") or 1))
+    retry_errors = bool(request_payload.get("retry_errors"))
     output_root = DEFAULT_OUTPUT_ROOT if Path("/opt/wb-core-runtime/state").exists() else LOCAL_OUTPUT_ROOT
     report: dict[str, Any] = {
         "contract_name": SUBMIT_JOB_CONTRACT_NAME,
@@ -1071,7 +1072,11 @@ def _run_guarded_submit_selected_for_runtime(
     submitted_ids: list[str] = []
     skipped: list[dict[str, Any]] = []
     attempts: list[dict[str, Any]] = []
-    current_journal_ids = [str(item.get("feedback_id") or "") for item in journal.list_records()]
+    current_journal_ids = [
+        str(item.get("feedback_id") or "")
+        for item in journal.list_records()
+        if str(item.get("complaint_status") or "") != "error" or not retry_errors
+    ]
     deny_ids = normalize_deny_feedback_ids([*current_journal_ids, "QhDufSkeSBzUCxaDchAn"])
 
     def publish(status: str = "running", error: str = "") -> None:
@@ -1100,23 +1105,34 @@ def _run_guarded_submit_selected_for_runtime(
         report["events"].append(_submit_event("row_selected", feedback_id=feedback_id, message="Row selected for guarded submit", status="running"))
         existing = journal.find_by_feedback_id(feedback_id)
         if existing is not None:
-            reason = f"complaint already exists for feedback_id with status={existing.get('complaint_status') or ''}"
-            skipped.append(_submit_skip(feedback_id, "row_skipped_existing_complaint", reason))
-            attempts.append(
-                _submit_attempt(
-                    feedback_id,
-                    status="skipped",
-                    label="Обработана, не подана",
-                    code="row_skipped_existing_complaint",
-                    reason=reason,
-                    run_id=run_id,
+            existing_status = str(existing.get("complaint_status") or "")
+            if existing_status == "error" and retry_errors:
+                report["events"].append(
+                    _submit_event(
+                        "row_retry_existing_error_complaint",
+                        feedback_id=feedback_id,
+                        message="Retrying existing non-terminal error complaint journal record",
+                        status="running",
+                    )
                 )
-            )
-            report["events"].append(_submit_event("row_skipped_existing_complaint", feedback_id=feedback_id, message=reason, status="skipped"))
-            report["rows"].append({"feedback_id": feedback_id, "status": "skipped", "skip_reason": reason})
-            report["aggregate"]["skipped_count"] += 1
-            publish()
-            continue
+            else:
+                reason = f"complaint already exists for feedback_id with status={existing_status}"
+                skipped.append(_submit_skip(feedback_id, "row_skipped_existing_complaint", reason))
+                attempts.append(
+                    _submit_attempt(
+                        feedback_id,
+                        status="skipped",
+                        label="Обработана, не подана",
+                        code="row_skipped_existing_complaint",
+                        reason=reason,
+                        run_id=run_id,
+                    )
+                )
+                report["events"].append(_submit_event("row_skipped_existing_complaint", feedback_id=feedback_id, message=reason, status="skipped"))
+                report["rows"].append({"feedback_id": feedback_id, "status": "skipped", "skip_reason": reason})
+                report["aggregate"]["skipped_count"] += 1
+                publish()
+                continue
         config = SubmitConfig(
             date_from=str(request_payload.get("date_from") or ""),
             date_to=str(request_payload.get("date_to") or ""),
@@ -1127,7 +1143,7 @@ def _run_guarded_submit_selected_for_runtime(
             include_review=True,
             dry_run=False,
             require_exact=True,
-            retry_errors=False,
+            retry_errors=retry_errors,
             submit_confirmation=True,
             runtime_dir=runtime_dir,
             storage_state_path=DEFAULT_STORAGE_STATE_PATH,
