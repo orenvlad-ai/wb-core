@@ -378,6 +378,72 @@ def build_onec_stocks_lookup(payload: Any | None) -> dict[int, dict[str, float]]
     return result
 
 
+def summarize_onec_stage_bucket_coverage(payload: Any | None) -> dict[str, Any]:
+    if payload is None:
+        return {}
+    items = getattr(payload, "items", None)
+    if not isinstance(items, list):
+        return {}
+
+    stage_row_counts: dict[str, int] = {}
+    stage_qty: dict[str, float] = {}
+    stage_cost_total_rub: dict[str, float] = {}
+    raw_stage_names: set[str] = set()
+    unmapped_stage_names: set[str] = set()
+    nm_ids_with_rows: set[int] = set()
+    nm_ids_by_stage: dict[str, set[int]] = {}
+
+    for item in items:
+        nm_id = getattr(item, "nm_id", None)
+        stage_name = str(getattr(item, "stage_name", "") or "").strip()
+        if stage_name:
+            raw_stage_names.add(stage_name)
+        if isinstance(nm_id, int):
+            nm_ids_with_rows.add(nm_id)
+        stage_key = normalize_onec_stage_code(
+            getattr(item, "canonical_stage_code", None)
+            or getattr(item, "stage_name", None)
+        )
+        if stage_key is None:
+            if stage_name:
+                unmapped_stage_names.add(stage_name)
+            continue
+        stage_row_counts[stage_key] = stage_row_counts.get(stage_key, 0) + 1
+        stage_qty[stage_key] = stage_qty.get(stage_key, 0.0) + _to_float(getattr(item, "qty", None))
+        stage_cost_total_rub[stage_key] = stage_cost_total_rub.get(stage_key, 0.0) + _to_float(
+            getattr(item, "cost_total_rub", None)
+        )
+        if isinstance(nm_id, int):
+            nm_ids_by_stage.setdefault(stage_key, set()).add(nm_id)
+
+    covered_stage_buckets = [stage_key for stage_key in ONEC_STOCKS_STAGE_KEYS if stage_key in stage_row_counts]
+    missing_stage_buckets = [stage_key for stage_key in ONEC_STOCKS_STAGE_KEYS if stage_key not in stage_row_counts]
+    return {
+        "item_count": len(items),
+        "covered_nm_id_count": len(nm_ids_with_rows),
+        "covered_stage_buckets": covered_stage_buckets,
+        "missing_stage_buckets": missing_stage_buckets,
+        "stage_row_counts": {
+            stage_key: stage_row_counts[stage_key]
+            for stage_key in covered_stage_buckets
+        },
+        "stage_nm_id_counts": {
+            stage_key: len(nm_ids_by_stage.get(stage_key, set()))
+            for stage_key in covered_stage_buckets
+        },
+        "stage_qty": {
+            stage_key: round(stage_qty.get(stage_key, 0.0), 6)
+            for stage_key in covered_stage_buckets
+        },
+        "stage_cost_total_rub": {
+            stage_key: round(stage_cost_total_rub.get(stage_key, 0.0), 6)
+            for stage_key in covered_stage_buckets
+        },
+        "raw_stage_names": sorted(raw_stage_names),
+        "unmapped_stage_names": sorted(unmapped_stage_names),
+    }
+
+
 def normalize_onec_stage_code(value: Any) -> str | None:
     text = str(value or "").strip()
     if not text:

@@ -56,6 +56,7 @@ from packages.application.sheet_vitrina_v1_onec_stocks import (
     onec_weighted_unit_cost_components,
     resolve_onec_stock_metric_value,
     resolve_onec_stocks_account_id,
+    summarize_onec_stage_bucket_coverage,
 )
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     CANONICAL_SOURCE_TEMPORAL_POLICIES,
@@ -2915,32 +2916,7 @@ def _capture_live_source(
         missing_nm_ids = list(getattr(payload, "missing_nm_ids", []))
         requested_count = int(getattr(payload, "requested_count", len(requested_nm_ids)))
         covered_count = int(getattr(payload, "covered_count", 0))
-        return (
-            LiveSourceStatus(
-                source_key=source_key,
-                temporal_slot=temporal_slot,
-                temporal_policy=temporal_policy,
-                column_date=column_date,
-                kind=kind,
-                freshness=_resolve_freshness(payload),
-                snapshot_date=_payload_temporal_value(payload, "snapshot_date"),
-                date=_payload_temporal_value(payload, "date"),
-                date_from=_payload_temporal_value(payload, "date_from"),
-                date_to=_payload_temporal_value(payload, "date_to"),
-                requested_count=requested_count,
-                covered_count=covered_count,
-                missing_nm_ids=missing_nm_ids,
-                note=str(getattr(payload, "detail", "") or ""),
-                diagnostics=payload_diagnostics,
-            ),
-            payload,
-        )
-
-    items = list(getattr(payload, "items", []) or [])
-    covered_nm_ids = {getattr(item, "nm_id", None) for item in items if isinstance(getattr(item, "nm_id", None), int)}
-    covered_nm_ids.discard(None)
-    return (
-        LiveSourceStatus(
+        status = LiveSourceStatus(
             source_key=source_key,
             temporal_slot=temporal_slot,
             temporal_policy=temporal_policy,
@@ -2951,13 +2927,80 @@ def _capture_live_source(
             date=_payload_temporal_value(payload, "date"),
             date_from=_payload_temporal_value(payload, "date_from"),
             date_to=_payload_temporal_value(payload, "date_to"),
-            requested_count=len(requested_nm_ids),
-            covered_count=len(covered_nm_ids),
-            missing_nm_ids=sorted(set(requested_nm_ids) - set(covered_nm_ids)),
-            note=_status_note_from_payload(payload),
+            requested_count=requested_count,
+            covered_count=covered_count,
+            missing_nm_ids=missing_nm_ids,
+            note=str(getattr(payload, "detail", "") or ""),
             diagnostics=payload_diagnostics,
-        ),
+        )
+        return (
+            _with_onec_stage_bucket_coverage_status(status, payload),
+            payload,
+        )
+
+    items = list(getattr(payload, "items", []) or [])
+    covered_nm_ids = {getattr(item, "nm_id", None) for item in items if isinstance(getattr(item, "nm_id", None), int)}
+    covered_nm_ids.discard(None)
+    status = LiveSourceStatus(
+        source_key=source_key,
+        temporal_slot=temporal_slot,
+        temporal_policy=temporal_policy,
+        column_date=column_date,
+        kind=kind,
+        freshness=_resolve_freshness(payload),
+        snapshot_date=_payload_temporal_value(payload, "snapshot_date"),
+        date=_payload_temporal_value(payload, "date"),
+        date_from=_payload_temporal_value(payload, "date_from"),
+        date_to=_payload_temporal_value(payload, "date_to"),
+        requested_count=len(requested_nm_ids),
+        covered_count=len(covered_nm_ids),
+        missing_nm_ids=sorted(set(requested_nm_ids) - set(covered_nm_ids)),
+        note=_status_note_from_payload(payload),
+        diagnostics=payload_diagnostics,
+    )
+    return (
+        _with_onec_stage_bucket_coverage_status(status, payload),
         payload,
+    )
+
+
+def _with_onec_stage_bucket_coverage_status(
+    status: LiveSourceStatus,
+    payload: Any | None,
+) -> LiveSourceStatus:
+    if status.source_key != ONEC_STOCKS_SOURCE_KEY or status.kind not in {"success", "incomplete"}:
+        return status
+    coverage = summarize_onec_stage_bucket_coverage(payload)
+    if not coverage or int(coverage.get("item_count") or 0) <= 0:
+        return status
+
+    diagnostics = dict(status.diagnostics or {})
+    diagnostics["onec_stage_bucket_coverage"] = coverage
+    missing_stage_buckets = [
+        str(item)
+        for item in (coverage.get("missing_stage_buckets") or [])
+        if str(item).strip()
+    ]
+    if not missing_stage_buckets:
+        return replace(status, diagnostics=diagnostics)
+
+    covered_stage_buckets = [
+        str(item)
+        for item in (coverage.get("covered_stage_buckets") or [])
+        if str(item).strip()
+    ]
+    coverage_note = _format_note(
+        {
+            "missing_stage_buckets": ",".join(missing_stage_buckets),
+            "covered_stage_buckets": ",".join(covered_stage_buckets),
+            "missing_stage_bucket_rows": "left_blank_without_fake_zeros",
+        }
+    )
+    return replace(
+        status,
+        kind="incomplete",
+        note=_append_invalid_payload_note(status.note, coverage_note),
+        diagnostics=diagnostics,
     )
 
 

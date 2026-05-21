@@ -85,12 +85,13 @@ class OnecCountingBlock:
             items=[
                 SimpleNamespace(
                     nm_id=PROBE_NM_ID,
-                    stage_name="CHINA_TO_FF",
-                    canonical_stage_code="CHINA_TO_FF",
+                    stage_name=stage_key,
+                    canonical_stage_code=stage_key,
                     qty=1.0,
                     unit_cost_rub=1.0,
                     cost_total_rub=1.0,
                 )
+                for stage_key in ("CHINA_TO_FF", "FF_STOCK", "FF_TO_WB", "WB_STOCK")
             ],
             snapshot_date=request_date,
             date=request_date,

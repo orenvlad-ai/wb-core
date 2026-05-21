@@ -84,12 +84,13 @@ class OnecCountingBlock:
                         for item in _load_json(INPUT_BUNDLE_FIXTURE)["config_v2"]
                         if item["enabled"]
                     ),
-                    stage_name="CHINA_TO_FF",
-                    canonical_stage_code="CHINA_TO_FF",
+                    stage_name=stage_key,
+                    canonical_stage_code=stage_key,
                     qty=2.0,
                     unit_cost_rub=10.0,
                     cost_total_rub=20.0,
                 )
+                for stage_key in ("CHINA_TO_FF", "FF_STOCK", "FF_TO_WB", "WB_STOCK")
             ],
             snapshot_date=request_date,
             date=request_date,
