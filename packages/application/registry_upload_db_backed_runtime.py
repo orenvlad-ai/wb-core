@@ -2080,6 +2080,12 @@ def _humanize_status_note(note: str) -> str:
     if "missing_stage_buckets=" in normalized:
         missing = _status_note_value(normalized, "missing_stage_buckets")
         bucket_text = f": {missing}" if missing else ""
+        fallback = _status_note_value(normalized, "accepted_fallback_stage_buckets")
+        if fallback:
+            return (
+                f"1C не вернула stage bucket{bucket_text}; "
+                "строки bucket заполнены из ранее принятой server-side версии"
+            )
         return f"1C не вернула stage bucket{bucket_text}; строки bucket оставлены blank без fake zeros"
     replacements = (
         (

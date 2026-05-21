@@ -5986,6 +5986,8 @@ def _loading_slot_has_confirmed_success(slot: Mapping[str, Any]) -> bool:
     note = str(slot.get("note") or "").strip()
     if _status_note_is_unverified_closed_day_fallback(note):
         return False
+    if kind == "incomplete" and _status_note_has_accepted_stage_fallback(note):
+        return True
     if status == "success":
         return True
     return kind == "success" and _status_note_is_latest_confirmed(note)
@@ -6011,6 +6013,8 @@ def _loading_slot_reason(
         if nonblocking_reason:
             return nonblocking_reason
         note = str(slot.get("note") or "")
+        if _status_note_has_accepted_stage_fallback(note):
+            return _humanize_note(note) or "использована ранее принятая server-side версия"
         if _status_note_is_latest_confirmed(note):
             return _humanize_note(note) or "использована последняя подтверждённая версия"
         return "Готово"
@@ -6465,6 +6469,11 @@ def _status_note_is_latest_confirmed(note: str) -> bool:
         "exact_date_runtime_cache",
     )
     return any(token in normalized for token in latest_confirmed_tokens)
+
+
+def _status_note_has_accepted_stage_fallback(note: str) -> bool:
+    normalized = str(note or "").strip().lower()
+    return "accepted_fallback_stage_buckets=" in normalized
 
 
 def _status_note_is_unverified_closed_day_fallback(note: str) -> bool:
