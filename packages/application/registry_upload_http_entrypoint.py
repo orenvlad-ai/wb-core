@@ -6083,6 +6083,8 @@ def _slot_reason_from_log_record(
     if normalized_kind == "success" and requested_count > 0 and covered_count < requested_count:
         return _coverage_reason(requested_count=requested_count, covered_count=covered_count)
     if normalized_kind == "incomplete":
+        if human_note:
+            return human_note
         return _coverage_reason(requested_count=requested_count, covered_count=covered_count)
     if normalized_kind in {"closure_pending", "closure_retrying", "closure_rate_limited"} and human_note:
         return human_note
@@ -6149,6 +6151,10 @@ def _humanize_note(note: str) -> str:
     normalized = str(note or "").strip()
     if not normalized:
         return ""
+    if "missing_stage_buckets=" in normalized:
+        missing = _note_value(normalized, "missing_stage_buckets")
+        bucket_text = f": {missing}" if missing else ""
+        return f"1C не вернула stage bucket{bucket_text}; строки bucket оставлены blank без fake zeros"
     replacements = (
         (
             "seller_portal_session_invalid",
@@ -6250,6 +6256,15 @@ def _humanize_note(note: str) -> str:
     if "resolution_rule=latest_effective_from<=slot_date" in normalized:
         return ""
     return normalized
+
+
+def _note_value(note: str, key: str) -> str:
+    prefix = f"{key}="
+    for part in str(note or "").split(";"):
+        text = part.strip()
+        if text.startswith(prefix):
+            return text[len(prefix):].strip()
+    return ""
 
 
 def _note_requires_warning(note: str) -> bool:
