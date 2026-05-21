@@ -50,11 +50,16 @@ from packages.application.sheet_vitrina_v1_onec_stocks import (
     ONEC_STOCKS_SOURCE_GROUP_ID,
     ONEC_STOCKS_SOURCE_GROUP_LABEL_RU,
     ONEC_STOCKS_SOURCE_KEY,
+    ONEC_STOCKS_SKU_TOTAL_QTY_METRIC_KEY,
     ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY,
+    ONEC_STOCKS_STAGE_KEYS,
+    ONEC_STOCKS_TOTAL_QTY_METRIC_KEY,
     ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY,
     ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY,
     ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY,
     extend_metrics_with_onec_stock_metrics,
+    onec_stage_metric_key,
+    onec_stage_total_metric_key,
 )
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     effective_source_temporal_policy,
@@ -3843,6 +3848,19 @@ def _merge_source_group_ready_snapshot(
         if _metric_key_from_row_id(row_id) in metric_key_set
     }
     partial_cell_statuses = _updated_cell_statuses_by_source_and_date(partial_plan)
+    onec_missing_bucket_metric_keys: set[str] = set()
+    if source_group_id == ONEC_STOCKS_SOURCE_GROUP_ID and selected_date:
+        onec_missing_bucket_metric_keys = _onec_missing_stage_metric_keys_from_status_rows(
+            [
+                list(row)
+                for row in partial_status.rows
+                if _status_row_source_base(row) == ONEC_STOCKS_SOURCE_KEY
+                and (
+                    not selected_temporal_slots
+                    or _status_row_temporal_slot(row) in selected_temporal_slots
+                )
+            ]
+        )
     merged_row_ids: set[str] = set()
     merged_data_rows: list[list[Any]] = []
     rows_updated = 0
@@ -3861,14 +3879,19 @@ def _merge_source_group_ready_snapshot(
                 rows_preserved += 1
                 continue
             if selected_date:
-                merged_data_rows.append(
-                    _merge_row_selected_date(
-                        previous_row=list(row),
-                        partial_row=partial_rows_by_id[row_id],
-                        previous_indexes=previous_date_indexes,
-                        partial_indexes=partial_date_indexes,
-                    )
+                merged_row = _merge_row_selected_date(
+                    previous_row=list(row),
+                    partial_row=partial_rows_by_id[row_id],
+                    previous_indexes=previous_date_indexes,
+                    partial_indexes=partial_date_indexes,
                 )
+                if metric_key in onec_missing_bucket_metric_keys:
+                    merged_row = _preserve_selected_date_values_from_previous_when_partial_blank(
+                        previous_row=list(row),
+                        merged_row=merged_row,
+                        previous_indexes=previous_date_indexes,
+                    )
+                merged_data_rows.append(merged_row)
             else:
                 merged_data_rows.append(partial_rows_by_id[row_id])
             merged_row_ids.add(row_id)
@@ -4614,6 +4637,8 @@ def _updated_cell_status_for_status_row(row: list[Any]) -> str:
         return ""
     if _status_note_is_latest_confirmed(note):
         return "latest_confirmed"
+    if kind == "incomplete" and "accepted_fallback_stage_buckets=" in note:
+        return "latest_confirmed"
     if kind == "warning":
         return "latest_confirmed"
     if kind == "incomplete" and covered_count > 0:
@@ -4672,6 +4697,50 @@ def _merge_row_selected_date(
                 merged.append("")
             merged[previous_index] = partial_row[partial_index]
     return merged
+
+
+def _preserve_selected_date_values_from_previous_when_partial_blank(
+    *,
+    previous_row: list[Any],
+    merged_row: list[Any],
+    previous_indexes: list[int],
+) -> list[Any]:
+    merged = list(merged_row)
+    for index in previous_indexes:
+        previous_value = previous_row[index] if index < len(previous_row) else ""
+        if _is_blank_sheet_value(previous_value):
+            continue
+        current_value = merged[index] if index < len(merged) else ""
+        if not _is_blank_sheet_value(current_value):
+            continue
+        while index >= len(merged):
+            merged.append("")
+        merged[index] = previous_value
+    return merged
+
+
+def _onec_missing_stage_metric_keys_from_status_rows(rows: Iterable[list[Any]]) -> set[str]:
+    missing_buckets: set[str] = set()
+    for row in rows:
+        note = str(row[10] if len(row) > 10 else "")
+        missing_buckets.update(_note_csv_values(note, "missing_stage_buckets"))
+    result: set[str] = set()
+    for stage_key in missing_buckets:
+        for field in ("qty", "unit_cost_rub", "cost_total_rub"):
+            result.add(onec_stage_metric_key(stage_key, field))
+            result.add(onec_stage_total_metric_key(stage_key, field))
+    return result
+
+
+def _note_csv_values(note: str, key: str) -> list[str]:
+    prefix = f"{key}="
+    for part in str(note or "").split(";"):
+        text = part.strip()
+        if not text.startswith(prefix):
+            continue
+        value = text[len(prefix):].strip()
+        return sorted({item.strip() for item in value.split(",") if item.strip()})
+    return []
 
 
 def _recompute_other_sources_derived_rows(
@@ -4745,6 +4814,51 @@ def _recompute_onec_derived_rows(
     if not date_indexes:
         return
     for date_index in date_indexes:
+        for row_id, row in sorted(row_by_id.items()):
+            if row_id not in updated_row_ids:
+                continue
+            metric_key = _metric_key_from_row_id(row_id)
+            scope = _row_scope_from_row_id(row_id)
+            if metric_key == ONEC_STOCKS_SKU_TOTAL_QTY_METRIC_KEY:
+                value = _sum_scope_metric_values(
+                    row_by_id,
+                    scope=scope,
+                    metric_keys=[
+                        onec_stage_metric_key(stage_key, "qty")
+                        for stage_key in ONEC_STOCKS_STAGE_KEYS
+                    ],
+                    date_index=date_index,
+                )
+                if value is not None:
+                    _set_row_value(row, date_index, _to_sheet_cell_number(value))
+            elif metric_key == ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY:
+                value = _sum_scope_metric_values(
+                    row_by_id,
+                    scope=scope,
+                    metric_keys=[
+                        onec_stage_metric_key(stage_key, "cost_total_rub")
+                        for stage_key in ONEC_STOCKS_STAGE_KEYS
+                    ],
+                    date_index=date_index,
+                )
+                if value is not None:
+                    _set_row_value(row, date_index, _to_sheet_cell_number(value))
+            elif metric_key == ONEC_STOCKS_TOTAL_QTY_METRIC_KEY:
+                value = _sum_sku_metric_values(
+                    row_by_id,
+                    metric_key=ONEC_STOCKS_SKU_TOTAL_QTY_METRIC_KEY,
+                    date_index=date_index,
+                )
+                if value is not None:
+                    _set_row_value(row, date_index, _to_sheet_cell_number(value))
+            elif metric_key == ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY:
+                value = _sum_sku_metric_values(
+                    row_by_id,
+                    metric_key=ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY,
+                    date_index=date_index,
+                )
+                if value is not None:
+                    _set_row_value(row, date_index, _to_sheet_cell_number(value))
         for row_id, row in sorted(row_by_id.items()):
             if (
                 row_id not in updated_row_ids
@@ -4842,6 +4956,26 @@ def _sum_sku_metric_values(
         _cell_number(row[date_index] if date_index < len(row) else None)
         for row_id, row in row_by_id.items()
         if row_id.startswith("SKU:") and _metric_key_from_row_id(row_id) == metric_key
+    ]
+    numeric = [value for value in values if value is not None]
+    return float(sum(numeric)) if numeric else None
+
+
+def _sum_scope_metric_values(
+    row_by_id: Mapping[str, list[Any]],
+    *,
+    scope: str,
+    metric_keys: Iterable[str],
+    date_index: int,
+) -> float | None:
+    values = [
+        _row_metric_number(
+            row_by_id,
+            scope=scope,
+            metric_key=metric_key,
+            date_index=date_index,
+        )
+        for metric_key in metric_keys
     ]
     numeric = [value for value in values if value is not None]
     return float(sum(numeric)) if numeric else None
@@ -6154,6 +6288,12 @@ def _humanize_note(note: str) -> str:
     if "missing_stage_buckets=" in normalized:
         missing = _note_value(normalized, "missing_stage_buckets")
         bucket_text = f": {missing}" if missing else ""
+        fallback = _note_value(normalized, "accepted_fallback_stage_buckets")
+        if fallback:
+            return (
+                f"1C не вернула stage bucket{bucket_text}; "
+                "строки bucket заполнены из ранее принятой server-side версии"
+            )
         return f"1C не вернула stage bucket{bucket_text}; строки bucket оставлены blank без fake zeros"
     replacements = (
         (

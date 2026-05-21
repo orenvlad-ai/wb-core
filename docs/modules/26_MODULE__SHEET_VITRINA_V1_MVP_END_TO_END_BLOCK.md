@@ -374,6 +374,7 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - `spp` и `fin_report_daily` still request `today_current`, but intraday current-day non-yield (`empty`, `zero-like`, `invalid_exact_snapshot`, `no-result`, bounded `429/timeout`, preserved/runtime-cache current fallback) is tolerated when `yesterday_closed` is confirmed success.
   - `prices_snapshot` и `ads_bids` remain current-snapshot-only: accepted-current rollover, same-day accepted preservation and latest confirmed filled values are OK; a required current slot without accepted fallback remains not OK.
   - `promo_by_price` accepted/runtime-cached latest confirmed values are OK when the visible cells are filled; invalid attempts without accepted fallback remain not OK.
+  - `onec_stocks` may be semantically partial by stage bucket: current 1C rows for present buckets materialize, missing bucket rows are filled only from server-owned accepted same-date truth when available, and no-truth missing bucket cells remain blank with an `incomplete` source reason rather than fake zeros.
   - loading/action status cells must use this same source-aware reduction instead of treating every `not refreshed / unchanged / fallback` note as red.
 - Для bot/web-source family (`seller_funnel_snapshot`, `web_source_snapshot`) current server-side read rule теперь bounded и truthful:
   - сначала source adapter пробует explicit requested date/window;

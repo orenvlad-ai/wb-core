@@ -53,6 +53,7 @@ from packages.application.sheet_vitrina_v1_onec_stocks import (
     build_onec_stocks_lookup,
     extend_metrics_with_onec_stock_metrics,
     is_onec_stock_sku_metric_key,
+    normalize_onec_stage_code,
     onec_weighted_unit_cost_components,
     resolve_onec_stock_metric_value,
     resolve_onec_stocks_account_id,
@@ -1846,6 +1847,17 @@ class SheetVitrinaV1LivePlanBlock:
                     captured_at=now_iso,
                     payload=payload,
                 )
+            if source_key == ONEC_STOCKS_SOURCE_KEY:
+                payload, status = self._preserve_onec_missing_stage_buckets(
+                    status=status,
+                    payload=payload,
+                    temporal_slot=temporal_slot,
+                    temporal_policy=temporal_policy,
+                    column_date=column_date,
+                    requested_nm_ids=requested_nm_ids,
+                    accepted_snapshot=accepted_snapshot,
+                    accepted_role=accepted_role,
+                )
 
         candidate_valid = _is_valid_temporal_candidate(
             source_key=source_key,
@@ -2052,6 +2064,73 @@ class SheetVitrinaV1LivePlanBlock:
             loader=lambda: cached_payload,
         )
         return cached_status, cached_payload, cached_at
+
+    def _preserve_onec_missing_stage_buckets(
+        self,
+        *,
+        status: LiveSourceStatus,
+        payload: Any | None,
+        temporal_slot: str,
+        temporal_policy: str,
+        column_date: str,
+        requested_nm_ids: list[int],
+        accepted_snapshot: tuple[LiveSourceStatus, Any, str | None] | None,
+        accepted_role: str,
+    ) -> tuple[Any | None, LiveSourceStatus]:
+        if status.source_key != ONEC_STOCKS_SOURCE_KEY or payload is None:
+            return payload, status
+        missing_buckets = _missing_onec_stage_buckets_from_status(status)
+        if not missing_buckets:
+            return payload, status
+
+        fallback_candidates: list[tuple[str, LiveSourceStatus, Any, str | None]] = []
+        if accepted_snapshot is not None:
+            fallback_status, fallback_payload, fallback_at = accepted_snapshot
+            fallback_candidates.append((accepted_role, fallback_status, fallback_payload, fallback_at))
+        if temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED:
+            accepted_current = self._load_slot_snapshot_status(
+                source_key=ONEC_STOCKS_SOURCE_KEY,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
+                requested_nm_ids=requested_nm_ids,
+                snapshot_role=TEMPORAL_ROLE_ACCEPTED_CURRENT,
+            )
+            if accepted_current is not None:
+                fallback_status, fallback_payload, fallback_at = accepted_current
+                fallback_candidates.append(
+                    (TEMPORAL_ROLE_ACCEPTED_CURRENT, fallback_status, fallback_payload, fallback_at)
+                )
+
+        for fallback_role, _fallback_status, fallback_payload, fallback_at in fallback_candidates:
+            merged_payload, preserved_buckets = _merge_onec_missing_stage_buckets_from_payload(
+                payload=payload,
+                fallback_payload=fallback_payload,
+                missing_stage_buckets=missing_buckets,
+            )
+            if merged_payload is None or not preserved_buckets:
+                continue
+            diagnostics = dict(status.diagnostics or {})
+            diagnostics["onec_stage_bucket_fallback"] = {
+                "role": fallback_role,
+                "captured_at": fallback_at or "",
+                "stage_buckets": preserved_buckets,
+                "source": "server_side_accepted_snapshot",
+            }
+            note = _format_note(
+                {
+                    "accepted_fallback_stage_buckets": ",".join(preserved_buckets),
+                    "accepted_fallback_role": fallback_role,
+                    "accepted_fallback_captured_at": fallback_at or "",
+                    "missing_stage_bucket_rows": "filled_from_server_side_accepted_snapshot",
+                }
+            )
+            return merged_payload, replace(
+                status,
+                note=_append_invalid_payload_note(status.note, note),
+                diagnostics=diagnostics,
+            )
+        return payload, status
 
     def _capture_cached_temporal_source(
         self,
@@ -3002,6 +3081,93 @@ def _with_onec_stage_bucket_coverage_status(
         note=_append_invalid_payload_note(status.note, coverage_note),
         diagnostics=diagnostics,
     )
+
+
+def _missing_onec_stage_buckets_from_status(status: LiveSourceStatus) -> list[str]:
+    coverage = status.diagnostics.get("onec_stage_bucket_coverage") if isinstance(status.diagnostics, Mapping) else None
+    if isinstance(coverage, Mapping):
+        missing = [
+            str(item).strip()
+            for item in (coverage.get("missing_stage_buckets") or [])
+            if str(item).strip()
+        ]
+        if missing:
+            return sorted(set(missing))
+    return _note_csv_values(status.note, "missing_stage_buckets")
+
+
+def _merge_onec_missing_stage_buckets_from_payload(
+    *,
+    payload: Any,
+    fallback_payload: Any,
+    missing_stage_buckets: Iterable[str],
+) -> tuple[Any | None, list[str]]:
+    missing = {str(item).strip() for item in missing_stage_buckets if str(item).strip()}
+    if not missing:
+        return None, []
+    current_items = list(getattr(payload, "items", []) or [])
+    fallback_items = list(getattr(fallback_payload, "items", []) or [])
+    existing_keys = {
+        (
+            getattr(item, "nm_id", None),
+            normalize_onec_stage_code(
+                getattr(item, "canonical_stage_code", None)
+                or getattr(item, "stage_name", None)
+            ),
+        )
+        for item in current_items
+    }
+    preserved_items: list[Any] = []
+    preserved_buckets: set[str] = set()
+    for item in fallback_items:
+        stage_key = normalize_onec_stage_code(
+            getattr(item, "canonical_stage_code", None)
+            or getattr(item, "stage_name", None)
+        )
+        if stage_key not in missing:
+            continue
+        dedupe_key = (getattr(item, "nm_id", None), stage_key)
+        if dedupe_key in existing_keys:
+            continue
+        preserved_items.append(item)
+        preserved_buckets.add(str(stage_key))
+        existing_keys.add(dedupe_key)
+    if not preserved_items:
+        return None, []
+
+    dynamic_stage_names = [
+        str(item)
+        for item in (getattr(payload, "dynamic_stage_names", []) or [])
+        if str(item).strip()
+    ]
+    seen_dynamic = set(dynamic_stage_names)
+    for item in preserved_items:
+        stage_name = str(getattr(item, "stage_name", "") or "").strip()
+        if stage_name and stage_name not in seen_dynamic:
+            dynamic_stage_names.append(stage_name)
+            seen_dynamic.add(stage_name)
+
+    merged_items = [*current_items, *preserved_items]
+    return (
+        replace(
+            payload,
+            items=merged_items,
+            stage_count=len(merged_items),
+            dynamic_stage_names=dynamic_stage_names,
+        ),
+        sorted(preserved_buckets),
+    )
+
+
+def _note_csv_values(note: str, key: str) -> list[str]:
+    prefix = f"{key}="
+    for part in str(note or "").split(";"):
+        text = part.strip()
+        if not text.startswith(prefix):
+            continue
+        raw = text[len(prefix):].strip()
+        return sorted({item.strip() for item in raw.split(",") if item.strip()})
+    return []
 
 
 def _build_temporal_gap_status(

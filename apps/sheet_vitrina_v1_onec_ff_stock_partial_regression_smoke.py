@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from packages.application.onec_stocks_block import OnecStocksBlock
+from packages.application.onec_stocks_block import OnecStocksBlock, normalize_onec_stocks_payload
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock
@@ -60,9 +60,17 @@ def main() -> None:
             refreshed_at="2026-05-19T08:05:00Z",
             plan=first_plan,
         )
+        runtime.save_temporal_source_slot_snapshot(
+            source_key=ONEC_STOCKS_SOURCE_KEY,
+            snapshot_date=MISSING_DATE,
+            snapshot_role="accepted_current_snapshot",
+            captured_at="2026-05-19T08:10:00Z",
+            payload=_accepted_onec_payload(MISSING_DATE),
+        )
 
         second_plan = _build_plan(runtime, source, as_of_date=MISSING_DATE, current_date=CURRENT_DATE)
-        _assert_plan_ff_stock_blank(second_plan, MISSING_DATE)
+        _assert_plan_ff_stock_filled(second_plan, MISSING_DATE)
+        _assert_plan_ff_stock_blank(second_plan, CURRENT_DATE)
         _assert_missing_ff_stock_status(second_plan, MISSING_DATE)
         runtime.save_sheet_vitrina_ready_snapshot(
             current_state=runtime.load_current_state(),
@@ -81,12 +89,12 @@ def main() -> None:
         )
         period_rows = {row.row_id: row for row in period_contract.rows}
         _assert_web_ff_stock_filled(period_rows, FILLED_DATE)
-        _assert_web_ff_stock_blank(period_rows, MISSING_DATE)
+        _assert_web_ff_stock_filled(period_rows, MISSING_DATE)
         _assert_web_ff_stock_blank(period_rows, CURRENT_DATE)
         assert_close(
             period_rows[f"TOTAL|{ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY}"].values_by_date.get(MISSING_DATE),
-            1560.0,
-            "missing-date total 1C cost must include only available source buckets",
+            3050.0,
+            "missing-date total 1C cost must include available source buckets plus accepted FF_STOCK fallback",
         )
 
         stale_plan = _with_stale_ff_stock_cells_and_unrelated_row(second_plan)
@@ -121,12 +129,21 @@ def main() -> None:
 
         repaired_plan = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=MISSING_DATE)
         repaired_rows = _data_rows(repaired_plan)
+        selected_idx = _date_index(repaired_plan, MISSING_DATE)
+        current_idx = _date_index(repaired_plan, CURRENT_DATE)
+        assert_close(repaired_rows[f"TOTAL|{FF_TOTAL_QTY}"][selected_idx], 12.0, "selected FF_STOCK qty after group refresh")
+        assert_close(
+            repaired_rows[f"TOTAL|{FF_TOTAL_UNIT_COST}"][selected_idx],
+            1490.0 / 12.0,
+            "selected FF_STOCK unit cost after group refresh",
+        )
+        assert_close(
+            repaired_rows[f"TOTAL|{FF_TOTAL_COST}"][selected_idx],
+            1490.0,
+            "selected FF_STOCK cost after group refresh",
+        )
         for row_id in _ff_total_row_ids():
-            row = repaired_rows[row_id]
-            selected_idx = _date_index(repaired_plan, MISSING_DATE)
-            current_idx = _date_index(repaired_plan, CURRENT_DATE)
-            assert_blank(row[selected_idx], f"{row_id} selected date after group refresh")
-            assert_close(row[current_idx], 777.0, f"{row_id} non-selected date must be preserved")
+            assert_close(repaired_rows[row_id][current_idx], 777.0, f"{row_id} non-selected date must be preserved")
         unrelated = repaired_rows[UNRELATED_ROW_ID]
         if unrelated[_date_index(repaired_plan, MISSING_DATE)] != "keep-selected":
             raise AssertionError(f"group refresh must preserve unrelated selected-date cells, got {unrelated}")
@@ -151,10 +168,10 @@ def main() -> None:
         )
         repaired_web_rows = {row.row_id: row for row in repaired_contract.rows}
         _assert_web_ff_stock_filled(repaired_web_rows, FILLED_DATE)
-        _assert_web_ff_stock_blank(repaired_web_rows, MISSING_DATE)
+        _assert_web_ff_stock_filled(repaired_web_rows, MISSING_DATE)
 
-    print("sheet_vitrina_onec_ff_stock_partial_regression: ok -> filled_when_present_blank_when_missing")
-    print("sheet_vitrina_onec_ff_stock_group_refresh: ok -> selected_date_only_and_unrelated_preserved")
+    print("sheet_vitrina_onec_ff_stock_partial_regression: ok -> source_or_accepted_truth_filled_no_truth_blank")
+    print("sheet_vitrina_onec_ff_stock_group_refresh: ok -> accepted_ff_stock_preserved_and_unrelated_preserved")
 
 
 def _build_plan(
@@ -186,6 +203,26 @@ def _build_plan(
             onec_stage_metric_key("FF_STOCK", "cost_total_rub"),
         ],
     )
+
+
+def _accepted_onec_payload(snapshot_date: str) -> Any:
+    return normalize_onec_stocks_payload(
+        {
+            "meta": {
+                "version": "1.0",
+                "marketplace": "WB",
+                "account_id": "000000001",
+                "date": snapshot_date,
+                "generated_at": f"{snapshot_date}T08:10:00",
+                "currency": "RUB",
+            },
+            "items": [
+                _build_onec_item(SKU_A, "sku-a", include_ff_stock=True),
+                _build_onec_item(SKU_B, "sku-b", include_ff_stock=True),
+            ],
+        },
+        stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
+    ).result
 
 
 def _assert_plan_ff_stock_filled(plan: SheetVitrinaV1Envelope, column_date: str) -> None:
