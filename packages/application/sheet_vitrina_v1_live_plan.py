@@ -1404,7 +1404,10 @@ class SheetVitrinaV1LivePlanBlock:
                 elif source_key == "stocks":
                     current_lookups.stocks_lookup = _index_items_by_nm_id(payload)
                 elif source_key == ONEC_STOCKS_SOURCE_KEY:
-                    current_lookups.onec_stocks_lookup = build_onec_stocks_lookup(payload)
+                    current_lookups.onec_stocks_lookup = build_onec_stocks_lookup(
+                        payload,
+                        expected_nm_ids=requested_nm_ids,
+                    )
                 elif source_key == "ads_compact":
                     current_lookups.ads_compact_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "fin_report_daily":
@@ -2632,8 +2635,10 @@ class _MetricEvaluator:
         cost_metric_key, qty_metric_key = components
         total_cost = self._aggregate_sum(cost_metric_key, self.enabled_config, temporal_slot)
         total_qty = self._aggregate_sum(qty_metric_key, self.enabled_config, temporal_slot)
-        if total_cost is None or total_qty in (None, 0):
+        if total_cost is None or total_qty is None:
             return None
+        if float(total_qty) == 0.0:
+            return 0.0 if float(total_cost) == 0.0 else None
         return float(total_cost) / float(total_qty)
 
     def _resolve_direct_sku(self, metric_key: str, nm_id: int, temporal_slot: str) -> float | None:
@@ -3068,6 +3073,26 @@ def _with_onec_stage_bucket_coverage_status(
         for item in (coverage.get("covered_stage_buckets") or [])
         if str(item).strip()
     ]
+    if _onec_missing_stage_buckets_are_zero_stock(status, coverage):
+        diagnostics["onec_zero_stock_stage_buckets"] = {
+            "stage_buckets": missing_stage_buckets,
+            "reason": "empty_bucket_after_active_sku_filter",
+            "materialization": "zero_stock_rows",
+        }
+        coverage_note = _format_note(
+            {
+                "zero_stock_stage_buckets": ",".join(missing_stage_buckets),
+                "covered_stage_buckets": ",".join(covered_stage_buckets),
+                "missing_stage_bucket_rows": "materialized_as_zero_stock",
+                "zero_stock_reason": "empty_bucket_after_active_sku_filter",
+            }
+        )
+        return replace(
+            status,
+            kind="success",
+            note=_append_invalid_payload_note(status.note, coverage_note),
+            diagnostics=diagnostics,
+        )
     coverage_note = _format_note(
         {
             "missing_stage_buckets": ",".join(missing_stage_buckets),
@@ -3083,7 +3108,30 @@ def _with_onec_stage_bucket_coverage_status(
     )
 
 
+def _onec_missing_stage_buckets_are_zero_stock(
+    status: LiveSourceStatus,
+    coverage: Mapping[str, Any],
+) -> bool:
+    if status.kind != "success":
+        return False
+    if int(status.requested_count or 0) <= 0:
+        return False
+    if int(status.covered_count or 0) < int(status.requested_count or 0):
+        return False
+    if status.missing_nm_ids:
+        return False
+    if coverage.get("unmapped_stage_names"):
+        return False
+    return True
+
+
 def _missing_onec_stage_buckets_from_status(status: LiveSourceStatus) -> list[str]:
+    if _note_csv_values(status.note, "zero_stock_stage_buckets"):
+        return []
+    diagnostics = status.diagnostics if isinstance(status.diagnostics, Mapping) else {}
+    zero_stock = diagnostics.get("onec_zero_stock_stage_buckets") if isinstance(diagnostics, Mapping) else None
+    if isinstance(zero_stock, Mapping) and zero_stock.get("stage_buckets"):
+        return []
     coverage = status.diagnostics.get("onec_stage_bucket_coverage") if isinstance(status.diagnostics, Mapping) else None
     if isinstance(coverage, Mapping):
         missing = [

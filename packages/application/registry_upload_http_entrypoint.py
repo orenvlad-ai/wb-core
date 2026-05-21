@@ -6013,6 +6013,8 @@ def _loading_slot_reason(
         if nonblocking_reason:
             return nonblocking_reason
         note = str(slot.get("note") or "")
+        if _status_note_has_zero_stock_stage_bucket(note):
+            return _humanize_note(note) or "1C source свежий; отсутствующий bucket трактуется как нулевой остаток"
         if _status_note_has_accepted_stage_fallback(note):
             return _humanize_note(note) or "использована ранее принятая server-side версия"
         if _status_note_is_latest_confirmed(note):
@@ -6289,6 +6291,13 @@ def _humanize_note(note: str) -> str:
     normalized = str(note or "").strip()
     if not normalized:
         return ""
+    if "zero_stock_stage_buckets=" in normalized:
+        buckets = _note_value(normalized, "zero_stock_stage_buckets")
+        bucket_text = f": {buckets}" if buckets else ""
+        return (
+            f"1C source свежий: stage bucket{bucket_text} отсутствует по active SKU; "
+            "трактуется как нулевой остаток"
+        )
     if "missing_stage_buckets=" in normalized:
         missing = _note_value(normalized, "missing_stage_buckets")
         bucket_text = f": {missing}" if missing else ""
@@ -6474,6 +6483,11 @@ def _status_note_is_latest_confirmed(note: str) -> bool:
 def _status_note_has_accepted_stage_fallback(note: str) -> bool:
     normalized = str(note or "").strip().lower()
     return "accepted_fallback_stage_buckets=" in normalized
+
+
+def _status_note_has_zero_stock_stage_bucket(note: str) -> bool:
+    normalized = str(note or "").strip().lower()
+    return "zero_stock_stage_buckets=" in normalized
 
 
 def _status_note_is_unverified_closed_day_fallback(note: str) -> bool:

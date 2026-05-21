@@ -54,7 +54,8 @@ def main() -> None:
         source = _FfStockRegressionSource()
         first_plan = _build_plan(runtime, source, as_of_date=FILLED_DATE, current_date=MISSING_DATE)
         _assert_plan_ff_stock_filled(first_plan, FILLED_DATE)
-        _assert_plan_ff_stock_blank(first_plan, MISSING_DATE)
+        _assert_plan_ff_stock_zero(first_plan, MISSING_DATE)
+        _assert_ff_stock_status_has_zero_stock(first_plan, MISSING_DATE)
         runtime.save_sheet_vitrina_ready_snapshot(
             current_state=runtime.load_current_state(),
             refreshed_at="2026-05-19T08:05:00Z",
@@ -69,9 +70,10 @@ def main() -> None:
         )
 
         second_plan = _build_plan(runtime, source, as_of_date=MISSING_DATE, current_date=CURRENT_DATE)
-        _assert_plan_ff_stock_filled(second_plan, MISSING_DATE)
-        _assert_plan_ff_stock_blank(second_plan, CURRENT_DATE)
-        _assert_ff_stock_status_has_accepted_fallback(second_plan, MISSING_DATE)
+        _assert_plan_ff_stock_zero(second_plan, MISSING_DATE)
+        _assert_plan_ff_stock_zero(second_plan, CURRENT_DATE)
+        _assert_ff_stock_status_has_zero_stock(second_plan, MISSING_DATE)
+        _assert_ff_stock_status_has_zero_stock(second_plan, CURRENT_DATE)
         runtime.save_sheet_vitrina_ready_snapshot(
             current_state=runtime.load_current_state(),
             refreshed_at="2026-05-20T08:05:00Z",
@@ -89,12 +91,12 @@ def main() -> None:
         )
         period_rows = {row.row_id: row for row in period_contract.rows}
         _assert_web_ff_stock_filled(period_rows, FILLED_DATE)
-        _assert_web_ff_stock_filled(period_rows, MISSING_DATE)
-        _assert_web_ff_stock_blank(period_rows, CURRENT_DATE)
+        _assert_web_ff_stock_zero(period_rows, MISSING_DATE)
+        _assert_web_ff_stock_zero(period_rows, CURRENT_DATE)
         assert_close(
             period_rows[f"TOTAL|{ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY}"].values_by_date.get(MISSING_DATE),
-            3050.0,
-            "missing-date total 1C cost must include available source buckets plus accepted FF_STOCK fallback",
+            1560.0,
+            "missing-date total 1C cost must include available source buckets plus structural zero FF_STOCK",
         )
 
         stale_plan = _with_stale_ff_stock_cells_and_unrelated_row(second_plan)
@@ -124,22 +126,22 @@ def main() -> None:
         if job_snapshot["status"] != "success":
             raise AssertionError(f"1C FF_STOCK group refresh must finish, got {job_snapshot}")
         job_result = dict(job_snapshot.get("result") or {})
-        if job_result.get("semantic_status") != "warning":
-            raise AssertionError(f"missing FF_STOCK group refresh must be a warning, got {job_result}")
+        if job_result.get("semantic_status") != "success":
+            raise AssertionError(f"zero-stock FF_STOCK group refresh must be a success, got {job_result}")
 
         repaired_plan = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=MISSING_DATE)
         repaired_rows = _data_rows(repaired_plan)
         selected_idx = _date_index(repaired_plan, MISSING_DATE)
         current_idx = _date_index(repaired_plan, CURRENT_DATE)
-        assert_close(repaired_rows[f"TOTAL|{FF_TOTAL_QTY}"][selected_idx], 12.0, "selected FF_STOCK qty after group refresh")
+        assert_close(repaired_rows[f"TOTAL|{FF_TOTAL_QTY}"][selected_idx], 0.0, "selected FF_STOCK qty after group refresh")
         assert_close(
             repaired_rows[f"TOTAL|{FF_TOTAL_UNIT_COST}"][selected_idx],
-            1490.0 / 12.0,
+            0.0,
             "selected FF_STOCK unit cost after group refresh",
         )
         assert_close(
             repaired_rows[f"TOTAL|{FF_TOTAL_COST}"][selected_idx],
-            1490.0,
+            0.0,
             "selected FF_STOCK cost after group refresh",
         )
         for row_id in _ff_total_row_ids():
@@ -147,7 +149,7 @@ def main() -> None:
         unrelated = repaired_rows[UNRELATED_ROW_ID]
         if unrelated[_date_index(repaired_plan, MISSING_DATE)] != "keep-selected":
             raise AssertionError(f"group refresh must preserve unrelated selected-date cells, got {unrelated}")
-        _assert_ff_stock_status_has_accepted_fallback(repaired_plan, MISSING_DATE)
+        _assert_ff_stock_status_has_zero_stock(repaired_plan, MISSING_DATE)
         page_payload = entrypoint.handle_sheet_web_vitrina_page_composition_request(
             page_route="/sheet-vitrina-v1/vitrina",
             read_route="/v1/sheet-vitrina-v1/web-vitrina",
@@ -155,7 +157,7 @@ def main() -> None:
             as_of_date=MISSING_DATE,
             include_source_status=True,
         )
-        _assert_loading_table_explains_accepted_ff_stock_fallback(page_payload)
+        _assert_loading_table_explains_zero_stock(page_payload)
 
         repaired_contract = SheetVitrinaV1WebVitrinaBlock(
             runtime=runtime,
@@ -168,10 +170,10 @@ def main() -> None:
         )
         repaired_web_rows = {row.row_id: row for row in repaired_contract.rows}
         _assert_web_ff_stock_filled(repaired_web_rows, FILLED_DATE)
-        _assert_web_ff_stock_filled(repaired_web_rows, MISSING_DATE)
+        _assert_web_ff_stock_zero(repaired_web_rows, MISSING_DATE)
 
-    print("sheet_vitrina_onec_ff_stock_partial_regression: ok -> source_or_accepted_truth_filled_no_truth_blank")
-    print("sheet_vitrina_onec_ff_stock_group_refresh: ok -> accepted_ff_stock_preserved_and_unrelated_preserved")
+    print("sheet_vitrina_onec_ff_stock_partial_regression: ok -> fresh_empty_bucket_materialized_as_zero")
+    print("sheet_vitrina_onec_ff_stock_group_refresh: ok -> zero_stock_written_and_unrelated_preserved")
 
 
 def _build_plan(
@@ -234,11 +236,12 @@ def _assert_plan_ff_stock_filled(plan: SheetVitrinaV1Envelope, column_date: str)
     assert_close(rows[f"TOTAL|{FF_TOTAL_UNIT_COST}"][date_idx], 1490.0 / 12.0, "FF_STOCK weighted unit cost")
 
 
-def _assert_plan_ff_stock_blank(plan: SheetVitrinaV1Envelope, column_date: str) -> None:
+def _assert_plan_ff_stock_zero(plan: SheetVitrinaV1Envelope, column_date: str) -> None:
     rows = _data_rows(plan)
     date_idx = _date_index(plan, column_date)
-    for row_id in _ff_total_row_ids():
-        assert_blank(rows[row_id][date_idx], f"{row_id} {column_date}")
+    assert_close(rows[f"TOTAL|{FF_TOTAL_QTY}"][date_idx], 0.0, f"FF_STOCK total qty {column_date}")
+    assert_close(rows[f"TOTAL|{FF_TOTAL_COST}"][date_idx], 0.0, f"FF_STOCK total cost {column_date}")
+    assert_close(rows[f"TOTAL|{FF_TOTAL_UNIT_COST}"][date_idx], 0.0, f"FF_STOCK weighted unit cost {column_date}")
     assert_close(rows[f"TOTAL|{CHINA_TOTAL_QTY}"][date_idx], 5.0, "neighbor CHINA_TO_FF qty")
     assert_close(rows[f"TOTAL|{WB_TOTAL_COST}"][date_idx], 900.0, "neighbor WB_STOCK cost")
 
@@ -253,9 +256,14 @@ def _assert_web_ff_stock_filled(rows: dict[str, Any], column_date: str) -> None:
     )
 
 
-def _assert_web_ff_stock_blank(rows: dict[str, Any], column_date: str) -> None:
-    for row_id in _ff_total_row_ids():
-        assert_blank(rows[row_id].values_by_date.get(column_date), f"web {row_id} {column_date}")
+def _assert_web_ff_stock_zero(rows: dict[str, Any], column_date: str) -> None:
+    assert_close(rows[f"TOTAL|{FF_TOTAL_QTY}"].values_by_date.get(column_date), 0.0, "web FF_STOCK total qty")
+    assert_close(rows[f"TOTAL|{FF_TOTAL_COST}"].values_by_date.get(column_date), 0.0, "web FF_STOCK total cost")
+    assert_close(
+        rows[f"TOTAL|{FF_TOTAL_UNIT_COST}"].values_by_date.get(column_date),
+        0.0,
+        "web FF_STOCK unit cost",
+    )
     assert_close(
         rows[f"TOTAL|{CHINA_TOTAL_QTY}"].values_by_date.get(column_date),
         5.0,
@@ -263,7 +271,7 @@ def _assert_web_ff_stock_blank(rows: dict[str, Any], column_date: str) -> None:
     )
 
 
-def _assert_missing_ff_stock_status(plan: SheetVitrinaV1Envelope, column_date: str) -> None:
+def _find_onec_status_row(plan: SheetVitrinaV1Envelope, column_date: str) -> list[Any]:
     rows = {str(row[0]): row for row in _sheet_rows(plan, "STATUS")}
     matching_rows = [
         row for row in rows.values()
@@ -276,7 +284,20 @@ def _assert_missing_ff_stock_status(plan: SheetVitrinaV1Envelope, column_date: s
         ]
     if not matching_rows:
         raise AssertionError(f"missing FF_STOCK status row for {column_date}: {rows}")
-    status_row = matching_rows[0]
+    return matching_rows[0]
+
+
+def _assert_ff_stock_status_has_zero_stock(plan: SheetVitrinaV1Envelope, column_date: str) -> None:
+    status_row = _find_onec_status_row(plan, column_date)
+    if status_row[1] != "success":
+        raise AssertionError(f"empty FF_STOCK bucket must be a successful zero-stock source status, got {status_row}")
+    note = str(status_row[10] if len(status_row) > 10 else "")
+    if "zero_stock_stage_buckets=FF_STOCK" not in note:
+        raise AssertionError(f"zero-stock FF_STOCK status must name the bucket, got {status_row}")
+
+
+def _assert_missing_ff_stock_status(plan: SheetVitrinaV1Envelope, column_date: str) -> None:
+    status_row = _find_onec_status_row(plan, column_date)
     if status_row[1] != "incomplete":
         raise AssertionError(f"missing FF_STOCK must surface incomplete source status, got {status_row}")
     note = str(status_row[10] if len(status_row) > 10 else "")
@@ -286,19 +307,13 @@ def _assert_missing_ff_stock_status(plan: SheetVitrinaV1Envelope, column_date: s
 
 def _assert_ff_stock_status_has_accepted_fallback(plan: SheetVitrinaV1Envelope, column_date: str) -> None:
     _assert_missing_ff_stock_status(plan, column_date)
-    rows = {str(row[0]): row for row in _sheet_rows(plan, "STATUS")}
-    matching_rows = [
-        row for row in rows.values()
-        if row[0] == f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]" and row[3] == column_date
-    ]
-    if not matching_rows:
-        raise AssertionError(f"missing accepted fallback status row for {column_date}: {rows}")
-    note = str(matching_rows[0][10] if len(matching_rows[0]) > 10 else "")
+    status_row = _find_onec_status_row(plan, column_date)
+    note = str(status_row[10] if len(status_row) > 10 else "")
     if "accepted_fallback_stage_buckets=FF_STOCK" not in note:
-        raise AssertionError(f"accepted fallback status must name FF_STOCK fallback, got {matching_rows[0]}")
+        raise AssertionError(f"accepted fallback status must name FF_STOCK fallback, got {status_row}")
 
 
-def _assert_loading_table_explains_accepted_ff_stock_fallback(page_payload: dict[str, Any]) -> None:
+def _assert_loading_table_explains_zero_stock(page_payload: dict[str, Any]) -> None:
     loading_table = ((page_payload.get("activity_surface") or {}).get("loading_table") or {})
     onec_rows = [
         row for row in (loading_table.get("rows") or [])
@@ -310,8 +325,8 @@ def _assert_loading_table_explains_accepted_ff_stock_fallback(page_payload: dict
         str(onec_rows[0].get(key) or "")
         for key in ("today_reason", "yesterday_reason")
     )
-    if "stage bucket: FF_STOCK" not in reason_text or "server-side" not in reason_text:
-        raise AssertionError(f"source-status reason must explain accepted FF_STOCK fallback, got {onec_rows[0]}")
+    if "stage bucket: FF_STOCK" not in reason_text or "нулевой остаток" not in reason_text:
+        raise AssertionError(f"source-status reason must explain zero-stock FF_STOCK, got {onec_rows[0]}")
 
 
 def _assert_exact_labels(rows: dict[str, list[Any]]) -> None:
