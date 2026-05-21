@@ -335,7 +335,11 @@ def is_onec_stock_sku_metric_key(metric_key: str) -> bool:
     return str(metric_key or "").strip() in set(ONEC_STOCKS_SKU_METRIC_KEYS)
 
 
-def build_onec_stocks_lookup(payload: Any | None) -> dict[int, dict[str, float]]:
+def build_onec_stocks_lookup(
+    payload: Any | None,
+    *,
+    expected_nm_ids: Iterable[int] | None = None,
+) -> dict[int, dict[str, float]]:
     if payload is None:
         return {}
     items = getattr(payload, "items", None)
@@ -366,6 +370,15 @@ def build_onec_stocks_lookup(payload: Any | None) -> dict[int, dict[str, float]]
             next_cost / next_qty if next_qty else _to_float(getattr(item, "unit_cost_rub", None))
         )
 
+    expected_set = _normalize_expected_nm_id_set(expected_nm_ids)
+    if expected_set and expected_set.issubset(result.keys()) and not _items_have_unmapped_stage_names(items):
+        for nm_id in expected_set:
+            row = result.setdefault(nm_id, {})
+            for stage_key in ONEC_STOCKS_STAGE_KEYS:
+                row.setdefault(onec_stage_metric_key(stage_key, "qty"), 0.0)
+                row.setdefault(onec_stage_metric_key(stage_key, "cost_total_rub"), 0.0)
+                row.setdefault(onec_stage_metric_key(stage_key, "unit_cost_rub"), 0.0)
+
     for row in result.values():
         row[ONEC_STOCKS_SKU_TOTAL_QTY_METRIC_KEY] = sum(
             float(row.get(onec_stage_metric_key(stage_key, "qty"), 0.0) or 0.0)
@@ -375,6 +388,31 @@ def build_onec_stocks_lookup(payload: Any | None) -> dict[int, dict[str, float]]
             float(row.get(onec_stage_metric_key(stage_key, "cost_total_rub"), 0.0) or 0.0)
             for stage_key in ONEC_STOCKS_STAGE_KEYS
         )
+    return result
+
+
+def _items_have_unmapped_stage_names(items: Iterable[Any]) -> bool:
+    for item in items:
+        stage_name = (
+            getattr(item, "canonical_stage_code", None)
+            or getattr(item, "stage_name", None)
+        )
+        if stage_name and normalize_onec_stage_code(stage_name) is None:
+            return True
+    return False
+
+
+def _normalize_expected_nm_id_set(values: Iterable[int] | None) -> set[int]:
+    result: set[int] = set()
+    if values is None:
+        return result
+    for value in values:
+        if isinstance(value, bool):
+            continue
+        try:
+            result.add(int(value))
+        except (TypeError, ValueError):
+            continue
     return result
 
 

@@ -2077,6 +2077,13 @@ def _humanize_status_note(note: str) -> str:
     normalized = str(note or "").strip()
     if not normalized:
         return ""
+    if "zero_stock_stage_buckets=" in normalized:
+        missing = _status_note_value(normalized, "zero_stock_stage_buckets")
+        bucket_text = f": {missing}" if missing else ""
+        return (
+            f"1C source свежий: stage bucket{bucket_text} отсутствует по active SKU; "
+            "трактуется как нулевой остаток"
+        )
     if "missing_stage_buckets=" in normalized:
         missing = _status_note_value(normalized, "missing_stage_buckets")
         bucket_text = f": {missing}" if missing else ""
