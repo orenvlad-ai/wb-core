@@ -171,11 +171,13 @@ def main() -> None:
             raise AssertionError(f"missing FF_TO_WB stage must stay blank, got {data_rows}")
 
         status_rows = {str(row[0]): row for row in _sheet_rows(plan, "STATUS")}
-        if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[today_current]"][1] != "success":
-            raise AssertionError(f"1C today status must be success, got {status_rows}")
+        _assert_onec_loaded_status(
+            status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[today_current]"],
+            TODAY_DATE,
+            "1C today",
+        )
         yesterday_status = status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"]
-        if yesterday_status[1] != "success":
-            raise AssertionError(f"1C yesterday status must load the requested historical date, got {status_rows}")
+        _assert_onec_loaded_status(yesterday_status, AS_OF_DATE, "1C yesterday")
         if yesterday_status[3] != AS_OF_DATE:
             raise AssertionError(f"1C yesterday snapshot lineage must match requested date, got {yesterday_status}")
         if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[today_current]"][3] != TODAY_DATE:
@@ -567,8 +569,7 @@ def _assert_onec_date_specific_snapshot_lineage() -> None:
             raise AssertionError(f"1C 2026-05-16 and 2026-05-17 values must be date-specific, got {row}")
         status_rows = {str(row[0]): row for row in _sheet_rows(second_plan, "STATUS")}
         yesterday_status = status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"]
-        if yesterday_status[1] != "success":
-            raise AssertionError(f"1C closed date must use a matching historical source payload, got {status_rows}")
+        _assert_onec_loaded_status(yesterday_status, next_closed_date, "1C closed date")
         if yesterday_status[3] != next_closed_date:
             raise AssertionError(f"1C closed date lineage must match requested date, got {yesterday_status}")
         if "accepted_closed_from_prior_current_snapshot" in str(yesterday_status[10]):
@@ -931,8 +932,11 @@ def _assert_weighted_unit_cost_semantics() -> None:
         if rows[f"SKU:{NM_ID}|onec_CHINA_TO_FF_unit_cost_rub"][3] == rows[f"SKU:{MISSING_NM_ID}|onec_CHINA_TO_FF_unit_cost_rub"][3]:
             raise AssertionError("weighted fixture must keep distinct SKU unit costs")
         status_rows = {str(row[0]): row for row in _sheet_rows(plan, "STATUS")}
-        if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"][1] != "success":
-            raise AssertionError(f"weighted 1C historical status must be success, got {status_rows}")
+        _assert_onec_loaded_status(
+            status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"],
+            AS_OF_DATE,
+            "weighted 1C historical",
+        )
         if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[yesterday_closed]"][3] != AS_OF_DATE:
             raise AssertionError(f"weighted 1C historical lineage must match requested date, got {status_rows}")
 
@@ -1261,6 +1265,16 @@ def assert_close(actual: object, expected: float, label: str) -> None:
 def assert_nonblank(actual: object, label: str) -> None:
     if actual is None or str(actual).strip() == "":
         raise AssertionError(f"{label} must be nonblank, got {actual!r}")
+
+
+def _assert_onec_loaded_status(row: list[object], expected_snapshot_date: str, label: str) -> None:
+    kind = str(row[1] if len(row) > 1 else "")
+    if kind not in {"success", "incomplete"}:
+        raise AssertionError(f"{label} status must load 1C data, got {row}")
+    if str(row[3] if len(row) > 3 else "") != expected_snapshot_date:
+        raise AssertionError(f"{label} snapshot lineage must match {expected_snapshot_date}, got {row}")
+    if kind == "incomplete" and "missing_stage_buckets=" not in str(row[10] if len(row) > 10 else ""):
+        raise AssertionError(f"{label} incomplete status must explain missing stage buckets, got {row}")
 
 
 def assert_blank(actual: object, label: str) -> None:

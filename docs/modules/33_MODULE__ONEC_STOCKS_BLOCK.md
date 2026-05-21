@@ -13,6 +13,7 @@ source_basis:
   - "packages/application/sheet_vitrina_v1_live_plan.py"
   - "apps/onec_stocks_block_smoke.py"
   - "apps/sheet_vitrina_v1_onec_stocks_wiring_smoke.py"
+  - "apps/sheet_vitrina_v1_onec_ff_stock_partial_regression_smoke.py"
   - "apps/onec_stocks_block_live_smoke.py"
   - "artifacts/onec_stocks_block/source/success__stocks_wb__fixture.json"
   - "artifacts/onec_stocks_block/evidence/initial__onec-stocks__evidence.md"
@@ -28,13 +29,14 @@ related_endpoints:
 related_runners:
   - "apps/onec_stocks_block_smoke.py"
   - "apps/sheet_vitrina_v1_onec_stocks_wiring_smoke.py"
+  - "apps/sheet_vitrina_v1_onec_ff_stock_partial_regression_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_group_coverage_smoke.py"
   - "apps/onec_stocks_block_live_smoke.py"
 related_docs:
   - "docs/modules/07_MODULE__STOCKS_BLOCK.md"
   - "docs/modules/12_MODULE__COGS_BY_GROUP_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "1C source теперь date-specific для истории и подключён к web-vitrina как source group `onec_product_capital`; расчётные метрики `proxy_profit_2_rub`, `proxy_margin_2_pct` и `inventory_capital_return_pct` используют 1C WB unit cost и 1C товарный капитал."
+update_note: "1C source теперь date-specific для истории и подключён к web-vitrina как source group `onec_product_capital`; расчётные метрики `proxy_profit_2_rub`, `proxy_margin_2_pct` и `inventory_capital_return_pct` используют 1C WB unit cost и 1C товарный капитал. Если 1C payload содержит строки, но не содержит ожидаемый canonical stage bucket, runtime помечает source status как `incomplete`, оставляет строки отсутствующего bucket blank без fake zeros и продолжает материализовать присутствующие buckets."
 ---
 
 # 1. Идентификатор и статус
@@ -42,7 +44,7 @@ update_note: "1C source теперь date-specific для истории и по
 - `module_id`: `onec_stocks_block`
 - `family`: `external-1c-source`
 - `status_transfer`: bounded source path и web-vitrina metric wiring добавлены в `wb-core`
-- `status_verification`: fixture-backed source smoke, wiring smoke и group-coverage smoke подтверждают parser/normalizer, date-specific snapshots, source group wiring и расчётные метрики; live smoke optional и env-guarded
+- `status_verification`: fixture-backed source smoke, wiring smoke, FF_STOCK partial regression smoke и group-coverage smoke подтверждают parser/normalizer, date-specific snapshots, source group wiring, stage-bucket partial status и расчётные метрики; live smoke optional и env-guarded
 - `status_main`: active/current in repo; optional live smoke remains env-guarded
 
 # 2. Runtime contract
@@ -108,6 +110,10 @@ Current web-vitrina metric wiring uses four stage buckets:
 - `WB_STOCK`
 
 Runtime default mapping folds source/contract aliases such as `CN_TO_RU_TRANSIT` into `CHINA_TO_FF` and `FF_TO_WB_TRANSIT` into `FF_TO_WB`.
+
+For web-vitrina readiness, a transport-successful 1C payload can still be semantically partial. When normalized source rows are present but one or more expected web-vitrina stage buckets are absent, the live source status is coerced to `incomplete` and carries `diagnostics.onec_stage_bucket_coverage` plus a note such as `missing_stage_buckets=FF_STOCK`. Missing bucket metric rows stay blank; the runtime does not convert absence to zero and does not reuse browser-local truth. Present buckets are still materialized, so `CHINA_TO_FF`, `FF_TO_WB`, `WB_STOCK`, overall 1C totals and dependent calculations keep using the source rows that actually exist.
+
+`onec_product_capital` group-refresh accepts this bounded `incomplete` status when covered 1C rows exist. It updates only the selected `source_group_id + as_of_date`, may clear stale selected-date cells to blank for missing buckets, and preserves unrelated groups plus non-selected date cells.
 
 # 5. Code parts
 
