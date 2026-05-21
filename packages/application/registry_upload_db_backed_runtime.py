@@ -2058,7 +2058,7 @@ def _semantic_reason_from_source_slot(
     if kind == "not_found":
         return mapped_reason or "источник не вернул данные на точную дату"
     if kind == "incomplete":
-        return _coverage_reason(requested_count=requested_count, covered_count=covered_count)
+        return mapped_reason or _coverage_reason(requested_count=requested_count, covered_count=covered_count)
     if kind == "error":
         return mapped_reason or note or "источник завершился ошибкой"
     if requested_count > 0 and covered_count < requested_count:
@@ -2077,6 +2077,10 @@ def _humanize_status_note(note: str) -> str:
     normalized = str(note or "").strip()
     if not normalized:
         return ""
+    if "missing_stage_buckets=" in normalized:
+        missing = _status_note_value(normalized, "missing_stage_buckets")
+        bucket_text = f": {missing}" if missing else ""
+        return f"1C не вернула stage bucket{bucket_text}; строки bucket оставлены blank без fake zeros"
     replacements = (
         (
             "seller_portal_session_invalid",
@@ -2176,6 +2180,15 @@ def _humanize_status_note(note: str) -> str:
     if "closure_state=closure_exhausted" in normalized:
         return "retry для closed-day snapshot исчерпан"
     return normalized
+
+
+def _status_note_value(note: str, key: str) -> str:
+    prefix = f"{key}="
+    for part in str(note or "").split(";"):
+        text = part.strip()
+        if text.startswith(prefix):
+            return text[len(prefix):].strip()
+    return ""
 
 
 def _note_requires_warning(note: str) -> bool:

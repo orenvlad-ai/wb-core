@@ -131,6 +131,14 @@ def main() -> None:
         if unrelated[_date_index(repaired_plan, MISSING_DATE)] != "keep-selected":
             raise AssertionError(f"group refresh must preserve unrelated selected-date cells, got {unrelated}")
         _assert_missing_ff_stock_status(repaired_plan, MISSING_DATE)
+        page_payload = entrypoint.handle_sheet_web_vitrina_page_composition_request(
+            page_route="/sheet-vitrina-v1/vitrina",
+            read_route="/v1/sheet-vitrina-v1/web-vitrina",
+            operator_route="/sheet-vitrina-v1/operator",
+            as_of_date=MISSING_DATE,
+            include_source_status=True,
+        )
+        _assert_loading_table_explains_missing_ff_stock(page_payload)
 
         repaired_contract = SheetVitrinaV1WebVitrinaBlock(
             runtime=runtime,
@@ -237,6 +245,22 @@ def _assert_missing_ff_stock_status(plan: SheetVitrinaV1Envelope, column_date: s
     note = str(status_row[10] if len(status_row) > 10 else "")
     if "missing_stage_buckets=FF_STOCK" not in note:
         raise AssertionError(f"missing FF_STOCK status must name the missing bucket, got {status_row}")
+
+
+def _assert_loading_table_explains_missing_ff_stock(page_payload: dict[str, Any]) -> None:
+    loading_table = ((page_payload.get("activity_surface") or {}).get("loading_table") or {})
+    onec_rows = [
+        row for row in (loading_table.get("rows") or [])
+        if row.get("source_key") == ONEC_STOCKS_SOURCE_KEY
+    ]
+    if not onec_rows:
+        raise AssertionError(f"source-status loading table must expose 1C row, got {loading_table}")
+    reason_text = " ".join(
+        str(onec_rows[0].get(key) or "")
+        for key in ("today_reason", "yesterday_reason")
+    )
+    if "stage bucket: FF_STOCK" not in reason_text:
+        raise AssertionError(f"source-status reason must explain missing FF_STOCK bucket, got {onec_rows[0]}")
 
 
 def _assert_exact_labels(rows: dict[str, list[Any]]) -> None:
