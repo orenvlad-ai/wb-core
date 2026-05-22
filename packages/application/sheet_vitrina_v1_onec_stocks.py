@@ -10,11 +10,11 @@ from packages.contracts.registry_upload_bundle_v1 import MetricV2Item
 
 ONEC_STOCKS_SOURCE_KEY = "onec_stocks"
 ONEC_STOCKS_SOURCE_GROUP_ID = "onec_product_capital"
-ONEC_STOCKS_SOURCE_GROUP_LABEL_RU = "1С / товарный капитал"
+ONEC_STOCKS_SOURCE_GROUP_LABEL_RU = "1С"
 ONEC_STOCKS_ACCOUNT_ID_ENV = "ONEC_STOCKS_ACCOUNT_ID"
 DEFAULT_ONEC_STOCKS_ACCOUNT_ID = "000000001"
 
-ONEC_STOCKS_SECTION_RU = "1С / товарный капитал"
+ONEC_STOCKS_SECTION_RU = "1С"
 ONEC_STOCKS_STAGE_KEYS: tuple[str, ...] = (
     "CHINA_TO_FF",
     "FF_STOCK",
@@ -136,7 +136,7 @@ def build_onec_stock_metric_items() -> list[MetricV2Item]:
             metric_key=ONEC_STOCKS_TOTAL_QTY_METRIC_KEY,
             enabled=True,
             scope="TOTAL",
-            label_ru="1С: всего товаров, шт",
+            label_ru="всего товаров, шт",
             calc_type="metric",
             calc_ref=ONEC_STOCKS_SKU_TOTAL_QTY_METRIC_KEY,
             show_in_data=True,
@@ -148,7 +148,7 @@ def build_onec_stock_metric_items() -> list[MetricV2Item]:
             metric_key=ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY,
             enabled=True,
             scope="TOTAL",
-            label_ru="1С: товарный капитал всего, руб",
+            label_ru="товарный капитал всего, руб",
             calc_type="metric",
             calc_ref=ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY,
             show_in_data=True,
@@ -199,9 +199,9 @@ def build_onec_stock_metric_items() -> list[MetricV2Item]:
         for field in ONEC_STOCKS_STAGE_FIELDS:
             total_metric_key = onec_stage_total_metric_key(stage_key, field)
             label = (
-                f"1С {stage_label}: средневзвешенная себестоимость за ед., руб"
+                f"{stage_label}: средневзвешенная себестоимость за ед., руб"
                 if field == ONEC_STOCKS_STAGE_TOTAL_UNIT_COST_FIELD
-                else f"1С {stage_label}: всего {ONEC_STOCKS_FIELD_LABELS_RU[field]}"
+                else f"{stage_label}: всего {ONEC_STOCKS_FIELD_LABELS_RU[field]}"
             )
             items.append(
                 MetricV2Item(
@@ -226,7 +226,7 @@ def build_onec_stock_metric_items() -> list[MetricV2Item]:
                     metric_key=onec_stage_metric_key(stage_key, field),
                     enabled=True,
                     scope="SKU",
-                    label_ru=f"1С {stage_label}: {ONEC_STOCKS_FIELD_LABELS_RU[field]}",
+                    label_ru=f"{stage_label}: {ONEC_STOCKS_FIELD_LABELS_RU[field]}",
                     calc_type="metric",
                     calc_ref=onec_stage_metric_key(stage_key, field),
                     show_in_data=True,
@@ -242,7 +242,7 @@ def build_onec_stock_metric_items() -> list[MetricV2Item]:
                 metric_key=ONEC_STOCKS_SKU_TOTAL_QTY_METRIC_KEY,
                 enabled=True,
                 scope="SKU",
-                label_ru="1С всего товаров, шт",
+                label_ru="всего товаров, шт",
                 calc_type="metric",
                 calc_ref=ONEC_STOCKS_SKU_TOTAL_QTY_METRIC_KEY,
                 show_in_data=True,
@@ -254,7 +254,7 @@ def build_onec_stock_metric_items() -> list[MetricV2Item]:
                 metric_key=ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY,
                 enabled=True,
                 scope="SKU",
-                label_ru="1С товарный капитал всего, руб",
+                label_ru="товарный капитал всего, руб",
                 calc_type="metric",
                 calc_ref=ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY,
                 show_in_data=True,

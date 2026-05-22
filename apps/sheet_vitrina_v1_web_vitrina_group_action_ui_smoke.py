@@ -193,7 +193,7 @@ def _assert_group_action_launch_error() -> None:
                   const log = document.querySelector('[data-activity-log-body]');
                   return !!group && !!log
                     && group.textContent.includes('Ошибка запуска')
-                    && log.textContent.includes('Не удалось запустить обновление группы 1С / товарный капитал за 2026-04-20: HTTP 404 route not found');
+                    && log.textContent.includes('Не удалось запустить обновление группы 1С за 2026-04-20: HTTP 404 route not found');
                 }""",
                 timeout=5000,
             )

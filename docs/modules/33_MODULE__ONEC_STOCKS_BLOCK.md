@@ -139,13 +139,13 @@ The active web-vitrina source group is:
 
 - `source_group_id = onec_product_capital`
 - `source_key = onec_stocks`
-- label = `1С / товарный капитал`
+- visible source group label = `1С` (`source_group_id` stays `onec_product_capital`)
 
 Source metric ids used by derived calculations:
 
-- `onec_WB_STOCK_unit_cost_rub` = SKU-level `1С WB: себестоимость за ед., руб`
-- `onec_total_cost_rub` = SKU-level `1С товарный капитал всего, руб`
-- `total_onec_total_cost_rub` = TOTAL `1С: товарный капитал всего, руб`
+- `onec_WB_STOCK_unit_cost_rub` = SKU-level `WB: себестоимость за ед., руб`
+- `onec_total_cost_rub` = SKU-level `товарный капитал всего, руб`
+- `total_onec_total_cost_rub` = TOTAL `товарный капитал всего, руб`
 
 Derived metrics:
 

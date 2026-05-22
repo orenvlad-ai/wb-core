@@ -297,7 +297,7 @@ def main() -> None:
                 raise AssertionError(f"web-vitrina loading table must follow upload source truth, got {activity_surface}")
             if sorted(loading_groups) != ["onec_product_capital", "other_sources", "seller_portal_bot", "wb_api"]:
                 raise AssertionError(f"web-vitrina loading table must expose stable source groups, got {loading_groups}")
-            if loading_groups["onec_product_capital"].get("label") != "1С / товарный капитал":
+            if loading_groups["onec_product_capital"].get("label") != "1С":
                 raise AssertionError(f"1C product-capital group label mismatch, got {loading_groups}")
             if not loading_groups["seller_portal_bot"].get("session_controls"):
                 raise AssertionError(f"seller portal group must expose session controls, got {loading_groups}")
