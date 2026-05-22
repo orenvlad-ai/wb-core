@@ -17,6 +17,8 @@ source_basis:
   - "apps/sheet_vitrina_v1_business_time_smoke.py"
   - "apps/onec_stocks_block_smoke.py"
   - "apps/sheet_vitrina_v1_onec_stocks_wiring_smoke.py"
+  - "apps/sheet_vitrina_v1_onec_ff_stock_partial_regression_smoke.py"
+  - "apps/sheet_vitrina_v1_onec_zero_stock_empty_bucket_smoke.py"
   - "apps/onec_stocks_block_live_smoke.py"
   - "apps/sheet_vitrina_v1_registry_upload_trigger_smoke.py"
   - "apps/sheet_vitrina_v1_registry_seed_v3_bootstrap_smoke.py"
@@ -66,7 +68,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "2788d9abfa7db64b849b6337a3f6c02b0c726fb4"
+built_from_commit: "8df3ca374c982f590202a533ae97e0f9c8c0df40"
 ---
 
 # Summary
@@ -100,6 +102,8 @@ python3 apps/stocks_block_region_mapping_smoke.py
 python3 apps/stocks_block_batching_smoke.py
 python3 apps/onec_stocks_block_smoke.py
 python3 apps/sheet_vitrina_v1_onec_stocks_wiring_smoke.py
+python3 apps/sheet_vitrina_v1_onec_ff_stock_partial_regression_smoke.py
+python3 apps/sheet_vitrina_v1_onec_zero_stock_empty_bucket_smoke.py
 python3 apps/sheet_vitrina_v1_registry_upload_trigger_smoke.py
 python3 apps/sheet_vitrina_v1_cost_price_upload_smoke.py
 python3 apps/sheet_vitrina_v1_cost_price_read_side_smoke.py
@@ -175,6 +179,8 @@ git diff --check
 Current 1C/Soykasoft smoke intent:
 - `apps/onec_stocks_block_smoke.py` proves the 1C stocks parser/normalizer contract, supported stage-code preservation, canonical cost fields, date mismatch rejection and partial-fetch diagnostics without live secrets.
 - `apps/sheet_vitrina_v1_onec_stocks_wiring_smoke.py` proves date-specific current/historical web-vitrina load, source group `onec_product_capital`, stage rows, weighted unit-cost totals, group-refresh merge semantics and runtime-extended 1C profitability metrics.
+- `apps/sheet_vitrina_v1_onec_ff_stock_partial_regression_smoke.py` proves that fresh 1C source with missing `FF_STOCK` after active SKU filtering materializes the affected qty/unit-cost/capital rows truthfully and does not blank unrelated dates/groups.
+- `apps/sheet_vitrina_v1_onec_zero_stock_empty_bucket_smoke.py` proves structural zero-stock semantics for absent canonical 1C buckets on fresh successful full-coverage payloads, while source errors, date mismatch, unmapped stages and partial SKU coverage stay warning/error/blank.
 - `apps/sheet_vitrina_v1_web_vitrina_group_coverage_smoke.py` keeps `onec_product_capital` visible in grouped `Загрузка данных` / page-composition source metadata.
 - `apps/onec_stocks_block_live_smoke.py` is optional/env-guarded live evidence and is not required for repo-only derived-sync closure.
 
@@ -605,11 +611,12 @@ Use this section for current website/operator/public verification. Legacy Google
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition&include_source_status=1` returns the detailed grouped `Загрузка данных` payload for an explicit details request; it must use server-owned `snapshot_as_of_date`, expose `source_status_state`, and must not infer date from browser-local today or the rightmost `today_current` column;
 - grouped `Загрузка данных` must include `onec_product_capital` / `1С / товарный капитал`; its group refresh is date-scoped and may update only 1C-owned rows/source status for the requested date;
 - 1C stage rows use current buckets `CHINA_TO_FF`, `FF_STOCK`, `FF_TO_WB`, `WB_STOCK`; source aliases such as `CN_TO_RU_TRANSIT` and `FF_TO_WB_TRANSIT` fold into the canonical web-vitrina buckets;
+- a fresh successful 1C payload with full active SKU coverage and an absent canonical stage bucket must materialize that bucket's qty/unit-cost/capital rows as `0` with zero-stock diagnostics; source errors, date mismatch, unmapped stages and partial SKU coverage stay warning/error/blank without fake zeros;
 - 1C profitability rows are server-side derived from current 1C product-capital truth; total percent rows are ratio-of-aggregates, not averaged row percentages;
 - vitrina page shows primary action `Загрузить и обновить`; old top-panel `Обновить`, `JSON Connect` and permanent top status badge are not active current UI.
 - bottom `Действия и состояния` contains server-driven lazy `Загрузка данных`: initial `not_loaded` + `Загрузить`, then grouped table (`WB API`, `1С / товарный капитал`, `Seller Portal / бот`, `Прочие источники`) after explicit details load, plus secondary `Лог`; former sibling block `Обновление данных` is not active page-composition UI.
-- compact toolbar above the table owns `Диапазон`, `Поиск`, `Секции`, `Группа`, `Тип строк`, `Метрики`, `Столбцы`, `Сброс`; the old always-expanded `История`, visible sort selector and separate `Фильтры и настройки` card are not default page sections.
-- no-query page-composition opens latest three server-readable business dates inclusive, ending on backend-owned `today_current_date` when available; explicit `as_of_date` and `date_from/date_to` remain read-only ready-snapshot reads.
+- compact in-header controls above the table own period, section and group next to the load action; visible `Поиск`, `Столбцы`, `Сброс`, `Тип строк`, toolbar `Метрики`, visible sort selector and separate `Фильтры и настройки` card are not current page sections, while the separate browser-local `Метрики` block owns scope-level `Итого`/`SKU` presentation only.
+- no-query page-composition opens the backend-owned current business week `D-6..D` inclusive, ending on `today_current_date`; explicit `as_of_date` and `date_from/date_to` remain read-only ready-snapshot reads with truthful blank/partial current-week dates when snapshots are not yet materialized.
 - `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` must reach app-level validation. A request without `source_group_id` returns app-level `400 {"error":"source_group_id is required"}`, not proxy `404`.
 - valid group-refresh payload `{async: true, source_group_id, as_of_date}` creates a group/date-scoped job and must not clear, overwrite or timestamp unrelated groups/date cells; `updated_cells` metadata drives only transient browser-session text-color highlighting.
 - `GET /v1/sheet-vitrina-v1/daily-report` остаётся cheap read-only JSON path: default route выбирает две последние persisted ready snapshot даты `<= default_business_as_of_date(now)`, читает их `yesterday_closed` slots, не использует `today_current` как comparison baseline и не trigger-ит refresh/upstream fetch;
