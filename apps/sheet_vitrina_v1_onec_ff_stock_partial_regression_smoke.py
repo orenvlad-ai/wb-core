@@ -331,9 +331,9 @@ def _assert_loading_table_explains_zero_stock(page_payload: dict[str, Any]) -> N
 
 def _assert_exact_labels(rows: dict[str, list[Any]]) -> None:
     expected = {
-        f"TOTAL|{FF_TOTAL_QTY}": "1С ФФ: всего кол-во",
-        f"TOTAL|{FF_TOTAL_UNIT_COST}": "1С ФФ: средневзвешенная себестоимость за ед., руб",
-        f"TOTAL|{FF_TOTAL_COST}": "1С ФФ: всего капитал, руб",
+        f"TOTAL|{FF_TOTAL_QTY}": "ФФ: всего кол-во",
+        f"TOTAL|{FF_TOTAL_UNIT_COST}": "ФФ: средневзвешенная себестоимость за ед., руб",
+        f"TOTAL|{FF_TOTAL_COST}": "ФФ: всего капитал, руб",
     }
     for row_id, label in expected.items():
         if rows[row_id][0] not in {label, f"Итого: {label}"}:

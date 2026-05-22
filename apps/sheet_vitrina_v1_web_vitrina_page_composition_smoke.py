@@ -258,7 +258,7 @@ def main() -> None:
             raise AssertionError(f"loading table rows must follow the upload source truth, got {activity_surface}")
         if sorted(loading_groups) != ["onec_product_capital", "other_sources", "seller_portal_bot", "wb_api"]:
             raise AssertionError(f"loading table must expose stable source groups, got {loading_groups}")
-        if loading_groups["onec_product_capital"]["label"] != "1С / товарный капитал":
+        if loading_groups["onec_product_capital"]["label"] != "1С":
             raise AssertionError(f"1C source group label mismatch, got {loading_groups}")
         if not loading_groups["seller_portal_bot"]["session_controls"]:
             raise AssertionError(f"Seller Portal group must expose session controls, got {loading_groups}")
@@ -626,7 +626,7 @@ def _build_activity_surface_fixture() -> dict[str, object]:
                 },
                 {
                     "group_id": "onec_product_capital",
-                    "label": "1С / товарный капитал",
+                    "label": "1С",
                     "source_keys": ["onec_stocks"],
                     "last_updated_at": "2026-04-20T12:05:00Z",
                     "refresh_action": {"label": "Обновить группу", "source_group_id": "onec_product_capital"},

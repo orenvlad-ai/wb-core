@@ -281,8 +281,11 @@ def main() -> None:
         ]
         if not onec_rows or onec_rows[0]["source_group_id"] != ONEC_STOCKS_SOURCE_GROUP_ID:
             raise AssertionError(f"1C loading row must carry source group id, got {loading_table}")
-        if "1С: товарный капитал всего, руб" not in onec_rows[0]["metric_labels"]:
+        onec_metric_labels = list(onec_rows[0]["metric_labels"])
+        if "товарный капитал всего, руб" not in onec_metric_labels:
             raise AssertionError(f"1C loading row must expose metric labels, got {onec_rows[0]}")
+        if any(str(label).startswith(("1C:", "1С:", "1C ", "1С ")) for label in onec_metric_labels):
+            raise AssertionError(f"1C loading row labels must not expose 1C prefix, got {onec_rows[0]}")
         period_page_payload = entrypoint.handle_sheet_web_vitrina_page_composition_request(
             page_route="/sheet-vitrina-v1/vitrina",
             read_route="/v1/sheet-vitrina-v1/web-vitrina",

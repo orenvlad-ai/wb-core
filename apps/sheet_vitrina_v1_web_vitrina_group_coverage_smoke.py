@@ -425,7 +425,7 @@ def _build_previous_onec_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
                 header=["label", "key", "2026-04-20", "2026-04-21"],
                 rows=[
                     ["Итого: сумма заказов", "TOTAL|total_orderSum", 900, 1000],
-                    ["Итого: 1C товарный капитал", f"TOTAL|{ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY}", 3000, 3000],
+                    ["Итого: товарный капитал всего, руб", f"TOTAL|{ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY}", 3000, 3000],
                     ["Итого: прокси прибыль 2", f"TOTAL|{ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY}", 0, 0],
                     ["Итого: прокси маржинальность 2", f"TOTAL|{ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY}", 0, 0],
                     [
@@ -437,8 +437,8 @@ def _build_previous_onec_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
                     ["SKU: сумма заказов", f"SKU:{nm_id}|orderSum", 900, 1000],
                     ["SKU: количество заказов", f"SKU:{nm_id}|orderCount", 1, 2],
                     ["SKU: реклама", f"SKU:{nm_id}|ads_sum", 50, 100],
-                    ["SKU: 1C ВБ себестоимость", f"SKU:{nm_id}|{ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY}", 100, 100],
-                    ["SKU: 1C товарный капитал", f"SKU:{nm_id}|{ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY}", 3000, 3000],
+                    ["SKU: WB: себестоимость за ед., руб", f"SKU:{nm_id}|{ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY}", 100, 100],
+                    ["SKU: товарный капитал всего, руб", f"SKU:{nm_id}|{ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY}", 3000, 3000],
                     ["SKU: прокси прибыль 2", f"SKU:{nm_id}|{ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY}", 0, 0],
                     ["SKU: прокси маржинальность 2", f"SKU:{nm_id}|{ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY}", 0, 0],
                     [
@@ -537,7 +537,7 @@ def _build_partial_onec_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
                 partial_update_allowed=False,
                 header=["label", "key", "2026-04-20", "2026-04-21"],
                 rows=[
-                    ["Итого: 1C товарный капитал", f"TOTAL|{ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY}", 3333, 5000],
+                    ["Итого: товарный капитал всего, руб", f"TOTAL|{ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY}", 3333, 5000],
                     ["Итого: прокси прибыль 2", f"TOTAL|{ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY}", 999, 999],
                     ["Итого: прокси маржинальность 2", f"TOTAL|{ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY}", 999, 999],
                     [
@@ -546,8 +546,8 @@ def _build_partial_onec_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
                         999,
                         999,
                     ],
-                    ["SKU: 1C ВБ себестоимость", f"SKU:{nm_id}|{ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY}", 111, 200],
-                    ["SKU: 1C товарный капитал", f"SKU:{nm_id}|{ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY}", 3333, 5000],
+                    ["SKU: WB: себестоимость за ед., руб", f"SKU:{nm_id}|{ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY}", 111, 200],
+                    ["SKU: товарный капитал всего, руб", f"SKU:{nm_id}|{ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY}", 3333, 5000],
                     ["SKU: прокси прибыль 2", f"SKU:{nm_id}|{ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY}", 999, 999],
                     ["SKU: прокси маржинальность 2", f"SKU:{nm_id}|{ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY}", 999, 999],
                     [
