@@ -20,7 +20,7 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "2788d9abfa7db64b849b6337a3f6c02b0c726fb4"
+built_from_commit: "8df3ca374c982f590202a533ae97e0f9c8c0df40"
 ---
 
 # Summary
@@ -119,6 +119,7 @@ Current 1C/Soykasoft source flow:
 - historical/current snapshots are date-specific; requested historical load is accepted only when `payload.meta.date` equals the requested date
 - current stage buckets are `CHINA_TO_FF`, `FF_STOCK`, `FF_TO_WB`, `WB_STOCK`; aliases `CN_TO_RU_TRANSIT` and `FF_TO_WB_TRANSIT` fold into the current buckets
 - current 1C metric rows include 1C stage qty/unit-cost/capital rows, SKU/TOTAL товарный капитал, `proxy_profit_2_rub`, `proxy_margin_2_pct` and `inventory_capital_return_pct` families
+- a fresh successful exact-date 1C payload with full active SKU coverage may be validly empty for any canonical stage bucket; runtime materializes that bucket's qty/unit-cost/capital rows as `0` with zero-stock diagnostics, while source errors, date mismatch, unmapped stages and partial SKU coverage remain warning/error/blank and preserve accepted same-date truth only as fallback for invalid attempts
 
 Current sibling local promo collector precursor flow:
 - `python3 apps/promo_xlsx_collector_live.py`
@@ -142,23 +143,25 @@ Current repo-owned unified web/operator surface:
 - `GET /v1/sheet-vitrina-v1/web-vitrina` stays server-owned and library-agnostic on the default path: current v1 shape is `meta + status_summary + schema + rows + capabilities`, built only from existing ready snapshot/current truth and optional `as_of_date`
 - phase-2 web-vitrina materializes repo-owned `web_vitrina_view_model` over that stable contract: current schema = `columns + rows + groups + sections + formatters + filters + sorts + state_model`
 - phase-3 web-vitrina materializes repo-owned `web_vitrina_gravity_table_adapter` over that `view_model`: current Gravity-specific surface = `columns + rows + renderers + groupings + filters + sorts + use_table_options + table_props + state_surface`
-- phase-4 web-vitrina materializes repo-owned `web_vitrina_page_composition` via optional `surface=page_composition`; the page shell renders summary, compact toolbar/history controls, main table and then bottom `Действия и состояния`
+- phase-4 web-vitrina materializes repo-owned `web_vitrina_page_composition` via optional `surface=page_composition`; the page shell renders compact table header/history controls, browser-local `Метрики` presentation block, main table and then bottom `Действия и состояния`
 - visual system is dark across `Витрина`, embedded `Поставки` / `Отчёты`, `Отзывы` and `Исследования`; primary/action accent is violet/indigo, while green is kept only for semantic success/status signals
 - the same unified shell exposes `Отзывы` as a manual read-only WB feedbacks table with strict server-side date/star/answered filters, 62-day feedback date picker, chunked WB pagination, diagnostic meta, Excel export for the current table, bounded internal horizontal scroll for wide columns, resizable columns, official review tags/actionable resolver, optional transient AI review columns, nested `Жалобы` over runtime complaint journal/status sync plus protected selected-row submit jobs, and nested `Авто-жалобы` over runtime schedules/run-now/tick reports; prompt storage, AI output and auto-complaints run stats are operational/transient, not ЕБД/accepted truth
 - the same unified shell exposes `Исследования` as read-only SKU group comparison; options/calculate use active SKU truth, selectable non-financial metrics and persisted ready snapshots only
 - current live vitrina action/status semantics:
   - `Загрузить и обновить` = canonical full refresh: `POST /v1/sheet-vitrina-v1/refresh` + ready snapshot materialize + page reread, without Google Sheets write dependency; both manual and automatic triggers use `Asia/Yekaterinburg` `today_current` / `yesterday_closed` slots and keep expected stale/missing source groups visible in semantic status/logs
   - the old cheap top-panel `Обновить`, `JSON Connect` and permanent top status badge are not rendered
-  - summary keeps browser-owned `Последнее обновление страницы` separate from server-owned `Свежесть данных`, and both use readable timestamps without raw ISO `T/Z`
+  - table header keeps browser-owned page refresh time separate from server-owned freshness and the load-adjacent latest-window status lamp; old selected-period errors outside the latest two-day window do not force the visible load state red
+  - visible table controls are compact: period/section/group near the load action, no separate `Фильтры и настройки` card, and obsolete search/columns/reset/type/sort controls are ignored safely
+  - browser-local `Метрики` presentation has separate `Итого` and `SKU` scopes, drag-and-drop ordering, transient selected-row batch mode and display states `Показано` / `Свернуто` / `Скрыто`; collapsed rows reveal under the nearest shown metric through icon-only disclosure, hidden rows stay absent from the main table
   - `Загрузка данных` is lazy: initial page composition renders `not_loaded` plus `Загрузить`, then explicit `include_source_status=1` loads a grouped compact table over source truth (`WB API`, `1С / товарный капитал`, `Seller Portal / бот`, `Прочие источники`); every visible main-table metric belongs to exactly one group, with residual calculated/formula metrics assigned to `Прочие источники`
   - each group has one compact date control, `Обновить группу`, group-level last update timestamp, today/yesterday status columns, reason columns, Russian metric labels and secondary technical endpoint text
   - `Seller Portal / бот` additionally exposes session status and `Проверить сессию` / `Восстановить сессию` / `Скачать лаунчер`
   - `Лог` renders below the loading table and keeps existing job/log download contour
   - former sibling block `Обновление данных` is no longer an active page-composition activity block; persisted `STATUS` rows remain underlying read-side truth
   - raw STATUS/job note, JSON fragments, traceback text, request ids and similar diagnostics stay only in existing log/download surfaces
-- `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` accepts `{async: true, source_group_id, as_of_date}` for one source group and one selected date; it must not clear, overwrite or timestamp unrelated groups/date cells
+- `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` accepts `{async: true, source_group_id, as_of_date}` for one source group and one selected date; it must not clear, overwrite or timestamp unrelated groups/date cells; for `onec_product_capital`, fresh empty canonical 1C stage buckets are materialized as structural zeros, not blanks
 - group-refresh/full-refresh job results may include `updated_cells`/latest-confirmed metadata for transient browser-session highlighting only; current UI uses green/amber text-color emphasis without legacy light cell backgrounds and no permanent styling truth is persisted
-- the sibling page keeps bounded history controls: no-query default opens latest three server-readable business dates, explicit `as_of_date`, and `date_from/date_to` period mode over existing ready snapshots; old always-expanded `История` / `Фильтры и настройки` blocks are replaced by a compact toolbar
+- the sibling page keeps bounded history controls: no-query default opens the backend-owned current business week `D-6..D` ending on `today_current_date`, explicit `as_of_date`, and `date_from/date_to` period mode over existing ready snapshots plus truthful blank/partial cells for visible current-week dates without ready snapshots; old always-expanded `История` / `Фильтры и настройки` blocks are replaced by compact in-header controls
 - `web_vitrina_view_model` remains canonical and library-agnostic, the Gravity adapter stays isolated repo-side, and the page layer stays a page-only consumer instead of a second truth owner
 - current phase-1/2/3/4 scope remains narrow: route fixation, stable read contract, library-agnostic presentation seam, concrete grid adapter and server-driven page composition only; export layer, legacy Google Sheets/export migration and broad feature parity stay later
 - `Отчёты` uses one sibling subsection selector: `Ежедневные отчёты`, `Отчёт по остаткам`, `Выполнение плана`; only one report body is visible at a time

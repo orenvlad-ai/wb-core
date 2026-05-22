@@ -23,7 +23,7 @@ update_triggers:
   - "изменение canonical naming"
   - "появление нового публичного термина"
   - "изменение operator-visible labels"
-built_from_commit: "2788d9abfa7db64b849b6337a3f6c02b0c726fb4"
+built_from_commit: "8df3ca374c982f590202a533ae97e0f9c8c0df40"
 ---
 
 # Summary
@@ -71,6 +71,7 @@ built_from_commit: "2788d9abfa7db64b849b6337a3f6c02b0c726fb4"
 | `onec_product_capital` | `1С / товарный капитал`, `1C source group` | web-vitrina source group for `onec_stocks`; supports date-scoped group refresh and source-status rows |
 | `1C profitability metrics` | `proxy_profit_2_rub`, `proxy_margin_2_pct`, `inventory_capital_return_pct` | runtime-extended 1C-derived rows: proxy profit with 1C WB unit cost, proxy margin 2 and inventory capital return; TOTAL percent rows are ratio-of-aggregates |
 | `1C stage buckets` | `CHINA_TO_FF`, `FF_STOCK`, `FF_TO_WB`, `WB_STOCK` | current web-vitrina buckets for normalized 1C stock capital; source aliases such as `CN_TO_RU_TRANSIT` and `FF_TO_WB_TRANSIT` fold into current buckets |
+| `1C structural zero stock` | `zero_stock_stage_buckets`, `empty bucket zero` | fresh successful exact-date 1C payload with active SKU coverage and an absent canonical stage bucket means zero stock for that bucket; server materializes qty/unit-cost/capital as `0`, while source errors, date mismatch, unmapped stages and partial coverage remain warning/error/blank |
 | `SPP current source` | `discountOnSite`, `Seller Portal discounts-prices SPP` | current-visible SPP source from Seller Portal; exact current-day evidence may roll over as accepted closed-day truth, while legacy sales-row average remains explicit fallback only |
 | `promo current invariant smoke` | `promo invariant guard` | read-only live/public guard for current promo row visibility and expected ended/no-download artifact handling |
 | `normalized promo archive` | `campaign_rows.jsonl`, `campaign_rows_manifest.json` | normalized campaign-row truth for historical promo replay without permanent raw workbook dependency |

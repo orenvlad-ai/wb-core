@@ -27,7 +27,7 @@ update_triggers:
   - "изменение migration boundary"
   - "изменение operator/runtime invariant"
   - "изменение docs governance"
-built_from_commit: "2788d9abfa7db64b849b6337a3f6c02b0c726fb4"
+built_from_commit: "8df3ca374c982f590202a533ae97e0f9c8c0df40"
 ---
 
 # Summary
@@ -85,7 +85,7 @@ built_from_commit: "2788d9abfa7db64b849b6337a3f6c02b0c726fb4"
 | `C-40` | `Загрузить и обновить` is the canonical full-refresh action for web-vitrina: manual and automatic triggers share the same source/status/materialize/reread semantics, `Asia/Yekaterinburg` date-slot resolution, and truthful warning/error status when expected visible source groups are stale or missing. |
 | `C-41` | Web-vitrina/feedbacks visual fixes stay UI-local: wide feedbacks tables must scroll inside bounded containers, and updated-cell feedback uses transient text-color emphasis rather than legacy light backgrounds or persisted styling truth. |
 | `C-42` | Reports default-read must not request a not-yet-ready business day: daily-report selects the two latest persisted ready snapshots `<= default_business_as_of_date(now)`, stock-report default selects the latest one, and explicit stock `as_of_date` remains strict exact-read with no fallback/upstream fetch. |
-| `C-43` | 1C/Soykasoft `onec_stocks` is a date-capable server-side source group, not a browser/UI truth layer: `onec_product_capital` group refresh must stay date-scoped; historical loads require matching `payload.meta.date`; current stage buckets are `CHINA_TO_FF`, `FF_STOCK`, `FF_TO_WB`, `WB_STOCK`; 1C profitability totals must remain server-side ratio-of-aggregates where documented. |
+| `C-43` | 1C/Soykasoft `onec_stocks` is a date-capable server-side source group, not a browser/UI truth layer: `onec_product_capital` group refresh must stay date-scoped; historical loads require matching `payload.meta.date`; current stage buckets are `CHINA_TO_FF`, `FF_STOCK`, `FF_TO_WB`, `WB_STOCK`; fresh successful active-SKU-covered payloads may materialize absent canonical buckets as structural zero stock, but source errors/date mismatch/unmapped stages/partial coverage must stay warning/error/blank without fake zeros; 1C profitability totals must remain server-side ratio-of-aggregates where documented. |
 
 # Known gaps
 

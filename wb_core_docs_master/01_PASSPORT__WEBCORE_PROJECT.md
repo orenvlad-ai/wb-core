@@ -40,7 +40,7 @@ update_triggers:
   - "изменение current main-confirmed contour"
   - "merge нового bounded модуля"
   - "смена главного project gap"
-built_from_commit: "2788d9abfa7db64b849b6337a3f6c02b0c726fb4"
+built_from_commit: "8df3ca374c982f590202a533ae97e0f9c8c0df40"
 ---
 
 # Summary
@@ -108,10 +108,12 @@ Confirmed contour на текущем `main`:
   - current/historical load is date-specific and accepts historical snapshots only when `payload.meta.date` matches the requested date;
   - current web-vitrina stage buckets are `CHINA_TO_FF`, `FF_STOCK`, `FF_TO_WB`, `WB_STOCK`; runtime default mapping folds aliases such as `CN_TO_RU_TRANSIT -> CHINA_TO_FF` and `FF_TO_WB_TRANSIT -> FF_TO_WB`;
   - 1C source metrics include `onec_WB_STOCK_unit_cost_rub`, `onec_total_cost_rub`, `total_onec_total_cost_rub`, and derived profitability metrics `proxy_profit_2_rub`, `total_proxy_profit_2_rub`, `proxy_margin_2_pct`, `proxy_margin_2_pct_total`, `inventory_capital_return_pct`, `inventory_capital_return_pct_total`;
-  - 1C profitability uses the existing proxy-profit coefficients with only `cost_price_rub` replaced by 1C WB unit cost, and percent totals are ratio-of-aggregates rather than row averages.
+  - 1C profitability uses the existing proxy-profit coefficients with only `cost_price_rub` replaced by 1C WB unit cost, and percent totals are ratio-of-aggregates rather than row averages;
+  - if a fresh exact-date 1C payload successfully covers the active SKU universe but lacks one of the canonical stage buckets after filtering, the server treats that bucket as structural zero stock: qty, weighted unit-cost and capital rows materialize as `0` with `zero_stock_stage_buckets` diagnostics; source errors, date mismatch, unmapped stages and partial SKU coverage stay warning/error/blank without fake zeros.
 - unified web-vitrina/operator surface:
   - primary manual action `Загрузить и обновить` is the canonical full refresh: backend resolves `today_current` / `yesterday_closed` in `Asia/Yekaterinburg`, runs the same source/status machinery as group refresh, materializes the ready snapshot, rereads the page payload and keeps stale/missing expected source groups visible as warning/error instead of false success;
-  - compact table toolbar combines period/search/filter/column controls; default no-query history opens the latest three server-readable business dates ending on backend-owned `today_current_date` when available;
+  - compact table header keeps period/section/group controls and the load action close to the table, hides obsolete search/columns/reset/type/sort toolbar controls, and uses a latest-window status lamp for `today_current + yesterday_closed` instead of letting old historical errors color the visible load state;
+  - the browser-local `Метрики` presentation block is presentation-only over received metric rows: two scope tables `Итого` / `SKU`, row and selected-row drag-and-drop, display states `Показано` / `Свернуто` / `Скрыто`, SKU `Как Итого` sync, and no changes to metric registry, formulas, ready snapshots or accepted truth;
   - bottom `Загрузка данных` is lazy: initial state shows only `not_loaded` + `Загрузить`, then explicit read-only `surface=page_composition&include_source_status=1` loads grouped source status table (`WB API`, `Seller Portal / бот`, `Прочие источники`) with date-scoped `Обновить группу`;
   - `1С / товарный капитал` is a first-class loading/source group with date-scoped group refresh, and its metrics stay server-owned rather than browser-local truth;
   - `Отзывы` tab is read-only over official WB feedbacks API through canonical `WB_API_TOKEN`, with bounded 62-day date picker independent from ready-snapshot dates, chunked `take/skip` loading, final server-side filters (`date_from/date_to/stars/is_answered`), diagnostic meta, Excel export, bounded internal table scroll for wide feedback columns, resizable columns, official review tags/actionable complaint resolver and transient AI-assisted review through server-side prompt+model config/OpenAI route; AI labels are not accepted truth, Seller Portal automation or Google Sheets/GAS state;
