@@ -2025,9 +2025,9 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
     if route == "supplier_page":
         body = str(result.get("body_excerpt", ""))
         tokens = [
-            "Реестр заказов",
-            "Добавить заказ",
-            "Дата отгрузки / Shipment date",
+            "订单登记表 / Order registry / Реестр заказов",
+            "新增订单 / Add order / Добавить заказ",
+            "出货日期 / Shipment date / Дата отгрузки",
             DEFAULT_SUPPLIER_SHIPMENTS_PATH,
             DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/parse",
         ]
