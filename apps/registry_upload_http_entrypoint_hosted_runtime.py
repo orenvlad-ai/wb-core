@@ -62,10 +62,12 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_REFRESH_PATH,
     DEFAULT_SHEET_STOCK_REPORT_PATH,
     DEFAULT_SHEET_STATUS_PATH,
+    DEFAULT_SHEET_SUPPLIER_UI_PATH,
     DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH,
     DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
     DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
+    DEFAULT_SUPPLIER_SHIPMENTS_PATH,
     DEFAULT_UPLOAD_PATH,
     DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX,
     DEFAULT_WB_REGIONAL_STATUS_PATH,
@@ -478,6 +480,20 @@ def collect_public_surface(
             name="web_vitrina_page",
             method="GET",
             url=f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}",
+            timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
+        ),
+        _collect_http_probe(
+            name="supplier_page",
+            method="GET",
+            url=f"{base_url}{DEFAULT_SHEET_SUPPLIER_UI_PATH}",
+            timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
+        ),
+        _collect_http_probe(
+            name="supplier_shipments_list",
+            method="GET",
+            url=f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
             timeout_seconds=timeout_seconds,
             auth_cookie=auth_cookie,
         ),
@@ -1039,6 +1055,7 @@ def render_nginx_public_route_block(
     managed_block_label: str = DEFAULT_NGINX_MANAGED_BLOCK_LABEL,
 ) -> str:
     routes = _validated_public_routes(manifest)
+    client_max_body_size = _nginx_scalar(str(manifest.get("client_max_body_size") or "32m"))
     read_timeout = _nginx_scalar(str(manifest.get("proxy_read_timeout") or "180s"))
     send_timeout = _nginx_scalar(str(manifest.get("proxy_send_timeout") or "180s"))
     lines = [
@@ -1057,6 +1074,7 @@ def render_nginx_public_route_block(
                 "        proxy_set_header Host $host;",
                 "        proxy_set_header X-Real-IP $remote_addr;",
                 "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+                f"        client_max_body_size {client_max_body_size};",
                 f"        proxy_read_timeout {read_timeout};",
                 f"        proxy_send_timeout {send_timeout};",
                 "    }",
@@ -1164,6 +1182,7 @@ def _describe_nginx_public_routes(target: HostedRuntimeTarget) -> dict[str, Any]
         "managed_block_label": target.nginx_public_routes.managed_block_label,
         "server_names": list(_nginx_server_names_for_target(target)),
         "tls": _describe_nginx_tls(target.nginx_public_routes.tls),
+        "client_max_body_size": str(manifest.get("client_max_body_size") or "32m"),
         "route_count": len(routes),
         "routes": [
             {
@@ -2003,6 +2022,24 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         )
         return evaluation
 
+    if route == "supplier_page":
+        body = str(result.get("body_excerpt", ""))
+        tokens = [
+            "Реестр поставок",
+            "Добавить поставку",
+            "Дата отгрузки / Shipment date",
+            DEFAULT_SUPPLIER_SHIPMENTS_PATH,
+            DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/parse",
+        ]
+        missing_tokens = [token for token in tokens if token not in body]
+        evaluation["ok"] = status == 200 and "text/html" in content_type and not missing_tokens
+        evaluation["detail"] = (
+            "supplier shipments page ok"
+            if evaluation["ok"]
+            else f"expected 200 text/html with supplier shipment tokens, missing={missing_tokens}"
+        )
+        return evaluation
+
     if route in {
         "web_vitrina_page_composition",
         "factory_order_template_stock_ff",
@@ -2200,6 +2237,24 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         if evaluation["ok"] and payload.get("contract_name") != "sheet_vitrina_v1_feedbacks":
             evaluation["ok"] = False
             evaluation["detail"] = f"expected sheet_vitrina_v1_feedbacks contract, got {payload.get('contract_name')!r}"
+        return evaluation
+
+    if route == "supplier_shipments_list":
+        evaluation["ok"], evaluation["detail"] = _validate_json_result(
+            status,
+            payload,
+            success_keys=[
+                "contract_name",
+                "status",
+                "shipments",
+            ],
+        )
+        if evaluation["ok"] and payload.get("contract_name") != "sheet_vitrina_v1_supplier_shipments":
+            evaluation["ok"] = False
+            evaluation["detail"] = (
+                "expected sheet_vitrina_v1_supplier_shipments contract, "
+                f"got {payload.get('contract_name')!r}"
+            )
         return evaluation
 
     if route == "plan":

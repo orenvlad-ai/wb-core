@@ -115,6 +115,8 @@ Canonical repo-owned systemd artifacts for this contour:
 Canonical repo-owned public route allowlist:
 - `artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`
 
+The managed nginx block renders `client_max_body_size 32m` for the public WebCore routes so real supplier invoice XLSX uploads reach the app instead of failing at nginx with an HTML `413 Request Entity Too Large` page.
+
 Runner работает от current checked-out worktree и поэтому применим к незамёрженному branch/PR without merge-before-verify, если доступны safe deploy rights.
 
 Supported commands:

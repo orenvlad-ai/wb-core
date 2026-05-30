@@ -21,6 +21,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_SUPPLIER_UI_PATH,
+    DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
     DEFAULT_UPLOAD_PATH,
     build_registry_upload_http_server,
 )
@@ -69,6 +70,19 @@ def main() -> None:
                 frame.get_by_role("button", name="Добавить поставку").click()
                 expect(frame.get_by_label("Дата отгрузки / Shipment date")).to_be_visible()
                 expect(frame.get_by_role("button", name="Сохранить")).to_be_disabled()
+                parse_url = f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH}"
+                page.route(
+                    parse_url,
+                    lambda route: route.fulfill(
+                        status=413,
+                        content_type="text/html",
+                        body="<html><head><title>413 Request Entity Too Large</title></head><body><h1>413</h1></body></html>",
+                    ),
+                )
+                frame.locator("#invoiceFileInput").set_input_files(str(invoice_path))
+                expect(frame.locator("#cardMessage")).to_contain_text("HTTP 413")
+                expect(frame.locator("#cardMessage")).not_to_contain_text("Unexpected token")
+                page.unroute(parse_url)
                 frame.locator("#invoiceFileInput").set_input_files(str(invoice_path))
                 expect(frame.locator("#productLines input[data-line-field='model_raw']").first).to_be_visible()
                 frame.get_by_label("Дата отгрузки / Shipment date").fill("2026-05-14")

@@ -29,6 +29,8 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
+    DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
+    DEFAULT_SUPPLIER_SHIPMENTS_PATH,
     DEFAULT_UPLOAD_PATH,
     build_registry_upload_http_server,
 )
@@ -77,6 +79,16 @@ def main() -> None:
                 auto_code, auto_payload = _get_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH}")
                 if auto_code != 401 or auto_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated automation route must return 401 JSON: {auto_code} {auto_payload}")
+                supplier_list_code, supplier_list_payload = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
+                if supplier_list_code != 401 or supplier_list_payload.get("error") != "authentication_required":
+                    raise AssertionError(f"unauthenticated supplier shipment list must return 401 JSON: {supplier_list_code} {supplier_list_payload}")
+                supplier_parse_code, supplier_parse_payload = _post_multipart(
+                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH}",
+                    b"not-authenticated",
+                    filename="invoice.xlsx",
+                )
+                if supplier_parse_code != 401 or supplier_parse_payload.get("error") != "authentication_required":
+                    raise AssertionError(f"unauthenticated supplier parse must return 401 JSON: {supplier_parse_code} {supplier_parse_payload}")
                 tick_code, tick_payload = _post_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH}", {})
                 if tick_code != 401 or tick_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated automation tick must return 401 JSON: {tick_code} {tick_payload}")
@@ -188,6 +200,30 @@ def _post_json(url: str, payload: dict[str, object]) -> tuple[int, dict[str, obj
         url,
         data=body,
         headers={"Accept": "application/json", "Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib_error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _post_multipart(url: str, body_bytes: bytes, *, filename: str) -> tuple[int, dict[str, object]]:
+    boundary = "----webcore-auth-smoke"
+    body = b"".join(
+        [
+            f"--{boundary}\r\n".encode("utf-8"),
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode("utf-8"),
+            b"Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n\r\n",
+            body_bytes,
+            f"\r\n--{boundary}--\r\n".encode("utf-8"),
+        ]
+    )
+    request = urllib_request.Request(
+        url,
+        data=body,
+        headers={"Accept": "application/json", "Content-Type": f"multipart/form-data; boundary={boundary}"},
         method="POST",
     )
     try:

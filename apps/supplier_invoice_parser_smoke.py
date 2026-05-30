@@ -68,25 +68,30 @@ def _build_invoice_fixture() -> bytes:
     sheet["B2"] = "14.5.2026"
     sheet["A3"] = "Supplier:"
     sheet["B3"] = "Zhejiang Supplier"
-    sheet["D3"] = "Currency:"
-    sheet["E3"] = "USD"
-    sheet["A4"] = "Invoice Total:"
-    sheet["B4"] = 47
-    headers = ["NO.", "NAME & SPECIFICATION", "MODELS", "QTY", "U.PRICE", "AMOUNT", "COMMENT"]
+    headers = [
+        "NO.",
+        "MODELS / （型号）",
+        "NAME & SPECIFICATION / （品名规格）",
+        "QTY (PCS) / （数量）",
+        "U.PRICE / （单价） (RMB/PCS)",
+        "AMOUNT / （总价） (RMB)",
+        "备注",
+    ]
     sheet.append(headers)
     rows = [
-        [1, "高清膜 smk", "iPhone 14 Pro", 10, 1, 10, ""],
-        [2, None, "iPhone 15 / 16", 5, 2, 10, ""],
-        [3, "防窥膜 (Anti-Spy)", "iPhone 14 Pro Max", 7, 1, 7, ""],
-        [4, None, "iPhone 16 Pro/17", 3, 2, 6, ""],
-        [5, "磨砂膜 (Matte)", "iPhone 17e / 16e /14 / 13 / 13Pro", 15, 0.6, 9, ""],
-        [6, "OPP bag packets", "", 100, 0.03, 3, "OPP packets"],
-        [7, "labels", "", 100, 0.02, 2, "labels"],
+        [1, "iPhone 14 Pro", "高清膜 smk / 带包装", 10, 1, 10, "OPP袋子 + 标签 + 卡片 in packaging comment"],
+        [2, "iPhone 15 / 16", None, 5, 2, 10, ""],
+        [3, "iPhone 14 Pro Max", "防窥膜 (Anti-Spy)", 7, 1, 7, "OPP袋子 + 标签"],
+        [4, "iPhone 16 Pro/17", None, 3, 2, 6, ""],
+        [5, "iPhone 17e / 16e /14 / 13 / 13Pro", "磨砂膜 (Matte)", 15, 0.6, 9, ""],
+        [6, "OPP bag packets", "OPP bag packets", 100, 0.03, 3, "OPP packets"],
+        [7, "labels", "custom labels", 100, 0.02, 2, "labels"],
     ]
     for row in rows:
         sheet.append(row)
-    sheet.merge_cells("B6:B7")
-    sheet.merge_cells("B8:B9")
+    sheet.append(["（总值）Total:", "", "", "", "", 47, ""])
+    sheet.merge_cells("C5:C6")
+    sheet.merge_cells("C7:C8")
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()

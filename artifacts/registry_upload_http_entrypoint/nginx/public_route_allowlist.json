@@ -2,6 +2,7 @@
   "manifest_name": "wb_core_hosted_public_routes",
   "contract_version": "v1",
   "description": "Repo-owned nginx allowlist for wb-core hosted registry/sheet-vitrina public routes.",
+  "client_max_body_size": "32m",
   "proxy_read_timeout": "180s",
   "proxy_send_timeout": "180s",
   "routes": [
