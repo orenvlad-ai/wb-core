@@ -14,11 +14,17 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
-from packages.application.supplier_invoice_parser import normalize_invoice_model, parse_supplier_invoice_xlsx
+from packages.application.supplier_invoice_parser import (
+    extract_iphone_model_keys,
+    normalize_invoice_model,
+    parse_supplier_invoice_xlsx,
+)
 from packages.contracts.supplier_shipments import (
     LINE_TYPE_EXTRA,
     LINE_TYPE_PRODUCT,
+    MATCH_STATUS_AMBIGUOUS,
     MATCH_STATUS_MATCHED,
+    MATCH_STATUS_MATCHED_BY_COMPATIBILITY,
     MATCH_STATUS_UNMATCHED,
     SHIPMENT_STATUS_ALL_MATCHED,
     SHIPMENT_STATUS_CHECKSUM_ERROR,
@@ -61,6 +67,10 @@ class SupplierShipmentsBlock:
             workbook_bytes,
             filename=filename,
             aliases=self._active_nomenclature_aliases(),
+        )
+        parsed_payload["lines"] = _apply_nomenclature_matches(
+            [dict(item) for item in parsed_payload.get("lines") or []],
+            self._active_nomenclature_items(),
         )
         upload_id = "upl_" + uuid4().hex
         created_at = self.timestamp_factory()
@@ -108,7 +118,7 @@ class SupplierShipmentsBlock:
             shipment_date=shipment_date,
             force_manual_override=False,
         )
-        lines = _apply_nomenclature_matches(lines, self._active_nomenclature_by_key())
+        lines = _apply_nomenclature_matches(lines, self._active_nomenclature_items())
         summary = _recalculate_summary(lines, declared_total=_optional_number(metadata.get("declared_invoice_total")))
         match_status = _shipment_match_status(lines, checksum_error=summary["checksum_error"])
         shipment_id = "sup_" + uuid4().hex
@@ -216,7 +226,7 @@ class SupplierShipmentsBlock:
         overwrite_manual = bool((payload or {}).get("overwrite_manual"))
         detail_payload["lines"] = _apply_nomenclature_matches(
             detail_payload.get("lines") or [],
-            self._active_nomenclature_by_key(),
+            self._active_nomenclature_items(),
             overwrite_manual=overwrite_manual,
         )
         shipment_date = _validate_iso_date(str(detail_payload.get("shipment_date") or ""))
@@ -261,7 +271,7 @@ class SupplierShipmentsBlock:
         return file_path.read_bytes(), str(header.get("source_filename") or "supplier-invoice.xlsx"), content_type
 
     def list_nomenclature(self) -> dict[str, Any]:
-        self._seed_nomenclature_from_current_config_if_empty()
+        self._ensure_nomenclature_ready()
         return {
             "contract_name": "sheet_vitrina_v1_nomenclature",
             "status": "ok",
@@ -353,21 +363,19 @@ class SupplierShipmentsBlock:
             shutil.rmtree(parent, ignore_errors=True)
 
     def _active_nomenclature_aliases(self) -> list[dict[str, Any]]:
-        self._seed_nomenclature_from_current_config_if_empty()
+        self._ensure_nomenclature_ready()
         aliases: list[dict[str, Any]] = []
         for item in self.runtime.list_nomenclature_items(active_only=True):
             aliases.extend(_nomenclature_item_aliases(item))
         return aliases
 
-    def _active_nomenclature_by_key(self) -> dict[str, dict[str, Any]]:
+    def _active_nomenclature_items(self) -> list[dict[str, Any]]:
+        self._ensure_nomenclature_ready()
+        return self.runtime.list_nomenclature_items(active_only=True)
+
+    def _ensure_nomenclature_ready(self) -> None:
         self._seed_nomenclature_from_current_config_if_empty()
-        by_key: dict[str, dict[str, Any]] = {}
-        for item in self.runtime.list_nomenclature_items(active_only=True):
-            for alias in _nomenclature_item_aliases(item):
-                match_key = str(alias.get("match_key") or "").strip()
-                if match_key and match_key not in by_key:
-                    by_key[match_key] = alias
-        return by_key
+        self._backfill_nomenclature_compatible_models()
 
     def _validate_nomenclature_unique(self, item: Mapping[str, Any]) -> None:
         if (
@@ -396,6 +404,7 @@ class SupplierShipmentsBlock:
             product_type = _product_type_from_config_item(display_name, str(getattr(config_item, "group", "") or ""))
             model_text = _model_text_from_nomenclature_name(display_name)
             normalized_model = normalize_invoice_model(model_text)
+            compatible_model_keys = extract_iphone_model_keys(model_text)
             if not product_type or not normalized_model:
                 continue
             match_key = f"{product_type}|{normalized_model}"
@@ -412,11 +421,29 @@ class SupplierShipmentsBlock:
                     "product_type": product_type,
                     "match_key": match_key,
                     "aliases": [],
+                    "compatible_models_text": model_text,
+                    "compatible_model_keys": compatible_model_keys,
                     "comment": "seeded from current registry config_v2",
                     "created_at": now,
                     "updated_at": now,
                 }
             )
+
+    def _backfill_nomenclature_compatible_models(self) -> None:
+        items = self.runtime.list_nomenclature_items()
+        now = self.timestamp_factory()
+        for item in items:
+            if item.get("compatible_model_keys"):
+                continue
+            keys = _infer_compatible_model_keys(item)
+            if not keys:
+                continue
+            text = str(item.get("compatible_models_text") or "").strip() or _compatible_models_text_from_keys(keys)
+            updated = dict(item)
+            updated["compatible_models_text"] = text
+            updated["compatible_model_keys"] = keys
+            updated["updated_at"] = now
+            self.runtime.save_nomenclature_item(updated)
 
 
 def _resolve_edited_payload(payload: Mapping[str, Any], *, fallback: Mapping[str, Any]) -> dict[str, Any]:
@@ -510,7 +537,12 @@ def _normalize_line(
     match_status = str(raw.get("match_status") or "").strip()
     if line_type == LINE_TYPE_EXTRA:
         match_status = "extra"
-    elif match_status not in {MATCH_STATUS_MATCHED, MATCH_STATUS_UNMATCHED}:
+    elif match_status not in {
+        MATCH_STATUS_MATCHED,
+        MATCH_STATUS_MATCHED_BY_COMPATIBILITY,
+        MATCH_STATUS_UNMATCHED,
+        MATCH_STATUS_AMBIGUOUS,
+    }:
         match_status = MATCH_STATUS_MATCHED if has_internal_match else MATCH_STATUS_UNMATCHED
     raw_payload = raw.get("raw") if isinstance(raw.get("raw"), Mapping) else {}
     return {
@@ -559,7 +591,7 @@ def _shipment_match_status(lines: list[Mapping[str, Any]], *, checksum_error: bo
         return SHIPMENT_STATUS_MANUAL_OVERRIDE
     if any(
         item.get("line_type") == LINE_TYPE_PRODUCT
-        and item.get("match_status") != MATCH_STATUS_MATCHED
+        and item.get("match_status") not in {MATCH_STATUS_MATCHED, MATCH_STATUS_MATCHED_BY_COMPATIBILITY}
         for item in lines
     ):
         return SHIPMENT_STATUS_HAS_UNMATCHED
@@ -606,10 +638,11 @@ def _with_invoice_download_path(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def _apply_nomenclature_matches(
     lines: list[Mapping[str, Any]],
-    aliases_by_key: Mapping[str, Mapping[str, Any]],
+    nomenclature_items: list[Mapping[str, Any]],
     *,
     overwrite_manual: bool = False,
 ) -> list[dict[str, Any]]:
+    index = _build_nomenclature_match_index(nomenclature_items)
     matched_lines: list[dict[str, Any]] = []
     for raw_line in lines:
         line = dict(raw_line)
@@ -625,21 +658,100 @@ def _apply_nomenclature_matches(
         if bool(line.get("manual_override")) and not overwrite_manual:
             matched_lines.append(line)
             continue
-        alias = aliases_by_key.get(match_key) if match_key else None
-        if alias:
-            line["internal_sku"] = str(alias.get("internal_sku") or alias.get("our_sku") or "")
-            line["internal_nm_id"] = _optional_int(alias.get("internal_nm_id") or alias.get("nm_id"))
-            line["internal_name"] = str(alias.get("internal_name") or alias.get("nomenclature_name") or "")
-            line["match_status"] = MATCH_STATUS_MATCHED
-            line["manual_override"] = False
-        else:
-            line["internal_sku"] = ""
-            line["internal_nm_id"] = None
-            line["internal_name"] = ""
-            line["match_status"] = MATCH_STATUS_UNMATCHED
-            line["manual_override"] = False
+        resolution = _resolve_nomenclature_match(line, index)
+        _apply_match_resolution(line, resolution)
         matched_lines.append(line)
     return matched_lines
+
+
+def _build_nomenclature_match_index(items: list[Mapping[str, Any]]) -> dict[str, Any]:
+    exact_by_key: dict[str, list[dict[str, Any]]] = {}
+    alias_by_key: dict[str, list[dict[str, Any]]] = {}
+    compatible: list[dict[str, Any]] = []
+    for item in items:
+        if not bool(item.get("is_active")):
+            continue
+        item_payload = _nomenclature_item_match_payload(item)
+        base_match_key = str(item.get("match_key") or "").strip()
+        if base_match_key:
+            exact_by_key.setdefault(base_match_key, []).append(item_payload)
+        for alias in _nomenclature_item_aliases(item):
+            alias_key = str(alias.get("match_key") or "").strip()
+            if alias_key and alias_key != base_match_key:
+                alias_by_key.setdefault(alias_key, []).append(_nomenclature_item_match_payload({**item, **alias}))
+        compatible_keys = _infer_compatible_model_keys(item)
+        if compatible_keys and str(item.get("product_type") or "") in {"clear", "anti_spy", "matte"}:
+            compatible.append({**item_payload, "compatible_model_keys": compatible_keys})
+    return {
+        "exact_by_key": exact_by_key,
+        "alias_by_key": alias_by_key,
+        "compatible": compatible,
+    }
+
+
+def _resolve_nomenclature_match(line: Mapping[str, Any], index: Mapping[str, Any]) -> dict[str, Any] | None:
+    product_type = str(line.get("product_type") or "").strip()
+    match_key = str(line.get("match_key") or "").strip()
+    exact_candidates = list((index.get("exact_by_key") or {}).get(match_key) or [])
+    if len(exact_candidates) == 1:
+        return {**exact_candidates[0], "match_status": MATCH_STATUS_MATCHED}
+    if len(exact_candidates) > 1:
+        return {"match_status": MATCH_STATUS_AMBIGUOUS}
+
+    alias_candidates = list((index.get("alias_by_key") or {}).get(match_key) or [])
+    if len(alias_candidates) == 1:
+        return {**alias_candidates[0], "match_status": MATCH_STATUS_MATCHED}
+    if len(alias_candidates) > 1:
+        return {"match_status": MATCH_STATUS_AMBIGUOUS}
+
+    invoice_keys = _line_compatible_model_keys(line)
+    if product_type not in {"clear", "anti_spy", "matte"} or not invoice_keys:
+        return None
+    invoice_key_set = set(invoice_keys)
+    scored: list[tuple[tuple[int, int, int], dict[str, Any]]] = []
+    for candidate in index.get("compatible") or []:
+        if str(candidate.get("product_type") or "") != product_type:
+            continue
+        candidate_keys = [str(item) for item in candidate.get("compatible_model_keys") or [] if str(item or "").strip()]
+        if not candidate_keys:
+            continue
+        candidate_key_set = set(candidate_keys)
+        intersection = sorted(invoice_key_set & candidate_key_set)
+        if not intersection:
+            continue
+        subset_bonus = 1 if candidate_key_set.issubset(invoice_key_set) or invoice_key_set.issubset(candidate_key_set) else 0
+        exact_size_bonus = 1 if candidate_key_set == invoice_key_set else 0
+        score = (subset_bonus, len(intersection), exact_size_bonus)
+        scored.append((score, {**candidate, "matched_model_keys": intersection}))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: item[0], reverse=True)
+    top_score, top_candidate = scored[0]
+    if len(scored) > 1 and scored[1][0] == top_score:
+        return {"match_status": MATCH_STATUS_AMBIGUOUS}
+    return {**top_candidate, "match_status": MATCH_STATUS_MATCHED_BY_COMPATIBILITY}
+
+
+def _apply_match_resolution(line: dict[str, Any], resolution: Mapping[str, Any] | None) -> None:
+    if not resolution:
+        line["internal_sku"] = ""
+        line["internal_nm_id"] = None
+        line["internal_name"] = ""
+        line["match_status"] = MATCH_STATUS_UNMATCHED
+        line["manual_override"] = False
+        return
+    if str(resolution.get("match_status") or "") == MATCH_STATUS_AMBIGUOUS:
+        line["internal_sku"] = ""
+        line["internal_nm_id"] = None
+        line["internal_name"] = ""
+        line["match_status"] = MATCH_STATUS_AMBIGUOUS
+        line["manual_override"] = False
+        return
+    line["internal_sku"] = str(resolution.get("internal_sku") or resolution.get("our_sku") or "")
+    line["internal_nm_id"] = _optional_int(resolution.get("internal_nm_id") or resolution.get("nm_id"))
+    line["internal_name"] = str(resolution.get("internal_name") or resolution.get("nomenclature_name") or "")
+    line["match_status"] = str(resolution.get("match_status") or MATCH_STATUS_MATCHED)
+    line["manual_override"] = False
 
 
 def _normalize_nomenclature_payload(
@@ -655,6 +767,14 @@ def _normalize_nomenclature_payload(
     is_active = bool(payload.get("is_active", True))
     nomenclature_name = str(payload.get("nomenclature_name") or "").strip()
     match_key = _normalize_match_key(payload.get("match_key"))
+    compatible_models_text = str(payload.get("compatible_models_text") or "").strip()
+    compatible_model_keys = _normalize_compatible_model_keys(
+        payload.get("compatible_model_keys"),
+        fallback_text=compatible_models_text,
+        item_hint={**dict(payload), "match_key": match_key, "nomenclature_name": nomenclature_name},
+    )
+    if not compatible_models_text and compatible_model_keys:
+        compatible_models_text = _compatible_models_text_from_keys(compatible_model_keys)
     if is_active and product_type in {"clear", "anti_spy", "matte"}:
         if not match_key:
             raise ValueError("active product nomenclature item requires match_key")
@@ -669,6 +789,8 @@ def _normalize_nomenclature_payload(
         "product_type": product_type,
         "match_key": match_key,
         "aliases": _normalize_alias_list(payload.get("aliases")),
+        "compatible_models_text": compatible_models_text,
+        "compatible_model_keys": compatible_model_keys,
         "comment": str(payload.get("comment") or "").strip(),
         "created_at": created_at,
         "updated_at": updated_at,
@@ -701,6 +823,120 @@ def _normalize_alias_list(value: Any) -> list[str]:
         seen.add(alias)
         aliases.append(alias)
     return aliases
+
+
+def _normalize_compatible_model_keys(
+    value: Any,
+    *,
+    fallback_text: str = "",
+    item_hint: Mapping[str, Any] | None = None,
+) -> list[str]:
+    raw_items: list[str]
+    if isinstance(value, str):
+        raw_items = re.split(r"[\n,;]+", value)
+    elif isinstance(value, list):
+        raw_items = [str(item) for item in value]
+    else:
+        raw_items = []
+    keys: list[str] = []
+    seen: set[str] = set()
+    for raw_item in raw_items:
+        for key in extract_iphone_model_keys(raw_item):
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+    for source in [fallback_text]:
+        for key in extract_iphone_model_keys(source):
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+    if not keys and item_hint:
+        for key in _infer_compatible_model_keys(item_hint):
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+    return keys
+
+
+def _line_compatible_model_keys(line: Mapping[str, Any]) -> list[str]:
+    parts = [
+        line.get("model_raw"),
+        line.get("model_normalized"),
+        str(line.get("match_key") or "").split("|", 1)[1] if "|" in str(line.get("match_key") or "") else "",
+    ]
+    keys: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        for key in extract_iphone_model_keys(part):
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+    return keys
+
+
+def _infer_compatible_model_keys(item: Mapping[str, Any]) -> list[str]:
+    raw_keys = item.get("compatible_model_keys")
+    if isinstance(raw_keys, list):
+        keys = [str(key).strip() for key in raw_keys if str(key or "").strip()]
+        if keys:
+            return _dedupe(keys)
+    keys: list[str] = []
+    seen: set[str] = set()
+    sources: list[Any] = [
+        item.get("compatible_models_text"),
+        str(item.get("match_key") or "").split("|", 1)[1] if "|" in str(item.get("match_key") or "") else "",
+        item.get("nomenclature_name"),
+    ]
+    sources.extend(item.get("aliases") or [])
+    for source in sources:
+        for key in extract_iphone_model_keys(source):
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+    return keys
+
+
+def _nomenclature_item_match_payload(item: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "active": True,
+        "item_id": str(item.get("item_id") or ""),
+        "product_type": str(item.get("product_type") or ""),
+        "factory_type": str(item.get("product_type") or ""),
+        "internal_sku": str(item.get("our_sku") or item.get("internal_sku") or ""),
+        "internal_nm_id": _optional_int(item.get("nm_id") or item.get("internal_nm_id")),
+        "internal_name": str(item.get("nomenclature_name") or item.get("internal_name") or ""),
+        "nomenclature_name": str(item.get("nomenclature_name") or item.get("internal_name") or ""),
+        "match_key": str(item.get("match_key") or ""),
+        "compatible_model_keys": _infer_compatible_model_keys(item),
+        "group": "nomenclature",
+    }
+
+
+def _compatible_models_text_from_keys(keys: list[str]) -> str:
+    return ", ".join(_model_key_to_label(key) for key in keys)
+
+
+def _model_key_to_label(key: str) -> str:
+    normalized = str(key or "").strip()
+    if not normalized.startswith("iphone_"):
+        return normalized
+    parts = normalized.removeprefix("iphone_").split("_")
+    if not parts:
+        return normalized
+    number = parts[0]
+    suffix = " ".join(part.capitalize() if part != "e" else "e" for part in parts[1:])
+    return ("iPhone " + number + (" " + suffix if suffix else "")).strip()
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        normalized = str(item or "").strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
 
 
 def _nomenclature_item_aliases(item: Mapping[str, Any]) -> list[dict[str, Any]]:

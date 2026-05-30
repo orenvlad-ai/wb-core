@@ -80,7 +80,7 @@
             <p>Сопоставление строк invoice с внутренними SKU/nmId и номенклатурой.</p>
           </div>
           <div class="toolbar">
-            <input id="nomenclatureFilter" class="wide" placeholder="Поиск по match key / SKU / номенклатуре">
+            <input id="nomenclatureFilter" class="wide" placeholder="Поиск по match key / SKU / номенклатуре / модели">
             <button id="addItemButton" class="primary" type="button">Добавить строку</button>
           </div>
         </div>
@@ -96,13 +96,14 @@
                 <th>Тип</th>
                 <th>Match key</th>
                 <th>Aliases</th>
+                <th>Совместимые модели</th>
                 <th>Комментарий</th>
                 <th>Обновлено</th>
                 <th>Действия</th>
               </tr>
             </thead>
             <tbody id="nomenclatureRows">
-              <tr><td colspan="10">Справочник пуст.</td></tr>
+              <tr><td colspan="11">Справочник пуст.</td></tr>
             </tbody>
           </table>
         </div>
@@ -166,7 +167,7 @@
         const query = filterInput.value.trim().toLowerCase();
         const visible = query ? items.filter((item) => itemText(item).includes(query)) : items;
         if (!visible.length) {
-          rowsBody.innerHTML = '<tr><td colspan="10">Справочник пуст.</td></tr>';
+          rowsBody.innerHTML = '<tr><td colspan="11">Справочник пуст.</td></tr>';
           return;
         }
         rowsBody.innerHTML = visible.map(renderRow).join("");
@@ -181,7 +182,8 @@
       function itemText(item) {
         return [
           item.match_key, item.our_sku, item.nm_id, item.nomenclature_name,
-          item.product_type, (item.aliases || []).join(" ")
+          item.product_type, (item.aliases || []).join(" "),
+          item.compatible_models_text, (item.compatible_model_keys || []).join(" ")
         ].join(" ").toLowerCase();
       }
 
@@ -195,6 +197,7 @@
           '<td><select data-field="product_type">' + productTypeOptions(item.product_type || "clear") + '</select></td>',
           '<td><input class="wide" data-field="match_key" value="' + escapeHtml(item.match_key || "") + '"></td>',
           '<td><textarea data-field="aliases">' + escapeHtml((item.aliases || []).join("\n")) + '</textarea></td>',
+          '<td><textarea data-field="compatible_models_text" placeholder="Например: iPhone 17e, iPhone 16e, iPhone 14, iPhone 13, iPhone 13 Pro">' + escapeHtml(item.compatible_models_text || "") + '</textarea><p>Keys: ' + escapeHtml((item.compatible_model_keys || []).join(", ") || "-") + '</p></td>',
           '<td><textarea data-field="comment">' + escapeHtml(item.comment || "") + '</textarea></td>',
           '<td>' + escapeHtml(item.updated_at || "-") + '</td>',
           '<td><button type="button" data-save-item>Сохранить</button> <button class="danger" type="button" data-delete-item>Выключить</button></td>',
@@ -215,6 +218,7 @@
           payload[key] = input.type === "checkbox" ? input.checked : input.value.trim();
         });
         payload.aliases = String(payload.aliases || "").split(/\n|,|;/).map((item) => item.trim()).filter(Boolean);
+        payload.compatible_models_text = String(payload.compatible_models_text || "").trim();
         if (payload.nm_id === "") {
           payload.nm_id = null;
         }
@@ -286,6 +290,8 @@
           product_type: "clear",
           match_key: "",
           aliases: [],
+          compatible_models_text: "",
+          compatible_model_keys: [],
           comment: "",
           updated_at: "-"
         };

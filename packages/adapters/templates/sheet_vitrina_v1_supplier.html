@@ -317,7 +317,9 @@
       };
       const lineStatusLabels = {
         matched: "OK / Сопоставлено",
+        matched_by_compatibility: "Сопоставлено по совместимости",
         unmatched: "Не сопоставлено",
+        ambiguous: "Неоднозначно",
         extra: "Прочая позиция"
       };
 
@@ -545,7 +547,7 @@
           '<td><input class="line-input small" data-line-field="unit_price" value="' + escapeHtml(line.unit_price ?? "") + '"></td>',
           '<td><input class="line-input small" data-line-field="amount" value="' + escapeHtml(line.amount ?? "") + '"></td>',
           '<td><input class="line-input wide" data-line-field="comment" value="' + escapeHtml(line.comment || "") + '"></td>',
-          '<td><span class="badge ' + (line.manual_override ? "warning" : line.match_status === "matched" ? "success" : "warning") + '" data-match-status>' + escapeHtml(line.manual_override ? "Ручная правка" : (lineStatusLabels[line.match_status] || line.match_status || "Не сопоставлено")) + '</span></td>',
+          '<td><span class="badge ' + (line.manual_override ? "warning" : (line.match_status === "matched" || line.match_status === "matched_by_compatibility") ? "success" : "warning") + '" data-match-status>' + escapeHtml(line.manual_override ? "Ручная правка" : (lineStatusLabels[line.match_status] || line.match_status || "Не сопоставлено")) + '</span></td>',
           '</tr>'
         ].join("");
       }
@@ -648,7 +650,7 @@
         if (lines.some((line) => line.manual_override)) {
           return "manual_override";
         }
-        if (lines.some((line) => line.line_type !== "extra" && line.match_status !== "matched")) {
+        if (lines.some((line) => line.line_type !== "extra" && !["matched", "matched_by_compatibility"].includes(line.match_status))) {
           return "has_unmatched";
         }
         return "all_matched";

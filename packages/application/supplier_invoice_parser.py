@@ -258,6 +258,43 @@ def normalize_invoice_model(value: Any) -> str:
     return text
 
 
+def extract_iphone_model_keys(value: Any) -> list[str]:
+    """Return normalized iPhone model tokens for compatibility matching."""
+
+    text = _stringify(value).lower()
+    if not text:
+        return []
+    text = text.replace("（", "(").replace("）", ")")
+    text = re.sub(r"\((?:anti[-\s]?spy|matte|smk|clear)[^)]*\)", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bip\s*hone\b", "iphone", text)
+    text = re.sub(r"\biphone\b", " iphone ", text)
+    text = re.sub(r"\bpromax\b", "pro max", text)
+    text = re.sub(r"(?<=\d)pro\s*max\b", " pro max", text)
+    text = re.sub(r"(?<=\d)pro\b", " pro", text)
+    text = re.sub(r"(?<=\d)plus\b", " plus", text)
+    text = re.sub(r"(?<=\d)air\b", " air", text)
+    text = text.replace("_", " ")
+    text = re.sub(r"[/\\,;|]+", " ", text)
+    text = re.sub(r"[-–—]+", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    pattern = re.compile(
+        r"(?:\biphone\s*)?"
+        r"\b(?P<number>1[0-9]|2[0-9])\s*"
+        r"(?P<suffix>pro\s*max|pro|max|plus|mini|air|e)?\b",
+        flags=re.IGNORECASE,
+    )
+    keys: list[str] = []
+    seen: set[str] = set()
+    for match in pattern.finditer(text):
+        number = match.group("number")
+        suffix = re.sub(r"\s+", "_", (match.group("suffix") or "").strip().lower())
+        key = f"iphone_{number}" + (suffix if suffix == "e" else f"_{suffix}" if suffix else "")
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return keys
+
+
 def _normalize_aliases(raw_aliases: Iterable[Mapping[str, Any]]) -> dict[str, SupplierInvoiceAlias]:
     aliases: dict[str, SupplierInvoiceAlias] = {}
     for item in raw_aliases:

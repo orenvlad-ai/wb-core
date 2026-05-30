@@ -12,10 +12,26 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from packages.application.supplier_invoice_parser import parse_supplier_invoice_xlsx  # noqa: E402
+from packages.application.supplier_invoice_parser import extract_iphone_model_keys, parse_supplier_invoice_xlsx  # noqa: E402
+from packages.application.supplier_shipments import _apply_nomenclature_matches  # noqa: E402
 
 
 def main() -> None:
+    expected_keys = {
+        "iPhone 17e / 16e /14 / 13 / 13Pro": [
+            "iphone_17e",
+            "iphone_16e",
+            "iphone_14",
+            "iphone_13",
+            "iphone_13_pro",
+        ],
+        "iPhone 15 / 16": ["iphone_15", "iphone_16"],
+        "iPhone 16 Pro/17": ["iphone_16_pro", "iphone_17"],
+    }
+    for raw_model, expected in expected_keys.items():
+        actual = extract_iphone_model_keys(raw_model)
+        if actual != expected:
+            raise AssertionError(f"compatible model normalizer mismatch for {raw_model!r}: {actual}")
     workbook_bytes = _build_invoice_fixture()
     payload = parse_supplier_invoice_xlsx(
         workbook_bytes,
@@ -48,11 +64,11 @@ def main() -> None:
     ):
         raise AssertionError("active deterministic nomenclature alias must fill SKU/nmId/name by exact type+model key")
     if product_lines[1]["match_key"] != "clear|iphone_15_16" or product_lines[1]["match_status"] != "unmatched":
-        raise AssertionError("compatible model aliases like iPhone 15 / 16 must stay one unmatched invoice alias")
+        raise AssertionError("compatible model aliases like iPhone 15 / 16 must stay one invoice line")
     if product_lines[3]["match_key"] != "anti_spy|iphone_16_pro_17":
-        raise AssertionError("iPhone 16 Pro/17 must stay one anti_spy invoice alias")
+        raise AssertionError("iPhone 16 Pro/17 must stay one anti_spy invoice line")
     if product_lines[4]["match_key"] != "matte|iphone_17e_16e_14_13_13pro":
-        raise AssertionError("multi-compatible matte alias must not be split into separate models")
+        raise AssertionError("multi-compatible matte alias must not be split into separate product rows")
     summary = payload["summary"]
     if summary["product_qty_total"] != 40.0 or summary["product_amount_total"] != 42.0:
         raise AssertionError(f"product totals mismatch: {summary}")
@@ -60,6 +76,87 @@ def main() -> None:
         raise AssertionError(f"invoice totals mismatch: {summary}")
     if summary["checksum_error"]:
         raise AssertionError("declared invoice total must match parsed total in fixture")
+    compatibility_lines = _apply_nomenclature_matches(
+        [
+            {
+                "line_type": "product",
+                "product_type": "anti_spy",
+                "model_raw": "iPhone 17e / 16e /14 / 13 / 13Pro",
+                "model_normalized": "iphone_17e_16e_14_13_13pro",
+                "match_key": "anti_spy|iphone_17e_16e_14_13_13pro",
+                "match_status": "unmatched",
+            }
+        ],
+        [
+            {
+                "item_id": "nom_compat",
+                "is_active": True,
+                "our_sku": "SKU-AS-141313P",
+                "nm_id": 391662410,
+                "nomenclature_name": "anti-spy iPhone 14 / 13 / 13Pro",
+                "product_type": "anti_spy",
+                "match_key": "anti_spy|iphone_14_13_13pro",
+                "aliases": [],
+                "compatible_models_text": "iPhone 14, iPhone 13, iPhone 13 Pro",
+                "compatible_model_keys": ["iphone_14", "iphone_13", "iphone_13_pro"],
+            }
+        ],
+    )
+    if (
+        compatibility_lines[0].get("match_status") != "matched_by_compatibility"
+        or compatibility_lines[0].get("internal_nm_id") != 391662410
+        or compatibility_lines[0].get("internal_name") != "anti-spy iPhone 14 / 13 / 13Pro"
+    ):
+        raise AssertionError(f"compatibility matching must fill SKU/nmId/name, got {compatibility_lines[0]}")
+    type_guard_lines = _apply_nomenclature_matches(
+        [{**compatibility_lines[0], "internal_nm_id": None, "internal_name": "", "match_status": "unmatched"}],
+        [
+            {
+                "item_id": "nom_wrong_type",
+                "is_active": True,
+                "our_sku": "SKU-CLEAR-141313P",
+                "nm_id": 210183919,
+                "nomenclature_name": "clean iPhone 14",
+                "product_type": "clear",
+                "match_key": "clear|iphone_14",
+                "compatible_model_keys": ["iphone_14", "iphone_13", "iphone_13_pro"],
+            }
+        ],
+    )
+    if type_guard_lines[0].get("match_status") != "unmatched":
+        raise AssertionError("compatibility matching must not cross product_type")
+    ambiguous_lines = _apply_nomenclature_matches(
+        [
+            {
+                "line_type": "product",
+                "product_type": "matte",
+                "model_raw": "iPhone 12",
+                "model_normalized": "iphone_12",
+                "match_key": "matte|iphone_12",
+                "match_status": "unmatched",
+            }
+        ],
+        [
+            {
+                "item_id": "nom_ambiguous_1",
+                "is_active": True,
+                "nomenclature_name": "matte ambiguous 1",
+                "product_type": "matte",
+                "match_key": "matte|legacy_a",
+                "compatible_model_keys": ["iphone_12"],
+            },
+            {
+                "item_id": "nom_ambiguous_2",
+                "is_active": True,
+                "nomenclature_name": "matte ambiguous 2",
+                "product_type": "matte",
+                "match_key": "matte|legacy_b",
+                "compatible_model_keys": ["iphone_12"],
+            },
+        ],
+    )
+    if ambiguous_lines[0].get("match_status") != "ambiguous" or ambiguous_lines[0].get("internal_name"):
+        raise AssertionError(f"equal compatibility candidates must stay ambiguous without SKU fill: {ambiguous_lines[0]}")
     print("supplier_invoice_parser_smoke: OK")
 
 

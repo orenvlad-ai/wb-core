@@ -86,11 +86,14 @@ def main() -> None:
                     "product_type": "clear",
                     "match_key": "clear|iphone_14_pro",
                     "aliases": ["iPhone 14 Pro"],
+                    "compatible_models_text": "iPhone 14 Pro",
                     "comment": "smoke",
                 },
             )
             if create_nom_status != 200 or create_nom_payload.get("item", {}).get("nm_id") != 210183919:
                 raise AssertionError(f"nomenclature create must persist item, got {create_nom_status} {create_nom_payload}")
+            if create_nom_payload.get("item", {}).get("compatible_model_keys") != ["iphone_14_pro"]:
+                raise AssertionError("nomenclature create must normalize compatible model keys")
             duplicate_nom_status, duplicate_nom_payload = _post_json(
                 f"{base_url}{DEFAULT_NOMENCLATURE_PATH}",
                 {
@@ -102,6 +105,25 @@ def main() -> None:
             )
             if duplicate_nom_status != 400 or "duplicate" not in str(duplicate_nom_payload.get("error", "")).lower():
                 raise AssertionError(f"duplicate active match_key must be rejected, got {duplicate_nom_status} {duplicate_nom_payload}")
+            compat_nom_status, compat_nom_payload = _post_json(
+                f"{base_url}{DEFAULT_NOMENCLATURE_PATH}",
+                {
+                    "is_active": True,
+                    "our_sku": "SKU-AS-141313P",
+                    "nm_id": 391662410,
+                    "nomenclature_name": "anti-spy iPhone 14 / 13 / 13Pro",
+                    "product_type": "anti_spy",
+                    "match_key": "anti_spy|iphone_14_13_13pro",
+                    "compatible_models_text": "iPhone 14, iPhone 13, iPhone 13 Pro",
+                    "comment": "compatibility smoke",
+                },
+            )
+            if compat_nom_status != 200 or compat_nom_payload.get("item", {}).get("compatible_model_keys") != [
+                "iphone_14",
+                "iphone_13",
+                "iphone_13_pro",
+            ]:
+                raise AssertionError(f"compatible nomenclature item must save normalized keys, got {compat_nom_status} {compat_nom_payload}")
 
             parse_status, parse_payload = _post_multipart(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH}",
@@ -115,7 +137,12 @@ def main() -> None:
             product_lines = [item for item in parse_payload.get("lines", []) if item.get("line_type") == "product"]
             if product_lines[0].get("internal_nm_id") != 210183919 or product_lines[0].get("match_status") != "matched":
                 raise AssertionError("parse route must resolve active nomenclature match_key into nmId/name")
-            if product_lines[1].get("match_status") != "unmatched":
+            if (
+                product_lines[1].get("match_status") != "matched_by_compatibility"
+                or product_lines[1].get("internal_nm_id") != 391662410
+            ):
+                raise AssertionError(f"parse route must resolve compatible model overlap, got {product_lines[1]}")
+            if product_lines[2].get("match_status") != "unmatched":
                 raise AssertionError("unknown product match_key must remain visible and unmatched")
 
             missing_date_status, missing_date_payload = _post_json(
@@ -138,7 +165,7 @@ def main() -> None:
             shipment_id = detail["shipment_id"]
             if detail.get("shipment_date") != "2026-05-14" or detail.get("match_status") != "has_unmatched":
                 raise AssertionError("created shipment must keep date and unmatched status")
-            if len(detail.get("product_lines", [])) != 2 or len(detail.get("extra_lines", [])) != 1:
+            if len(detail.get("product_lines", [])) != 3 or len(detail.get("extra_lines", [])) != 1:
                 raise AssertionError("detail must split product and extra lines")
             if detail["product_lines"][0].get("internal_name") != "Clear iPhone 14 Pro":
                 raise AssertionError("created shipment must persist nomenclature auto-match")
@@ -154,14 +181,14 @@ def main() -> None:
             edited["lines"][0]["match_status"] = "matched"
             edited["lines"][0]["manual_override"] = True
             edited["lines"][0]["amount"] = 12
-            edited["metadata"]["declared_invoice_total"] = 27
+            edited["metadata"]["declared_invoice_total"] = 35
             patch_status, patched = _patch_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
                 {"shipment_date": "2026-05-15", "payload": edited},
             )
             if patch_status != 200 or patched.get("shipment_date") != "2026-05-15":
                 raise AssertionError(f"patch route must update shipment date, got {patch_status} {patched}")
-            if patched.get("match_status") != "manual_override" or patched.get("summary", {}).get("product_amount_total") != 22.0:
+            if patched.get("match_status") != "manual_override" or patched.get("summary", {}).get("product_amount_total") != 30.0:
                 raise AssertionError("patch route must mark manual_override and recalculate totals server-side")
 
             second_nom_status, second_nom_payload = _post_json(
@@ -187,7 +214,7 @@ def main() -> None:
             rematched_products = rematched.get("product_lines", [])
             if rematched_products[0].get("internal_sku") != "SKU-MANUAL":
                 raise AssertionError("rematch must not overwrite manual_override rows by default")
-            if rematched_products[1].get("internal_nm_id") != 210184534:
+            if rematched_products[2].get("internal_nm_id") != 210184534:
                 raise AssertionError("rematch must fill previously unmatched rows from nomenclature")
 
             registry_status, registry_payload = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
@@ -222,11 +249,12 @@ def _build_invoice_fixture() -> bytes:
     sheet.append(["Invoice No:", "26GN390"])
     sheet.append(["Invoice Date:", "14.5.2026"])
     sheet.append(["Supplier:", "Zhejiang Supplier", "", "Currency:", "USD"])
-    sheet.append(["Invoice Total:", 25])
+    sheet.append(["Invoice Total:", 33])
     sheet.append(["NO.", "NAME & SPECIFICATION", "MODELS", "QTY", "U.PRICE", "AMOUNT", "COMMENT"])
     sheet.append([1, "高清膜 smk", "iPhone 14 Pro", 10, 1, 10, ""])
-    sheet.append([2, "防窥膜 (Anti-Spy)", "iPhone 14 Pro Max", 5, 2, 10, ""])
-    sheet.append([3, "OPP bag packets", "", 100, 0.05, 5, "OPP packets"])
+    sheet.append([2, "防窥膜 (Anti-Spy)", "iPhone 17e / 16e /14 / 13 / 13Pro", 4, 2, 8, ""])
+    sheet.append([3, "防窥膜 (Anti-Spy)", "iPhone 14 Pro Max", 5, 2, 10, ""])
+    sheet.append([4, "OPP bag packets", "", 100, 0.05, 5, "OPP packets"])
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()

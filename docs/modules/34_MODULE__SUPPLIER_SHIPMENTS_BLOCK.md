@@ -49,7 +49,7 @@ related_docs:
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Реестр заказов UX, delete/close/rematch, settings/nomenclature API/UI and server-side config_v2-seeded deterministic matching; no Google Sheets/GAS contour, no browser-local truth, no low-confidence fuzzy matching."
+update_note: "Реестр заказов UX, delete/close/rematch, settings/nomenclature API/UI and server-side config_v2-seeded deterministic exact/alias/compatible-model matching; no Google Sheets/GAS contour, no browser-local truth, no low-confidence fuzzy matching."
 ---
 
 # 1. Contract
@@ -73,19 +73,20 @@ update_note: "Реестр заказов UX, delete/close/rematch, settings/nom
   - `高清膜` / `smk` -> `clear`
   - `防窥膜` / `(Anti-Spy)` -> `anti_spy`
   - `磨砂膜` / `(Matte)` -> `matte`
-- Compatible model aliases such as `iPhone 15 / 16` stay as one normalized alias (`iphone_15_16`); parser does not split them into separate SKU rows.
+- Compatible model aliases such as `iPhone 15 / 16` stay as one invoice row and one legacy normalized `match_key`; parser does not split quantity into separate SKU rows.
 - Extras such as OPP packets, labels and cards are stored as `line_type=extra`, not product SKU rows. Product-row comments may mention OPP/labels/cards as packaging instructions without turning the product line into an extra.
 - Unknown aliases remain persisted and visible with `match_status=unmatched`; low-confidence fuzzy matching is not performed.
 
 # 3. Nomenclature And Matching
 
 - Server-side nomenclature lives in `sheet_vitrina_v1_nomenclature_items` and is edited through `Настройки -> Справочник номенклатуры`.
-- Nomenclature rows include `item_id`, `is_active`, `our_sku`, `nm_id`, `nomenclature_name`, `product_type`, `match_key`, `aliases`, `comment`, `created_at`, `updated_at`.
+- Nomenclature rows include `item_id`, `is_active`, `our_sku`, `nm_id`, `nomenclature_name`, `product_type`, `match_key`, `aliases`, `compatible_models_text`, normalized `compatible_model_keys`, `comment`, `created_at`, `updated_at`.
 - If the nomenclature table is empty and current `registry config_v2` is available, active SKU rows seed deterministic entries from `display_name`/`group`/`nm_id`; no SKU is invented beyond current config truth.
 - Active duplicate `match_key` values are rejected. Active product rows require non-empty `match_key` and `nomenclature_name`.
-- Matching is deterministic only: `factory_product_type + normalized_model -> match_key -> our_sku/nmId/nomenclature_name`.
-- Compatible model aliases such as `iPhone 16 Pro/17` are not split; they match only when an explicit nomenclature row or alias covers that combined key.
-- `Match status` in the order card is read-only UI state: `OK / Сопоставлено`, `Не сопоставлено`, or `Ручная правка`.
+- Matching is deterministic only. Resolution order is exact active `match_key`, exact alias/normalized alias, then compatibility by `product_type + intersection(invoice_model_keys, compatible_model_keys)`.
+- Compatibility extraction recognizes iPhone tokens such as `iPhone 17e / 16e /14 / 13 / 13Pro` as `iphone_17e`, `iphone_16e`, `iphone_14`, `iphone_13`, `iphone_13_pro`. It is used only for matching; it never splits invoice quantity into separate rows.
+- A compatibility candidate is auto-selected only when one best candidate is deterministic. Equal top candidates stay unfilled with `match_status=ambiguous`.
+- `Match status` in the order card is read-only UI state: `OK / Сопоставлено`, `Сопоставлено по совместимости`, `Неоднозначно`, `Не сопоставлено`, or `Ручная правка`.
 - Empty or inactive nomenclature is valid; the UI/API must still preserve unmatched rows for manual operator correction.
 
 # 4. Auth Boundary
