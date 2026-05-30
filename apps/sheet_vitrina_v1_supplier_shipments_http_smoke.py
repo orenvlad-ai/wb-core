@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_NOMENCLATURE_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
@@ -72,6 +73,36 @@ def main() -> None:
             if unsupported_status != 400 or "xlsx" not in str(unsupported_payload.get("error", "")).lower():
                 raise AssertionError(f"unsupported file type must return controlled JSON 400, got {unsupported_status} {unsupported_payload}")
 
+            nomenclature_status, nomenclature_payload = _get_json(f"{base_url}{DEFAULT_NOMENCLATURE_PATH}")
+            if nomenclature_status != 200 or nomenclature_payload.get("items") != []:
+                raise AssertionError(f"empty nomenclature must load, got {nomenclature_status} {nomenclature_payload}")
+            create_nom_status, create_nom_payload = _post_json(
+                f"{base_url}{DEFAULT_NOMENCLATURE_PATH}",
+                {
+                    "is_active": True,
+                    "our_sku": "SKU-CLEAR-14P",
+                    "nm_id": 210183919,
+                    "nomenclature_name": "Clear iPhone 14 Pro",
+                    "product_type": "clear",
+                    "match_key": "clear|iphone_14_pro",
+                    "aliases": ["iPhone 14 Pro"],
+                    "comment": "smoke",
+                },
+            )
+            if create_nom_status != 200 or create_nom_payload.get("item", {}).get("nm_id") != 210183919:
+                raise AssertionError(f"nomenclature create must persist item, got {create_nom_status} {create_nom_payload}")
+            duplicate_nom_status, duplicate_nom_payload = _post_json(
+                f"{base_url}{DEFAULT_NOMENCLATURE_PATH}",
+                {
+                    "is_active": True,
+                    "nomenclature_name": "Duplicate",
+                    "product_type": "clear",
+                    "match_key": "clear|iphone_14_pro",
+                },
+            )
+            if duplicate_nom_status != 400 or "duplicate" not in str(duplicate_nom_payload.get("error", "")).lower():
+                raise AssertionError(f"duplicate active match_key must be rejected, got {duplicate_nom_status} {duplicate_nom_payload}")
+
             parse_status, parse_payload = _post_multipart(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH}",
                 workbook_bytes,
@@ -81,6 +112,11 @@ def main() -> None:
                 raise AssertionError(f"parse route must stage upload and return editable payload, got {parse_status} {parse_payload}")
             if parse_payload.get("source_file_sha256") != workbook_sha256:
                 raise AssertionError("parse route must expose sha256 of original upload")
+            product_lines = [item for item in parse_payload.get("lines", []) if item.get("line_type") == "product"]
+            if product_lines[0].get("internal_nm_id") != 210183919 or product_lines[0].get("match_status") != "matched":
+                raise AssertionError("parse route must resolve active nomenclature match_key into nmId/name")
+            if product_lines[1].get("match_status") != "unmatched":
+                raise AssertionError("unknown product match_key must remain visible and unmatched")
 
             missing_date_status, missing_date_payload = _post_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
@@ -104,6 +140,8 @@ def main() -> None:
                 raise AssertionError("created shipment must keep date and unmatched status")
             if len(detail.get("product_lines", [])) != 2 or len(detail.get("extra_lines", [])) != 1:
                 raise AssertionError("detail must split product and extra lines")
+            if detail["product_lines"][0].get("internal_name") != "Clear iPhone 14 Pro":
+                raise AssertionError("created shipment must persist nomenclature auto-match")
 
             detail_status, loaded_detail = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}")
             if detail_status != 200 or loaded_detail.get("shipment_id") != shipment_id:
@@ -114,6 +152,7 @@ def main() -> None:
             edited["lines"][0]["internal_nm_id"] = 123456
             edited["lines"][0]["internal_name"] = "Manual SKU"
             edited["lines"][0]["match_status"] = "matched"
+            edited["lines"][0]["manual_override"] = True
             edited["lines"][0]["amount"] = 12
             edited["metadata"]["declared_invoice_total"] = 27
             patch_status, patched = _patch_json(
@@ -125,6 +164,32 @@ def main() -> None:
             if patched.get("match_status") != "manual_override" or patched.get("summary", {}).get("product_amount_total") != 22.0:
                 raise AssertionError("patch route must mark manual_override and recalculate totals server-side")
 
+            second_nom_status, second_nom_payload = _post_json(
+                f"{base_url}{DEFAULT_NOMENCLATURE_PATH}",
+                {
+                    "is_active": True,
+                    "our_sku": "SKU-AS-14PM",
+                    "nm_id": 210184534,
+                    "nomenclature_name": "Anti-Spy iPhone 14 Pro Max",
+                    "product_type": "anti_spy",
+                    "match_key": "anti_spy|iphone_14_pro_max",
+                    "comment": "rematch smoke",
+                },
+            )
+            if second_nom_status != 200 or second_nom_payload.get("item", {}).get("nm_id") != 210184534:
+                raise AssertionError("second nomenclature item must save for rematch")
+            rematch_status, rematched = _post_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/rematch",
+                {"overwrite_manual": False},
+            )
+            if rematch_status != 200:
+                raise AssertionError(f"rematch route must return updated detail, got {rematch_status} {rematched}")
+            rematched_products = rematched.get("product_lines", [])
+            if rematched_products[0].get("internal_sku") != "SKU-MANUAL":
+                raise AssertionError("rematch must not overwrite manual_override rows by default")
+            if rematched_products[1].get("internal_nm_id") != 210184534:
+                raise AssertionError("rematch must fill previously unmatched rows from nomenclature")
+
             registry_status, registry_payload = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
             if registry_status != 200 or len(registry_payload.get("shipments", [])) != 1:
                 raise AssertionError("list route must expose saved shipment")
@@ -134,6 +199,15 @@ def main() -> None:
                 raise AssertionError("invoice download must preserve original XLSX bytes")
             if "attachment" not in str(invoice_headers.get("Content-Disposition", "")):
                 raise AssertionError("invoice download must be an attachment")
+            delete_status, delete_payload = _delete_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}")
+            if delete_status != 200 or delete_payload.get("deleted") is not True:
+                raise AssertionError(f"delete route must remove shipment, got {delete_status} {delete_payload}")
+            after_delete_status, after_delete_payload = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
+            if after_delete_status != 200 or after_delete_payload.get("shipments") != []:
+                raise AssertionError("deleted supplier order must disappear from registry")
+            deleted_invoice_status, _, _ = _get_bytes(f"{base_url}{invoice_path}")
+            if deleted_invoice_status != 404:
+                raise AssertionError("deleted supplier invoice must not remain downloadable")
         finally:
             server.shutdown()
             server.server_close()
@@ -201,6 +275,11 @@ def _patch_json(url: str, payload: dict[str, object]) -> tuple[int, dict[str, ob
         headers={"Content-Type": "application/json; charset=utf-8", "Accept": "application/json"},
         method="PATCH",
     )
+    return _open_json(request)
+
+
+def _delete_json(url: str) -> tuple[int, dict[str, object]]:
+    request = urllib_request.Request(url, headers={"Accept": "application/json"}, method="DELETE")
     return _open_json(request)
 
 

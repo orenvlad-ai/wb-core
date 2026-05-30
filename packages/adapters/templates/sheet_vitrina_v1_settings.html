@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Настройки</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f1117;
+      --panel: #171923;
+      --panel-2: #1e2230;
+      --control: #10131b;
+      --border: rgba(177, 139, 255, 0.22);
+      --text: #f2f4ff;
+      --muted: #aab0c5;
+      --accent: #a78bfa;
+      --danger: #fb7185;
+      --success: #34d399;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; font-family: Inter, Arial, sans-serif; background: var(--bg); color: var(--text); }
+    main { padding: 24px; }
+    .shell { max-width: 1440px; margin: 0 auto; display: grid; gap: 18px; }
+    .topbar, .block { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 18px; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+    h1, h2 { margin: 0; letter-spacing: 0; }
+    h1 { font-size: 26px; }
+    h2 { font-size: 18px; }
+    p { margin: 6px 0 0; color: var(--muted); }
+    button, .button-link {
+      min-height: 36px; border: 1px solid var(--border); border-radius: 7px; padding: 8px 12px;
+      color: var(--text); background: var(--panel-2); font: inherit; font-weight: 800; cursor: pointer;
+      text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    }
+    button.primary { background: linear-gradient(135deg, #7c3aed, #2563eb); border-color: transparent; }
+    button.danger { border-color: rgba(251, 113, 133, 0.55); color: var(--danger); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .message { min-height: 20px; margin: 0; font-size: 13px; }
+    .message.error { color: var(--danger); }
+    .message.success { color: var(--success); }
+    .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; margin-top: 12px; }
+    table { width: 100%; min-width: 1180px; border-collapse: collapse; }
+    th, td { padding: 9px; border-bottom: 1px solid rgba(177, 139, 255, 0.14); text-align: left; vertical-align: top; }
+    th { position: sticky; top: 0; z-index: 1; background: #171923; color: var(--muted); font-size: 12px; text-transform: uppercase; }
+    input, select, textarea {
+      width: 100%; min-height: 34px; border: 1px solid rgba(177, 139, 255, 0.28); border-radius: 6px;
+      padding: 7px 8px; background: var(--control); color: var(--text); font: inherit;
+    }
+    textarea { min-height: 56px; resize: vertical; }
+    .checkbox-cell { text-align: center; }
+    .checkbox-cell input { width: 18px; min-height: 18px; }
+    .narrow { min-width: 82px; }
+    .wide { min-width: 180px; }
+    @media (max-width: 760px) {
+      main { padding: 16px; }
+      button, .button-link { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="shell">
+      <section class="topbar">
+        <div>
+          <h1>Настройки</h1>
+          <p>Server-side настройки WebCore</p>
+        </div>
+        <div class="toolbar">
+          <a id="vitrinaLink" class="button-link" href="/sheet-vitrina-v1/vitrina">К витрине</a>
+          <a id="logoutLink" class="button-link" href="/logout">Выйти</a>
+        </div>
+      </section>
+
+      <section class="block" aria-labelledby="nomenclatureTitle">
+        <div class="toolbar" style="justify-content: space-between;">
+          <div>
+            <h2 id="nomenclatureTitle">Справочник номенклатуры</h2>
+            <p>Сопоставление строк invoice с внутренними SKU/nmId и номенклатурой.</p>
+          </div>
+          <div class="toolbar">
+            <input id="nomenclatureFilter" class="wide" placeholder="Поиск по match key / SKU / номенклатуре">
+            <button id="addItemButton" class="primary" type="button">Добавить строку</button>
+          </div>
+        </div>
+        <p id="nomenclatureMessage" class="message">Читаем справочник...</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Active</th>
+                <th>Наш SKU</th>
+                <th>nmId</th>
+                <th>Номенклатура</th>
+                <th>Тип</th>
+                <th>Match key</th>
+                <th>Aliases</th>
+                <th>Комментарий</th>
+                <th>Обновлено</th>
+                <th>Действия</th>
+              </tr>
+            </thead>
+            <tbody id="nomenclatureRows">
+              <tr><td colspan="10">Справочник пуст.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script id="sheet-vitrina-v1-settings-config" type="application/json">__SHEET_VITRINA_V1_SETTINGS_CONFIG_JSON__</script>
+  <script>
+    (() => {
+      const config = JSON.parse(document.getElementById("sheet-vitrina-v1-settings-config").textContent);
+      const nomenclaturePath = config.nomenclature_path;
+      const rowsBody = document.getElementById("nomenclatureRows");
+      const message = document.getElementById("nomenclatureMessage");
+      const filterInput = document.getElementById("nomenclatureFilter");
+      const addItemButton = document.getElementById("addItemButton");
+      const logoutLink = document.getElementById("logoutLink");
+      const vitrinaLink = document.getElementById("vitrinaLink");
+
+      let items = [];
+
+      function escapeHtml(value) {
+        return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#039;"
+        }[char]));
+      }
+
+      function setMessage(text, tone) {
+        message.textContent = text || "";
+        message.className = "message" + (tone ? " " + tone : "");
+      }
+
+      async function fetchJson(url, options) {
+        const response = await fetch(url, options || {});
+        const contentType = response.headers.get("content-type") || "";
+        const text = await response.text();
+        if (!contentType.toLowerCase().includes("application/json")) {
+          const preview = text.replace(/\s+/g, " ").trim().slice(0, 220);
+          throw new Error("HTTP " + response.status + " " + response.url + " returned non-JSON " + (contentType || "content-type") + (preview ? ": " + preview : ""));
+        }
+        const payload = text ? JSON.parse(text) : {};
+        if (!response.ok) {
+          throw new Error(payload.error || ("HTTP " + response.status));
+        }
+        return payload;
+      }
+
+      async function loadItems() {
+        setMessage("Читаем справочник...", "");
+        try {
+          const payload = await fetchJson(nomenclaturePath, { headers: { Accept: "application/json" } });
+          items = Array.isArray(payload.items) ? payload.items : [];
+          renderRows();
+          setMessage("", "");
+        } catch (error) {
+          setMessage(error.message, "error");
+        }
+      }
+
+      function renderRows() {
+        const query = filterInput.value.trim().toLowerCase();
+        const visible = query ? items.filter((item) => itemText(item).includes(query)) : items;
+        if (!visible.length) {
+          rowsBody.innerHTML = '<tr><td colspan="10">Справочник пуст.</td></tr>';
+          return;
+        }
+        rowsBody.innerHTML = visible.map(renderRow).join("");
+        Array.from(rowsBody.querySelectorAll("[data-save-item]")).forEach((button) => {
+          button.addEventListener("click", () => saveRow(button.closest("tr")));
+        });
+        Array.from(rowsBody.querySelectorAll("[data-delete-item]")).forEach((button) => {
+          button.addEventListener("click", () => deactivateRow(button.closest("tr")));
+        });
+      }
+
+      function itemText(item) {
+        return [
+          item.match_key, item.our_sku, item.nm_id, item.nomenclature_name,
+          item.product_type, (item.aliases || []).join(" ")
+        ].join(" ").toLowerCase();
+      }
+
+      function renderRow(item) {
+        return [
+          '<tr data-item-id="' + escapeHtml(item.item_id || "") + '">',
+          '<td class="checkbox-cell"><input type="checkbox" data-field="is_active"' + (item.is_active ? " checked" : "") + '></td>',
+          '<td><input class="narrow" data-field="our_sku" value="' + escapeHtml(item.our_sku || "") + '"></td>',
+          '<td><input class="narrow" data-field="nm_id" value="' + escapeHtml(item.nm_id ?? "") + '"></td>',
+          '<td><input class="wide" data-field="nomenclature_name" value="' + escapeHtml(item.nomenclature_name || "") + '"></td>',
+          '<td><select data-field="product_type">' + productTypeOptions(item.product_type || "clear") + '</select></td>',
+          '<td><input class="wide" data-field="match_key" value="' + escapeHtml(item.match_key || "") + '"></td>',
+          '<td><textarea data-field="aliases">' + escapeHtml((item.aliases || []).join("\n")) + '</textarea></td>',
+          '<td><textarea data-field="comment">' + escapeHtml(item.comment || "") + '</textarea></td>',
+          '<td>' + escapeHtml(item.updated_at || "-") + '</td>',
+          '<td><button type="button" data-save-item>Сохранить</button> <button class="danger" type="button" data-delete-item>Выключить</button></td>',
+          '</tr>'
+        ].join("");
+      }
+
+      function productTypeOptions(value) {
+        return ["clear", "anti_spy", "matte", "extra", "other"].map((item) => (
+          '<option value="' + item + '"' + (item === value ? " selected" : "") + '>' + item + '</option>'
+        )).join("");
+      }
+
+      function readRow(row) {
+        const payload = {};
+        Array.from(row.querySelectorAll("[data-field]")).forEach((input) => {
+          const key = input.dataset.field;
+          payload[key] = input.type === "checkbox" ? input.checked : input.value.trim();
+        });
+        payload.aliases = String(payload.aliases || "").split(/\n|,|;/).map((item) => item.trim()).filter(Boolean);
+        if (payload.nm_id === "") {
+          payload.nm_id = null;
+        }
+        return payload;
+      }
+
+      function validateRow(payload) {
+        if (payload.is_active && ["clear", "anti_spy", "matte"].includes(payload.product_type)) {
+          if (!payload.match_key) {
+            return "Для active product строки нужен match_key.";
+          }
+          if (!payload.nomenclature_name) {
+            return "Для active product строки нужна номенклатура.";
+          }
+        }
+        return "";
+      }
+
+      async function saveRow(row) {
+        const payload = readRow(row);
+        const validationError = validateRow(payload);
+        if (validationError) {
+          setMessage(validationError, "error");
+          return;
+        }
+        const itemId = row.dataset.itemId || "";
+        const isNew = !itemId;
+        const url = isNew ? nomenclaturePath : nomenclaturePath + "/" + encodeURIComponent(itemId);
+        setMessage("Сохраняем строку справочника...", "");
+        try {
+          await fetchJson(url, {
+            method: isNew ? "POST" : "PATCH",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify(payload)
+          });
+          await loadItems();
+          setMessage("Справочник сохранён.", "success");
+        } catch (error) {
+          setMessage(error.message, "error");
+        }
+      }
+
+      async function deactivateRow(row) {
+        const itemId = row.dataset.itemId || "";
+        if (!itemId) {
+          row.remove();
+          return;
+        }
+        if (!confirm("Выключить строку справочника?")) {
+          return;
+        }
+        setMessage("Выключаем строку...", "");
+        try {
+          await fetchJson(nomenclaturePath + "/" + encodeURIComponent(itemId), { method: "DELETE", headers: { Accept: "application/json" } });
+          await loadItems();
+          setMessage("Строка выключена.", "success");
+        } catch (error) {
+          setMessage(error.message, "error");
+        }
+      }
+
+      addItemButton.addEventListener("click", () => {
+        const draft = {
+          item_id: "",
+          is_active: true,
+          our_sku: "",
+          nm_id: null,
+          nomenclature_name: "",
+          product_type: "clear",
+          match_key: "",
+          aliases: [],
+          comment: "",
+          updated_at: "-"
+        };
+        rowsBody.insertAdjacentHTML("afterbegin", renderRow(draft));
+        const row = rowsBody.querySelector("tr[data-item-id='']");
+        row.querySelector("[data-save-item]").addEventListener("click", () => saveRow(row));
+        row.querySelector("[data-delete-item]").addEventListener("click", () => deactivateRow(row));
+        setMessage("", "");
+      });
+      filterInput.addEventListener("input", renderRows);
+      if (logoutLink && config.logout_path) {
+        logoutLink.href = config.logout_path;
+      }
+      if (vitrinaLink && config.vitrina_path) {
+        vitrinaLink.href = config.vitrina_path;
+      }
+      loadItems();
+    })();
+  </script>
+</body>
+</html>

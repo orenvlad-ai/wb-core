@@ -14,7 +14,7 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
-from packages.application.supplier_invoice_parser import parse_supplier_invoice_xlsx
+from packages.application.supplier_invoice_parser import normalize_invoice_model, parse_supplier_invoice_xlsx
 from packages.contracts.supplier_shipments import (
     LINE_TYPE_EXTRA,
     LINE_TYPE_PRODUCT,
@@ -57,7 +57,11 @@ class SupplierShipmentsBlock:
         filename = _safe_filename(uploaded_filename or "supplier-invoice.xlsx")
         if not filename.lower().endswith(".xlsx"):
             raise ValueError("supplier invoice upload must be an .xlsx file")
-        parsed_payload = parse_supplier_invoice_xlsx(workbook_bytes, filename=filename)
+        parsed_payload = parse_supplier_invoice_xlsx(
+            workbook_bytes,
+            filename=filename,
+            aliases=self._active_nomenclature_aliases(),
+        )
         upload_id = "upl_" + uuid4().hex
         created_at = self.timestamp_factory()
         sha256 = hashlib.sha256(workbook_bytes).hexdigest()
@@ -104,6 +108,9 @@ class SupplierShipmentsBlock:
             shipment_date=shipment_date,
             force_manual_override=False,
         )
+        lines = _apply_nomenclature_matches(lines, self._active_nomenclature_by_key())
+        summary = _recalculate_summary(lines, declared_total=_optional_number(metadata.get("declared_invoice_total")))
+        match_status = _shipment_match_status(lines, checksum_error=summary["checksum_error"])
         shipment_id = "sup_" + uuid4().hex
         now = self.timestamp_factory()
         source_filename = str(upload.get("source_filename") or "supplier-invoice.xlsx")
@@ -157,7 +164,7 @@ class SupplierShipmentsBlock:
         metadata, lines, warnings, errors, summary, match_status = _normalize_edit_payload(
             edited_payload,
             shipment_date=shipment_date,
-            force_manual_override=True,
+            force_manual_override=False,
         )
         existing_header = dict(existing["header"])
         now = self.timestamp_factory()
@@ -165,6 +172,64 @@ class SupplierShipmentsBlock:
             **existing_header,
             "updated_at": now,
             "shipment_date": shipment_date,
+            "invoice_no": metadata.get("invoice_no") or "",
+            "invoice_date": metadata.get("invoice_date") or "",
+            "contract_no": metadata.get("contract_no") or "",
+            "contract_date": metadata.get("contract_date") or "",
+            "supplier_name": metadata.get("supplier_name") or "",
+            "customer_name": metadata.get("customer_name") or "",
+            "currency": metadata.get("currency") or "",
+            "product_qty_total": summary["product_qty_total"],
+            "product_amount_total": summary["product_amount_total"],
+            "extras_amount_total": summary["extras_amount_total"],
+            "invoice_amount_total": summary["invoice_amount_total"],
+            "declared_invoice_total": summary.get("declared_invoice_total"),
+            "match_status": match_status,
+            "warnings": warnings,
+            "errors": errors,
+        }
+        self.runtime.save_supplier_shipment(header=header, lines=lines)
+        return self.get_shipment(shipment_id)
+
+    def delete_shipment(self, shipment_id: str) -> dict[str, Any]:
+        detail = self.runtime.load_supplier_shipment(shipment_id)
+        if detail is None:
+            raise ValueError(f"supplier shipment not found: {shipment_id}")
+        header = dict(detail.get("header") or {})
+        source_file_path = str(header.get("source_file_path") or "")
+        deleted = self.runtime.delete_supplier_shipment(shipment_id)
+        if not deleted:
+            raise ValueError(f"supplier shipment not found: {shipment_id}")
+        self._delete_runtime_invoice_file(source_file_path)
+        return {
+            "contract_name": "sheet_vitrina_v1_supplier_shipments",
+            "status": "ok",
+            "deleted": True,
+            "shipment_id": shipment_id,
+        }
+
+    def rematch_shipment(self, shipment_id: str, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        existing = self.runtime.load_supplier_shipment(shipment_id)
+        if existing is None:
+            raise ValueError(f"supplier shipment not found: {shipment_id}")
+        detail_payload = _detail_payload(existing)
+        overwrite_manual = bool((payload or {}).get("overwrite_manual"))
+        detail_payload["lines"] = _apply_nomenclature_matches(
+            detail_payload.get("lines") or [],
+            self._active_nomenclature_by_key(),
+            overwrite_manual=overwrite_manual,
+        )
+        shipment_date = _validate_iso_date(str(detail_payload.get("shipment_date") or ""))
+        metadata, lines, warnings, errors, summary, match_status = _normalize_edit_payload(
+            detail_payload,
+            shipment_date=shipment_date,
+            force_manual_override=False,
+        )
+        existing_header = dict(existing["header"])
+        now = self.timestamp_factory()
+        header = {
+            **existing_header,
+            "updated_at": now,
             "invoice_no": metadata.get("invoice_no") or "",
             "invoice_date": metadata.get("invoice_date") or "",
             "contract_no": metadata.get("contract_no") or "",
@@ -195,6 +260,55 @@ class SupplierShipmentsBlock:
         content_type = SUPPLIER_INVOICE_CONTENT_TYPE
         return file_path.read_bytes(), str(header.get("source_filename") or "supplier-invoice.xlsx"), content_type
 
+    def list_nomenclature(self) -> dict[str, Any]:
+        self._seed_nomenclature_from_current_config_if_empty()
+        return {
+            "contract_name": "sheet_vitrina_v1_nomenclature",
+            "status": "ok",
+            "items": self.runtime.list_nomenclature_items(),
+        }
+
+    def create_nomenclature_item(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        now = self.timestamp_factory()
+        item = _normalize_nomenclature_payload(
+            payload,
+            item_id="nom_" + uuid4().hex,
+            created_at=now,
+            updated_at=now,
+        )
+        self._validate_nomenclature_unique(item)
+        return {
+            "contract_name": "sheet_vitrina_v1_nomenclature",
+            "status": "ok",
+            "item": self.runtime.save_nomenclature_item(item),
+        }
+
+    def update_nomenclature_item(self, item_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        existing = self.runtime.load_nomenclature_item(item_id)
+        if existing is None:
+            raise ValueError(f"nomenclature item not found: {item_id}")
+        now = self.timestamp_factory()
+        item = _normalize_nomenclature_payload(
+            {**existing, **dict(payload)},
+            item_id=item_id,
+            created_at=str(existing.get("created_at") or now),
+            updated_at=now,
+        )
+        self._validate_nomenclature_unique(item)
+        return {
+            "contract_name": "sheet_vitrina_v1_nomenclature",
+            "status": "ok",
+            "item": self.runtime.save_nomenclature_item(item),
+        }
+
+    def deactivate_nomenclature_item(self, item_id: str) -> dict[str, Any]:
+        item = self.runtime.delete_nomenclature_item(item_id, updated_at=self.timestamp_factory())
+        return {
+            "contract_name": "sheet_vitrina_v1_nomenclature",
+            "status": "ok",
+            "item": item,
+        }
+
     def _copy_upload_to_shipment_file(self, *, upload_path: str, shipment_id: str, filename: str) -> str:
         source_path = self._resolve_runtime_file(upload_path)
         if not source_path.exists() or not source_path.is_file():
@@ -223,6 +337,86 @@ class SupplierShipmentsBlock:
         if root != path and root not in path.parents:
             raise ValueError("runtime file path escapes runtime dir")
         return path
+
+    def _delete_runtime_invoice_file(self, relative_path: str) -> None:
+        if not str(relative_path or "").strip():
+            return
+        try:
+            file_path = self._resolve_runtime_file(relative_path)
+        except ValueError:
+            return
+        root = self.runtime.runtime_dir.resolve()
+        if file_path.exists() and file_path.is_file():
+            file_path.unlink()
+        parent = file_path.parent
+        if root != parent and root in parent.parents and parent.name.startswith("sup_"):
+            shutil.rmtree(parent, ignore_errors=True)
+
+    def _active_nomenclature_aliases(self) -> list[dict[str, Any]]:
+        self._seed_nomenclature_from_current_config_if_empty()
+        aliases: list[dict[str, Any]] = []
+        for item in self.runtime.list_nomenclature_items(active_only=True):
+            aliases.extend(_nomenclature_item_aliases(item))
+        return aliases
+
+    def _active_nomenclature_by_key(self) -> dict[str, dict[str, Any]]:
+        self._seed_nomenclature_from_current_config_if_empty()
+        by_key: dict[str, dict[str, Any]] = {}
+        for item in self.runtime.list_nomenclature_items(active_only=True):
+            for alias in _nomenclature_item_aliases(item):
+                match_key = str(alias.get("match_key") or "").strip()
+                if match_key and match_key not in by_key:
+                    by_key[match_key] = alias
+        return by_key
+
+    def _validate_nomenclature_unique(self, item: Mapping[str, Any]) -> None:
+        if (
+            bool(item.get("is_active"))
+            and str(item.get("match_key") or "").strip()
+            and self.runtime.active_nomenclature_match_key_exists(
+                match_key=str(item.get("match_key") or "").strip(),
+                exclude_item_id=str(item.get("item_id") or ""),
+            )
+        ):
+            raise ValueError(f"duplicate active nomenclature match_key: {item.get('match_key')}")
+
+    def _seed_nomenclature_from_current_config_if_empty(self) -> None:
+        if self.runtime.list_nomenclature_items():
+            return
+        try:
+            current_state = self.runtime.load_current_state()
+        except Exception:
+            return
+        now = self.timestamp_factory()
+        seen: set[str] = set()
+        for config_item in getattr(current_state, "config_v2", []) or []:
+            if not bool(getattr(config_item, "enabled", False)):
+                continue
+            display_name = str(getattr(config_item, "display_name", "") or "").strip()
+            product_type = _product_type_from_config_item(display_name, str(getattr(config_item, "group", "") or ""))
+            model_text = _model_text_from_nomenclature_name(display_name)
+            normalized_model = normalize_invoice_model(model_text)
+            if not product_type or not normalized_model:
+                continue
+            match_key = f"{product_type}|{normalized_model}"
+            if match_key in seen:
+                continue
+            seen.add(match_key)
+            self.runtime.save_nomenclature_item(
+                {
+                    "item_id": f"nom_seed_{int(getattr(config_item, 'nm_id'))}",
+                    "is_active": True,
+                    "our_sku": "",
+                    "nm_id": int(getattr(config_item, "nm_id")),
+                    "nomenclature_name": display_name,
+                    "product_type": product_type,
+                    "match_key": match_key,
+                    "aliases": [],
+                    "comment": "seeded from current registry config_v2",
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
 
 
 def _resolve_edited_payload(payload: Mapping[str, Any], *, fallback: Mapping[str, Any]) -> dict[str, Any]:
@@ -410,6 +604,159 @@ def _with_invoice_download_path(row: Mapping[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _apply_nomenclature_matches(
+    lines: list[Mapping[str, Any]],
+    aliases_by_key: Mapping[str, Mapping[str, Any]],
+    *,
+    overwrite_manual: bool = False,
+) -> list[dict[str, Any]]:
+    matched_lines: list[dict[str, Any]] = []
+    for raw_line in lines:
+        line = dict(raw_line)
+        if line.get("line_type") != LINE_TYPE_PRODUCT:
+            matched_lines.append(line)
+            continue
+        product_type = str(line.get("product_type") or "").strip()
+        normalized_model = str(line.get("model_normalized") or "").strip()
+        match_key = str(line.get("match_key") or "").strip()
+        if not match_key and product_type and normalized_model:
+            match_key = f"{product_type}|{normalized_model}"
+            line["match_key"] = match_key
+        if bool(line.get("manual_override")) and not overwrite_manual:
+            matched_lines.append(line)
+            continue
+        alias = aliases_by_key.get(match_key) if match_key else None
+        if alias:
+            line["internal_sku"] = str(alias.get("internal_sku") or alias.get("our_sku") or "")
+            line["internal_nm_id"] = _optional_int(alias.get("internal_nm_id") or alias.get("nm_id"))
+            line["internal_name"] = str(alias.get("internal_name") or alias.get("nomenclature_name") or "")
+            line["match_status"] = MATCH_STATUS_MATCHED
+            line["manual_override"] = False
+        else:
+            line["internal_sku"] = ""
+            line["internal_nm_id"] = None
+            line["internal_name"] = ""
+            line["match_status"] = MATCH_STATUS_UNMATCHED
+            line["manual_override"] = False
+        matched_lines.append(line)
+    return matched_lines
+
+
+def _normalize_nomenclature_payload(
+    payload: Mapping[str, Any],
+    *,
+    item_id: str,
+    created_at: str,
+    updated_at: str,
+) -> dict[str, Any]:
+    product_type = str(payload.get("product_type") or "").strip()
+    if product_type not in {"clear", "anti_spy", "matte", "extra", "other"}:
+        raise ValueError("nomenclature product_type must be clear, anti_spy, matte, extra or other")
+    is_active = bool(payload.get("is_active", True))
+    nomenclature_name = str(payload.get("nomenclature_name") or "").strip()
+    match_key = _normalize_match_key(payload.get("match_key"))
+    if is_active and product_type in {"clear", "anti_spy", "matte"}:
+        if not match_key:
+            raise ValueError("active product nomenclature item requires match_key")
+        if not nomenclature_name:
+            raise ValueError("active product nomenclature item requires nomenclature_name")
+    return {
+        "item_id": item_id,
+        "is_active": is_active,
+        "our_sku": str(payload.get("our_sku") or "").strip(),
+        "nm_id": _optional_int(payload.get("nm_id")),
+        "nomenclature_name": nomenclature_name,
+        "product_type": product_type,
+        "match_key": match_key,
+        "aliases": _normalize_alias_list(payload.get("aliases")),
+        "comment": str(payload.get("comment") or "").strip(),
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
+def _normalize_match_key(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    normalized = normalized.replace(" ", "_")
+    normalized = re.sub(r"_+", "_", normalized)
+    normalized = normalized.strip("_")
+    if normalized and "|" not in normalized:
+        raise ValueError("nomenclature match_key must use product_type|normalized_model")
+    return normalized
+
+
+def _normalize_alias_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw_items = re.split(r"[\n,;]+", value)
+    elif isinstance(value, list):
+        raw_items = [str(item) for item in value]
+    else:
+        raw_items = []
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        alias = str(item or "").strip()
+        if not alias or alias in seen:
+            continue
+        seen.add(alias)
+        aliases.append(alias)
+    return aliases
+
+
+def _nomenclature_item_aliases(item: Mapping[str, Any]) -> list[dict[str, Any]]:
+    if not bool(item.get("is_active")):
+        return []
+    base_match_key = str(item.get("match_key") or "").strip()
+    payload_base = {
+        "active": True,
+        "product_type": str(item.get("product_type") or ""),
+        "factory_type": str(item.get("product_type") or ""),
+        "internal_sku": str(item.get("our_sku") or ""),
+        "internal_nm_id": _optional_int(item.get("nm_id")),
+        "internal_name": str(item.get("nomenclature_name") or ""),
+        "nomenclature_name": str(item.get("nomenclature_name") or ""),
+        "group": "nomenclature",
+    }
+    aliases: list[dict[str, Any]] = []
+    if base_match_key:
+        aliases.append({**payload_base, "match_key": base_match_key})
+    product_type = str(item.get("product_type") or "").strip()
+    for raw_alias in item.get("aliases") or []:
+        alias_text = str(raw_alias or "").strip()
+        if not alias_text:
+            continue
+        if "|" in alias_text:
+            aliases.append({**payload_base, "match_key": _normalize_match_key(alias_text)})
+            continue
+        normalized_model = normalize_invoice_model(alias_text)
+        if product_type and normalized_model:
+            aliases.append(
+                {
+                    **payload_base,
+                    "normalized_model": normalized_model,
+                    "match_key": f"{product_type}|{normalized_model}",
+                }
+            )
+    return aliases
+
+
+def _product_type_from_config_item(display_name: str, group: str) -> str:
+    text = f"{group} {display_name}".lower()
+    if "anti" in text and "spy" in text:
+        return "anti_spy"
+    if "matte" in text:
+        return "matte"
+    if "clean" in text or "clear" in text:
+        return "clear"
+    return ""
+
+
+def _model_text_from_nomenclature_name(value: str) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"^\s*(clean|clear|matte|anti[-\s]?spy)\s+", "", text, flags=re.IGNORECASE)
+    return text.strip()
+
+
 def _invoice_download_path(shipment_id: str) -> str:
     if not shipment_id:
         return ""
@@ -508,4 +855,3 @@ def _string_list(value: Any) -> list[str]:
 
 def _default_timestamp_factory() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-

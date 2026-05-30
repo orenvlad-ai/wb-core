@@ -246,6 +246,7 @@ def normalize_invoice_model(value: Any) -> str:
     text = text.replace("（", "(").replace("）", ")")
     text = re.sub(r"\((?:anti[-\s]?spy|matte|smk|clear)[^)]*\)", " ", text, flags=re.IGNORECASE)
     text = text.replace("iphone", "iphone ")
+    text = re.sub(r"\bpromax\b", "pro max", text)
     text = re.sub(r"\bip\s*hone\b", "iphone", text)
     text = text.replace("&", " ")
     text = text.replace("+", " plus ")
@@ -277,9 +278,11 @@ def _normalize_aliases(raw_aliases: Iterable[Mapping[str, Any]]) -> dict[str, Su
             factory_type=factory_type,
             normalized_model=normalized_model,
             match_key=match_key,
-            internal_sku=str(item.get("internal_sku") or item.get("sku") or "").strip(),
+            internal_sku=str(item.get("internal_sku") or item.get("our_sku") or item.get("sku") or "").strip(),
             internal_nm_id=internal_nm_id,
-            internal_name=str(item.get("internal_name") or item.get("name") or "").strip(),
+            internal_name=str(
+                item.get("internal_name") or item.get("nomenclature_name") or item.get("name") or ""
+            ).strip(),
             group=str(item.get("group") or "").strip(),
             active=active,
         )
@@ -395,7 +398,13 @@ def _extract_declared_invoice_total(
         row_text = " ".join(_stringify(value) for value in row if _stringify(value))
         if not _is_total_row(row_text):
             continue
-        numeric_values = [number for number in (_to_number(value) for value in row) if number is not None]
+        numeric_values = [
+            float(value)
+            for value in row
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ]
+        if not numeric_values:
+            numeric_values = [number for number in (_to_number(value) for value in row) if number is not None]
         if numeric_values:
             return numeric_values[-1]
     return None
@@ -437,7 +446,7 @@ def _metadata_from_filename(filename: str) -> dict[str, str]:
         if len(year) == 2:
             year = "20" + year
         result["invoice_date"] = f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
-    invoice_match = re.search(r"\b(\d{2}[A-Z]{1,5}\d{2,})\b", stem, flags=re.IGNORECASE)
+    invoice_match = re.search(r"(\d{2}[A-Z]{1,5}\d{2,})", stem, flags=re.IGNORECASE)
     if invoice_match:
         result["invoice_no"] = invoice_match.group(1).upper()
     return result

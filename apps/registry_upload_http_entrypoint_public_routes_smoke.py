@@ -65,7 +65,10 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/supply/wb-regional/",
         "/v1/sheet-vitrina-v1/supply/supplier-shipments",
         "/v1/sheet-vitrina-v1/supply/supplier-shipments/",
+        "/v1/sheet-vitrina-v1/settings/nomenclature",
+        "/v1/sheet-vitrina-v1/settings/nomenclature/",
         "/sheet-vitrina-v1/supplier",
+        "/sheet-vitrina-v1/settings",
         "/login",
         "/logout",
     }
@@ -103,6 +106,12 @@ def main() -> None:
         raise AssertionError("rendered nginx block must include supplier shipment list exactly once")
     if rendered.count("location ^~ /v1/sheet-vitrina-v1/supply/supplier-shipments/ {") != 1:
         raise AssertionError("rendered nginx block must include supplier shipment prefix exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/settings/nomenclature {") != 1:
+        raise AssertionError("rendered nginx block must include nomenclature API exactly once")
+    if rendered.count("location ^~ /v1/sheet-vitrina-v1/settings/nomenclature/ {") != 1:
+        raise AssertionError("rendered nginx block must include nomenclature item API exactly once")
+    if rendered.count("location = /sheet-vitrina-v1/settings {") != 1:
+        raise AssertionError("rendered nginx block must include settings page exactly once")
     if "client_max_body_size 32m;" not in rendered:
         raise AssertionError("rendered nginx block must raise body limit for supplier invoice uploads")
     if rendered.count("location = /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start {") != 1:

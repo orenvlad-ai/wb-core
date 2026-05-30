@@ -22,6 +22,8 @@ if str(ROOT) not in sys.path:
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
+    DEFAULT_SETTINGS_UI_PATH,
+    DEFAULT_NOMENCLATURE_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_SUPPLIER_UI_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
@@ -81,7 +83,7 @@ def main() -> None:
                 if operator_shell_code != 200 or "Поставки" not in operator_shell or "От поставщика" not in operator_shell:
                     raise AssertionError("operator must keep full operator shell and supplier module entry")
                 operator_supplier_code, _, operator_supplier = _opener_text(operator, f"{base_url}{DEFAULT_SHEET_SUPPLIER_UI_PATH}")
-                if operator_supplier_code != 200 or "Реестр поставок" not in operator_supplier:
+                if operator_supplier_code != 200 or "Реестр заказов" not in operator_supplier:
                     raise AssertionError("operator role must access supplier-only module page")
 
                 supplier = urllib_request.build_opener(urllib_request.HTTPCookieProcessor(CookieJar()))
@@ -92,10 +94,10 @@ def main() -> None:
                     supplier_password,
                     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
                 )
-                if supplier_login_code != 200 or "Реестр поставок" not in supplier_login_body:
+                if supplier_login_code != 200 or "Реестр заказов" not in supplier_login_body:
                     raise AssertionError("supplier login with full-shell next must land on supplier-only page")
                 supplier_page_code, _, supplier_page = _opener_text(supplier, f"{base_url}{DEFAULT_SHEET_SUPPLIER_UI_PATH}")
-                if supplier_page_code != 200 or "От поставщика" not in supplier_page:
+                if supplier_page_code != 200 or "Реестр заказов" not in supplier_page:
                     raise AssertionError("supplier role must access supplier page")
                 supplier_api_code, supplier_api_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
                 if supplier_api_code != 200 or supplier_api_payload.get("shipments") != []:
@@ -106,6 +108,21 @@ def main() -> None:
                 forbidden_api_code, forbidden_api_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SHEET_STATUS_PATH}")
                 if forbidden_api_code != 403 or forbidden_api_payload.get("error") != "forbidden":
                     raise AssertionError("supplier role must not access unrelated operator APIs")
+                forbidden_settings_code, _, _ = _opener_text(supplier, f"{base_url}{DEFAULT_SETTINGS_UI_PATH}")
+                if forbidden_settings_code != 403:
+                    raise AssertionError("supplier role must not access operator settings page")
+                forbidden_nomenclature_code, forbidden_nomenclature_payload = _opener_json(
+                    supplier,
+                    f"{base_url}{DEFAULT_NOMENCLATURE_PATH}",
+                )
+                if forbidden_nomenclature_code != 403 or forbidden_nomenclature_payload.get("error") != "forbidden":
+                    raise AssertionError("supplier role must not access nomenclature API")
+                supplier_delete_code, supplier_delete_payload = _opener_delete_json(
+                    supplier,
+                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/sup_forbidden",
+                )
+                if supplier_delete_code != 403 or supplier_delete_payload.get("error") != "forbidden":
+                    raise AssertionError("supplier role must not delete supplier orders")
             finally:
                 server.shutdown()
                 server.server_close()
@@ -145,6 +162,15 @@ def _opener_text(
 
 def _opener_json(opener: urllib_request.OpenerDirector, url: str) -> tuple[int, dict[str, object]]:
     request = urllib_request.Request(url, headers={"Accept": "application/json"}, method="GET")
+    try:
+        with opener.open(request, timeout=5) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib_error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _opener_delete_json(opener: urllib_request.OpenerDirector, url: str) -> tuple[int, dict[str, object]]:
+    request = urllib_request.Request(url, headers={"Accept": "application/json"}, method="DELETE")
     try:
         with opener.open(request, timeout=5) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
