@@ -25,6 +25,8 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
+    DEFAULT_SETTINGS_UI_PATH,
+    DEFAULT_NOMENCLATURE_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
@@ -89,6 +91,9 @@ def main() -> None:
                 )
                 if supplier_parse_code != 401 or supplier_parse_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated supplier parse must return 401 JSON: {supplier_parse_code} {supplier_parse_payload}")
+                nomenclature_code, nomenclature_payload = _get_json(f"{base_url}{DEFAULT_NOMENCLATURE_PATH}")
+                if nomenclature_code != 401 or nomenclature_payload.get("error") != "authentication_required":
+                    raise AssertionError(f"unauthenticated nomenclature API must return 401 JSON: {nomenclature_code} {nomenclature_payload}")
                 tick_code, tick_payload = _post_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH}", {})
                 if tick_code != 401 or tick_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated automation tick must return 401 JSON: {tick_code} {tick_payload}")
@@ -120,6 +125,15 @@ def main() -> None:
                     payload = json.loads(response.read().decode("utf-8"))
                     if response.status != 200 or payload.get("contract_name") != "sheet_vitrina_v1_feedbacks_complaints":
                         raise AssertionError(f"authenticated JSON route must work: {response.status} {payload}")
+                settings_request = urllib_request.Request(
+                    f"{base_url}{DEFAULT_SETTINGS_UI_PATH}",
+                    headers={"Accept": "text/html"},
+                    method="GET",
+                )
+                with opener.open(settings_request, timeout=5) as response:
+                    body = response.read().decode("utf-8")
+                    if response.status != 200 or "Справочник номенклатуры" not in body:
+                        raise AssertionError("authenticated operator settings page must render nomenclature section")
                 schedules_request = urllib_request.Request(
                     f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH}",
                     headers={"Accept": "application/json"},

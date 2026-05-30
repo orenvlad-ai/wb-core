@@ -138,10 +138,13 @@ DEFAULT_WB_REGIONAL_CALCULATE_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/ca
 DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX = "/v1/sheet-vitrina-v1/supply/wb-regional/district"
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
+DEFAULT_SETTINGS_UI_PATH = "/sheet-vitrina-v1/settings"
+DEFAULT_NOMENCLATURE_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature"
 DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
 OPERATOR_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_operator.html"
 WEB_VITRINA_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_web_vitrina.html"
 SUPPLIER_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_supplier.html"
+SETTINGS_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_settings.html"
 
 
 def load_registry_upload_http_entrypoint_config() -> RegistryUploadHttpEntrypointConfig:
@@ -954,6 +957,45 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, result)
                 return
 
+            if _is_supplier_shipment_rematch_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id = _resolve_supplier_shipment_id_from_rematch_path(parsed.path)
+                    payload = _load_optional_request_payload(self)
+                    result = entrypoint.handle_supplier_shipments_rematch_request(shipment_id, payload)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier shipment rematch failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if parsed.path == DEFAULT_NOMENCLATURE_PATH:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_nomenclature_create_request(payload)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"nomenclature create failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
             if parsed.path in {
                 DEFAULT_FACTORY_ORDER_UPLOAD_STOCK_FF_PATH,
                 DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FACTORY_PATH,
@@ -1062,6 +1104,16 @@ def _build_handler(
                     self,
                     HTTPStatus.OK,
                     _render_sheet_vitrina_supplier_ui(),
+                )
+                return
+
+            if parsed.path == DEFAULT_SETTINGS_UI_PATH:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                _write_html_response(
+                    self,
+                    HTTPStatus.OK,
+                    _render_sheet_vitrina_settings_ui(),
                 )
                 return
 
@@ -1582,6 +1634,21 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if parsed.path == DEFAULT_NOMENCLATURE_PATH:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_nomenclature_list_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"nomenclature list failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if _is_supplier_shipment_invoice_path(parsed.path):
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_invoice_path(parsed.path)
@@ -1899,6 +1966,26 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, result)
                 return
 
+            if _is_nomenclature_item_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    item_id = _resolve_nomenclature_item_id(parsed.path)
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_nomenclature_patch_request(item_id, payload)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"nomenclature patch failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
             _write_json_response(
                 self,
                 HTTPStatus.NOT_FOUND,
@@ -1926,6 +2013,44 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"factory order delete runtime failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if _is_supplier_shipment_detail_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id = _resolve_supplier_shipment_id_from_detail_path(parsed.path)
+                    payload = entrypoint.handle_supplier_shipments_delete_request(shipment_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier shipment delete failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if _is_nomenclature_item_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    item_id = _resolve_nomenclature_item_id(parsed.path)
+                    payload = entrypoint.handle_nomenclature_delete_request(item_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"nomenclature delete failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -2312,6 +2437,21 @@ def _is_supplier_shipment_invoice_path(path: str) -> bool:
     return len(parts) == 2 and bool(parts[0]) and parts[1] == "invoice"
 
 
+def _is_supplier_shipment_rematch_path(path: str) -> bool:
+    if not path.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
+        return False
+    suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+    parts = suffix.split("/")
+    return len(parts) == 2 and bool(parts[0]) and parts[1] == "rematch"
+
+
+def _is_nomenclature_item_path(path: str) -> bool:
+    if not path.startswith(DEFAULT_NOMENCLATURE_PATH + "/"):
+        return False
+    suffix = path[len(DEFAULT_NOMENCLATURE_PATH) + 1 :]
+    return bool(suffix) and "/" not in suffix
+
+
 def _resolve_supplier_shipment_id_from_detail_path(path: str) -> str:
     if not _is_supplier_shipment_detail_path(path):
         raise ValueError(f"unsupported supplier shipment detail path: {path}")
@@ -2323,6 +2463,19 @@ def _resolve_supplier_shipment_id_from_invoice_path(path: str) -> str:
         raise ValueError(f"unsupported supplier shipment invoice path: {path}")
     suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
     return suffix.split("/", 1)[0]
+
+
+def _resolve_supplier_shipment_id_from_rematch_path(path: str) -> str:
+    if not _is_supplier_shipment_rematch_path(path):
+        raise ValueError(f"unsupported supplier shipment rematch path: {path}")
+    suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+    return suffix.split("/", 1)[0]
+
+
+def _resolve_nomenclature_item_id(path: str) -> str:
+    if not _is_nomenclature_item_path(path):
+        raise ValueError(f"unsupported nomenclature item path: {path}")
+    return path[len(DEFAULT_NOMENCLATURE_PATH) + 1 :]
 
 
 def _resolve_wb_regional_district_from_download_path(path: str) -> str:
@@ -2502,6 +2655,17 @@ def _ensure_web_auth(handler: BaseHTTPRequestHandler, parsed: urllib_parse.Parse
     if next_path and next_path != DEFAULT_WEB_AUTH_LOGIN_PATH:
         location += "?" + urllib_parse.urlencode({"next": next_path})
     _write_redirect_response(handler, HTTPStatus.SEE_OTHER, location)
+    return False
+
+
+def _ensure_operator_role(handler: BaseHTTPRequestHandler, path: str) -> bool:
+    config = _web_auth_config()
+    if not config["enabled"]:
+        return True
+    user = _authenticated_web_user(handler, config)
+    if user and str(user.get("role") or "") == "operator":
+        return True
+    _write_auth_forbidden(handler, path)
     return False
 
 
@@ -3128,7 +3292,7 @@ def _render_sheet_vitrina_operator_ui(
 
 def _render_sheet_vitrina_supplier_ui() -> str:
     config_payload = {
-        "page_title": "От поставщика",
+        "page_title": "Реестр заказов",
         "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
         "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
         "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
@@ -3136,6 +3300,20 @@ def _render_sheet_vitrina_supplier_ui() -> str:
     template = SUPPLIER_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     return template.replace(
         "__SHEET_VITRINA_V1_SUPPLIER_CONFIG_JSON__",
+        json.dumps(config_payload, ensure_ascii=False),
+    )
+
+
+def _render_sheet_vitrina_settings_ui() -> str:
+    config_payload = {
+        "page_title": "Настройки",
+        "nomenclature_path": DEFAULT_NOMENCLATURE_PATH,
+        "vitrina_path": DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
+        "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
+    }
+    template = SETTINGS_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return template.replace(
+        "__SHEET_VITRINA_V1_SETTINGS_CONFIG_JSON__",
         json.dumps(config_payload, ensure_ascii=False),
     )
 
@@ -3172,6 +3350,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "feedbacks_auto_complaints_runs_path": DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH,
         "feedbacks_auto_complaints_run_path": DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_PATH,
         "feedbacks_auto_complaints_tick_path": DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH,
+        "settings_path": DEFAULT_SETTINGS_UI_PATH,
         "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
         "job_path": job_path,
         "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,

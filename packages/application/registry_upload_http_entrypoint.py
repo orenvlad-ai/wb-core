@@ -1548,8 +1548,26 @@ class RegistryUploadHttpEntrypoint:
     def handle_supplier_shipments_patch_request(self, shipment_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self.supplier_shipments_block.update_shipment(shipment_id, payload)
 
+    def handle_supplier_shipments_delete_request(self, shipment_id: str) -> dict[str, Any]:
+        return self.supplier_shipments_block.delete_shipment(shipment_id)
+
+    def handle_supplier_shipments_rematch_request(self, shipment_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.supplier_shipments_block.rematch_shipment(shipment_id, payload)
+
     def handle_supplier_shipments_invoice_request(self, shipment_id: str) -> tuple[bytes, str, str]:
         return self.supplier_shipments_block.download_invoice(shipment_id)
+
+    def handle_nomenclature_list_request(self) -> dict[str, Any]:
+        return self.supplier_shipments_block.list_nomenclature()
+
+    def handle_nomenclature_create_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.supplier_shipments_block.create_nomenclature_item(payload)
+
+    def handle_nomenclature_patch_request(self, item_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.supplier_shipments_block.update_nomenclature_item(item_id, payload)
+
+    def handle_nomenclature_delete_request(self, item_id: str) -> dict[str, Any]:
+        return self.supplier_shipments_block.deactivate_nomenclature_item(item_id)
 
     def _run_sheet_auto_update(
         self,

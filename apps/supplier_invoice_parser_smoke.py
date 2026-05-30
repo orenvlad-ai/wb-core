@@ -25,9 +25,9 @@ def main() -> None:
                 "factory_type": "clear",
                 "normalized_model": "iphone_14_pro",
                 "match_key": "clear|iphone_14_pro",
-                "internal_sku": "SKU-CLEAR-14PRO",
-                "internal_nm_id": 210183919,
-                "internal_name": "Clear iPhone 14 Pro",
+                "our_sku": "SKU-CLEAR-14PRO",
+                "nm_id": 210183919,
+                "nomenclature_name": "Clear iPhone 14 Pro",
                 "group": "clear",
                 "active": True,
             }
@@ -40,8 +40,13 @@ def main() -> None:
         raise AssertionError(f"parser must keep product and extra rows separately, got {len(product_lines)} / {len(extra_lines)}")
     if [line["product_type"] for line in product_lines] != ["clear", "clear", "anti_spy", "anti_spy", "matte"]:
         raise AssertionError("parser must fill down clear/anti_spy/matte markers from Chinese/comment blocks")
-    if product_lines[0]["match_status"] != "matched" or product_lines[0]["internal_nm_id"] != 210183919:
-        raise AssertionError("active deterministic alias must match the exact type+normalized model key")
+    if (
+        product_lines[0]["match_status"] != "matched"
+        or product_lines[0]["internal_nm_id"] != 210183919
+        or product_lines[0]["internal_sku"] != "SKU-CLEAR-14PRO"
+        or product_lines[0]["internal_name"] != "Clear iPhone 14 Pro"
+    ):
+        raise AssertionError("active deterministic nomenclature alias must fill SKU/nmId/name by exact type+model key")
     if product_lines[1]["match_key"] != "clear|iphone_15_16" or product_lines[1]["match_status"] != "unmatched":
         raise AssertionError("compatible model aliases like iPhone 15 / 16 must stay one unmatched invoice alias")
     if product_lines[3]["match_key"] != "anti_spy|iphone_16_pro_17":
@@ -89,7 +94,7 @@ def _build_invoice_fixture() -> bytes:
     ]
     for row in rows:
         sheet.append(row)
-    sheet.append(["（总值）Total:", "", "", "", "", 47, ""])
+    sheet.append(["（总值）Total:", "", "", "", "", 47, "定金(15%)：120000元"])
     sheet.merge_cells("C5:C6")
     sheet.merge_cells("C7:C8")
     buffer = BytesIO()

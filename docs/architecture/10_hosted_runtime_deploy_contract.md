@@ -60,9 +60,16 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `POST /v1/sheet-vitrina-v1/supply/supplier-shipments`
 - `GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}`
 - `PATCH /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}`
+- `DELETE /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}`
+- `POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/rematch`
 - `GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/invoice`
+- `GET /sheet-vitrina-v1/settings`
+- `GET /v1/sheet-vitrina-v1/settings/nomenclature`
+- `POST /v1/sheet-vitrina-v1/settings/nomenclature`
+- `PATCH /v1/sheet-vitrina-v1/settings/nomenclature/{item_id}`
+- `DELETE /v1/sheet-vitrina-v1/settings/nomenclature/{item_id}`
 
-Contract не меняет public HTTP schema этих routes и не переносит truth logic в Apps Script.
+Contract keeps runtime truth inside hosted WebCore and does not move supplier/order/nomenclature logic into Apps Script.
 
 ## Repo-Owned Execution Entrypoint
 

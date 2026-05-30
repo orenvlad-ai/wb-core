@@ -1563,6 +1563,150 @@ class RegistryUploadDbBackedRuntime:
                 "lines": [_supplier_shipment_line_to_dict(row) for row in line_rows],
             }
 
+    def delete_supplier_shipment(self, shipment_id: str) -> bool:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            cursor = conn.execute(
+                """
+                DELETE FROM sheet_vitrina_v1_supplier_shipments
+                WHERE shipment_id = ?
+                """,
+                (shipment_id,),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def list_nomenclature_items(self, *, active_only: bool = False) -> list[dict[str, Any]]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            where_clause = "WHERE is_active = 1" if active_only else ""
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM sheet_vitrina_v1_nomenclature_items
+                {where_clause}
+                ORDER BY is_active DESC, product_type ASC, match_key ASC, nomenclature_name ASC
+                """
+            ).fetchall()
+            return [_nomenclature_item_to_dict(row) for row in rows]
+
+    def load_nomenclature_item(self, item_id: str) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_nomenclature_items
+                WHERE item_id = ?
+                """,
+                (item_id,),
+            ).fetchone()
+            return _nomenclature_item_to_dict(row) if row is not None else None
+
+    def active_nomenclature_match_key_exists(self, *, match_key: str, exclude_item_id: str = "") -> bool:
+        normalized = str(match_key or "").strip()
+        if not normalized:
+            return False
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT item_id
+                FROM sheet_vitrina_v1_nomenclature_items
+                WHERE is_active = 1
+                  AND match_key = ?
+                  AND item_id != ?
+                LIMIT 1
+                """,
+                (normalized, str(exclude_item_id or "")),
+            ).fetchone()
+            return row is not None
+
+    def save_nomenclature_item(self, item: Mapping[str, Any]) -> dict[str, Any]:
+        item_id = str(item.get("item_id") or "").strip()
+        if not item_id:
+            raise ValueError("nomenclature item_id is required")
+        created_at = str(item.get("created_at") or "").strip()
+        updated_at = str(item.get("updated_at") or "").strip()
+        _validate_timestamp(created_at, field_name="created_at")
+        _validate_timestamp(updated_at, field_name="updated_at")
+        aliases = item.get("aliases") if isinstance(item.get("aliases"), list) else []
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_nomenclature_items(
+                    item_id,
+                    is_active,
+                    our_sku,
+                    nm_id,
+                    nomenclature_name,
+                    product_type,
+                    match_key,
+                    aliases_json,
+                    comment,
+                    created_at,
+                    updated_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(item_id) DO UPDATE SET
+                    is_active = excluded.is_active,
+                    our_sku = excluded.our_sku,
+                    nm_id = excluded.nm_id,
+                    nomenclature_name = excluded.nomenclature_name,
+                    product_type = excluded.product_type,
+                    match_key = excluded.match_key,
+                    aliases_json = excluded.aliases_json,
+                    comment = excluded.comment,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    item_id,
+                    1 if bool(item.get("is_active")) else 0,
+                    str(item.get("our_sku") or ""),
+                    item.get("nm_id"),
+                    str(item.get("nomenclature_name") or ""),
+                    str(item.get("product_type") or ""),
+                    str(item.get("match_key") or ""),
+                    json.dumps([str(alias) for alias in aliases if str(alias or "").strip()], ensure_ascii=False),
+                    str(item.get("comment") or ""),
+                    created_at,
+                    updated_at,
+                ),
+            )
+            conn.commit()
+        loaded = self.load_nomenclature_item(item_id)
+        if loaded is None:
+            raise ValueError(f"nomenclature item was not saved: {item_id}")
+        return loaded
+
+    def delete_nomenclature_item(self, item_id: str, *, updated_at: str) -> dict[str, Any]:
+        _validate_timestamp(updated_at, field_name="updated_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            cursor = conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_nomenclature_items
+                SET is_active = 0,
+                    updated_at = ?
+                WHERE item_id = ?
+                """,
+                (updated_at, item_id),
+            )
+            conn.commit()
+            if cursor.rowcount <= 0:
+                raise ValueError(f"nomenclature item not found: {item_id}")
+        loaded = self.load_nomenclature_item(item_id)
+        if loaded is None:
+            raise ValueError(f"nomenclature item not found: {item_id}")
+        return loaded
+
     def save_plan_report_monthly_baseline(
         self,
         *,
@@ -2813,6 +2957,22 @@ def _supplier_shipment_line_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _nomenclature_item_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "item_id": row["item_id"],
+        "is_active": bool(row["is_active"]),
+        "our_sku": row["our_sku"] or "",
+        "nm_id": row["nm_id"],
+        "nomenclature_name": row["nomenclature_name"] or "",
+        "product_type": row["product_type"] or "",
+        "match_key": row["match_key"] or "",
+        "aliases": [str(item) for item in _loads_json_list(row["aliases_json"]) if str(item or "").strip()],
+        "comment": row["comment"] or "",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
 def _loads_json_list(value: Any) -> list[Any]:
     try:
         payload = json.loads(str(value or "[]"))
@@ -3156,6 +3316,23 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_shipment_lines_by_shipment
         ON sheet_vitrina_v1_supplier_shipment_lines(shipment_id, sort_order);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_nomenclature_items (
+            item_id TEXT PRIMARY KEY,
+            is_active INTEGER NOT NULL,
+            our_sku TEXT,
+            nm_id INTEGER,
+            nomenclature_name TEXT NOT NULL,
+            product_type TEXT NOT NULL,
+            match_key TEXT NOT NULL,
+            aliases_json TEXT NOT NULL,
+            comment TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_nomenclature_items_by_match_key
+        ON sheet_vitrina_v1_nomenclature_items(is_active, match_key);
         """
     )
     _ensure_column(

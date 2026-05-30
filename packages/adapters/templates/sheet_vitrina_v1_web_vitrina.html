@@ -124,6 +124,14 @@
       background: #ffffff;
     }
 
+    .shell-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
     .unified-tab-panel[hidden] {
       display: none;
     }
@@ -3819,7 +3827,10 @@
         <button class="unified-tab-button" type="button" data-unified-tab-button="feedbacks" role="tab" aria-selected="false">Отзывы</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="research" role="tab" aria-selected="false">Исследования</button>
       </nav>
-      <a class="shell-logout-link" data-logout-link href="/logout">Выйти</a>
+      <div class="shell-actions">
+        <a class="shell-logout-link" data-settings-link href="/sheet-vitrina-v1/settings">Настройки</a>
+        <a class="shell-logout-link" data-logout-link href="/logout">Выйти</a>
+      </div>
     </header>
 
     <section class="unified-tab-panel" data-unified-tab-panel="vitrina">

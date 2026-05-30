@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>От поставщика</title>
+  <title>Реестр заказов</title>
   <style>
     :root {
       color-scheme: dark;
@@ -60,6 +60,7 @@
       gap: 6px;
     }
     button.primary { background: linear-gradient(135deg, #7c3aed, #2563eb); border-color: transparent; }
+    button.danger, .button-link.danger { border-color: rgba(251, 113, 133, 0.55); color: var(--danger); }
     button:disabled { cursor: not-allowed; opacity: 0.48; }
     .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
     .message { min-height: 20px; margin: 0; font-size: 13px; }
@@ -127,18 +128,18 @@
     <div class="shell">
       <section class="topbar">
         <div>
-          <h1>От поставщика</h1>
-          <p class="message">Реестр invoice-поставок хранится server-side в runtime WebCore.</p>
+          <h1>Реестр заказов</h1>
+          <p class="message">Invoice-заказы поставщиков, сохранённые в WebCore</p>
         </div>
         <div class="toolbar">
-          <button id="addShipmentButton" class="primary" type="button">Добавить поставку</button>
+          <button id="addShipmentButton" class="primary" type="button">Добавить заказ</button>
           <a id="logoutLink" class="button-link" href="/logout">Выйти</a>
         </div>
       </section>
 
       <section class="block" aria-labelledby="registryTitle">
         <div class="card-head">
-          <h2 id="registryTitle">Реестр поставок</h2>
+          <h2 id="registryTitle">Реестр заказов</h2>
           <p id="registryMessage" class="message">Читаем реестр...</p>
         </div>
         <div class="registry-wrap">
@@ -157,10 +158,11 @@
                 <th>Статус матчинга</th>
                 <th>Дата загрузки</th>
                 <th>Файл / скачать</th>
+                <th>Действия</th>
               </tr>
             </thead>
             <tbody id="shipmentRows">
-              <tr><td colspan="12">Реестр пока пуст.</td></tr>
+              <tr><td colspan="13">Реестр пока пуст.</td></tr>
             </tbody>
           </table>
         </div>
@@ -169,13 +171,15 @@
       <section id="shipmentCard" class="block" hidden>
         <div class="card-head">
           <div>
-            <h2 id="cardTitle">Новая поставка</h2>
+            <h2 id="cardTitle">Новый заказ</h2>
             <p id="cardMessage" class="message"></p>
           </div>
           <div class="toolbar">
             <span id="matchStatusBadge" class="badge">-</span>
             <a id="invoiceDownloadLink" class="button-link" href="#" hidden>Скачать invoice</a>
+            <button id="rematchShipmentButton" type="button" hidden>Пересопоставить</button>
             <button id="saveShipmentButton" class="primary" type="button" disabled>Сохранить</button>
+            <button id="closeShipmentButton" type="button">Закрыть</button>
           </div>
         </div>
 
@@ -232,19 +236,17 @@
           <table>
             <thead>
               <tr>
-                <th>line no</th>
-                <th>тип товара</th>
-                <th>model raw</th>
-                <th>normalized model</th>
-                <th>match key</th>
-                <th>наш SKU</th>
-                <th>nmId</th>
-                <th>номенклатура</th>
-                <th>qty</th>
-                <th>unit price</th>
-                <th>amount</th>
-                <th>comment</th>
-                <th>match status</th>
+                <th>Тип товара</th>
+                <th>Модель из invoice</th>
+                <th>Нормализованная модель</th>
+                <th>Match key</th>
+                <th>Наш SKU / nmId</th>
+                <th>Номенклатура</th>
+                <th>Кол-во</th>
+                <th>Цена</th>
+                <th>Сумма</th>
+                <th>Комментарий</th>
+                <th>Match status</th>
               </tr>
             </thead>
             <tbody id="productLines"></tbody>
@@ -286,6 +288,8 @@
       const shipmentDateField = document.getElementById("shipmentDateField");
       const shipmentDateInput = document.getElementById("shipmentDateInput");
       const saveShipmentButton = document.getElementById("saveShipmentButton");
+      const closeShipmentButton = document.getElementById("closeShipmentButton");
+      const rematchShipmentButton = document.getElementById("rematchShipmentButton");
       const cardTitle = document.getElementById("cardTitle");
       const cardMessage = document.getElementById("cardMessage");
       const matchStatusBadge = document.getElementById("matchStatusBadge");
@@ -303,12 +307,18 @@
       let currentShipment = null;
       let currentUploadId = "";
       let isNewShipment = false;
+      let cardDirty = false;
 
       const statusLabels = {
         all_matched: "Всё сопоставлено",
         has_unmatched: "Есть несопоставленные строки",
         manual_override: "Есть ручные правки",
         checksum_error: "Ошибка контрольных сумм"
+      };
+      const lineStatusLabels = {
+        matched: "OK / Сопоставлено",
+        unmatched: "Не сопоставлено",
+        extra: "Прочая позиция"
       };
 
       function escapeHtml(value) {
@@ -370,7 +380,7 @@
 
       function renderRegistry(rows) {
         if (!rows.length) {
-          shipmentRows.innerHTML = '<tr><td colspan="12">Реестр пока пуст.</td></tr>';
+          shipmentRows.innerHTML = '<tr><td colspan="13">Реестр пока пуст.</td></tr>';
           return;
         }
         shipmentRows.innerHTML = rows.map((row) => {
@@ -389,16 +399,23 @@
             '<td>' + escapeHtml(status) + '</td>',
             '<td>' + escapeHtml(row.created_at || "-") + '</td>',
             '<td><a class="button-link" href="' + escapeHtml(row.invoice_download_path || "#") + '" data-download>Скачать</a></td>',
+            '<td><button class="danger" type="button" data-delete-shipment="' + escapeHtml(row.shipment_id) + '">Удалить</button></td>',
             '</tr>'
           ].join("");
         }).join("");
         Array.from(shipmentRows.querySelectorAll("tr[data-row]")).forEach((row) => {
           row.addEventListener("click", (event) => {
-            if (event.target && event.target.closest("[data-download]")) {
+            if (event.target && event.target.closest("[data-download], [data-delete-shipment]")) {
               event.stopPropagation();
               return;
             }
             openShipment(row.dataset.row);
+          });
+        });
+        Array.from(shipmentRows.querySelectorAll("[data-delete-shipment]")).forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.stopPropagation();
+            deleteShipment(button.dataset.deleteShipment);
           });
         });
       }
@@ -428,6 +445,7 @@
         currentShipment = blankShipment();
         currentUploadId = "";
         isNewShipment = true;
+        cardDirty = false;
         renderCard();
         shipmentCard.hidden = false;
         shipmentCard.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -440,6 +458,7 @@
           });
           currentUploadId = "";
           isNewShipment = false;
+          cardDirty = false;
           renderCard();
           shipmentCard.hidden = false;
           shipmentCard.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -471,6 +490,7 @@
           };
           isNewShipment = true;
           renderCard();
+          cardDirty = true;
           setMessage(cardMessage, "Invoice распознан. Проверьте строки и заполните дату отгрузки.", "success");
         } catch (error) {
           setMessage(cardMessage, error.message, "error");
@@ -481,7 +501,7 @@
       function renderCard() {
         const shipment = currentShipment || blankShipment();
         const metadata = shipment.metadata || {};
-        cardTitle.textContent = shipment.shipment_id ? "Поставка " + shipment.shipment_id : "Новая поставка";
+        cardTitle.textContent = shipment.shipment_id ? "Заказ " + shipment.shipment_id : "Новый заказ";
         shipmentDateInput.value = shipment.shipment_date || "";
         metaInputs.forEach((input) => {
           input.value = metadata[input.dataset.metaField] ?? "";
@@ -489,6 +509,7 @@
         uploadPanel.hidden = !isNewShipment;
         invoiceDownloadLink.hidden = !shipment.invoice_download_path;
         invoiceDownloadLink.href = shipment.invoice_download_path || "#";
+        rematchShipmentButton.hidden = isNewShipment || !shipment.shipment_id;
         renderLineTables(shipment.lines || []);
         updateTotalsAndState();
       }
@@ -496,10 +517,11 @@
       function renderLineTables(lines) {
         const products = lines.filter((line) => line.line_type !== "extra");
         const extras = lines.filter((line) => line.line_type === "extra");
-        productLines.innerHTML = products.length ? products.map(renderProductLine).join("") : '<tr><td colspan="13">Товарные строки не распознаны.</td></tr>';
+        productLines.innerHTML = products.length ? products.map(renderProductLine).join("") : '<tr><td colspan="11">Товарные строки не распознаны.</td></tr>';
         extraLines.innerHTML = extras.length ? extras.map(renderExtraLine).join("") : '<tr><td colspan="6">Прочие позиции не распознаны.</td></tr>';
         Array.from(shipmentCard.querySelectorAll("[data-line-field]")).forEach((input) => {
           input.addEventListener("input", () => {
+            cardDirty = true;
             const row = input.closest("tr[data-line-kind]");
             if (row) {
               row.dataset.dirty = "1";
@@ -513,19 +535,17 @@
       function renderProductLine(line, index) {
         return [
           '<tr data-line-kind="product" data-line-index="' + index + '">',
-          '<td><input class="line-input small" data-line-field="source_no" value="' + escapeHtml(line.source_no || "") + '"></td>',
           '<td><select class="line-input" data-line-field="product_type">' + productTypeOptions(line.product_type) + '</select></td>',
           '<td><input class="line-input wide" data-line-field="model_raw" value="' + escapeHtml(line.model_raw || "") + '"></td>',
           '<td><input class="line-input wide" data-line-field="model_normalized" value="' + escapeHtml(line.model_normalized || "") + '"></td>',
           '<td><input class="line-input wide" data-line-field="match_key" value="' + escapeHtml(line.match_key || "") + '"></td>',
-          '<td><input class="line-input" data-line-field="internal_sku" value="' + escapeHtml(line.internal_sku || "") + '"></td>',
-          '<td><input class="line-input small" data-line-field="internal_nm_id" value="' + escapeHtml(line.internal_nm_id || "") + '"></td>',
+          '<td><input class="line-input" data-line-field="internal_sku" aria-label="Наш SKU" value="' + escapeHtml(line.internal_sku || "") + '"><input class="line-input small" data-line-field="internal_nm_id" aria-label="nmId" value="' + escapeHtml(line.internal_nm_id || "") + '"></td>',
           '<td><input class="line-input wide" data-line-field="internal_name" value="' + escapeHtml(line.internal_name || "") + '"></td>',
           '<td><input class="line-input small" data-line-field="qty" value="' + escapeHtml(line.qty ?? "") + '"></td>',
           '<td><input class="line-input small" data-line-field="unit_price" value="' + escapeHtml(line.unit_price ?? "") + '"></td>',
           '<td><input class="line-input small" data-line-field="amount" value="' + escapeHtml(line.amount ?? "") + '"></td>',
           '<td><input class="line-input wide" data-line-field="comment" value="' + escapeHtml(line.comment || "") + '"></td>',
-          '<td><select class="line-input" data-line-field="match_status">' + matchStatusOptions(line.match_status) + '</select></td>',
+          '<td><span class="badge ' + (line.manual_override ? "warning" : line.match_status === "matched" ? "success" : "warning") + '" data-match-status>' + escapeHtml(line.manual_override ? "Ручная правка" : (lineStatusLabels[line.match_status] || line.match_status || "Не сопоставлено")) + '</span></td>',
           '</tr>'
         ].join("");
       }
@@ -546,12 +566,6 @@
       function productTypeOptions(value) {
         return ["clear", "anti_spy", "matte", ""].map((item) => (
           '<option value="' + item + '"' + (item === value ? " selected" : "") + '>' + (item || "-") + '</option>'
-        )).join("");
-      }
-
-      function matchStatusOptions(value) {
-        return ["matched", "unmatched"].map((item) => (
-          '<option value="' + item + '"' + (item === value ? " selected" : "") + '>' + item + '</option>'
         )).join("");
       }
 
@@ -585,6 +599,8 @@
         });
         if (lineType === "extra") {
           line.match_status = "extra";
+        } else if (row.dataset.dirty === "1") {
+          line.match_status = (line.internal_sku || line.internal_nm_id || line.internal_name) ? "matched" : "unmatched";
         }
         return line;
       }
@@ -670,18 +686,91 @@
             });
           }
           renderCard();
+          cardDirty = false;
           await loadRegistry();
-          setMessage(cardMessage, "Поставка сохранена.", "success");
+          setMessage(cardMessage, "Заказ сохранён.", "success");
         } catch (error) {
           setMessage(cardMessage, error.message, "error");
           updateTotalsAndState();
         }
       }
 
+      async function rematchCurrentShipment() {
+        if (!currentShipment || !currentShipment.shipment_id || isNewShipment) {
+          return;
+        }
+        if (cardDirty && !confirm("В карточке есть несохранённые изменения. Пересопоставить без их сохранения?")) {
+          return;
+        }
+        rematchShipmentButton.disabled = true;
+        setMessage(cardMessage, "Пересопоставляем по справочнику...", "");
+        try {
+          currentShipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(currentShipment.shipment_id) + "/rematch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify({ overwrite_manual: false })
+          });
+          cardDirty = false;
+          renderCard();
+          await loadRegistry();
+          setMessage(cardMessage, "Справочник применён к заказу.", "success");
+        } catch (error) {
+          setMessage(cardMessage, error.message, "error");
+        } finally {
+          rematchShipmentButton.disabled = false;
+        }
+      }
+
+      function closeCard() {
+        if ((cardDirty || (isNewShipment && currentUploadId)) && !confirm("Закрыть карточку без сохранения изменений?")) {
+          return;
+        }
+        shipmentCard.hidden = true;
+        currentShipment = null;
+        currentUploadId = "";
+        isNewShipment = false;
+        cardDirty = false;
+        setMessage(cardMessage, "", "");
+      }
+
+      async function deleteShipment(shipmentId) {
+        if (!shipmentId || !confirm("Удалить заказ из реестра?")) {
+          return;
+        }
+        setMessage(registryMessage, "Удаляем заказ...", "");
+        try {
+          await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), { method: "DELETE", headers: { Accept: "application/json" } });
+          if (currentShipment && currentShipment.shipment_id === shipmentId) {
+            closeCardWithoutConfirm();
+          }
+          await loadRegistry();
+          setMessage(registryMessage, "Заказ удалён.", "success");
+        } catch (error) {
+          setMessage(registryMessage, error.message, "error");
+        }
+      }
+
+      function closeCardWithoutConfirm() {
+        shipmentCard.hidden = true;
+        currentShipment = null;
+        currentUploadId = "";
+        isNewShipment = false;
+        cardDirty = false;
+        setMessage(cardMessage, "", "");
+      }
+
       addShipmentButton.addEventListener("click", openNewShipment);
       saveShipmentButton.addEventListener("click", saveCurrentShipment);
-      shipmentDateInput.addEventListener("input", updateTotalsAndState);
-      metaInputs.forEach((input) => input.addEventListener("input", updateTotalsAndState));
+      closeShipmentButton.addEventListener("click", closeCard);
+      rematchShipmentButton.addEventListener("click", rematchCurrentShipment);
+      shipmentDateInput.addEventListener("input", () => {
+        cardDirty = true;
+        updateTotalsAndState();
+      });
+      metaInputs.forEach((input) => input.addEventListener("input", () => {
+        cardDirty = true;
+        updateTotalsAndState();
+      }));
       invoiceFileInput.addEventListener("change", () => parseFile(invoiceFileInput.files[0]));
       uploadPanel.addEventListener("dragover", (event) => {
         event.preventDefault();

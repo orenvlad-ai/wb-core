@@ -17,10 +17,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_SETTINGS_UI_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_SUPPLIER_UI_PATH,
+    DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
     DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
     DEFAULT_UPLOAD_PATH,
     build_registry_upload_http_server,
@@ -60,14 +62,29 @@ def main() -> None:
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch()
                 page = browser.new_page(viewport={"width": 1440, "height": 1000})
-                page.goto(f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}?embedded_tab=factory-order", wait_until="domcontentloaded")
-                expect(page.get_by_role("button", name="Расчёты")).to_be_visible()
-                expect(page.get_by_role("button", name="От поставщика")).to_be_visible()
-                page.get_by_role("button", name="От поставщика").click()
-                frame = page.frame_locator("iframe[title='От поставщика']")
-                expect(frame.get_by_text("Реестр поставок")).to_be_visible()
-                expect(frame.get_by_role("button", name="Добавить поставку")).to_be_visible()
-                frame.get_by_role("button", name="Добавить поставку").click()
+                settings_page = browser.new_page(viewport={"width": 1280, "height": 900})
+                settings_page.goto(f"{base_url}{DEFAULT_SETTINGS_UI_PATH}", wait_until="domcontentloaded")
+                expect(settings_page.get_by_text("Справочник номенклатуры")).to_be_visible()
+                settings_page.get_by_role("button", name="Добавить строку").click()
+                draft_row = settings_page.locator("#nomenclatureRows tr").first
+                draft_row.locator("[data-field='our_sku']").fill("SKU-CLEAR-14P")
+                draft_row.locator("[data-field='nm_id']").fill("210183919")
+                draft_row.locator("[data-field='nomenclature_name']").fill("Clear iPhone 14 Pro")
+                draft_row.locator("[data-field='match_key']").fill("clear|iphone_14_pro")
+                draft_row.locator("[data-save-item]").click()
+                expect(settings_page.locator("#nomenclatureMessage")).to_contain_text("Справочник сохранён.", timeout=5000)
+                page.goto(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}", wait_until="domcontentloaded")
+                expect(page.get_by_role("link", name="Настройки")).to_be_visible()
+                page.locator("[data-unified-tab-button='factory-order']").click()
+                operator_frame = page.frame_locator("iframe[title='Поставки']")
+                expect(operator_frame.get_by_role("button", name="Расчёты")).to_be_visible()
+                expect(operator_frame.get_by_role("button", name="От поставщика")).to_be_visible()
+                operator_frame.get_by_role("button", name="От поставщика").click()
+                frame = operator_frame.frame_locator("iframe[title='От поставщика']")
+                expect(frame.locator("h1", has_text="Реестр заказов")).to_be_visible()
+                expect(frame.get_by_text("Реестр поставок")).to_have_count(0)
+                expect(frame.get_by_role("button", name="Добавить заказ")).to_be_visible()
+                frame.get_by_role("button", name="Добавить заказ").click()
                 expect(frame.get_by_label("Дата отгрузки / Shipment date")).to_be_visible()
                 expect(frame.get_by_role("button", name="Сохранить")).to_be_disabled()
                 parse_url = f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH}"
@@ -85,18 +102,28 @@ def main() -> None:
                 page.unroute(parse_url)
                 frame.locator("#invoiceFileInput").set_input_files(str(invoice_path))
                 expect(frame.locator("#productLines input[data-line-field='model_raw']").first).to_be_visible()
+                expect(frame.locator("#productLines input[data-line-field='internal_nm_id']").first).to_have_value("210183919")
+                expect(frame.locator("#productLines").get_by_text("OK / Сопоставлено")).to_be_visible()
+                expect(frame.locator("select[data-line-field='match_status']")).to_have_count(0)
                 frame.get_by_label("Дата отгрузки / Shipment date").fill("2026-05-14")
                 expect(frame.get_by_role("button", name="Сохранить")).to_be_enabled()
                 frame.get_by_role("button", name="Сохранить").click()
-                expect(frame.get_by_text("Поставка сохранена.")).to_be_visible(timeout=5000)
+                expect(frame.get_by_text("Заказ сохранён.")).to_be_visible(timeout=5000)
                 expect(frame.locator("#shipmentRows").get_by_text("26GN390")).to_be_visible()
                 frame.locator("#shipmentRows tr[data-row]").first.click()
                 expect(frame.get_by_role("link", name="Скачать invoice")).to_be_visible()
+                expect(frame.get_by_role("button", name="Пересопоставить")).to_be_visible()
+                frame.get_by_role("button", name="Закрыть").click()
+                expect(frame.locator("#shipmentCard")).to_be_hidden()
 
                 supplier_page = browser.new_page(viewport={"width": 1280, "height": 900})
                 supplier_page.goto(f"{base_url}{DEFAULT_SHEET_SUPPLIER_UI_PATH}", wait_until="domcontentloaded")
-                expect(supplier_page.get_by_text("Реестр поставок")).to_be_visible()
+                expect(supplier_page.locator("h1", has_text="Реестр заказов")).to_be_visible()
                 expect(supplier_page.get_by_text("26GN390")).to_be_visible()
+                page.once("dialog", lambda dialog: dialog.accept())
+                frame.locator("[data-delete-shipment]").first.click()
+                expect(frame.locator("#registryMessage")).to_contain_text("Заказ удалён.", timeout=5000)
+                expect(frame.locator("#shipmentRows")).not_to_contain_text("26GN390")
                 browser.close()
         finally:
             server.shutdown()
