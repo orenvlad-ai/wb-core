@@ -252,9 +252,27 @@
       "methods": ["GET", "POST"]
     },
     {
+      "name": "sheet_vitrina_supply_supplier_shipments_list",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/supply/supplier-shipments",
+      "methods": ["GET", "POST"]
+    },
+    {
+      "name": "sheet_vitrina_supply_supplier_shipments",
+      "match": "prefix",
+      "path": "/v1/sheet-vitrina-v1/supply/supplier-shipments/",
+      "methods": ["GET", "POST", "PATCH"]
+    },
+    {
       "name": "sheet_vitrina_operator_page",
       "match": "exact",
       "path": "/sheet-vitrina-v1/operator",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_supplier_page",
+      "match": "exact",
+      "path": "/sheet-vitrina-v1/supplier",
       "methods": ["GET"]
     },
     {

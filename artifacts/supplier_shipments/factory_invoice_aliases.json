@@ -1,0 +1,5 @@
+{
+  "schema": "factory_invoice_aliases.v1",
+  "description": "Repo-owned seed config for deterministic supplier invoice aliases. Keep entries inactive or empty unless the SKU/nmId mapping is verified.",
+  "aliases": []
+}

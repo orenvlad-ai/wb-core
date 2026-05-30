@@ -1,0 +1,683 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>От поставщика</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f1117;
+      --panel: #171923;
+      --panel-2: #1e2230;
+      --control: #10131b;
+      --border: rgba(177, 139, 255, 0.22);
+      --text: #f2f4ff;
+      --muted: #aab0c5;
+      --accent: #a78bfa;
+      --accent-2: #38bdf8;
+      --danger: #fb7185;
+      --success: #34d399;
+      --warning: #fbbf24;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    main { padding: 24px; }
+    .shell { max-width: 1440px; margin: 0 auto; display: grid; gap: 18px; }
+    .topbar, .block {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 18px;
+      box-shadow: 0 16px 48px rgba(0, 0, 0, 0.22);
+    }
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+    h1, h2, h3 { margin: 0; letter-spacing: 0; }
+    h1 { font-size: 26px; }
+    h2 { font-size: 18px; }
+    h3 { font-size: 15px; }
+    p { color: var(--muted); }
+    button, .button-link {
+      min-height: 38px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 8px 13px;
+      color: var(--text);
+      background: var(--panel-2);
+      font: inherit;
+      font-weight: 800;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+    button.primary { background: linear-gradient(135deg, #7c3aed, #2563eb); border-color: transparent; }
+    button:disabled { cursor: not-allowed; opacity: 0.48; }
+    .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .message { min-height: 20px; margin: 0; font-size: 13px; }
+    .message.error { color: var(--danger); }
+    .message.success { color: var(--success); }
+    .registry-wrap, .line-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; min-width: 980px; }
+    th, td { padding: 10px; border-bottom: 1px solid rgba(177, 139, 255, 0.14); text-align: left; vertical-align: top; }
+    th { position: sticky; top: 0; background: #171923; color: var(--muted); font-size: 12px; text-transform: uppercase; z-index: 1; }
+    tr[data-row] { cursor: pointer; }
+    tr[data-row]:hover td { background: rgba(167, 139, 250, 0.08); }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 12px; }
+    .field { display: grid; gap: 6px; }
+    label { color: var(--muted); font-size: 12px; font-weight: 900; }
+    input, select, textarea {
+      width: 100%;
+      min-height: 36px;
+      border: 1px solid rgba(177, 139, 255, 0.28);
+      border-radius: 6px;
+      padding: 8px 9px;
+      background: var(--control);
+      color: var(--text);
+      font: inherit;
+    }
+    textarea { min-height: 70px; resize: vertical; }
+    .required-missing input {
+      border-color: var(--warning);
+      box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.14);
+    }
+    .dropzone {
+      display: grid;
+      gap: 10px;
+      place-items: center;
+      min-height: 128px;
+      border: 1px dashed rgba(167, 139, 250, 0.65);
+      border-radius: 8px;
+      background: rgba(167, 139, 250, 0.07);
+      padding: 18px;
+      text-align: center;
+    }
+    .dropzone.is-dragover { background: rgba(56, 189, 248, 0.12); border-color: var(--accent-2); }
+    .card-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+    .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 10px; font-size: 12px; font-weight: 900; background: rgba(167, 139, 250, 0.14); color: var(--accent); }
+    .badge.success { background: rgba(52, 211, 153, 0.12); color: var(--success); }
+    .badge.warning { background: rgba(251, 191, 36, 0.14); color: var(--warning); }
+    .badge.error { background: rgba(251, 113, 133, 0.14); color: var(--danger); }
+    .totals { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 10px; }
+    .total { background: var(--panel-2); border: 1px solid var(--border); border-radius: 7px; padding: 10px; }
+    .total span { display: block; color: var(--muted); font-size: 12px; }
+    .total strong { font-size: 18px; }
+    .line-input { min-width: 100px; }
+    .line-input.small { min-width: 72px; }
+    .line-input.wide { min-width: 180px; }
+    [hidden] { display: none !important; }
+    @media (max-width: 760px) {
+      main { padding: 16px; }
+      .grid, .totals { grid-template-columns: 1fr; }
+      .topbar { align-items: stretch; }
+      button, .button-link { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="shell">
+      <section class="topbar">
+        <div>
+          <h1>От поставщика</h1>
+          <p class="message">Реестр invoice-поставок хранится server-side в runtime WebCore.</p>
+        </div>
+        <div class="toolbar">
+          <button id="addShipmentButton" class="primary" type="button">Добавить поставку</button>
+          <a id="logoutLink" class="button-link" href="/logout">Выйти</a>
+        </div>
+      </section>
+
+      <section class="block" aria-labelledby="registryTitle">
+        <div class="card-head">
+          <h2 id="registryTitle">Реестр поставок</h2>
+          <p id="registryMessage" class="message">Читаем реестр...</p>
+        </div>
+        <div class="registry-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Дата отгрузки</th>
+                <th>Invoice No</th>
+                <th>Invoice Date</th>
+                <th>Поставщик</th>
+                <th>Кол-во товарных единиц</th>
+                <th>Сумма товаров</th>
+                <th>Прочие позиции</th>
+                <th>Итог invoice</th>
+                <th>Валюта</th>
+                <th>Статус матчинга</th>
+                <th>Дата загрузки</th>
+                <th>Файл / скачать</th>
+              </tr>
+            </thead>
+            <tbody id="shipmentRows">
+              <tr><td colspan="12">Реестр пока пуст.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="shipmentCard" class="block" hidden>
+        <div class="card-head">
+          <div>
+            <h2 id="cardTitle">Новая поставка</h2>
+            <p id="cardMessage" class="message"></p>
+          </div>
+          <div class="toolbar">
+            <span id="matchStatusBadge" class="badge">-</span>
+            <a id="invoiceDownloadLink" class="button-link" href="#" hidden>Скачать invoice</a>
+            <button id="saveShipmentButton" class="primary" type="button" disabled>Сохранить</button>
+          </div>
+        </div>
+
+        <div id="uploadPanel" class="dropzone">
+          <strong>Перетащите XLSX invoice сюда</strong>
+          <span>или выберите файл</span>
+          <input id="invoiceFileInput" type="file" accept=".xlsx">
+        </div>
+
+        <div class="grid" style="margin-top: 16px;">
+          <div id="shipmentDateField" class="field required-missing">
+            <label for="shipmentDateInput">Дата отгрузки / Shipment date</label>
+            <input id="shipmentDateInput" type="date" required>
+          </div>
+          <div class="field">
+            <label for="invoiceNoInput">Invoice No</label>
+            <input id="invoiceNoInput" data-meta-field="invoice_no">
+          </div>
+          <div class="field">
+            <label for="invoiceDateInput">Invoice Date</label>
+            <input id="invoiceDateInput" type="date" data-meta-field="invoice_date">
+          </div>
+          <div class="field">
+            <label for="currencyInput">Currency</label>
+            <input id="currencyInput" data-meta-field="currency">
+          </div>
+          <div class="field">
+            <label for="supplierInput">Supplier</label>
+            <input id="supplierInput" data-meta-field="supplier_name">
+          </div>
+          <div class="field">
+            <label for="customerInput">Customer</label>
+            <input id="customerInput" data-meta-field="customer_name">
+          </div>
+          <div class="field">
+            <label for="contractNoInput">Contract No</label>
+            <input id="contractNoInput" data-meta-field="contract_no">
+          </div>
+          <div class="field">
+            <label for="contractDateInput">Contract Date</label>
+            <input id="contractDateInput" type="date" data-meta-field="contract_date">
+          </div>
+        </div>
+
+        <div class="totals" style="margin-top: 16px;">
+          <div class="total"><span>Кол-во товарных единиц</span><strong id="totalQty">0</strong></div>
+          <div class="total"><span>Сумма товаров</span><strong id="totalProducts">0</strong></div>
+          <div class="total"><span>Прочие позиции</span><strong id="totalExtras">0</strong></div>
+          <div class="total"><span>Итог invoice</span><strong id="totalInvoice">0</strong></div>
+        </div>
+
+        <h3 style="margin-top: 18px;">Товарные строки</h3>
+        <div class="line-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>line no</th>
+                <th>тип товара</th>
+                <th>model raw</th>
+                <th>normalized model</th>
+                <th>match key</th>
+                <th>наш SKU</th>
+                <th>nmId</th>
+                <th>номенклатура</th>
+                <th>qty</th>
+                <th>unit price</th>
+                <th>amount</th>
+                <th>comment</th>
+                <th>match status</th>
+              </tr>
+            </thead>
+            <tbody id="productLines"></tbody>
+          </table>
+        </div>
+
+        <h3 style="margin-top: 18px;">Прочие invoice positions</h3>
+        <div class="line-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>line no</th>
+                <th>позиция</th>
+                <th>qty</th>
+                <th>unit price</th>
+                <th>amount</th>
+                <th>comment</th>
+              </tr>
+            </thead>
+            <tbody id="extraLines"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script id="sheet-vitrina-v1-supplier-config" type="application/json">__SHEET_VITRINA_V1_SUPPLIER_CONFIG_JSON__</script>
+  <script>
+    (() => {
+      const config = JSON.parse(document.getElementById("sheet-vitrina-v1-supplier-config").textContent);
+      const shipmentsPath = config.supplier_shipments_path;
+      const parsePath = config.supplier_shipments_parse_path;
+      const addShipmentButton = document.getElementById("addShipmentButton");
+      const registryMessage = document.getElementById("registryMessage");
+      const shipmentRows = document.getElementById("shipmentRows");
+      const shipmentCard = document.getElementById("shipmentCard");
+      const uploadPanel = document.getElementById("uploadPanel");
+      const invoiceFileInput = document.getElementById("invoiceFileInput");
+      const shipmentDateField = document.getElementById("shipmentDateField");
+      const shipmentDateInput = document.getElementById("shipmentDateInput");
+      const saveShipmentButton = document.getElementById("saveShipmentButton");
+      const cardTitle = document.getElementById("cardTitle");
+      const cardMessage = document.getElementById("cardMessage");
+      const matchStatusBadge = document.getElementById("matchStatusBadge");
+      const invoiceDownloadLink = document.getElementById("invoiceDownloadLink");
+      const productLines = document.getElementById("productLines");
+      const extraLines = document.getElementById("extraLines");
+      const totalQty = document.getElementById("totalQty");
+      const totalProducts = document.getElementById("totalProducts");
+      const totalExtras = document.getElementById("totalExtras");
+      const totalInvoice = document.getElementById("totalInvoice");
+      const logoutLink = document.getElementById("logoutLink");
+      const metaInputs = Array.from(document.querySelectorAll("[data-meta-field]"));
+      const numberFormatter = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 });
+
+      let currentShipment = null;
+      let currentUploadId = "";
+      let isNewShipment = false;
+
+      const statusLabels = {
+        all_matched: "Всё сопоставлено",
+        has_unmatched: "Есть несопоставленные строки",
+        manual_override: "Есть ручные правки",
+        checksum_error: "Ошибка контрольных сумм"
+      };
+
+      function escapeHtml(value) {
+        return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#039;"
+        }[char]));
+      }
+
+      function formatNumber(value) {
+        const number = Number(value);
+        return Number.isFinite(number) ? numberFormatter.format(number) : "-";
+      }
+
+      function setMessage(element, text, tone) {
+        element.textContent = text || "";
+        element.className = "message" + (tone ? " " + tone : "");
+      }
+
+      async function fetchJson(url, options) {
+        const response = await fetch(url, options || {});
+        const text = await response.text();
+        const payload = text ? JSON.parse(text) : {};
+        if (!response.ok) {
+          throw new Error(payload.error || ("HTTP " + response.status));
+        }
+        return payload;
+      }
+
+      async function loadRegistry() {
+        setMessage(registryMessage, "Читаем реестр...", "");
+        try {
+          const payload = await fetchJson(shipmentsPath, { headers: { Accept: "application/json" } });
+          renderRegistry(Array.isArray(payload.shipments) ? payload.shipments : []);
+          setMessage(registryMessage, "", "");
+        } catch (error) {
+          setMessage(registryMessage, error.message, "error");
+        }
+      }
+
+      function renderRegistry(rows) {
+        if (!rows.length) {
+          shipmentRows.innerHTML = '<tr><td colspan="12">Реестр пока пуст.</td></tr>';
+          return;
+        }
+        shipmentRows.innerHTML = rows.map((row) => {
+          const status = statusLabels[row.match_status] || row.match_status || "-";
+          return [
+            '<tr data-row="' + escapeHtml(row.shipment_id) + '">',
+            '<td>' + escapeHtml(row.shipment_date || "-") + '</td>',
+            '<td>' + escapeHtml(row.invoice_no || "-") + '</td>',
+            '<td>' + escapeHtml(row.invoice_date || "-") + '</td>',
+            '<td>' + escapeHtml(row.supplier_name || "-") + '</td>',
+            '<td>' + escapeHtml(formatNumber(row.product_qty_total)) + '</td>',
+            '<td>' + escapeHtml(formatNumber(row.product_amount_total)) + '</td>',
+            '<td>' + escapeHtml(formatNumber(row.extras_amount_total)) + '</td>',
+            '<td>' + escapeHtml(formatNumber(row.invoice_amount_total)) + '</td>',
+            '<td>' + escapeHtml(row.currency || "-") + '</td>',
+            '<td>' + escapeHtml(status) + '</td>',
+            '<td>' + escapeHtml(row.created_at || "-") + '</td>',
+            '<td><a class="button-link" href="' + escapeHtml(row.invoice_download_path || "#") + '" data-download>Скачать</a></td>',
+            '</tr>'
+          ].join("");
+        }).join("");
+        Array.from(shipmentRows.querySelectorAll("tr[data-row]")).forEach((row) => {
+          row.addEventListener("click", (event) => {
+            if (event.target && event.target.closest("[data-download]")) {
+              event.stopPropagation();
+              return;
+            }
+            openShipment(row.dataset.row);
+          });
+        });
+      }
+
+      function blankShipment() {
+        return {
+          shipment_id: "",
+          shipment_date: "",
+          metadata: {
+            invoice_no: "",
+            invoice_date: "",
+            contract_no: "",
+            contract_date: "",
+            supplier_name: "",
+            customer_name: "",
+            currency: "",
+            declared_invoice_total: null
+          },
+          lines: [],
+          warnings: [],
+          errors: [],
+          match_status: "has_unmatched"
+        };
+      }
+
+      function openNewShipment() {
+        currentShipment = blankShipment();
+        currentUploadId = "";
+        isNewShipment = true;
+        renderCard();
+        shipmentCard.hidden = false;
+        shipmentCard.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+
+      async function openShipment(shipmentId) {
+        try {
+          currentShipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
+            headers: { Accept: "application/json" }
+          });
+          currentUploadId = "";
+          isNewShipment = false;
+          renderCard();
+          shipmentCard.hidden = false;
+          shipmentCard.scrollIntoView({ behavior: "smooth", block: "start" });
+        } catch (error) {
+          setMessage(registryMessage, error.message, "error");
+        }
+      }
+
+      async function parseFile(file) {
+        if (!file) {
+          return;
+        }
+        if (!file.name.toLowerCase().endsWith(".xlsx")) {
+          setMessage(cardMessage, "Загрузите XLSX invoice.", "error");
+          return;
+        }
+        setMessage(cardMessage, "Парсим invoice...", "");
+        const formData = new FormData();
+        formData.append("file", file, file.name);
+        try {
+          const payload = await fetchJson(parsePath, { method: "POST", body: formData });
+          currentUploadId = payload.upload_id || "";
+          currentShipment = {
+            ...blankShipment(),
+            ...payload,
+            shipment_date: shipmentDateInput.value || "",
+            metadata: payload.metadata || {},
+            lines: Array.isArray(payload.lines) ? payload.lines : []
+          };
+          isNewShipment = true;
+          renderCard();
+          setMessage(cardMessage, "Invoice распознан. Проверьте строки и заполните дату отгрузки.", "success");
+        } catch (error) {
+          setMessage(cardMessage, error.message, "error");
+        }
+      }
+
+      function renderCard() {
+        const shipment = currentShipment || blankShipment();
+        const metadata = shipment.metadata || {};
+        cardTitle.textContent = shipment.shipment_id ? "Поставка " + shipment.shipment_id : "Новая поставка";
+        shipmentDateInput.value = shipment.shipment_date || "";
+        metaInputs.forEach((input) => {
+          input.value = metadata[input.dataset.metaField] ?? "";
+        });
+        uploadPanel.hidden = !isNewShipment;
+        invoiceDownloadLink.hidden = !shipment.invoice_download_path;
+        invoiceDownloadLink.href = shipment.invoice_download_path || "#";
+        renderLineTables(shipment.lines || []);
+        updateTotalsAndState();
+      }
+
+      function renderLineTables(lines) {
+        const products = lines.filter((line) => line.line_type !== "extra");
+        const extras = lines.filter((line) => line.line_type === "extra");
+        productLines.innerHTML = products.length ? products.map(renderProductLine).join("") : '<tr><td colspan="13">Товарные строки не распознаны.</td></tr>';
+        extraLines.innerHTML = extras.length ? extras.map(renderExtraLine).join("") : '<tr><td colspan="6">Прочие позиции не распознаны.</td></tr>';
+        Array.from(shipmentCard.querySelectorAll("[data-line-field]")).forEach((input) => {
+          input.addEventListener("input", () => {
+            const row = input.closest("tr[data-line-kind]");
+            if (row) {
+              row.dataset.dirty = "1";
+            }
+            syncLinesFromInputs();
+            updateTotalsAndState();
+          });
+        });
+      }
+
+      function renderProductLine(line, index) {
+        return [
+          '<tr data-line-kind="product" data-line-index="' + index + '">',
+          '<td><input class="line-input small" data-line-field="source_no" value="' + escapeHtml(line.source_no || "") + '"></td>',
+          '<td><select class="line-input" data-line-field="product_type">' + productTypeOptions(line.product_type) + '</select></td>',
+          '<td><input class="line-input wide" data-line-field="model_raw" value="' + escapeHtml(line.model_raw || "") + '"></td>',
+          '<td><input class="line-input wide" data-line-field="model_normalized" value="' + escapeHtml(line.model_normalized || "") + '"></td>',
+          '<td><input class="line-input wide" data-line-field="match_key" value="' + escapeHtml(line.match_key || "") + '"></td>',
+          '<td><input class="line-input" data-line-field="internal_sku" value="' + escapeHtml(line.internal_sku || "") + '"></td>',
+          '<td><input class="line-input small" data-line-field="internal_nm_id" value="' + escapeHtml(line.internal_nm_id || "") + '"></td>',
+          '<td><input class="line-input wide" data-line-field="internal_name" value="' + escapeHtml(line.internal_name || "") + '"></td>',
+          '<td><input class="line-input small" data-line-field="qty" value="' + escapeHtml(line.qty ?? "") + '"></td>',
+          '<td><input class="line-input small" data-line-field="unit_price" value="' + escapeHtml(line.unit_price ?? "") + '"></td>',
+          '<td><input class="line-input small" data-line-field="amount" value="' + escapeHtml(line.amount ?? "") + '"></td>',
+          '<td><input class="line-input wide" data-line-field="comment" value="' + escapeHtml(line.comment || "") + '"></td>',
+          '<td><select class="line-input" data-line-field="match_status">' + matchStatusOptions(line.match_status) + '</select></td>',
+          '</tr>'
+        ].join("");
+      }
+
+      function renderExtraLine(line, index) {
+        return [
+          '<tr data-line-kind="extra" data-line-index="' + index + '">',
+          '<td><input class="line-input small" data-line-field="source_no" value="' + escapeHtml(line.source_no || "") + '"></td>',
+          '<td><input class="line-input wide" data-line-field="model_raw" value="' + escapeHtml(line.model_raw || "") + '"></td>',
+          '<td><input class="line-input small" data-line-field="qty" value="' + escapeHtml(line.qty ?? "") + '"></td>',
+          '<td><input class="line-input small" data-line-field="unit_price" value="' + escapeHtml(line.unit_price ?? "") + '"></td>',
+          '<td><input class="line-input small" data-line-field="amount" value="' + escapeHtml(line.amount ?? "") + '"></td>',
+          '<td><input class="line-input wide" data-line-field="comment" value="' + escapeHtml(line.comment || "") + '"></td>',
+          '</tr>'
+        ].join("");
+      }
+
+      function productTypeOptions(value) {
+        return ["clear", "anti_spy", "matte", ""].map((item) => (
+          '<option value="' + item + '"' + (item === value ? " selected" : "") + '>' + (item || "-") + '</option>'
+        )).join("");
+      }
+
+      function matchStatusOptions(value) {
+        return ["matched", "unmatched"].map((item) => (
+          '<option value="' + item + '"' + (item === value ? " selected" : "") + '>' + item + '</option>'
+        )).join("");
+      }
+
+      function syncLinesFromInputs() {
+        if (!currentShipment) {
+          return;
+        }
+        const existingProducts = (currentShipment.lines || []).filter((line) => line.line_type !== "extra");
+        const existingExtras = (currentShipment.lines || []).filter((line) => line.line_type === "extra");
+        const nextLines = [];
+        Array.from(productLines.querySelectorAll("tr[data-line-kind='product']")).forEach((row) => {
+          const source = existingProducts[Number(row.dataset.lineIndex)] || {};
+          nextLines.push(readLineRow(row, source, "product"));
+        });
+        Array.from(extraLines.querySelectorAll("tr[data-line-kind='extra']")).forEach((row) => {
+          const source = existingExtras[Number(row.dataset.lineIndex)] || {};
+          nextLines.push(readLineRow(row, source, "extra"));
+        });
+        currentShipment.lines = nextLines;
+      }
+
+      function readLineRow(row, source, lineType) {
+        const line = {
+          ...source,
+          line_type: lineType,
+          manual_override: Boolean(source.manual_override) || row.dataset.dirty === "1"
+        };
+        Array.from(row.querySelectorAll("[data-line-field]")).forEach((input) => {
+          const key = input.dataset.lineField;
+          line[key] = input.value;
+        });
+        if (lineType === "extra") {
+          line.match_status = "extra";
+        }
+        return line;
+      }
+
+      function readCurrentPayload() {
+        syncLinesFromInputs();
+        const metadata = {};
+        metaInputs.forEach((input) => {
+          metadata[input.dataset.metaField] = input.value.trim();
+        });
+        return {
+          shipment_date: shipmentDateInput.value,
+          metadata,
+          lines: (currentShipment && currentShipment.lines) || [],
+          warnings: (currentShipment && currentShipment.warnings) || [],
+          errors: (currentShipment && currentShipment.errors) || []
+        };
+      }
+
+      function updateTotalsAndState() {
+        const payload = readCurrentPayload();
+        const lines = payload.lines || [];
+        const productLines = lines.filter((line) => line.line_type !== "extra");
+        const extraLines = lines.filter((line) => line.line_type === "extra");
+        const productQty = sum(productLines.map((line) => line.qty));
+        const productAmount = sum(productLines.map((line) => line.amount));
+        const extraAmount = sum(extraLines.map((line) => line.amount));
+        const invoiceAmount = productAmount + extraAmount;
+        totalQty.textContent = formatNumber(productQty);
+        totalProducts.textContent = formatNumber(productAmount);
+        totalExtras.textContent = formatNumber(extraAmount);
+        totalInvoice.textContent = formatNumber(invoiceAmount);
+        const hasDate = Boolean(shipmentDateInput.value);
+        shipmentDateField.classList.toggle("required-missing", !hasDate);
+        saveShipmentButton.disabled = !hasDate || (isNewShipment && !currentUploadId);
+        const status = resolveStatus(lines, currentShipment && currentShipment.match_status);
+        matchStatusBadge.textContent = statusLabels[status] || status;
+        matchStatusBadge.className = "badge " + (status === "all_matched" ? "success" : status === "checksum_error" ? "error" : "warning");
+      }
+
+      function resolveStatus(lines, fallback) {
+        if (fallback === "checksum_error") {
+          return "checksum_error";
+        }
+        if (lines.some((line) => line.manual_override)) {
+          return "manual_override";
+        }
+        if (lines.some((line) => line.line_type !== "extra" && line.match_status !== "matched")) {
+          return "has_unmatched";
+        }
+        return "all_matched";
+      }
+
+      function sum(values) {
+        return values.reduce((acc, value) => {
+          const number = Number(String(value ?? "").replace(",", "."));
+          return Number.isFinite(number) ? acc + number : acc;
+        }, 0);
+      }
+
+      async function saveCurrentShipment() {
+        const payload = readCurrentPayload();
+        if (!payload.shipment_date) {
+          updateTotalsAndState();
+          return;
+        }
+        saveShipmentButton.disabled = true;
+        setMessage(cardMessage, "Сохраняем...", "");
+        try {
+          if (isNewShipment) {
+            currentShipment = await fetchJson(shipmentsPath, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Accept: "application/json" },
+              body: JSON.stringify({ upload_id: currentUploadId, shipment_date: payload.shipment_date, payload })
+            });
+            isNewShipment = false;
+            currentUploadId = "";
+          } else {
+            currentShipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(currentShipment.shipment_id), {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json", Accept: "application/json" },
+              body: JSON.stringify({ shipment_date: payload.shipment_date, payload })
+            });
+          }
+          renderCard();
+          await loadRegistry();
+          setMessage(cardMessage, "Поставка сохранена.", "success");
+        } catch (error) {
+          setMessage(cardMessage, error.message, "error");
+          updateTotalsAndState();
+        }
+      }
+
+      addShipmentButton.addEventListener("click", openNewShipment);
+      saveShipmentButton.addEventListener("click", saveCurrentShipment);
+      shipmentDateInput.addEventListener("input", updateTotalsAndState);
+      metaInputs.forEach((input) => input.addEventListener("input", updateTotalsAndState));
+      invoiceFileInput.addEventListener("change", () => parseFile(invoiceFileInput.files[0]));
+      uploadPanel.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        uploadPanel.classList.add("is-dragover");
+      });
+      uploadPanel.addEventListener("dragleave", () => uploadPanel.classList.remove("is-dragover"));
+      uploadPanel.addEventListener("drop", (event) => {
+        event.preventDefault();
+        uploadPanel.classList.remove("is-dragover");
+        parseFile(event.dataTransfer.files[0]);
+      });
+      if (logoutLink && config.logout_path) {
+        logoutLink.href = config.logout_path;
+      }
+
+      loadRegistry();
+    })();
+  </script>
+</body>
+</html>

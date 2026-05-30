@@ -40,6 +40,7 @@ from packages.application.sheet_vitrina_v1_auto_refresh import (
 )
 from packages.application.sheet_vitrina_v1_stock_report import SheetVitrinaV1StockReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import list_active_sku_options
+from packages.application.supplier_shipments import SupplierShipmentsBlock
 from packages.application.sheet_vitrina_v1_onec_stocks import (
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
@@ -603,6 +604,10 @@ class RegistryUploadHttpEntrypoint:
         self.wb_regional_supply_block = WbRegionalSupplyBlock(
             runtime=self.runtime,
             now_factory=self.now_factory,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.supplier_shipments_block = SupplierShipmentsBlock(
+            runtime=self.runtime,
             timestamp_factory=self.activated_at_factory,
         )
 
@@ -1517,6 +1522,34 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_wb_regional_district_recommendation_request(self, district_key: str) -> tuple[bytes, str]:
         return self.wb_regional_supply_block.download_district_recommendation(district_key)
+
+    def handle_supplier_shipments_list_request(self) -> dict[str, Any]:
+        return self.supplier_shipments_block.list_shipments()
+
+    def handle_supplier_shipments_parse_request(
+        self,
+        workbook_bytes: bytes,
+        *,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+    ) -> dict[str, Any]:
+        return self.supplier_shipments_block.parse_upload(
+            workbook_bytes,
+            uploaded_filename=uploaded_filename,
+            uploaded_content_type=uploaded_content_type,
+        )
+
+    def handle_supplier_shipments_create_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.supplier_shipments_block.create_shipment(payload)
+
+    def handle_supplier_shipments_detail_request(self, shipment_id: str) -> dict[str, Any]:
+        return self.supplier_shipments_block.get_shipment(shipment_id)
+
+    def handle_supplier_shipments_patch_request(self, shipment_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.supplier_shipments_block.update_shipment(shipment_id, payload)
+
+    def handle_supplier_shipments_invoice_request(self, shipment_id: str) -> tuple[bytes, str, str]:
+        return self.supplier_shipments_block.download_invoice(shipment_id)
 
     def _run_sheet_auto_update(
         self,

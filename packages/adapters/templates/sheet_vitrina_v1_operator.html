@@ -1689,6 +1689,24 @@
       border: 1px solid rgba(248, 113, 113, 0.34);
     }
 
+    .supplier-embed-block {
+      margin-top: 28px;
+      padding: 0;
+      overflow: hidden;
+    }
+
+    .supplier-embed-block .block-header {
+      padding: 20px 20px 0;
+    }
+
+    .supplier-shipments-frame {
+      width: 100%;
+      min-height: 900px;
+      border: 0;
+      display: block;
+      background: #0f1117;
+    }
+
     @media (max-width: 760px) {
       .page {
         padding: 28px 16px;
@@ -2088,12 +2106,16 @@
       <section class="operator-panel" data-tab-panel="factory-order" hidden>
         <a class="eyebrow eyebrow-link" href="__SHEET_VITRINA_V1_WEB_VITRINA_URL__" target="_blank" rel="noreferrer">sheet_vitrina_v1</a>
         <p class="section-lead">
-          Во вкладке materialized два sibling-раздела: <strong>Заказ на фабрике</strong> и
-          <strong>Поставка на Wildberries</strong>. Оба расчёта идут server-side; блок поставки на Wildberries считает
-          рекомендации по федеральным округам и использует
-          общий операторский файл <strong>«Остатки ФФ»</strong> без дублирования state.
+          Внутри раздела «Поставки» текущие supply calculation blocks остаются в «Расчёты», а invoice-реестр поставщика
+          доступен в «От поставщика».
         </p>
 
+        <div class="subsection-strip" role="tablist" aria-label="Внутренние разделы поставок">
+          <button class="subsection-button is-active" type="button" data-supply-mode-button="calculations" aria-selected="true">Расчёты</button>
+          <button class="subsection-button" type="button" data-supply-mode-button="supplier" aria-selected="false">От поставщика</button>
+        </div>
+
+        <section class="supply-mode-panel" data-supply-mode-panel="calculations">
         <section class="block" aria-labelledby="shared-stock-title" style="margin-top: 28px;">
           <div class="block-header">
             <h2 id="shared-stock-title" class="block-title">Общий вход для двух расчётов</h2>
@@ -2380,6 +2402,17 @@
             </div>
           </section>
         </section>
+        </section>
+
+        <section class="supply-mode-panel" data-supply-mode-panel="supplier" hidden>
+          <section class="block supplier-embed-block" aria-labelledby="supplier-shipments-title">
+            <div class="block-header">
+              <h2 id="supplier-shipments-title" class="block-title">От поставщика</h2>
+              <a id="supplierShipmentsOpenLink" class="action-button secondary-button" href="/sheet-vitrina-v1/supplier" target="_blank" rel="noreferrer">Открыть отдельно</a>
+            </div>
+            <iframe id="supplierShipmentsFrame" class="supplier-shipments-frame" title="От поставщика"></iframe>
+          </section>
+        </section>
       </section>
     </section>
   </main>
@@ -2392,6 +2425,8 @@
       const tabPanels = Array.from(document.querySelectorAll("[data-tab-panel]"));
       const reportSectionButtons = Array.from(document.querySelectorAll("[data-report-section-button]"));
       const reportSectionPanels = Array.from(document.querySelectorAll("[data-report-section-panel]"));
+      const supplyModeButtons = Array.from(document.querySelectorAll("[data-supply-mode-button]"));
+      const supplyModePanels = Array.from(document.querySelectorAll("[data-supply-mode-panel]"));
       const supplySectionButtons = Array.from(document.querySelectorAll("[data-supply-section-button]"));
       const supplySectionPanels = Array.from(document.querySelectorAll("[data-supply-section-panel]"));
 
@@ -2545,6 +2580,8 @@
       const regionalMessage = document.getElementById("regionalMessage");
       const regionalDistrictTableBody = document.getElementById("regionalDistrictTableBody");
       const calculateRegionalSupplyButton = document.getElementById("calculateRegionalSupplyButton");
+      const supplierShipmentsFrame = document.getElementById("supplierShipmentsFrame");
+      const supplierShipmentsOpenLink = document.getElementById("supplierShipmentsOpenLink");
 
       const actionLabels = {
         refresh: {
@@ -2562,9 +2599,11 @@
       const OPERATOR_UI_STORAGE_VERSION = 1;
       const DEFAULT_ACTIVE_TAB = "vitrina";
       const DEFAULT_REPORT_SECTION = "daily";
+      const DEFAULT_SUPPLY_MODE = "calculations";
       const DEFAULT_SUPPLY_SECTION = "factory";
       const VALID_TABS = new Set(["vitrina", "factory-order", "reports"]);
       const VALID_REPORT_SECTIONS = new Set(["daily", "stock", "plan"]);
+      const VALID_SUPPLY_MODES = new Set(["calculations", "supplier"]);
       const VALID_SUPPLY_SECTIONS = new Set(["factory", "regional"]);
       const VALID_PLAN_REPORT_PERIODS = new Set([
         "yesterday",
@@ -2796,6 +2835,27 @@
         return activeTabName;
       }
 
+      function activateSupplyMode(modeName, options) {
+        const activeModeName = normalizePersistedSectionName(modeName, VALID_SUPPLY_MODES, DEFAULT_SUPPLY_MODE);
+        closeOperatorFloatingControls();
+        supplyModeButtons.forEach((button) => {
+          const selected = button.dataset.supplyModeButton === activeModeName;
+          button.classList.toggle("is-active", selected);
+          button.setAttribute("aria-selected", selected ? "true" : "false");
+        });
+        supplyModePanels.forEach((panel) => {
+          panel.hidden = panel.dataset.supplyModePanel !== activeModeName;
+        });
+        if (activeModeName === "supplier" && supplierShipmentsFrame && !supplierShipmentsFrame.src) {
+          supplierShipmentsFrame.src = config.supplier_ui_path || "/sheet-vitrina-v1/supplier";
+        }
+        if (!options || options.persist !== false) {
+          writePersistedOperatorUiState({ supply_mode: activeModeName });
+        }
+        scheduleEmbeddedHeightPost();
+        return activeModeName;
+      }
+
       function activateSupplySection(sectionName, options) {
         const activeSectionName = normalizePersistedSectionName(sectionName, VALID_SUPPLY_SECTIONS, DEFAULT_SUPPLY_SECTION);
         closeOperatorFloatingControls();
@@ -2980,6 +3040,10 @@
 
       tabButtons.forEach((button) => {
         button.addEventListener("click", () => activateTab(button.dataset.tabButton));
+      });
+
+      supplyModeButtons.forEach((button) => {
+        button.addEventListener("click", () => activateSupplyMode(button.dataset.supplyModeButton));
       });
 
       supplySectionButtons.forEach((button) => {
@@ -5002,6 +5066,9 @@
       });
 
       setupOperatorFloatingControlListeners();
+      if (supplierShipmentsOpenLink) {
+        supplierShipmentsOpenLink.href = config.supplier_ui_path || "/sheet-vitrina-v1/supplier";
+      }
       restorePlanReportInputs(persistedOperatorUiState);
       activateTab(
         isEmbeddedMode ? configuredInitialTab : (persistedOperatorUiState.active_tab || DEFAULT_ACTIVE_TAB),
@@ -5009,6 +5076,10 @@
       );
       activateReportSection(
         persistedOperatorUiState.report_section || DEFAULT_REPORT_SECTION,
+        { persist: !isEmbeddedMode }
+      );
+      activateSupplyMode(
+        persistedOperatorUiState.supply_mode || DEFAULT_SUPPLY_MODE,
         { persist: !isEmbeddedMode }
       );
       activateSupplySection(
