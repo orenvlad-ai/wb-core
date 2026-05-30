@@ -5,6 +5,7 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 import sys
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from openpyxl import Workbook
 
@@ -50,6 +51,9 @@ def main() -> None:
         ],
     )
     lines = payload["lines"]
+    metadata = payload["metadata"]
+    if metadata.get("contract_no") != "CNT-2026-0513" or metadata.get("contract_date") != "2026-05-13":
+        raise AssertionError(f"parser must extract contract no/date from cells, got {metadata}")
     product_lines = [line for line in lines if line["line_type"] == "product"]
     extra_lines = [line for line in lines if line["line_type"] == "extra"]
     if len(product_lines) != 5 or len(extra_lines) != 2:
@@ -76,6 +80,13 @@ def main() -> None:
         raise AssertionError(f"invoice totals mismatch: {summary}")
     if summary["checksum_error"]:
         raise AssertionError("declared invoice total must match parsed total in fixture")
+    drawing_payload = parse_supplier_invoice_xlsx(
+        _with_drawing_text_fixture(_build_invoice_fixture(contract_cells=False)),
+        filename="PI-drawing 26GN391 (15.5.2026).xlsx",
+    )
+    drawing_metadata = drawing_payload["metadata"]
+    if drawing_metadata.get("contract_no") != "26DRAW001" or drawing_metadata.get("contract_date") != "2026-05-13":
+        raise AssertionError(f"parser must extract contract no/date from drawing XML text, got {drawing_metadata}")
     compatibility_lines = _apply_nomenclature_matches(
         [
             {
@@ -160,7 +171,7 @@ def main() -> None:
     print("supplier_invoice_parser_smoke: OK")
 
 
-def _build_invoice_fixture() -> bytes:
+def _build_invoice_fixture(*, contract_cells: bool = True) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Invoice"
@@ -168,8 +179,16 @@ def _build_invoice_fixture() -> bytes:
     sheet["B1"] = "26GN390"
     sheet["A2"] = "Invoice Date:"
     sheet["B2"] = "14.5.2026"
-    sheet["A3"] = "Supplier:"
-    sheet["B3"] = "Zhejiang Supplier"
+    if contract_cells:
+        sheet["A3"] = "Contract No."
+        sheet["B3"] = "CNT-2026-0513"
+        sheet["A4"] = "Date of Contract"
+        sheet["B4"] = "2026.5.13"
+        sheet["A5"] = "Supplier:"
+        sheet["B5"] = "Zhejiang Supplier"
+    else:
+        sheet["A3"] = "Supplier:"
+        sheet["B3"] = "Zhejiang Supplier"
     headers = [
         "NO.",
         "MODELS / （型号）",
@@ -192,11 +211,35 @@ def _build_invoice_fixture() -> bytes:
     for row in rows:
         sheet.append(row)
     sheet.append(["（总值）Total:", "", "", "", "", 47, "定金(15%)：120000元"])
-    sheet.merge_cells("C5:C6")
-    sheet.merge_cells("C7:C8")
+    product_start_row = 7 if contract_cells else 5
+    sheet.merge_cells(f"C{product_start_row}:C{product_start_row + 1}")
+    sheet.merge_cells(f"C{product_start_row + 2}:C{product_start_row + 3}")
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
+
+
+def _with_drawing_text_fixture(workbook_bytes: bytes) -> bytes:
+    drawing_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <xdr:twoCellAnchor>
+    <xdr:sp>
+      <xdr:txBody>
+        <a:bodyPr/><a:lstStyle/>
+        <a:p><a:r><a:t>合同号 (Invoice No.)：26DRAW001</a:t></a:r></a:p>
+        <a:p><a:r><a:t>下单日期 (Date)：2026.5.13</a:t></a:r></a:p>
+      </xdr:txBody>
+    </xdr:sp>
+  </xdr:twoCellAnchor>
+</xdr:wsDr>"""
+    source = BytesIO(workbook_bytes)
+    target = BytesIO()
+    with ZipFile(source, "r") as zin, ZipFile(target, "w", ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            zout.writestr(item, zin.read(item.filename))
+        zout.writestr("xl/drawings/drawing1.xml", drawing_xml)
+    return target.getvalue()
 
 
 if __name__ == "__main__":

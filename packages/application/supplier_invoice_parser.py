@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
 from io import BytesIO
 import json
 from pathlib import Path
 import re
 from typing import Any, Iterable, Mapping
+from zipfile import BadZipFile, ZipFile
+from xml.etree import ElementTree
 
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
@@ -84,7 +87,13 @@ class SupplierInvoiceParser:
         worksheet = workbook.worksheets[0]
         merged_values = _build_merged_value_index(worksheet)
         header_row, columns = _find_header_row(worksheet, merged_values)
-        metadata = _extract_metadata(worksheet, merged_values, header_row=header_row, filename=filename)
+        metadata = _extract_metadata(
+            worksheet,
+            merged_values,
+            header_row=header_row,
+            filename=filename,
+            workbook_text_blocks=_extract_workbook_text_blocks(workbook_bytes),
+        )
         lines, warnings = self._parse_lines(worksheet, merged_values, header_row=header_row, columns=columns)
         if metadata.get("declared_invoice_total") is None:
             metadata["declared_invoice_total"] = _extract_declared_invoice_total(
@@ -381,6 +390,7 @@ def _extract_metadata(
     *,
     header_row: int,
     filename: str,
+    workbook_text_blocks: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {
         "invoice_no": "",
@@ -413,6 +423,19 @@ def _extract_metadata(
                 number = _to_number(next_value) or _last_number(text)
                 if number is not None:
                     metadata["declared_invoice_total"] = number
+
+    text_blocks = [item for item in (workbook_text_blocks or []) if _stringify(item)]
+    for index, text in enumerate(text_blocks):
+        next_value = text_blocks[index + 1] if index + 1 < len(text_blocks) else ""
+        _maybe_assign_metadata(metadata, text, next_value)
+        if not metadata["currency"]:
+            currency = _detect_currency(text)
+            if currency:
+                metadata["currency"] = currency
+        if metadata["declared_invoice_total"] is None and re.search(r"\btotal\b|合计|总计", text, re.IGNORECASE):
+            number = _to_number(next_value) or _last_number(text)
+            if number is not None:
+                metadata["declared_invoice_total"] = number
 
     filename_meta = _metadata_from_filename(filename)
     for key, value in filename_meta.items():
@@ -448,7 +471,7 @@ def _extract_declared_invoice_total(
 
 
 def _maybe_assign_metadata(metadata: dict[str, Any], text: str, next_value: str) -> None:
-    normalized = re.sub(r"\s+", " ", text).strip()
+    normalized = re.sub(r"\s+", " ", text).strip().replace("：", ":")
     lower = normalized.lower()
     value_after_colon = ""
     if ":" in normalized:
@@ -456,14 +479,29 @@ def _maybe_assign_metadata(metadata: dict[str, Any], text: str, next_value: str)
     candidate = value_after_colon or next_value
     if not candidate:
         return
-    if "invoice" in lower and ("no" in lower or "number" in lower) and not metadata["invoice_no"]:
+    has_contract_no_label = bool(
+        (
+            "contract" in lower
+            and ("no" in lower or "number" in lower or "№" in lower)
+        )
+        or re.search(r"合同\s*(号|编号|号码|no|number)", normalized, flags=re.IGNORECASE)
+        or re.search(r"合约\s*(号|编号|号码|no|number)", normalized, flags=re.IGNORECASE)
+    )
+    has_contract_date_label = bool(
+        ("contract" in lower and "date" in lower)
+        or "date of contract" in lower
+        or re.search(r"(合同|合约)\s*(日期|时间)", normalized)
+        or "下单日期" in normalized
+        or "订单日期" in normalized
+    )
+    if has_contract_no_label and not metadata["contract_no"]:
+        metadata["contract_no"] = candidate
+    elif has_contract_date_label and not metadata["contract_date"]:
+        metadata["contract_date"] = _normalize_date(candidate) or candidate
+    elif "invoice" in lower and ("no" in lower or "number" in lower) and not metadata["invoice_no"]:
         metadata["invoice_no"] = candidate
     elif "invoice" in lower and "date" in lower and not metadata["invoice_date"]:
         metadata["invoice_date"] = _normalize_date(candidate) or candidate
-    elif "contract" in lower and ("no" in lower or "number" in lower) and not metadata["contract_no"]:
-        metadata["contract_no"] = candidate
-    elif "contract" in lower and "date" in lower and not metadata["contract_date"]:
-        metadata["contract_date"] = _normalize_date(candidate) or candidate
     elif "supplier" in lower and not metadata["supplier_name"]:
         metadata["supplier_name"] = candidate
     elif "customer" in lower and not metadata["customer_name"]:
@@ -490,16 +528,77 @@ def _metadata_from_filename(filename: str) -> dict[str, str]:
 
 
 def _normalize_date(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
     text = _stringify(value)
     if not text:
         return ""
-    date_match = re.search(r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})", text)
+    year_first = re.search(r"(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})", text)
+    if year_first:
+        year, month, day = year_first.groups()
+        return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+    date_match = re.search(r"(\d{1,2})([.\-/])(\d{1,2})\2(\d{2,4})", text)
     if not date_match:
         return ""
-    day, month, year = date_match.groups()
+    first, separator, second, year = date_match.groups()
     if len(year) == 2:
         year = "20" + year
+    if separator == "/" and int(first) <= 12 < int(second):
+        month, day = first, second
+    else:
+        day, month = first, second
     return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+
+
+def _extract_workbook_text_blocks(workbook_bytes: bytes) -> list[str]:
+    blocks: list[str] = []
+    try:
+        with ZipFile(BytesIO(workbook_bytes)) as workbook_zip:
+            for name in workbook_zip.namelist():
+                lower_name = name.lower()
+                if not (
+                    lower_name.startswith("xl/drawings/")
+                    and (lower_name.endswith(".xml") or lower_name.endswith(".vml"))
+                ):
+                    continue
+                try:
+                    root = ElementTree.fromstring(workbook_zip.read(name))
+                except ElementTree.ParseError:
+                    continue
+                blocks.extend(_drawing_text_blocks(root))
+    except BadZipFile:
+        return []
+    return [block for block in blocks if block]
+
+
+def _drawing_text_blocks(root: ElementTree.Element) -> list[str]:
+    blocks: list[str] = []
+    for paragraph in root.iter():
+        if _xml_local_name(paragraph.tag) != "p":
+            continue
+        parts = [
+            str(node.text or "")
+            for node in paragraph.iter()
+            if _xml_local_name(node.tag) == "t" and str(node.text or "").strip()
+        ]
+        text = re.sub(r"\s+", " ", "".join(parts)).strip()
+        if text:
+            blocks.append(text)
+    if blocks:
+        return blocks
+    parts = [
+        str(node.text or "")
+        for node in root.iter()
+        if _xml_local_name(node.tag) == "t" and str(node.text or "").strip()
+    ]
+    text = re.sub(r"\s+", " ", " ".join(parts)).strip()
+    return [text] if text else []
+
+
+def _xml_local_name(tag: str) -> str:
+    return str(tag).rsplit("}", 1)[-1]
 
 
 def _detect_currency(value: Any) -> str:

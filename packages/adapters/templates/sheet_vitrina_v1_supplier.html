@@ -147,6 +147,7 @@
                 <th>出货日期 / Shipment date / Дата отгрузки</th>
                 <th>发票编号 / Invoice No / Номер invoice</th>
                 <th>发票日期 / Invoice date / Дата invoice</th>
+                <th>供应商 / Supplier / Поставщик</th>
                 <th>商品数量 / Product qty / Кол-во товаров</th>
                 <th>商品金额 / Product amount / Сумма товаров</th>
                 <th>其他费用 / Extras amount / Прочие позиции</th>
@@ -159,7 +160,7 @@
               </tr>
             </thead>
             <tbody id="shipmentRows">
-              <tr><td colspan="12">暂无订单 / No orders yet / Заказов пока нет.</td></tr>
+              <tr><td colspan="13">暂无订单 / No orders yet / Заказов пока нет.</td></tr>
             </tbody>
           </table>
         </div>
@@ -174,7 +175,6 @@
           <div class="toolbar">
             <span id="matchStatusBadge" class="badge">-</span>
             <a id="invoiceDownloadLink" class="button-link" href="#" hidden>下载发票 / Download invoice / Скачать invoice</a>
-            <button id="rematchShipmentButton" type="button" hidden>重新匹配 / Re-match / Пересопоставить</button>
             <button id="saveShipmentButton" class="primary" type="button" disabled>保存 / Save / Сохранить</button>
             <button id="closeShipmentButton" type="button">关闭 / Close / Закрыть</button>
           </div>
@@ -280,7 +280,6 @@
       const shipmentDateInput = document.getElementById("shipmentDateInput");
       const saveShipmentButton = document.getElementById("saveShipmentButton");
       const closeShipmentButton = document.getElementById("closeShipmentButton");
-      const rematchShipmentButton = document.getElementById("rematchShipmentButton");
       const cardTitle = document.getElementById("cardTitle");
       const cardMessage = document.getElementById("cardMessage");
       const matchStatusBadge = document.getElementById("matchStatusBadge");
@@ -294,6 +293,7 @@
       const logoutLink = document.getElementById("logoutLink");
       const metaInputs = Array.from(document.querySelectorAll("[data-meta-field]"));
       const numberFormatter = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 });
+      const defaultSupplierName = "HanShang Technology";
 
       let currentShipment = null;
       let currentUploadId = "";
@@ -374,7 +374,7 @@
 
       function renderRegistry(rows) {
         if (!rows.length) {
-          shipmentRows.innerHTML = '<tr><td colspan="12">暂无订单 / No orders yet / Заказов пока нет.</td></tr>';
+          shipmentRows.innerHTML = '<tr><td colspan="13">暂无订单 / No orders yet / Заказов пока нет.</td></tr>';
           return;
         }
         shipmentRows.innerHTML = rows.map((row) => {
@@ -384,6 +384,7 @@
             '<td>' + escapeHtml(row.shipment_date || "-") + '</td>',
             '<td>' + escapeHtml(row.invoice_no || "-") + '</td>',
             '<td>' + escapeHtml(row.invoice_date || "-") + '</td>',
+            '<td>' + escapeHtml(row.supplier_name || defaultSupplierName) + '</td>',
             '<td>' + escapeHtml(formatNumber(row.product_qty_total)) + '</td>',
             '<td>' + escapeHtml(formatNumber(row.product_amount_total)) + '</td>',
             '<td>' + escapeHtml(formatNumber(row.extras_amount_total)) + '</td>',
@@ -510,7 +511,6 @@
         uploadPanel.hidden = !isNewShipment;
         invoiceDownloadLink.hidden = !shipment.invoice_download_path;
         invoiceDownloadLink.href = shipment.invoice_download_path || "#";
-        rematchShipmentButton.hidden = isNewShipment || !shipment.shipment_id;
         renderLineTables(shipment.lines || []);
         updateTotalsAndState();
       }
@@ -696,32 +696,6 @@
         }
       }
 
-      async function rematchCurrentShipment() {
-        if (!currentShipment || !currentShipment.shipment_id || isNewShipment) {
-          return;
-        }
-        if (cardDirty && !confirm("存在未保存修改，是否继续重新匹配？ / Unsaved changes exist. Re-match without saving? / В карточке есть несохранённые изменения. Пересопоставить без их сохранения?")) {
-          return;
-        }
-        rematchShipmentButton.disabled = true;
-        setMessage(cardMessage, "按词典重新匹配 / Re-matching by dictionary / Пересопоставляем по справочнику...", "");
-        try {
-          currentShipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(currentShipment.shipment_id) + "/rematch", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Accept: "application/json" },
-            body: JSON.stringify({ overwrite_manual: false })
-          });
-          cardDirty = false;
-          renderCard();
-          await loadRegistry();
-          setMessage(cardMessage, "已应用词典 / Dictionary applied / Справочник применён к заказу.", "success");
-        } catch (error) {
-          setMessage(cardMessage, error.message, "error");
-        } finally {
-          rematchShipmentButton.disabled = false;
-        }
-      }
-
       function closeCard() {
         if ((cardDirty || (isNewShipment && currentUploadId)) && !confirm("关闭且不保存修改？ / Close without saving changes? / Закрыть карточку без сохранения изменений?")) {
           return;
@@ -763,7 +737,6 @@
       addShipmentButton.addEventListener("click", openNewShipment);
       saveShipmentButton.addEventListener("click", saveCurrentShipment);
       closeShipmentButton.addEventListener("click", closeCard);
-      rematchShipmentButton.addEventListener("click", rematchCurrentShipment);
       shipmentDateInput.addEventListener("input", () => {
         cardDirty = true;
         updateTotalsAndState();
