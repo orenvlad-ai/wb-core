@@ -49,19 +49,23 @@ related_docs:
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Реестр заказов UX, delete/close/rematch, settings/nomenclature API/UI and server-side config_v2-seeded deterministic exact/alias/compatible-model matching; no Google Sheets/GAS contour, no browser-local truth, no low-confidence fuzzy matching."
+update_note: "Supplier-facing order registry uses trilingual Chinese/English/Russian labels, hides Supplier/Customer and order SKU fields, defaults supplier metadata to HanShang Technology, keeps nmId/nomenclature visible, and preserves deterministic nomenclature matching; no Google Sheets/GAS contour, no browser-local truth, no low-confidence fuzzy matching."
 ---
 
 # 1. Contract
 
 - Operator surface: in `Поставки`, inner tab `Расчёты` keeps the existing factory/WB supply calculators; inner tab `От поставщика` embeds `Реестр заказов`.
 - Supplier-only surface: `GET /sheet-vitrina-v1/supplier` renders only the supplier shipment registry without full operator navigation.
+- Supplier-facing labels in the order registry/card use `中文 / English / Русский` business wording. The main title is `订单登记表 / Order registry / Реестр заказов`; duplicated registry headings and the old subtitle are not rendered.
+- Visible order UI does not render `Supplier` or `Customer`. Supplier metadata is fixed server-side to `HanShang Technology`; customer is kept backward-compatible in stored/API payloads but is not required by create/save and is not shown.
+- Visible order product rows do not render `our_sku`/`SKU` fields. Matching still may keep legacy `internal_sku` in storage for backward compatibility, but the supplier/order UI shows only `平台ID / nmId / nmId` and `我方品名 / Our item name / Номенклатура`.
+- Registry matching column is `匹配 / Matching / Матчинг`; compact registry values are `OK` when every product line is matched and `Check` otherwise.
 - Operator settings surface: `GET /sheet-vitrina-v1/settings` is a service page reachable from the top-right `Настройки` button, not a top-level WebCore tab.
 - Runtime truth is server-owned:
   - original XLSX files live under `<runtime_dir>/supplier_invoices/files/<shipment_id>/<safe_filename>`;
   - staged uploads live under `<runtime_dir>/supplier_invoices/uploads/<upload_id>/<safe_filename>`;
   - SQLite stores upload metadata, shipment headers, editable line details and nomenclature rows.
-- `shipment_date` is required on create/save and is validated server-side even though the UI disables save until it is present.
+- `shipment_date` is the only required manual field after parse. It is rendered as `出货日期 / Shipment date / Дата отгрузки`, is required on create/save, and is validated server-side even though the UI disables save until it is present.
 - Orders can be deleted by operator role. Delete removes the DB order/lines and makes the original invoice download unavailable.
 - Saved order cards expose `Закрыть` and `Пересопоставить`; rematch applies current nomenclature without overwriting manual overrides unless explicitly requested by API payload.
 
@@ -86,7 +90,7 @@ update_note: "Реестр заказов UX, delete/close/rematch, settings/nom
 - Matching is deterministic only. Resolution order is exact active `match_key`, exact alias/normalized alias, then compatibility by `product_type + intersection(invoice_model_keys, compatible_model_keys)`.
 - Compatibility extraction recognizes iPhone tokens such as `iPhone 17e / 16e /14 / 13 / 13Pro` as `iphone_17e`, `iphone_16e`, `iphone_14`, `iphone_13`, `iphone_13_pro`. It is used only for matching; it never splits invoice quantity into separate rows.
 - A compatibility candidate is auto-selected only when one best candidate is deterministic. Equal top candidates stay unfilled with `match_status=ambiguous`.
-- `Match status` in the order card is read-only UI state: `OK / Сопоставлено`, `Сопоставлено по совместимости`, `Неоднозначно`, `Не сопоставлено`, or `Ручная правка`.
+- `Match status` in the order card is read-only UI state rendered under `匹配 / Matching / Матчинг`: `已匹配 / Matched / Сопоставлено`, `按兼容型号匹配 / Matched by compatibility / Сопоставлено по совместимости`, `不明确 / Ambiguous / Неоднозначно`, `未匹配 / Unmatched / Не сопоставлено`, or `手动修改 / Manual override / Ручная правка`.
 - Empty or inactive nomenclature is valid; the UI/API must still preserve unmatched rows for manual operator correction.
 
 # 4. Auth Boundary

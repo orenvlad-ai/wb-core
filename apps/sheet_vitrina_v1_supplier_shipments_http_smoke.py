@@ -134,6 +134,10 @@ def main() -> None:
                 raise AssertionError(f"parse route must stage upload and return editable payload, got {parse_status} {parse_payload}")
             if parse_payload.get("source_file_sha256") != workbook_sha256:
                 raise AssertionError("parse route must expose sha256 of original upload")
+            if parse_payload.get("metadata", {}).get("supplier_name") != "HanShang Technology":
+                raise AssertionError("parse route must default supplier_name to HanShang Technology")
+            if parse_payload.get("metadata", {}).get("customer_name") not in {"", None}:
+                raise AssertionError("parse route must not require or persist parsed customer_name")
             product_lines = [item for item in parse_payload.get("lines", []) if item.get("line_type") == "product"]
             if product_lines[0].get("internal_nm_id") != 210183919 or product_lines[0].get("match_status") != "matched":
                 raise AssertionError("parse route must resolve active nomenclature match_key into nmId/name")
@@ -165,6 +169,10 @@ def main() -> None:
             shipment_id = detail["shipment_id"]
             if detail.get("shipment_date") != "2026-05-14" or detail.get("match_status") != "has_unmatched":
                 raise AssertionError("created shipment must keep date and unmatched status")
+            if detail.get("supplier_name") != "HanShang Technology" or detail.get("metadata", {}).get("supplier_name") != "HanShang Technology":
+                raise AssertionError("created shipment must persist fixed supplier_name")
+            if detail.get("customer_name") not in {"", None} or detail.get("metadata", {}).get("customer_name") not in {"", None}:
+                raise AssertionError("created shipment must not require customer_name")
             if len(detail.get("product_lines", [])) != 3 or len(detail.get("extra_lines", [])) != 1:
                 raise AssertionError("detail must split product and extra lines")
             if detail["product_lines"][0].get("internal_name") != "Clear iPhone 14 Pro":
@@ -220,6 +228,8 @@ def main() -> None:
             registry_status, registry_payload = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
             if registry_status != 200 or len(registry_payload.get("shipments", [])) != 1:
                 raise AssertionError("list route must expose saved shipment")
+            if registry_payload["shipments"][0].get("supplier_name") != "HanShang Technology":
+                raise AssertionError("list route must expose fixed supplier_name")
             invoice_path = registry_payload["shipments"][0].get("invoice_download_path")
             invoice_status, invoice_bytes, invoice_headers = _get_bytes(f"{base_url}{invoice_path}")
             if invoice_status != 200 or hashlib.sha256(invoice_bytes).hexdigest() != workbook_sha256:

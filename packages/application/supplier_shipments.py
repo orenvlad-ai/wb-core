@@ -35,6 +35,9 @@ from packages.contracts.supplier_shipments import (
 )
 
 
+DEFAULT_SUPPLIER_NAME = "HanShang Technology"
+
+
 class SupplierShipmentsBlock:
     def __init__(
         self,
@@ -68,6 +71,7 @@ class SupplierShipmentsBlock:
             filename=filename,
             aliases=self._active_nomenclature_aliases(),
         )
+        parsed_payload["metadata"] = _supplier_order_metadata(parsed_payload.get("metadata"))
         parsed_payload["lines"] = _apply_nomenclature_matches(
             [dict(item) for item in parsed_payload.get("lines") or []],
             self._active_nomenclature_items(),
@@ -501,11 +505,18 @@ def _normalize_metadata(raw: Any) -> dict[str, Any]:
         "invoice_date": _optional_iso_date(metadata.get("invoice_date")),
         "contract_no": str(metadata.get("contract_no") or "").strip(),
         "contract_date": _optional_iso_date(metadata.get("contract_date")),
-        "supplier_name": str(metadata.get("supplier_name") or "").strip(),
-        "customer_name": str(metadata.get("customer_name") or "").strip(),
+        "supplier_name": DEFAULT_SUPPLIER_NAME,
+        "customer_name": "",
         "currency": str(metadata.get("currency") or "").strip().upper(),
         "declared_invoice_total": _optional_number(metadata.get("declared_invoice_total")),
     }
+
+
+def _supplier_order_metadata(raw: Any) -> dict[str, Any]:
+    metadata = _normalize_metadata(raw)
+    metadata["supplier_name"] = DEFAULT_SUPPLIER_NAME
+    metadata["customer_name"] = ""
+    return metadata
 
 
 def _normalize_line(
@@ -600,6 +611,8 @@ def _shipment_match_status(lines: list[Mapping[str, Any]], *, checksum_error: bo
 
 def _detail_payload(detail: Mapping[str, Any]) -> dict[str, Any]:
     header = dict(detail.get("header") or {})
+    header["supplier_name"] = DEFAULT_SUPPLIER_NAME
+    header["customer_name"] = ""
     lines = [dict(item) for item in detail.get("lines") or []]
     summary = {
         "product_qty_total": header.get("product_qty_total"),
@@ -632,6 +645,8 @@ def _detail_payload(detail: Mapping[str, Any]) -> dict[str, Any]:
 
 def _with_invoice_download_path(row: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(row)
+    payload["supplier_name"] = DEFAULT_SUPPLIER_NAME
+    payload["customer_name"] = ""
     payload["invoice_download_path"] = _invoice_download_path(str(payload.get("shipment_id") or ""))
     return payload
 
