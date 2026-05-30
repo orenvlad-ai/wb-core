@@ -49,7 +49,7 @@ related_docs:
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Supplier-facing order registry uses trilingual Chinese/English/Russian labels, hides Supplier/Customer and order SKU fields, defaults supplier metadata to HanShang Technology, keeps nmId/nomenclature visible, and preserves deterministic nomenclature matching; no Google Sheets/GAS contour, no browser-local truth, no low-confidence fuzzy matching."
+update_note: "Supplier-facing order registry uses trilingual Chinese/English/Russian labels, shows fixed supplier in the registry only, hides Supplier/Customer and order SKU fields from the card, defaults supplier metadata to HanShang Technology, reads contract no/date from cells or drawing XML text, keeps nmId/nomenclature visible, and preserves deterministic nomenclature matching; no Google Sheets/GAS contour, no browser-local truth, no low-confidence fuzzy matching."
 ---
 
 # 1. Contract
@@ -57,7 +57,7 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
 - Operator surface: in `Поставки`, inner tab `Расчёты` keeps the existing factory/WB supply calculators; inner tab `От поставщика` embeds `Реестр заказов`.
 - Supplier-only surface: `GET /sheet-vitrina-v1/supplier` renders only the supplier shipment registry without full operator navigation.
 - Supplier-facing labels in the order registry/card use `中文 / English / Русский` business wording. The main title is `订单登记表 / Order registry / Реестр заказов`; duplicated registry headings and the old subtitle are not rendered.
-- Visible order UI does not render `Supplier` or `Customer`. Supplier metadata is fixed server-side to `HanShang Technology`; customer is kept backward-compatible in stored/API payloads but is not required by create/save and is not shown.
+- Visible order card/form UI does not render editable `Supplier` or `Customer`. Supplier metadata is fixed server-side to `HanShang Technology`; the registry shows this fixed value in `供应商 / Supplier / Поставщик` with fallback for legacy rows. Customer is kept backward-compatible in stored/API payloads but is not required by create/save and is not shown.
 - Visible order product rows do not render `our_sku`/`SKU` fields. Matching still may keep legacy `internal_sku` in storage for backward compatibility, but the supplier/order UI shows only `平台ID / nmId / nmId` and `我方品名 / Our item name / Номенклатура`.
 - Registry matching column is `匹配 / Matching / Матчинг`; compact registry values are `OK` when every product line is matched and `Check` otherwise.
 - Operator settings surface: `GET /sheet-vitrina-v1/settings` is a service page reachable from the top-right `Настройки` button, not a top-level WebCore tab.
@@ -67,12 +67,13 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
   - SQLite stores upload metadata, shipment headers, editable line details and nomenclature rows.
 - `shipment_date` is the only required manual field after parse. It is rendered as `出货日期 / Shipment date / Дата отгрузки`, is required on create/save, and is validated server-side even though the UI disables save until it is present.
 - Orders can be deleted by operator role. Delete removes the DB order/lines and makes the original invoice download unavailable.
-- Saved order cards expose `Закрыть` and `Пересопоставить`; rematch applies current nomenclature without overwriting manual overrides unless explicitly requested by API payload.
+- Saved order cards expose `关闭 / Close / Закрыть`; the visible `重新匹配 / Re-match / Пересопоставить` action is not rendered in the supplier/order card. The rematch API remains available for internal compatibility and applies current nomenclature without overwriting manual overrides unless explicitly requested by API payload.
 
 # 2. Parser
 
 - Parser uses `openpyxl` and searches for flexible invoice table headers including `NO.`, `MODELS / （型号）`, `NAME & SPECIFICATION / （品名规格）`, `QTY (PCS) / （数量）`, `U.PRICE / （单价）` and `AMOUNT / （总价）`.
 - `RMB`/`CNY`/`¥` invoice currency is normalized to `RMB`; declared invoice totals may be read from post-table `Total`/`总值` rows when the value is not available in pre-table metadata.
+- Contract metadata is extracted from ordinary cells, merged-cell values and bounded workbook drawing XML text. Supported labels include `Contract No`, `Contract No.`, `Contract Number`, `Contract Date`, `Date of Contract`, `合同号`, `合同编号`, `合同日期`, `下单日期`; date formats such as `2026.5.13`, `2026-05-13`, `13.05.2026` and `5/13/2026` normalize to `YYYY-MM-DD`.
 - Merged-cell/fill-down blocks are handled for product type markers:
   - `高清膜` / `smk` -> `clear`
   - `防窥膜` / `(Anti-Spy)` -> `anti_spy`

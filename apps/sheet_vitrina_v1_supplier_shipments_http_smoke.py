@@ -138,6 +138,11 @@ def main() -> None:
                 raise AssertionError("parse route must default supplier_name to HanShang Technology")
             if parse_payload.get("metadata", {}).get("customer_name") not in {"", None}:
                 raise AssertionError("parse route must not require or persist parsed customer_name")
+            if (
+                parse_payload.get("metadata", {}).get("contract_no") != "CNT-2026-0513"
+                or parse_payload.get("metadata", {}).get("contract_date") != "2026-05-13"
+            ):
+                raise AssertionError(f"parse route must expose contract no/date, got {parse_payload.get('metadata')}")
             product_lines = [item for item in parse_payload.get("lines", []) if item.get("line_type") == "product"]
             if product_lines[0].get("internal_nm_id") != 210183919 or product_lines[0].get("match_status") != "matched":
                 raise AssertionError("parse route must resolve active nomenclature match_key into nmId/name")
@@ -173,6 +178,8 @@ def main() -> None:
                 raise AssertionError("created shipment must persist fixed supplier_name")
             if detail.get("customer_name") not in {"", None} or detail.get("metadata", {}).get("customer_name") not in {"", None}:
                 raise AssertionError("created shipment must not require customer_name")
+            if detail.get("contract_no") != "CNT-2026-0513" or detail.get("contract_date") != "2026-05-13":
+                raise AssertionError("created shipment must persist contract no/date")
             if len(detail.get("product_lines", [])) != 3 or len(detail.get("extra_lines", [])) != 1:
                 raise AssertionError("detail must split product and extra lines")
             if detail["product_lines"][0].get("internal_name") != "Clear iPhone 14 Pro":
@@ -245,6 +252,41 @@ def main() -> None:
             deleted_invoice_status, _, _ = _get_bytes(f"{base_url}{invoice_path}")
             if deleted_invoice_status != 404:
                 raise AssertionError("deleted supplier invoice must not remain downloadable")
+
+            runtime.save_supplier_shipment(
+                header={
+                    "shipment_id": "sup_legacy_missing_supplier",
+                    "created_at": "2026-05-30T08:10:00Z",
+                    "updated_at": "2026-05-30T08:10:00Z",
+                    "shipment_date": "2026-05-16",
+                    "invoice_no": "LEGACY-1",
+                    "invoice_date": "2026-05-15",
+                    "contract_no": "",
+                    "contract_date": "",
+                    "supplier_name": "",
+                    "customer_name": "",
+                    "currency": "RMB",
+                    "product_qty_total": 0,
+                    "product_amount_total": 0,
+                    "extras_amount_total": 0,
+                    "invoice_amount_total": 0,
+                    "declared_invoice_total": 0,
+                    "match_status": "all_matched",
+                    "source_filename": "legacy.xlsx",
+                    "source_file_sha256": "",
+                    "source_file_path": "",
+                    "parser_version": "legacy",
+                    "warnings": [],
+                    "errors": [],
+                },
+                lines=[],
+            )
+            legacy_list_status, legacy_list_payload = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
+            if (
+                legacy_list_status != 200
+                or legacy_list_payload.get("shipments", [{}])[0].get("supplier_name") != "HanShang Technology"
+            ):
+                raise AssertionError(f"legacy missing supplier must list with default fallback, got {legacy_list_payload}")
         finally:
             server.shutdown()
             server.server_close()
@@ -258,6 +300,8 @@ def _build_invoice_fixture() -> bytes:
     sheet.title = "Invoice"
     sheet.append(["Invoice No:", "26GN390"])
     sheet.append(["Invoice Date:", "14.5.2026"])
+    sheet.append(["Contract No.", "CNT-2026-0513"])
+    sheet.append(["Date of Contract", "2026.5.13"])
     sheet.append(["Supplier:", "Zhejiang Supplier", "", "Currency:", "USD"])
     sheet.append(["Invoice Total:", 33])
     sheet.append(["NO.", "NAME & SPECIFICATION", "MODELS", "QTY", "U.PRICE", "AMOUNT", "COMMENT"])
