@@ -55,13 +55,14 @@ update_note: "Initial supplier shipment registry checkpoint: no Google Sheets/GA
 
 # 2. Parser
 
-- Parser uses `openpyxl` and searches for table headers `NO.`, `MODELS`, `QTY`, `U.PRICE`, `AMOUNT`.
+- Parser uses `openpyxl` and searches for flexible invoice table headers including `NO.`, `MODELS / （型号）`, `NAME & SPECIFICATION / （品名规格）`, `QTY (PCS) / （数量）`, `U.PRICE / （单价）` and `AMOUNT / （总价）`.
+- `RMB`/`CNY`/`¥` invoice currency is normalized to `RMB`; declared invoice totals may be read from post-table `Total`/`总值` rows when the value is not available in pre-table metadata.
 - Merged-cell/fill-down blocks are handled for product type markers:
   - `高清膜` / `smk` -> `clear`
   - `防窥膜` / `(Anti-Spy)` -> `anti_spy`
   - `磨砂膜` / `(Matte)` -> `matte`
 - Compatible model aliases such as `iPhone 15 / 16` stay as one normalized alias (`iphone_15_16`); parser does not split them into separate SKU rows.
-- Extras such as OPP packets, labels and cards are stored as `line_type=extra`, not product SKU rows.
+- Extras such as OPP packets, labels and cards are stored as `line_type=extra`, not product SKU rows. Product-row comments may mention OPP/labels/cards as packaging instructions without turning the product line into an extra.
 - Unknown aliases remain persisted and visible with `match_status=unmatched`; low-confidence fuzzy matching is not performed.
 
 # 3. Matching
@@ -78,4 +79,3 @@ update_note: "Initial supplier shipment registry checkpoint: no Google Sheets/GA
   - `WB_CORE_SUPPLIER_AUTH_PASSWORD_HASH`
   - `WB_CORE_SUPPLIER_AUTH_DISPLAY_NAME`
 - Supplier role can access only `/sheet-vitrina-v1/supplier`, supplier shipment APIs, invoice downloads, login/logout and needed static/browser assets. It cannot access `/sheet-vitrina-v1/vitrina`, `/sheet-vitrina-v1/operator` or unrelated `/v1/sheet-vitrina-v1/...` APIs.
-

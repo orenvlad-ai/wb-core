@@ -63,6 +63,9 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/feedbacks/complaints/submit-job",
         "/v1/sheet-vitrina-v1/supply/factory-order/",
         "/v1/sheet-vitrina-v1/supply/wb-regional/",
+        "/v1/sheet-vitrina-v1/supply/supplier-shipments",
+        "/v1/sheet-vitrina-v1/supply/supplier-shipments/",
+        "/sheet-vitrina-v1/supplier",
         "/login",
         "/logout",
     }
@@ -96,6 +99,12 @@ def main() -> None:
         raise AssertionError("rendered nginx block must include WebCore auth routes exactly once")
     if rendered.count("location ^~ /v1/sheet-vitrina-v1/supply/factory-order/ {") != 1:
         raise AssertionError("rendered nginx block must include factory-order prefix exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/supply/supplier-shipments {") != 1:
+        raise AssertionError("rendered nginx block must include supplier shipment list exactly once")
+    if rendered.count("location ^~ /v1/sheet-vitrina-v1/supply/supplier-shipments/ {") != 1:
+        raise AssertionError("rendered nginx block must include supplier shipment prefix exactly once")
+    if "client_max_body_size 32m;" not in rendered:
+        raise AssertionError("rendered nginx block must raise body limit for supplier invoice uploads")
     if rendered.count("location = /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start {") != 1:
         raise AssertionError("rendered nginx block must include web-vitrina seller recovery start exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/seller-portal-recovery/status {") != 1:

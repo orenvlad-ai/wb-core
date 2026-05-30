@@ -86,6 +86,12 @@ class SupplierInvoiceParser:
         header_row, columns = _find_header_row(worksheet, merged_values)
         metadata = _extract_metadata(worksheet, merged_values, header_row=header_row, filename=filename)
         lines, warnings = self._parse_lines(worksheet, merged_values, header_row=header_row, columns=columns)
+        if metadata.get("declared_invoice_total") is None:
+            metadata["declared_invoice_total"] = _extract_declared_invoice_total(
+                worksheet,
+                merged_values,
+                header_row=header_row,
+            )
         summary = _build_summary(lines, declared_total=_to_number(metadata.get("declared_invoice_total")))
         warnings.extend(_metadata_warnings(metadata))
         errors: list[str] = []
@@ -125,8 +131,6 @@ class SupplierInvoiceParser:
             }
             row_text = " ".join(_stringify(value) for value in row_values.values() if _stringify(value))
             detected_type = detect_product_type(row_text)
-            if detected_type:
-                current_product_type = detected_type
 
             model_raw = _stringify(row_values.get("models"))
             name_spec = _stringify(row_values.get("name_spec"))
@@ -144,10 +148,18 @@ class SupplierInvoiceParser:
             blank_run = 0
 
             has_numeric_payload = qty is not None or unit_price is not None or amount is not None
+            if lines and _is_total_row(row_text):
+                break
             if not (model_raw or name_spec or source_no or has_numeric_payload):
                 continue
+            if has_numeric_payload and not (model_raw or name_spec or source_no):
+                continue
 
-            if _is_extra_row(row_text):
+            is_extra = _is_extra_row(source_no, model_raw, name_spec)
+            if not is_extra and detected_type:
+                current_product_type = detected_type
+
+            if is_extra:
                 sort_order += 1
                 lines.append(
                     {
@@ -305,17 +317,17 @@ def _find_header_row(
             normalized = _normalize_header(_cell_value(worksheet, row_index, col_index, merged_values))
             if normalized in {"NO", "NO."}:
                 columns["no"] = col_index
-            elif normalized == "MODELS":
+            elif "MODEL" in normalized or "型号" in normalized:
                 columns["models"] = col_index
-            elif normalized == "QTY":
+            elif "QTY" in normalized or "数量" in normalized:
                 columns["qty"] = col_index
-            elif normalized in {"U.PRICE", "U PRICE", "UNIT PRICE", "UNITPRICE"}:
+            elif normalized in {"U.PRICE", "U PRICE", "UNIT PRICE", "UNITPRICE"} or "单价" in normalized:
                 columns["unit_price"] = col_index
-            elif normalized == "AMOUNT":
+            elif "AMOUNT" in normalized or "总价" in normalized or "金额" in normalized:
                 columns["amount"] = col_index
-            elif "NAME" in normalized and "SPEC" in normalized:
+            elif ("NAME" in normalized and "SPEC" in normalized) or "品名" in normalized or "规格" in normalized:
                 columns["name_spec"] = col_index
-            elif normalized in {"COMMENT", "COMMENTS", "REMARK", "REMARKS"}:
+            elif normalized in {"COMMENT", "COMMENTS", "REMARK", "REMARKS"} or "备注" in normalized:
                 columns["comment"] = col_index
         required = {"no", "models", "qty", "unit_price", "amount"}
         if required.issubset(columns):
@@ -340,7 +352,7 @@ def _extract_metadata(
         "currency": "",
         "declared_invoice_total": None,
     }
-    scan_rows = range(1, min(max(header_row - 1, 1), 40) + 1)
+    scan_rows = range(1, min(max(header_row, 1), 40) + 1)
     for row_index in scan_rows:
         row = [
             _stringify(_cell_value(worksheet, row_index, col_index, merged_values))
@@ -367,6 +379,26 @@ def _extract_metadata(
         if not metadata.get(key) and value:
             metadata[key] = value
     return metadata
+
+
+def _extract_declared_invoice_total(
+    worksheet: Worksheet,
+    merged_values: Mapping[tuple[int, int], Any],
+    *,
+    header_row: int,
+) -> float | None:
+    for row_index in range(header_row + 1, min(worksheet.max_row, header_row + 120) + 1):
+        row = [
+            _cell_value(worksheet, row_index, col_index, merged_values)
+            for col_index in range(1, worksheet.max_column + 1)
+        ]
+        row_text = " ".join(_stringify(value) for value in row if _stringify(value))
+        if not _is_total_row(row_text):
+            continue
+        numeric_values = [number for number in (_to_number(value) for value in row) if number is not None]
+        if numeric_values:
+            return numeric_values[-1]
+    return None
 
 
 def _maybe_assign_metadata(metadata: dict[str, Any], text: str, next_value: str) -> None:
@@ -429,7 +461,7 @@ def _detect_currency(value: Any) -> str:
     if "USD" in text or "$" in text:
         return "USD"
     if "CNY" in text or "RMB" in text or "¥" in text:
-        return "CNY"
+        return "RMB"
     if "EUR" in text:
         return "EUR"
     return ""
@@ -462,25 +494,33 @@ def _build_summary(lines: list[Mapping[str, Any]], *, declared_total: float | No
     }
 
 
-def _is_extra_row(row_text: str) -> bool:
-    lower = row_text.lower()
-    return any(
-        marker in lower
-        for marker in (
-            "opp",
-            "bag",
-            "packet",
-            "package",
-            "label",
-            "card",
-            "packaging",
-            "袋",
-            "包装",
-            "标签",
-            "标贴",
-            "卡",
-        )
+def _is_extra_row(*values: Any) -> bool:
+    lower = " ".join(_stringify(value) for value in values if _stringify(value)).lower()
+    if not lower:
+        return False
+    strong_markers = (
+        "opp",
+        "label",
+        "labels",
+        "card",
+        "cards",
+        "shipping",
+        "freight",
+        "售后卡",
+        "定制卡",
+        "卡片",
+        "标签",
+        "标贴",
+        "运费",
     )
+    if any(marker in lower for marker in strong_markers):
+        return True
+    packaging_markers = ("bag", "packet", "package", "packaging", "袋", "包装")
+    return any(marker in lower for marker in packaging_markers) and not detect_product_type(lower) and "iphone" not in lower
+
+
+def _is_total_row(row_text: str) -> bool:
+    return bool(re.search(r"\btotal\b|合计|总计|总值", _stringify(row_text), re.IGNORECASE))
 
 
 def _normalize_header(value: Any) -> str:
@@ -538,4 +578,3 @@ def _raw_row_payload(row_index: int, row_values: Mapping[str, Any]) -> dict[str,
         "worksheet_row": row_index,
         "values": {key: _stringify(value) for key, value in row_values.items()},
     }
-

@@ -63,6 +63,15 @@ def main() -> None:
             if list_status != 200 or list_payload.get("shipments") != []:
                 raise AssertionError(f"empty registry must load, got {list_status} {list_payload}")
 
+            unsupported_status, unsupported_payload = _post_multipart(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH}",
+                b"not an invoice",
+                filename="invoice.txt",
+                content_type="text/plain",
+            )
+            if unsupported_status != 400 or "xlsx" not in str(unsupported_payload.get("error", "")).lower():
+                raise AssertionError(f"unsupported file type must return controlled JSON 400, got {unsupported_status} {unsupported_payload}")
+
             parse_status, parse_payload = _post_multipart(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH}",
                 workbook_bytes,
@@ -149,13 +158,19 @@ def _build_invoice_fixture() -> bytes:
     return buffer.getvalue()
 
 
-def _post_multipart(url: str, workbook_bytes: bytes, *, filename: str) -> tuple[int, dict[str, object]]:
+def _post_multipart(
+    url: str,
+    workbook_bytes: bytes,
+    *,
+    filename: str,
+    content_type: str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+) -> tuple[int, dict[str, object]]:
     boundary = "----wbcore-supplier" + uuid4().hex
     body = b"".join(
         [
             f"--{boundary}\r\n".encode("utf-8"),
             f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode("utf-8"),
-            b"Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n\r\n",
+            f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"),
             workbook_bytes,
             f"\r\n--{boundary}--\r\n".encode("utf-8"),
         ]
