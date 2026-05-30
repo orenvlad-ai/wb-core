@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-22-REGISTRY-UPLOAD-DB-BACKED-RUNTIME-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `registry_upload_db_backed_runtime_block`."
-scope: "Локальный SQLite-backed runtime ingest для V2-реестров: persistent current state, version history, upload result, exact-date temporal source snapshots, role-aware temporal slot truth (`provisional_current / closed_day_candidate / accepted_closed`) и persisted closure-retry state без Apps Script UI и внешнего API."
+scope: "Локальный SQLite-backed runtime ingest для V2-реестров: persistent current state, version history, upload result, exact-date temporal source snapshots, role-aware temporal slot truth (`provisional_current / closed_day_candidate / accepted_closed`), persisted closure-retry state и supplier invoice shipment registry state без Apps Script UI и внешнего API."
 source_basis:
   - "migration/86_registry_upload_contract.md"
   - "migration/88_registry_upload_file_backed_service.md"
@@ -19,6 +19,7 @@ related_modules:
   - "packages/contracts/registry_upload_db_backed_runtime.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/application/factory_order_sales_history.py"
+  - "packages/application/supplier_shipments.py"
 related_tables:
   - "CONFIG_V2"
   - "METRICS_V2"
@@ -29,19 +30,24 @@ related_tables:
   - "sheet_vitrina_v1_plan_report_monthly_baseline"
   - "sheet_vitrina_v1_factory_order_dataset_state"
   - "sheet_vitrina_v1_factory_order_result_state"
+  - "sheet_vitrina_v1_supplier_shipment_uploads"
+  - "sheet_vitrina_v1_supplier_shipments"
+  - "sheet_vitrina_v1_supplier_shipment_lines"
 related_endpoints: []
 related_runners:
   - "apps/registry_upload_bundle_v1_smoke.py"
   - "apps/registry_upload_file_backed_service_smoke.py"
   - "apps/registry_upload_db_backed_runtime_smoke.py"
   - "apps/factory_order_sales_history_smoke.py"
+  - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
 related_docs:
   - "migration/86_registry_upload_contract.md"
   - "migration/88_registry_upload_file_backed_service.md"
   - "migration/89_registry_upload_db_backed_runtime.md"
   - "docs/modules/21_MODULE__REGISTRY_UPLOAD_FILE_BACKED_SERVICE_BLOCK.md"
+  - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current temporal closure seam and plan-report baseline: SQLite-backed runtime теперь materialize-ит current registry state/version history, role-aware temporal slot snapshots, persisted closure retry state, operator-side factory-order dataset/result state and a separate manual monthly baseline table used only by the plan-report."
+update_note: "Обновлён под current temporal closure seam, plan-report baseline and supplier shipments: SQLite-backed runtime теперь materialize-ит current registry state/version history, role-aware temporal slot snapshots, persisted closure retry state, operator-side factory-order dataset/result state, supplier invoice upload/header/line state and a separate manual monthly baseline table used only by the plan-report."
 ---
 
 # 1. Идентификатор и статус
@@ -100,6 +106,10 @@ update_note: "Обновлён под current temporal closure seam and plan-rep
     - baseline не подменяет `accepted_closed_day_snapshot` и используется только расчётом `GET /v1/sheet-vitrina-v1/plan-report`;
   - operator-side uploaded workbook state для factory-order datasets;
   - last successful factory-order result state.
+  - supplier invoice registry state:
+    - staged upload metadata in `sheet_vitrina_v1_supplier_shipment_uploads`;
+    - shipment headers/totals/status/file references in `sheet_vitrina_v1_supplier_shipments`;
+    - editable product/extra line details in `sheet_vitrina_v1_supplier_shipment_lines`.
 - Для current factory-order seam `temporal_source_snapshots[source_key=sales_funnel_history]` является authoritative server-side storage contract для persisted `orderCount` history:
   - bounded historical window может truthfully replace-иться целиком;
   - future exact-date snapshots продолжают дописываться existing live flow без возврата truth logic в sheet.

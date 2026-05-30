@@ -97,6 +97,7 @@ DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH = "/v1/sheet-vitrina-v1/seller-portal-r
 DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH = "/v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip"
 DEFAULT_SHEET_OPERATOR_UI_PATH = "/sheet-vitrina-v1/operator"
 DEFAULT_SHEET_WEB_VITRINA_UI_PATH = "/sheet-vitrina-v1/vitrina"
+DEFAULT_SHEET_SUPPLIER_UI_PATH = "/sheet-vitrina-v1/supplier"
 DEFAULT_WEB_AUTH_LOGIN_PATH = "/login"
 DEFAULT_WEB_AUTH_LOGOUT_PATH = "/logout"
 WEB_AUTH_COOKIE_NAME = "wb_core_web_session"
@@ -135,9 +136,12 @@ DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH = "/v1/sheet-vitrina-v1/supply/factory
 DEFAULT_WB_REGIONAL_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/status"
 DEFAULT_WB_REGIONAL_CALCULATE_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/calculate"
 DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX = "/v1/sheet-vitrina-v1/supply/wb-regional/district"
+DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
+DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
 DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
 OPERATOR_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_operator.html"
 WEB_VITRINA_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_web_vitrina.html"
+SUPPLIER_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_supplier.html"
 
 
 def load_registry_upload_http_entrypoint_config() -> RegistryUploadHttpEntrypointConfig:
@@ -912,6 +916,44 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if parsed.path == DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH:
+                try:
+                    upload_payload = _load_uploaded_file_payload(self)
+                    payload = entrypoint.handle_supplier_shipments_parse_request(
+                        upload_payload["workbook_bytes"],
+                        uploaded_filename=str(upload_payload.get("filename") or ""),
+                        uploaded_content_type=str(upload_payload.get("content_type") or ""),
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": f"supplier invoice parse failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_SUPPLIER_SHIPMENTS_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_supplier_shipments_create_request(payload)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier shipment create failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
             if parsed.path in {
                 DEFAULT_FACTORY_ORDER_UPLOAD_STOCK_FF_PATH,
                 DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FACTORY_PATH,
@@ -1012,6 +1054,14 @@ def _build_handler(
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
                     ),
+                )
+                return
+
+            if parsed.path == DEFAULT_SHEET_SUPPLIER_UI_PATH:
+                _write_html_response(
+                    self,
+                    HTTPStatus.OK,
+                    _render_sheet_vitrina_supplier_ui(),
                 )
                 return
 
@@ -1519,6 +1569,62 @@ def _build_handler(
                 )
                 return
 
+            if parsed.path == DEFAULT_SUPPLIER_SHIPMENTS_PATH:
+                try:
+                    payload = entrypoint.handle_supplier_shipments_list_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier shipments list failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if _is_supplier_shipment_invoice_path(parsed.path):
+                try:
+                    shipment_id = _resolve_supplier_shipment_id_from_invoice_path(parsed.path)
+                    workbook_bytes, filename, content_type = entrypoint.handle_supplier_shipments_invoice_request(
+                        shipment_id
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier invoice download failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    workbook_bytes,
+                    content_type=content_type,
+                    filename=filename,
+                    as_attachment=True,
+                )
+                return
+
+            if _is_supplier_shipment_detail_path(parsed.path):
+                try:
+                    shipment_id = _resolve_supplier_shipment_id_from_detail_path(parsed.path)
+                    payload = entrypoint.handle_supplier_shipments_detail_request(shipment_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier shipment detail failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if parsed.path == DEFAULT_FACTORY_ORDER_STATUS_PATH:
                 try:
                     payload = entrypoint.handle_factory_order_status_request()
@@ -1768,6 +1874,35 @@ def _build_handler(
                 self,
                 HTTPStatus.OK,
                 payload,
+            )
+            return
+
+        def do_PATCH(self) -> None:  # noqa: N802
+            parsed = urllib_parse.urlparse(self.path)
+            if not _ensure_web_auth(self, parsed):
+                return
+            if _is_supplier_shipment_detail_path(parsed.path):
+                try:
+                    shipment_id = _resolve_supplier_shipment_id_from_detail_path(parsed.path)
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_supplier_shipments_patch_request(shipment_id, payload)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier shipment patch failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            _write_json_response(
+                self,
+                HTTPStatus.NOT_FOUND,
+                {"error": f"unsupported path: {parsed.path}"},
             )
             return
 
@@ -2162,6 +2297,34 @@ def _resolve_factory_order_dataset_type_from_delete_path(path: str) -> str:
     return dataset_type
 
 
+def _is_supplier_shipment_detail_path(path: str) -> bool:
+    if not path.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
+        return False
+    suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+    return bool(suffix) and "/" not in suffix and suffix != "parse"
+
+
+def _is_supplier_shipment_invoice_path(path: str) -> bool:
+    if not path.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
+        return False
+    suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+    parts = suffix.split("/")
+    return len(parts) == 2 and bool(parts[0]) and parts[1] == "invoice"
+
+
+def _resolve_supplier_shipment_id_from_detail_path(path: str) -> str:
+    if not _is_supplier_shipment_detail_path(path):
+        raise ValueError(f"unsupported supplier shipment detail path: {path}")
+    return path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+
+
+def _resolve_supplier_shipment_id_from_invoice_path(path: str) -> str:
+    if not _is_supplier_shipment_invoice_path(path):
+        raise ValueError(f"unsupported supplier shipment invoice path: {path}")
+    suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+    return suffix.split("/", 1)[0]
+
+
 def _resolve_wb_regional_district_from_download_path(path: str) -> str:
     prefix = DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX + "/"
     if not path.startswith(prefix) or not path.endswith(".xlsx"):
@@ -2274,6 +2437,9 @@ def _write_binary_response(
 def _web_auth_config() -> dict[str, Any]:
     username = str(os.environ.get("WB_CORE_WEB_AUTH_USERNAME", "") or "").strip()
     password_hash = str(os.environ.get("WB_CORE_WEB_AUTH_PASSWORD_HASH", "") or "").strip()
+    supplier_username = str(os.environ.get("WB_CORE_SUPPLIER_AUTH_USERNAME", "") or "").strip()
+    supplier_password_hash = str(os.environ.get("WB_CORE_SUPPLIER_AUTH_PASSWORD_HASH", "") or "").strip()
+    supplier_display_name = str(os.environ.get("WB_CORE_SUPPLIER_AUTH_DISPLAY_NAME", "") or "").strip()
     session_secret = str(os.environ.get("WB_CORE_WEB_AUTH_SESSION_SECRET", "") or "").strip()
     required = _truthy_env("WB_CORE_WEB_AUTH_REQUIRED")
     max_age = _safe_positive_int(
@@ -2281,6 +2447,7 @@ def _web_auth_config() -> dict[str, Any]:
         WEB_AUTH_DEFAULT_MAX_AGE_SECONDS,
     )
     enabled = bool(username and password_hash and session_secret)
+    supplier_enabled = bool(supplier_username and supplier_password_hash and session_secret)
     configured = enabled or not required
     return {
         "enabled": enabled,
@@ -2288,6 +2455,19 @@ def _web_auth_config() -> dict[str, Any]:
         "required": required,
         "username": username,
         "password_hash": password_hash,
+        "operator": {
+            "username": username,
+            "password_hash": password_hash,
+            "role": "operator",
+            "display_name": username,
+        },
+        "supplier": {
+            "enabled": supplier_enabled,
+            "username": supplier_username,
+            "password_hash": supplier_password_hash,
+            "role": "supplier",
+            "display_name": supplier_display_name or supplier_username,
+        },
         "session_secret": session_secret,
         "max_age": max_age,
     }
@@ -2300,8 +2480,13 @@ def _ensure_web_auth(handler: BaseHTTPRequestHandler, parsed: urllib_parse.Parse
         return False
     if not config["enabled"]:
         return True
-    if _authenticated_web_user(handler, config):
-        return True
+    user = _authenticated_web_user(handler, config)
+    if user:
+        role = str(user.get("role") or "")
+        if role in _allowed_roles_for_path(parsed.path):
+            return True
+        _write_auth_forbidden(handler, parsed.path)
+        return False
     if _is_json_route(parsed.path, handler):
         _write_json_response(
             handler,
@@ -2336,10 +2521,20 @@ def _handle_web_auth_login(handler: BaseHTTPRequestHandler, query: str) -> None:
     username = str(payload.get("username") or "").strip()
     password = str(payload.get("password") or "")
     next_path = _safe_next_path(str(payload.get("next") or _resolve_single_query_param(query, "next") or DEFAULT_SHEET_WEB_VITRINA_UI_PATH))
-    if username != config["username"] or not _verify_pbkdf2_password(password, config["password_hash"]):
+    principal = _match_web_auth_principal(username, password, config)
+    if principal is None:
         _write_login_form_response(handler, urllib_parse.urlencode({"next": next_path}), error="Неверный логин или пароль.")
         return
-    cookie = _build_session_cookie(handler, username, config)
+    role = str(principal.get("role") or "")
+    if role not in _allowed_roles_for_path(next_path):
+        next_path = DEFAULT_SHEET_SUPPLIER_UI_PATH if role == "supplier" else DEFAULT_SHEET_WEB_VITRINA_UI_PATH
+    cookie = _build_session_cookie(
+        handler,
+        username,
+        config,
+        role=role,
+        display_name=str(principal.get("display_name") or username),
+    )
     _write_redirect_response(handler, HTTPStatus.SEE_OTHER, next_path, headers={"Set-Cookie": cookie})
 
 
@@ -2417,6 +2612,21 @@ def _write_auth_setup_error(handler: BaseHTTPRequestHandler, path: str) -> None:
     )
 
 
+def _write_auth_forbidden(handler: BaseHTTPRequestHandler, path: str) -> None:
+    if _is_json_path(path):
+        _write_json_response(
+            handler,
+            HTTPStatus.FORBIDDEN,
+            {"error": "forbidden", "reason": "role_not_allowed_for_route"},
+        )
+        return
+    _write_html_response(
+        handler,
+        HTTPStatus.FORBIDDEN,
+        "<!doctype html><meta charset=\"utf-8\"><title>Forbidden</title><p>Недостаточно прав для этого раздела.</p>",
+    )
+
+
 def _write_redirect_response(
     handler: BaseHTTPRequestHandler,
     status: HTTPStatus,
@@ -2458,10 +2668,35 @@ def _load_login_payload(handler: BaseHTTPRequestHandler) -> dict[str, str]:
     return {key: str(values[0] if values else "") for key, values in form.items()}
 
 
-def _authenticated_web_user(handler: BaseHTTPRequestHandler, config: Mapping[str, Any]) -> str:
+def _match_web_auth_principal(username: str, password: str, config: Mapping[str, Any]) -> dict[str, str] | None:
+    operator = config.get("operator") if isinstance(config.get("operator"), Mapping) else {}
+    if (
+        username == str(operator.get("username") or "")
+        and _verify_pbkdf2_password(password, str(operator.get("password_hash") or ""))
+    ):
+        return {
+            "username": username,
+            "role": "operator",
+            "display_name": str(operator.get("display_name") or username),
+        }
+    supplier = config.get("supplier") if isinstance(config.get("supplier"), Mapping) else {}
+    if (
+        bool(supplier.get("enabled"))
+        and username == str(supplier.get("username") or "")
+        and _verify_pbkdf2_password(password, str(supplier.get("password_hash") or ""))
+    ):
+        return {
+            "username": username,
+            "role": "supplier",
+            "display_name": str(supplier.get("display_name") or username),
+        }
+    return None
+
+
+def _authenticated_web_user(handler: BaseHTTPRequestHandler, config: Mapping[str, Any]) -> dict[str, str] | None:
     cookie_value = _request_cookie(handler, WEB_AUTH_COOKIE_NAME)
     if not cookie_value or "." not in cookie_value:
-        return ""
+        return None
     payload_b64, signature_b64 = cookie_value.rsplit(".", 1)
     expected_signature = _base64url_encode(
         hmac.new(
@@ -2471,28 +2706,50 @@ def _authenticated_web_user(handler: BaseHTTPRequestHandler, config: Mapping[str
         ).digest()
     )
     if not hmac.compare_digest(signature_b64, expected_signature):
-        return ""
+        return None
     try:
         payload = json.loads(_base64url_decode(payload_b64).decode("utf-8"))
     except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
-        return ""
+        return None
     if not isinstance(payload, Mapping):
-        return ""
+        return None
     username = str(payload.get("u") or "")
     expires_at = int(payload.get("exp") or 0)
-    if username != str(config.get("username") or ""):
-        return ""
     if expires_at < int(time.time()):
-        return ""
-    return username
+        return None
+    role = str(payload.get("r") or "").strip() or "operator"
+    operator = config.get("operator") if isinstance(config.get("operator"), Mapping) else {}
+    if username == str(operator.get("username") or "") and role == "operator":
+        return {
+            "username": username,
+            "role": "operator",
+            "display_name": str(payload.get("d") or operator.get("display_name") or username),
+        }
+    supplier = config.get("supplier") if isinstance(config.get("supplier"), Mapping) else {}
+    if bool(supplier.get("enabled")) and username == str(supplier.get("username") or "") and role == "supplier":
+        return {
+            "username": username,
+            "role": "supplier",
+            "display_name": str(payload.get("d") or supplier.get("display_name") or username),
+        }
+    return None
 
 
-def _build_session_cookie(handler: BaseHTTPRequestHandler, username: str, config: Mapping[str, Any]) -> str:
+def _build_session_cookie(
+    handler: BaseHTTPRequestHandler,
+    username: str,
+    config: Mapping[str, Any],
+    *,
+    role: str,
+    display_name: str,
+) -> str:
     max_age = int(config.get("max_age") or WEB_AUTH_DEFAULT_MAX_AGE_SECONDS)
     payload = _base64url_encode(
         json.dumps(
             {
                 "u": username,
+                "r": role,
+                "d": display_name,
                 "exp": int(time.time()) + max_age,
             },
             ensure_ascii=False,
@@ -2577,6 +2834,15 @@ def _safe_next_path(value: str) -> str:
     if next_path.startswith(DEFAULT_WEB_AUTH_LOGIN_PATH):
         return DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     return next_path
+
+
+def _allowed_roles_for_path(path: str) -> set[str]:
+    normalized = str(path or "").split("?", 1)[0]
+    if normalized == DEFAULT_SHEET_SUPPLIER_UI_PATH:
+        return {"operator", "supplier"}
+    if normalized == DEFAULT_SUPPLIER_SHIPMENTS_PATH or normalized.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
+        return {"operator", "supplier"}
+    return {"operator"}
 
 
 def _is_json_route(path: str, handler: BaseHTTPRequestHandler) -> bool:
@@ -2839,6 +3105,9 @@ def _render_sheet_vitrina_operator_ui(
         "factory_order_recommendation_path": DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
         "wb_regional_status_path": DEFAULT_WB_REGIONAL_STATUS_PATH,
         "wb_regional_calculate_path": DEFAULT_WB_REGIONAL_CALCULATE_PATH,
+        "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
+        "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
+        "supplier_ui_path": DEFAULT_SHEET_SUPPLIER_UI_PATH,
         "stock_report_active_skus": list(operator_ui_context.get("stock_report_active_skus") or []),
         "stock_report_active_sku_count": int(operator_ui_context.get("stock_report_active_sku_count") or 0),
         "stock_report_active_sku_source": str(
@@ -2854,6 +3123,20 @@ def _render_sheet_vitrina_operator_ui(
         )
         .replace("__SHEET_VITRINA_V1_WEB_VITRINA_URL__", web_vitrina_url)
         .replace("__SHEET_VITRINA_V1_OPERATOR_CONFIG_JSON__", json.dumps(config_payload, ensure_ascii=False))
+    )
+
+
+def _render_sheet_vitrina_supplier_ui() -> str:
+    config_payload = {
+        "page_title": "От поставщика",
+        "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
+        "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
+        "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
+    }
+    template = SUPPLIER_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return template.replace(
+        "__SHEET_VITRINA_V1_SUPPLIER_CONFIG_JSON__",
+        json.dumps(config_payload, ensure_ascii=False),
     )
 
 

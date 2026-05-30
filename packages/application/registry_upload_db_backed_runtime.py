@@ -1280,6 +1280,289 @@ class RegistryUploadDbBackedRuntime:
             conn.commit()
             return cursor.rowcount > 0
 
+    def save_supplier_shipment_upload(
+        self,
+        *,
+        upload_id: str,
+        created_at: str,
+        source_filename: str,
+        content_type: str,
+        source_file_sha256: str,
+        source_file_path: str,
+        parser_version: str,
+        parsed_payload: Mapping[str, Any],
+    ) -> None:
+        _validate_timestamp(created_at, field_name="created_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_supplier_shipment_uploads(
+                    upload_id,
+                    created_at,
+                    source_filename,
+                    content_type,
+                    source_file_sha256,
+                    source_file_path,
+                    parser_version,
+                    parsed_payload_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    upload_id,
+                    created_at,
+                    source_filename,
+                    content_type,
+                    source_file_sha256,
+                    source_file_path,
+                    parser_version,
+                    json.dumps(dict(parsed_payload), ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+
+    def load_supplier_shipment_upload(self, upload_id: str) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT upload_id,
+                       created_at,
+                       source_filename,
+                       content_type,
+                       source_file_sha256,
+                       source_file_path,
+                       parser_version,
+                       parsed_payload_json
+                FROM sheet_vitrina_v1_supplier_shipment_uploads
+                WHERE upload_id = ?
+                """,
+                (upload_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "upload_id": row["upload_id"],
+                "created_at": row["created_at"],
+                "source_filename": row["source_filename"],
+                "content_type": row["content_type"],
+                "source_file_sha256": row["source_file_sha256"],
+                "source_file_path": row["source_file_path"],
+                "parser_version": row["parser_version"],
+                "parsed_payload": json.loads(row["parsed_payload_json"]),
+            }
+
+    def save_supplier_shipment(
+        self,
+        *,
+        header: Mapping[str, Any],
+        lines: list[Mapping[str, Any]],
+    ) -> None:
+        shipment_id = str(header.get("shipment_id") or "").strip()
+        if not shipment_id:
+            raise ValueError("supplier shipment_id is required")
+        _validate_timestamp(str(header.get("created_at") or ""), field_name="created_at")
+        _validate_timestamp(str(header.get("updated_at") or ""), field_name="updated_at")
+        _validate_iso_date(str(header.get("shipment_date") or ""), field_name="shipment_date")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_supplier_shipments(
+                    shipment_id,
+                    created_at,
+                    updated_at,
+                    shipment_date,
+                    invoice_no,
+                    invoice_date,
+                    contract_no,
+                    contract_date,
+                    supplier_name,
+                    customer_name,
+                    currency,
+                    product_qty_total,
+                    product_amount_total,
+                    extras_amount_total,
+                    invoice_amount_total,
+                    declared_invoice_total,
+                    match_status,
+                    source_filename,
+                    source_file_sha256,
+                    source_file_path,
+                    parser_version,
+                    warnings_json,
+                    errors_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(shipment_id) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    shipment_date = excluded.shipment_date,
+                    invoice_no = excluded.invoice_no,
+                    invoice_date = excluded.invoice_date,
+                    contract_no = excluded.contract_no,
+                    contract_date = excluded.contract_date,
+                    supplier_name = excluded.supplier_name,
+                    customer_name = excluded.customer_name,
+                    currency = excluded.currency,
+                    product_qty_total = excluded.product_qty_total,
+                    product_amount_total = excluded.product_amount_total,
+                    extras_amount_total = excluded.extras_amount_total,
+                    invoice_amount_total = excluded.invoice_amount_total,
+                    declared_invoice_total = excluded.declared_invoice_total,
+                    match_status = excluded.match_status,
+                    source_filename = excluded.source_filename,
+                    source_file_sha256 = excluded.source_file_sha256,
+                    source_file_path = excluded.source_file_path,
+                    parser_version = excluded.parser_version,
+                    warnings_json = excluded.warnings_json,
+                    errors_json = excluded.errors_json
+                """,
+                (
+                    shipment_id,
+                    header.get("created_at"),
+                    header.get("updated_at"),
+                    header.get("shipment_date"),
+                    header.get("invoice_no") or "",
+                    header.get("invoice_date") or "",
+                    header.get("contract_no") or "",
+                    header.get("contract_date") or "",
+                    header.get("supplier_name") or "",
+                    header.get("customer_name") or "",
+                    header.get("currency") or "",
+                    header.get("product_qty_total"),
+                    header.get("product_amount_total"),
+                    header.get("extras_amount_total"),
+                    header.get("invoice_amount_total"),
+                    header.get("declared_invoice_total"),
+                    header.get("match_status") or "",
+                    header.get("source_filename") or "",
+                    header.get("source_file_sha256") or "",
+                    header.get("source_file_path") or "",
+                    header.get("parser_version") or "",
+                    json.dumps(list(header.get("warnings") or []), ensure_ascii=False),
+                    json.dumps(list(header.get("errors") or []), ensure_ascii=False),
+                ),
+            )
+            conn.execute(
+                """
+                DELETE FROM sheet_vitrina_v1_supplier_shipment_lines
+                WHERE shipment_id = ?
+                """,
+                (shipment_id,),
+            )
+            conn.executemany(
+                """
+                INSERT INTO sheet_vitrina_v1_supplier_shipment_lines(
+                    line_id,
+                    shipment_id,
+                    line_type,
+                    sort_order,
+                    source_no,
+                    product_type,
+                    model_raw,
+                    model_normalized,
+                    match_key,
+                    internal_sku,
+                    internal_nm_id,
+                    internal_name,
+                    qty,
+                    unit_price,
+                    amount,
+                    currency,
+                    comment,
+                    match_status,
+                    manual_override,
+                    raw_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        str(item.get("line_id") or ""),
+                        shipment_id,
+                        str(item.get("line_type") or ""),
+                        int(item.get("sort_order") or index),
+                        str(item.get("source_no") or ""),
+                        str(item.get("product_type") or ""),
+                        str(item.get("model_raw") or ""),
+                        str(item.get("model_normalized") or ""),
+                        str(item.get("match_key") or ""),
+                        str(item.get("internal_sku") or ""),
+                        item.get("internal_nm_id"),
+                        str(item.get("internal_name") or ""),
+                        item.get("qty"),
+                        item.get("unit_price"),
+                        item.get("amount"),
+                        str(item.get("currency") or ""),
+                        str(item.get("comment") or ""),
+                        str(item.get("match_status") or ""),
+                        1 if bool(item.get("manual_override")) else 0,
+                        json.dumps(dict(item.get("raw") or {}), ensure_ascii=False),
+                    )
+                    for index, item in enumerate(lines, start=1)
+                ],
+            )
+            conn.commit()
+
+    def list_supplier_shipments(self) -> list[dict[str, Any]]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT shipment_id,
+                       created_at,
+                       updated_at,
+                       shipment_date,
+                       invoice_no,
+                       invoice_date,
+                       supplier_name,
+                       currency,
+                       product_qty_total,
+                       product_amount_total,
+                       extras_amount_total,
+                       invoice_amount_total,
+                       match_status,
+                       source_filename,
+                       source_file_sha256
+                FROM sheet_vitrina_v1_supplier_shipments
+                ORDER BY shipment_date DESC, created_at DESC
+                """
+            ).fetchall()
+            return [_supplier_shipment_row_to_dict(row) for row in rows]
+
+    def load_supplier_shipment(self, shipment_id: str) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            header_row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_supplier_shipments
+                WHERE shipment_id = ?
+                """,
+                (shipment_id,),
+            ).fetchone()
+            if header_row is None:
+                return None
+            line_rows = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_supplier_shipment_lines
+                WHERE shipment_id = ?
+                ORDER BY sort_order ASC, line_id ASC
+                """,
+                (shipment_id,),
+            ).fetchall()
+            return {
+                "header": _supplier_shipment_header_to_dict(header_row),
+                "lines": [_supplier_shipment_line_to_dict(row) for row in line_rows],
+            }
+
     def save_plan_report_monthly_baseline(
         self,
         *,
@@ -2458,6 +2741,94 @@ def _deserialize_temporal_source_payload(payload_json: str) -> Any:
     return _to_namespace(json.loads(payload_json))
 
 
+def _supplier_shipment_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "shipment_id": row["shipment_id"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "shipment_date": row["shipment_date"],
+        "invoice_no": row["invoice_no"] or "",
+        "invoice_date": row["invoice_date"] or "",
+        "supplier_name": row["supplier_name"] or "",
+        "currency": row["currency"] or "",
+        "product_qty_total": row["product_qty_total"],
+        "product_amount_total": row["product_amount_total"],
+        "extras_amount_total": row["extras_amount_total"],
+        "invoice_amount_total": row["invoice_amount_total"],
+        "match_status": row["match_status"],
+        "source_filename": row["source_filename"] or "",
+        "source_file_sha256": row["source_file_sha256"] or "",
+    }
+
+
+def _supplier_shipment_header_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "shipment_id": row["shipment_id"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "shipment_date": row["shipment_date"],
+        "invoice_no": row["invoice_no"] or "",
+        "invoice_date": row["invoice_date"] or "",
+        "contract_no": row["contract_no"] or "",
+        "contract_date": row["contract_date"] or "",
+        "supplier_name": row["supplier_name"] or "",
+        "customer_name": row["customer_name"] or "",
+        "currency": row["currency"] or "",
+        "product_qty_total": row["product_qty_total"],
+        "product_amount_total": row["product_amount_total"],
+        "extras_amount_total": row["extras_amount_total"],
+        "invoice_amount_total": row["invoice_amount_total"],
+        "declared_invoice_total": row["declared_invoice_total"],
+        "match_status": row["match_status"],
+        "source_filename": row["source_filename"] or "",
+        "source_file_sha256": row["source_file_sha256"] or "",
+        "source_file_path": row["source_file_path"] or "",
+        "parser_version": row["parser_version"] or "",
+        "warnings": _loads_json_list(row["warnings_json"]),
+        "errors": _loads_json_list(row["errors_json"]),
+    }
+
+
+def _supplier_shipment_line_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "line_id": row["line_id"],
+        "line_type": row["line_type"],
+        "sort_order": row["sort_order"],
+        "source_no": row["source_no"] or "",
+        "product_type": row["product_type"] or "",
+        "model_raw": row["model_raw"] or "",
+        "model_normalized": row["model_normalized"] or "",
+        "match_key": row["match_key"] or "",
+        "internal_sku": row["internal_sku"] or "",
+        "internal_nm_id": row["internal_nm_id"],
+        "internal_name": row["internal_name"] or "",
+        "qty": row["qty"],
+        "unit_price": row["unit_price"],
+        "amount": row["amount"],
+        "currency": row["currency"] or "",
+        "comment": row["comment"] or "",
+        "match_status": row["match_status"] or "",
+        "manual_override": bool(row["manual_override"]),
+        "raw": _loads_json_object(row["raw_json"]),
+    }
+
+
+def _loads_json_list(value: Any) -> list[Any]:
+    try:
+        payload = json.loads(str(value or "[]"))
+    except json.JSONDecodeError:
+        return []
+    return payload if isinstance(payload, list) else []
+
+
+def _loads_json_object(value: Any) -> dict[str, Any]:
+    try:
+        payload = json.loads(str(value or "{}"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _to_jsonable(value: Any) -> Any:
     if isinstance(value, SimpleNamespace):
         return {key: _to_jsonable(item) for key, item in vars(value).items()}
@@ -2719,6 +3090,72 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             calculated_at TEXT NOT NULL,
             result_json TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_shipment_uploads (
+            upload_id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            source_filename TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            source_file_sha256 TEXT NOT NULL,
+            source_file_path TEXT NOT NULL,
+            parser_version TEXT NOT NULL,
+            parsed_payload_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_shipments (
+            shipment_id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            shipment_date TEXT NOT NULL,
+            invoice_no TEXT,
+            invoice_date TEXT,
+            contract_no TEXT,
+            contract_date TEXT,
+            supplier_name TEXT,
+            customer_name TEXT,
+            currency TEXT,
+            product_qty_total REAL,
+            product_amount_total REAL,
+            extras_amount_total REAL,
+            invoice_amount_total REAL,
+            declared_invoice_total REAL,
+            match_status TEXT NOT NULL,
+            source_filename TEXT,
+            source_file_sha256 TEXT,
+            source_file_path TEXT,
+            parser_version TEXT,
+            warnings_json TEXT NOT NULL,
+            errors_json TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_shipments_by_date
+        ON sheet_vitrina_v1_supplier_shipments(shipment_date DESC, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_shipment_lines (
+            line_id TEXT PRIMARY KEY,
+            shipment_id TEXT NOT NULL REFERENCES sheet_vitrina_v1_supplier_shipments(shipment_id) ON DELETE CASCADE,
+            line_type TEXT NOT NULL,
+            sort_order INTEGER NOT NULL,
+            source_no TEXT,
+            product_type TEXT,
+            model_raw TEXT,
+            model_normalized TEXT,
+            match_key TEXT,
+            internal_sku TEXT,
+            internal_nm_id INTEGER,
+            internal_name TEXT,
+            qty REAL,
+            unit_price REAL,
+            amount REAL,
+            currency TEXT,
+            comment TEXT,
+            match_status TEXT,
+            manual_override INTEGER NOT NULL,
+            raw_json TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_shipment_lines_by_shipment
+        ON sheet_vitrina_v1_supplier_shipment_lines(shipment_id, sort_order);
         """
     )
     _ensure_column(

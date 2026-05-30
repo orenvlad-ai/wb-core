@@ -14,6 +14,7 @@ source_basis:
 related_modules:
   - "packages/contracts/cost_price_upload.py"
   - "packages/contracts/factory_order_supply.py"
+  - "packages/contracts/supplier_shipments.py"
   - "packages/contracts/registry_upload_bundle_v1.py"
   - "packages/contracts/registry_upload_file_backed_service.py"
   - "packages/contracts/registry_upload_db_backed_runtime.py"
@@ -23,6 +24,8 @@ related_modules:
   - "packages/application/cost_price_upload.py"
   - "packages/application/factory_order_sales_history.py"
   - "packages/application/factory_order_supply.py"
+  - "packages/application/supplier_invoice_parser.py"
+  - "packages/application/supplier_shipments.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/application/simple_xlsx.py"
@@ -38,6 +41,7 @@ related_modules:
   - "packages/adapters/wb_feedbacks.py"
   - "packages/adapters/openai_feedbacks_ai.py"
   - "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"
+  - "packages/adapters/templates/sheet_vitrina_v1_supplier.html"
   - "apps/seller_portal_automation_guard.py"
   - "apps/seller_portal_automation_guard_smoke.py"
 related_tables:
@@ -92,6 +96,13 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/supply/factory-order/upload/inbound-ff-to-wb"
   - "POST /v1/sheet-vitrina-v1/supply/factory-order/calculate"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
+  - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments"
+  - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
+  - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments"
+  - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}"
+  - "PATCH /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}"
+  - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/invoice"
+  - "GET /sheet-vitrina-v1/supplier"
 related_runners:
   - "apps/seller_portal_relogin_session.py"
   - "apps/seller_portal_relogin_session_smoke.py"
@@ -99,6 +110,7 @@ related_runners:
   - "apps/registry_upload_http_entrypoint_hosted_runtime.py"
   - "apps/registry_upload_http_entrypoint_smoke.py"
   - "apps/registry_upload_http_entrypoint_auth_smoke.py"
+  - "apps/registry_upload_http_entrypoint_supplier_auth_smoke.py"
   - "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"
   - "apps/registry_upload_http_entrypoint_public_routes_smoke.py"
   - "apps/sheet_vitrina_v1_seller_portal_recovery_http_smoke.py"
@@ -107,6 +119,9 @@ related_runners:
   - "apps/factory_order_sales_history_reconcile.py"
   - "apps/factory_order_supply_smoke.py"
   - "apps/sheet_vitrina_v1_factory_order_http_smoke.py"
+  - "apps/supplier_invoice_parser_smoke.py"
+  - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
+  - "apps/sheet_vitrina_v1_supplier_shipments_browser_smoke.py"
   - "apps/sheet_vitrina_v1_daily_report_smoke.py"
   - "apps/sheet_vitrina_v1_daily_report_http_smoke.py"
   - "apps/sheet_vitrina_v1_plan_report_smoke.py"
@@ -135,8 +150,9 @@ related_docs:
   - "migration/90_registry_upload_http_entrypoint.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
+  - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под simple WebCore auth, strict feedbacks загрузку и operator UI: `Отзывы` получает chunked WB feedbacks read route with final server-side date/star/answered filtering, official WB review tags/chips (`review_tags` from fields such as `bables`) and diagnostic meta, XLSX export route for the current table including tags, server-side AI prompt+model discovery config, protected `feedbacks/ai-prompt` + `feedbacks/ai-analyze` routes that pass tags into AI input, operational complaint journal read route, async read-only complaints status sync job route and protected async `submit-selected` job route. AI labels stay transient UI/session output; real complaint submit is guarded-runner-only through the existing Seller Portal runner/resolver path, with CLI explicit flag in CLI mode and auth-protected selected-row job in operator UI. The guarded runner verifies the WB `Опишите ситуацию` field value after blur before final submit, records sanitized request-payload description evidence when available, classifies disabled/already-complained actions as controlled skips, exposes per-row attempts for operator UI overlay, and blocks future submit when AI reason says text is absent while API/UI review tags exist. Uncertain submit attempts are confirmed only by read-only CLI confirmation/detail-network probes with direct-id/strict-strong-composite proof."
+update_note: "Обновлён под simple role-aware WebCore auth, supplier shipment registry, strict feedbacks загрузку и operator UI: `Поставки -> От поставщика` добавляет protected supplier invoice parse/create/list/detail/patch/download routes and optional supplier-only login role; `Отзывы` получает chunked WB feedbacks read route with final server-side date/star/answered filtering, official WB review tags/chips (`review_tags` from fields such as `bables`) and diagnostic meta, XLSX export route for the current table including tags, server-side AI prompt+model discovery config, protected `feedbacks/ai-prompt` + `feedbacks/ai-analyze` routes that pass tags into AI input, operational complaint journal read route, async read-only complaints status sync job route and protected async `submit-selected` job route. AI labels stay transient UI/session output; real complaint submit is guarded-runner-only through the existing Seller Portal runner/resolver path, with CLI explicit flag in CLI mode and auth-protected selected-row job in operator UI. The guarded runner verifies the WB `Опишите ситуацию` field value after blur before final submit, records sanitized request-payload description evidence when available, classifies disabled/already-complained actions as controlled skips, exposes per-row attempts for operator UI overlay, and blocks future submit when AI reason says text is absent while API/UI review tags exist. Uncertain submit attempts are confirmed only by read-only CLI confirmation/detail-network probes with direct-id/strict-strong-composite proof."
 ---
 
 # 1. Идентификатор и статус
@@ -204,6 +220,7 @@ update_note: "Обновлён под simple WebCore auth, strict feedbacks за
   - `409` для duplicate `dataset_version`
   - `422` для contract-level rejection после parse/validation
 - Public/operator WebCore surface is guarded by simple app-level session auth when runtime env provides `WB_CORE_WEB_AUTH_USERNAME`, `WB_CORE_WEB_AUTH_PASSWORD_HASH` and `WB_CORE_WEB_AUTH_SESSION_SECRET` (or `WB_CORE_WEB_AUTH_REQUIRED=1`). `GET /login` renders the login form, `POST /login` verifies the PBKDF2-HMAC password hash and sets an httpOnly SameSite=Lax session cookie, and `GET/POST /logout` clears it. HTML routes redirect unauthenticated users to login; JSON/API routes return 401 JSON. Health/infrastructure probes may stay public when explicitly required, but operator/product routes under `/sheet-vitrina-v1` and `/v1/...` are protected in production.
+- Optional supplier credentials use the same session-secret/hash style through `WB_CORE_SUPPLIER_AUTH_USERNAME`, `WB_CORE_SUPPLIER_AUTH_PASSWORD_HASH` and `WB_CORE_SUPPLIER_AUTH_DISPLAY_NAME`. Supplier role can access only `/sheet-vitrina-v1/supplier`, supplier shipment APIs and invoice downloads; operator role remains full-access and can use the supplier module inside `Поставки`.
 - Для `sheet_vitrina_v1` тот же entrypoint обслуживает narrow operator surface в двух блоках:
   - `POST /v1/sheet-vitrina-v1/refresh` = existing heavy server-side action
   - `POST /v1/sheet-vitrina-v1/load` = thin operator action, который пишет уже готовый snapshot в live sheet через existing bound Apps Script bridge, но operator-facing result отдельно distinguishes technical bridge completion from confirmed sheet update

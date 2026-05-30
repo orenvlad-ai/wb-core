@@ -54,6 +54,13 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/status`
 - `POST /v1/sheet-vitrina-v1/supply/wb-regional/calculate`
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx`
+- `GET /sheet-vitrina-v1/supplier`
+- `GET /v1/sheet-vitrina-v1/supply/supplier-shipments`
+- `POST /v1/sheet-vitrina-v1/supply/supplier-shipments/parse`
+- `POST /v1/sheet-vitrina-v1/supply/supplier-shipments`
+- `GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}`
+- `PATCH /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}`
+- `GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/invoice`
 
 Contract не меняет public HTTP schema этих routes и не переносит truth logic в Apps Script.
 
@@ -207,8 +214,11 @@ Hosted service должна предоставлять current repo entrypoint e
 - `WB_CORE_WEB_AUTH_USERNAME`
 - `WB_CORE_WEB_AUTH_PASSWORD_HASH`
 - `WB_CORE_WEB_AUTH_SESSION_SECRET`
+- `WB_CORE_SUPPLIER_AUTH_USERNAME` (optional supplier-only account)
+- `WB_CORE_SUPPLIER_AUTH_PASSWORD_HASH` (optional supplier-only account)
+- `WB_CORE_SUPPLIER_AUTH_DISPLAY_NAME` (optional)
 
-Production WebCore auth is app-level session auth, not nginx basic auth. The password hash uses the entrypoint PBKDF2-HMAC format `pbkdf2_sha256$iterations$salt_b64$digest_b64`; plaintext credentials must stay outside Git/docs/logs and are handed to the owner separately. `WB_CORE_WEB_AUTH_REQUIRED=1` may be set to fail closed when auth env is incomplete.
+Production WebCore auth is app-level session auth, not nginx basic auth. The password hash uses the entrypoint PBKDF2-HMAC format `pbkdf2_sha256$iterations$salt_b64$digest_b64`; plaintext credentials must stay outside Git/docs/logs and are handed to the owner separately. `WB_CORE_WEB_AUTH_REQUIRED=1` may be set to fail closed when auth env is incomplete. Supplier credentials are optional: when absent, supplier login is unavailable, but operator access to `Поставки -> От поставщика` remains available through the operator role.
 
 Current required upstream secret contract stays:
 - `WB_API_TOKEN`

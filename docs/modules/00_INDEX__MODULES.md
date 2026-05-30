@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–33`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–34`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -39,6 +39,7 @@ source_basis:
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/modules/32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md"
   - "docs/modules/33_MODULE__ONEC_STOCKS_BLOCK.md"
+  - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -77,6 +78,7 @@ related_docs:
   - "31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md"
   - "33_MODULE__ONEC_STOCKS_BLOCK.md"
+  - "34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
 source_of_truth_level: "navigation_only"
 update_note: "Обновлён под Google Sheets decommission: modules 17/18/19/24/25 are archive/migration-only, module 26 current contour is website/operator/web-vitrina, and Google Sheets/GAS is no longer an active runtime/update/write/load/verify target."
 ---
@@ -95,7 +97,7 @@ update_note: "Обновлён под Google Sheets decommission: modules 17/18/
 
 # 1.1 Текущий Checkpoint Main
 
-На текущем `main` main-confirmed модульные блоки доходят до `01–33`; module `33` active в repo как 1C source + web-vitrina metric wiring checkpoint.
+На текущем `main` main-confirmed модульные блоки доходят до `01–34`; module `34` active в repo как supplier invoice registry в разделе `Поставки -> От поставщика`.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`
@@ -118,6 +120,7 @@ update_note: "Обновлён под Google Sheets decommission: modules 17/18/
 - `promo_live_source_wiring_block` как bounded live wiring этого precursor обратно в current `sheet_vitrina_v1` refresh/runtime/read-side contour.
 - `web_vitrina_view_model_block` как bounded phase-2 presentation-domain слой между stable `web_vitrina_contract` и concrete grid/page layers.
 - `web_vitrina_gravity_table_adapter_block` как bounded phase-3 concrete adapter для `@gravity-ui/table` над stable `view_model`.
+- `supplier_shipments_block` как server-owned supplier invoice registry с XLSX parser/runtime storage/API/UI/auth boundary.
 - `web_vitrina_page_composition_block` как bounded phase-4 live page composition на `/sheet-vitrina-v1/vitrina` с existing read route, вкладкой `Отзывы` поверх read-only WB feedbacks route including official WB review tags/chips, current-server-week feedback default and current-date presets with v3/TTL stale-range guard, transient AI prompt/analyze flow с real WB complaint category schema, tag-aware input и `reason` как текстом для WB `Опишите ситуацию`, runtime-журналом `Жалобы`, runtime schedule UI `Авто-жалобы`, async deep read-only status sync job из WB `Мои жалобы` with canonical-supplier route-specific status checks, direct status URL pagination/scroll, public polling, default local `Ждёт ответа` scope and shared Seller Portal automation lock, auth-protected operator-selected async submit job plus runtime-scheduled auto complaint runs over non-journaled 1–2★ AI yes/review rows through the existing guarded Seller Portal runner/resolver plus per-row attempt overlay, description field value/payload evidence, review-tag contradiction guard, historical hard denylist, disabled/already-complained action classification and shared `Есть ответ`/`Ждут ответа` status/date/star/search/virtual-scroll filter-aware actionable-row resolver, read-only single-feedback confirmation/detail-network probe runners, read-only Seller Portal complaint scout + filter DOM scout + target-row probe + no-submit matching replay/dry-run runners, bounded complaint batch wrapper with explicit not-submitted reason taxonomy, canonical EU bot storage-state/no-local-fallback policy и minimal inline client island.
 - `research_sku_group_comparison_block` как первый read-only MVP-контур вкладки `Исследования`: ретроспективное сравнение двух непересекающихся групп SKU по non-financial метрикам поверх persisted ready snapshots, с candidate-only chip `Товар в акции`, compact date-range period controls и scrollable table/grid result.
 - `onec_stocks_block` как active bounded 1C/Soykasoft source для остатков, себестоимости WB и товарного капитала, с отдельным parser/normalizer, date-specific historical load, dynamic stage names, explicit stage-mapping boundary, web-vitrina source group `onec_product_capital` и runtime-extended 1C profitability metrics.
