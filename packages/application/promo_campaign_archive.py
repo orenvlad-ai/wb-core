@@ -554,6 +554,9 @@ def materialize_promo_result_from_archive(
         for record, validation in validation_pairs
         if validation.is_complete
     ]
+    validation_pairs, superseded_metadata_only_artifacts = _drop_superseded_metadata_only_records(
+        validation_pairs
+    )
     failed_artifacts = [
         (record, validation)
         for record, validation in validation_pairs
@@ -581,6 +584,11 @@ def materialize_promo_result_from_archive(
     _set_promo_diag_counter(diagnostics, "covering_campaigns", len(covering))
     _set_promo_diag_counter(diagnostics, "usable_campaigns", len(usable))
     _set_promo_diag_counter(diagnostics, "materializable_campaigns", len(usable))
+    _set_promo_diag_counter(
+        diagnostics,
+        "superseded_metadata_only_artifact_count",
+        len(superseded_metadata_only_artifacts),
+    )
     _set_promo_diag_counter(diagnostics, "archive_hit_count", len(usable))
     _set_promo_diag_counter(diagnostics, "archive_miss_count", len(missing_artifacts))
     _set_promo_diag_counter(diagnostics, "fatal_missing_artifact_count", len(fatal_artifact_failures))
@@ -665,6 +673,14 @@ def materialize_promo_result_from_archive(
     ]
     if detail_prefix:
         detail_parts.insert(0, detail_prefix)
+    if superseded_metadata_only_artifacts:
+        detail_parts.append(
+            "superseded_metadata_only_artifacts_ignored="
+            + ",".join(
+                record.archive_key
+                for record, _validation in superseded_metadata_only_artifacts[:8]
+            )
+        )
     if expected_non_materializable_artifacts:
         detail_parts.append(
             "expected_non_materializable_artifacts="
@@ -1034,6 +1050,72 @@ def _apply_artifact_validation_diagnostics(
         state_counts.get(ARTIFACT_STATE_COMPLETE, 0),
     )
     _set_promo_diag_counter(diagnostics, "incomplete_artifact_count", len(failures))
+
+
+def _drop_superseded_metadata_only_records(
+    validation_pairs: list[tuple[PromoCampaignArchiveRecord, PromoCampaignArtifactValidation]],
+) -> tuple[
+    list[tuple[PromoCampaignArchiveRecord, PromoCampaignArtifactValidation]],
+    list[tuple[PromoCampaignArchiveRecord, PromoCampaignArtifactValidation]],
+]:
+    complete_keys = {
+        key
+        for record, validation in validation_pairs
+        for key in [_superseded_campaign_key(record)]
+        if key is not None and validation.is_complete
+    }
+    if not complete_keys:
+        return validation_pairs, []
+
+    retained: list[tuple[PromoCampaignArchiveRecord, PromoCampaignArtifactValidation]] = []
+    superseded: list[tuple[PromoCampaignArchiveRecord, PromoCampaignArtifactValidation]] = []
+    for record, validation in validation_pairs:
+        key = _superseded_campaign_key(record)
+        if (
+            key in complete_keys
+            and _is_pending_metadata_only_duplicate(record=record, validation=validation)
+        ):
+            superseded.append((record, validation))
+            continue
+        retained.append((record, validation))
+    return retained, superseded
+
+
+def _is_pending_metadata_only_duplicate(
+    *,
+    record: PromoCampaignArchiveRecord,
+    validation: PromoCampaignArtifactValidation,
+) -> bool:
+    if validation.is_complete:
+        return False
+    if record.metadata.period_id is not None:
+        return False
+    if validation.artifact_state not in {
+        ARTIFACT_STATE_METADATA_ONLY,
+        ARTIFACT_STATE_MISSING_WORKBOOK,
+    }:
+        return False
+    return validation.validation_failure_reason in {
+        ARTIFACT_REASON_METADATA_ONLY_TRUE_ARTIFACT_LOSS,
+        "workbook_file_missing",
+    }
+
+
+def _superseded_campaign_key(record: PromoCampaignArchiveRecord) -> tuple[Any, ...] | None:
+    if record.metadata.promo_id is None:
+        return None
+    return (
+        int(record.metadata.promo_id),
+        _normalize_archive_compare_text(record.metadata.promo_title),
+        str(record.metadata.promo_start_at or ""),
+        str(record.metadata.promo_end_at or ""),
+        _normalize_archive_compare_text(record.metadata.source_tab),
+        _normalize_archive_compare_text(record.metadata.source_filter_code),
+    )
+
+
+def _normalize_archive_compare_text(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().casefold())
 
 
 def _sync_archive_record_from_metadata(

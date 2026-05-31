@@ -992,9 +992,15 @@
       width: 9px;
       height: 9px;
       border-radius: 999px;
-      background: var(--accent);
-      box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.48);
-      animation: pulse 1.4s ease-in-out infinite;
+      background: #a78bfa;
+      box-shadow: 0 0 0 0 rgba(167, 139, 250, 0.42);
+      opacity: 1;
+      transform: scale(1);
+      animation: none;
+    }
+
+    .top-progress.is-loading .top-progress-pulse {
+      animation: topProgressPulse 820ms ease-in-out infinite;
     }
 
     .top-progress-track {
@@ -1021,9 +1027,26 @@
       border: 0;
     }
 
+    @keyframes topProgressPulse {
+      0%,
+      100% {
+        opacity: 1;
+        transform: scale(1);
+        box-shadow: 0 0 0 0 rgba(167, 139, 250, 0.55);
+      }
+      50% {
+        opacity: 0.34;
+        transform: scale(0.68);
+        box-shadow: 0 0 0 5px rgba(167, 139, 250, 0.12);
+      }
+    }
+
     @media (prefers-reduced-motion: reduce) {
-      .top-progress-pulse {
+      .top-progress.is-loading .top-progress-pulse {
         animation: none;
+        opacity: 0.72;
+        transform: scale(0.82);
+        box-shadow: 0 0 0 4px rgba(167, 139, 250, 0.12);
       }
     }
 
@@ -1637,14 +1660,14 @@
       align-items: center;
       justify-content: center;
       flex: 0 0 auto;
-      width: 24px;
-      height: 24px;
-      min-width: 24px;
-      min-height: 24px;
+      width: 14px;
+      height: 14px;
+      min-width: 14px;
+      min-height: 14px;
       margin: 0;
-      border: 1px solid var(--border);
+      border: 0;
       border-radius: 999px;
-      background: var(--panel-subtle);
+      background: transparent;
       color: var(--muted-strong);
       padding: 0;
     }
@@ -1654,30 +1677,22 @@
       height: 8px;
       border-radius: 999px;
       background: currentColor;
-      box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 16%, transparent);
+      box-shadow: none;
     }
 
     .table-load-status.tone-success {
-      border-color: rgba(34, 197, 94, 0.34);
-      background: rgba(34, 197, 94, 0.12);
       color: #4ade80;
     }
 
     .table-load-status.tone-warning {
-      border-color: rgba(245, 158, 11, 0.36);
-      background: rgba(245, 158, 11, 0.12);
       color: #fbbf24;
     }
 
     .table-load-status.tone-error {
-      border-color: rgba(248, 113, 113, 0.4);
-      background: rgba(248, 113, 113, 0.12);
       color: #f87171;
     }
 
     .table-load-status.tone-neutral {
-      border-color: rgba(148, 163, 184, 0.28);
-      background: rgba(148, 163, 184, 0.12);
       color: #94a3b8;
     }
 

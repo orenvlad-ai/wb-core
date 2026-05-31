@@ -120,6 +120,7 @@ def main() -> None:
         _assert_true_artifact_loss_remains_fatal(Path(tmp) / "case-b")
         _assert_only_expected_non_materializable_stays_incomplete(Path(tmp) / "case-c")
         _assert_normalized_rows_replay_without_workbook(Path(tmp) / "case-d")
+        _assert_pending_metadata_duplicate_does_not_block_replay(Path(tmp) / "case-e")
         print(
             "promo campaign archive integrity smoke passed: "
             f"states={counts}; validation_failed_count={audit.get('validation_failed_count')}"
@@ -349,6 +350,52 @@ def _assert_normalized_rows_replay_without_workbook(runtime_dir: Path) -> None:
         after_value = (after.diagnostics.get("counters") or {}).get(counter)
         if before_value != after_value:
             raise AssertionError(f"normalized replay counter mismatch for {counter}: before={before.diagnostics}, after={after.diagnostics}")
+
+
+def _assert_pending_metadata_duplicate_does_not_block_replay(runtime_dir: Path) -> None:
+    _write_promo_fixture(
+        runtime_dir=runtime_dir,
+        run_name="2026-04-26__complete-with-period",
+        promo_folder="2501__3501__pending-duplicate",
+        promo_id=2501,
+        period_id=3501,
+        title="Pending duplicate campaign",
+        confidence="high",
+        workbook_kind="valid",
+    )
+    _write_promo_fixture(
+        runtime_dir=runtime_dir,
+        run_name="2026-04-26__metadata-only-pending-duplicate",
+        promo_folder="2501__pending__pending-duplicate",
+        promo_id=2501,
+        period_id=None,
+        title="Pending duplicate campaign",
+        confidence="high",
+        workbook_kind="missing",
+        ui_status="active",
+        download_action_state="available",
+    )
+    _write_price_truth(runtime_dir=runtime_dir, snapshot_date="2026-04-26", nm_id=123456, discounted_price=900)
+    result = materialize_promo_result_from_archive(
+        runtime_dir=runtime_dir,
+        snapshot_date="2026-04-26",
+        requested_nm_ids=[123456],
+        sync_summary=sync_promo_campaign_archive(runtime_dir),
+        diagnostics={},
+    )
+    if result.kind != "success" or result.covered_count != 1 or not result.items:
+        raise AssertionError(f"complete period artifact must supersede metadata-only pending duplicate, got {result}")
+    item = result.items[0]
+    if item.promo_count_by_price != 1.0 or item.promo_participation != 1.0 or item.promo_entry_price_best != 999.0:
+        raise AssertionError(f"expected values from complete period artifact, got {item}")
+    counters = result.diagnostics.get("counters") or {}
+    if int(counters.get("superseded_metadata_only_artifact_count") or 0) != 1:
+        raise AssertionError(f"pending metadata-only duplicate must be reported as superseded, got {result.diagnostics}")
+    summary = result.diagnostics.get("artifact_validation_summary") or {}
+    if int(summary.get("fatal_missing_artifact_count") or 0) != 0:
+        raise AssertionError(f"superseded pending duplicate must not remain fatal, got {result.diagnostics}")
+    if "superseded_metadata_only_artifacts_ignored=2501__pending__pending-duplicate" not in (result.detail or ""):
+        raise AssertionError(f"result detail must preserve superseded duplicate evidence, got {result.detail}")
 
 
 def _write_promo_fixture(

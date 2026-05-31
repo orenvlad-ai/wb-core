@@ -2869,13 +2869,15 @@ def _check_load_refresh_action(
           const progress = document.querySelector('[data-global-progress]');
           const pulse = progress ? progress.querySelector('.top-progress-pulse') : null;
           const rect = progress ? progress.getBoundingClientRect() : {width: 0};
+          const pulseStyle = pulse ? getComputedStyle(pulse) : null;
           const trackVisible = Array.from(document.querySelectorAll('.top-progress-track, [data-global-progress-bar]'))
             .some((node) => {
               const style = getComputedStyle(node);
               return style.display !== 'none' && style.visibility !== 'hidden' && node.getBoundingClientRect().width > 0;
             });
 	          return !!progress && !!pulse && !progress.hidden && progress.getAttribute('data-progress-state') === 'loading' &&
-	            progress.classList.contains('is-loading') && !trackVisible && rect.width <= 32 && !!progress.getAttribute('aria-label');
+	            progress.classList.contains('is-loading') && !trackVisible && rect.width <= 32 && !!progress.getAttribute('aria-label') &&
+	            pulseStyle.animationName === 'topProgressPulse' && pulseStyle.animationDuration !== '0s';
         }""",
         timeout=5000,
     )
@@ -2884,6 +2886,32 @@ def _check_load_refresh_action(
         timeout=45000,
         require_enabled_button=True,
     )
+    final_lamp = page.evaluate(
+        """() => {
+          const progress = document.querySelector('[data-global-progress]');
+          const lamp = document.querySelector('[data-table-load-status]');
+          const dot = lamp ? lamp.querySelector('.table-load-status-dot') : null;
+          const lampStyle = lamp ? getComputedStyle(lamp) : null;
+          const dotStyle = dot ? getComputedStyle(dot) : null;
+          return {
+            progressHidden: !!progress && progress.hidden,
+            progressLoading: !!progress && progress.classList.contains('is-loading'),
+            lampVisible: !!lamp && !lamp.hidden && lamp.getBoundingClientRect().width <= 18,
+            lampBorder: lampStyle ? lampStyle.borderTopWidth : '',
+            lampBackground: lampStyle ? lampStyle.backgroundColor : '',
+            dotBoxShadow: dotStyle ? dotStyle.boxShadow : '',
+            dotAnimation: dotStyle ? dotStyle.animationName : ''
+          };
+        }"""
+    )
+    if not final_lamp.get("progressHidden") or final_lamp.get("progressLoading"):
+        raise AssertionError(f"loading progress must stop after refresh, got {final_lamp}")
+    if not final_lamp.get("lampVisible"):
+        raise AssertionError(f"final load status must be a compact semantic dot, got {final_lamp}")
+    if final_lamp.get("lampBorder") not in {"0px", "0"}:
+        raise AssertionError(f"final load status dot must not have an outline, got {final_lamp}")
+    if final_lamp.get("dotBoxShadow") != "none" or final_lamp.get("dotAnimation") != "none":
+        raise AssertionError(f"final load status dot must be static without extra graphics, got {final_lamp}")
     next_summary_cards = _read_summary_cards(page)
     if expected_final_badge_tone is not None:
         expected_label = _badge_label(expected_final_badge_tone)
