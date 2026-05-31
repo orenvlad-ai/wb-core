@@ -86,18 +86,20 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
                 or "не OK" in initial_payload["empty_text"]
             ):
                 raise AssertionError(f"initial source status surface must be lazy/neutral, got {initial_payload}")
-            page.locator("[data-source-status-load]").click()
+            page.locator("[data-activity-block] > summary").click()
             page.wait_for_function(
                 """() => {
                   const empty = document.querySelector('[data-loading-table-empty]');
+                  const loadButton = document.querySelector('[data-source-status-load]');
                   return !!empty && !empty.classList.contains('is-hidden')
+                    && !!loadButton && loadButton.offsetParent !== null
                     && empty.textContent.includes('Status payload не содержит source rows')
                     && document.querySelectorAll('[data-loading-source-empty]').length === 0
                     && document.querySelectorAll('[data-refresh-source-group]').length === 0;
                 }""",
                 timeout=5000,
             )
-            print("web_vitrina_source_status_lazy_empty: ok -> initial neutral, empty details collapse")
+            print("web_vitrina_source_status_lazy_empty: ok -> open auto-load, empty details collapse")
             browser.close()
 
 
@@ -120,8 +122,8 @@ def _assert_group_action_launch_error() -> None:
             context.route("**/v1/sheet-vitrina-v1/web-vitrina/group-refresh", fail_group_refresh)
             page = context.new_page()
             page.goto(base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, wait_until="domcontentloaded")
-            page.wait_for_selector("[data-source-status-load]", timeout=20000)
-            page.locator("[data-source-status-load]").click()
+            page.wait_for_selector("[data-activity-block]", timeout=20000)
+            page.locator("[data-activity-block] > summary").click()
             page.wait_for_selector("[data-refresh-source-group]", timeout=20000)
             group_button = page.locator("[data-refresh-source-group='wb_api']").first
             page.locator("[data-refresh-source-group-date='wb_api']").fill("2026-04-13")

@@ -3775,7 +3775,7 @@ def _default_web_vitrina_page_period(
     *,
     available_snapshot_dates: Iterable[str],
 ) -> tuple[str, str] | None:
-    """Default UI period: seven calendar dates ending on backend-owned business today."""
+    """Default UI period: rolling two-week preset ending on backend-owned business today."""
 
     del available_snapshot_dates
     status_summary = contract.status_summary
@@ -3787,7 +3787,7 @@ def _default_web_vitrina_page_period(
         end_date = date.fromisoformat(period_end)
     except ValueError:
         return None
-    period_start = (end_date - timedelta(days=6)).isoformat()
+    period_start = (end_date - timedelta(days=13)).isoformat()
     return period_start, period_end
 
 

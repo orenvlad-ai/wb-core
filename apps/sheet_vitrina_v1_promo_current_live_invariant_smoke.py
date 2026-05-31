@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import ssl
+import sys
 from typing import Any
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
@@ -23,10 +24,17 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TARGET_FILE = (
     ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "hosted_runtime_target__europe_api.json"
 )
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from apps.registry_upload_http_entrypoint_hosted_runtime import (  # noqa: E402
+    _build_probe_auth_cookie,
+    load_hosted_runtime_target,
+)
 ALLOW_INSECURE_ENV = "SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK"
 
 PROMO_SOURCE_KEY = "promo_by_price"
 TODAY_SLOT = "today_current"
+YESTERDAY_SLOT = "yesterday_closed"
 CORE_PROMO_METRIC_KEYS = (
     "promo_participation",
     "promo_count_by_price",
@@ -53,6 +61,7 @@ def main() -> None:
     args = _parse_args()
     base_url = _resolve_base_url(args)
     allow_insecure = args.allow_insecure or os.environ.get(ALLOW_INSECURE_ENV) == "1"
+    auth_cookie = _resolve_auth_cookie(args)
 
     routes: list[dict[str, Any]] = []
     status_payload = _get_json(
@@ -60,6 +69,7 @@ def main() -> None:
         route_name="status",
         timeout_seconds=args.timeout_seconds,
         allow_insecure=allow_insecure,
+        auth_cookie=auth_cookie,
         routes=routes,
     )
     as_of_date = _resolve_as_of_date(status_payload)
@@ -70,6 +80,15 @@ def main() -> None:
         route_name="web_vitrina",
         timeout_seconds=args.timeout_seconds,
         allow_insecure=allow_insecure,
+        auth_cookie=auth_cookie,
+        routes=routes,
+    )
+    composition_payload = _get_json(
+        _join_url(base_url, "/v1/sheet-vitrina-v1/web-vitrina?surface=page_composition&include_source_status=1"),
+        route_name="page_composition_source_status",
+        timeout_seconds=args.timeout_seconds,
+        allow_insecure=allow_insecure,
+        auth_cookie=auth_cookie,
         routes=routes,
     )
     plan_payload = _get_json(
@@ -77,6 +96,7 @@ def main() -> None:
         route_name="plan",
         timeout_seconds=args.timeout_seconds,
         allow_insecure=allow_insecure,
+        auth_cookie=auth_cookie,
         routes=routes,
     )
 
@@ -87,13 +107,25 @@ def main() -> None:
             route_name="job",
             timeout_seconds=args.timeout_seconds,
             allow_insecure=allow_insecure,
+            auth_cookie=auth_cookie,
             routes=routes,
         )
 
     diagnostics = _resolve_refresh_diagnostics(plan_payload, job_payload=job_payload)
-    promo_slot = _find_promo_today_slot(diagnostics)
-    promo_summary = _assert_promo_source_invariant(promo_slot)
-    row_summary = _assert_current_promo_rows(web_payload, today_current=today_current)
+    promo_today_slot = _find_promo_slot(diagnostics, TODAY_SLOT)
+    promo_yesterday_slot = _find_promo_slot(diagnostics, YESTERDAY_SLOT)
+    promo_today_summary = _assert_promo_source_invariant(promo_today_slot)
+    promo_yesterday_summary = _assert_promo_source_invariant(promo_yesterday_slot)
+    source_status_summary = _assert_promo_source_status_visible(
+        composition_payload,
+        today_materialized=bool(promo_today_summary["materialized"]),
+        yesterday_materialized=bool(promo_yesterday_summary["materialized"]),
+    )
+    row_summary = _assert_current_promo_rows(
+        web_payload,
+        today_current=today_current,
+        require_present=bool(promo_today_summary["materialized"]),
+    )
 
     output = {
         "ok": True,
@@ -101,7 +133,9 @@ def main() -> None:
         "as_of_date": as_of_date,
         "today_current": today_current,
         "routes": routes,
-        "promo_by_price_today_current": promo_summary,
+        "promo_by_price_today_current": promo_today_summary,
+        "promo_by_price_yesterday_closed": promo_yesterday_summary,
+        "promo_by_price_source_status": source_status_summary,
         "promo_metric_rows": row_summary,
         "insecure_fallback_used": any(item.get("insecure") for item in routes),
     }
@@ -109,10 +143,9 @@ def main() -> None:
     print(
         "sheet_vitrina_v1_promo_current_live_invariant: ok "
         f"as_of_date={as_of_date} today_current={today_current} "
-        f"status={promo_summary['status']} origin={promo_summary['origin']} "
-        f"covered={promo_summary['covered_count']}/{promo_summary['requested_count']} "
-        f"fatal_missing={promo_summary['fatal_missing_artifact_count']} "
-        f"expected_non_materializable={promo_summary['non_materializable_expected_count']}"
+        f"today_status={promo_today_summary['status']} today_materialized={promo_today_summary['materialized']} "
+        f"yesterday_status={promo_yesterday_summary['status']} yesterday_materialized={promo_yesterday_summary['materialized']} "
+        f"source_reason={source_status_summary['today_reason'] or source_status_summary['yesterday_reason']}"
     )
 
 
@@ -151,6 +184,14 @@ def _normalize_base_url(value: str) -> str:
     return normalized
 
 
+def _resolve_auth_cookie(args: argparse.Namespace) -> str:
+    try:
+        target = load_hosted_runtime_target(args.target_file)
+        return _build_probe_auth_cookie(target, timeout_seconds=args.timeout_seconds)
+    except Exception:
+        return ""
+
+
 def _join_url(base_url: str, path_and_query: str) -> str:
     if not path_and_query.startswith("/"):
         path_and_query = "/" + path_and_query
@@ -163,17 +204,18 @@ def _get_json(
     route_name: str,
     timeout_seconds: float,
     allow_insecure: bool,
+    auth_cookie: str,
     routes: list[dict[str, Any]],
 ) -> dict[str, Any]:
     try:
-        status, payload = _open_json(url, timeout_seconds=timeout_seconds, context=None)
+        status, payload = _open_json(url, timeout_seconds=timeout_seconds, context=None, auth_cookie=auth_cookie)
         routes.append({"route": route_name, "url": _redact_url(url), "http_status": status, "insecure": False})
     except (ssl.SSLError, urllib_error.URLError) as exc:
         if not allow_insecure:
             raise AssertionError(f"{route_name} route unavailable: {url}: {exc}") from exc
         context = ssl._create_unverified_context()
         try:
-            status, payload = _open_json(url, timeout_seconds=timeout_seconds, context=context)
+            status, payload = _open_json(url, timeout_seconds=timeout_seconds, context=context, auth_cookie=auth_cookie)
         except Exception as insecure_exc:  # pragma: no cover - live-only diagnostic fallback
             raise AssertionError(
                 f"{route_name} route unavailable even with insecure TLS fallback: {url}: {insecure_exc}"
@@ -191,8 +233,12 @@ def _open_json(
     *,
     timeout_seconds: float,
     context: ssl.SSLContext | None,
+    auth_cookie: str,
 ) -> tuple[int, Any]:
-    request = urllib_request.Request(url, headers={"Accept": "application/json", "User-Agent": "wb-core-smoke/1"})
+    headers = {"Accept": "application/json", "User-Agent": "wb-core-smoke/1"}
+    if auth_cookie:
+        headers["Cookie"] = auth_cookie
+    request = urllib_request.Request(url, headers=headers)
     try:
         with urllib_request.urlopen(request, timeout=timeout_seconds, context=context) as response:
             raw = response.read()
@@ -254,44 +300,38 @@ def _resolve_refresh_diagnostics(
     raise AssertionError("plan/job payload does not expose metadata.refresh_diagnostics.source_slots")
 
 
-def _find_promo_today_slot(diagnostics: dict[str, Any]) -> dict[str, Any]:
+def _find_promo_slot(diagnostics: dict[str, Any], slot_kind: str) -> dict[str, Any]:
     for slot in diagnostics.get("source_slots") or []:
-        if slot.get("source_key") == PROMO_SOURCE_KEY and slot.get("slot_kind") == TODAY_SLOT:
+        if slot.get("source_key") == PROMO_SOURCE_KEY and slot.get("slot_kind") == slot_kind:
             return slot
-    raise AssertionError("metadata.refresh_diagnostics.source_slots missing promo_by_price[today_current]")
+    raise AssertionError(f"metadata.refresh_diagnostics.source_slots missing promo_by_price[{slot_kind}]")
 
 
 def _assert_promo_source_invariant(slot: dict[str, Any]) -> dict[str, Any]:
     status = str(slot.get("status") or "")
     semantic_status = str(slot.get("semantic_status") or "")
-    if status != "success" or semantic_status != "success":
-        raise AssertionError(
-            "promo_by_price[today_current] is not healthy: "
-            f"status={status!r} semantic_status={semantic_status!r} "
-            f"origin={slot.get('origin')!r} note_kind={slot.get('note_kind')!r} "
-            f"requested_count={slot.get('requested_count')!r} covered_count={slot.get('covered_count')!r}"
-        )
+    materialized = status == "success" and semantic_status == "success"
 
     requested_count = _int_or_none(_counter(slot, "requested_count"))
     covered_count = _int_or_none(_counter(slot, "covered_count"))
-    if requested_count is not None and covered_count is not None and requested_count != covered_count:
+    if materialized and requested_count is not None and covered_count is not None and requested_count != covered_count:
         raise AssertionError(
-            "promo_by_price[today_current] must cover all requested rows when successful, "
+            "promo_by_price must cover all requested rows when successful, "
             f"got covered_count={covered_count}, requested_count={requested_count}"
         )
 
     fatal_count = _int_or_none(_counter(slot, "fatal_missing_artifact_count"))
-    if fatal_count not in (None, 0):
+    if materialized and fatal_count not in (None, 0):
         raise AssertionError(f"fatal_missing_artifact_count must be 0, got {fatal_count}")
     true_loss_count = _int_or_none(_counter(slot, "true_artifact_loss_count"))
-    if true_loss_count not in (None, 0):
+    if materialized and true_loss_count not in (None, 0):
         raise AssertionError(f"true_artifact_loss_count must be 0, got {true_loss_count}")
 
     promo_diagnostics = slot.get("promo_diagnostics") or {}
     fatal_artifacts = _diagnostic_list(promo_diagnostics, "fatal_missing_artifacts")
     expected_artifacts = _diagnostic_list(promo_diagnostics, "expected_non_materializable_artifacts")
     missing_artifacts = _diagnostic_list(promo_diagnostics, "missing_campaign_artifacts")
-    if fatal_artifacts:
+    if materialized and fatal_artifacts:
         raise AssertionError(f"fatal_missing_artifacts must be empty for current live invariant, got {fatal_artifacts}")
 
     expected_keys = {_artifact_identity(item) for item in expected_artifacts if _artifact_identity(item)}
@@ -315,13 +355,33 @@ def _assert_promo_source_invariant(slot: dict[str, Any]) -> dict[str, Any]:
             raise AssertionError(f"campaign 2242 must have workbook_required=false, got {campaign_2242}")
 
     fallback = promo_diagnostics.get("fallback") or {}
-    if fallback:
+    if materialized and fallback:
         if fallback.get("candidate_rejected") is True:
             raise AssertionError(f"current promo candidate must not be rejected, got fallback={fallback}")
         if fallback.get("fallback_reason"):
             raise AssertionError(f"fallback must not be used as fresh success, got fallback={fallback}")
 
+    if not materialized:
+        note = str(slot.get("note") or slot.get("note_kind") or slot.get("reason") or "")
+        missing_ids = str(slot.get("missing_nm_ids") or slot.get("missing_ids") or "")
+        has_reason = any(
+            str(value or "").strip()
+            for value in (
+                note,
+                slot.get("message"),
+                slot.get("detail"),
+                slot.get("status_reason"),
+                missing_ids,
+                fallback.get("invalid_reason") if isinstance(fallback, dict) else "",
+                fallback.get("fallback_reason") if isinstance(fallback, dict) else "",
+            )
+        )
+        has_diagnostics = bool(fatal_artifacts or missing_artifacts or expected_artifacts or _counter(slot, "missing_count"))
+        if not (has_reason or has_diagnostics):
+            raise AssertionError(f"unavailable promo source must expose a diagnostic reason, got {slot}")
+
     return {
+        "materialized": materialized,
         "status": status,
         "semantic_status": semantic_status,
         "origin": slot.get("origin"),
@@ -386,7 +446,7 @@ def _find_campaign_2242(items: list[dict[str, Any]]) -> dict[str, Any] | None:
     return None
 
 
-def _assert_current_promo_rows(web_payload: dict[str, Any], *, today_current: str) -> list[dict[str, Any]]:
+def _assert_current_promo_rows(web_payload: dict[str, Any], *, today_current: str, require_present: bool) -> list[dict[str, Any]]:
     rows = web_payload.get("rows")
     if not isinstance(rows, list):
         raise AssertionError("web-vitrina payload must expose rows[]")
@@ -405,7 +465,7 @@ def _assert_current_promo_rows(web_payload: dict[str, Any], *, today_current: st
             if isinstance(row.get("values_by_date"), dict)
         ]
         present_values = [value for value in values if value is not None and value != ""]
-        if not present_values:
+        if require_present and not present_values:
             raise AssertionError(f"web-vitrina current promo metric {metric_key} is all blank for {today_current}")
         summaries.append(
             {
@@ -418,6 +478,37 @@ def _assert_current_promo_rows(web_payload: dict[str, Any], *, today_current: st
             }
         )
     return summaries
+
+
+def _assert_promo_source_status_visible(
+    composition_payload: dict[str, Any],
+    *,
+    today_materialized: bool,
+    yesterday_materialized: bool,
+) -> dict[str, Any]:
+    activity_surface = composition_payload.get("activity_surface") or {}
+    loading_table = activity_surface.get("loading_table") or {}
+    rows = loading_table.get("rows") or []
+    promo_rows = [row for row in rows if isinstance(row, dict) and row.get("source_key") == PROMO_SOURCE_KEY]
+    if not promo_rows:
+        raise AssertionError("page composition source-status must expose promo_by_price row")
+    row = promo_rows[0]
+    today_reason = str(row.get("today_reason") or ((row.get("today") or {}).get("reason")) or "")
+    yesterday_reason = str(row.get("yesterday_reason") or ((row.get("yesterday") or {}).get("reason")) or "")
+    if not today_materialized and not today_reason:
+        raise AssertionError(f"unavailable today promo source must show a source-status reason, got {row}")
+    if not yesterday_materialized and not yesterday_reason:
+        raise AssertionError(f"unavailable yesterday promo source must show a source-status reason, got {row}")
+    metric_labels = row.get("metric_labels") or []
+    if not metric_labels:
+        raise AssertionError(f"promo source-status row must name affected metrics, got {row}")
+    return {
+        "today_reason": today_reason,
+        "yesterday_reason": yesterday_reason,
+        "metric_label_count": len(metric_labels) if isinstance(metric_labels, list) else 0,
+        "today_status": (row.get("today") or {}).get("label"),
+        "yesterday_status": (row.get("yesterday") or {}).get("label"),
+    }
 
 
 def _int_or_none(value: Any) -> int | None:

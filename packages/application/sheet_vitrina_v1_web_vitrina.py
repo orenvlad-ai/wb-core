@@ -38,6 +38,7 @@ WEB_VITRINA_READ_MODEL = "persisted_ready_snapshot"
 WEB_VITRINA_PERIOD_READ_MODEL = "persisted_ready_snapshot_window"
 WEB_VITRINA_SOURCE_SHEET_NAME = "DATA_VITRINA"
 WEB_VITRINA_PERIOD_PLAN_VERSION = "delivery_contract_v1__web_vitrina_period_window_v1"
+WEB_VITRINA_DEFAULT_PERIOD_DAYS = 14
 FUNNEL_SECTION_LABEL = "Воронка"
 FUNNEL_VIEW_METRIC_KEY = "view_count"
 FUNNEL_TOTAL_VIEW_METRIC_KEY = "total_view_count"
@@ -99,7 +100,7 @@ class SheetVitrinaV1WebVitrinaBlock:
         return _merge_readable_dates(
             exact_ready_dates=exact_ready_dates,
             default_visible_snapshot=default_visible_snapshot,
-            business_week_dates=_default_business_week_dates(self.now_factory()),
+            business_week_dates=_default_business_period_dates(self.now_factory()),
             date_from=date_from,
             date_to=date_to,
             descending=descending,
@@ -660,9 +661,12 @@ def _merge_readable_dates(
     return filtered_dates
 
 
-def _default_business_week_dates(now: datetime) -> list[str]:
+def _default_business_period_dates(now: datetime) -> list[str]:
     today = date.fromisoformat(current_business_date_iso(now))
-    return [(today - timedelta(days=offset)).isoformat() for offset in range(6, -1, -1)]
+    return [
+        (today - timedelta(days=offset)).isoformat()
+        for offset in range(WEB_VITRINA_DEFAULT_PERIOD_DAYS - 1, -1, -1)
+    ]
 
 
 def _last_materialized_snapshot_as_of_date(bindings: list[_PeriodDateBinding]) -> str:
