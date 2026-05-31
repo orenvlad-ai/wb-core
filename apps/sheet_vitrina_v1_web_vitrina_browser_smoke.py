@@ -109,6 +109,7 @@ def main() -> None:
         "status_summary": ready_result["status_summary"],
         "auto_schedule_block": ready_result["auto_schedule_block"],
         "activity_surface": ready_result["activity_surface"],
+        "activity_metrics_preview": ready_result["activity_metrics_preview"],
         "compact_widths": ready_result["compact_widths"],
         "percent_formatting": ready_result["percent_formatting"],
         "operator_screen_layout": ready_result["operator_screen_layout"],
@@ -129,6 +130,7 @@ def main() -> None:
         "preset_calendar_sync": ready_result["preset_calendar_sync"],
         "historical_selector_works": ready_result["historical_selector_works"],
         "historical_reset_works": ready_result["historical_reset_works"],
+        "stale_history_storage": ready_result["stale_history_storage"],
         "error_state": error_result["error_state"],
     })
 
@@ -308,28 +310,15 @@ def run_browser_checks(
             activity_collapsible = _check_activity_collapsible_block(page)
             initial_summary_cards = _read_summary_cards(page)
             status_summary = initial_summary_cards.get("status", {})
-            initial_unloaded_activity_surface = _read_activity_surface(
-                page,
-                allow_empty_log=True,
-            )
-            initial_loading_rows = initial_unloaded_activity_surface["loading"]["rows"]
-            initial_loading_groups = initial_unloaded_activity_surface["loading"]["groups"]
-            if initial_loading_rows or initial_loading_groups or initial_unloaded_activity_surface["loading"]["headers"]:
-                raise AssertionError(
-                    f"initial source-status surface must stay lazy/neutral before click, got {initial_unloaded_activity_surface}"
-                )
-            if "Источники группы пока не представлены" in initial_unloaded_activity_surface["loading"].get("empty_text", ""):
-                raise AssertionError(
-                    f"initial unloaded state must not look like missing status payload, got {initial_unloaded_activity_surface}"
-                )
-            if "не OK" in initial_unloaded_activity_surface["loading"].get("empty_text", ""):
-                raise AssertionError(f"initial unloaded state must not show false not_ok status, got {initial_unloaded_activity_surface}")
-            if initial_unloaded_activity_surface["loading"].get("source_status_button") != "Загрузить":
-                raise AssertionError(f"source-status load button mismatch, got {initial_unloaded_activity_surface}")
-            page.locator("[data-source-status-load]").click()
+            details_request_deadline = time.time() + 5
+            while not source_status_detail_urls and time.time() < details_request_deadline:
+                time.sleep(0.05)
             page.wait_for_selector("[data-loading-source]", timeout=20000)
-            if not source_status_detail_urls:
-                raise AssertionError("source-status details request was not captured")
+            source_status_request_count_after_open = len(source_status_detail_urls)
+            if source_status_request_count_after_open != 1:
+                raise AssertionError(
+                    f"opening activity block must auto-load source-status exactly once, got {source_status_detail_urls}"
+                )
             latest_details_url = source_status_detail_urls[-1]
             if "include_source_status=1" not in latest_details_url or "as_of_date=" not in latest_details_url:
                 raise AssertionError(
@@ -342,6 +331,13 @@ def run_browser_checks(
             if base_url.startswith("http://127.0.0.1") and "as_of_date=2026-04-20" not in latest_details_url:
                 raise AssertionError(
                     f"fixture source-status details must use visible snapshot 2026-04-20, got {latest_details_url}"
+                )
+            page.locator("[data-activity-summary]").click()
+            page.locator("[data-activity-summary]").click()
+            page.wait_for_selector("[data-loading-source]", timeout=20000)
+            if len(source_status_detail_urls) != source_status_request_count_after_open:
+                raise AssertionError(
+                    f"reopening loaded activity block must not duplicate source-status request, got {source_status_detail_urls}"
                 )
             initial_activity_surface = _read_activity_surface(
                 page,
@@ -360,6 +356,7 @@ def run_browser_checks(
                 raise AssertionError(f"activity rows must expose Russian metric labels, got {initial_activity_surface}")
             if "POST /api/v2/list/goods/filter" not in str(first_loading_row.get("technical") or ""):
                 raise AssertionError(f"activity rows must keep the technical endpoint, got {initial_activity_surface}")
+            activity_metrics_preview = _check_activity_metrics_preview(page)
             historical_panel_present = (
                 page.locator("[data-history-panel]").count() == 1
                 and page.locator("[data-history-toggle]").count() == 1
@@ -384,12 +381,12 @@ def run_browser_checks(
                   dateTo: (document.querySelector('[data-history-date-to]') || {}).value || ''
                 })"""
             )
-            if initial_history_state["label"].strip() != "15.04.2026 - 21.04.2026":
+            if initial_history_state["label"].strip() != "08.04.2026 - 21.04.2026":
                 raise AssertionError(f"default compact history label mismatch, got {initial_history_state}")
             if not initial_history_state["popoverHidden"]:
                 raise AssertionError(f"history picker popover must be closed by default, got {initial_history_state}")
-            if initial_history_state["dateFrom"] != "2026-04-15" or initial_history_state["dateTo"] != "2026-04-21":
-                raise AssertionError(f"default history range must be week ending business today, got {initial_history_state}")
+            if initial_history_state["dateFrom"] != "2026-04-08" or initial_history_state["dateTo"] != "2026-04-21":
+                raise AssertionError(f"default history range must be rolling two-week preset ending business today, got {initial_history_state}")
             visible_body_text = page.locator("body").inner_text()
             for forbidden_history_text in (
                 "mode:",
@@ -622,7 +619,7 @@ def run_browser_checks(
                 )
                 page.wait_for_function("() => document.querySelector('[data-history-popover]').hidden", timeout=5000)
                 page.wait_for_function(
-                    "() => (document.querySelector('[data-history-label]').textContent || '').trim() === '15.04.2026 - 21.04.2026'",
+                    "() => (document.querySelector('[data-history-label]').textContent || '').trim() === '08.04.2026 - 21.04.2026'",
                     timeout=5000,
                 )
                 page.wait_for_function(
@@ -633,6 +630,7 @@ def run_browser_checks(
                 historical_reset_works = page.locator("[data-table-body] tr").count() > 0 and page.evaluate(
                     "() => window.location.search"
                 ) == initial_query
+            stale_history_storage = _check_stale_history_storage_ignored(page, base_url) if not as_of_date else {"skipped": "historical as_of_date mode"}
         finally:
             operator_page.close()
             context.close()
@@ -655,6 +653,7 @@ def run_browser_checks(
         "status_summary": status_summary,
         "auto_schedule_block": auto_schedule_block,
         "activity_collapsible": activity_collapsible,
+        "activity_metrics_preview": activity_metrics_preview,
         "summary_cards": initial_summary_cards,
         "activity_surface": initial_activity_surface,
         "compact_widths": compact_widths,
@@ -676,6 +675,7 @@ def run_browser_checks(
         "preset_calendar_sync": preset_calendar_sync,
         "historical_selector_works": historical_selector_works,
         "historical_reset_works": historical_reset_works,
+        "stale_history_storage": stale_history_storage,
     }
 
 
@@ -717,6 +717,8 @@ def _print_summary(result: dict[str, object]) -> None:
     if "auto_schedule_block" in result:
         print("web_vitrina_browser_auto_schedule: ok ->", result["auto_schedule_block"])
     print("web_vitrina_browser_activity_surface: ok ->", result["activity_surface"])
+    if "activity_metrics_preview" in result:
+        print("web_vitrina_browser_activity_metrics_preview: ok ->", result["activity_metrics_preview"])
     print("web_vitrina_browser_compact_widths: ok ->", result["compact_widths"])
     if "sticky_section_offsets" in result:
         print("web_vitrina_browser_sticky_section: ok ->", result["sticky_section_offsets"])
@@ -747,6 +749,8 @@ def _print_summary(result: dict[str, object]) -> None:
     print("web_vitrina_browser_reset_default_order: ok ->", result["reset_restores_default_order"])
     print("web_vitrina_browser_history_selector: ok ->", result["historical_selector_present"], result["historical_selector_works"], result["preset_calendar_sync"])
     print("web_vitrina_browser_history_reset: ok ->", result["historical_reset_works"])
+    if "stale_history_storage" in result:
+        print("web_vitrina_browser_stale_history_storage: ok ->", result["stale_history_storage"])
     if "error_state" in result:
         error_state = result["error_state"]
         print("web_vitrina_browser_error_state: ok ->", error_state["title"])
@@ -776,6 +780,39 @@ def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
         "tabs": ", ".join(tab_texts),
         "default_active": active_tabs[0],
     }
+
+
+def _check_stale_history_storage_ignored(page: object, base_url: str) -> dict[str, object]:
+    if not base_url.startswith("http://127.0.0.1"):
+        return {"skipped": "public base-url mode"}
+    page.evaluate(
+        """() => {
+          localStorage.setItem('wb-core:sheet-vitrina-v1:web-vitrina:legacy-period:v0', JSON.stringify({
+            date_from: '2026-04-20',
+            date_to: '2026-04-24',
+            preset: 'legacy'
+          }));
+          localStorage.setItem('wb_core_web_vitrina_legacy_history_range', '2026-04-20..2026-04-24');
+          localStorage.setItem('wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1:period', '{broken-json');
+        }"""
+    )
+    page.goto(base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, wait_until="commit")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    state = page.evaluate(
+        """() => ({
+          label: (document.querySelector('[data-history-label]') || {}).textContent || '',
+          dateFrom: (document.querySelector('[data-history-date-from]') || {}).value || '',
+          dateTo: (document.querySelector('[data-history-date-to]') || {}).value || '',
+          query: window.location.search
+        })"""
+    )
+    if state["label"].strip() != "08.04.2026 - 21.04.2026":
+        raise AssertionError(f"stale browser history storage must not override rolling two-week default, got {state}")
+    if state["dateFrom"] != "2026-04-08" or state["dateTo"] != "2026-04-21" or state["query"]:
+        raise AssertionError(f"stale/broken history storage must fall back to no-query default, got {state}")
+    if "20.04.2026 - 24.04.2026" in state["label"]:
+        raise AssertionError(f"legacy April range leaked into history label, got {state}")
+    return state
 
 
 def _check_metric_toolbar_removed(page: object) -> dict[str, object]:
@@ -905,10 +942,10 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     if (
         not panel_state["exists"]
         or int(panel_state["oldToolbarCount"]) != 0
-        or not panel_state["beforeTable"]
+        or panel_state["beforeTable"]
         or int(panel_state["scopeCount"]) < 2
     ):
-        raise AssertionError(f"metrics presentation panel must sit before the table without the old toolbar, got {panel_state}")
+        raise AssertionError(f"metrics presentation panel must sit below the table without the old toolbar, got {panel_state}")
     if int(panel_state["groupMoveButtonCount"]) != 0 or int(panel_state["metricMoveButtonCount"]) != 0:
         raise AssertionError(f"metrics presentation must remove arrow move buttons, got {panel_state}")
     if int(panel_state["anchorControlCount"]) != 0:
@@ -1071,6 +1108,12 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
     persisted_display = _persisted_metric_display(page, storage_key, scope_id)
     if persisted_display.get(collapsed_one) != "collapsed" or persisted_display.get(hidden_key) != "hidden":
         raise AssertionError(f"display statuses must persist after reload, got {persisted_display}")
+    reloaded_disclosure = _metric_disclosure_state(page)
+    reloaded_counts = _visible_metric_key_counts(page)
+    if set(reloaded_disclosure["expandedValues"]) != {"true"} or int(reloaded_counts.get(collapsed_one, 0)) <= 0:
+        raise AssertionError(
+            f"expanded collapsed-metric disclosure must persist after reload, got disclosure={reloaded_disclosure}, counts={reloaded_counts}"
+        )
 
     _trigger_hidden_reset(page)
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=5000)
@@ -2150,7 +2193,7 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         raise AssertionError(f"load status must use a short semantic value, got {payload}")
     history_control = payload["history_control"]
     if (
-        history_control["text"] != "15.04.2026 - 21.04.2026"
+        history_control["text"] != "08.04.2026 - 21.04.2026"
         or int(history_control["labelScrollWidth"]) > int(history_control["labelWidth"]) + 2
         or int(history_control["iconGap"]) < 4
         or int(history_control["iconRightInset"]) < 7
@@ -2227,6 +2270,7 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
             headers,
             order: {
               summary: nodeIndex('[data-summary-grid]'),
+              auto: nodeIndex('[data-vitrina-auto-schedule]'),
               metrics: nodeIndex('[data-metrics-presentation]'),
               oldToolbar: nodeIndex('[data-table-toolbar]'),
               history: nodeIndex('[data-history-panel]'),
@@ -2269,7 +2313,7 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
         if expected not in payload["headers"]:
             raise AssertionError(f"main table must expose header {expected!r}, got {payload['headers']}")
     order_values = payload["order"]
-    expected_order = [order_values[key] for key in ("summary", "metrics", "table", "actions")]
+    expected_order = [order_values[key] for key in ("table", "auto", "metrics", "actions")]
     if any(value < 0 for value in expected_order) or expected_order != sorted(expected_order):
         raise AssertionError(f"web-vitrina blocks must follow the operator screen order, got {payload}")
     if order_values["oldToolbar"] != -1:
@@ -2798,7 +2842,7 @@ def _check_activity_collapsible_block(page: object) -> dict[str, object]:
           };
         }"""
     )
-    if not opened["open"] or not opened["bodyVisible"] or opened["sourceStatusButton"] != "Загрузить":
+    if not opened["open"] or not opened["bodyVisible"] or opened["sourceStatusButton"] not in {"Загрузить", "Загрузка…"}:
         raise AssertionError(f"activity block body must open without losing existing content, got {opened}")
     return {"collapsed": collapsed, "opened": opened}
 
@@ -2830,7 +2874,8 @@ def _check_load_refresh_action(
               const style = getComputedStyle(node);
               return style.display !== 'none' && style.visibility !== 'hidden' && node.getBoundingClientRect().width > 0;
             });
-          return !!progress && !!pulse && !progress.hidden && !trackVisible && rect.width <= 32 && !!progress.getAttribute('aria-label');
+	          return !!progress && !!pulse && !progress.hidden && progress.getAttribute('data-progress-state') === 'loading' &&
+	            progress.classList.contains('is-loading') && !trackVisible && rect.width <= 32 && !!progress.getAttribute('aria-label');
         }""",
         timeout=5000,
     )
@@ -3079,6 +3124,54 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
     return payload
 
 
+def _check_activity_metrics_preview(page: object) -> dict[str, object]:
+    payload = page.evaluate(
+        """() => {
+          const toggles = Array.from(document.querySelectorAll('[data-loading-metrics-toggle]'));
+          const firstToggle = toggles[0] || null;
+          const cell = firstToggle ? firstToggle.closest('[data-col-id="metrics"]') : null;
+          const list = cell ? cell.querySelector('.activity-metric-list') : null;
+          const beforeRect = list ? list.getBoundingClientRect() : {height: 0};
+          const beforeText = list ? (list.textContent || '').trim() : '';
+          const beforeClass = list ? (list.getAttribute('class') || '') : '';
+          return {
+            toggleCount: toggles.length,
+            buttonText: firstToggle ? (firstToggle.textContent || '').trim() : '',
+            beforeHeight: Math.round(beforeRect.height),
+            beforeText,
+            beforeClass,
+            title: list ? (list.getAttribute('title') || '') : ''
+          };
+        }"""
+    )
+    if int(payload["toggleCount"]) < 1:
+        raise AssertionError(f"loading table must expose compact metrics disclosure for long source lists, got {payload}")
+    if not str(payload["buttonText"]).startswith("Показать все"):
+        raise AssertionError(f"collapsed metric list must show explicit expand action, got {payload}")
+    if "is-expanded" in str(payload["beforeClass"]) or int(payload["beforeHeight"]) > 48:
+        raise AssertionError(f"collapsed metric list must stay compact, got {payload}")
+    if not payload["title"] or "," not in str(payload["title"]):
+        raise AssertionError(f"collapsed metric list must keep the full list in title, got {payload}")
+    page.locator("[data-loading-metrics-toggle]").first.click()
+    expanded = page.evaluate(
+        """() => {
+          const list = document.querySelector('.activity-metric-list.is-expanded');
+          const toggle = document.querySelector('[data-loading-metrics-toggle]');
+          const rect = list ? list.getBoundingClientRect() : {height: 0};
+          return {
+            expanded: !!list,
+            text: list ? (list.textContent || '').trim() : '',
+            buttonText: toggle ? (toggle.textContent || '').trim() : '',
+            height: Math.round(rect.height)
+          };
+        }"""
+    )
+    if not expanded["expanded"] or expanded["buttonText"] != "Скрыть" or int(expanded["height"]) < int(payload["beforeHeight"]):
+        raise AssertionError(f"expanded metric list must reveal full list and collapse action, got before={payload}, after={expanded}")
+    page.locator("[data-loading-metrics-toggle]").first.click()
+    return {"collapsed": payload, "expanded": expanded}
+
+
 def _wait_for_action_completion(
     page: object,
     *,
@@ -3169,23 +3262,39 @@ def _check_sticky_section_offsets(page: object) -> dict[str, object]:
             }];
           }));
           const firstRow = document.querySelector('[data-table-body] tr:not(.group-row):not(.sku-separator-row)');
-          const sectionCell = firstRow ? firstRow.querySelector('td[data-col-id="section"]') : null;
-          const sectionCellStyle = sectionCell ? getComputedStyle(sectionCell) : null;
+	          const scroll = document.querySelector('[data-table-scroll]');
+	          if (scroll) {
+	            scroll.scrollLeft = Math.min(420, Math.max(0, scroll.scrollWidth - scroll.clientWidth));
+	          }
+	          const metricCell = firstRow ? firstRow.querySelector('td[data-col-id="metric_label"]') : null;
+	          const sectionCell = firstRow ? firstRow.querySelector('td[data-col-id="section"]') : null;
+	          const metricRect = metricCell ? metricCell.getBoundingClientRect() : {left: 0, right: 0, width: 0};
+	          const sectionRect = sectionCell ? sectionCell.getBoundingClientRect() : {left: 0, right: 0, width: 0};
+	          const sectionCellStyle = sectionCell ? getComputedStyle(sectionCell) : null;
           const dateHeader = document.querySelector('[data-table-head] th[data-col-id^="date:"]');
           const dateHeaderStyle = dateHeader ? getComputedStyle(dateHeader) : null;
           return {
             headers,
             hiddenObjectHeaderCount: document.querySelectorAll('[data-table-head] th[data-col-id="scope_label"]').length,
-            sectionCell: {
-              exists: !!sectionCell,
-              position: sectionCellStyle ? sectionCellStyle.position : '',
-              left: sectionCellStyle ? Math.round(parseFloat(sectionCellStyle.left || '0')) : -1,
-              zIndex: sectionCellStyle ? Number(sectionCellStyle.zIndex || 0) : 0,
-              background: sectionCellStyle ? sectionCellStyle.backgroundColor : ''
-            },
-            dateHeaderZIndex: dateHeaderStyle ? Number(dateHeaderStyle.zIndex || 0) : 0
-          };
-        }"""
+	            sectionCell: {
+	              exists: !!sectionCell,
+	              position: sectionCellStyle ? sectionCellStyle.position : '',
+	              left: sectionCellStyle ? Math.round(parseFloat(sectionCellStyle.left || '0')) : -1,
+	              zIndex: sectionCellStyle ? Number(sectionCellStyle.zIndex || 0) : 0,
+	              background: sectionCellStyle ? sectionCellStyle.backgroundColor : '',
+	              rectLeft: Math.round(sectionRect.left),
+	              rectRight: Math.round(sectionRect.right),
+	              rectWidth: Math.round(sectionRect.width)
+	            },
+	            metricCell: {
+	              exists: !!metricCell,
+	              rectLeft: Math.round(metricRect.left),
+	              rectRight: Math.round(metricRect.right),
+	              rectWidth: Math.round(metricRect.width)
+	            },
+	            dateHeaderZIndex: dateHeaderStyle ? Number(dateHeaderStyle.zIndex || 0) : 0
+	          };
+	        }"""
     )
     headers = payload["headers"]
     if int(payload["hiddenObjectHeaderCount"]) != 0:
@@ -3200,6 +3309,12 @@ def _check_sticky_section_offsets(page: object) -> dict[str, object]:
         raise AssertionError(f"metric must be the first sticky column and section must follow it, got {payload}")
     if int(headers["section"]["zIndex"]) <= int(payload["dateHeaderZIndex"]):
         raise AssertionError(f"section sticky header must render above date headers, got {payload}")
+    if not payload["metricCell"]["exists"]:
+        raise AssertionError(f"metric body cells must be visible for sticky overlap check, got {payload}")
+    if int(payload["sectionCell"]["rectLeft"]) < int(payload["metricCell"]["rectRight"]) - 1:
+        raise AssertionError(f"section sticky column overlaps metric column after horizontal scroll, got {payload}")
+    if abs(int(payload["sectionCell"]["rectWidth"]) - 76) > 24 or int(payload["metricCell"]["rectWidth"]) < 120:
+        raise AssertionError(f"sticky body column widths must stay stable, got {payload}")
     if payload["sectionCell"]["background"] == "rgba(0, 0, 0, 0)":
         raise AssertionError(f"section sticky cell must have opaque background, got {payload}")
     return payload
@@ -3208,18 +3323,19 @@ def _check_sticky_section_offsets(page: object) -> dict[str, object]:
 def _check_percent_formatting(page: object, *, expected_rows: dict[str, str] | None) -> dict[str, str]:
     percent_rows = page.locator("[data-table-body] tr").evaluate_all(
         """rows => rows
-          .map(row => {
-            const valueNode = row.querySelector('td[data-col-id^="date:"]');
-            if (!valueNode) {
-              return null;
-            }
-            return {
-              metric_key: (valueNode.getAttribute('data-metric-key') || '').trim(),
-              value: (valueNode.getAttribute('title') || valueNode.textContent || '').trim()
+	          .map(row => {
+	            const valueNodes = Array.from(row.querySelectorAll('td[data-col-id^="date:"]'));
+	            if (!valueNodes.length) {
+	              return null;
+	            }
+	            const valueNode = valueNodes.slice().reverse().find((node) => ((node.getAttribute('title') || node.textContent || '').trim()) !== '—') || valueNodes[valueNodes.length - 1];
+	            return {
+	              metric_key: (valueNode.getAttribute('data-metric-key') || '').trim(),
+	              value: (valueNode.getAttribute('title') || valueNode.textContent || '').trim()
             };
-          })
-          .filter(Boolean)
-          .filter(item => item.metric_key === 'avg_addToCartConversion')"""
+	          })
+	          .filter(Boolean)
+	          .filter(item => item.metric_key === 'avg_addToCartConversion')"""
     )
     if len(percent_rows) < 2:
         raise AssertionError(f"percent metric rows must be visible in browser smoke, got {percent_rows}")
