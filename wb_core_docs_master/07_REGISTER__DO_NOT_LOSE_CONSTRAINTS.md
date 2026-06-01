@@ -15,6 +15,7 @@ source_basis:
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/modules/32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md"
   - "docs/modules/33_MODULE__ONEC_STOCKS_BLOCK.md"
+  - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
 source_of_truth_level: "derived_secondary_project_pack"
 related_docs:
   - "docs/architecture/03_source_of_truth_policy.md"
@@ -23,11 +24,12 @@ related_docs:
   - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
   - "docs/modules/33_MODULE__ONEC_STOCKS_BLOCK.md"
+  - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
 update_triggers:
   - "изменение migration boundary"
   - "изменение operator/runtime invariant"
   - "изменение docs governance"
-built_from_commit: "8df3ca374c982f590202a533ae97e0f9c8c0df40"
+built_from_commit: "623dcc17ad637f04e601f67f71bcb627881cadaa"
 ---
 
 # Summary
@@ -86,6 +88,10 @@ built_from_commit: "8df3ca374c982f590202a533ae97e0f9c8c0df40"
 | `C-41` | Web-vitrina/feedbacks visual fixes stay UI-local: wide feedbacks tables must scroll inside bounded containers, and updated-cell feedback uses transient text-color emphasis rather than legacy light backgrounds or persisted styling truth. |
 | `C-42` | Reports default-read must not request a not-yet-ready business day: daily-report selects the two latest persisted ready snapshots `<= default_business_as_of_date(now)`, stock-report default selects the latest one, and explicit stock `as_of_date` remains strict exact-read with no fallback/upstream fetch. |
 | `C-43` | 1C/Soykasoft `onec_stocks` is a date-capable server-side source group, not a browser/UI truth layer: `onec_product_capital` group refresh must stay date-scoped; historical loads require matching `payload.meta.date`; current stage buckets are `CHINA_TO_FF`, `FF_STOCK`, `FF_TO_WB`, `WB_STOCK`; fresh successful active-SKU-covered payloads may materialize absent canonical buckets as structural zero stock, but source errors/date mismatch/unmapped stages/partial coverage must stay warning/error/blank without fake zeros; 1C profitability totals must remain server-side ratio-of-aggregates where documented. |
+| `C-44` | `Метрики` presentation preferences are server-side app-account config, not data/source truth and not browser localStorage truth. LocalStorage may be cache/one-time migration input only; stale/broken browser state must not overwrite newer server config, and new/removed metric keys must merge safely. |
+| `C-45` | `CTR в поиске средний` TOTAL must stay a weighted aggregate by SKU `views_current`; low-view SKU CTR outliers must not dominate the total, and valid zero must render/persist as zero instead of dash/missing. |
+| `C-46` | Supplier shipment/order UI remains server-owned and supplier-facing: no editable Supplier/Customer fields, fixed supplier metadata `HanShang Technology` shown only in the registry, no order-card `Our SKU`/`Наш SKU`/`我方SKU`, `nmId` and nomenclature remain visible, shipment date is required, original invoice download is auth-protected, delete is operator-only, and unmatched/ambiguous product rows must remain visible. |
+| `C-47` | Supplier invoice matching is deterministic only: exact `match_key`, exact aliases, then product-type compatible-model overlap. It must not split invoice quantities into separate rows, must not hardcode filenames/line numbers, and must not use low-confidence fuzzy or first-match selection when candidates are ambiguous. |
 
 # Known gaps
 

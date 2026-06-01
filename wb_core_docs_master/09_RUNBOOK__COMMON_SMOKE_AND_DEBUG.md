@@ -56,9 +56,17 @@ source_basis:
   - "apps/promo_xlsx_collector_contract_smoke.py"
   - "apps/promo_xlsx_collector_integration_smoke.py"
   - "apps/promo_campaign_archive_integrity_smoke.py"
+  - "apps/promo_metric_eligibility_recompute_smoke.py"
   - "apps/sheet_vitrina_v1_promo_live_source_smoke.py"
   - "apps/sheet_vitrina_v1_promo_live_source_integration_smoke.py"
   - "apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py"
+  - "apps/supplier_invoice_parser_smoke.py"
+  - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
+  - "apps/sheet_vitrina_v1_supplier_shipments_browser_smoke.py"
+  - "apps/registry_upload_http_entrypoint_supplier_auth_smoke.py"
+  - "apps/sheet_vitrina_v1_user_config_smoke.py"
+  - "apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py"
+  - "apps/sheet_vitrina_v1_search_ctr_weighted_average_smoke.py"
 source_of_truth_level: "derived_secondary_project_pack"
 related_paths:
   - "apps/"
@@ -68,7 +76,7 @@ update_triggers:
   - "изменение smoke runner"
   - "изменение live operator flow"
   - "изменение common failure signature"
-built_from_commit: "8df3ca374c982f590202a533ae97e0f9c8c0df40"
+built_from_commit: "623dcc17ad637f04e601f67f71bcb627881cadaa"
 ---
 
 # Summary
@@ -168,11 +176,19 @@ python3 apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py
 python3 apps/promo_xlsx_collector_contract_smoke.py
 python3 apps/promo_xlsx_collector_integration_smoke.py
 python3 apps/promo_campaign_archive_integrity_smoke.py
+python3 apps/promo_metric_eligibility_recompute_smoke.py
 python3 apps/promo_campaign_archive_gc_smoke.py
 python3 apps/sheet_vitrina_v1_refresh_promo_artifact_gc_smoke.py
 python3 apps/sheet_vitrina_v1_promo_live_source_smoke.py
 python3 apps/sheet_vitrina_v1_promo_live_source_integration_smoke.py
 python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py
+python3 apps/supplier_invoice_parser_smoke.py
+python3 apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py
+python3 apps/sheet_vitrina_v1_supplier_shipments_browser_smoke.py
+python3 apps/registry_upload_http_entrypoint_supplier_auth_smoke.py
+python3 apps/sheet_vitrina_v1_user_config_smoke.py
+python3 apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py
+python3 apps/sheet_vitrina_v1_search_ctr_weighted_average_smoke.py
 git diff --check
 ```
 
@@ -190,6 +206,7 @@ Current promo smoke intent:
 - `apps/promo_campaign_archive_gc_smoke.py` covers guarded audit/dry-run/apply fixture behavior, duplicate/debug cleanup candidates and unknown/incomplete artifact skips.
 - `apps/sheet_vitrina_v1_refresh_promo_artifact_gc_smoke.py` proves refresh-integrated light GC runs after normalized archive/ready snapshot persistence and surfaces warnings without turning successful data refresh into data loss.
 - `apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py` is the read-only live/public guard for `promo_by_price[today_current]`, expected ended/no-download diagnostics and non-blank current promo rows.
+- `apps/promo_metric_eligibility_recompute_smoke.py` covers bounded recompute of promo eligibility from normalized archive/current truth without fabricating metric values.
 
 Current web-vitrina phase-2 smoke intent:
 - `apps/sheet_vitrina_v1_web_vitrina_view_model_smoke.py` keeps the mapper library-agnostic and checks canonical `columns / rows / groups / sections / formatters / filters / sorts / state_model`.
@@ -212,6 +229,15 @@ Current web-vitrina phase-4 smoke intent:
 - `apps/seller_portal_feedbacks_complaints_scout_smoke.py`, `apps/seller_portal_feedbacks_matching_replay_smoke.py`, `apps/seller_portal_feedbacks_complaint_dry_run_plan_smoke.py`, `apps/seller_portal_feedbacks_complaint_submit_smoke.py`, `apps/seller_portal_feedbacks_complaints_status_sync_smoke.py`, `apps/seller_portal_feedbacks_complaint_confirmation_smoke.py` and `apps/seller_portal_feedbacks_complaints_detail_probe_smoke.py` cover the guarded Seller Portal complaint lane: scout/matching/dry-run/submit/status sync/confirmation/detail probes without turning web UI into a submit route.
 - `apps/sheet_vitrina_v1_research_sku_group_comparison_smoke.py` covers read-only research options/calculate semantics, non-financial metric filtering, promo candidate chip metadata and no zero-fill coverage behavior.
 - `apps/web_source_owner_runtime_base_url_smoke.py` covers localhost owner runtime API defaults and env override behavior for bot-backed web-source/seller-funnel adapters.
+- `apps/sheet_vitrina_v1_user_config_smoke.py` covers auth-protected server-side user-config storage, schema/version handling, user-key separation, localStorage migration candidates at route/storage boundary and rapid last-write semantics for metric presentation preferences.
+- `apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py` covers real browser behavior for metric presentation settings: server config restore after reload/new context, stale localStorage rollback prevention and safe merge with changed metric keys.
+- `apps/sheet_vitrina_v1_search_ctr_weighted_average_smoke.py` covers `CTR в поиске средний` TOTAL weighted by SKU `views_current`, rejects arithmetic mean over SKU CTR values and preserves valid zero.
+
+Current supplier shipments smoke intent:
+- `apps/supplier_invoice_parser_smoke.py` covers supplier invoice parser type detection (`clear`/`anti_spy`/`matte`), extras separation, totals, contract no/date extraction, compatible model key extraction and unmatched visibility without committing real invoices.
+- `apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py` covers protected parse/create/list/detail/patch/delete/download/nomenclature/rematch route behavior, required shipment date, JSON API errors and invoice hash preservation.
+- `apps/sheet_vitrina_v1_supplier_shipments_browser_smoke.py` covers the supplier/order UI: trilingual labels, registry supplier fallback, no editable Supplier/Customer, no order-card SKU, `nmId`/nomenclature visibility, read-only matching status, delete/close/download and contract field rendering.
+- `apps/registry_upload_http_entrypoint_supplier_auth_smoke.py` covers optional supplier role isolation: supplier-only surface/API allowed, full operator shell/settings/delete/rematch/unrelated APIs denied.
 
 Current reports smoke intent:
 - `apps/sheet_vitrina_v1_stock_report_smoke.py` checks previous-closed stock report semantics and active SKU filtering.

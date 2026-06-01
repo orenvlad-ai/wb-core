@@ -4,7 +4,7 @@ doc_id: "WB-CORE-PROJECT-05-MODULE-STATUS"
 doc_type: "register"
 status: "active"
 purpose: "Дать compact register смёрженных модулей и current checkpoints без чтения всех module docs подряд."
-scope: "Семейства модулей, диапазоны `01–33`, текущий статус `main`, главный current checkpoint и открытые хвосты."
+scope: "Семейства модулей, диапазоны `01–34`, текущий статус `main`, главный current checkpoint и открытые хвосты."
 source_basis:
   - "docs/modules/00_INDEX__MODULES.md"
   - "README.md"
@@ -20,18 +20,19 @@ update_triggers:
   - "merge нового модуля"
   - "изменение main-confirmed checkpoint"
   - "смена статуса family/gap"
-built_from_commit: "8df3ca374c982f590202a533ae97e0f9c8c0df40"
+built_from_commit: "623dcc17ad637f04e601f67f71bcb627881cadaa"
 ---
 
 # Summary
 
-На текущем `main` main-confirmed module set уже доходит до `33`.
+На текущем `main` main-confirmed module set уже доходит до `34`.
 
 Практически это значит:
 - source/data foundation уже materialized;
 - registry upload line уже замкнута до HTTP entrypoint;
 - sheet-side line reached bounded MVP historically, but Google Sheets/GAS load/write contour is now archived/do-not-use.
-- web-vitrina line уже имеет stable route/contract seam, отдельный library-agnostic `view_model`, первый concrete grid adapter layer и real live page composition на sibling route, plus read-only feedbacks, research tab and active 1C product-capital source group in the same unified shell.
+- web-vitrina line уже имеет stable route/contract seam, отдельный library-agnostic `view_model`, concrete grid adapter layer и real live page composition на sibling route, plus read-only feedbacks, research tab, active 1C product-capital source group, server-side metric presentation user-config and weighted TOTAL search CTR in the same unified shell.
+- supplier shipments line materialized as module `34`: `Поставки -> От поставщика` registry, XLSX invoice parser, nomenclature/compatibility matching, runtime storage and protected operator/supplier surfaces.
 
 # Current norm
 
@@ -48,6 +49,7 @@ built_from_commit: "8df3ca374c982f590202a533ae97e0f9c8c0df40"
 | `29–31` | `web-vitrina seams` | смёржены в `main` как stable read/view-model/adapter ladder plus real sibling page composition, включая read-only feedbacks tab and transient AI review flow |
 | `32` | `web/operator/research` | смёржен в `main` как read-only SKU group comparison over accepted truth / ready snapshots |
 | `33` | `external-1c-source` | active/current in repo: 1C/Soykasoft stocks+cost source, date-specific load, web-vitrina source group `onec_product_capital`, 1C товарный капитал rows and 1C profitability metrics |
+| `34` | `supplier-shipments` | active/current in repo: supplier invoice order registry, XLSX parser, runtime SQLite/filesystem storage, protected API/UI, settings/nomenclature, exact/alias/compatibility matching and optional supplier-only role boundary |
 
 ## Current checkpoint ladder
 
@@ -73,6 +75,7 @@ built_from_commit: "8df3ca374c982f590202a533ae97e0f9c8c0df40"
 20. `web_vitrina_page_composition_block`
 21. `research_sku_group_comparison_block`
 22. `onec_stocks_block`
+23. `supplier_shipments_block`
 
 ## Operator-facing checkpoint
 
@@ -83,6 +86,7 @@ Current main-confirmed operator flow:
 - `GET /v1/sheet-vitrina-v1/web-vitrina`
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition`
 - `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition&include_source_status=1`
+- `GET/POST /v1/sheet-vitrina-v1/web-vitrina/user-config`
 - `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh`
 - `GET /v1/sheet-vitrina-v1/daily-report`
 - `GET /v1/sheet-vitrina-v1/stock-report`
@@ -103,6 +107,10 @@ Current main-confirmed operator flow:
 - `POST /v1/sheet-vitrina-v1/research/sku-group-comparison/calculate`
 - `POST /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start`
 - `GET /login`, `POST /login`, `GET /logout`, `POST /logout`
+- `GET /sheet-vitrina-v1/supplier`
+- `GET /sheet-vitrina-v1/settings`
+- `GET/POST/PATCH/DELETE /v1/sheet-vitrina-v1/supply/supplier-shipments...`
+- `GET/POST/PATCH/DELETE /v1/sheet-vitrina-v1/settings/nomenclature...`
 - `GET /sheet-vitrina-v1/operator`
 - `GET /sheet-vitrina-v1/vitrina`
 - former Google Sheets `prepare/upload/load DATA_VITRINA` flow is archived and blocked by guards
@@ -143,7 +151,7 @@ Current repo-owned unified web/operator surface:
 - `GET /v1/sheet-vitrina-v1/web-vitrina` stays server-owned and library-agnostic on the default path: current v1 shape is `meta + status_summary + schema + rows + capabilities`, built only from existing ready snapshot/current truth and optional `as_of_date`
 - phase-2 web-vitrina materializes repo-owned `web_vitrina_view_model` over that stable contract: current schema = `columns + rows + groups + sections + formatters + filters + sorts + state_model`
 - phase-3 web-vitrina materializes repo-owned `web_vitrina_gravity_table_adapter` over that `view_model`: current Gravity-specific surface = `columns + rows + renderers + groupings + filters + sorts + use_table_options + table_props + state_surface`
-- phase-4 web-vitrina materializes repo-owned `web_vitrina_page_composition` via optional `surface=page_composition`; the page shell renders compact table header/history controls, browser-local `Метрики` presentation block, main table and then bottom `Действия и состояния`
+- phase-4 web-vitrina materializes repo-owned `web_vitrina_page_composition` via optional `surface=page_composition`; the page shell renders compact table header/history controls, main table first, then `Автообновления`, server-configured `Метрики` presentation block and bottom `Действия и состояния`
 - visual system is dark across `Витрина`, embedded `Поставки` / `Отчёты`, `Отзывы` and `Исследования`; primary/action accent is violet/indigo, while green is kept only for semantic success/status signals
 - the same unified shell exposes `Отзывы` as a manual read-only WB feedbacks table with strict server-side date/star/answered filters, 62-day feedback date picker, chunked WB pagination, diagnostic meta, Excel export for the current table, bounded internal horizontal scroll for wide columns, resizable columns, official review tags/actionable resolver, optional transient AI review columns, nested `Жалобы` over runtime complaint journal/status sync plus protected selected-row submit jobs, and nested `Авто-жалобы` over runtime schedules/run-now/tick reports; prompt storage, AI output and auto-complaints run stats are operational/transient, not ЕБД/accepted truth
 - the same unified shell exposes `Исследования` as read-only SKU group comparison; options/calculate use active SKU truth, selectable non-financial metrics and persisted ready snapshots only
@@ -152,7 +160,8 @@ Current repo-owned unified web/operator surface:
   - the old cheap top-panel `Обновить`, `JSON Connect` and permanent top status badge are not rendered
   - table header keeps browser-owned page refresh time separate from server-owned freshness and the load-adjacent latest-window status lamp; old selected-period errors outside the latest two-day window do not force the visible load state red
   - visible table controls are compact: period/section/group near the load action, no separate `Фильтры и настройки` card, and obsolete search/columns/reset/type/sort controls are ignored safely
-  - browser-local `Метрики` presentation has separate `Итого` and `SKU` scopes, drag-and-drop ordering, transient selected-row batch mode and display states `Показано` / `Свернуто` / `Скрыто`; collapsed rows reveal under the nearest shown metric through icon-only disclosure, hidden rows stay absent from the main table
+  - `Метрики` presentation has separate `Итого` and `SKU` scopes, drag-and-drop ordering, transient selected-row batch mode and display states `Показано` / `Свернуто` / `Скрыто`; canonical settings persist through auth-protected server user-config, localStorage is cache/one-time migration only, collapsed rows reveal under the nearest shown metric through icon-only disclosure, hidden rows stay absent from the main table
+  - `CTR в поиске средний` TOTAL uses weighted aggregation by SKU `views_current`, not arithmetic mean of SKU CTR ratios; valid zero CTR remains zero
   - `Загрузка данных` is lazy: initial page composition renders `not_loaded` plus `Загрузить`, then explicit `include_source_status=1` loads a grouped compact table over source truth (`WB API`, `1С / товарный капитал`, `Seller Portal / бот`, `Прочие источники`); every visible main-table metric belongs to exactly one group, with residual calculated/formula metrics assigned to `Прочие источники`
   - each group has one compact date control, `Обновить группу`, group-level last update timestamp, today/yesterday status columns, reason columns, Russian metric labels and secondary technical endpoint text
   - `Seller Portal / бот` additionally exposes session status and `Проверить сессию` / `Восстановить сессию` / `Скачать лаунчер`
@@ -161,7 +170,7 @@ Current repo-owned unified web/operator surface:
   - raw STATUS/job note, JSON fragments, traceback text, request ids and similar diagnostics stay only in existing log/download surfaces
 - `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` accepts `{async: true, source_group_id, as_of_date}` for one source group and one selected date; it must not clear, overwrite or timestamp unrelated groups/date cells; for `onec_product_capital`, fresh empty canonical 1C stage buckets are materialized as structural zeros, not blanks
 - group-refresh/full-refresh job results may include `updated_cells`/latest-confirmed metadata for transient browser-session highlighting only; current UI uses green/amber text-color emphasis without legacy light cell backgrounds and no permanent styling truth is persisted
-- the sibling page keeps bounded history controls: no-query default opens the backend-owned current business week `D-6..D` ending on `today_current_date`, explicit `as_of_date`, and `date_from/date_to` period mode over existing ready snapshots plus truthful blank/partial cells for visible current-week dates without ready snapshots; old always-expanded `История` / `Фильтры и настройки` blocks are replaced by compact in-header controls
+- the sibling page keeps bounded history controls: no-query default opens the backend-owned rolling `2 недели` period `D-13..D` ending on `today_current_date`, explicit `as_of_date`, and `date_from/date_to` period mode over existing ready snapshots plus truthful blank/partial cells for visible dates without ready snapshots; stale April/browser-local period state cannot override the default, and old always-expanded `История` / `Фильтры и настройки` blocks are replaced by compact in-header controls
 - `web_vitrina_view_model` remains canonical and library-agnostic, the Gravity adapter stays isolated repo-side, and the page layer stays a page-only consumer instead of a second truth owner
 - current phase-1/2/3/4 scope remains narrow: route fixation, stable read contract, library-agnostic presentation seam, concrete grid adapter and server-driven page composition only; export layer, legacy Google Sheets/export migration and broad feature parity stay later
 - `Отчёты` uses one sibling subsection selector: `Ежедневные отчёты`, `Отчёт по остаткам`, `Выполнение плана`; only one report body is visible at a time
@@ -205,7 +214,10 @@ Current repo-owned unified web/operator surface:
 - live retry completion is bounded by repo-owned runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py` plus repo-owned artifacts `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.{service,timer}` installed on host as `wb-core-sheet-vitrina-closure-retry.timer`; the runner covers due `yesterday_closed` for the full historical/date-period matrix and same-day current-only capture retries only within the current business day
 
 Current additional operator supply flow on the same page:
-- top-level tab `Поставки` keeps the existing page pattern and materializes two bounded sibling blocks: `Заказ на фабрике` and `Поставка на Wildberries`
+- top-level tab `Поставки` keeps inner tabs `Расчёты` / `От поставщика`: `Расчёты` keeps the existing factory/regional calculators, while `От поставщика` materializes the supplier order registry.
+- `От поставщика` renders `订单登记表 / Order registry / Реестр заказов`, accepts XLSX invoice uploads, stores original invoices under runtime dir, persists headers/lines/nomenclature in SQLite, requires only shipment date after parse, downloads original invoice, supports operator delete and optional supplier-only role isolation.
+- Supplier order matching is deterministic through server-side nomenclature: exact `product_type|normalized_model`, aliases, then compatible iPhone model overlap; `nmId` and nomenclature are auto-filled only for deterministic matches, ambiguous/unmatched rows stay visible, and the order card hides editable Supplier/Customer and order SKU fields while the registry shows supplier fallback `HanShang Technology`.
+- the `Расчёты` tab keeps the existing page pattern and materializes two bounded sibling blocks: `Заказ на фабрике` and `Поставка на Wildberries`
 - operator vocabulary inside these sibling blocks is unified around `period average / lead times / safety / batch / cycle`; factory now materializes `cycle_order_days`, while WB regional keeps the same math under `cycle_supply_days`
 - current operator UX uses auto-upload after file selection, subtle delete icons for current uploaded files and a clickable `sheet_vitrina_v1` link to the bound live spreadsheet
 - `Остатки ФФ` is a shared server-owned dataset block for both calculations; the same uploaded workbook/state is reused, not duplicated
