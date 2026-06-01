@@ -171,6 +171,9 @@ SOURCE_CLASSIFICATION_GROUPS = {
     "promo_by_price": "D_other_non_wb_or_browser_collector",
 }
 PERCENT_SOURCE_KEYS = {"ctr", "ctr_current", "localizationPercent"}
+SEARCH_CTR_AVG_TOTAL_METRIC_KEY = "avg_ctr_current"
+SEARCH_CTR_SKU_METRIC_KEY = "ctr_current"
+SEARCH_VIEWS_SKU_METRIC_KEY = "views_current"
 DECISION_SUMMARY = {
     "alias_zone": "openCount and open_card_count remain distinct metrics from different sources",
     "total_avg_policy": "preserve all total_/avg_ uploaded rows; total_=sum, avg_=arithmetic_mean",
@@ -2543,6 +2546,13 @@ class _MetricEvaluator:
                 )
             elif onec_weighted_unit_cost_components(metric.metric_key) is not None:
                 value = self._aggregate_onec_weighted_unit_cost(metric.metric_key, temporal_slot)
+            elif metric.metric_key == SEARCH_CTR_AVG_TOTAL_METRIC_KEY:
+                value = self._aggregate_weighted_avg(
+                    SEARCH_CTR_SKU_METRIC_KEY,
+                    SEARCH_VIEWS_SKU_METRIC_KEY,
+                    self.enabled_config,
+                    temporal_slot,
+                )
             elif metric.metric_key.startswith(AGGREGATE_SUM_PREFIX):
                 value = self._aggregate_sum(metric.calc_ref, self.enabled_config, temporal_slot)
             elif metric.metric_key.startswith(AGGREGATE_AVG_PREFIX):
@@ -2580,7 +2590,14 @@ class _MetricEvaluator:
             raise ValueError(f"metric_key missing in current registry: {metric_key}")
         group_items = self.grouped_config.get(group_name, [])
         if metric.calc_type == "metric":
-            if metric.metric_key.startswith(AGGREGATE_AVG_PREFIX):
+            if metric.metric_key == SEARCH_CTR_AVG_TOTAL_METRIC_KEY:
+                value = self._aggregate_weighted_avg(
+                    SEARCH_CTR_SKU_METRIC_KEY,
+                    SEARCH_VIEWS_SKU_METRIC_KEY,
+                    group_items,
+                    temporal_slot,
+                )
+            elif metric.metric_key.startswith(AGGREGATE_AVG_PREFIX):
                 value = self._aggregate_avg(metric.calc_ref, group_items, temporal_slot)
             else:
                 value = self._aggregate_sum(metric.calc_ref, group_items, temporal_slot)
@@ -2627,6 +2644,33 @@ class _MetricEvaluator:
         values = [self.resolve_sku(metric_key, item.nm_id, temporal_slot) for item in config_items]
         numeric = [value for value in values if value is not None]
         return float(sum(numeric)) / len(numeric) if numeric else None
+
+    def _aggregate_weighted_avg(
+        self,
+        value_metric_key: str,
+        weight_metric_key: str,
+        config_items: Iterable[ConfigV2Item],
+        temporal_slot: str,
+    ) -> float | None:
+        weighted_sum = 0.0
+        total_weight = 0.0
+        numeric_values: list[float] = []
+        for item in config_items:
+            value = self.resolve_sku(value_metric_key, item.nm_id, temporal_slot)
+            weight = self.resolve_sku(weight_metric_key, item.nm_id, temporal_slot)
+            if value is None:
+                continue
+            numeric_values.append(float(value))
+            if weight is None or float(weight) <= 0:
+                continue
+            numeric_weight = float(weight)
+            weighted_sum += float(value) * numeric_weight
+            total_weight += numeric_weight
+        if total_weight > 0:
+            return weighted_sum / total_weight
+        if numeric_values and all(value == 0.0 for value in numeric_values):
+            return 0.0
+        return None
 
     def _aggregate_onec_weighted_unit_cost(self, metric_key: str, temporal_slot: str) -> float | None:
         components = onec_weighted_unit_cost_components(metric_key)

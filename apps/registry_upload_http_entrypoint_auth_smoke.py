@@ -30,6 +30,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
+    DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
     DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
     DEFAULT_SUPPLIER_SHIPMENTS_PATH,
@@ -94,6 +95,9 @@ def main() -> None:
                 nomenclature_code, nomenclature_payload = _get_json(f"{base_url}{DEFAULT_NOMENCLATURE_PATH}")
                 if nomenclature_code != 401 or nomenclature_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated nomenclature API must return 401 JSON: {nomenclature_code} {nomenclature_payload}")
+                user_config_code, user_config_payload = _get_json(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH}")
+                if user_config_code != 401 or user_config_payload.get("error") != "authentication_required":
+                    raise AssertionError(f"unauthenticated user-config API must return 401 JSON: {user_config_code} {user_config_payload}")
                 tick_code, tick_payload = _post_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH}", {})
                 if tick_code != 401 or tick_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated automation tick must return 401 JSON: {tick_code} {tick_payload}")
@@ -134,6 +138,35 @@ def main() -> None:
                     body = response.read().decode("utf-8")
                     if response.status != 200 or "Справочник номенклатуры" not in body:
                         raise AssertionError("authenticated operator settings page must render nomenclature section")
+                user_config_get = urllib_request.Request(
+                    f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH}",
+                    headers={"Accept": "application/json"},
+                    method="GET",
+                )
+                with opener.open(user_config_get, timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                    if response.status != 200 or payload.get("status") != "missing":
+                        raise AssertionError(f"authenticated user-config GET must start missing: {response.status} {payload}")
+                user_config_post = urllib_request.Request(
+                    f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH}",
+                    data=json.dumps(
+                        {
+                            "base_revision": 0,
+                            "config": {
+                                "version": 2,
+                                "scopes": {"total": {"order": ["avg_ctr_current"], "display": {"avg_ctr_current": "collapsed"}, "manual": True}},
+                                "expanded_anchors": [],
+                            },
+                        },
+                        ensure_ascii=False,
+                    ).encode("utf-8"),
+                    headers={"Accept": "application/json", "Content-Type": "application/json"},
+                    method="POST",
+                )
+                with opener.open(user_config_post, timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                    if response.status != 200 or payload.get("revision") != 1:
+                        raise AssertionError(f"authenticated user-config POST must persist revision 1: {response.status} {payload}")
                 schedules_request = urllib_request.Request(
                     f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH}",
                     headers={"Accept": "application/json"},

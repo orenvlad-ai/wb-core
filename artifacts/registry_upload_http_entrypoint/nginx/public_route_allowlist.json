@@ -187,6 +187,12 @@
       "methods": ["POST"]
     },
     {
+      "name": "sheet_vitrina_web_vitrina_user_config",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/web-vitrina/user-config",
+      "methods": ["GET", "POST"]
+    },
+    {
       "name": "sheet_vitrina_web_vitrina_seller_recovery_start",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start",

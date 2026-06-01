@@ -60,6 +60,7 @@ DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE = "page_composition"
 DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH = "/v1/sheet-vitrina-v1/web-vitrina/group-refresh"
 DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_PATH = "/v1/sheet-vitrina-v1/web-vitrina/auto-schedules"
 DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_RUN_NOW_PATH = "/v1/sheet-vitrina-v1/web-vitrina/auto-schedules/run-now"
+DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH = "/v1/sheet-vitrina-v1/web-vitrina/user-config"
 DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH = (
     "/v1/sheet-vitrina-v1/research/sku-group-comparison/options"
 )
@@ -559,6 +560,33 @@ def _build_handler(
                     HTTPStatus.ACCEPTED,
                     _with_sheet_job_urls(job_payload, sheet_job_path),
                 )
+                return
+
+            if parsed.path == DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH:
+                try:
+                    payload = _load_optional_request_payload(self)
+                    result = entrypoint.handle_sheet_web_vitrina_user_config_save_request(
+                        user_key=_current_web_user_config_key(self),
+                        payload=payload,
+                    )
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina user config save failed: {exc}"},
+                    )
+                    return
+                if result.get("status") == "conflict":
+                    _write_json_response(self, HTTPStatus.CONFLICT, result)
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
                 return
 
             if parsed.path == DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_CALCULATE_PATH:
@@ -1439,6 +1467,24 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"sheet vitrina auto schedule runtime failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH:
+                try:
+                    payload = entrypoint.handle_sheet_web_vitrina_user_config_request(
+                        user_key=_current_web_user_config_key(self),
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina user config runtime failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -2669,6 +2715,20 @@ def _ensure_operator_role(handler: BaseHTTPRequestHandler, path: str) -> bool:
     return False
 
 
+def _current_web_user_config_key(handler: BaseHTTPRequestHandler) -> str:
+    config = _web_auth_config()
+    if config["enabled"]:
+        user = _authenticated_web_user(handler, config) or {}
+        username = str(user.get("username") or "").strip()
+        role = str(user.get("role") or "operator").strip() or "operator"
+    else:
+        username = "local_operator"
+        role = "operator"
+    principal = f"{role}:{username or 'anonymous_operator'}"
+    digest = hashlib.sha256(principal.encode("utf-8")).hexdigest()[:32]
+    return f"webcore_user_{digest}"
+
+
 def _handle_web_auth_login(handler: BaseHTTPRequestHandler, query: str) -> None:
     config = _web_auth_config()
     if not config["configured"]:
@@ -3333,6 +3393,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "group_refresh_path": DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH,
         "auto_schedules_path": DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_PATH,
         "auto_schedules_run_now_path": DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_RUN_NOW_PATH,
+        "user_config_path": DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH,
         "research_options_path": DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH,
         "research_calculate_path": DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_CALCULATE_PATH,
         "research_promotions_calculate_path": DEFAULT_SHEET_RESEARCH_PROMOTIONS_CALCULATE_PATH,

@@ -4792,7 +4792,21 @@
         manualByScope: {},
         expandedAnchors: new Set(),
         selectionModeByScope: {},
-        selectionByScope: {}
+        selectionByScope: {},
+        serverConfig: {
+          loaded: false,
+          loading: false,
+          available: false,
+          status: "not_loaded",
+          revision: 0,
+          updatedAt: "",
+          config: null,
+          saveTimer: null,
+          saveInFlight: false,
+          savePending: false,
+          pendingBaseRevision: null,
+          lastError: ""
+        }
       },
       sellerSession: {
         statusLabel: "",
@@ -6171,13 +6185,128 @@
           return null;
         }
         const parsed = JSON.parse(raw);
-        if (!parsed || Number(parsed.version) !== 2 || !parsed.scopes || typeof parsed.scopes !== "object") {
-          return null;
-        }
-        return parsed;
+        return normalizePersistedMetricPresentation(parsed);
       } catch (error) {
         return null;
       }
+    }
+
+    function normalizePersistedMetricPresentation(candidate) {
+      if (!candidate || Number(candidate.version) !== 2 || !candidate.scopes || typeof candidate.scopes !== "object") {
+        return null;
+      }
+      const scopes = {};
+      Object.keys(candidate.scopes).forEach(function(scopeId) {
+        const normalizedScopeId = String(scopeId || "").trim();
+        const savedScope = candidate.scopes[scopeId];
+        if (!normalizedScopeId || !savedScope || typeof savedScope !== "object") {
+          return;
+        }
+        const order = [];
+        const seen = new Set();
+        (Array.isArray(savedScope.order) ? savedScope.order : []).forEach(function(metricKey) {
+          const normalizedMetricKey = String(metricKey || "").trim();
+          if (normalizedMetricKey && !seen.has(normalizedMetricKey)) {
+            order.push(normalizedMetricKey);
+            seen.add(normalizedMetricKey);
+          }
+        });
+        const display = {};
+        const rawDisplay = savedScope.display && typeof savedScope.display === "object" ? savedScope.display : {};
+        Object.keys(rawDisplay).forEach(function(metricKey) {
+          const normalizedMetricKey = String(metricKey || "").trim();
+          const status = normalizeMetricDisplayStatus(rawDisplay[metricKey]);
+          if (normalizedMetricKey && status !== "shown") {
+            display[normalizedMetricKey] = status;
+          }
+        });
+        scopes[normalizedScopeId] = {
+          order: order,
+          display: display,
+          manual: !!savedScope.manual
+        };
+      });
+      const expandedAnchors = [];
+      const seenAnchors = new Set();
+      (Array.isArray(candidate.expanded_anchors) ? candidate.expanded_anchors : []).forEach(function(token) {
+        const normalizedToken = String(token || "").trim();
+        if (normalizedToken && !seenAnchors.has(normalizedToken)) {
+          expandedAnchors.push(normalizedToken);
+          seenAnchors.add(normalizedToken);
+        }
+      });
+      return {
+        version: 2,
+        scopes: scopes,
+        expanded_anchors: expandedAnchors
+      };
+    }
+
+    function metricPresentationUserConfigPath() {
+      return String(WEB_VITRINA_CONFIG.user_config_path || "");
+    }
+
+    async function ensureMetricPresentationUserConfigLoaded() {
+      const serverConfig = state.metricPresentation.serverConfig;
+      if (serverConfig.loaded || serverConfig.loading) {
+        return;
+      }
+      const path = metricPresentationUserConfigPath();
+      if (!path) {
+        serverConfig.loaded = true;
+        serverConfig.available = false;
+        serverConfig.status = "unavailable";
+        serverConfig.lastError = "user config route is not configured";
+        return;
+      }
+      serverConfig.loading = true;
+      try {
+        const response = await fetch(path, {
+          method: "GET",
+          headers: {"Accept": "application/json"}
+        });
+        const payload = await readJsonResponse(response, "non-json response from user config route");
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "user config route returned " + response.status);
+        }
+        const normalizedConfig = normalizePersistedMetricPresentation(payload && payload.config);
+        serverConfig.loaded = true;
+        serverConfig.available = true;
+        serverConfig.status = String(payload && payload.status ? payload.status : (normalizedConfig ? "ok" : "missing"));
+        serverConfig.revision = Number(payload && payload.revision ? payload.revision : 0) || 0;
+        serverConfig.updatedAt = String((payload && payload.updated_at) || "");
+        serverConfig.config = normalizedConfig;
+        serverConfig.lastError = "";
+      } catch (error) {
+        serverConfig.loaded = true;
+        serverConfig.available = false;
+        serverConfig.status = "unavailable";
+        serverConfig.config = null;
+        serverConfig.lastError = String(error && error.message ? error.message : error);
+      } finally {
+        serverConfig.loading = false;
+      }
+    }
+
+    function resolveMetricPresentationPersistedCandidate(storageKey, forceDefault) {
+      if (forceDefault) {
+        return {source: "default", payload: null};
+      }
+      const serverConfig = state.metricPresentation.serverConfig || {};
+      const serverPayload = normalizePersistedMetricPresentation(serverConfig.config);
+      if (serverConfig.loaded && serverConfig.available && serverPayload) {
+        return {source: "server", payload: serverPayload};
+      }
+      const localPayload = readPersistedMetricPresentation(storageKey);
+      if (localPayload) {
+        if (serverConfig.loaded && serverConfig.available && String(serverConfig.status || "") === "missing") {
+          return {source: "local_migration", payload: localPayload};
+        }
+        if (!serverConfig.loaded || !serverConfig.available) {
+          return {source: "local_fallback", payload: localPayload};
+        }
+      }
+      return {source: "default", payload: null};
     }
 
     function sanitizeMetricOrder(candidateOrder, defaultOrder, extraAllowedKeys) {
@@ -6257,7 +6386,8 @@
       const forceDefault = !!(options && options.forceDefault);
       const model = buildMetricPresentationModel(payload);
       const storageKey = buildMetricPresentationStorageKey(payload);
-      const persisted = forceDefault ? null : readPersistedMetricPresentation(storageKey);
+      const persistedCandidate = resolveMetricPresentationPersistedCandidate(storageKey, forceDefault);
+      const persisted = persistedCandidate.payload;
       const previousSelectionModeByScope = state.metricPresentation.selectionModeByScope || {};
       const previousSelectionByScope = state.metricPresentation.selectionByScope || {};
       const scopeByKey = {};
@@ -6316,15 +6446,14 @@
         }
       });
       pruneExpandedMetricPresentationAnchors();
-      persistMetricPresentation();
+      persistMetricPresentation({skipServer: true});
+      if (persistedCandidate.source === "local_migration") {
+        persistMetricPresentation({serverBaseRevision: 0});
+      }
       renderMetricPresentationPanel(payload);
     }
 
-    function persistMetricPresentation() {
-      const storageKey = state.metricPresentation.storageKey;
-      if (!storageKey || !window || !window.localStorage) {
-        return;
-      }
+    function buildMetricPresentationPersistedPayload() {
       const scopes = {};
       (state.metricPresentation.scopes || []).forEach(function(scope) {
         const display = {};
@@ -6340,14 +6469,117 @@
           manual: !!(state.metricPresentation.manualByScope || {})[scope.scopeId]
         };
       });
+      return {
+        version: 2,
+        scopes: scopes,
+        expanded_anchors: Array.from(state.metricPresentation.expandedAnchors || [])
+      };
+    }
+
+    function writeMetricPresentationLocalCache(storageKey, payload) {
+      if (!storageKey || !window || !window.localStorage) {
+        return;
+      }
       try {
-        window.localStorage.setItem(storageKey, JSON.stringify({
-          version: 2,
-          scopes: scopes,
-          expanded_anchors: Array.from(state.metricPresentation.expandedAnchors || [])
-        }));
+        window.localStorage.setItem(storageKey, JSON.stringify(payload));
       } catch (error) {
-        // Browser-local presentation preferences must not block table rendering.
+        // Browser-local presentation cache must not block table rendering.
+      }
+    }
+
+    function persistMetricPresentation(options) {
+      const normalizedOptions = options || {};
+      const storageKey = state.metricPresentation.storageKey;
+      const payload = buildMetricPresentationPersistedPayload();
+      writeMetricPresentationLocalCache(storageKey, payload);
+      if (normalizedOptions.skipServer) {
+        return;
+      }
+      if (state.metricPresentation.serverConfig && state.metricPresentation.serverConfig.available) {
+        state.metricPresentation.serverConfig.config = payload;
+      }
+      scheduleMetricPresentationServerSave(normalizedOptions.serverBaseRevision);
+    }
+
+    function scheduleMetricPresentationServerSave(serverBaseRevision) {
+      const serverConfig = state.metricPresentation.serverConfig || {};
+      if (!serverConfig.loaded || !serverConfig.available || !metricPresentationUserConfigPath()) {
+        return;
+      }
+      if (typeof serverBaseRevision === "number") {
+        serverConfig.pendingBaseRevision = serverBaseRevision;
+      }
+      serverConfig.savePending = true;
+      if (serverConfig.saveTimer) {
+        window.clearTimeout(serverConfig.saveTimer);
+      }
+      serverConfig.saveTimer = window.setTimeout(function() {
+        serverConfig.saveTimer = null;
+        flushMetricPresentationServerSave();
+      }, 300);
+    }
+
+    async function flushMetricPresentationServerSave() {
+      const serverConfig = state.metricPresentation.serverConfig || {};
+      if (serverConfig.saveInFlight || !serverConfig.savePending || !serverConfig.available || !metricPresentationUserConfigPath()) {
+        return;
+      }
+      serverConfig.savePending = false;
+      serverConfig.saveInFlight = true;
+      const explicitBaseRevision = typeof serverConfig.pendingBaseRevision === "number"
+        ? serverConfig.pendingBaseRevision
+        : null;
+      serverConfig.pendingBaseRevision = null;
+      const baseRevision = explicitBaseRevision === null ? (Number(serverConfig.revision) || 0) : explicitBaseRevision;
+      const configPayload = buildMetricPresentationPersistedPayload();
+      try {
+        const response = await fetch(metricPresentationUserConfigPath(), {
+          method: "POST",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            config_key: "metric_presentation",
+            base_revision: baseRevision,
+            config: configPayload
+          })
+        });
+        const payload = await readJsonResponse(response, "non-json response from user config save route");
+        if (response.status === 409 || (payload && payload.status === "conflict")) {
+          const current = (payload && payload.current) || {};
+          serverConfig.revision = Number(current.revision || 0) || 0;
+          serverConfig.updatedAt = String(current.updated_at || "");
+          serverConfig.config = normalizePersistedMetricPresentation(current.config);
+          serverConfig.status = String(current.status || "ok");
+          serverConfig.lastError = "server_config_conflict";
+          const latestLocalPayload = buildMetricPresentationPersistedPayload();
+          if (JSON.stringify(latestLocalPayload) !== JSON.stringify(configPayload)) {
+            serverConfig.savePending = true;
+            serverConfig.pendingBaseRevision = Number(serverConfig.revision) || 0;
+            return;
+          }
+          if (state.composition && serverConfig.config) {
+            initializeMetricPresentation(state.composition);
+            renderTable();
+          }
+          return;
+        }
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "user config save route returned " + response.status);
+        }
+        serverConfig.revision = Number(payload && payload.revision ? payload.revision : serverConfig.revision) || 0;
+        serverConfig.updatedAt = String((payload && payload.updated_at) || "");
+        serverConfig.config = normalizePersistedMetricPresentation(payload && payload.config) || configPayload;
+        serverConfig.status = "ok";
+        serverConfig.lastError = "";
+      } catch (error) {
+        serverConfig.lastError = String(error && error.message ? error.message : error);
+      } finally {
+        serverConfig.saveInFlight = false;
+        if (serverConfig.savePending) {
+          flushMetricPresentationServerSave();
+        }
       }
     }
 
@@ -8562,13 +8794,18 @@
         "state namespace: " +
         valueOrDash(payload.meta && payload.meta.state_namespace) +
         " · server persistence: " +
-        valueOrDash(payload.meta && payload.meta.browser_state_persistence);
+        valueOrDash(payload.meta && payload.meta.browser_state_persistence) +
+        " · user config: " +
+        (state.metricPresentation.serverConfig.available ? "server" : "local fallback");
       renderTable();
       const tableSurface = payload.table_surface || {};
       const tableFreshness = normalizedOptions.tableFreshness || (
         String(tableSurface.table_data_state || "included") === "included" ? "fresh" : "hidden"
       );
       setTableFreshnessIndicator(tableFreshness, payload);
+      if (activityPanelNode && activityPanelNode.open && !state.sourceStatus.loaded && !state.sourceStatus.loading) {
+        window.setTimeout(ensureSourceStatusDetailsLoaded, 0);
+      }
     }
 
     function renderTable() {
@@ -13528,6 +13765,7 @@
         if (!payload || payload.composition_name !== "web_vitrina_page_composition") {
           throw new Error("unexpected table data payload");
         }
+        await ensureMetricPresentationUserConfigLoaded();
         const tableSurface = payload.table_surface || {};
         if (String(tableSurface.table_data_state || "included") !== "included") {
           throw new Error("table data payload did not include rows");
@@ -13597,6 +13835,7 @@
         if (!payload || payload.composition_name !== "web_vitrina_page_composition") {
           throw new Error("unexpected page composition payload");
         }
+        await ensureMetricPresentationUserConfigLoaded();
         const tableSurface = payload.table_surface || {};
         if (String(tableSurface.table_data_state || "included") === "deferred") {
           if (!showingCachedTable) {

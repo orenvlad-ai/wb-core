@@ -108,6 +108,10 @@ OperatorLogEmitter = Callable[[str], None]
 SheetLoadRunner = Callable[[SheetVitrinaV1Envelope, OperatorLogEmitter], dict[str, Any]]
 PromoArtifactGcRunner = Callable[..., dict[str, Any]]
 SHEET_OPERATOR_JOB_ID: ContextVar[str] = ContextVar("sheet_vitrina_v1_operator_job_id", default="")
+WEB_VITRINA_METRIC_PRESENTATION_CONFIG_KEY = "metric_presentation"
+WEB_VITRINA_USER_CONFIG_SCHEMA_VERSION = 1
+WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION = 2
+WEB_VITRINA_METRIC_DISPLAY_STATUSES = {"shown", "collapsed", "hidden"}
 SHEET_VITRINA_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/refresh"
 SHEET_VITRINA_LOAD_ROUTE = "/v1/sheet-vitrina-v1/load"
 SHEET_VITRINA_GROUP_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/group-refresh"
@@ -1008,6 +1012,70 @@ class RegistryUploadHttpEntrypoint:
             due_at="",
             trigger_source="manual_run_now_from_auto_schedule",
         )
+
+    def handle_sheet_web_vitrina_user_config_request(
+        self,
+        *,
+        user_key: str,
+        config_key: str = WEB_VITRINA_METRIC_PRESENTATION_CONFIG_KEY,
+    ) -> dict[str, Any]:
+        normalized_config_key = _normalize_web_vitrina_user_config_key(config_key)
+        record = self.runtime.load_sheet_vitrina_user_config(
+            user_key=user_key,
+            config_key=normalized_config_key,
+        )
+        if record.get("status") == "ok":
+            record = dict(record)
+            record["config"] = _sanitize_web_vitrina_metric_presentation_config(record.get("config"))
+        return {
+            "status": record.get("status") or "missing",
+            "config_key": normalized_config_key,
+            "schema_version": int(record.get("schema_version") or 0),
+            "revision": int(record.get("revision") or 0),
+            "updated_at": str(record.get("updated_at") or ""),
+            "config": record.get("config"),
+            "canonical_store": "server_runtime_user_config",
+        }
+
+    def handle_sheet_web_vitrina_user_config_save_request(
+        self,
+        *,
+        user_key: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        normalized_config_key = _normalize_web_vitrina_user_config_key(
+            str(payload.get("config_key") or WEB_VITRINA_METRIC_PRESENTATION_CONFIG_KEY)
+        )
+        config = _sanitize_web_vitrina_metric_presentation_config(payload.get("config"))
+        expected_revision = _optional_int(payload.get("base_revision"))
+        saved = self.runtime.save_sheet_vitrina_user_config(
+            user_key=user_key,
+            config_key=normalized_config_key,
+            schema_version=WEB_VITRINA_USER_CONFIG_SCHEMA_VERSION,
+            payload=config,
+            updated_at=_default_activated_at_factory(),
+            expected_revision=expected_revision,
+        )
+        if saved.get("status") == "conflict":
+            current = dict(saved.get("current") or {})
+            if current.get("status") == "ok":
+                current["config"] = _sanitize_web_vitrina_metric_presentation_config(current.get("config"))
+            return {
+                "status": "conflict",
+                "config_key": normalized_config_key,
+                "expected_revision": int(saved.get("expected_revision") or 0),
+                "current": current,
+                "canonical_store": "server_runtime_user_config",
+            }
+        return {
+            "status": "ok",
+            "config_key": normalized_config_key,
+            "schema_version": int(saved.get("schema_version") or WEB_VITRINA_USER_CONFIG_SCHEMA_VERSION),
+            "revision": int(saved.get("revision") or 0),
+            "updated_at": str(saved.get("updated_at") or ""),
+            "config": _sanitize_web_vitrina_metric_presentation_config(saved.get("config")),
+            "canonical_store": "server_runtime_user_config",
+        }
 
     def handle_sheet_scheduled_auto_update_request(
         self,
@@ -3241,6 +3309,73 @@ def _default_activated_at_factory() -> str:
         .isoformat()
         .replace("+00:00", "Z")
     )
+
+
+def _normalize_web_vitrina_user_config_key(value: str) -> str:
+    normalized = str(value or WEB_VITRINA_METRIC_PRESENTATION_CONFIG_KEY).strip()
+    if normalized != WEB_VITRINA_METRIC_PRESENTATION_CONFIG_KEY:
+        raise ValueError("unsupported web-vitrina user config key")
+    return normalized
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("base_revision must be an integer") from exc
+
+
+def _sanitize_web_vitrina_metric_presentation_config(value: Any) -> dict[str, Any]:
+    source = value if isinstance(value, Mapping) else {}
+    scopes_payload = source.get("scopes") if isinstance(source.get("scopes"), Mapping) else {}
+    scopes: dict[str, Any] = {}
+    for raw_scope_id, raw_scope_payload in scopes_payload.items():
+        scope_id = str(raw_scope_id or "").strip()
+        if not scope_id or len(scope_id) > 80 or not isinstance(raw_scope_payload, Mapping):
+            continue
+        raw_order = raw_scope_payload.get("order")
+        order: list[str] = []
+        seen_order: set[str] = set()
+        for metric_key in raw_order if isinstance(raw_order, list) else []:
+            normalized_metric_key = str(metric_key or "").strip()
+            if not normalized_metric_key or len(normalized_metric_key) > 160 or normalized_metric_key in seen_order:
+                continue
+            order.append(normalized_metric_key)
+            seen_order.add(normalized_metric_key)
+        raw_display = raw_scope_payload.get("display")
+        display: dict[str, str] = {}
+        if isinstance(raw_display, Mapping):
+            for raw_metric_key, raw_status in raw_display.items():
+                metric_key = str(raw_metric_key or "").strip()
+                status = str(raw_status or "").strip()
+                if (
+                    metric_key
+                    and len(metric_key) <= 160
+                    and status in WEB_VITRINA_METRIC_DISPLAY_STATUSES
+                    and status != "shown"
+                ):
+                    display[metric_key] = status
+        scopes[scope_id] = {
+            "order": order,
+            "display": display,
+            "manual": bool(raw_scope_payload.get("manual")),
+        }
+
+    expanded_anchors: list[str] = []
+    seen_anchors: set[str] = set()
+    for token in source.get("expanded_anchors") if isinstance(source.get("expanded_anchors"), list) else []:
+        normalized_token = str(token or "").strip()
+        if normalized_token and len(normalized_token) <= 260 and normalized_token not in seen_anchors:
+            expanded_anchors.append(normalized_token)
+            seen_anchors.add(normalized_token)
+
+    return {
+        "version": WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION,
+        "scopes": scopes,
+        "expanded_anchors": expanded_anchors,
+    }
 
 
 def _default_now_factory() -> datetime:
