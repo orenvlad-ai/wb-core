@@ -15,6 +15,7 @@ source_basis:
   - "docs/modules/27_MODULE__PROMO_XLSX_COLLECTOR_BLOCK.md"
   - "docs/modules/28_MODULE__PROMO_LIVE_SOURCE_WIRING_BLOCK.md"
   - "docs/modules/33_MODULE__ONEC_STOCKS_BLOCK.md"
+  - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
 source_of_truth_level: "derived_secondary_project_pack"
 related_docs:
   - "README.md"
@@ -26,11 +27,12 @@ related_docs:
   - "docs/modules/27_MODULE__PROMO_XLSX_COLLECTOR_BLOCK.md"
   - "docs/modules/28_MODULE__PROMO_LIVE_SOURCE_WIRING_BLOCK.md"
   - "docs/modules/33_MODULE__ONEC_STOCKS_BLOCK.md"
+  - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
 update_triggers:
   - "перенос новой legacy capability"
   - "изменение migration boundary"
   - "закрытие крупного compatibility gap"
-built_from_commit: "8df3ca374c982f590202a533ae97e0f9c8c0df40"
+built_from_commit: "623dcc17ad637f04e601f67f71bcb627881cadaa"
 ---
 
 # Summary
@@ -49,6 +51,7 @@ built_from_commit: "8df3ca374c982f590202a533ae97e0f9c8c0df40"
 | legacy `DATA`/vitrina readback | `sheet_vitrina_v1_mvp_end_to_end_block` + `promo_live_source_wiring_block` + `onec_stocks_block` | bounded replacement есть | rows materialize-ятся server-side; `COST_PRICE` overlay, promo-backed `promo_by_price` rows and 1C product-capital/profitability rows are integrated in current refresh/runtime/read-side contour |
 | legacy report historical fact gaps | accepted temporal slots + `manual_monthly_plan_report_baseline` + one-off ready-fact reconcile + Reports ready-snapshot selector | bounded server-side replacement есть | daily/stock default reads use persisted ready snapshots already materialized in server runtime; plan-report may use controlled monthly XLSX baseline only for full-month aggregates; ready snapshots may be one-off reconcile input for missing accepted `fin_report_daily` / `ads_compact` slots; neither path revives Google Sheets/GAS as report truth |
 | feedback complaints / Seller Portal complaint handling | `Отзывы` nested `Жалобы` runtime journal/status sync + protected selected-row submit job + nested `Авто-жалобы` schedules/run-now/tick + guarded support/probe runners | bounded replacement есть for status/evidence, selected-row submit and runtime-scheduled auto-complaints; broad public/browser-side submit deliberately absent | current auth-protected web UI can submit only selected/analyzed rows through bounded jobs; auto-complaints use runtime schedules, saved AI and the same guarded submit path; real submit still requires exact match/hard caps, and uncertain results require read-only confirmation/detail probes |
+| supplier invoice order handling | `docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md` + `packages/application/supplier_shipments.py` + `packages/application/supplier_invoice_parser.py` | bounded WebCore-native server replacement есть | not a Google Sheets/GAS flow: invoices upload through protected WebCore API/UI, original XLSX is stored under runtime dir, order headers/lines/nomenclature live in SQLite, and supplier-facing matching uses server-side dictionary/compatibility rules rather than browser-local SKU entry |
 | legacy `AI_EXPORT` | отдельного полного replacement пока нет | open gap | compatibility boundary ещё не закрыт |
 | `wb-ai-research` ingest/runtime вокруг registry | `registry_upload_file_backed_service_block`, `registry_upload_db_backed_runtime_block`, `registry_upload_http_entrypoint_block` | перенесено bounded chain-ом | repo-owned deploy/probe contract, app-level auth, auth-aware canonical probes, EU current-live target metadata, managed public-route allowlist, production HTTPS/domain/TLS invariant and rollback-only selleros write guard есть; broader storage/failover hardening остаётся отдельно |
 | `wb-ai-research` snapshot consumers | source/data blocks `01–10` | largely migrated | current repo owns contracts/artifacts/smokes |

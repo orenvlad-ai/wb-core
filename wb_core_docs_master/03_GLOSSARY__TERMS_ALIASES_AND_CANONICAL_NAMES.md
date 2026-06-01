@@ -12,6 +12,7 @@ source_basis:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
   - "docs/modules/33_MODULE__ONEC_STOCKS_BLOCK.md"
+  - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
 source_of_truth_level: "derived_secondary_project_pack"
 related_docs:
   - "README.md"
@@ -19,11 +20,12 @@ related_docs:
   - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
   - "docs/modules/33_MODULE__ONEC_STOCKS_BLOCK.md"
+  - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
 update_triggers:
   - "изменение canonical naming"
   - "появление нового публичного термина"
   - "изменение operator-visible labels"
-built_from_commit: "8df3ca374c982f590202a533ae97e0f9c8c0df40"
+built_from_commit: "623dcc17ad637f04e601f67f71bcb627881cadaa"
 ---
 
 # Summary
@@ -66,6 +68,8 @@ built_from_commit: "8df3ca374c982f590202a533ae97e0f9c8c0df40"
 | `WebCore app auth` | `login session`, `operator auth`, `app-level auth` | simple app-level login/session boundary for public/operator WebCore routes; credentials live in runtime env, not repo |
 | `owner runtime API` | `wb-ai-api.service`, `localhost owner API`, `127.0.0.1:8000` | EU host-local owner runtime for bot-backed web-source/seller-funnel handoff; not public nginx route and not `api.selleros.pro` surface |
 | `operator dark/violet theme` | `dark operator UI`, `violet primary accent` | current visual shell for `/sheet-vitrina-v1/vitrina` and `/sheet-vitrina-v1/operator`; primary/action accent is violet/indigo, while green is reserved for semantic success/status |
+| `metric presentation user-config` | `Метрики settings`, `web-vitrina user config` | auth-protected server-side presentation preferences for metric order/display/collapse by app account; localStorage is cache/one-time migration only, not canonical state |
+| `CTR в поиске средний` | `avg search CTR total`, `SEARCH_CTR_AVG_TOTAL_METRIC_KEY` | TOTAL search CTR row weighted by SKU `views_current`; not an arithmetic mean of SKU CTR values and valid zero stays zero |
 | `research_sku_group_comparison` | `Исследования`, `Сравнение групп SKU` | read-only retrospective comparison of two SKU groups over persisted ready snapshots; no causal/statistical claims |
 | `onec_stocks_block` | `1C/Soykasoft stocks`, `1С остатки`, `1С себестоимость WB` | active bounded source module for `/hs/soykasoft/stocks_wb`; owns parser/normalizer, date-specific current/historical load and web-vitrina metric wiring |
 | `onec_product_capital` | `1С / товарный капитал`, `1C source group` | web-vitrina source group for `onec_stocks`; supports date-scoped group refresh and source-status rows |
@@ -76,6 +80,9 @@ built_from_commit: "8df3ca374c982f590202a533ae97e0f9c8c0df40"
 | `promo current invariant smoke` | `promo invariant guard` | read-only live/public guard for current promo row visibility and expected ended/no-download artifact handling |
 | `normalized promo archive` | `campaign_rows.jsonl`, `campaign_rows_manifest.json` | normalized campaign-row truth for historical promo replay without permanent raw workbook dependency |
 | `promo_refresh_light_gc_v1` | `promo artifact light GC`, `refresh-integrated GC` | bounded refresh-time cleanup after normalized archive + ready snapshot persistence; protects current/unknown/replay-critical artifacts |
+| `supplier_shipments_block` | `Поставки -> От поставщика`, `订单登记表 / Order registry / Реестр заказов` | server-owned supplier invoice order registry with XLSX parser, runtime DB/filesystem storage, protected API/UI, delete/download, fixed supplier `HanShang Technology` and optional supplier-only role isolation |
+| `Справочник номенклатуры` | `nomenclature dictionary`, `settings/nomenclature` | server-side dictionary mapping invoice product lines to `nmId` and nomenclature by exact match key, alias and compatible iPhone model sets; edited in operator settings, supplier role default-denied |
+| `compatible model matching` | `compatible_models`, `matched_by_compatibility` | deterministic supplier invoice matching by `product_type` plus overlap of normalized compatible model keys; ambiguous equal candidates stay unfilled instead of first-match guessing |
 | `public route allowlist` | `nginx allowlist`, `managed public routes` | repo-owned hosted nginx route publication manifest for the current HTTPS wb-core hosted contour |
 | `EU hosted runtime target` | `wb-core-eu-root`, `89.191.226.88`, `current live target` | current primary hosted runtime target for deploy/probe/GC/runtime writes; must publish production HTTPS domain route |
 | `selleros rollback target` | `selleros-root`, `178.72.152.177`, `old selleros VPS` | rollback-only/read-only legacy target; routine mutating writes are blocked by hosted runner guard |

@@ -31,6 +31,7 @@ related_modules:
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/modules/32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md"
   - "docs/modules/33_MODULE__ONEC_STOCKS_BLOCK.md"
+  - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
 related_paths:
   - "packages/"
   - "apps/"
@@ -40,7 +41,7 @@ update_triggers:
   - "изменение current main-confirmed contour"
   - "merge нового bounded модуля"
   - "смена главного project gap"
-built_from_commit: "8df3ca374c982f590202a533ae97e0f9c8c0df40"
+built_from_commit: "623dcc17ad637f04e601f67f71bcb627881cadaa"
 ---
 
 # Summary
@@ -57,6 +58,7 @@ built_from_commit: "8df3ca374c982f590202a533ae97e0f9c8c0df40"
 - web-vitrina line `29–31` уже смёржена и является active user-facing surface: `/sheet-vitrina-v1/vitrina` + `/v1/sheet-vitrina-v1/web-vitrina`.
 - research block `32` уже смёржен как read-only MVP вкладки `Исследования` для сравнения двух групп SKU по persisted ready snapshots.
 - module `33` / `onec_stocks_block` active в repo как 1C/Soykasoft source + web-vitrina metric wiring checkpoint: date-specific `/hs/soykasoft/stocks_wb`, source group `onec_product_capital`, 1C товарный капитал rows and runtime-extended 1C profitability metrics.
+- module `34` / `supplier_shipments_block` active в repo как server-owned `Поставки -> От поставщика` order registry: XLSX invoice parser, runtime SQLite/filesystem storage, protected parse/create/list/detail/patch/delete/download APIs, settings/nomenclature dictionary, deterministic exact/alias/compatible-model matching to `nmId`/nomenclature, trilingual supplier-facing labels, fixed supplier `HanShang Technology`, contract no/date extraction and optional supplier-only role isolation.
 - current operator UI unified вокруг `/sheet-vitrina-v1/vitrina`: first tab `Витрина`, sibling tabs `Поставки`, `Отчёты`, `Отзывы` и `Исследования`; `/sheet-vitrina-v1/operator` остаётся compatibility entry на тот же shell. Current visual system is dark dashboard-style with violet/indigo primary accent; green is reserved for semantic success/status, not the site primary action accent.
 - current `Отзывы` checkpoint includes strict server-side feedback filtering/export, official WB review tags/actionable resolver, transient AI review, nested `Жалобы` and nested `Авто-жалобы`: complaint journal/status sync remain runtime evidence routes, real Seller Portal submit is limited to protected selected-row operator jobs / guarded support runners with exact-match, hard-cap and confirmation/detail evidence checks, and auto-complaint schedules are runtime-owned daily jobs using the same guarded submit path rather than browser-side broad automation.
 - current hosted EU checkpoint now includes repo-owned localhost owner runtime wiring (`wb-ai-api.service` on `127.0.0.1:8000`), app-level auth/session boundary for the public/operator surface, auth-aware canonical probes and explicit deep refresh probe policy; public nginx remains product route publication, not the owner API path.
@@ -113,7 +115,8 @@ Confirmed contour на текущем `main`:
 - unified web-vitrina/operator surface:
   - primary manual action `Загрузить и обновить` is the canonical full refresh: backend resolves `today_current` / `yesterday_closed` in `Asia/Yekaterinburg`, runs the same source/status machinery as group refresh, materializes the ready snapshot, rereads the page payload and keeps stale/missing expected source groups visible as warning/error instead of false success;
   - compact table header keeps period/section/group controls and the load action close to the table, hides obsolete search/columns/reset/type/sort toolbar controls, and uses a latest-window status lamp for `today_current + yesterday_closed` instead of letting old historical errors color the visible load state;
-  - the browser-local `Метрики` presentation block is presentation-only over received metric rows: two scope tables `Итого` / `SKU`, row and selected-row drag-and-drop, display states `Показано` / `Свернуто` / `Скрыто`, SKU `Как Итого` sync, and no changes to metric registry, formulas, ready snapshots or accepted truth;
+  - the `Метрики` presentation block is presentation-only over received metric rows: two scope tables `Итого` / `SKU`, row and selected-row drag-and-drop, display states `Показано` / `Свернуто` / `Скрыто`, SKU `Как Итого` sync, and no changes to metric registry, formulas, ready snapshots or accepted truth; canonical preferences are stored in auth-protected server user-config, while browser localStorage is only cache/one-time migration input and cannot overwrite newer server config;
+  - TOTAL search row `CTR в поиске средний` is weighted by SKU `views_current`; low-view SKU outliers must not dominate the operator total and valid zero remains `0` rather than dash;
   - bottom `Загрузка данных` is lazy: initial state shows only `not_loaded` + `Загрузить`, then explicit read-only `surface=page_composition&include_source_status=1` loads grouped source status table (`WB API`, `Seller Portal / бот`, `Прочие источники`) with date-scoped `Обновить группу`;
   - `1С / товарный капитал` is a first-class loading/source group with date-scoped group refresh, and its metrics stay server-owned rather than browser-local truth;
   - `Отзывы` tab is read-only over official WB feedbacks API through canonical `WB_API_TOKEN`, with bounded 62-day date picker independent from ready-snapshot dates, chunked `take/skip` loading, final server-side filters (`date_from/date_to/stars/is_answered`), diagnostic meta, Excel export, bounded internal table scroll for wide feedback columns, resizable columns, official review tags/actionable complaint resolver and transient AI-assisted review through server-side prompt+model config/OpenAI route; AI labels are not accepted truth, Seller Portal automation or Google Sheets/GAS state;
@@ -127,6 +130,7 @@ Confirmed contour на текущем `main`:
   - `GET /v1/sheet-vitrina-v1/stock-report` remains read-only previous-closed stock report with current active SKU selector: default-read uses the latest persisted ready snapshot not newer than the requested default closed day, while explicit `?as_of_date=YYYY-MM-DD` stays strict exact-read with no fallback/upstream fetch;
   - current SPP visible values are sourced from Seller Portal `discountOnSite` as current-only evidence; successful current fetches persist exact business-date accepted-current snapshots, later blank attempts must not overwrite them, and legacy WB Statistics sales-average SPP is only an explicit fallback mode, not fresh current-visible truth.
   - supply tab keeps server-driven factory-order and regional calculations; regional result now uses compact district rows with per-district XLSX action and district files include `nmId / SKU / Количество к поставке / Дефицит`;
+  - supplier order registry under `Поставки -> От поставщика` keeps XLSX upload/parse/save/detail/download/delete server-owned; visible order UI hides editable Supplier/Customer and order SKU fields, shows supplier only in the registry as `HanShang Technology`, requires only shipment date after parse, keeps `nmId` and nomenclature visible, and preserves unmatched/ambiguous rows instead of inventing matches;
   - seller-funnel materialization filters raw rows to enabled/relevant `nm_ids` before strict field validation and logs ignored invalid non-relevant rows.
 - User-facing `ЕБД` / `единая база данных` now means the shared server-side accepted truth/runtime layer behind web-vitrina, plan-report and future reports; it is not Google Sheets/GAS, browser UI/localStorage or a private report-only manual table.
 - Hosted runtime target governance:
