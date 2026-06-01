@@ -67,6 +67,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
     DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
+    DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH,
     DEFAULT_SUPPLIER_SHIPMENTS_PATH,
     DEFAULT_UPLOAD_PATH,
     DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX,
@@ -548,6 +549,13 @@ def collect_public_surface(
                     "surface": DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
                 },
             ),
+            timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
+        ),
+        _collect_http_probe(
+            name="web_vitrina_user_config",
+            method="GET",
+            url=f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH}",
             timeout_seconds=timeout_seconds,
             auth_cookie=auth_cookie,
         ),
@@ -2042,6 +2050,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
 
     if route in {
         "web_vitrina_page_composition",
+        "web_vitrina_user_config",
         "factory_order_template_stock_ff",
         "factory_order_template_inbound_factory",
         "factory_order_template_inbound_ff_to_wb",
@@ -2062,6 +2071,21 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
                 "web-vitrina page composition surface ok"
                 if evaluation["ok"]
                 else "expected 200 JSON page composition surface on web-vitrina read route"
+            )
+            return evaluation
+        if route == "web_vitrina_user_config":
+            json_body = result.get("json_body") or {}
+            evaluation["ok"] = (
+                status == 200
+                and "application/json" in content_type
+                and json_body.get("config_key") == "metric_presentation"
+                and json_body.get("canonical_store") == "server_runtime_user_config"
+                and json_body.get("status") in {"missing", "ok"}
+            )
+            evaluation["detail"] = (
+                "web-vitrina user config route ok"
+                if evaluation["ok"]
+                else "expected 200 JSON user config payload"
             )
             return evaluation
         evaluation["ok"] = status == 200 and "spreadsheetml.sheet" in content_type
@@ -2739,6 +2763,7 @@ results = [
     _collect("status", "GET", _append_as_of_date(PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_STATUS_HTTP_PATH"], PAYLOAD["as_of_date"])),
     _collect("web_vitrina_read", "GET", _append_as_of_date(PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_READ_PATH!r}, PAYLOAD["as_of_date"])),
     _collect("web_vitrina_page_composition", "GET", _append_query_params(PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_READ_PATH!r}, {{"as_of_date": PAYLOAD["as_of_date"], "surface": {DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE!r}}})),
+    _collect("web_vitrina_user_config", "GET", PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH!r}),
     _collect("web_vitrina_group_refresh_missing_group", "POST", PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH!r}, {{}}),
     _collect("daily_report", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/daily-report"),
     _collect("stock_report", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/stock-report"),

@@ -39,6 +39,7 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/job",
         "/v1/sheet-vitrina-v1/web-vitrina",
         "/v1/sheet-vitrina-v1/web-vitrina/group-refresh",
+        "/v1/sheet-vitrina-v1/web-vitrina/user-config",
         "/v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start",
         "/v1/sheet-vitrina-v1/refresh",
         "/v1/sheet-vitrina-v1/daily-report",
@@ -116,6 +117,8 @@ def main() -> None:
         raise AssertionError("rendered nginx block must raise body limit for supplier invoice uploads")
     if rendered.count("location = /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start {") != 1:
         raise AssertionError("rendered nginx block must include web-vitrina seller recovery start exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/web-vitrina/user-config {") != 1:
+        raise AssertionError("rendered nginx block must include web-vitrina user config exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/seller-portal-recovery/status {") != 1:
         raise AssertionError("rendered nginx block must include seller recovery status exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip {") != 1:

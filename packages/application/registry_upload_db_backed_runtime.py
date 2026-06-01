@@ -691,6 +691,116 @@ class RegistryUploadDbBackedRuntime:
                 last_manual_load_result=_deserialize_optional_state_payload(row["last_manual_load_result_json"]),
             )
 
+    def load_sheet_vitrina_user_config(
+        self,
+        *,
+        user_key: str,
+        config_key: str,
+    ) -> dict[str, Any]:
+        normalized_user_key = _normalize_required_storage_key(user_key, field_name="user_key")
+        normalized_config_key = _normalize_required_storage_key(config_key, field_name="config_key")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT user_key, config_key, schema_version, payload_json, updated_at, revision
+                FROM sheet_vitrina_v1_user_configs
+                WHERE user_key = ? AND config_key = ?
+                """,
+                (normalized_user_key, normalized_config_key),
+            ).fetchone()
+            if row is None:
+                return {
+                    "status": "missing",
+                    "user_key": normalized_user_key,
+                    "config_key": normalized_config_key,
+                    "schema_version": 0,
+                    "revision": 0,
+                    "updated_at": "",
+                    "config": None,
+                }
+            return _sheet_vitrina_user_config_row_to_dict(row)
+
+    def save_sheet_vitrina_user_config(
+        self,
+        *,
+        user_key: str,
+        config_key: str,
+        schema_version: int,
+        payload: Mapping[str, Any],
+        updated_at: str,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        normalized_user_key = _normalize_required_storage_key(user_key, field_name="user_key")
+        normalized_config_key = _normalize_required_storage_key(config_key, field_name="config_key")
+        normalized_schema_version = int(schema_version)
+        if normalized_schema_version < 1:
+            raise ValueError("schema_version must be a positive integer")
+        _validate_timestamp(updated_at, field_name="updated_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            current = conn.execute(
+                """
+                SELECT user_key, config_key, schema_version, payload_json, updated_at, revision
+                FROM sheet_vitrina_v1_user_configs
+                WHERE user_key = ? AND config_key = ?
+                """,
+                (normalized_user_key, normalized_config_key),
+            ).fetchone()
+            current_revision = int(current["revision"]) if current is not None else 0
+            if expected_revision is not None and current_revision != int(expected_revision):
+                return {
+                    "status": "conflict",
+                    "expected_revision": int(expected_revision),
+                    "current": (
+                        _sheet_vitrina_user_config_row_to_dict(current)
+                        if current is not None
+                        else {
+                            "status": "missing",
+                            "user_key": normalized_user_key,
+                            "config_key": normalized_config_key,
+                            "schema_version": 0,
+                            "revision": 0,
+                            "updated_at": "",
+                            "config": None,
+                        }
+                    ),
+                }
+            next_revision = current_revision + 1
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_user_configs(
+                    user_key,
+                    config_key,
+                    schema_version,
+                    payload_json,
+                    updated_at,
+                    revision
+                )
+                VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_key, config_key) DO UPDATE SET
+                    schema_version = excluded.schema_version,
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at,
+                    revision = excluded.revision
+                """,
+                (
+                    normalized_user_key,
+                    normalized_config_key,
+                    normalized_schema_version,
+                    json.dumps(dict(payload), ensure_ascii=False, sort_keys=True),
+                    updated_at,
+                    next_revision,
+                ),
+            )
+            conn.commit()
+        return self.load_sheet_vitrina_user_config(
+            user_key=normalized_user_key,
+            config_key=normalized_config_key,
+        )
+
     def save_sheet_vitrina_load_state(
         self,
         *,
@@ -2278,6 +2388,15 @@ def _validate_optional_timestamp(value: str | None, field_name: str) -> None:
     _validate_timestamp(value, field_name=field_name)
 
 
+def _normalize_required_storage_key(value: str, field_name: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise ValueError(f"{field_name} is required")
+    if len(normalized) > 160:
+        raise ValueError(f"{field_name} is too long")
+    return normalized
+
+
 def _validate_iso_date(value: str, field_name: str) -> None:
     try:
         date.fromisoformat(value)
@@ -3005,6 +3124,18 @@ def _loads_json_object(value: Any) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _sheet_vitrina_user_config_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "user_key": row["user_key"],
+        "config_key": row["config_key"],
+        "schema_version": int(row["schema_version"]),
+        "revision": int(row["revision"]),
+        "updated_at": row["updated_at"],
+        "config": _loads_json_object(row["payload_json"]),
+    }
+
+
 def _to_jsonable(value: Any) -> Any:
     if isinstance(value, SimpleNamespace):
         return {key: _to_jsonable(item) for key, item in vars(value).items()}
@@ -3159,6 +3290,16 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             refreshed_at TEXT,
             plan_fingerprint TEXT,
             result_json TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_user_configs (
+            user_key TEXT NOT NULL,
+            config_key TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            payload_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            PRIMARY KEY (user_key, config_key)
         );
 
         CREATE TABLE IF NOT EXISTS cost_price_upload_versions (
