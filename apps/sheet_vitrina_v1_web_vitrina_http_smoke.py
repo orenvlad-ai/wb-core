@@ -179,6 +179,13 @@ def main() -> None:
             if composition_meta.get("snapshot_as_of_date") != "2026-04-20":
                 raise AssertionError(f"snapshot_as_of_date must point to visible source-status snapshot key, got {composition_meta}")
             if composition_meta.get("visible_date_columns") != [
+                "2026-04-07",
+                "2026-04-08",
+                "2026-04-09",
+                "2026-04-10",
+                "2026-04-11",
+                "2026-04-12",
+                "2026-04-13",
                 "2026-04-14",
                 "2026-04-15",
                 "2026-04-16",
@@ -187,7 +194,7 @@ def main() -> None:
                 "2026-04-19",
                 "2026-04-20",
             ]:
-                raise AssertionError(f"default page composition must use week ending business today, got {composition_meta}")
+                raise AssertionError(f"default page composition must use rolling two-week range ending business today, got {composition_meta}")
             if (composition_payload.get("status_summary") or {}).get("source_status_snapshot_as_of_date") != "2026-04-20":
                 raise AssertionError(f"source-status snapshot key mismatch, got {composition_payload.get('status_summary')}")
             if composition_meta.get("business_timezone") != "Asia/Yekaterinburg":
@@ -195,8 +202,8 @@ def main() -> None:
             historical_access = composition_payload.get("historical_access") or {}
             if historical_access.get("current_mode") != "historical_period":
                 raise AssertionError(f"web-vitrina historical selector mode mismatch, got {composition_payload}")
-            if historical_access.get("selected_date_from") != "2026-04-14" or historical_access.get("selected_date_to") != "2026-04-20":
-                raise AssertionError(f"default history range must be week ending business today, got {historical_access}")
+            if historical_access.get("selected_date_from") != "2026-04-07" or historical_access.get("selected_date_to") != "2026-04-20":
+                raise AssertionError(f"default history range must be rolling two-week period ending business today, got {historical_access}")
             if historical_access.get("supported_query_mode") != "date_window":
                 raise AssertionError(f"web-vitrina historical query mode mismatch, got {historical_access}")
             if [item.get("value") for item in historical_access.get("options") or []] != [
@@ -207,6 +214,13 @@ def main() -> None:
                 "2026-04-16",
                 "2026-04-15",
                 "2026-04-14",
+                "2026-04-13",
+                "2026-04-12",
+                "2026-04-11",
+                "2026-04-10",
+                "2026-04-09",
+                "2026-04-08",
+                "2026-04-07",
             ]:
                 raise AssertionError(f"web-vitrina historical selector options mismatch, got {historical_access}")
             if [item.get("preset_id") for item in historical_access.get("preset_options") or []] != [
