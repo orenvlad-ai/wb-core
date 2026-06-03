@@ -4655,6 +4655,11 @@
     const FEEDBACKS_MIN_COLUMN_WIDTH = 72;
     const TABLE_SNAPSHOT_STORAGE_KEY = "wb_core_web_vitrina_table_snapshot_v1";
     const TABLE_SNAPSHOT_STORAGE_VERSION = 1;
+    const OBSOLETE_HISTORY_STORAGE_KEYS = [
+      "wb-core:sheet-vitrina-v1:web-vitrina:legacy-period:v0",
+      "wb_core_web_vitrina_legacy_history_range",
+      "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1:period"
+    ];
 	    const FEEDBACKS_DEFAULT_COLUMN_WIDTHS = {
 	      select: 54,
 	      complaint_status: 120,
@@ -5329,18 +5334,15 @@
     function buildReadUrl(surface, options) {
       const url = new URL(WEB_VITRINA_CONFIG.read_path, window.location.origin);
       const normalizedOptions = options || {};
-      const params = new URLSearchParams(window.location.search);
-      const dateFrom = params.get("date_from");
-      const dateTo = params.get("date_to");
-      const asOfDate = params.get("as_of_date");
+      const historyQuery = currentExplicitHistoryQuery();
       const explicitAsOfDate = normalizeIsoDate(normalizedOptions.asOfDate || "");
       if (explicitAsOfDate) {
         url.searchParams.set("as_of_date", explicitAsOfDate);
-      } else if (dateFrom && dateTo) {
-        url.searchParams.set("date_from", dateFrom);
-        url.searchParams.set("date_to", dateTo);
-      } else if (asOfDate) {
-        url.searchParams.set("as_of_date", asOfDate);
+      } else if (historyQuery.mode === "period") {
+        url.searchParams.set("date_from", historyQuery.dateFrom);
+        url.searchParams.set("date_to", historyQuery.dateTo);
+      } else if (historyQuery.mode === "as_of_date") {
+        url.searchParams.set("as_of_date", historyQuery.asOfDate);
       }
       if (surface && surface !== "contract") {
         url.searchParams.set("surface", surface);
@@ -5373,6 +5375,61 @@
       return url.pathname + "?" + url.searchParams.toString();
     }
 
+    function currentExplicitHistoryQuery() {
+      const params = new URLSearchParams(window.location.search);
+      const rawDateFrom = String(params.get("date_from") || "").trim();
+      const rawDateTo = String(params.get("date_to") || "").trim();
+      const rawAsOfDate = String(params.get("as_of_date") || "").trim();
+      const dateFrom = normalizeIsoDate(rawDateFrom);
+      const dateTo = normalizeIsoDate(rawDateTo);
+      const asOfDate = normalizeIsoDate(rawAsOfDate);
+      if (dateFrom && dateTo && !rawAsOfDate && dateFrom <= dateTo) {
+        return {
+          mode: "period",
+          dateFrom: dateFrom,
+          dateTo: dateTo,
+          asOfDate: "",
+          hasSelection: true
+        };
+      }
+      if (asOfDate && !rawDateFrom && !rawDateTo) {
+        return {
+          mode: "as_of_date",
+          dateFrom: asOfDate,
+          dateTo: asOfDate,
+          asOfDate: asOfDate,
+          hasSelection: true
+        };
+      }
+      return {
+        mode: "default",
+        dateFrom: "",
+        dateTo: "",
+        asOfDate: "",
+        hasSelection: false
+      };
+    }
+
+    function currentUrlHasExplicitHistorySelection() {
+      return currentExplicitHistoryQuery().hasSelection;
+    }
+
+    function purgeObsoleteHistoryStorage() {
+      if (!window || !window.localStorage) {
+        return;
+      }
+      try {
+        OBSOLETE_HISTORY_STORAGE_KEYS.forEach(function(key) {
+          window.localStorage.removeItem(key);
+        });
+        if (!currentUrlHasExplicitHistorySelection()) {
+          window.localStorage.removeItem(TABLE_SNAPSHOT_STORAGE_KEY);
+        }
+      } catch (error) {
+        // Broken localStorage must not make the backend-owned default period unusable.
+      }
+    }
+
     function hasDisplayedCachedTableForRequest(requestKey) {
       return Boolean(
         state.tableSnapshot.showingCached &&
@@ -5398,6 +5455,10 @@
       if (!window || !window.localStorage) {
         return null;
       }
+      purgeObsoleteHistoryStorage();
+      if (!currentUrlHasExplicitHistorySelection()) {
+        return null;
+      }
       try {
         const raw = window.localStorage.getItem(TABLE_SNAPSHOT_STORAGE_KEY);
         if (!raw) {
@@ -5421,6 +5482,10 @@
 
     function persistSuccessfulTableSnapshot(payload) {
       if (!window || !window.localStorage || !isSuccessfulTableSnapshotPayload(payload)) {
+        return;
+      }
+      purgeObsoleteHistoryStorage();
+      if (!currentUrlHasExplicitHistorySelection()) {
         return;
       }
       try {
@@ -8239,28 +8304,11 @@
     }
 
     function currentHistoryQuery() {
-      const params = new URLSearchParams(window.location.search);
-      const dateFrom = String(params.get("date_from") || "").trim();
-      const dateTo = String(params.get("date_to") || "").trim();
-      const asOfDate = String(params.get("as_of_date") || "").trim();
-      if (dateFrom && dateTo) {
-        return {
-          dateFrom: dateFrom,
-          dateTo: dateTo,
-          hasSelection: true
-        };
-      }
-      if (asOfDate) {
-        return {
-          dateFrom: asOfDate,
-          dateTo: asOfDate,
-          hasSelection: true
-        };
-      }
+      const historyQuery = currentExplicitHistoryQuery();
       return {
-        dateFrom: "",
-        dateTo: "",
-        hasSelection: false
+        dateFrom: historyQuery.dateFrom,
+        dateTo: historyQuery.dateTo,
+        hasSelection: historyQuery.hasSelection
       };
     }
 
@@ -13906,6 +13954,7 @@
 
     activateUnifiedTab(initialUnifiedTab(), {persist: false});
     loadVitrinaAutoSchedules();
+    purgeObsoleteHistoryStorage();
     renderCachedTableSnapshotForCurrentRequest();
     loadPageComposition();
   </script>
