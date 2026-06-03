@@ -54,6 +54,17 @@ def main() -> None:
             runtime=runtime,
             activated_at_factory=lambda: "2026-05-30T08:00:00Z",
         )
+        original_list_supplier_shipments = entrypoint.handle_supplier_shipments_list_request
+        first_list_seen = threading.Event()
+        first_list_release = threading.Event()
+
+        def _delayed_first_list_request():
+            if not first_list_seen.is_set():
+                first_list_seen.set()
+                first_list_release.wait(timeout=5)
+            return original_list_supplier_shipments()
+
+        entrypoint.handle_supplier_shipments_list_request = _delayed_first_list_request
         server = build_registry_upload_http_server(config, entrypoint=entrypoint)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -92,14 +103,62 @@ def main() -> None:
                 expect(operator_frame.get_by_role("button", name="Расчёты")).to_be_visible()
                 expect(operator_frame.get_by_role("button", name="От поставщика")).to_be_visible()
                 operator_frame.get_by_role("button", name="От поставщика").click()
+                expect(operator_frame.locator("#supplier-shipments-title")).to_have_count(0)
+                expect(operator_frame.locator(".supplier-embed-block")).to_have_count(0)
+                expect(operator_frame.get_by_text("Реестр заказов", exact=True)).to_have_count(0)
                 frame = operator_frame.frame_locator("iframe[title='От поставщика']")
                 expect(frame.locator("h1", has_text="订单登记表 / Order registry / Реестр заказов")).to_be_visible()
                 expect(frame.locator("h1", has_text="订单登记表 / Order registry / Реестр заказов")).to_have_count(1)
                 expect(frame.locator("h2", has_text="Реестр заказов")).to_have_count(0)
                 expect(frame.get_by_text("Invoice-заказы поставщиков, сохранённые в WebCore")).to_have_count(0)
+                if not first_list_seen.wait(timeout=3):
+                    raise AssertionError("supplier registry list request must start on embedded load")
+                expect(frame.locator("#shipmentRows")).to_have_attribute("data-registry-state", "loading")
+                expect(frame.locator("#shipmentRows")).to_contain_text("Загрузка")
+                expect(frame.locator("#shipmentRows")).not_to_contain_text("Заказов пока нет")
+                first_list_release.set()
+                expect(frame.locator("#shipmentRows")).to_have_attribute("data-registry-state", "loaded_empty", timeout=5000)
+                expect(frame.locator("#shipmentRows")).to_contain_text("暂无订单 / No orders yet / Заказов пока нет.")
                 expect(frame.get_by_text("匹配 / Matching / Матчинг").first).to_be_visible()
                 expect(frame.get_by_text("供应商 / Supplier / Поставщик")).to_be_visible()
                 expect(frame.get_by_text("Реестр поставок")).to_have_count(0)
+                actions = frame.locator(".topbar .toolbar > *").evaluate_all("(nodes) => nodes.map((node) => node.textContent.trim())")
+                expected_actions = [
+                    "新增订单 / Add order / Добавить заказ",
+                    "退出 / Logout / Выйти",
+                    "Открыть отдельно",
+                ]
+                if actions != expected_actions:
+                    raise AssertionError(f"supplier topbar actions must stay ordered, got {actions}")
+                expect(frame.get_by_role("link", name="Открыть отдельно")).to_be_visible()
+                standalone_href = frame.get_by_role("link", name="Открыть отдельно").get_attribute("href") or ""
+                if standalone_href != DEFAULT_SHEET_SUPPLIER_UI_PATH:
+                    raise AssertionError(f"standalone supplier link must keep existing route, got {standalone_href!r}")
+                header_style = frame.locator(".registry-wrap thead th").first.evaluate(
+                    """(node) => {
+                        const styles = window.getComputedStyle(node);
+                        return {
+                            backgroundColor: styles.backgroundColor,
+                            backgroundImage: styles.backgroundImage,
+                            borderBottomColor: styles.borderBottomColor,
+                            borderBottomWidth: styles.borderBottomWidth,
+                            color: styles.color,
+                            fontWeight: styles.fontWeight
+                        };
+                    }"""
+                )
+                body_style = frame.locator("#shipmentRows td").first.evaluate(
+                    """(node) => {
+                        const styles = window.getComputedStyle(node);
+                        return { backgroundColor: styles.backgroundColor };
+                    }"""
+                )
+                if header_style["backgroundColor"] == body_style["backgroundColor"] and header_style["backgroundImage"] == "none":
+                    raise AssertionError(f"table header must differ from body background, got {header_style}")
+                if float(header_style["borderBottomWidth"].replace("px", "") or 0) < 1:
+                    raise AssertionError(f"table header must keep a visible lower border, got {header_style}")
+                if header_style["borderBottomColor"] in {"rgba(0, 0, 0, 0)", "transparent"}:
+                    raise AssertionError(f"table header border must not be transparent, got {header_style}")
                 expect(frame.get_by_role("button", name="新增订单 / Add order / Добавить заказ")).to_be_visible()
                 frame.get_by_role("button", name="新增订单 / Add order / Добавить заказ").click()
                 expect(frame.get_by_label("出货日期 / Shipment date / Дата отгрузки")).to_be_visible()
@@ -151,6 +210,7 @@ def main() -> None:
                 supplier_page = browser.new_page(viewport={"width": 1280, "height": 900})
                 supplier_page.goto(f"{base_url}{DEFAULT_SHEET_SUPPLIER_UI_PATH}", wait_until="domcontentloaded")
                 expect(supplier_page.locator("h1", has_text="订单登记表 / Order registry / Реестр заказов")).to_be_visible()
+                expect(supplier_page.get_by_role("link", name="Открыть отдельно")).to_have_count(0)
                 expect(supplier_page.get_by_text("26GN390")).to_be_visible()
                 page.once("dialog", lambda dialog: dialog.accept())
                 frame.locator("[data-delete-shipment]").first.click()

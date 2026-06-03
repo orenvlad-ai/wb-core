@@ -1689,18 +1689,9 @@
       border: 1px solid rgba(248, 113, 113, 0.34);
     }
 
-    .supplier-embed-block {
-      margin-top: 28px;
-      padding: 0;
-      overflow: hidden;
-    }
-
-    .supplier-embed-block .block-header {
-      padding: 20px 20px 0;
-    }
-
     .supplier-shipments-frame {
       width: 100%;
+      margin-top: 18px;
       min-height: 900px;
       border: 0;
       display: block;
@@ -2405,13 +2396,7 @@
         </section>
 
         <section class="supply-mode-panel" data-supply-mode-panel="supplier" hidden>
-          <section class="block supplier-embed-block" aria-labelledby="supplier-shipments-title">
-            <div class="block-header">
-              <h2 id="supplier-shipments-title" class="block-title">Реестр заказов</h2>
-              <a id="supplierShipmentsOpenLink" class="action-button secondary-button" href="/sheet-vitrina-v1/supplier" target="_blank" rel="noreferrer">Открыть отдельно</a>
-            </div>
-            <iframe id="supplierShipmentsFrame" class="supplier-shipments-frame" title="От поставщика"></iframe>
-          </section>
+          <iframe id="supplierShipmentsFrame" class="supplier-shipments-frame" title="От поставщика"></iframe>
         </section>
       </section>
     </section>
@@ -2581,7 +2566,6 @@
       const regionalDistrictTableBody = document.getElementById("regionalDistrictTableBody");
       const calculateRegionalSupplyButton = document.getElementById("calculateRegionalSupplyButton");
       const supplierShipmentsFrame = document.getElementById("supplierShipmentsFrame");
-      const supplierShipmentsOpenLink = document.getElementById("supplierShipmentsOpenLink");
 
       const actionLabels = {
         refresh: {
@@ -5066,9 +5050,6 @@
       });
 
       setupOperatorFloatingControlListeners();
-      if (supplierShipmentsOpenLink) {
-        supplierShipmentsOpenLink.href = config.supplier_ui_path || "/sheet-vitrina-v1/supplier";
-      }
       restorePlanReportInputs(persistedOperatorUiState);
       activateTab(
         isEmbeddedMode ? configuredInitialTab : (persistedOperatorUiState.active_tab || DEFAULT_ACTIVE_TAB),

@@ -3355,6 +3355,7 @@ def _render_sheet_vitrina_supplier_ui() -> str:
         "page_title": "Реестр заказов",
         "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
         "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
+        "supplier_ui_path": DEFAULT_SHEET_SUPPLIER_UI_PATH,
         "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
     }
     template = SUPPLIER_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
