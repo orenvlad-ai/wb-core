@@ -1,9 +1,5 @@
 {
   "repo_root": "/absolute/path/to/wb-core",
-  "source_mode": "local_checkout",
-  "repo_url": "https://github.com/orenvlad-ai/wb-core.git",
-  "branch": "main",
-  "refresh_policy": "none",
   "max_file_bytes": 1048576,
   "max_response_chars": 262144,
   "max_range_lines": 400,

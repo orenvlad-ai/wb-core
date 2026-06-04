@@ -46,7 +46,7 @@ Legacy-репозитории остаются рабочими, но счита
 - `packages/contracts`, `packages/application`, `packages/adapters` с живыми bounded modules;
 - `apps/` с smoke runners; legacy live sheet-side runners сохранены как archived fail-fast guards;
 - `artifacts/` с fixture/parity/evidence по смёрженным блокам;
-- `packages/application/wb_core_readonly_mcp.py`, `apps/wb_core_readonly_mcp.py`, `apps/wb_core_readonly_mcp_http.py`, `apps/wb_core_readonly_mcp_smoke.py`, `apps/wb_core_readonly_mcp_remote_smoke.py` и `artifacts/wb_core_readonly_mcp/input/*.example.json` как local/remote read-only MCP boundary для ChatGPT Project prompt-preparation поверх checkout/managed clone, без DevControl/deploy/execution-plane/product-plane прав;
+- `packages/application/wb_core_readonly_mcp.py`, `apps/wb_core_readonly_mcp.py`, `apps/wb_core_readonly_mcp_smoke.py` и `artifacts/wb_core_readonly_mcp/input/config.example.json` как локальный read-only MCP boundary для ChatGPT Project prompt-preparation поверх текущего checkout, без DevControl/deploy/execution-plane прав;
 - `registry/pilot_bundle/` как pilot registry line для новой витрины;
 - `artifacts/registry_upload_bundle_v1/` как первый artifact-backed upload path для V2-реестров;
 - `artifacts/registry_upload_file_backed_service/` как локальный file-backed receiver для registry upload path;
