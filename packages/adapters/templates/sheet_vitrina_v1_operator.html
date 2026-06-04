@@ -1193,14 +1193,14 @@
       padding: 14px;
       border: 1px solid var(--border);
       border-radius: 12px;
-      background: #f8fafc;
+      background: var(--panel-subtle);
     }
 
     .source-selector h3 {
       margin: 0;
       font-size: 14px;
       font-weight: 750;
-      color: var(--text);
+      color: var(--muted-strong);
     }
 
     .source-option {
@@ -1210,13 +1210,32 @@
       padding: 10px 12px;
       border: 1px solid var(--border);
       border-radius: 10px;
-      background: #ffffff;
+      background: var(--control-bg);
+      color: var(--text);
       cursor: pointer;
+      transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+    }
+
+    .source-option:hover {
+      border-color: var(--accent-border);
+      background: var(--control-bg-hover);
+    }
+
+    .source-option:focus-within {
+      outline: 2px solid var(--accent-focus);
+      outline-offset: 1px;
+      border-color: var(--accent);
+    }
+
+    .source-option:has(input:checked) {
+      border-color: var(--accent-border);
+      background: var(--accent-soft);
     }
 
     .source-option input {
       margin-top: 3px;
       accent-color: var(--accent);
+      color-scheme: dark;
     }
 
     .source-option strong {
@@ -1231,6 +1250,10 @@
       font-size: 12px;
       line-height: 1.5;
       color: var(--muted);
+    }
+
+    .source-option:has(input:checked) strong {
+      color: #ddd6fe;
     }
 
     .shipment-summary {
