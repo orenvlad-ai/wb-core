@@ -1186,6 +1186,53 @@
       color: var(--muted);
     }
 
+    .source-selector {
+      display: grid;
+      gap: 10px;
+      margin-top: 18px;
+      padding: 14px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #f8fafc;
+    }
+
+    .source-selector h3 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 750;
+      color: var(--text);
+    }
+
+    .source-option {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #ffffff;
+      cursor: pointer;
+    }
+
+    .source-option input {
+      margin-top: 3px;
+      accent-color: var(--accent);
+    }
+
+    .source-option strong {
+      display: block;
+      font-size: 13px;
+      line-height: 1.4;
+      color: var(--text);
+    }
+
+    .source-option span {
+      display: block;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--muted);
+    }
+
     .shipment-summary {
       display: grid;
       gap: 10px;
@@ -1232,6 +1279,10 @@
       line-height: 1.45;
     }
 
+    .shipment-summary-table.is-wide {
+      min-width: 860px;
+    }
+
     .shipment-summary-table th,
     .shipment-summary-table td {
       padding: 9px 10px;
@@ -1273,6 +1324,10 @@
 
     .factory-message.is-success {
       color: var(--success-text);
+    }
+
+    .factory-message.is-warning {
+      color: var(--warning-text);
     }
 
     .section-message {
@@ -2186,6 +2241,23 @@
                 Inbound-файлы необязательны: если они не загружены, соответствующий inbound будет учтён как <strong>0</strong>.
                 Если requested период продаж выходит за current authoritative history boundary, сервер вернёт явную ошибку с точным диапазоном.
               </p>
+              <div class="source-selector" role="radiogroup" aria-labelledby="factoryInboundSourceTitle">
+                <h3 id="factoryInboundSourceTitle">Источник «Товары в пути от фабрики»</h3>
+                <label class="source-option">
+                  <input type="radio" name="factoryInboundSource" value="manual_excel" checked>
+                  <span>
+                    <strong>Ручной Excel</strong>
+                    <span>Использовать загруженный файл «Товары в пути от фабрики».</span>
+                  </span>
+                </label>
+                <label class="source-option">
+                  <input type="radio" name="factoryInboundSource" value="supplier_registry">
+                  <span>
+                    <strong>Реестр поставщика</strong>
+                    <span>Использовать matched product lines из «От поставщика»; дата приёмки = дата отгрузки + 30 дней.</span>
+                  </span>
+                </label>
+              </div>
             </section>
 
             <section class="block summary-card" aria-labelledby="factory-summary-title">
@@ -2202,6 +2274,18 @@
                 <div>
                   <dt>Горизонт, дней</dt>
                   <dd id="factoryResultHorizon">-</dd>
+                </div>
+                <div>
+                  <dt>Target window, дней</dt>
+                  <dd id="factoryResultTargetWindow">-</dd>
+                </div>
+                <div>
+                  <dt>Окно inbound до</dt>
+                  <dd id="factoryResultInboundWindowEnd">-</dd>
+                </div>
+                <div>
+                  <dt>Источник inbound фабрика</dt>
+                  <dd id="factoryInboundSourceResult">-</dd>
                 </div>
                 <div>
                   <dt>Результат обновлён</dt>
@@ -2270,6 +2354,32 @@
                     </table>
                   </div>
                 </div>
+              </article>
+
+              <article class="dataset-card">
+                <h3>Товары в пути из реестра поставщика</h3>
+                <p class="dataset-status" id="supplierRegistryInboundSummaryState">Читаем состояние...</p>
+                <p class="dataset-upload-hint">Read-only source из сохранённых supplier shipment cards. Текущий bounded default: дата приёмки = дата отгрузки + 30 дней.</p>
+                <div class="shipment-summary-table-wrap" id="supplierRegistryInboundSummaryTableWrap" hidden>
+                  <table class="shipment-summary-table is-wide">
+                    <thead>
+                      <tr>
+                        <th>Инвойс</th>
+                        <th>Дата инвойса</th>
+                        <th>Всего товаров</th>
+                        <th>Дата отгрузки</th>
+                        <th>Расчётная приёмка</th>
+                        <th>Matched</th>
+                        <th>Unmatched</th>
+                        <th>Ambiguous</th>
+                        <th>Без даты</th>
+                        <th>Usable qty</th>
+                      </tr>
+                    </thead>
+                    <tbody id="supplierRegistryInboundSummaryBody"></tbody>
+                  </table>
+                </div>
+                <p class="shipment-summary-state" id="supplierRegistryInboundDiagnostics">-</p>
               </article>
 
               <article class="dataset-card">
@@ -2514,6 +2624,9 @@
       const factoryResultStatus = document.getElementById("factoryResultStatus");
       const factoryResultReportDate = document.getElementById("factoryResultReportDate");
       const factoryResultHorizon = document.getElementById("factoryResultHorizon");
+      const factoryResultTargetWindow = document.getElementById("factoryResultTargetWindow");
+      const factoryResultInboundWindowEnd = document.getElementById("factoryResultInboundWindowEnd");
+      const factoryInboundSourceResult = document.getElementById("factoryInboundSourceResult");
       const factoryResultCalculatedAt = document.getElementById("factoryResultCalculatedAt");
       const factoryTotalQty = document.getElementById("factoryTotalQty");
       const factoryTotalWeight = document.getElementById("factoryTotalWeight");
@@ -2536,9 +2649,14 @@
       const inboundFactoryShipmentSummaryState = document.getElementById("inboundFactoryShipmentSummaryState");
       const inboundFactoryShipmentSummaryTableWrap = document.getElementById("inboundFactoryShipmentSummaryTableWrap");
       const inboundFactoryShipmentSummaryBody = document.getElementById("inboundFactoryShipmentSummaryBody");
+      const supplierRegistryInboundSummaryState = document.getElementById("supplierRegistryInboundSummaryState");
+      const supplierRegistryInboundSummaryTableWrap = document.getElementById("supplierRegistryInboundSummaryTableWrap");
+      const supplierRegistryInboundSummaryBody = document.getElementById("supplierRegistryInboundSummaryBody");
+      const supplierRegistryInboundDiagnostics = document.getElementById("supplierRegistryInboundDiagnostics");
       const stockFfFileInput = document.getElementById("stockFfFileInput");
       const inboundFactoryFileInput = document.getElementById("inboundFactoryFileInput");
       const inboundFfToWbFileInput = document.getElementById("inboundFfToWbFileInput");
+      const factoryInboundSourceInputs = Array.from(document.querySelectorAll("input[name='factoryInboundSource']"));
       const downloadStockFfTemplateButton = document.getElementById("downloadStockFfTemplateButton");
       const downloadInboundFactoryTemplateButton = document.getElementById("downloadInboundFactoryTemplateButton");
       const downloadInboundFfToWbTemplateButton = document.getElementById("downloadInboundFfToWbTemplateButton");
@@ -2589,6 +2707,8 @@
       const VALID_REPORT_SECTIONS = new Set(["daily", "stock", "plan"]);
       const VALID_SUPPLY_MODES = new Set(["calculations", "supplier"]);
       const VALID_SUPPLY_SECTIONS = new Set(["factory", "regional"]);
+      const DEFAULT_FACTORY_INBOUND_SOURCE = "manual_excel";
+      const VALID_FACTORY_INBOUND_SOURCES = new Set(["manual_excel", "supplier_registry"]);
       const VALID_PLAN_REPORT_PERIODS = new Set([
         "yesterday",
         "last_7_days",
@@ -2616,6 +2736,7 @@
       const stockReportActiveSkus = normalizeStockReportActiveSkus(config.stock_report_active_skus);
       const allStockReportSkuIds = stockReportActiveSkus.map((item) => item.nm_id);
       let persistedOperatorUiState = readPersistedOperatorUiState();
+      let factoryInboundSource = normalizeFactoryInboundSource(persistedOperatorUiState.factory_inbound_source);
       let stockReportSelectedSkuIds = resolveRestoredStockReportDraftSkuIds(persistedOperatorUiState);
       let stockReportAppliedSkuIds = resolveRestoredStockReportAppliedSkuIds(persistedOperatorUiState);
       let stockReportPayload = null;
@@ -2662,6 +2783,27 @@
       function normalizePersistedSectionName(value, validValues, fallbackValue) {
         const normalized = String(value || "").trim();
         return validValues.has(normalized) ? normalized : fallbackValue;
+      }
+
+      function normalizeFactoryInboundSource(value) {
+        const normalized = String(value || "").trim();
+        return VALID_FACTORY_INBOUND_SOURCES.has(normalized) ? normalized : DEFAULT_FACTORY_INBOUND_SOURCE;
+      }
+
+      function factoryInboundSourceLabel(value) {
+        return normalizeFactoryInboundSource(value) === "supplier_registry"
+          ? "Реестр поставщика"
+          : "Ручной Excel";
+      }
+
+      function setFactoryInboundSource(value, options) {
+        factoryInboundSource = normalizeFactoryInboundSource(value);
+        factoryInboundSourceInputs.forEach((input) => {
+          input.checked = input.value === factoryInboundSource;
+        });
+        if (!options || options.persist !== false) {
+          writePersistedOperatorUiState({ factory_inbound_source: factoryInboundSource });
+        }
       }
 
       function sanitizePersistedSkuIds(rawValue, options) {
@@ -4003,6 +4145,7 @@
         Object.keys(factoryFields).forEach((key) => {
           payload[key] = factoryFields[key].value;
         });
+        payload.factory_inbound_source = factoryInboundSource;
         return payload;
       }
 
@@ -4085,6 +4228,56 @@
         inboundFactoryShipmentSummaryTableWrap.hidden = false;
       }
 
+      function renderSupplierRegistryInboundSummary(state) {
+        const summaryState = state && typeof state === "object" ? state : {};
+        const diagnostics = summaryState.diagnostics && typeof summaryState.diagnostics === "object" ? summaryState.diagnostics : {};
+        const items = Array.isArray(summaryState.shipment_summary) ? summaryState.shipment_summary : [];
+        const usableQuantity = Number(diagnostics.usable_quantity || 0);
+        const usableLines = Number(diagnostics.usable_line_count || 0);
+        const warnings = Array.isArray(summaryState.warnings) ? summaryState.warnings : [];
+
+        if (!items.length) {
+          supplierRegistryInboundSummaryState.textContent = "В реестре поставщика пока нет сохранённых заказов.";
+          supplierRegistryInboundSummaryState.className = "dataset-status";
+          supplierRegistryInboundSummaryTableWrap.hidden = true;
+          supplierRegistryInboundSummaryBody.innerHTML = "";
+        } else {
+          supplierRegistryInboundSummaryState.textContent = "Сохранённых заказов: " + items.length + ". Usable matched quantity: " + formatNumber(usableQuantity) + ".";
+          supplierRegistryInboundSummaryState.className = "dataset-status";
+          supplierRegistryInboundSummaryBody.innerHTML = items.map((item) => [
+            "<tr>",
+            "<td>" + escapeHtml(valueOrDash(item.invoice_no || item.shipment_label)) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(item.invoice_date)) + "</td>",
+            "<td>" + escapeHtml(formatNumber(Number(item.total_product_quantity || 0))) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(item.shipment_date)) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(item.calculated_acceptance_date)) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(item.matched_line_count)) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(item.unmatched_line_count)) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(item.ambiguous_line_count)) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(item.missing_shipment_date_line_count)) + "</td>",
+            "<td>" + escapeHtml(formatNumber(Number(item.usable_quantity || 0))) + "</td>",
+            "</tr>"
+          ].join("")).join("");
+          supplierRegistryInboundSummaryTableWrap.hidden = false;
+        }
+
+        const diagnosticLine = [
+          "product lines: " + valueOrDash(diagnostics.product_line_count),
+          "matched: " + valueOrDash(diagnostics.matched_line_count),
+          "unmatched: " + valueOrDash(diagnostics.unmatched_line_count),
+          "ambiguous: " + valueOrDash(diagnostics.ambiguous_line_count),
+          "missing shipment date: " + valueOrDash(diagnostics.missing_shipment_date_line_count),
+          "usable lines: " + valueOrDash(usableLines),
+          "usable qty: " + formatNumber(usableQuantity)
+        ].join(" · ");
+        supplierRegistryInboundDiagnostics.textContent = warnings.length
+          ? diagnosticLine + " · warnings: " + warnings.join(" ")
+          : diagnosticLine;
+        supplierRegistryInboundDiagnostics.className = "shipment-summary-state" + (
+          usableLines > 0 ? " is-success" : " is-error"
+        );
+      }
+
       function renderSharedStockState(state) {
         renderFactoryDatasetStatus(
           stockFfStatus,
@@ -4101,6 +4294,9 @@
           factoryResultStatus.textContent = "ещё не рассчитывался";
           factoryResultReportDate.textContent = "-";
           factoryResultHorizon.textContent = "-";
+          factoryResultTargetWindow.textContent = "-";
+          factoryResultInboundWindowEnd.textContent = "-";
+          factoryInboundSourceResult.textContent = factoryInboundSourceLabel(factoryInboundSource);
           factoryResultCalculatedAt.textContent = "-";
           factoryTotalQty.textContent = "-";
           factoryTotalWeight.textContent = "-";
@@ -4111,6 +4307,9 @@
         factoryResultStatus.textContent = valueOrDash(result.status);
         factoryResultReportDate.textContent = valueOrDash(result.report_date);
         factoryResultHorizon.textContent = valueOrDash(result.horizon_days);
+        factoryResultTargetWindow.textContent = valueOrDash(result.target_window_days);
+        factoryResultInboundWindowEnd.textContent = valueOrDash(result.inbound_window_end);
+        factoryInboundSourceResult.textContent = factoryInboundSourceLabel(result.factory_inbound_source || (result.settings && result.settings.factory_inbound_source) || factoryInboundSource);
         factoryResultCalculatedAt.textContent = valueOrDash(result.calculated_at).replace("T", " ");
         const summary = result.summary || {};
         factoryTotalQty.textContent = valueOrDash(summary.total_qty);
@@ -4127,6 +4326,7 @@
         renderSharedStockState(datasets.stock_ff);
         renderFactoryDatasetStatus(inboundFactoryStatus, inboundFactoryCurrentFile, inboundFactoryCurrentFileLink, deleteInboundFactoryButton, datasets.inbound_factory_to_ff, { optional: true });
         renderInboundFactoryShipmentSummary(datasets.inbound_factory_to_ff);
+        renderSupplierRegistryInboundSummary(payload ? payload.supplier_registry_inbound_summary : null);
         renderFactoryDatasetStatus(inboundFfToWbStatus, inboundFfToWbCurrentFile, inboundFfToWbCurrentFileLink, deleteInboundFfToWbButton, datasets.inbound_ff_to_wb, { optional: true });
         renderFactoryResult(payload ? payload.last_result : null);
       }
@@ -4856,7 +5056,13 @@
           }
           recommendationDownloadPath = payload.recommendation_download_path || config.factory_order_recommendation_path;
           renderFactoryResult(payload);
-          setFactoryMessage("Расчёт завершён. Рекомендация готова к скачиванию.", "success");
+          const warnings = Array.isArray(payload.warnings) ? payload.warnings.filter(Boolean) : [];
+          setFactoryMessage(
+            warnings.length
+              ? "Расчёт завершён с предупреждениями: " + warnings.join(" ")
+              : "Расчёт завершён. Рекомендация готова к скачиванию.",
+            warnings.length ? "warning" : "success"
+          );
           await loadFactoryStatus();
         } catch (error) {
           setFactoryMessage(
@@ -4954,6 +5160,13 @@
         setFactoryMessage,
         [loadFactoryStatus]
       ));
+      factoryInboundSourceInputs.forEach((input) => {
+        input.addEventListener("change", () => {
+          if (input.checked) {
+            setFactoryInboundSource(input.value);
+          }
+        });
+      });
       deleteStockFfButton.addEventListener("click", () => deleteDataset(
         deleteStockFfButton.dataset.deletePath,
         deleteStockFfButton,
@@ -5051,6 +5264,7 @@
 
       setupOperatorFloatingControlListeners();
       restorePlanReportInputs(persistedOperatorUiState);
+      setFactoryInboundSource(factoryInboundSource, { persist: false });
       activateTab(
         isEmbeddedMode ? configuredInitialTab : (persistedOperatorUiState.active_tab || DEFAULT_ACTIVE_TAB),
         { persist: !isEmbeddedMode }

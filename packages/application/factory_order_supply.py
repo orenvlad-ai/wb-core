@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 import math
 from typing import Any, Mapping
@@ -20,9 +20,13 @@ from packages.contracts.factory_order_supply import (
     DATASET_INBOUND_FACTORY_TO_FF,
     DATASET_INBOUND_FF_TO_WB,
     DATASET_STOCK_FF,
+    FACTORY_INBOUND_SOURCE_MANUAL_EXCEL,
+    FACTORY_INBOUND_SOURCE_SUPPLIER_REGISTRY,
+    SUPPLIER_REGISTRY_FACTORY_TO_FF_ACCEPTANCE_DAYS,
     FactoryOrderCalculationResult,
     FactoryOrderDatasetDeleteResult,
     FactoryOrderDatasetState,
+    FactoryOrderEffectiveInboundRow,
     FactoryOrderInboundRow,
     FactoryOrderInboundShipmentSummary,
     FactoryOrderRecommendationRow,
@@ -30,7 +34,17 @@ from packages.contracts.factory_order_supply import (
     FactoryOrderStatus,
     FactoryOrderStockFfRow,
     FactoryOrderSummary,
+    FactoryOrderSupplierRegistryDiagnostics,
+    FactoryOrderSupplierRegistryInboundState,
+    FactoryOrderSupplierRegistryShipmentSummary,
     FactoryOrderUploadResult,
+)
+from packages.contracts.supplier_shipments import (
+    LINE_TYPE_PRODUCT,
+    MATCH_STATUS_AMBIGUOUS,
+    MATCH_STATUS_MATCHED,
+    MATCH_STATUS_MATCHED_BY_COMPATIBILITY,
+    MATCH_STATUS_UNMATCHED,
 )
 from packages.contracts.stocks_block import StocksRequest
 
@@ -83,9 +97,32 @@ _COVERAGE_CONTRACT_NOTE = (
     "Файлы «Товары в пути от фабрики» и «Товары в пути от ФФ на Wildberries» необязательны: "
     "если файл не загружен, соответствующий inbound считается как 0. "
     "Строки inbound с количеством 0 принимаются, но игнорируются и не влияют на coverage. "
+    "Inbound считается только если его effective arrival date попадает в окно от даты отчёта "
+    "до полного target window: производство + фабрика→ФФ + ФФ→WB + safety MP + safety ФФ + цикл заказа. "
     "В пути ФФ -> Wildberries учитываются только из отдельного загруженного шаблона, "
-    "потому что в текущем wb-core нет другого authoritative source для этого члена формулы."
+    "потому что в текущем wb-core нет другого authoritative source для этого члена формулы. "
+    "Для «Товары в пути от фабрики» оператор может выбрать manual Excel или read-only source из supplier registry; "
+    "supplier registry uses shipment_date + 30 days as current bounded factory-to-FF acceptance default."
 )
+
+
+@dataclass(frozen=True)
+class _SupplierRegistryShipmentFactorySummary:
+    shipment_id: str
+    shipment_label: str
+    invoice_no: str
+    invoice_date: str
+    total_product_quantity: float
+    shipment_date: str
+    calculated_acceptance_date: str
+    product_line_count: int
+    matched_line_count: int
+    unmatched_line_count: int
+    ambiguous_line_count: int
+    missing_shipment_date_line_count: int
+    invalid_quantity_line_count: int
+    usable_line_count: int
+    usable_quantity: float
 
 
 class FactoryOrderSupplyBlock:
@@ -116,11 +153,20 @@ class FactoryOrderSupplyBlock:
         active_skus = self._load_active_skus()
         datasets = {dataset_type: self._load_dataset_state(dataset_type) for dataset_type in _DATASET_LABELS}
         last_result = self._load_last_result()
+        supplier_registry_state = self._build_supplier_registry_inbound_state()
+        factory_inbound_source = (
+            last_result.factory_inbound_source
+            if last_result is not None
+            else FACTORY_INBOUND_SOURCE_MANUAL_EXCEL
+        )
         return FactoryOrderStatus(
             status="ready" if last_result is not None else "idle",
             active_sku_count=len(active_skus),
             coverage_contract_note=self.sales_history.build_operator_note(_COVERAGE_CONTRACT_NOTE),
+            factory_inbound_source=factory_inbound_source,
             datasets=datasets,
+            manual_factory_inbound_dataset=datasets[DATASET_INBOUND_FACTORY_TO_FF],
+            supplier_registry_inbound_summary=supplier_registry_state,
             last_result=last_result,
         )
 
@@ -251,7 +297,13 @@ class FactoryOrderSupplyBlock:
             )
 
         stock_ff_rows = self._load_stock_ff_rows()
-        inbound_factory_rows = self._load_inbound_rows(DATASET_INBOUND_FACTORY_TO_FF)
+        factory_inbound_source = settings.factory_inbound_source
+        supplier_registry_state = self._build_supplier_registry_inbound_state()
+        inbound_factory_rows = (
+            self._supplier_registry_inbound_rows(supplier_registry_state)
+            if factory_inbound_source == FACTORY_INBOUND_SOURCE_SUPPLIER_REGISTRY
+            else self._load_inbound_rows(DATASET_INBOUND_FACTORY_TO_FF)
+        )
         inbound_ff_to_wb_rows = self._load_inbound_rows(DATASET_INBOUND_FF_TO_WB)
 
         report_date = settings.report_date_override or current_business_date_iso(self.now_factory())
@@ -260,8 +312,14 @@ class FactoryOrderSupplyBlock:
             + settings.lead_time_factory_to_ff_days
             + settings.lead_time_ff_to_wb_days
         )
+        target_window_days = (
+            horizon_days
+            + settings.safety_days_mp
+            + settings.safety_days_ff
+            + settings.cycle_order_days
+        )
         report_date_obj = date.fromisoformat(report_date)
-        horizon_end = report_date_obj + timedelta(days=horizon_days)
+        inbound_window_end = report_date_obj + timedelta(days=target_window_days)
         stock_snapshot_date = current_business_date_iso(self.now_factory())
 
         nm_ids = [nm_id for nm_id, _ in active_skus]
@@ -295,12 +353,30 @@ class FactoryOrderSupplyBlock:
         )
 
         stock_ff_by_nm = {row.nm_id: float(row.stock_ff) for row in stock_ff_rows}
-        inbound_factory_by_nm = _sum_inbound_rows_within_horizon(
+        effective_inbound_factory_rows = _effective_inbound_rows_within_window(
             inbound_factory_rows,
-            horizon_end,
+            report_date_obj,
+            inbound_window_end,
+            source=factory_inbound_source,
             projected_days=settings.lead_time_ff_to_wb_days,
         )
-        inbound_ff_to_wb_by_nm = _sum_inbound_rows_within_horizon(inbound_ff_to_wb_rows, horizon_end)
+        inbound_factory_by_nm = _sum_effective_inbound_rows(effective_inbound_factory_rows)
+        inbound_ff_to_wb_by_nm = _sum_effective_inbound_rows(
+            _effective_inbound_rows_within_window(
+                inbound_ff_to_wb_rows,
+                report_date_obj,
+                inbound_window_end,
+                source=DATASET_INBOUND_FF_TO_WB,
+            )
+        )
+        result_warnings = tuple(supplier_registry_state.warnings) if factory_inbound_source == FACTORY_INBOUND_SOURCE_SUPPLIER_REGISTRY else ()
+        if (
+            factory_inbound_source == FACTORY_INBOUND_SOURCE_SUPPLIER_REGISTRY
+            and not effective_inbound_factory_rows
+        ):
+            result_warnings = result_warnings + (
+                "Источник supplier registry выбран, но usable matched supplier rows внутри расчётного окна = 0.",
+            )
 
         result_rows: list[FactoryOrderRecommendationRow] = []
         for nm_id, sku_comment in active_skus:
@@ -350,11 +426,18 @@ class FactoryOrderSupplyBlock:
             calculated_at=self.timestamp_factory(),
             report_date=report_date,
             horizon_days=horizon_days,
+            target_window_days=target_window_days,
+            inbound_window_end=inbound_window_end.isoformat(),
             coverage_contract_note=self.sales_history.build_operator_note(_COVERAGE_CONTRACT_NOTE),
             settings=settings,
+            factory_inbound_source=factory_inbound_source,
             datasets=datasets,
+            manual_factory_inbound_dataset=datasets[DATASET_INBOUND_FACTORY_TO_FF],
+            supplier_registry_inbound_summary=supplier_registry_state,
+            effective_inbound_factory_to_ff=effective_inbound_factory_rows,
             summary=summary,
             rows=result_rows,
+            warnings=result_warnings,
         )
         self.runtime.save_factory_order_result_state(
             calculated_at=result.calculated_at,
@@ -451,6 +534,137 @@ class FactoryOrderSupplyBlock:
             for item in payload["rows"]
         ]
 
+    def _build_supplier_registry_inbound_state(self) -> FactoryOrderSupplierRegistryInboundState:
+        summaries: list[FactoryOrderSupplierRegistryShipmentSummary] = []
+        diagnostics = {
+            "shipment_count": 0,
+            "product_line_count": 0,
+            "matched_line_count": 0,
+            "unmatched_line_count": 0,
+            "ambiguous_line_count": 0,
+            "missing_shipment_date_line_count": 0,
+            "invalid_quantity_line_count": 0,
+            "usable_line_count": 0,
+            "usable_quantity": 0.0,
+        }
+        warnings: list[str] = []
+        for shipment in self.runtime.list_supplier_shipments():
+            shipment_id = str(shipment.get("shipment_id") or "").strip()
+            if not shipment_id:
+                continue
+            diagnostics["shipment_count"] += 1
+            try:
+                detail = self.runtime.load_supplier_shipment(shipment_id)
+            except Exception as exc:  # pragma: no cover - defensive diagnostics
+                warnings.append(f"Supplier shipment {shipment_id} skipped: {exc}")
+                continue
+            if not detail:
+                warnings.append(f"Supplier shipment {shipment_id} skipped: detail is missing.")
+                continue
+            header = dict(detail.get("header") or {})
+            lines = [dict(item) for item in detail.get("lines") or []]
+            shipment_date = str(header.get("shipment_date") or "").strip()
+            calculated_acceptance_date = (
+                (date.fromisoformat(shipment_date) + timedelta(days=SUPPLIER_REGISTRY_FACTORY_TO_FF_ACCEPTANCE_DAYS)).isoformat()
+                if _is_iso_date(shipment_date)
+                else ""
+            )
+            shipment_summary = _summarize_supplier_shipment_for_factory_inbound(
+                header=header,
+                lines=lines,
+                calculated_acceptance_date=calculated_acceptance_date,
+            )
+            diagnostics["product_line_count"] += shipment_summary.product_line_count
+            diagnostics["matched_line_count"] += shipment_summary.matched_line_count
+            diagnostics["unmatched_line_count"] += shipment_summary.unmatched_line_count
+            diagnostics["ambiguous_line_count"] += shipment_summary.ambiguous_line_count
+            diagnostics["missing_shipment_date_line_count"] += shipment_summary.missing_shipment_date_line_count
+            diagnostics["invalid_quantity_line_count"] += shipment_summary.invalid_quantity_line_count
+            diagnostics["usable_line_count"] += shipment_summary.usable_line_count
+            diagnostics["usable_quantity"] += shipment_summary.usable_quantity
+            if shipment_summary.unmatched_line_count:
+                warnings.append(
+                    f"{shipment_summary.shipment_label}: unmatched product lines skipped = {shipment_summary.unmatched_line_count}."
+                )
+            if shipment_summary.ambiguous_line_count:
+                warnings.append(
+                    f"{shipment_summary.shipment_label}: ambiguous product lines skipped = {shipment_summary.ambiguous_line_count}."
+                )
+            if shipment_summary.missing_shipment_date_line_count:
+                warnings.append(
+                    f"{shipment_summary.shipment_label}: product lines skipped because shipment_date is missing = {shipment_summary.missing_shipment_date_line_count}."
+                )
+            if shipment_summary.invalid_quantity_line_count:
+                warnings.append(
+                    f"{shipment_summary.shipment_label}: product lines skipped because quantity is missing/invalid = {shipment_summary.invalid_quantity_line_count}."
+                )
+            summaries.append(
+                FactoryOrderSupplierRegistryShipmentSummary(
+                    shipment_id=shipment_summary.shipment_id,
+                    shipment_label=shipment_summary.shipment_label,
+                    invoice_no=shipment_summary.invoice_no,
+                    invoice_date=shipment_summary.invoice_date,
+                    total_product_quantity=shipment_summary.total_product_quantity,
+                    shipment_date=shipment_summary.shipment_date,
+                    calculated_acceptance_date=shipment_summary.calculated_acceptance_date,
+                    matched_line_count=shipment_summary.matched_line_count,
+                    unmatched_line_count=shipment_summary.unmatched_line_count,
+                    ambiguous_line_count=shipment_summary.ambiguous_line_count,
+                    missing_shipment_date_line_count=shipment_summary.missing_shipment_date_line_count,
+                    usable_quantity=shipment_summary.usable_quantity,
+                )
+            )
+        diagnostics_payload = FactoryOrderSupplierRegistryDiagnostics(
+            shipment_count=int(diagnostics["shipment_count"]),
+            product_line_count=int(diagnostics["product_line_count"]),
+            matched_line_count=int(diagnostics["matched_line_count"]),
+            unmatched_line_count=int(diagnostics["unmatched_line_count"]),
+            ambiguous_line_count=int(diagnostics["ambiguous_line_count"]),
+            missing_shipment_date_line_count=int(diagnostics["missing_shipment_date_line_count"]),
+            invalid_quantity_line_count=int(diagnostics["invalid_quantity_line_count"]),
+            usable_line_count=int(diagnostics["usable_line_count"]),
+            usable_quantity=round(float(diagnostics["usable_quantity"]), 2),
+        )
+        status = "ready" if diagnostics_payload.usable_line_count > 0 else "empty"
+        return FactoryOrderSupplierRegistryInboundState(
+            source=FACTORY_INBOUND_SOURCE_SUPPLIER_REGISTRY,
+            status=status,
+            acceptance_days=SUPPLIER_REGISTRY_FACTORY_TO_FF_ACCEPTANCE_DAYS,
+            shipment_summary=tuple(summaries),
+            diagnostics=diagnostics_payload,
+            warnings=tuple(warnings),
+        )
+
+    def _supplier_registry_inbound_rows(
+        self,
+        state: FactoryOrderSupplierRegistryInboundState,
+    ) -> list[FactoryOrderInboundRow]:
+        active_skus = dict(self._load_active_skus())
+        rows: list[FactoryOrderInboundRow] = []
+        for shipment_summary in state.shipment_summary:
+            if not shipment_summary.calculated_acceptance_date:
+                continue
+            detail = self.runtime.load_supplier_shipment(shipment_summary.shipment_id)
+            if not detail:
+                continue
+            header = dict(detail.get("header") or {})
+            shipment_label = _supplier_shipment_label(header)
+            for line in detail.get("lines") or []:
+                if not _supplier_line_is_usable_factory_inbound(line, has_valid_shipment_date=True):
+                    continue
+                nm_id = int(line.get("internal_nm_id"))
+                rows.append(
+                    FactoryOrderInboundRow(
+                        nm_id=nm_id,
+                        sku_comment=active_skus.get(nm_id) or str(line.get("internal_name") or ""),
+                        quantity=float(line.get("qty") or 0.0),
+                        planned_arrival_date=shipment_summary.calculated_acceptance_date,
+                        comment="supplier_registry",
+                        shipment_name=shipment_label,
+                    )
+                )
+        return rows
+
     def _load_last_result(self) -> FactoryOrderCalculationResult | None:
         payload = self.runtime.load_factory_order_result_state()
         if not isinstance(payload, dict):
@@ -459,12 +673,33 @@ class FactoryOrderSupplyBlock:
         summary_payload = payload.get("summary") or {}
         datasets_payload = payload.get("datasets") or {}
         rows_payload = payload.get("rows") or []
+        datasets = {
+            key: FactoryOrderDatasetState(
+                dataset_type=str(value.get("dataset_type", key)),
+                label_ru=str(value.get("label_ru", _DATASET_LABELS.get(key, key))),
+                status=str(value.get("status", "missing")),
+                uploaded_at=str(value.get("uploaded_at")) if value.get("uploaded_at") else None,
+                row_count=int(value.get("row_count", 0)),
+                required=bool(value.get("required", _DATASET_REQUIRED.get(key, True))),
+                uploaded_filename=str(value.get("uploaded_filename")) if value.get("uploaded_filename") else None,
+                file_available=bool(value.get("file_available", False)),
+                shipment_summary=_parse_shipment_summary_payload(value.get("shipment_summary")),
+            )
+            for key, value in datasets_payload.items()
+            if isinstance(value, Mapping)
+        }
+        supplier_registry_state = _parse_supplier_registry_inbound_state(
+            payload.get("supplier_registry_inbound_summary")
+        )
+        manual_dataset = datasets.get(DATASET_INBOUND_FACTORY_TO_FF) or self._load_dataset_state(DATASET_INBOUND_FACTORY_TO_FF)
         return FactoryOrderCalculationResult(
             status=str(payload.get("status", "")),
             calculation_id=str(payload.get("calculation_id", "")),
             calculated_at=str(payload.get("calculated_at", "")),
             report_date=str(payload.get("report_date", "")),
             horizon_days=int(payload.get("horizon_days", 0)),
+            target_window_days=int(payload.get("target_window_days", payload.get("horizon_days", 0))),
+            inbound_window_end=str(payload.get("inbound_window_end", "") or ""),
             coverage_contract_note=str(payload.get("coverage_contract_note", _COVERAGE_CONTRACT_NOTE)),
             settings=FactoryOrderSettings(
                 prod_lead_time_days=int(settings_payload.get("prod_lead_time_days", 0)),
@@ -480,22 +715,17 @@ class FactoryOrderSupplyBlock:
                     else None
                 ),
                 sales_avg_period_days=int(settings_payload.get("sales_avg_period_days", _DEFAULT_SALES_AVG_PERIOD_DAYS)),
+                factory_inbound_source=_normalize_factory_inbound_source(
+                    settings_payload.get("factory_inbound_source", payload.get("factory_inbound_source"))
+                ),
             ),
-            datasets={
-                key: FactoryOrderDatasetState(
-                    dataset_type=str(value.get("dataset_type", key)),
-                    label_ru=str(value.get("label_ru", _DATASET_LABELS.get(key, key))),
-                    status=str(value.get("status", "missing")),
-                    uploaded_at=str(value.get("uploaded_at")) if value.get("uploaded_at") else None,
-                    row_count=int(value.get("row_count", 0)),
-                    required=bool(value.get("required", _DATASET_REQUIRED.get(key, True))),
-                    uploaded_filename=str(value.get("uploaded_filename")) if value.get("uploaded_filename") else None,
-                    file_available=bool(value.get("file_available", False)),
-                    shipment_summary=_parse_shipment_summary_payload(value.get("shipment_summary")),
-                )
-                for key, value in datasets_payload.items()
-                if isinstance(value, Mapping)
-            },
+            factory_inbound_source=_normalize_factory_inbound_source(payload.get("factory_inbound_source")),
+            datasets=datasets,
+            manual_factory_inbound_dataset=manual_dataset,
+            supplier_registry_inbound_summary=supplier_registry_state,
+            effective_inbound_factory_to_ff=_parse_effective_inbound_payload(
+                payload.get("effective_inbound_factory_to_ff")
+            ),
             summary=FactoryOrderSummary(
                 total_qty=int(summary_payload.get("total_qty", 0)),
                 estimated_weight=float(summary_payload.get("estimated_weight", 0.0)),
@@ -518,6 +748,7 @@ class FactoryOrderSupplyBlock:
                 for item in rows_payload
                 if isinstance(item, Mapping)
             ],
+            warnings=tuple(str(item) for item in payload.get("warnings", []) if str(item or "").strip()),
         )
 
     def _parse_dataset_rows(
@@ -659,6 +890,7 @@ def _parse_settings(payload: Mapping[str, Any]) -> FactoryOrderSettings:
         order_batch_qty=_parse_positive_int(payload.get("order_batch_qty"), "Кратность штук в коробке"),
         report_date_override=_parse_optional_date(payload.get("report_date_override"), row_index=None, field_label="Дата отчёта"),
         sales_avg_period_days=_parse_sales_avg_period_days(payload.get("sales_avg_period_days")),
+        factory_inbound_source=_parse_factory_inbound_source(payload.get("factory_inbound_source")),
     )
 
 
@@ -672,6 +904,22 @@ def _parse_sales_avg_period_days(value: Any) -> int:
     if numeric <= 0:
         return _DEFAULT_SALES_AVG_PERIOD_DAYS
     return numeric
+
+
+def _parse_factory_inbound_source(value: Any) -> str:
+    normalized = str(value or "").strip() or FACTORY_INBOUND_SOURCE_MANUAL_EXCEL
+    if normalized not in {FACTORY_INBOUND_SOURCE_MANUAL_EXCEL, FACTORY_INBOUND_SOURCE_SUPPLIER_REGISTRY}:
+        raise ValueError(
+            "Источник товаров в пути от фабрики должен быть manual_excel или supplier_registry"
+        )
+    return normalized
+
+
+def _normalize_factory_inbound_source(value: Any) -> str:
+    try:
+        return _parse_factory_inbound_source(value)
+    except ValueError:
+        return FACTORY_INBOUND_SOURCE_MANUAL_EXCEL
 
 
 def _parse_cycle_order_days(value: Any) -> int:
@@ -862,19 +1110,232 @@ def _parse_shipment_summary_payload(value: Any) -> tuple[FactoryOrderInboundShip
     return tuple(summary)
 
 
-def _sum_inbound_rows_within_horizon(
+def _parse_supplier_registry_inbound_state(value: Any) -> FactoryOrderSupplierRegistryInboundState:
+    if not isinstance(value, Mapping):
+        return _empty_supplier_registry_inbound_state()
+    diagnostics_payload = value.get("diagnostics") if isinstance(value.get("diagnostics"), Mapping) else {}
+    summaries = []
+    for item in value.get("shipment_summary") or []:
+        if not isinstance(item, Mapping):
+            continue
+        summaries.append(
+            FactoryOrderSupplierRegistryShipmentSummary(
+                shipment_id=str(item.get("shipment_id", "") or ""),
+                shipment_label=str(item.get("shipment_label", "") or ""),
+                invoice_no=str(item.get("invoice_no", "") or ""),
+                invoice_date=str(item.get("invoice_date", "") or ""),
+                total_product_quantity=float(item.get("total_product_quantity", 0.0)),
+                shipment_date=str(item.get("shipment_date", "") or ""),
+                calculated_acceptance_date=str(item.get("calculated_acceptance_date", "") or ""),
+                matched_line_count=int(item.get("matched_line_count", 0)),
+                unmatched_line_count=int(item.get("unmatched_line_count", 0)),
+                ambiguous_line_count=int(item.get("ambiguous_line_count", 0)),
+                missing_shipment_date_line_count=int(item.get("missing_shipment_date_line_count", 0)),
+                usable_quantity=float(item.get("usable_quantity", 0.0)),
+            )
+        )
+    diagnostics = FactoryOrderSupplierRegistryDiagnostics(
+        shipment_count=int(diagnostics_payload.get("shipment_count", 0)),
+        product_line_count=int(diagnostics_payload.get("product_line_count", 0)),
+        matched_line_count=int(diagnostics_payload.get("matched_line_count", 0)),
+        unmatched_line_count=int(diagnostics_payload.get("unmatched_line_count", 0)),
+        ambiguous_line_count=int(diagnostics_payload.get("ambiguous_line_count", 0)),
+        missing_shipment_date_line_count=int(diagnostics_payload.get("missing_shipment_date_line_count", 0)),
+        invalid_quantity_line_count=int(diagnostics_payload.get("invalid_quantity_line_count", 0)),
+        usable_line_count=int(diagnostics_payload.get("usable_line_count", 0)),
+        usable_quantity=float(diagnostics_payload.get("usable_quantity", 0.0)),
+    )
+    return FactoryOrderSupplierRegistryInboundState(
+        source=FACTORY_INBOUND_SOURCE_SUPPLIER_REGISTRY,
+        status=str(value.get("status", "empty") or "empty"),
+        acceptance_days=int(value.get("acceptance_days", SUPPLIER_REGISTRY_FACTORY_TO_FF_ACCEPTANCE_DAYS)),
+        shipment_summary=tuple(summaries),
+        diagnostics=diagnostics,
+        warnings=tuple(str(item) for item in value.get("warnings", []) if str(item or "").strip()),
+    )
+
+
+def _empty_supplier_registry_inbound_state() -> FactoryOrderSupplierRegistryInboundState:
+    return FactoryOrderSupplierRegistryInboundState(
+        source=FACTORY_INBOUND_SOURCE_SUPPLIER_REGISTRY,
+        status="empty",
+        acceptance_days=SUPPLIER_REGISTRY_FACTORY_TO_FF_ACCEPTANCE_DAYS,
+        shipment_summary=(),
+        diagnostics=FactoryOrderSupplierRegistryDiagnostics(
+            shipment_count=0,
+            product_line_count=0,
+            matched_line_count=0,
+            unmatched_line_count=0,
+            ambiguous_line_count=0,
+            missing_shipment_date_line_count=0,
+            invalid_quantity_line_count=0,
+            usable_line_count=0,
+            usable_quantity=0.0,
+        ),
+        warnings=(),
+    )
+
+
+def _parse_effective_inbound_payload(value: Any) -> list[FactoryOrderEffectiveInboundRow]:
+    if not isinstance(value, list):
+        return []
+    rows: list[FactoryOrderEffectiveInboundRow] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        rows.append(
+            FactoryOrderEffectiveInboundRow(
+                source=str(item.get("source", "") or ""),
+                nm_id=int(item.get("nm_id", 0)),
+                sku_comment=str(item.get("sku_comment", "") or ""),
+                quantity=float(item.get("quantity", 0.0)),
+                planned_arrival_date=str(item.get("planned_arrival_date", "") or ""),
+                effective_arrival_date=str(item.get("effective_arrival_date", "") or ""),
+                shipment_name=str(item.get("shipment_name", "") or ""),
+                comment=str(item.get("comment", "") or ""),
+            )
+        )
+    return rows
+
+
+def _effective_inbound_rows_within_window(
     rows: list[FactoryOrderInboundRow],
-    horizon_end: date,
+    report_date: date,
+    inbound_window_end: date,
     *,
+    source: str,
     projected_days: int = 0,
-) -> dict[int, float]:
-    totals: dict[int, float] = {}
+) -> list[FactoryOrderEffectiveInboundRow]:
+    effective_rows: list[FactoryOrderEffectiveInboundRow] = []
     for row in rows:
         effective_arrival_date = date.fromisoformat(row.planned_arrival_date) + timedelta(days=projected_days)
-        if effective_arrival_date > horizon_end:
+        if effective_arrival_date < report_date or effective_arrival_date > inbound_window_end:
             continue
+        effective_rows.append(
+            FactoryOrderEffectiveInboundRow(
+                source=source,
+                nm_id=row.nm_id,
+                sku_comment=row.sku_comment,
+                quantity=float(row.quantity),
+                planned_arrival_date=row.planned_arrival_date,
+                effective_arrival_date=effective_arrival_date.isoformat(),
+                shipment_name=row.shipment_name,
+                comment=row.comment,
+            )
+        )
+    return effective_rows
+
+
+def _sum_effective_inbound_rows(rows: list[FactoryOrderEffectiveInboundRow]) -> dict[int, float]:
+    totals: dict[int, float] = {}
+    for row in rows:
         totals[row.nm_id] = totals.get(row.nm_id, 0.0) + float(row.quantity)
     return totals
+
+
+def _summarize_supplier_shipment_for_factory_inbound(
+    *,
+    header: Mapping[str, Any],
+    lines: list[Mapping[str, Any]],
+    calculated_acceptance_date: str,
+) -> _SupplierRegistryShipmentFactorySummary:
+    shipment_id = str(header.get("shipment_id") or "").strip()
+    shipment_date = str(header.get("shipment_date") or "").strip()
+    has_valid_shipment_date = bool(calculated_acceptance_date)
+    product_lines = [item for item in lines if item.get("line_type") == LINE_TYPE_PRODUCT]
+    matched_line_count = 0
+    unmatched_line_count = 0
+    ambiguous_line_count = 0
+    missing_shipment_date_line_count = 0
+    invalid_quantity_line_count = 0
+    usable_line_count = 0
+    usable_quantity = 0.0
+    total_product_quantity = 0.0
+    for line in product_lines:
+        qty = _optional_positive_line_quantity(line.get("qty"))
+        if qty is not None:
+            total_product_quantity += qty
+        match_status = str(line.get("match_status") or "").strip()
+        if match_status in {MATCH_STATUS_MATCHED, MATCH_STATUS_MATCHED_BY_COMPATIBILITY} and _optional_int(line.get("internal_nm_id")) is not None:
+            matched_line_count += 1
+        elif match_status == MATCH_STATUS_AMBIGUOUS:
+            ambiguous_line_count += 1
+        elif match_status == MATCH_STATUS_UNMATCHED:
+            unmatched_line_count += 1
+        else:
+            unmatched_line_count += 1
+        if not has_valid_shipment_date:
+            missing_shipment_date_line_count += 1
+            continue
+        if qty is None:
+            invalid_quantity_line_count += 1
+            continue
+        if _supplier_line_is_usable_factory_inbound(line, has_valid_shipment_date=has_valid_shipment_date):
+            usable_line_count += 1
+            usable_quantity += qty
+    header_total = _optional_positive_line_quantity(header.get("product_qty_total"))
+    return _SupplierRegistryShipmentFactorySummary(
+        shipment_id=shipment_id,
+        shipment_label=_supplier_shipment_label(header),
+        invoice_no=str(header.get("invoice_no") or ""),
+        invoice_date=str(header.get("invoice_date") or ""),
+        total_product_quantity=round(header_total if header_total is not None else total_product_quantity, 2),
+        shipment_date=shipment_date,
+        calculated_acceptance_date=calculated_acceptance_date,
+        product_line_count=len(product_lines),
+        matched_line_count=matched_line_count,
+        unmatched_line_count=unmatched_line_count,
+        ambiguous_line_count=ambiguous_line_count,
+        missing_shipment_date_line_count=missing_shipment_date_line_count,
+        invalid_quantity_line_count=invalid_quantity_line_count,
+        usable_line_count=usable_line_count,
+        usable_quantity=round(usable_quantity, 2),
+    )
+
+
+def _supplier_line_is_usable_factory_inbound(line: Mapping[str, Any], *, has_valid_shipment_date: bool) -> bool:
+    if not has_valid_shipment_date:
+        return False
+    if line.get("line_type") != LINE_TYPE_PRODUCT:
+        return False
+    if str(line.get("match_status") or "").strip() not in {MATCH_STATUS_MATCHED, MATCH_STATUS_MATCHED_BY_COMPATIBILITY}:
+        return False
+    if _optional_int(line.get("internal_nm_id")) is None:
+        return False
+    return _optional_positive_line_quantity(line.get("qty")) is not None
+
+
+def _supplier_shipment_label(header: Mapping[str, Any]) -> str:
+    invoice_no = str(header.get("invoice_no") or "").strip()
+    if invoice_no:
+        return invoice_no
+    shipment_id = str(header.get("shipment_id") or "").strip()
+    return shipment_id or "supplier shipment"
+
+
+def _optional_positive_line_quantity(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    return number
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_iso_date(value: str) -> bool:
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _format_decimal(value: float) -> str:

@@ -104,3 +104,14 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
   - `WB_CORE_SUPPLIER_AUTH_PASSWORD_HASH`
   - `WB_CORE_SUPPLIER_AUTH_DISPLAY_NAME`
 - Supplier role can access only `/sheet-vitrina-v1/supplier`, read/create/edit supplier shipment APIs, invoice downloads, login/logout and needed static/browser assets. It cannot access `/sheet-vitrina-v1/vitrina`, `/sheet-vitrina-v1/operator`, `/sheet-vitrina-v1/settings`, nomenclature APIs, supplier delete/rematch or unrelated `/v1/sheet-vitrina-v1/...` APIs.
+- Supplier credentials are never committed as plaintext, hashes, cookies or tokens. A live supplier account may use machine-safe username `hanshang` and display label `HanShang Technology` / `Ханшанг`, but the password and PBKDF2-HMAC hash remain runtime-only values outside Git/log output.
+
+# 5. Factory-Order Inbound Source
+
+- The supplier shipment registry is an optional calculation input source for `Поставки -> Расчёты -> Заказ на фабрике`, not a new ЕБД/accepted truth replacement for supplier orders.
+- Manual Excel input for `Товары в пути от фабрики` remains available and is the default factory inbound source (`manual_excel`).
+- Operator may choose `supplier_registry` as the mutually exclusive factory inbound source. The selection is sent explicitly in the calculate request and may be persisted in browser/operator UI state plus the last server result payload.
+- Supplier registry conversion uses only saved shipments with valid `shipment_date`. Current bounded default acceptance date is `shipment_date + 30 days` (`SUPPLIER_REGISTRY_FACTORY_TO_FF_ACCEPTANCE_DAYS = 30`); this is intentionally a backend constant with a TODO to move into operator settings later.
+- Only product lines deterministically resolved to `nmId` (`matched` or `matched_by_compatibility`) and positive quantity become inbound rows. Unmatched, ambiguous, missing-shipment-date and invalid-quantity product lines stay visible in diagnostics/warnings and do not silently reduce the factory-order recommendation.
+- The factory-order UI shows a read-only supplier registry summary under the manual factory inbound block: invoice number/date, total product quantity, supplier shipment date, calculated acceptance date, matched/unmatched/ambiguous/missing-date diagnostics and usable quantity.
+- When supplier registry source is selected and usable matched rows inside the current factory-order inbound window are zero, calculation still succeeds with zero factory inbound coverage and a truthful warning.
