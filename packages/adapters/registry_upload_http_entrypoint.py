@@ -3205,6 +3205,19 @@ def _auto_complaints_error_payload(exc: SheetVitrinaV1FeedbacksAutoComplaintsErr
 def _with_factory_order_dataset_urls(payload: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
     normalized["datasets"] = _map_dataset_urls(normalized.get("datasets"))
+    manual_state = normalized.get("manual_factory_inbound_dataset")
+    if isinstance(manual_state, Mapping):
+        mapped_manual = _map_dataset_urls({DATASET_INBOUND_FACTORY_TO_FF: manual_state})
+        normalized["manual_factory_inbound_dataset"] = mapped_manual.get(DATASET_INBOUND_FACTORY_TO_FF, manual_state)
+    last_result = normalized.get("last_result")
+    if isinstance(last_result, Mapping):
+        nested = dict(last_result)
+        nested["datasets"] = _map_dataset_urls(nested.get("datasets"))
+        manual_nested = nested.get("manual_factory_inbound_dataset")
+        if isinstance(manual_nested, Mapping):
+            mapped_manual_nested = _map_dataset_urls({DATASET_INBOUND_FACTORY_TO_FF: manual_nested})
+            nested["manual_factory_inbound_dataset"] = mapped_manual_nested.get(DATASET_INBOUND_FACTORY_TO_FF, manual_nested)
+        normalized["last_result"] = nested
     return normalized
 
 

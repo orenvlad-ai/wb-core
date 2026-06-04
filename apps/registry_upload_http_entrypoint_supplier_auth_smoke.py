@@ -6,6 +6,7 @@ import base64
 from contextlib import contextmanager
 from http.cookiejar import CookieJar
 import hashlib
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,9 @@ import sys
 from tempfile import TemporaryDirectory
 import threading
 from urllib import error as urllib_error, parse as urllib_parse, request as urllib_request
+from uuid import uuid4
+
+from openpyxl import Workbook
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -27,6 +31,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_SUPPLIER_UI_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
+    DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
     DEFAULT_SUPPLIER_SHIPMENTS_PATH,
     DEFAULT_UPLOAD_PATH,
     build_registry_upload_http_server,
@@ -38,6 +43,7 @@ from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHtt
 def main() -> None:
     owner_password = "owner-password-not-secret"
     supplier_password = "supplier-password-not-secret"
+    supplier_invoice_bytes = _build_invoice_fixture()
     with TemporaryDirectory(prefix="supplier-auth-smoke-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         config = RegistryUploadHttpEntrypointConfig(
@@ -102,9 +108,43 @@ def main() -> None:
                 supplier_api_code, supplier_api_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
                 if supplier_api_code != 200 or supplier_api_payload.get("shipments") != []:
                     raise AssertionError("supplier role must access supplier shipment APIs")
+                parse_code, parse_payload = _opener_post_multipart(
+                    supplier,
+                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH}",
+                    supplier_invoice_bytes,
+                    filename="PI-test 26GN390.xlsx",
+                )
+                if parse_code != 200 or not parse_payload.get("upload_id"):
+                    raise AssertionError(f"supplier role must parse supplier invoices, got {parse_code} {parse_payload}")
+                create_code, create_payload = _opener_post_json(
+                    supplier,
+                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
+                    {
+                        "upload_id": parse_payload["upload_id"],
+                        "shipment_date": "2026-05-14",
+                        "payload": parse_payload,
+                    },
+                )
+                if create_code != 200 or not create_payload.get("shipment_id"):
+                    raise AssertionError(f"supplier role must create supplier shipments, got {create_code} {create_payload}")
+                shipment_id = str(create_payload["shipment_id"])
+                detail_code, detail_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}")
+                if detail_code != 200 or detail_payload.get("shipment_id") != shipment_id:
+                    raise AssertionError("supplier role must read supplier shipment detail")
+                patched_payload = json.loads(json.dumps(detail_payload, ensure_ascii=False))
+                patch_code, patch_payload = _opener_patch_json(
+                    supplier,
+                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                    {"shipment_date": "2026-05-15", "payload": patched_payload},
+                )
+                if patch_code != 200 or patch_payload.get("shipment_date") != "2026-05-15":
+                    raise AssertionError(f"supplier role must edit supplier shipments, got {patch_code} {patch_payload}")
                 forbidden_html_code, _, _ = _opener_text(supplier, f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}")
                 if forbidden_html_code != 403:
                     raise AssertionError("supplier role must not access full web-vitrina/operator shell")
+                forbidden_operator_code, _, _ = _opener_text(supplier, f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}")
+                if forbidden_operator_code != 403:
+                    raise AssertionError("supplier role must not access operator UI")
                 forbidden_api_code, forbidden_api_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SHEET_STATUS_PATH}")
                 if forbidden_api_code != 403 or forbidden_api_payload.get("error") != "forbidden":
                     raise AssertionError("supplier role must not access unrelated operator APIs")
@@ -117,9 +157,16 @@ def main() -> None:
                 )
                 if forbidden_nomenclature_code != 403 or forbidden_nomenclature_payload.get("error") != "forbidden":
                     raise AssertionError("supplier role must not access nomenclature API")
+                supplier_rematch_code, supplier_rematch_payload = _opener_post_json(
+                    supplier,
+                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/rematch",
+                    {"overwrite_manual": False},
+                )
+                if supplier_rematch_code != 403 or supplier_rematch_payload.get("error") != "forbidden":
+                    raise AssertionError("supplier role must not rematch supplier orders")
                 supplier_delete_code, supplier_delete_payload = _opener_delete_json(
                     supplier,
-                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/sup_forbidden",
+                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
                 )
                 if supplier_delete_code != 403 or supplier_delete_payload.get("error") != "forbidden":
                     raise AssertionError("supplier role must not delete supplier orders")
@@ -178,6 +225,72 @@ def _opener_delete_json(opener: urllib_request.OpenerDirector, url: str) -> tupl
         return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
+def _opener_post_json(
+    opener: urllib_request.OpenerDirector,
+    url: str,
+    payload: dict[str, object],
+) -> tuple[int, dict[str, object]]:
+    request = urllib_request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with opener.open(request, timeout=5) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib_error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _opener_patch_json(
+    opener: urllib_request.OpenerDirector,
+    url: str,
+    payload: dict[str, object],
+) -> tuple[int, dict[str, object]]:
+    request = urllib_request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8", "Accept": "application/json"},
+        method="PATCH",
+    )
+    try:
+        with opener.open(request, timeout=5) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib_error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _opener_post_multipart(
+    opener: urllib_request.OpenerDirector,
+    url: str,
+    workbook_bytes: bytes,
+    *,
+    filename: str,
+) -> tuple[int, dict[str, object]]:
+    boundary = "----wbcore-supplier-auth" + uuid4().hex
+    body = b"".join(
+        [
+            f"--{boundary}\r\n".encode("utf-8"),
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode("utf-8"),
+            b"Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n\r\n",
+            workbook_bytes,
+            f"\r\n--{boundary}--\r\n".encode("utf-8"),
+        ]
+    )
+    request = urllib_request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with opener.open(request, timeout=5) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib_error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
 def _request_text(
     url: str,
     *,
@@ -206,6 +319,24 @@ def _password_hash(password: str) -> str:
 
 def _b64(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _build_invoice_fixture() -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Invoice"
+    sheet.append(["Invoice No:", "26GN390"])
+    sheet.append(["Invoice Date:", "14.5.2026"])
+    sheet.append(["Contract No.", "CNT-2026-0513"])
+    sheet.append(["Date of Contract", "2026.5.13"])
+    sheet.append(["Supplier:", "Zhejiang Supplier", "", "Currency:", "USD"])
+    sheet.append(["Invoice Total:", 33])
+    sheet.append(["NO.", "NAME & SPECIFICATION", "MODELS", "QTY", "U.PRICE", "AMOUNT", "COMMENT"])
+    sheet.append([1, "高清膜 smk", "iPhone 14 Pro", 10, 1, 10, ""])
+    sheet.append([2, "防窥膜 (Anti-Spy)", "iPhone 14 Pro Max", 5, 2, 10, ""])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
 
 
 @contextmanager

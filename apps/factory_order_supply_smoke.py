@@ -298,33 +298,35 @@ def main() -> None:
                 "В пути от фабрики",
                 [
                     inbound_rows[0],
+                    [210183919, "SKU 1", 5, "2026-04-10", "", "Старая поставка"],
                     [210183919, "SKU 1", 40, "2026-04-25", "", "Поставка A"],
                     [210184534, "SKU 2", 15, "2026-04-25", "", "Поставка A"],
                     [210184534, "SKU 2", 0, "", "", ""],
                     [210183919, "SKU 1", 12, "2026-05-05", "", ""],
+                    [210183919, "SKU 1", 999, "2026-05-25", "", "Поздняя поставка"],
                 ],
             ),
             uploaded_filename="factory-inbound.xlsx",
         )
-        if inbound_factory_upload.accepted_row_count != 3 or inbound_factory_upload.ignored_row_count != 1:
+        if inbound_factory_upload.accepted_row_count != 5 or inbound_factory_upload.ignored_row_count != 1:
             raise AssertionError("factory inbound upload must ignore zero rows and keep positive rows grouped by shipment")
         shipment_summary = list(inbound_factory_upload.shipment_summary)
-        if len(shipment_summary) != 2:
-            raise AssertionError("factory inbound upload must expose two shipment summary rows")
+        if len(shipment_summary) != 4:
+            raise AssertionError("factory inbound upload must expose all shipment summary rows independently from calc window")
         if (
-            shipment_summary[0].shipment != "Поставка A"
-            or shipment_summary[0].total_quantity != 55.0
-            or shipment_summary[0].acceptance_date != "2026-04-25"
+            shipment_summary[1].shipment != "Поставка A"
+            or shipment_summary[1].total_quantity != 55.0
+            or shipment_summary[1].acceptance_date != "2026-04-25"
         ):
             raise AssertionError("explicit factory shipment summary must aggregate quantities by shipment/date")
         if (
-            shipment_summary[1].shipment != "Поставка №1"
-            or shipment_summary[1].total_quantity != 12.0
-            or shipment_summary[1].acceptance_date != "2026-05-05"
+            shipment_summary[2].shipment != "Поставка №1"
+            or shipment_summary[2].total_quantity != 12.0
+            or shipment_summary[2].acceptance_date != "2026-05-05"
         ):
             raise AssertionError("factory shipment summary must label missing shipment ids by row group order")
         persisted_summary = list(block.build_status().datasets[DATASET_INBOUND_FACTORY_TO_FF].shipment_summary)
-        if [item.total_quantity for item in persisted_summary] != [55.0, 12.0]:
+        if [item.total_quantity for item in persisted_summary] != [5.0, 55.0, 12.0, 999.0]:
             raise AssertionError("factory status must expose persisted shipment summary totals")
 
         inbound_ff_to_wb_upload = block.upload_dataset(
@@ -333,14 +335,17 @@ def main() -> None:
                 "В пути ФФ -> WB",
                 [
                     ["nmId", "Комментарий SKU", "Количество в пути", "Планируемая дата прихода на Wildberries", "Комментарий"],
+                    [210183919, "SKU 1", 6, "2026-04-17", ""],
                     [210183919, "SKU 1", 10, "2026-04-26", ""],
                     [210183919, "SKU 1", 0, "", ""],
+                    [210183919, "SKU 1", 7, "2026-05-10", ""],
+                    [210183919, "SKU 1", 888, "2026-05-25", ""],
                     [210184534, "SKU 2", 25, "2026-04-28", ""],
                 ],
             ),
             uploaded_filename="ff-to-wb.xlsx",
         )
-        if inbound_ff_to_wb_upload.accepted_row_count != 2 or inbound_ff_to_wb_upload.ignored_row_count != 1:
+        if inbound_ff_to_wb_upload.accepted_row_count != 5 or inbound_ff_to_wb_upload.ignored_row_count != 1:
             raise AssertionError("ff_to_wb upload must ignore zero rows and keep positive rows")
 
         result_with_inbound = block.calculate(
@@ -359,14 +364,40 @@ def main() -> None:
         by_nm_id = {item.nm_id: item for item in result_with_inbound.rows}
         sku_one = by_nm_id[210183919]
         sku_two = by_nm_id[210184534]
+        if result_with_inbound.target_window_days != 36 or result_with_inbound.inbound_window_end != "2026-05-24":
+            raise AssertionError("factory inbound upper bound must use the full target window, not only logistics days")
         if round(sku_one.daily_demand_total, 2) != _expected_average(210183919, report_date="2026-04-18", period_days=7):
             raise AssertionError("7-day lookback must change the average demand relative to 3-day lookback")
-        if round(sku_one.inbound_factory_to_ff, 2) != 40.0:
-            raise AssertionError("only the inbound_factory event that can still reach WB inside horizon must be counted")
-        if round(sku_one.inbound_ff_to_wb, 2) != 10.0:
-            raise AssertionError("ff_to_wb parity term must be kept when file is uploaded")
+        if round(sku_one.inbound_factory_to_ff, 2) != 52.0:
+            raise AssertionError("factory inbound must skip old rows, count inside full target window, and skip after target window")
+        if round(sku_one.inbound_ff_to_wb, 2) != 17.0:
+            raise AssertionError("ff_to_wb inbound must use report_date..target_window_end bounds")
         if round(sku_two.inbound_ff_to_wb, 2) != 25.0:
             raise AssertionError("ff_to_wb uploaded rows must contribute to coverage")
+        effective_factory_rows = [
+            (item.planned_arrival_date, item.effective_arrival_date, item.quantity)
+            for item in result_with_inbound.effective_inbound_factory_to_ff
+            if item.nm_id == 210183919
+        ]
+        if effective_factory_rows != [("2026-04-25", "2026-04-27", 40.0), ("2026-05-05", "2026-05-07", 12.0)]:
+            raise AssertionError(f"factory inbound effective date must add ff_to_wb lead time and enforce lower/upper bounds, got {effective_factory_rows}")
+        if sku_one.recommended_order_qty != _expected_recommended_order_qty(
+            210183919,
+            report_date="2026-04-18",
+            period_days=7,
+            prod_lead_time_days=10,
+            lead_time_factory_to_ff_days=5,
+            lead_time_ff_to_wb_days=2,
+            safety_days_mp=3,
+            safety_days_ff=2,
+            cycle_order_days=14,
+            stock_total_mp=100.0,
+            stock_ff=30.0,
+            inbound_factory_to_ff=52.0,
+            inbound_ff_to_wb=17.0,
+            order_batch_qty=50,
+        ):
+            raise AssertionError("recommended qty must reflect corrected inbound coverage and still round by order_batch_qty")
 
         recommendation_bytes, _ = block.download_recommendation()
         recommendation_rows = read_first_sheet_rows(recommendation_bytes)
@@ -408,7 +439,61 @@ def main() -> None:
         if sku_one_after_delete.recommended_order_qty % 25 != 0:
             raise AssertionError("box multiple must still be applied after inbound deletion")
 
-        # Scenario 5: a different report date and box multiple must change the recommendation math.
+        # Scenario 5: supplier registry can be selected instead of the manual factory inbound file.
+        supplier_empty_result = block.calculate(
+            {
+                "prod_lead_time_days": 10,
+                "lead_time_factory_to_ff_days": 5,
+                "lead_time_ff_to_wb_days": 2,
+                "safety_days_mp": 3,
+                "safety_days_ff": 2,
+                "cycle_order_days": 14,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "sales_avg_period_days": 3,
+                "factory_inbound_source": "supplier_registry",
+            }
+        )
+        supplier_empty_sku = {item.nm_id: item for item in supplier_empty_result.rows}[210183919]
+        if supplier_empty_result.factory_inbound_source != "supplier_registry":
+            raise AssertionError("supplier registry source selection must be persisted in calculation result")
+        if supplier_empty_sku.inbound_factory_to_ff != 0.0:
+            raise AssertionError("empty supplier registry source must not fall back to stale manual factory inbound rows")
+        if not supplier_empty_result.warnings:
+            raise AssertionError("supplier registry source with zero usable rows must expose a truthful warning")
+
+        _seed_supplier_factory_inbound_fixture(runtime)
+        supplier_source_result = block.calculate(
+            {
+                "prod_lead_time_days": 10,
+                "lead_time_factory_to_ff_days": 5,
+                "lead_time_ff_to_wb_days": 2,
+                "safety_days_mp": 3,
+                "safety_days_ff": 2,
+                "cycle_order_days": 14,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "sales_avg_period_days": 3,
+                "factory_inbound_source": "supplier_registry",
+            }
+        )
+        supplier_summary = supplier_source_result.supplier_registry_inbound_summary
+        supplier_sku = {item.nm_id: item for item in supplier_source_result.rows}[210183919]
+        if round(supplier_sku.inbound_factory_to_ff, 2) != 33.0:
+            raise AssertionError("supplier registry source must use only matched product line qty inside the calculation window")
+        if supplier_summary.diagnostics.usable_line_count != 2 or round(supplier_summary.diagnostics.usable_quantity, 2) != 133.0:
+            raise AssertionError("supplier registry diagnostics must count matched usable source lines before calc-window filtering")
+        if supplier_summary.diagnostics.unmatched_line_count != 1 or supplier_summary.diagnostics.ambiguous_line_count != 1:
+            raise AssertionError("supplier registry diagnostics must surface unmatched and ambiguous lines")
+        effective_supplier_rows = [
+            (item.shipment_name, item.planned_arrival_date, item.effective_arrival_date, item.quantity)
+            for item in supplier_source_result.effective_inbound_factory_to_ff
+            if item.nm_id == 210183919
+        ]
+        if effective_supplier_rows != [("26GN390", "2026-05-20", "2026-05-22", 33.0)]:
+            raise AssertionError(f"supplier registry inbound must use shipment_date + 30 days and then ff_to_wb lead time, got {effective_supplier_rows}")
+
+        # Scenario 6: a different report date and box multiple must change the recommendation math.
         shifted_result = block.calculate(
             {
                 "prod_lead_time_days": 4,
@@ -462,7 +547,7 @@ def main() -> None:
         ):
             raise AssertionError("shifted scenario must round SKU 2 up to the next 25-piece box multiple after cycle extension")
 
-        # Scenario 5: any positive lookback is allowed when the authoritative runtime history covers the window.
+        # Scenario 7: any positive lookback is allowed when the authoritative runtime history covers the window.
         for period_days in (10, 14, 21):
             covered_result = block.calculate(
                 {
@@ -609,6 +694,7 @@ def main() -> None:
         print("scenario_zero_only_inbound: ok -> accepted_row_count=0, coverage=0")
         print(f"scenario_multi_inbound: ok -> sku_one_inbound_factory={sku_one.inbound_factory_to_ff}")
         print(f"scenario_delete_then_zero: ok -> sku_one_coverage={sku_one_after_delete.coverage_qty}")
+        print(f"scenario_supplier_registry_source: ok -> inbound_factory={supplier_sku.inbound_factory_to_ff}")
         print(f"scenario_shifted_report_date: ok -> sku_one_qty={shifted_sku_one.recommended_order_qty}, sku_two_qty={shifted_sku_two.recommended_order_qty}")
         print("scenario_covered_windows: ok -> periods=10,14,21")
         print(f"scenario_default_sales_avg: ok -> daily_demand={round(default_sku.daily_demand_total, 2)}")
@@ -645,6 +731,102 @@ def _seed_runtime_sales_history(
             items=items,
         ),
         captured_at=ACTIVATED_AT,
+    )
+
+
+def _seed_supplier_factory_inbound_fixture(runtime: RegistryUploadDbBackedRuntime) -> None:
+    def line(
+        line_id: str,
+        *,
+        sort_order: int,
+        nm_id: int | None,
+        qty: float,
+        match_status: str,
+        name: str,
+    ) -> dict[str, object]:
+        return {
+            "line_id": line_id,
+            "line_type": "product",
+            "sort_order": sort_order,
+            "source_no": line_id,
+            "product_type": "clear",
+            "model_raw": name,
+            "model_normalized": name.lower().replace(" ", "_"),
+            "match_key": "clear|" + name.lower().replace(" ", "_"),
+            "internal_sku": "SKU-" + str(nm_id or ""),
+            "internal_nm_id": nm_id,
+            "internal_name": name,
+            "qty": qty,
+            "unit_price": 1,
+            "amount": qty,
+            "currency": "RMB",
+            "comment": "",
+            "match_status": match_status,
+            "manual_override": False,
+            "raw": {},
+        }
+
+    runtime.save_supplier_shipment(
+        header={
+            "shipment_id": "sup_factory_inbound_inside_window",
+            "created_at": "2026-04-18T09:00:00Z",
+            "updated_at": "2026-04-18T09:00:00Z",
+            "shipment_date": "2026-04-20",
+            "invoice_no": "26GN390",
+            "invoice_date": "2026-04-19",
+            "contract_no": "",
+            "contract_date": "",
+            "supplier_name": "HanShang Technology",
+            "customer_name": "",
+            "currency": "RMB",
+            "product_qty_total": 45,
+            "product_amount_total": 45,
+            "extras_amount_total": 0,
+            "invoice_amount_total": 45,
+            "declared_invoice_total": 45,
+            "match_status": "has_unmatched",
+            "source_filename": "supplier.xlsx",
+            "source_file_sha256": "",
+            "source_file_path": "",
+            "parser_version": "smoke",
+            "warnings": [],
+            "errors": [],
+        },
+        lines=[
+            line("ln_inside_1", sort_order=1, nm_id=210183919, qty=33, match_status="matched", name="Clear iPhone 14 Pro"),
+            line("ln_inside_2", sort_order=2, nm_id=None, qty=5, match_status="unmatched", name="Unknown"),
+            line("ln_inside_3", sort_order=3, nm_id=None, qty=7, match_status="ambiguous", name="Ambiguous"),
+        ],
+    )
+    runtime.save_supplier_shipment(
+        header={
+            "shipment_id": "sup_factory_inbound_after_window",
+            "created_at": "2026-04-18T09:05:00Z",
+            "updated_at": "2026-04-18T09:05:00Z",
+            "shipment_date": "2026-05-10",
+            "invoice_no": "LATE-1",
+            "invoice_date": "2026-05-09",
+            "contract_no": "",
+            "contract_date": "",
+            "supplier_name": "HanShang Technology",
+            "customer_name": "",
+            "currency": "RMB",
+            "product_qty_total": 100,
+            "product_amount_total": 100,
+            "extras_amount_total": 0,
+            "invoice_amount_total": 100,
+            "declared_invoice_total": 100,
+            "match_status": "all_matched",
+            "source_filename": "late.xlsx",
+            "source_file_sha256": "",
+            "source_file_path": "",
+            "parser_version": "smoke",
+            "warnings": [],
+            "errors": [],
+        },
+        lines=[
+            line("ln_late_1", sort_order=1, nm_id=210183919, qty=100, match_status="matched", name="Clear iPhone 14 Pro"),
+        ],
     )
 
 

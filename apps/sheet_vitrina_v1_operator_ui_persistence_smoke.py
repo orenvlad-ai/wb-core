@@ -226,6 +226,25 @@ class LocalOperatorFixtureServer:
                         "active_sku_count": len(ACTIVE_SKUS),
                         "coverage_contract_note": "-",
                         "datasets": {},
+                        "factory_inbound_source": "manual_excel",
+                        "manual_factory_inbound_dataset": {},
+                        "supplier_registry_inbound_summary": {
+                            "acceptance_days": 30,
+                            "shipment_count": 0,
+                            "shipments": [],
+                            "diagnostics": {
+                                "shipment_count": 0,
+                                "line_count": 0,
+                                "product_line_count": 0,
+                                "usable_line_count": 0,
+                                "matched_line_count": 0,
+                                "unmatched_line_count": 0,
+                                "ambiguous_line_count": 0,
+                                "missing_shipment_date_count": 0,
+                                "usable_quantity": 0.0,
+                            },
+                            "warnings": [],
+                        },
                         "last_result": None,
                     },
                     ensure_ascii=False,
@@ -368,14 +387,15 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "storage_key": STORAGE_KEY,
         "default_state": persistence_result["default_state"],
         "top_tab_persistence": persistence_result["top_tab_persistence"],
-            "subsection_persistence": persistence_result["subsection_persistence"],
-            "sku_persistence": persistence_result["sku_persistence"],
-            "plan_input_persistence": persistence_result["plan_input_persistence"],
-            "zero_selection_guard": persistence_result["zero_selection_guard"],
-            "invalid_storage_fallback": fallback_result["invalid_storage_fallback"],
-            "obsolete_sku_fallback": fallback_result["obsolete_sku_fallback"],
-            "invalid_plan_input_fallback": fallback_result["invalid_plan_input_fallback"],
-        }
+        "subsection_persistence": persistence_result["subsection_persistence"],
+        "factory_source_persistence": persistence_result["factory_source_persistence"],
+        "sku_persistence": persistence_result["sku_persistence"],
+        "plan_input_persistence": persistence_result["plan_input_persistence"],
+        "zero_selection_guard": persistence_result["zero_selection_guard"],
+        "invalid_storage_fallback": fallback_result["invalid_storage_fallback"],
+        "obsolete_sku_fallback": fallback_result["obsolete_sku_fallback"],
+        "invalid_plan_input_fallback": fallback_result["invalid_plan_input_fallback"],
+    }
 
 
 def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
@@ -419,6 +439,18 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         raise AssertionError("session-check action must refresh the seller recovery summary without starting recovery")
 
     page.click('[data-tab-button="factory-order"]')
+    if not page.locator('input[name="factoryInboundSource"][value="manual_excel"]').is_checked():
+        raise AssertionError("factory-order UI must default factory inbound source to manual_excel")
+    page.check('input[name="factoryInboundSource"][value="supplier_registry"]')
+    page.wait_for_function(
+        """(storageKey) => {
+            const raw = window.localStorage.getItem(storageKey);
+            if (!raw) return false;
+            const parsed = JSON.parse(raw);
+            return parsed.factory_inbound_source === "supplier_registry";
+        }""",
+        arg=STORAGE_KEY,
+    )
     page.click('[data-supply-section-button="regional"]')
     page.reload(wait_until="domcontentloaded")
     factory_state = {
@@ -431,6 +463,19 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     }
     if factory_state != {"top_tab": "factory-order", "supply_section": "regional"}:
         raise AssertionError(f"top tab + supply subsection must survive reload, got {factory_state}")
+    page.click('[data-supply-section-button="factory"]')
+    if not page.locator('input[name="factoryInboundSource"][value="supplier_registry"]').is_checked():
+        raise AssertionError("factory-order inbound source selection must survive reload")
+    factory_source_state = {
+        "selected": page.locator('input[name="factoryInboundSource"]:checked').input_value(),
+        "storage_state": page.evaluate(
+            """(storageKey) => {
+                const raw = window.localStorage.getItem(storageKey);
+                return raw ? JSON.parse(raw) : null;
+            }""",
+            STORAGE_KEY,
+        ),
+    }
 
     page.click('[data-tab-button="reports"]')
     page.click('[data-report-section-button="stock"]')
@@ -567,14 +612,15 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "default_state": default_state,
         "top_tab_persistence": factory_state,
         "subsection_persistence": reports_state,
-            "sku_persistence": {
-                "kept_label": kept_label,
-                "selected_labels_after_reload": selected_labels_after_reload,
-                "storage_state": persisted_state,
-            },
-            "zero_selection_guard": validation_text.strip(),
-            "plan_input_persistence": restored_plan_inputs,
-        }
+        "factory_source_persistence": factory_source_state,
+        "sku_persistence": {
+            "kept_label": kept_label,
+            "selected_labels_after_reload": selected_labels_after_reload,
+            "storage_state": persisted_state,
+        },
+        "zero_selection_guard": validation_text.strip(),
+        "plan_input_persistence": restored_plan_inputs,
+    }
 
 
 def _run_fallback_scenario(context, base_url: str) -> dict[str, object]:
@@ -779,6 +825,7 @@ def _print_summary(result: dict[str, object]) -> None:
         result["subsection_persistence"],
     )
     print("operator_ui_sku_restore: ok ->", result["sku_persistence"])
+    print("operator_ui_factory_source_restore: ok ->", result["factory_source_persistence"])
     print("operator_ui_plan_input_restore: ok ->", result["plan_input_persistence"])
     print("operator_ui_zero_guard: ok ->", result["zero_selection_guard"])
     print(

@@ -9,6 +9,10 @@ DATASET_STOCK_FF = "stock_ff"
 DATASET_INBOUND_FACTORY_TO_FF = "inbound_factory_to_ff"
 DATASET_INBOUND_FF_TO_WB = "inbound_ff_to_wb"
 
+FACTORY_INBOUND_SOURCE_MANUAL_EXCEL = "manual_excel"
+FACTORY_INBOUND_SOURCE_SUPPLIER_REGISTRY = "supplier_registry"
+SUPPLIER_REGISTRY_FACTORY_TO_FF_ACCEPTANCE_DAYS = 30
+
 
 @dataclass(frozen=True)
 class FactoryOrderSettings:
@@ -21,6 +25,7 @@ class FactoryOrderSettings:
     order_batch_qty: int
     report_date_override: str | None
     sales_avg_period_days: int
+    factory_inbound_source: str = FACTORY_INBOUND_SOURCE_MANUAL_EXCEL
 
 
 @dataclass(frozen=True)
@@ -47,6 +52,57 @@ class FactoryOrderInboundShipmentSummary:
     shipment: str
     total_quantity: float
     acceptance_date: str
+
+
+@dataclass(frozen=True)
+class FactoryOrderSupplierRegistryShipmentSummary:
+    shipment_id: str
+    shipment_label: str
+    invoice_no: str
+    invoice_date: str
+    total_product_quantity: float
+    shipment_date: str
+    calculated_acceptance_date: str
+    matched_line_count: int
+    unmatched_line_count: int
+    ambiguous_line_count: int
+    missing_shipment_date_line_count: int
+    usable_quantity: float
+
+
+@dataclass(frozen=True)
+class FactoryOrderSupplierRegistryDiagnostics:
+    shipment_count: int
+    product_line_count: int
+    matched_line_count: int
+    unmatched_line_count: int
+    ambiguous_line_count: int
+    missing_shipment_date_line_count: int
+    invalid_quantity_line_count: int
+    usable_line_count: int
+    usable_quantity: float
+
+
+@dataclass(frozen=True)
+class FactoryOrderSupplierRegistryInboundState:
+    source: str
+    status: str
+    acceptance_days: int
+    shipment_summary: tuple[FactoryOrderSupplierRegistryShipmentSummary, ...]
+    diagnostics: FactoryOrderSupplierRegistryDiagnostics
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FactoryOrderEffectiveInboundRow:
+    source: str
+    nm_id: int
+    sku_comment: str
+    quantity: float
+    planned_arrival_date: str
+    effective_arrival_date: str
+    shipment_name: str
+    comment: str
 
 
 @dataclass(frozen=True)
@@ -108,11 +164,18 @@ class FactoryOrderCalculationResult:
     calculated_at: str
     report_date: str
     horizon_days: int
+    target_window_days: int
+    inbound_window_end: str
     coverage_contract_note: str
     settings: FactoryOrderSettings
+    factory_inbound_source: str
     datasets: dict[str, FactoryOrderDatasetState]
+    manual_factory_inbound_dataset: FactoryOrderDatasetState
+    supplier_registry_inbound_summary: FactoryOrderSupplierRegistryInboundState
+    effective_inbound_factory_to_ff: list[FactoryOrderEffectiveInboundRow]
     summary: FactoryOrderSummary
     rows: list[FactoryOrderRecommendationRow]
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -120,5 +183,8 @@ class FactoryOrderStatus:
     status: str
     active_sku_count: int
     coverage_contract_note: str
+    factory_inbound_source: str
     datasets: dict[str, FactoryOrderDatasetState]
+    manual_factory_inbound_dataset: FactoryOrderDatasetState
+    supplier_registry_inbound_summary: FactoryOrderSupplierRegistryInboundState
     last_result: FactoryOrderCalculationResult | None
