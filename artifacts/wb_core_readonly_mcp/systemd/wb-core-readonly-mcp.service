@@ -1,0 +1,26 @@
+[Unit]
+Description=WB Core Read-Only MCP HTTP Service
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/wb-core-readonly-mcp/app/apps/wb_core_readonly_mcp_http.py
+ConditionPathExists=/opt/wb-core-readonly-mcp/config/remote.config.json
+
+[Service]
+Type=simple
+User=wb-core-readonly-mcp
+Group=wb-core-readonly-mcp
+WorkingDirectory=/opt/wb-core-readonly-mcp/app
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/opt/wb-core-readonly-mcp/env/wb-core-readonly-mcp.env
+ExecStart=/usr/bin/python3 /opt/wb-core-readonly-mcp/app/apps/wb_core_readonly_mcp_http.py --config /opt/wb-core-readonly-mcp/config/remote.config.json --host 127.0.0.1 --port 8766
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/wb-core-readonly-mcp/app /opt/wb-core-readonly-mcp/repo /opt/wb-core-readonly-mcp/config /opt/wb-core-readonly-mcp/env
+
+[Install]
+WantedBy=multi-user.target
