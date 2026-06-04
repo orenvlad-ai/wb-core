@@ -323,13 +323,11 @@ artifacts/wb_core_readonly_mcp/bin/setup_hosted_readonly_mcp.sh install-or-updat
 The script:
 - creates/updates only `/opt/wb-core-readonly-mcp/**` and `/etc/systemd/system/wb-core-readonly-mcp.service`;
 - creates a least-privilege service user if missing;
-- clones/pulls `origin/main` as that service user with `git pull --ff-only`;
+- clones/pulls `origin/main` with `git pull --ff-only`;
 - refuses dirty managed clones;
 - writes runtime config without secret values;
 - writes the bearer token only to the runtime env file when provided/generated;
 - restarts only `wb-core-readonly-mcp.service`.
-
-The app and repo clones are owned by the service user to keep Git `safe.directory` checks valid at runtime. The systemd unit still runs with `ProtectSystem=strict`, `NoNewPrivileges=true` and `ReadOnlyPaths=/opt/wb-core-readonly-mcp/app /opt/wb-core-readonly-mcp/repo /opt/wb-core-readonly-mcp/config /opt/wb-core-readonly-mcp/env`, so the service process itself cannot write to the clones while serving requests.
 
 The script must not:
 - touch `/opt/wb-core-runtime/app`;

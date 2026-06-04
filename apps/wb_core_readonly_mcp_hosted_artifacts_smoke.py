@@ -36,8 +36,6 @@ def main() -> None:
     subprocess.run(["bash", "-n", str(setup)], check=True)
     setup_text = setup.read_text(encoding="utf-8")
     _assert_contains(setup_text, "pull --ff-only")
-    _assert_contains(setup_text, "runuser -u \"$SERVICE_USER\" -- git")
-    _assert_contains(setup_text, "chown -R \"$SERVICE_USER:$SERVICE_USER\" \"$APP_DIR\" \"$REPO_DIR\"")
     _assert_not_contains(setup_text, "reset --hard")
     _assert_not_contains(setup_text, "rm -rf")
     _assert_not_contains(setup_text, "/opt/wb-core-runtime/app")

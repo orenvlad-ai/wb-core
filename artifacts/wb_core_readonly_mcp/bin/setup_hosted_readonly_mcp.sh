@@ -34,13 +34,8 @@ ensure_user() {
 }
 
 ensure_dirs() {
-  install -d -m 0755 "$BASE_DIR" "$CONFIG_DIR"
-  install -d -m 0755 -o "$SERVICE_USER" -g "$SERVICE_USER" "$APP_DIR" "$REPO_DIR"
+  install -d -m 0755 "$BASE_DIR" "$APP_DIR" "$REPO_DIR" "$CONFIG_DIR"
   install -d -m 0700 "$ENV_DIR"
-}
-
-git_as_service_user() {
-  runuser -u "$SERVICE_USER" -- git "$@"
 }
 
 ensure_git_clone() {
@@ -50,20 +45,20 @@ ensure_git_clone() {
       echo "error: $dir exists but is not an empty git clone directory" >&2
       exit 3
     fi
-    git_as_service_user clone --branch "$BRANCH" --single-branch "$REPO_URL" "$dir"
+    git clone --branch "$BRANCH" --single-branch "$REPO_URL" "$dir"
     return
   fi
-  if [ "$(git_as_service_user -C "$dir" config --get remote.origin.url)" != "$REPO_URL" ]; then
+  if [ "$(git -C "$dir" config --get remote.origin.url)" != "$REPO_URL" ]; then
     echo "error: $dir origin does not match expected repo URL" >&2
     exit 3
   fi
-  if [ -n "$(git_as_service_user -C "$dir" status --porcelain=v1 --untracked-files=all)" ]; then
+  if [ -n "$(git -C "$dir" status --porcelain=v1 --untracked-files=all)" ]; then
     echo "error: $dir is dirty; refusing to update managed clone" >&2
     exit 3
   fi
-  git_as_service_user -C "$dir" fetch --prune origin "$BRANCH"
-  git_as_service_user -C "$dir" checkout "$BRANCH"
-  git_as_service_user -C "$dir" pull --ff-only origin "$BRANCH"
+  git -C "$dir" fetch --prune origin "$BRANCH"
+  git -C "$dir" checkout "$BRANCH"
+  git -C "$dir" pull --ff-only origin "$BRANCH"
 }
 
 write_config() {
@@ -133,8 +128,7 @@ install_systemd_unit() {
 }
 
 set_permissions() {
-  chown root:root "$BASE_DIR" "$CONFIG_DIR" "$ENV_DIR" "$CONFIG_FILE" "$ENV_FILE"
-  chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR" "$REPO_DIR"
+  chown -R root:root "$BASE_DIR"
   chmod 0755 "$BASE_DIR" "$APP_DIR" "$REPO_DIR" "$CONFIG_DIR"
   chmod 0700 "$ENV_DIR"
   chmod 0600 "$ENV_FILE"
