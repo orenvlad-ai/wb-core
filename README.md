@@ -46,6 +46,7 @@ Legacy-репозитории остаются рабочими, но счита
 - `packages/contracts`, `packages/application`, `packages/adapters` с живыми bounded modules;
 - `apps/` с smoke runners; legacy live sheet-side runners сохранены как archived fail-fast guards;
 - `artifacts/` с fixture/parity/evidence по смёрженным блокам;
+- `packages/application/wb_core_readonly_mcp.py`, `apps/wb_core_readonly_mcp.py`, `apps/wb_core_readonly_mcp_smoke.py` и `artifacts/wb_core_readonly_mcp/input/config.example.json` как локальный read-only MCP boundary для ChatGPT Project prompt-preparation поверх текущего checkout, без DevControl/deploy/execution-plane прав;
 - `registry/pilot_bundle/` как pilot registry line для новой витрины;
 - `artifacts/registry_upload_bundle_v1/` как первый artifact-backed upload path для V2-реестров;
 - `artifacts/registry_upload_file_backed_service/` как локальный file-backed receiver для registry upload path;
@@ -98,6 +99,7 @@ Legacy-репозитории остаются рабочими, но счита
 - [docs/architecture/07_codex_execution_protocol.md](docs/architecture/07_codex_execution_protocol.md)
 - [docs/architecture/02_repo_workspace_blueprint.md](docs/architecture/02_repo_workspace_blueprint.md)
 - [docs/architecture/10_hosted_runtime_deploy_contract.md](docs/architecture/10_hosted_runtime_deploy_contract.md)
+- [docs/architecture/11_wb_core_readonly_mcp_contract.md](docs/architecture/11_wb_core_readonly_mcp_contract.md)
 
 `README.md` остаётся summary/navigation entrypoint и не должен использоваться как самостоятельный carrier operational governance.
 
@@ -108,6 +110,7 @@ Legacy-репозитории остаются рабочими, но счита
 - [docs/architecture/00_migration_charter.md](docs/architecture/00_migration_charter.md)
 - [docs/architecture/01_target_architecture.md](docs/architecture/01_target_architecture.md)
 - [docs/architecture/10_hosted_runtime_deploy_contract.md](docs/architecture/10_hosted_runtime_deploy_contract.md)
+- [docs/architecture/11_wb_core_readonly_mcp_contract.md](docs/architecture/11_wb_core_readonly_mcp_contract.md)
 - [migration/75_registry_v2_minimal_schema.md](migration/75_registry_v2_minimal_schema.md)
 - [migration/76_metric_runtime_registry_minimal_schema.md](migration/76_metric_runtime_registry_minimal_schema.md)
 - [migration/77_registry_implementation_path.md](migration/77_registry_implementation_path.md)
