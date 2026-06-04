@@ -1,9 +1,10 @@
 {
-  "repo_root": "/absolute/path/to/wb-core",
-  "source_mode": "local_checkout",
+  "repo_root": "/srv/wb-core-readonly-mcp/clone/wb-core",
+  "source_mode": "managed_clone",
   "repo_url": "https://github.com/orenvlad-ai/wb-core.git",
   "branch": "main",
-  "refresh_policy": "none",
+  "refresh_policy": "external_manual",
+  "remote_auth_token_env": "WB_CORE_READONLY_MCP_TOKEN",
   "max_file_bytes": 1048576,
   "max_response_chars": 262144,
   "max_range_lines": 400,
