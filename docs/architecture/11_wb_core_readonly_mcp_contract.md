@@ -2,7 +2,11 @@
 
 ## Purpose
 
-`wb-core-readonly-mcp` is a repo-owned minimal MCP server that gives a ChatGPT Project safe read-only access to the current local `wb-core` repository checkout.
+`wb-core-readonly-mcp` is a repo-owned minimal MCP server that gives a ChatGPT Project safe read-only access to a `wb-core` repository checkout.
+
+Supported modes:
+- local stdio mode for a user-controlled local checkout;
+- remote HTTP mode for a separate managed clone that tracks GitHub `origin/main`.
 
 Primary scenario:
 - user asks ChatGPT for a `wb-core` task;
@@ -16,8 +20,11 @@ DevControl is not part of this flow. The MCP is a repository-reading boundary on
 Current repo implementation:
 - policy/service: `packages/application/wb_core_readonly_mcp.py`;
 - stdio MCP entrypoint: `apps/wb_core_readonly_mcp.py`;
+- HTTP MCP entrypoint: `apps/wb_core_readonly_mcp_http.py`;
 - targeted local smoke: `apps/wb_core_readonly_mcp_smoke.py`;
+- targeted remote-mode smoke: `apps/wb_core_readonly_mcp_remote_smoke.py`;
 - non-secret example config: `artifacts/wb_core_readonly_mcp/input/config.example.json`.
+- non-secret remote example config: `artifacts/wb_core_readonly_mcp/input/remote.config.example.json`.
 
 ## Explicit Non-Goals
 
@@ -28,7 +35,9 @@ The MCP must not provide:
 - deploy, publish, service restart or runtime rollout;
 - SSH access, live runtime mutation, remote shell execution or remote file sync;
 - reads of secrets, env files, cookies, browser sessions or storage-state files;
-- DevControl production lane access or DevControl-backed execution.
+- DevControl production lane access or DevControl-backed execution;
+- product-plane routes on `api.selleros.pro` or any other production runtime;
+- unauthenticated public internet exposure.
 
 The server is intentionally unable to "just run the task". Its output is repo context and prompt material for a human-controlled Codex CLI run.
 
@@ -115,24 +124,37 @@ Recommended redaction classes:
 
 If a file is denied, the MCP should return a structured denial reason such as `denied_sensitive_path`, `denied_symlink_escape`, `denied_binary`, `denied_size_limit` or `denied_outside_repo`.
 
-## Freshness Model
+## Freshness Model And Managed Clone Source
 
 The MCP reads from one configured source repo path:
-- `repo_root`: local checkout of `wb-core`.
+- local mode: `repo_root` may be a user-controlled checkout;
+- remote mode: `repo_root` must be a separate managed clone, not `/opt/wb-core-runtime/app`, not production runtime state and not a random local Mac checkout.
+
+Remote managed-clone config records:
+- `source_mode = managed_clone`;
+- `repo_url = https://github.com/orenvlad-ai/wb-core.git`;
+- `branch = main`;
+- `refresh_policy = none | external_manual | external_managed`.
+
+Current implementation does not auto-fetch and does not mutate the clone. A separate external process may update the managed clone if `refresh_policy` documents that ownership. Served files still pass through the same read policy after any external refresh.
 
 `repo_status` must report:
 - resolved `repo_root`;
+- source mode;
+- configured repo URL and branch;
+- refresh policy;
 - current branch name;
 - current commit SHA;
 - dirty tracked-file state;
+- actual `origin` URL if configured;
 - whether the checkout has an upstream configured;
-- last known fetch metadata if available without network access.
+- last known `FETCH_HEAD` mtime if available without reading `.git` file contents.
 
 Default contract: the MCP reads the current checkout and does not auto-fetch. This keeps the server read-only and avoids hidden network or Git side effects.
 
 Before preparing a Codex prompt, ChatGPT should call `repo_status` and include the observed branch/commit in its reasoning or handoff. If the user expects a different branch/commit, the user updates the checkout outside the MCP and asks ChatGPT to re-check `repo_status`.
 
-Open decision: whether a future implementation may support an explicit off-by-default `fetch_status` or `auto_fetch=false/true` mode. Any such mode must not mutate worktree files and must be visibly reported in `repo_status`.
+Open decision: whether a future implementation may support an explicit off-by-default `fetch_status` or bounded refresh endpoint. Any such mode must be lock-protected, must not serve partially updated files, must not read secrets, must not target production runtime state and must be visibly reported in `repo_status`.
 
 ## Prompt-Preparation Workflow
 
@@ -158,6 +180,7 @@ The MCP may help prepare the prompt; it must not call Codex, DevControl, GitHub 
 Implementation shape:
 - dependency-light Python using only the standard library;
 - stdio JSON-RPC MCP transport for local MCP clients;
+- HTTP JSON-RPC MCP transport for URL-style clients;
 - one path resolver/policy layer for all tools;
 - redaction before text/snippet response;
 - no mutation, shell, deploy, SSH, GitHub, Codex or DevControl tools.
@@ -167,6 +190,10 @@ Example config shape lives at `artifacts/wb_core_readonly_mcp/input/config.examp
 ```json
 {
   "repo_root": "/absolute/path/to/wb-core",
+  "source_mode": "local_checkout",
+  "repo_url": "https://github.com/orenvlad-ai/wb-core.git",
+  "branch": "main",
+  "refresh_policy": "none",
   "max_file_bytes": 1048576,
   "max_response_chars": 262144,
   "max_range_lines": 400,
@@ -196,11 +223,68 @@ ChatGPT connector configuration concept:
 - connector env: no secrets;
 - connector description: "Read-only access to local `wb-core` checkout for prompt preparation only."
 
+## Remote HTTP Mode
+
+Remote mode is for hosting `wb-core-readonly-mcp` as a separate service over a dedicated read-only managed clone. It is not a product-plane route and must not be hosted inside the WebCore production runtime.
+
+Current HTTP endpoints:
+- `POST /mcp`: stateless JSON-RPC MCP requests (`initialize`, `tools/list`, `tools/call`);
+- `GET /sse`: minimal SSE descriptor that tells URL/SSE-oriented clients to use `/mcp`;
+- `GET /healthz`: non-secret server/transport health metadata.
+
+This is a minimal HTTP/SSE-compatible implementation. If ChatGPT requires a stricter stateful remote MCP transport than stateless JSON-RPC-over-HTTP plus the `/sse` descriptor, the next implementation step is to adapt this transport layer while reusing the same `McpJsonRpcServer` and read policy.
+
+Remote config example lives at `artifacts/wb_core_readonly_mcp/input/remote.config.example.json`:
+
+```json
+{
+  "repo_root": "/srv/wb-core-readonly-mcp/clone/wb-core",
+  "source_mode": "managed_clone",
+  "repo_url": "https://github.com/orenvlad-ai/wb-core.git",
+  "branch": "main",
+  "refresh_policy": "external_manual",
+  "remote_auth_token_env": "WB_CORE_READONLY_MCP_TOKEN",
+  "max_file_bytes": 1048576,
+  "max_response_chars": 262144,
+  "max_range_lines": 400,
+  "max_search_matches": 50,
+  "max_find_results": 200,
+  "max_tree_items": 500,
+  "max_tree_depth": 3
+}
+```
+
+Remote server run concept:
+
+```bash
+export WB_CORE_READONLY_MCP_TOKEN='set-outside-repo'
+python3 apps/wb_core_readonly_mcp_http.py \
+  --config /srv/wb-core-readonly-mcp/config/remote.config.json \
+  --host 127.0.0.1 \
+  --port 8766
+```
+
+URL connector concept:
+- URL: `https://<authenticated-host>/mcp`;
+- if the client asks for an SSE URL, use `https://<authenticated-host>/sse`;
+- auth: `Authorization: Bearer <token>` if `remote_auth_token_env` is configured;
+- exposure: place the service behind an authenticated tunnel or reverse proxy; do not expose it as an unauthenticated public internet service;
+- source: `/srv/wb-core-readonly-mcp/clone/wb-core` or equivalent managed clone, refreshed outside this MCP process from GitHub `origin/main`.
+
+Current remote mode rejects startup when:
+- `source_mode` is not `managed_clone`;
+- `repo_url` or `branch` is missing;
+- `repo_root` is under `/opt/wb-core-runtime` or `/opt/wb-ai`;
+- actual Git `origin` or current branch does not match configured `repo_url` / `branch`;
+- managed clone has tracked or untracked dirty files;
+- `remote_auth_token_env` is configured but the env var is empty.
+
 Targeted local validation:
 
 ```bash
 python3 apps/wb_core_readonly_mcp_smoke.py
-python3 -m py_compile packages/application/wb_core_readonly_mcp.py apps/wb_core_readonly_mcp.py apps/wb_core_readonly_mcp_smoke.py
+python3 apps/wb_core_readonly_mcp_remote_smoke.py
+python3 -m py_compile packages/application/wb_core_readonly_mcp.py apps/wb_core_readonly_mcp.py apps/wb_core_readonly_mcp_http.py apps/wb_core_readonly_mcp_smoke.py apps/wb_core_readonly_mcp_remote_smoke.py
 git diff --check
 ```
 
@@ -212,7 +296,8 @@ git diff --check
 | O-02 | Whether auto-fetch is allowed | Current implementation does not auto-fetch; future explicit opt-in remains undecided. |
 | O-03 | Max file size and response size | Current defaults: `1 MiB` file read and `256 KiB` response. |
 | O-04 | Whether `artifacts/**` is broad-read or fixture-only | Current implementation is fixture/config-like only after deny filtering. |
-| O-05 | Whether docs should be updated after implementation | This doc must be updated whenever tool/config/policy semantics change. |
+| O-05 | Exact ChatGPT remote MCP transport shape | Current implementation provides stateless HTTP JSON-RPC at `/mcp` and a minimal `/sse` descriptor; adjust if ChatGPT requires a stricter transport. |
+| O-06 | Whether docs should be updated after implementation | This doc must be updated whenever tool/config/policy semantics change. |
 
 ## Validation Contract
 

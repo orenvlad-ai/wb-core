@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from fnmatch import fnmatch
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import argparse
 import hashlib
 import json
@@ -18,6 +20,7 @@ import re
 import subprocess
 import sys
 from typing import Any, BinaryIO, Callable, Iterable, TextIO
+from urllib.parse import urlparse
 
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
@@ -109,6 +112,11 @@ ASSIGNMENT_SECRET_RE = re.compile(
 @dataclass(frozen=True)
 class ReadonlyMcpConfig:
     repo_root: Path
+    source_mode: str = "local_checkout"
+    repo_url: str | None = None
+    branch: str | None = None
+    refresh_policy: str = "none"
+    remote_auth_token_env: str | None = None
     max_file_bytes: int = 1_048_576
     max_response_chars: int = 262_144
     max_range_lines: int = 400
@@ -126,6 +134,11 @@ class ReadonlyMcpConfig:
             repo_root = find_repo_root(Path.cwd())
         return cls(
             repo_root=repo_root.resolve(),
+            source_mode=str(data.get("source_mode") or "local_checkout"),
+            repo_url=_optional_str(data.get("repo_url")),
+            branch=_optional_str(data.get("branch")),
+            refresh_policy=str(data.get("refresh_policy") or "none"),
+            remote_auth_token_env=_optional_str(data.get("remote_auth_token_env")),
             max_file_bytes=_positive_int(data.get("max_file_bytes"), 1_048_576),
             max_response_chars=_positive_int(
                 data.get("max_response_chars", data.get("max_response_bytes")),
@@ -183,6 +196,40 @@ def load_config(config_path: Path | None, *, repo_root_override: Path | None = N
     return ReadonlyMcpConfig.from_dict(data)
 
 
+def validate_managed_clone_config(
+    config: ReadonlyMcpConfig,
+    *,
+    allow_local_checkout_for_smoke: bool = False,
+) -> None:
+    if allow_local_checkout_for_smoke and config.source_mode == "local_checkout":
+        return
+    if config.source_mode != "managed_clone":
+        raise PolicyError(
+            "invalid_remote_source_mode",
+            "Remote HTTP MCP mode requires source_mode=managed_clone",
+        )
+    if not config.repo_url:
+        raise PolicyError("invalid_remote_config", "Remote managed-clone config requires repo_url")
+    if not config.branch:
+        raise PolicyError("invalid_remote_config", "Remote managed-clone config requires branch")
+    if config.refresh_policy not in {"none", "external_manual", "external_managed"}:
+        raise PolicyError(
+            "invalid_remote_config",
+            "refresh_policy must be one of: none, external_manual, external_managed",
+        )
+    forbidden_roots = (Path("/opt/wb-core-runtime"), Path("/opt/wb-ai"))
+    for forbidden in forbidden_roots:
+        try:
+            common = os.path.commonpath([str(forbidden), str(config.repo_root)])
+        except ValueError:
+            continue
+        if common == str(forbidden):
+            raise PolicyError(
+                "denied_runtime_repo_root",
+                "Remote MCP repo_root must be a separate managed clone, not production runtime/app state",
+            )
+
+
 def _positive_int(value: Any, default: int) -> int:
     if value is None:
         return default
@@ -193,6 +240,13 @@ def _positive_int(value: Any, default: int) -> int:
     if parsed <= 0:
         raise PolicyError("invalid_config", f"Expected positive integer config value, got {value!r}")
     return parsed
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    parsed = str(value).strip()
+    return parsed or None
 
 
 def redact_text(text: str) -> str:
@@ -248,6 +302,7 @@ class RepoReadService:
         branch = self._git(["rev-parse", "--abbrev-ref", "HEAD"], allow_failure=True)
         commit = self._git(["rev-parse", "HEAD"], allow_failure=True)
         upstream = self._git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], allow_failure=True)
+        origin_url = self._git(["config", "--get", "remote.origin.url"], allow_failure=True)
         status_output = self._git(
             ["status", "--porcelain=v1", "--untracked-files=all"],
             allow_failure=True,
@@ -278,10 +333,16 @@ class RepoReadService:
         return {
             "ok": True,
             "repo_root": str(self.repo_root),
+            "source_mode": self.config.source_mode,
+            "configured_repo_url": self.config.repo_url,
+            "configured_branch": self.config.branch,
+            "refresh_policy": self.config.refresh_policy,
             "branch": branch or None,
             "commit": commit or None,
             "upstream": upstream or None,
+            "origin_url": redact_text(origin_url) or None,
             "auto_fetch": False,
+            "last_fetch_head_mtime_epoch": self._fetch_head_mtime_epoch(),
             "dirty": dirty,
             "dirty_count": len(dirty),
             "omitted_sensitive_or_denied_count": omitted_sensitive,
@@ -494,6 +555,32 @@ class RepoReadService:
         metadata = self._metadata_for_resolved(resolved, include_hash=True)
         return {"ok": True, "metadata": metadata}
 
+    def validate_managed_clone_alignment(self) -> None:
+        if self.config.source_mode != "managed_clone":
+            return
+        branch = self._git(["rev-parse", "--abbrev-ref", "HEAD"], allow_failure=True)
+        if branch != self.config.branch:
+            raise PolicyError(
+                "managed_clone_branch_mismatch",
+                f"Managed clone branch mismatch: expected {self.config.branch!r}, got {branch!r}",
+            )
+        origin_url = self._git(["config", "--get", "remote.origin.url"], allow_failure=True)
+        if self.config.repo_url and origin_url != self.config.repo_url:
+            raise PolicyError(
+                "managed_clone_origin_mismatch",
+                "Managed clone origin URL does not match configured repo_url",
+            )
+        dirty = self._git(
+            ["status", "--porcelain=v1", "--untracked-files=all"],
+            allow_failure=True,
+            strip=False,
+        )
+        if dirty.strip():
+            raise PolicyError(
+                "managed_clone_dirty",
+                "Remote MCP managed clone must be clean before serving repo files",
+            )
+
     def _git(self, args: list[str], *, allow_failure: bool, strip: bool = True) -> str:
         try:
             completed = subprocess.run(
@@ -512,6 +599,13 @@ class RepoReadService:
         if completed.returncode != 0 and allow_failure:
             return ""
         return completed.stdout.strip() if strip else completed.stdout.rstrip("\n")
+
+    def _fetch_head_mtime_epoch(self) -> int | None:
+        fetch_head = self.repo_root / ".git" / "FETCH_HEAD"
+        try:
+            return int(fetch_head.stat().st_mtime)
+        except OSError:
+            return None
 
     def _resolve_existing_file(self, path: str) -> ResolvedRepoPath:
         resolved = self._resolve_existing(path, allow_root=False)
@@ -843,6 +937,173 @@ class McpJsonRpcServer:
         return {"jsonrpc": "2.0", "id": request_id, "error": error}
 
 
+class ReadonlyMcpHttpServer(ThreadingHTTPServer):
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        mcp_server: McpJsonRpcServer,
+        *,
+        auth_token: str | None = None,
+        mcp_path: str = "/mcp",
+        sse_path: str = "/sse",
+        health_path: str = "/healthz",
+        max_request_bytes: int = 1_048_576,
+    ) -> None:
+        super().__init__(server_address, ReadonlyMcpHttpHandler)
+        self.mcp_server = mcp_server
+        self.auth_token = auth_token
+        self.mcp_path = mcp_path
+        self.sse_path = sse_path
+        self.health_path = health_path
+        self.max_request_bytes = max_request_bytes
+
+
+class ReadonlyMcpHttpHandler(BaseHTTPRequestHandler):
+    server: ReadonlyMcpHttpServer
+
+    def do_GET(self) -> None:  # noqa: N802 - stdlib handler API.
+        parsed = urlparse(self.path)
+        if parsed.path == self.server.health_path:
+            self._write_json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "server": SERVER_NAME,
+                    "version": SERVER_VERSION,
+                    "transport": "http-jsonrpc",
+                    "mcp_path": self.server.mcp_path,
+                    "sse_path": self.server.sse_path,
+                    "auth_required": self.server.auth_token is not None,
+                },
+            )
+            return
+        if parsed.path == self.server.sse_path:
+            if not self._authorized():
+                self._write_json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
+                return
+            body = (
+                "event: endpoint\n"
+                f"data: {self.server.mcp_path}\n\n"
+                "event: ready\n"
+                "data: {\"transport\":\"http-jsonrpc\",\"session\":\"stateless\"}\n\n"
+            ).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self._write_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
+
+    def do_POST(self) -> None:  # noqa: N802 - stdlib handler API.
+        parsed = urlparse(self.path)
+        if parsed.path != self.server.mcp_path:
+            self._write_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
+            return
+        if not self._authorized():
+            self._write_json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
+            return
+        content_type = self.headers.get("Content-Type", "")
+        if "application/json" not in content_type:
+            self._write_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"ok": False, "error": "expected_json"})
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._write_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid_content_length"})
+            return
+        if content_length <= 0:
+            self._write_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "empty_request"})
+            return
+        if content_length > self.server.max_request_bytes:
+            self._write_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"ok": False, "error": "request_too_large"})
+            return
+        raw = self.rfile.read(content_length)
+        try:
+            request = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._write_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid_json"})
+            return
+        if not isinstance(request, dict):
+            self._write_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid_jsonrpc_request"})
+            return
+        response = self.server.mcp_server.handle_request(request)
+        if response is None:
+            self.send_response(HTTPStatus.ACCEPTED)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self._write_json(HTTPStatus.OK, response)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - stdlib signature.
+        return
+
+    def _authorized(self) -> bool:
+        token = self.server.auth_token
+        if token is None:
+            return True
+        return self.headers.get("Authorization") == f"Bearer {token}"
+
+    def _write_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def resolve_remote_auth_token(config: ReadonlyMcpConfig) -> str | None:
+    if not config.remote_auth_token_env:
+        return None
+    token = os.environ.get(config.remote_auth_token_env, "")
+    if not token:
+        raise PolicyError(
+            "missing_remote_auth_token",
+            f"remote_auth_token_env is configured but {config.remote_auth_token_env} is empty",
+        )
+    return token
+
+
+def build_http_server(
+    config: ReadonlyMcpConfig,
+    *,
+    host: str,
+    port: int,
+    allow_local_checkout_for_smoke: bool = False,
+) -> ReadonlyMcpHttpServer:
+    validate_managed_clone_config(config, allow_local_checkout_for_smoke=allow_local_checkout_for_smoke)
+    mcp_server = build_server(config)
+    mcp_server.service.validate_managed_clone_alignment()
+    auth_token = resolve_remote_auth_token(config)
+    return ReadonlyMcpHttpServer(
+        (host, port),
+        mcp_server,
+        auth_token=auth_token,
+        max_request_bytes=max(config.max_response_chars, 65_536),
+    )
+
+
+def serve_http(
+    config: ReadonlyMcpConfig,
+    *,
+    host: str,
+    port: int,
+    allow_local_checkout_for_smoke: bool = False,
+) -> None:
+    http_server = build_http_server(
+        config,
+        host=host,
+        port=port,
+        allow_local_checkout_for_smoke=allow_local_checkout_for_smoke,
+    )
+    try:
+        http_server.serve_forever(poll_interval=0.25)
+    finally:
+        http_server.server_close()
+
+
 def read_json_rpc_message(stream: BinaryIO) -> dict[str, Any] | None:
     headers: dict[str, str] = {}
     while True:
@@ -914,6 +1175,62 @@ def main(argv: list[str] | None = None, *, stdout: TextIO | None = None) -> int:
         return 0
 
     serve_stdio(server)
+    return 0
+
+
+def http_main(argv: list[str] | None = None, *, stdout: TextIO | None = None) -> int:
+    parser = argparse.ArgumentParser(description="HTTP JSON-RPC MCP server for a managed read-only wb-core clone.")
+    parser.add_argument("--config", type=Path, required=True, help="Path to JSON config file.")
+    parser.add_argument("--repo-root", type=Path, help="Override repo_root from config.")
+    parser.add_argument("--host", default="127.0.0.1", help="Bind host. Use a reverse proxy/tunnel for remote exposure.")
+    parser.add_argument("--port", type=int, default=8766, help="Bind port.")
+    parser.add_argument(
+        "--allow-local-checkout-for-smoke",
+        action="store_true",
+        help="Test-only override; remote mode normally requires source_mode=managed_clone.",
+    )
+    args = parser.parse_args(argv)
+
+    output = stdout or sys.stdout
+    try:
+        config = load_config(args.config, repo_root_override=args.repo_root)
+        http_server = build_http_server(
+            config,
+            host=args.host,
+            port=args.port,
+            allow_local_checkout_for_smoke=args.allow_local_checkout_for_smoke,
+        )
+    except PolicyError as exc:
+        sys.stderr.write(json.dumps(exc.payload(), ensure_ascii=False, sort_keys=True))
+        sys.stderr.write("\n")
+        return 2
+    actual_host, actual_port = http_server.server_address
+    auth_enabled = bool(config.remote_auth_token_env)
+    output.write(
+        json.dumps(
+            {
+                "ok": True,
+                "server": SERVER_NAME,
+                "transport": "http-jsonrpc",
+                "url": f"http://{actual_host}:{actual_port}/mcp",
+                "sse_url": f"http://{actual_host}:{actual_port}/sse",
+                "source_mode": config.source_mode,
+                "repo_root": str(config.repo_root),
+                "repo_url": config.repo_url,
+                "branch": config.branch,
+                "refresh_policy": config.refresh_policy,
+                "auth_required": auth_enabled,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    output.write("\n")
+    output.flush()
+    try:
+        http_server.serve_forever(poll_interval=0.25)
+    finally:
+        http_server.server_close()
     return 0
 
 
