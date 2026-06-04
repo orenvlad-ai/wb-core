@@ -21,13 +21,10 @@ Current repo implementation:
 - policy/service: `packages/application/wb_core_readonly_mcp.py`;
 - stdio MCP entrypoint: `apps/wb_core_readonly_mcp.py`;
 - HTTP MCP entrypoint: `apps/wb_core_readonly_mcp_http.py`;
-- hosted loopback probe: `apps/wb_core_readonly_mcp_hosted_probe.py`;
 - targeted local smoke: `apps/wb_core_readonly_mcp_smoke.py`;
 - targeted remote-mode smoke: `apps/wb_core_readonly_mcp_remote_smoke.py`;
-- targeted hosted-artifacts smoke: `apps/wb_core_readonly_mcp_hosted_artifacts_smoke.py`;
 - non-secret example config: `artifacts/wb_core_readonly_mcp/input/config.example.json`.
 - non-secret remote example config: `artifacts/wb_core_readonly_mcp/input/remote.config.example.json`.
-- hosted service artifacts: `artifacts/wb_core_readonly_mcp/systemd/`, `artifacts/wb_core_readonly_mcp/env/`, `artifacts/wb_core_readonly_mcp/nginx/`, `artifacts/wb_core_readonly_mcp/bin/`.
 
 ## Explicit Non-Goals
 
@@ -282,92 +279,12 @@ Current remote mode rejects startup when:
 - managed clone has tracked or untracked dirty files;
 - `remote_auth_token_env` is configured but the env var is empty.
 
-## Hosted Service Model
-
-The hosted service is a separate tooling service on the EU host, not part of WebCore product runtime.
-
-Repo-owned hosted artifacts:
-- systemd unit: `artifacts/wb_core_readonly_mcp/systemd/wb-core-readonly-mcp.service`;
-- runtime env example without secret values: `artifacts/wb_core_readonly_mcp/env/wb-core-readonly-mcp.env.example`;
-- setup/update script: `artifacts/wb_core_readonly_mcp/bin/setup_hosted_readonly_mcp.sh`;
-- dedicated proxy example: `artifacts/wb_core_readonly_mcp/nginx/wb-core-readonly-mcp.localhost-proxy.example.conf`;
-- hosted target example: `artifacts/wb_core_readonly_mcp/input/hosted_service_target__example.json`.
-
-Hosted directory contract:
-- base dir: `/opt/wb-core-readonly-mcp`;
-- app code clone: `/opt/wb-core-readonly-mcp/app`;
-- served repo clone: `/opt/wb-core-readonly-mcp/repo`;
-- config: `/opt/wb-core-readonly-mcp/config/remote.config.json`;
-- runtime env: `/opt/wb-core-readonly-mcp/env/wb-core-readonly-mcp.env`;
-- service user/group: `wb-core-readonly-mcp`;
-- systemd service: `wb-core-readonly-mcp.service`;
-- HTTP bind: `127.0.0.1:8766` by default.
-
-The app clone exists only to run `apps/wb_core_readonly_mcp_http.py`. The source of code truth served to ChatGPT is the separate repo clone at `/opt/wb-core-readonly-mcp/repo`, configured as `source_mode=managed_clone`, `repo_url=https://github.com/orenvlad-ai/wb-core.git`, `branch=main`.
-
-The setup script supports:
-
-```bash
-artifacts/wb_core_readonly_mcp/bin/setup_hosted_readonly_mcp.sh print-plan
-WB_CORE_READONLY_MCP_GENERATE_TOKEN=1 artifacts/wb_core_readonly_mcp/bin/setup_hosted_readonly_mcp.sh install-or-update
-artifacts/wb_core_readonly_mcp/bin/setup_hosted_readonly_mcp.sh loopback-probe
-```
-
-For manual token provisioning instead of generated token:
-
-```bash
-export WB_CORE_READONLY_MCP_TOKEN='set-outside-repo'
-artifacts/wb_core_readonly_mcp/bin/setup_hosted_readonly_mcp.sh install-or-update
-```
-
-The script:
-- creates/updates only `/opt/wb-core-readonly-mcp/**` and `/etc/systemd/system/wb-core-readonly-mcp.service`;
-- creates a least-privilege service user if missing;
-- clones/pulls `origin/main` with `git pull --ff-only`;
-- refuses dirty managed clones;
-- writes runtime config without secret values;
-- writes the bearer token only to the runtime env file when provided/generated;
-- restarts only `wb-core-readonly-mcp.service`.
-
-The script must not:
-- touch `/opt/wb-core-runtime/app`;
-- read `/opt/wb-ai/.env`;
-- touch Seller Portal/browser/session state;
-- edit broad nginx catch-all config;
-- publish a route under the WebCore product-plane domain.
-
-Hosted loopback verification:
-
-```bash
-set -a
-. /opt/wb-core-readonly-mcp/env/wb-core-readonly-mcp.env
-set +a
-python3 /opt/wb-core-readonly-mcp/app/apps/wb_core_readonly_mcp_hosted_probe.py --base-url http://127.0.0.1:8766
-```
-
-The probe checks:
-- `GET /healthz`;
-- MCP `initialize`;
-- MCP `tools/list`;
-- MCP `repo_status`;
-- one `read_file_range`;
-- one `search_text`;
-- denied `.env` behavior;
-- absence of mutation-like tools.
-
-Connector URL guidance:
-- direct connector URL is only safe after an authenticated tunnel/reverse proxy is configured;
-- if exposed through a dedicated authenticated hostname, use `/mcp` as the MCP URL and `/sse` only if the client requires an SSE discovery URL;
-- the connector needs the bearer token out-of-band; do not paste token values into repo docs, PRs or handoffs;
-- until authenticated URL/proxy is configured, the service is loopback-only and not externally reachable.
-
 Targeted local validation:
 
 ```bash
 python3 apps/wb_core_readonly_mcp_smoke.py
 python3 apps/wb_core_readonly_mcp_remote_smoke.py
-python3 apps/wb_core_readonly_mcp_hosted_artifacts_smoke.py
-python3 -m py_compile packages/application/wb_core_readonly_mcp.py apps/wb_core_readonly_mcp.py apps/wb_core_readonly_mcp_http.py apps/wb_core_readonly_mcp_smoke.py apps/wb_core_readonly_mcp_remote_smoke.py apps/wb_core_readonly_mcp_hosted_probe.py apps/wb_core_readonly_mcp_hosted_artifacts_smoke.py
+python3 -m py_compile packages/application/wb_core_readonly_mcp.py apps/wb_core_readonly_mcp.py apps/wb_core_readonly_mcp_http.py apps/wb_core_readonly_mcp_smoke.py apps/wb_core_readonly_mcp_remote_smoke.py
 git diff --check
 ```
 
