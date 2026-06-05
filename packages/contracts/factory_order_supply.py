@@ -148,6 +148,19 @@ class FactoryOrderRecommendationRow:
     stock_ff: float
     inbound_factory_to_ff: float
     inbound_ff_to_wb: float
+    demand_estimation_mode: str = "availability_adjusted"
+    sales_avg_period_days: int = 0
+    sales_lookup_days: int = 0
+    sales_calendar_day_count: int = 0
+    valid_sales_day_count: int = 0
+    excluded_low_sales_day_count: int = 0
+    baseline_daily_sales: float = 0.0
+    valid_day_threshold: float = 0.0
+    raw_recent_daily_demand: float = 0.0
+    earliest_used_sales_date: str = ""
+    latest_used_sales_date: str = ""
+    demand_warning: str = ""
+    demand_notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 import math
+from statistics import median
 from typing import Any, Mapping
 from uuid import uuid4
 
@@ -93,6 +94,9 @@ _WEIGHT_COEFFICIENT = 0.08593
 _VOLUME_DIVISOR = 204.38
 _DEFAULT_SALES_AVG_PERIOD_DAYS = 14
 _DEFAULT_CYCLE_ORDER_DAYS = 14
+_DEMAND_ESTIMATION_MODE = "availability_adjusted"
+_DEMAND_LOOKUP_DAY_CAP = 120
+_DEMAND_VALID_DAY_BASELINE_RATIO = 0.45
 _COVERAGE_CONTRACT_NOTE = (
     "Файлы «Товары в пути от фабрики» и «Товары в пути от ФФ на Wildberries» необязательны: "
     "если файл не загружен, соответствующий inbound считается как 0. "
@@ -102,7 +106,9 @@ _COVERAGE_CONTRACT_NOTE = (
     "В пути ФФ -> Wildberries учитываются только из отдельного загруженного шаблона, "
     "потому что в текущем wb-core нет другого authoritative source для этого члена формулы. "
     "Для «Товары в пути от фабрики» оператор может выбрать manual Excel или read-only source из supplier registry; "
-    "supplier registry uses shipment_date + 30 days as current bounded factory-to-FF acceptance default."
+    "supplier registry uses shipment_date + 30 days as current bounded factory-to-FF acceptance default. "
+    "Средний спрос считается availability-adjusted: sales_avg_period_days означает число валидных торговых дней, "
+    "а lookup depth ограничен min(120, period * 4)."
 )
 
 
@@ -123,6 +129,24 @@ class _SupplierRegistryShipmentFactorySummary:
     invalid_quantity_line_count: int
     usable_line_count: int
     usable_quantity: float
+
+
+@dataclass(frozen=True)
+class _DemandEstimate:
+    daily_demand_total: float
+    demand_estimation_mode: str
+    sales_avg_period_days: int
+    sales_lookup_days: int
+    sales_calendar_day_count: int
+    valid_sales_day_count: int
+    excluded_low_sales_day_count: int
+    baseline_daily_sales: float
+    valid_day_threshold: float
+    raw_recent_daily_demand: float
+    earliest_used_sales_date: str
+    latest_used_sales_date: str
+    demand_warning: str
+    demand_notes: tuple[str, ...]
 
 
 class FactoryOrderSupplyBlock:
@@ -344,12 +368,14 @@ class FactoryOrderSupplyBlock:
                 + ", ".join(str(item) for item in missing)
             )
 
-        history_from = report_date_obj - timedelta(days=settings.sales_avg_period_days)
         history_to = report_date_obj - timedelta(days=1)
-        order_counts_by_nm = self.sales_history.load_order_count_samples(
+        sales_lookup_days = _sales_lookup_days(settings.sales_avg_period_days)
+        history_from = report_date_obj - timedelta(days=sales_lookup_days)
+        order_counts_by_nm = self.sales_history.load_order_count_samples_by_date(
             date_from=history_from.isoformat(),
             date_to=history_to.isoformat(),
             nm_ids=nm_ids,
+            clamp_to_coverage=True,
         )
 
         stock_ff_by_nm = {row.nm_id: float(row.stock_ff) for row in stock_ff_rows}
@@ -381,7 +407,13 @@ class FactoryOrderSupplyBlock:
         result_rows: list[FactoryOrderRecommendationRow] = []
         for nm_id, sku_comment in active_skus:
             order_samples = order_counts_by_nm.get(nm_id, [])
-            daily_demand_total = sum(order_samples) / len(order_samples) if order_samples else 0.0
+            demand_estimate = _estimate_availability_adjusted_demand(
+                order_samples,
+                report_date=report_date_obj,
+                sales_avg_period_days=settings.sales_avg_period_days,
+                sales_lookup_days=sales_lookup_days,
+            )
+            daily_demand_total = demand_estimate.daily_demand_total
             demand_horizon = daily_demand_total * horizon_days
             safety_mp_units = daily_demand_total * settings.safety_days_mp
             safety_ff_units = daily_demand_total * settings.safety_days_ff
@@ -411,6 +443,19 @@ class FactoryOrderSupplyBlock:
                     stock_ff=stock_ff,
                     inbound_factory_to_ff=inbound_factory_to_ff,
                     inbound_ff_to_wb=inbound_ff_to_wb,
+                    demand_estimation_mode=demand_estimate.demand_estimation_mode,
+                    sales_avg_period_days=demand_estimate.sales_avg_period_days,
+                    sales_lookup_days=demand_estimate.sales_lookup_days,
+                    sales_calendar_day_count=demand_estimate.sales_calendar_day_count,
+                    valid_sales_day_count=demand_estimate.valid_sales_day_count,
+                    excluded_low_sales_day_count=demand_estimate.excluded_low_sales_day_count,
+                    baseline_daily_sales=demand_estimate.baseline_daily_sales,
+                    valid_day_threshold=demand_estimate.valid_day_threshold,
+                    raw_recent_daily_demand=demand_estimate.raw_recent_daily_demand,
+                    earliest_used_sales_date=demand_estimate.earliest_used_sales_date,
+                    latest_used_sales_date=demand_estimate.latest_used_sales_date,
+                    demand_warning=demand_estimate.demand_warning,
+                    demand_notes=demand_estimate.demand_notes,
                 )
             )
 
@@ -744,6 +789,19 @@ class FactoryOrderSupplyBlock:
                     stock_ff=float(item.get("stock_ff", 0.0)),
                     inbound_factory_to_ff=float(item.get("inbound_factory_to_ff", 0.0)),
                     inbound_ff_to_wb=float(item.get("inbound_ff_to_wb", 0.0)),
+                    demand_estimation_mode=str(item.get("demand_estimation_mode", _DEMAND_ESTIMATION_MODE)),
+                    sales_avg_period_days=int(item.get("sales_avg_period_days", 0)),
+                    sales_lookup_days=int(item.get("sales_lookup_days", 0)),
+                    sales_calendar_day_count=int(item.get("sales_calendar_day_count", 0)),
+                    valid_sales_day_count=int(item.get("valid_sales_day_count", 0)),
+                    excluded_low_sales_day_count=int(item.get("excluded_low_sales_day_count", 0)),
+                    baseline_daily_sales=float(item.get("baseline_daily_sales", 0.0)),
+                    valid_day_threshold=float(item.get("valid_day_threshold", 0.0)),
+                    raw_recent_daily_demand=float(item.get("raw_recent_daily_demand", item.get("daily_demand_total", 0.0))),
+                    earliest_used_sales_date=str(item.get("earliest_used_sales_date", "") or ""),
+                    latest_used_sales_date=str(item.get("latest_used_sales_date", "") or ""),
+                    demand_warning=str(item.get("demand_warning", "") or ""),
+                    demand_notes=tuple(str(note) for note in item.get("demand_notes", []) if str(note or "").strip()),
                 )
                 for item in rows_payload
                 if isinstance(item, Mapping)
@@ -920,6 +978,105 @@ def _normalize_factory_inbound_source(value: Any) -> str:
         return _parse_factory_inbound_source(value)
     except ValueError:
         return FACTORY_INBOUND_SOURCE_MANUAL_EXCEL
+
+
+def _sales_lookup_days(sales_avg_period_days: int) -> int:
+    return min(
+        _DEMAND_LOOKUP_DAY_CAP,
+        max(sales_avg_period_days, sales_avg_period_days * 4),
+    )
+
+
+def _estimate_availability_adjusted_demand(
+    samples_by_date: list[tuple[str, float]],
+    *,
+    report_date: date,
+    sales_avg_period_days: int,
+    sales_lookup_days: int,
+) -> _DemandEstimate:
+    samples = sorted(
+        [(str(snapshot_date), float(value)) for snapshot_date, value in samples_by_date],
+        key=lambda item: item[0],
+    )
+    recent_from = report_date - timedelta(days=sales_avg_period_days)
+    recent_samples = [
+        value
+        for snapshot_date, value in samples
+        if recent_from <= date.fromisoformat(snapshot_date) < report_date
+    ]
+    raw_recent_daily_demand = (
+        sum(recent_samples) / len(recent_samples)
+        if recent_samples
+        else 0.0
+    )
+    positive_samples = [value for _, value in samples if value > 0]
+    if not positive_samples:
+        warning = (
+            f"Нет положительных orderCount samples в bounded lookup window "
+            f"для {sales_avg_period_days} валидных дней."
+        )
+        return _DemandEstimate(
+            daily_demand_total=0.0,
+            demand_estimation_mode=_DEMAND_ESTIMATION_MODE,
+            sales_avg_period_days=sales_avg_period_days,
+            sales_lookup_days=sales_lookup_days,
+            sales_calendar_day_count=len(samples),
+            valid_sales_day_count=0,
+            excluded_low_sales_day_count=0,
+            baseline_daily_sales=0.0,
+            valid_day_threshold=0.0,
+            raw_recent_daily_demand=raw_recent_daily_demand,
+            earliest_used_sales_date="",
+            latest_used_sales_date="",
+            demand_warning=warning,
+            demand_notes=("no_positive_order_count_samples_in_lookup_window",),
+        )
+
+    baseline_daily_sales = float(median(positive_samples))
+    valid_day_threshold = max(1.0, baseline_daily_sales * _DEMAND_VALID_DAY_BASELINE_RATIO)
+    valid_samples: list[tuple[str, float]] = []
+    excluded_low_sales_day_count = 0
+    sales_calendar_day_count = 0
+    for snapshot_date, value in reversed(samples):
+        if len(valid_samples) >= sales_avg_period_days:
+            break
+        sales_calendar_day_count += 1
+        if value >= valid_day_threshold:
+            valid_samples.append((snapshot_date, value))
+        else:
+            excluded_low_sales_day_count += 1
+
+    valid_values = [value for _, value in valid_samples]
+    daily_demand_total = sum(valid_values) / len(valid_values) if valid_values else 0.0
+    used_dates = sorted(snapshot_date for snapshot_date, _ in valid_samples)
+    warning = ""
+    notes: list[str] = []
+    if len(valid_samples) < sales_avg_period_days:
+        warning = (
+            f"Собрано {len(valid_samples)} валидных торговых дней из {sales_avg_period_days} "
+            f"в lookup window {sales_lookup_days} дней; demand рассчитан по доступным valid days."
+        )
+        notes.append("insufficient_valid_sales_days")
+    else:
+        notes.append("collected_requested_valid_sales_days")
+    if excluded_low_sales_day_count:
+        notes.append("excluded_low_sales_days_below_threshold")
+    return _DemandEstimate(
+        daily_demand_total=daily_demand_total,
+        demand_estimation_mode=_DEMAND_ESTIMATION_MODE,
+        sales_avg_period_days=sales_avg_period_days,
+        sales_lookup_days=sales_lookup_days,
+        sales_calendar_day_count=sales_calendar_day_count,
+        valid_sales_day_count=len(valid_samples),
+        excluded_low_sales_day_count=excluded_low_sales_day_count,
+        baseline_daily_sales=baseline_daily_sales,
+        valid_day_threshold=valid_day_threshold,
+        raw_recent_daily_demand=raw_recent_daily_demand,
+        earliest_used_sales_date=used_dates[0] if used_dates else "",
+        latest_used_sales_date=used_dates[-1] if used_dates else "",
+        demand_warning=warning,
+        demand_notes=tuple(notes),
+    )
 
 
 def _parse_cycle_order_days(value: Any) -> int:

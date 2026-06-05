@@ -547,7 +547,7 @@ def main() -> None:
             if effective_supplier_rows != [("26GN390", "2026-05-20", "2026-05-22", 33.0)]:
                 raise AssertionError(f"supplier registry source must expose effective rows used, got {effective_supplier_rows}")
 
-            for period_days in (10, 14, 21):
+            for period_days in (10, 14):
                 covered_status, covered_payload = _post_json(
                     f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
                     {
@@ -571,6 +571,28 @@ def main() -> None:
                     period_days=period_days,
                 ):
                     raise AssertionError(f"HTTP calc must average exact covered runtime history for {period_days}-day lookback")
+                if covered_sku.get("demand_warning"):
+                    raise AssertionError(f"HTTP calc must not warn for stable covered window {period_days}")
+
+            ramp_up_status, ramp_up_payload = _post_json(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
+                {
+                    "prod_lead_time_days": 10,
+                    "lead_time_factory_to_ff_days": 5,
+                    "lead_time_ff_to_wb_days": 2,
+                    "safety_days_mp": 3,
+                    "safety_days_ff": 2,
+                    "cycle_order_days": 14,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "sales_avg_period_days": 21,
+                },
+            )
+            if ramp_up_status != 200:
+                raise AssertionError(f"HTTP calc must succeed for ramp-up window diagnostics, got {ramp_up_status} {ramp_up_payload}")
+            ramp_up_sku = next(item for item in ramp_up_payload.get("rows", []) if item.get("nm_id") == 210183919)
+            if ramp_up_sku.get("valid_sales_day_count") != 18 or "Собрано 18 валидных" not in str(ramp_up_sku.get("demand_warning", "")):
+                raise AssertionError("HTTP calc must expose 21-day ramp-up insufficient valid-day diagnostics")
 
             default_period_status, default_period_payload = _post_json(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
@@ -631,7 +653,7 @@ def main() -> None:
             if int(cycle_long_payload.get("summary", {}).get("total_qty", 0)) <= int(cycle_short_payload.get("summary", {}).get("total_qty", 0)):
                 raise AssertionError("larger cycle_order_days must materially increase the factory total_qty")
 
-            calc_out_of_range_status, calc_out_of_range_payload = _post_json(
+            calc_insufficient_history_status, calc_insufficient_history_payload = _post_json(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
                 {
                     "prod_lead_time_days": 10,
@@ -645,9 +667,18 @@ def main() -> None:
                     "sales_avg_period_days": 60,
                 },
             )
-            error_text = str(calc_out_of_range_payload.get("error", ""))
-            if calc_out_of_range_status != 422 or "нужен диапазон 2026-02-17..2026-04-17" not in error_text or "2026-03-28..2026-04-17" not in error_text:
-                raise AssertionError("HTTP calc must surface the exact coverage blocker outside the persisted runtime window")
+            if calc_insufficient_history_status != 200:
+                raise AssertionError(
+                    "HTTP calc must succeed with row-level insufficient-history diagnostics, "
+                    f"got {calc_insufficient_history_status} {calc_insufficient_history_payload}"
+                )
+            insufficient_history_sku = next(
+                item for item in calc_insufficient_history_payload.get("rows", []) if item.get("nm_id") == 210183919
+            )
+            if insufficient_history_sku.get("sales_lookup_days") != 120 or insufficient_history_sku.get("valid_sales_day_count") != 18:
+                raise AssertionError("HTTP calc must expose clamped lookup and valid day diagnostics")
+            if "Собрано 18 валидных" not in str(insufficient_history_sku.get("demand_warning", "")):
+                raise AssertionError("HTTP calc must expose insufficient-history demand warning")
 
             print(f"scenario_without_inbound_http: ok -> total_qty={calc_without_inbound_payload['summary']['total_qty']}")
             print("scenario_zero_only_inbound_http: ok -> accepted_row_count=0, coverage=0")
@@ -655,13 +686,13 @@ def main() -> None:
             print(
                 f"scenario_multi_inbound_http: ok -> inbound_factory={first_sku_with_inbound.get('inbound_factory_to_ff', 0.0)}"
             )
-            print("scenario_covered_windows_http: ok -> periods=10,14,21")
+            print("scenario_covered_windows_http: ok -> stable periods=10,14; ramp-up period=21 warns")
             print(f"scenario_default_sales_avg_http: ok -> daily_demand={round(float(default_sku.get('daily_demand_total', 0.0)), 2)}")
             print(
                 "scenario_cycle_order_days_http: ok -> "
                 f"{cycle_short_payload.get('summary', {}).get('total_qty')} -> {cycle_long_payload.get('summary', {}).get('total_qty')}"
             )
-            print("scenario_out_of_range_http: ok -> blocker exposes needed range 2026-02-17..2026-04-17 and available 2026-03-28..2026-04-17")
+            print("scenario_insufficient_history_http: ok -> clamped covered lookup with row-level demand warning")
         finally:
             server.shutdown()
             server.server_close()
