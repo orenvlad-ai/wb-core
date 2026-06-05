@@ -1128,10 +1128,18 @@ def _build_handler(
                 return
 
             if parsed.path == DEFAULT_SHEET_SUPPLIER_UI_PATH:
+                role = _current_web_user_role(self)
+                is_operator_embedded = (
+                    role == "operator"
+                    and _resolve_single_query_param(parsed.query, "embedded") == "operator"
+                )
                 _write_html_response(
                     self,
                     HTTPStatus.OK,
-                    _render_sheet_vitrina_supplier_ui(),
+                    _render_sheet_vitrina_supplier_ui(
+                        can_delete_shipments=role == "operator",
+                        can_edit_order_status=is_operator_embedded,
+                    ),
                 )
                 return
 
@@ -1998,7 +2006,15 @@ def _build_handler(
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_detail_path(parsed.path)
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_supplier_shipments_patch_request(shipment_id, payload)
+                    if "order_status" in payload:
+                        if not _ensure_operator_role(self, parsed.path):
+                            return
+                        if _is_supplier_order_status_only_payload(payload):
+                            result = entrypoint.handle_supplier_shipments_order_status_patch_request(shipment_id, payload)
+                        else:
+                            result = entrypoint.handle_supplier_shipments_patch_request(shipment_id, payload)
+                    else:
+                        result = entrypoint.handle_supplier_shipments_patch_request(shipment_id, payload)
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
@@ -2498,6 +2514,10 @@ def _is_nomenclature_item_path(path: str) -> bool:
     return bool(suffix) and "/" not in suffix
 
 
+def _is_supplier_order_status_only_payload(payload: Mapping[str, Any]) -> bool:
+    return set(payload.keys()) == {"order_status"}
+
+
 def _resolve_supplier_shipment_id_from_detail_path(path: str) -> str:
     if not _is_supplier_shipment_detail_path(path):
         raise ValueError(f"unsupported supplier shipment detail path: {path}")
@@ -2713,6 +2733,14 @@ def _ensure_operator_role(handler: BaseHTTPRequestHandler, path: str) -> bool:
         return True
     _write_auth_forbidden(handler, path)
     return False
+
+
+def _current_web_user_role(handler: BaseHTTPRequestHandler) -> str:
+    config = _web_auth_config()
+    if not config["enabled"]:
+        return "operator"
+    user = _authenticated_web_user(handler, config) or {}
+    return str(user.get("role") or "").strip() or "operator"
 
 
 def _current_web_user_config_key(handler: BaseHTTPRequestHandler) -> str:
@@ -3363,13 +3391,19 @@ def _render_sheet_vitrina_operator_ui(
     )
 
 
-def _render_sheet_vitrina_supplier_ui() -> str:
+def _render_sheet_vitrina_supplier_ui(
+    *,
+    can_delete_shipments: bool = True,
+    can_edit_order_status: bool = False,
+) -> str:
     config_payload = {
         "page_title": "Реестр заказов",
         "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
         "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
         "supplier_ui_path": DEFAULT_SHEET_SUPPLIER_UI_PATH,
         "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
+        "can_delete_shipments": bool(can_delete_shipments),
+        "can_edit_order_status": bool(can_edit_order_status),
     }
     template = SUPPLIER_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     return template.replace(

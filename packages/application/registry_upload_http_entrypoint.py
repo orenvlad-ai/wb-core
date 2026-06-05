@@ -1616,6 +1616,13 @@ class RegistryUploadHttpEntrypoint:
     def handle_supplier_shipments_patch_request(self, shipment_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self.supplier_shipments_block.update_shipment(shipment_id, payload)
 
+    def handle_supplier_shipments_order_status_patch_request(
+        self,
+        shipment_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return self.supplier_shipments_block.update_order_status(shipment_id, payload.get("order_status"))
+
     def handle_supplier_shipments_delete_request(self, shipment_id: str) -> dict[str, Any]:
         return self.supplier_shipments_block.delete_shipment(shipment_id)
 
