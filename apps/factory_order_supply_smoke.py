@@ -547,8 +547,8 @@ def main() -> None:
         ):
             raise AssertionError("shifted scenario must round SKU 2 up to the next 25-piece box multiple after cycle extension")
 
-        # Scenario 7: any positive lookback is allowed when the authoritative runtime history covers the window.
-        for period_days in (10, 14, 21):
+        # Scenario 7: stable covered windows keep the calendar average; ramp-up windows expose adjusted diagnostics.
+        for period_days in (10, 14):
             covered_result = block.calculate(
                 {
                     "prod_lead_time_days": 10,
@@ -569,6 +569,25 @@ def main() -> None:
                 period_days=period_days,
             ):
                 raise AssertionError(f"{period_days}-day lookback must use the exact covered runtime window")
+            if covered_sku.demand_warning:
+                raise AssertionError(f"{period_days}-day stable window must not produce a demand warning")
+
+        ramp_up_result = block.calculate(
+            {
+                "prod_lead_time_days": 10,
+                "lead_time_factory_to_ff_days": 5,
+                "lead_time_ff_to_wb_days": 2,
+                "safety_days_mp": 3,
+                "safety_days_ff": 2,
+                "cycle_order_days": 14,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "sales_avg_period_days": 21,
+            }
+        )
+        ramp_up_sku = {item.nm_id: item for item in ramp_up_result.rows}[210183919]
+        if ramp_up_sku.valid_sales_day_count != 18 or "Собрано 18 валидных" not in ramp_up_sku.demand_warning:
+            raise AssertionError("21-day ramp-up fixture must expose insufficient valid-day diagnostics")
 
         default_period_result = block.calculate(
             {
@@ -622,26 +641,24 @@ def main() -> None:
         if cycle_long_result.summary.total_qty <= cycle_short_result.summary.total_qty:
             raise AssertionError("larger cycle_order_days must materially increase factory total_qty")
 
-        try:
-            block.calculate(
-                {
-                    "prod_lead_time_days": 10,
-                    "lead_time_factory_to_ff_days": 5,
-                    "lead_time_ff_to_wb_days": 2,
-                    "safety_days_mp": 3,
-                    "safety_days_ff": 2,
-                    "cycle_order_days": 14,
-                    "order_batch_qty": 50,
-                    "report_date_override": "2026-04-18",
-                    "sales_avg_period_days": 60,
-                }
-            )
-        except ValueError as exc:
-            message = str(exc)
-            if "нужен диапазон 2026-02-17..2026-04-17" not in message or "2026-03-28..2026-04-17" not in message:
-                raise
-        else:
-            raise AssertionError("lookback outside the authoritative runtime coverage must fail truthfully")
+        insufficient_history_result = block.calculate(
+            {
+                "prod_lead_time_days": 10,
+                "lead_time_factory_to_ff_days": 5,
+                "lead_time_ff_to_wb_days": 2,
+                "safety_days_mp": 3,
+                "safety_days_ff": 2,
+                "cycle_order_days": 14,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "sales_avg_period_days": 60,
+            }
+        )
+        insufficient_sku = {item.nm_id: item for item in insufficient_history_result.rows}[210183919]
+        if insufficient_sku.sales_lookup_days != 120 or insufficient_sku.valid_sales_day_count != 18:
+            raise AssertionError("insufficient history must clamp to covered lookup and expose valid day count")
+        if "Собрано 18 валидных" not in insufficient_sku.demand_warning:
+            raise AssertionError("insufficient history must return a row-level demand warning")
 
         with TemporaryDirectory(prefix="factory-order-recent-fill-") as second_tmp:
             runtime_dir = Path(second_tmp) / "runtime"
@@ -687,8 +704,11 @@ def main() -> None:
             raise AssertionError("status must expose the current uploaded filename")
         if status.datasets[DATASET_INBOUND_FACTORY_TO_FF].status != "missing":
             raise AssertionError("status must reflect deleted inbound_factory state")
-        if status.last_result is None or status.last_result.settings.sales_avg_period_days != 14:
+        if status.last_result is None or status.last_result.settings.sales_avg_period_days != 60:
             raise AssertionError("status must persist the last successful calculation result")
+        persisted_sku = {item.nm_id: item for item in status.last_result.rows}[210183919]
+        if "Собрано 18 валидных" not in persisted_sku.demand_warning:
+            raise AssertionError("status must persist row-level demand diagnostics")
 
         print(f"scenario_without_inbound: ok -> total_qty={result_without_inbound.summary.total_qty}")
         print("scenario_zero_only_inbound: ok -> accepted_row_count=0, coverage=0")
@@ -696,10 +716,10 @@ def main() -> None:
         print(f"scenario_delete_then_zero: ok -> sku_one_coverage={sku_one_after_delete.coverage_qty}")
         print(f"scenario_supplier_registry_source: ok -> inbound_factory={supplier_sku.inbound_factory_to_ff}")
         print(f"scenario_shifted_report_date: ok -> sku_one_qty={shifted_sku_one.recommended_order_qty}, sku_two_qty={shifted_sku_two.recommended_order_qty}")
-        print("scenario_covered_windows: ok -> periods=10,14,21")
+        print("scenario_covered_windows: ok -> stable periods=10,14; ramp-up period=21 warns")
         print(f"scenario_default_sales_avg: ok -> daily_demand={round(default_sku.daily_demand_total, 2)}")
         print(f"scenario_cycle_order_days: ok -> {cycle_short_result.summary.total_qty} -> {cycle_long_result.summary.total_qty}")
-        print("scenario_out_of_range: ok -> blocker exposes needed range 2026-02-17..2026-04-17 and available 2026-03-28..2026-04-17")
+        print("scenario_insufficient_history: ok -> clamped covered lookup with row-level demand warning")
         print("scenario_recent_authoritative_fill: ok -> fetched missing recent date 2026-04-17")
 
 def _seed_runtime_sales_history(

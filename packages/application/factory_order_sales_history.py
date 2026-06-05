@@ -75,16 +75,51 @@ class FactoryOrderAuthoritativeSalesHistory:
         date_to: str,
         nm_ids: list[int],
     ) -> dict[int, list[float]]:
+        samples_by_date = self.load_order_count_samples_by_date(
+            date_from=date_from,
+            date_to=date_to,
+            nm_ids=nm_ids,
+            clamp_to_coverage=False,
+        )
+        return {
+            nm_id: [value for _, value in samples]
+            for nm_id, samples in samples_by_date.items()
+        }
+
+    def load_order_count_samples_by_date(
+        self,
+        *,
+        date_from: str,
+        date_to: str,
+        nm_ids: list[int],
+        clamp_to_coverage: bool = False,
+    ) -> dict[int, list[tuple[str, float]]]:
         self._fill_missing_recent_snapshots(date_from=date_from, date_to=date_to, nm_ids=nm_ids)
+        effective_date_from = date_from
+        effective_date_to = date_to
+        if clamp_to_coverage:
+            coverage = self.describe_coverage()
+            if not coverage.earliest_available_date or not coverage.latest_available_date:
+                return {nm_id: [] for nm_id in nm_ids}
+            requested_from = date.fromisoformat(date_from)
+            requested_to = date.fromisoformat(date_to)
+            earliest = date.fromisoformat(coverage.earliest_available_date)
+            latest = date.fromisoformat(coverage.latest_available_date)
+            effective_from_obj = max(requested_from, earliest)
+            effective_to_obj = min(requested_to, latest)
+            if effective_from_obj > effective_to_obj:
+                return {nm_id: [] for nm_id in nm_ids}
+            effective_date_from = effective_from_obj.isoformat()
+            effective_date_to = effective_to_obj.isoformat()
         payloads = load_runtime_sales_history_payloads(
             runtime=self.runtime,
-            date_from=date_from,
-            date_to=date_to,
+            date_from=effective_date_from,
+            date_to=effective_date_to,
         )
-        return _collect_required_order_count_samples(
+        return _collect_required_order_count_samples_by_date(
             payloads=payloads,
-            date_from=date_from,
-            date_to=date_to,
+            date_from=effective_date_from,
+            date_to=effective_date_to,
             nm_ids=nm_ids,
             coverage=self.describe_coverage(),
         )
@@ -359,6 +394,43 @@ def _collect_required_order_count_samples(
             continue
         for nm_id in nm_ids:
             by_nm_id[nm_id].append(order_counts[nm_id])
+    if missing_dates:
+        earliest = coverage.earliest_available_date or "coverage is empty"
+        latest = coverage.latest_available_date or "coverage is empty"
+        raise ValueError(
+            "Запрошенный период усреднения продаж не покрывается текущим authoritative sales history source: "
+            f"нужен диапазон {date_from}..{date_to}, "
+            f"а на сервере сейчас доступно {earliest}..{latest}; "
+            f"missing_dates={','.join(missing_dates)}; missing_pairs={missing_pairs}."
+        )
+    return by_nm_id
+
+
+def _collect_required_order_count_samples_by_date(
+    *,
+    payloads: Mapping[str, Any],
+    date_from: str,
+    date_to: str,
+    nm_ids: list[int],
+    coverage: FactoryOrderSalesHistoryCoverage,
+) -> dict[int, list[tuple[str, float]]]:
+    by_nm_id: dict[int, list[tuple[str, float]]] = {nm_id: [] for nm_id in nm_ids}
+    missing_dates: list[str] = []
+    missing_pairs = 0
+    for snapshot_date in _iter_iso_dates(date_from, date_to):
+        payload = payloads.get(snapshot_date)
+        if payload is None or str(getattr(payload, "kind", "")) != "success":
+            missing_dates.append(snapshot_date)
+            missing_pairs += len(nm_ids)
+            continue
+        order_counts = _collect_order_count_map(payload)
+        missing_nm_ids = sorted(set(nm_ids) - set(order_counts))
+        if missing_nm_ids:
+            missing_dates.append(snapshot_date)
+            missing_pairs += len(missing_nm_ids)
+            continue
+        for nm_id in nm_ids:
+            by_nm_id[nm_id].append((snapshot_date, order_counts[nm_id]))
     if missing_dates:
         earliest = coverage.earliest_available_date or "coverage is empty"
         latest = coverage.latest_available_date or "coverage is empty"
