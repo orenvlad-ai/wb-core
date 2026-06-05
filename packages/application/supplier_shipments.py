@@ -26,6 +26,8 @@ from packages.contracts.supplier_shipments import (
     MATCH_STATUS_MATCHED,
     MATCH_STATUS_MATCHED_BY_COMPATIBILITY,
     MATCH_STATUS_UNMATCHED,
+    ORDER_STATUS_DEFAULT,
+    ORDER_STATUSES,
     SHIPMENT_STATUS_ALL_MATCHED,
     SHIPMENT_STATUS_CHECKSUM_ERROR,
     SHIPMENT_STATUS_HAS_UNMATCHED,
@@ -117,6 +119,7 @@ class SupplierShipmentsBlock:
             raise ValueError(f"supplier shipment upload not found: {upload_id}")
         edited_payload = _resolve_edited_payload(payload, fallback=upload["parsed_payload"])
         shipment_date = _validate_iso_date(str(payload.get("shipment_date") or edited_payload.get("shipment_date") or ""))
+        order_status = ORDER_STATUS_DEFAULT
         metadata, lines, warnings, errors, summary, match_status = _normalize_edit_payload(
             edited_payload,
             shipment_date=shipment_date,
@@ -138,6 +141,7 @@ class SupplierShipmentsBlock:
             "created_at": now,
             "updated_at": now,
             "shipment_date": shipment_date,
+            "order_status": order_status,
             "invoice_no": metadata.get("invoice_no") or "",
             "invoice_date": metadata.get("invoice_date") or "",
             "contract_no": metadata.get("contract_no") or "",
@@ -181,11 +185,15 @@ class SupplierShipmentsBlock:
             force_manual_override=False,
         )
         existing_header = dict(existing["header"])
+        order_status = _normalize_order_status(
+            payload.get("order_status") if "order_status" in payload else existing_header.get("order_status")
+        )
         now = self.timestamp_factory()
         header = {
             **existing_header,
             "updated_at": now,
             "shipment_date": shipment_date,
+            "order_status": order_status,
             "invoice_no": metadata.get("invoice_no") or "",
             "invoice_date": metadata.get("invoice_date") or "",
             "contract_no": metadata.get("contract_no") or "",
@@ -203,6 +211,20 @@ class SupplierShipmentsBlock:
             "errors": errors,
         }
         self.runtime.save_supplier_shipment(header=header, lines=lines)
+        return self.get_shipment(shipment_id)
+
+    def update_order_status(self, shipment_id: str, order_status: Any) -> dict[str, Any]:
+        existing = self.runtime.load_supplier_shipment(shipment_id)
+        if existing is None:
+            raise ValueError(f"supplier shipment not found: {shipment_id}")
+        normalized = _normalize_order_status(order_status)
+        updated = self.runtime.update_supplier_shipment_order_status(
+            shipment_id=shipment_id,
+            order_status=normalized,
+            updated_at=self.timestamp_factory(),
+        )
+        if not updated:
+            raise ValueError(f"supplier shipment not found: {shipment_id}")
         return self.get_shipment(shipment_id)
 
     def delete_shipment(self, shipment_id: str) -> dict[str, Any]:
@@ -613,6 +635,7 @@ def _detail_payload(detail: Mapping[str, Any]) -> dict[str, Any]:
     header = dict(detail.get("header") or {})
     header["supplier_name"] = DEFAULT_SUPPLIER_NAME
     header["customer_name"] = ""
+    header["order_status"] = _normalize_order_status(header.get("order_status"))
     lines = [dict(item) for item in detail.get("lines") or []]
     summary = {
         "product_qty_total": header.get("product_qty_total"),
@@ -647,6 +670,7 @@ def _with_invoice_download_path(row: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(row)
     payload["supplier_name"] = DEFAULT_SUPPLIER_NAME
     payload["customer_name"] = ""
+    payload["order_status"] = _normalize_order_status(payload.get("order_status"))
     payload["invoice_download_path"] = _invoice_download_path(str(payload.get("shipment_id") or ""))
     return payload
 
@@ -1043,6 +1067,15 @@ def _validate_iso_date(value: str) -> str:
         date.fromisoformat(normalized)
     except ValueError as exc:
         raise ValueError("shipment_date must be an ISO date YYYY-MM-DD") from exc
+    return normalized
+
+
+def _normalize_order_status(value: Any) -> str:
+    normalized = str(value or ORDER_STATUS_DEFAULT).strip()
+    if not normalized:
+        return ORDER_STATUS_DEFAULT
+    if normalized not in ORDER_STATUSES:
+        raise ValueError(f"unsupported supplier order_status: {normalized}")
     return normalized
 
 

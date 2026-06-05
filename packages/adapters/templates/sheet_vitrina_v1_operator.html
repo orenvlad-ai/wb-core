@@ -2996,7 +2996,9 @@
           panel.hidden = panel.dataset.supplyModePanel !== activeModeName;
         });
         if (activeModeName === "supplier" && supplierShipmentsFrame && !supplierShipmentsFrame.src) {
-          supplierShipmentsFrame.src = config.supplier_ui_path || "/sheet-vitrina-v1/supplier";
+          const supplierUrl = new URL(config.supplier_ui_path || "/sheet-vitrina-v1/supplier", window.location.origin);
+          supplierUrl.searchParams.set("embedded", "operator");
+          supplierShipmentsFrame.src = supplierUrl.pathname + supplierUrl.search;
         }
         if (!options || options.persist !== false) {
           writePersistedOperatorUiState({ supply_mode: activeModeName });

@@ -201,6 +201,32 @@ def main() -> None:
                 expect(frame.locator("#shipmentRows").get_by_text("26GN390")).to_be_visible()
                 expect(frame.locator("#shipmentRows").get_by_text("HanShang Technology")).to_be_visible()
                 expect(frame.locator("#shipmentRows").get_by_text("Check")).to_be_visible()
+                frame.get_by_role("button", name="关闭 / Close / Закрыть").click()
+                expect(frame.locator("#shipmentCard")).to_be_hidden()
+                header_texts = frame.locator(".registry-wrap thead th:visible").evaluate_all(
+                            "(nodes) => nodes.map((node) => node.textContent.trim())"
+                        )
+                if any("Currency" in text or "Валюта" in text for text in header_texts):
+                        raise AssertionError(f"operator registry must hide Currency column, got {header_texts}")
+                try:
+                        invoice_index = next(index for index, text in enumerate(header_texts) if "Invoice" in text and "Файл" in text)
+                        status_index = header_texts.index("Статус заказа")
+                        actions_index = next(index for index, text in enumerate(header_texts) if "Actions" in text or "Действия" in text)
+                except StopIteration as exc:
+                        raise AssertionError(f"operator registry must expose invoice/status/actions headers, got {header_texts}") from exc
+                if not invoice_index < status_index < actions_index:
+                        raise AssertionError(f"order status header must be after invoice and before actions, got {header_texts}")
+                status_select = frame.locator("[data-order-status-shipment]").first
+                expect(status_select).to_have_value("production")
+                expect(status_select.locator("option:checked")).to_have_text("На производстве")
+                status_select.select_option("in_transit")
+                expect(frame.locator("#registryMessage")).to_contain_text("Статус заказа сохранён.", timeout=5000)
+                expect(frame.locator("#shipmentCard")).to_be_hidden()
+                frame.locator("body").evaluate("() => window.location.reload()")
+                expect(frame.locator("#shipmentRows").get_by_text("26GN390")).to_be_visible(timeout=5000)
+                expect(frame.locator("[data-order-status-shipment]").first).to_have_value("in_transit")
+                expect(frame.locator("a[data-download]").first).to_have_text("Download")
+                expect(frame.locator("[data-delete-shipment]").first).to_have_text("Delete")
                 frame.locator("#shipmentRows tr[data-row]").first.click()
                 expect(frame.get_by_role("link", name="下载发票 / Download invoice / Скачать invoice")).to_be_visible()
                 expect(frame.get_by_role("button", name="重新匹配 / Re-match / Пересопоставить")).to_have_count(0)
@@ -212,8 +238,18 @@ def main() -> None:
                 expect(supplier_page.locator("h1", has_text="订单登记表 / Order registry / Реестр заказов")).to_be_visible()
                 expect(supplier_page.get_by_role("link", name="Открыть отдельно")).to_have_count(0)
                 expect(supplier_page.get_by_text("26GN390")).to_be_visible()
-                page.once("dialog", lambda dialog: dialog.accept())
+                expect(supplier_page.locator("[data-order-status-shipment]")).to_have_count(0)
                 frame.locator("[data-delete-shipment]").first.click()
+                expect(frame.locator("[data-delete-confirmation]")).to_be_visible()
+                expect(frame.locator("#shipmentRows")).to_contain_text("26GN390")
+                frame.locator("#shipmentRows tr[data-row]").first.click()
+                expect(frame.locator("#shipmentCard")).to_be_hidden()
+                frame.locator("[data-delete-cancel]").click()
+                expect(frame.locator("[data-delete-confirmation]")).to_have_count(0)
+                expect(frame.locator("#shipmentRows")).to_contain_text("26GN390")
+                frame.locator("[data-delete-shipment]").first.click()
+                expect(frame.locator("[data-delete-confirmation]")).to_be_visible()
+                frame.locator("[data-delete-confirm]").click()
                 expect(frame.locator("#registryMessage")).to_contain_text("订单已删除 / Order deleted / Заказ удалён.", timeout=5000)
                 expect(frame.locator("#shipmentRows")).not_to_contain_text("26GN390")
                 browser.close()

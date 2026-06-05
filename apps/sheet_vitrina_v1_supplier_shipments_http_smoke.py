@@ -174,6 +174,8 @@ def main() -> None:
             shipment_id = detail["shipment_id"]
             if detail.get("shipment_date") != "2026-05-14" or detail.get("match_status") != "has_unmatched":
                 raise AssertionError("created shipment must keep date and unmatched status")
+            if detail.get("order_status") != "production":
+                raise AssertionError(f"created shipment must default order_status=production, got {detail.get('order_status')}")
             if detail.get("supplier_name") != "HanShang Technology" or detail.get("metadata", {}).get("supplier_name") != "HanShang Technology":
                 raise AssertionError("created shipment must persist fixed supplier_name")
             if detail.get("customer_name") not in {"", None} or detail.get("metadata", {}).get("customer_name") not in {"", None}:
@@ -188,6 +190,8 @@ def main() -> None:
             detail_status, loaded_detail = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}")
             if detail_status != 200 or loaded_detail.get("shipment_id") != shipment_id:
                 raise AssertionError("detail route must return persisted card payload")
+            if loaded_detail.get("order_status") != "production":
+                raise AssertionError("detail route must expose default order_status")
 
             edited = json.loads(json.dumps(loaded_detail, ensure_ascii=False))
             edited["lines"][0]["internal_sku"] = "SKU-MANUAL"
@@ -205,6 +209,33 @@ def main() -> None:
                 raise AssertionError(f"patch route must update shipment date, got {patch_status} {patched}")
             if patched.get("match_status") != "manual_override" or patched.get("summary", {}).get("product_amount_total") != 30.0:
                 raise AssertionError("patch route must mark manual_override and recalculate totals server-side")
+            if patched.get("order_status") != "production":
+                raise AssertionError("full patch must preserve existing order_status")
+
+            status_patch_status, status_patched = _patch_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                {"order_status": "in_transit"},
+            )
+            if status_patch_status != 200 or status_patched.get("order_status") != "in_transit":
+                raise AssertionError(f"status-only patch must persist in_transit, got {status_patch_status} {status_patched}")
+            if (
+                len(status_patched.get("product_lines", [])) != 3
+                or status_patched.get("source_file_sha256") != workbook_sha256
+                or status_patched.get("invoice_no") != "26GN390"
+            ):
+                raise AssertionError("status-only patch must not erase lines, metadata, or source file")
+            invalid_status, invalid_payload = _patch_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                {"order_status": "delivered_to_mars"},
+            )
+            if invalid_status != 400 or "order_status" not in str(invalid_payload.get("error", "")):
+                raise AssertionError(f"invalid order_status must be rejected, got {invalid_status} {invalid_payload}")
+            accepted_status, accepted_patched = _patch_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                {"order_status": "accepted_ff"},
+            )
+            if accepted_status != 200 or accepted_patched.get("order_status") != "accepted_ff":
+                raise AssertionError(f"status-only patch must persist accepted_ff, got {accepted_status} {accepted_patched}")
 
             second_nom_status, second_nom_payload = _post_json(
                 f"{base_url}{DEFAULT_NOMENCLATURE_PATH}",
@@ -237,6 +268,8 @@ def main() -> None:
                 raise AssertionError("list route must expose saved shipment")
             if registry_payload["shipments"][0].get("supplier_name") != "HanShang Technology":
                 raise AssertionError("list route must expose fixed supplier_name")
+            if registry_payload["shipments"][0].get("order_status") != "accepted_ff":
+                raise AssertionError("list route must expose persisted order_status")
             invoice_path = registry_payload["shipments"][0].get("invoice_download_path")
             invoice_status, invoice_bytes, invoice_headers = _get_bytes(f"{base_url}{invoice_path}")
             if invoice_status != 200 or hashlib.sha256(invoice_bytes).hexdigest() != workbook_sha256:
@@ -287,6 +320,8 @@ def main() -> None:
                 or legacy_list_payload.get("shipments", [{}])[0].get("supplier_name") != "HanShang Technology"
             ):
                 raise AssertionError(f"legacy missing supplier must list with default fallback, got {legacy_list_payload}")
+            if legacy_list_payload.get("shipments", [{}])[0].get("order_status") != "production":
+                raise AssertionError("legacy missing order_status must list with production fallback")
         finally:
             server.shutdown()
             server.server_close()

@@ -101,75 +101,100 @@ def main() -> None:
                     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
                 )
                 if supplier_login_code != 200 or "Реестр заказов" not in supplier_login_body:
-                    raise AssertionError("supplier login with full-shell next must land on supplier-only page")
+                        raise AssertionError("supplier login with full-shell next must land on supplier-only page")
                 supplier_page_code, _, supplier_page = _opener_text(supplier, f"{base_url}{DEFAULT_SHEET_SUPPLIER_UI_PATH}")
                 if supplier_page_code != 200 or "Реестр заказов" not in supplier_page:
-                    raise AssertionError("supplier role must access supplier page")
+                        raise AssertionError("supplier role must access supplier page")
+                if '"can_delete_shipments": false' not in supplier_page or '"can_edit_order_status": false' not in supplier_page:
+                        raise AssertionError("supplier page must not render operator-only shipment controls for supplier role")
                 supplier_api_code, supplier_api_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
                 if supplier_api_code != 200 or supplier_api_payload.get("shipments") != []:
-                    raise AssertionError("supplier role must access supplier shipment APIs")
+                        raise AssertionError("supplier role must access supplier shipment APIs")
                 parse_code, parse_payload = _opener_post_multipart(
-                    supplier,
-                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH}",
-                    supplier_invoice_bytes,
-                    filename="PI-test 26GN390.xlsx",
-                )
+                        supplier,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH}",
+                        supplier_invoice_bytes,
+                        filename="PI-test 26GN390.xlsx",
+                    )
                 if parse_code != 200 or not parse_payload.get("upload_id"):
-                    raise AssertionError(f"supplier role must parse supplier invoices, got {parse_code} {parse_payload}")
+                        raise AssertionError(f"supplier role must parse supplier invoices, got {parse_code} {parse_payload}")
                 create_code, create_payload = _opener_post_json(
-                    supplier,
-                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
-                    {
-                        "upload_id": parse_payload["upload_id"],
-                        "shipment_date": "2026-05-14",
-                        "payload": parse_payload,
-                    },
-                )
+                        supplier,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
+                        {
+                            "upload_id": parse_payload["upload_id"],
+                            "shipment_date": "2026-05-14",
+                            "order_status": "accepted_ff",
+                            "payload": parse_payload,
+                        },
+                    )
                 if create_code != 200 or not create_payload.get("shipment_id"):
-                    raise AssertionError(f"supplier role must create supplier shipments, got {create_code} {create_payload}")
+                        raise AssertionError(f"supplier role must create supplier shipments, got {create_code} {create_payload}")
+                if create_payload.get("order_status") != "production":
+                        raise AssertionError("supplier role must not set order_status during create")
                 shipment_id = str(create_payload["shipment_id"])
                 detail_code, detail_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}")
                 if detail_code != 200 or detail_payload.get("shipment_id") != shipment_id:
-                    raise AssertionError("supplier role must read supplier shipment detail")
+                        raise AssertionError("supplier role must read supplier shipment detail")
                 patched_payload = json.loads(json.dumps(detail_payload, ensure_ascii=False))
                 patch_code, patch_payload = _opener_patch_json(
-                    supplier,
-                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
-                    {"shipment_date": "2026-05-15", "payload": patched_payload},
-                )
+                        supplier,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                        {"shipment_date": "2026-05-15", "payload": patched_payload},
+                    )
                 if patch_code != 200 or patch_payload.get("shipment_date") != "2026-05-15":
-                    raise AssertionError(f"supplier role must edit supplier shipments, got {patch_code} {patch_payload}")
+                        raise AssertionError(f"supplier role must edit supplier shipments, got {patch_code} {patch_payload}")
+                supplier_status_code, supplier_status_payload = _opener_patch_json(
+                        supplier,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                        {"order_status": "in_transit"},
+                    )
+                if supplier_status_code != 403 or supplier_status_payload.get("error") != "forbidden":
+                        raise AssertionError("supplier role must not update supplier order_status")
+                operator_status_code, operator_status_payload = _opener_patch_json(
+                        operator,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                        {"order_status": "accepted_ff"},
+                    )
+                if operator_status_code != 200 or operator_status_payload.get("order_status") != "accepted_ff":
+                        raise AssertionError(f"operator role must update supplier order_status, got {operator_status_code} {operator_status_payload}")
                 forbidden_html_code, _, _ = _opener_text(supplier, f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}")
                 if forbidden_html_code != 403:
-                    raise AssertionError("supplier role must not access full web-vitrina/operator shell")
+                        raise AssertionError("supplier role must not access full web-vitrina/operator shell")
                 forbidden_operator_code, _, _ = _opener_text(supplier, f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}")
                 if forbidden_operator_code != 403:
-                    raise AssertionError("supplier role must not access operator UI")
+                        raise AssertionError("supplier role must not access operator UI")
                 forbidden_api_code, forbidden_api_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SHEET_STATUS_PATH}")
                 if forbidden_api_code != 403 or forbidden_api_payload.get("error") != "forbidden":
-                    raise AssertionError("supplier role must not access unrelated operator APIs")
+                        raise AssertionError("supplier role must not access unrelated operator APIs")
                 forbidden_settings_code, _, _ = _opener_text(supplier, f"{base_url}{DEFAULT_SETTINGS_UI_PATH}")
                 if forbidden_settings_code != 403:
-                    raise AssertionError("supplier role must not access operator settings page")
+                        raise AssertionError("supplier role must not access operator settings page")
                 forbidden_nomenclature_code, forbidden_nomenclature_payload = _opener_json(
-                    supplier,
-                    f"{base_url}{DEFAULT_NOMENCLATURE_PATH}",
-                )
+                        supplier,
+                        f"{base_url}{DEFAULT_NOMENCLATURE_PATH}",
+                    )
                 if forbidden_nomenclature_code != 403 or forbidden_nomenclature_payload.get("error") != "forbidden":
-                    raise AssertionError("supplier role must not access nomenclature API")
+                        raise AssertionError("supplier role must not access nomenclature API")
                 supplier_rematch_code, supplier_rematch_payload = _opener_post_json(
-                    supplier,
-                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/rematch",
-                    {"overwrite_manual": False},
-                )
+                        supplier,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/rematch",
+                        {"overwrite_manual": False},
+                    )
                 if supplier_rematch_code != 403 or supplier_rematch_payload.get("error") != "forbidden":
-                    raise AssertionError("supplier role must not rematch supplier orders")
+                        raise AssertionError("supplier role must not rematch supplier orders")
                 supplier_delete_code, supplier_delete_payload = _opener_delete_json(
-                    supplier,
-                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
-                )
+                        supplier,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                    )
                 if supplier_delete_code != 403 or supplier_delete_payload.get("error") != "forbidden":
-                    raise AssertionError("supplier role must not delete supplier orders")
+                        raise AssertionError("supplier role must not delete supplier orders")
+                operator_delete_code, operator_delete_payload = _opener_delete_json(
+                        operator,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                    )
+                if operator_delete_code != 200 or operator_delete_payload.get("deleted") is not True:
+                        raise AssertionError(f"operator role must delete supplier orders, got {operator_delete_code} {operator_delete_payload}")
             finally:
                 server.shutdown()
                 server.server_close()

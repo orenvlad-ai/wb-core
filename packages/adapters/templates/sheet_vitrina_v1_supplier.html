@@ -59,12 +59,40 @@
       justify-content: center;
       gap: 6px;
     }
-    button.primary { background: linear-gradient(135deg, #7c3aed, #2563eb); border-color: transparent; }
-    .button-link.secondary { background: rgba(167, 139, 250, 0.12); border-color: rgba(167, 139, 250, 0.4); color: #ddd6fe; }
-    button.danger, .button-link.danger { border-color: rgba(251, 113, 133, 0.55); color: var(--danger); }
-    button:disabled { cursor: not-allowed; opacity: 0.48; }
-    .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-    .message { min-height: 20px; margin: 0; font-size: 13px; }
+        button.primary { background: linear-gradient(135deg, #7c3aed, #2563eb); border-color: transparent; }
+        .button-link.secondary { background: rgba(167, 139, 250, 0.12); border-color: rgba(167, 139, 250, 0.4); color: #ddd6fe; }
+        button.danger, .button-link.danger { border-color: rgba(251, 113, 133, 0.55); color: var(--danger); }
+        button.compact, .button-link.compact {
+          min-height: 30px;
+          padding: 5px 9px;
+          border-radius: 6px;
+          font-size: 12px;
+          line-height: 1.15;
+        }
+        button:disabled { cursor: not-allowed; opacity: 0.48; }
+        .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .row-actions, .delete-confirmation { display: inline-flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+        .delete-confirmation {
+          padding: 7px;
+          border: 1px solid rgba(251, 113, 133, 0.36);
+          border-radius: 7px;
+          background: rgba(251, 113, 133, 0.08);
+        }
+        .delete-confirmation span {
+          width: 100%;
+          color: var(--danger);
+          font-size: 12px;
+          font-weight: 800;
+        }
+        .muted-dash { color: var(--muted); font-weight: 800; }
+        .order-status-select {
+          min-width: 148px;
+          min-height: 32px;
+          padding: 5px 8px;
+          font-size: 12px;
+          font-weight: 800;
+        }
+        .message { min-height: 20px; margin: 0; font-size: 13px; }
     .message.error { color: var(--danger); }
     .message.success { color: var(--success); }
     .registry-wrap, .line-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
@@ -182,11 +210,12 @@
                 <th>商品金额 / Product amount / Сумма товаров</th>
                 <th>其他费用 / Extras amount / Прочие позиции</th>
                 <th>发票总额 / Invoice total / Итого invoice</th>
-                <th>币种 / Currency / Валюта</th>
-                <th>匹配 / Matching / Матчинг</th>
-                <th>上传时间 / Uploaded / Дата загрузки</th>
-                <th>发票 / Invoice / Файл invoice</th>
-                <th>操作 / Actions / Действия</th>
+                    <th data-currency-column>币种 / Currency / Валюта</th>
+                    <th>匹配 / Matching / Матчинг</th>
+                    <th>上传时间 / Uploaded / Дата загрузки</th>
+                    <th>发票 / Invoice / Файл invoice</th>
+                    <th data-order-status-column hidden>Статус заказа</th>
+                    <th>操作 / Actions / Действия</th>
               </tr>
             </thead>
             <tbody id="shipmentRows" data-registry-state="loading">
@@ -323,8 +352,10 @@
       const logoutLink = document.getElementById("logoutLink");
       const openStandaloneLink = document.getElementById("openStandaloneLink");
       const metaInputs = Array.from(document.querySelectorAll("[data-meta-field]"));
-      const numberFormatter = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 });
-      const defaultSupplierName = "HanShang Technology";
+          const numberFormatter = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 });
+          const defaultSupplierName = "HanShang Technology";
+          const canDeleteShipments = config.can_delete_shipments !== false;
+          const canEditOrderStatus = Boolean(config.can_edit_order_status);
 
       let currentShipment = null;
       let currentUploadId = "";
@@ -338,14 +369,19 @@
         manual_override: "手动修改 / Manual override / Ручная правка",
         checksum_error: "金额错误 / Total error / Ошибка суммы"
       };
-      const lineStatusLabels = {
-        matched: "已匹配 / Matched / Сопоставлено",
-        matched_by_compatibility: "按兼容型号匹配 / Matched by compatibility / Сопоставлено по совместимости",
-        unmatched: "未匹配 / Unmatched / Не сопоставлено",
+          const lineStatusLabels = {
+            matched: "已匹配 / Matched / Сопоставлено",
+            matched_by_compatibility: "按兼容型号匹配 / Matched by compatibility / Сопоставлено по совместимости",
+            unmatched: "未匹配 / Unmatched / Не сопоставлено",
         ambiguous: "不明确 / Ambiguous / Неоднозначно",
         manual_override: "手动修改 / Manual override / Ручная правка",
-        extra: "其他 / Extra / Прочее"
-      };
+            extra: "其他 / Extra / Прочее"
+          };
+          const orderStatusLabels = {
+            production: "На производстве",
+            in_transit: "В пути",
+            accepted_ff: "Принято на ФФ"
+          };
 
       function escapeHtml(value) {
         return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -358,12 +394,21 @@
         return Number.isFinite(number) ? numberFormatter.format(number) : "-";
       }
 
-      function setMessage(element, text, tone) {
-        element.textContent = text || "";
-        element.className = "message" + (tone ? " " + tone : "");
-      }
+          function setMessage(element, text, tone) {
+            element.textContent = text || "";
+            element.className = "message" + (tone ? " " + tone : "");
+          }
 
-      async function fetchJson(url, options) {
+          function configureRegistryColumns() {
+            Array.from(document.querySelectorAll("[data-currency-column]")).forEach((node) => {
+              node.hidden = canEditOrderStatus;
+            });
+            Array.from(document.querySelectorAll("[data-order-status-column]")).forEach((node) => {
+              node.hidden = !canEditOrderStatus;
+            });
+          }
+
+          async function fetchJson(url, options) {
         const response = await fetch(url, options || {});
         const contentType = response.headers.get("content-type") || "";
         const text = await response.text();
@@ -425,46 +470,157 @@
           shipmentRows.innerHTML = '<tr data-registry-state="loaded_empty"><td colspan="13">暂无订单 / No orders yet / Заказов пока нет.</td></tr>';
           return;
         }
-        registryLoadState = "loaded_with_rows";
-        shipmentRows.dataset.registryState = registryLoadState;
-        shipmentRows.innerHTML = rows.map((row) => {
-          const status = row.match_status === "all_matched" ? "OK" : "Check";
-          return [
-            '<tr data-row="' + escapeHtml(row.shipment_id) + '">',
-            '<td>' + escapeHtml(row.shipment_date || "-") + '</td>',
-            '<td>' + escapeHtml(row.invoice_no || "-") + '</td>',
-            '<td>' + escapeHtml(row.invoice_date || "-") + '</td>',
-            '<td>' + escapeHtml(row.supplier_name || defaultSupplierName) + '</td>',
+            registryLoadState = "loaded_with_rows";
+            shipmentRows.dataset.registryState = registryLoadState;
+            shipmentRows.innerHTML = rows.map((row) => {
+              const status = row.match_status === "all_matched" ? "OK" : "Check";
+              const cells = [
+                '<tr data-row="' + escapeHtml(row.shipment_id) + '">',
+                '<td>' + escapeHtml(row.shipment_date || "-") + '</td>',
+                '<td>' + escapeHtml(row.invoice_no || "-") + '</td>',
+                '<td>' + escapeHtml(row.invoice_date || "-") + '</td>',
+                '<td>' + escapeHtml(row.supplier_name || defaultSupplierName) + '</td>',
             '<td>' + escapeHtml(formatNumber(row.product_qty_total)) + '</td>',
-            '<td>' + escapeHtml(formatNumber(row.product_amount_total)) + '</td>',
-            '<td>' + escapeHtml(formatNumber(row.extras_amount_total)) + '</td>',
-            '<td>' + escapeHtml(formatNumber(row.invoice_amount_total)) + '</td>',
-            '<td>' + escapeHtml(row.currency || "-") + '</td>',
-            '<td>' + escapeHtml(status) + '</td>',
-            '<td>' + escapeHtml(row.created_at || "-") + '</td>',
-            '<td><a class="button-link" href="' + escapeHtml(row.invoice_download_path || "#") + '" data-download>下载 / Download / Скачать</a></td>',
-            '<td><button class="danger" type="button" data-delete-shipment="' + escapeHtml(row.shipment_id) + '">删除 / Delete / Удалить</button></td>',
-            '</tr>'
-          ].join("");
-        }).join("");
-        Array.from(shipmentRows.querySelectorAll("tr[data-row]")).forEach((row) => {
-          row.addEventListener("click", (event) => {
-            if (event.target && event.target.closest("[data-download], [data-delete-shipment]")) {
-              event.stopPropagation();
+                '<td>' + escapeHtml(formatNumber(row.product_amount_total)) + '</td>',
+                '<td>' + escapeHtml(formatNumber(row.extras_amount_total)) + '</td>',
+                '<td>' + escapeHtml(formatNumber(row.invoice_amount_total)) + '</td>',
+              ];
+              if (!canEditOrderStatus) {
+                cells.push('<td data-currency-column>' + escapeHtml(row.currency || "-") + '</td>');
+              }
+              cells.push(
+                '<td>' + escapeHtml(status) + '</td>',
+                '<td>' + escapeHtml(row.created_at || "-") + '</td>',
+                '<td><a class="button-link compact" href="' + escapeHtml(row.invoice_download_path || "#") + '" data-download aria-label="Download invoice ' + escapeHtml(row.invoice_no || row.shipment_id || "") + '" title="Download invoice">Download</a></td>'
+              );
+              if (canEditOrderStatus) {
+                cells.push(renderOrderStatusCell(row));
+              }
+              cells.push('<td data-actions-cell>' + renderActionsContent(row) + '</td>', '</tr>');
+              return cells.join("");
+            }).join("");
+            Array.from(shipmentRows.querySelectorAll("tr[data-row]")).forEach((row) => {
+              row.addEventListener("click", (event) => {
+                if (event.target && event.target.closest("[data-download], [data-delete-shipment], [data-delete-confirm], [data-delete-cancel], [data-delete-confirmation], [data-order-status-shipment]")) {
+                  event.stopPropagation();
+                  return;
+                }
+                if (row.dataset.deleteConfirming === "1") {
+                  event.stopPropagation();
+                  return;
+                }
+                openShipment(row.dataset.row);
+              });
+            });
+            bindOrderStatusControls();
+            bindDeleteButtons();
+          }
+
+          function renderOrderStatusCell(row) {
+            const value = orderStatusLabels[row.order_status] ? row.order_status : "production";
+            const options = Object.keys(orderStatusLabels).map((status) => (
+              '<option value="' + status + '"' + (status === value ? " selected" : "") + '>' + escapeHtml(orderStatusLabels[status]) + '</option>'
+            )).join("");
+            return '<td data-order-status-column><select class="order-status-select" data-order-status-shipment="' + escapeHtml(row.shipment_id) + '" data-previous-status="' + escapeHtml(value) + '" aria-label="Статус заказа">' + options + '</select></td>';
+          }
+
+          function renderActionsContent(row) {
+            if (!canDeleteShipments) {
+              return '<span class="muted-dash">-</span>';
+            }
+            return '<div class="row-actions"><button class="danger compact" type="button" data-delete-shipment="' + escapeHtml(row.shipment_id) + '" aria-label="Delete order ' + escapeHtml(row.invoice_no || row.shipment_id || "") + '" title="Delete order">Delete</button></div>';
+          }
+
+          function bindDeleteButtons() {
+            Array.from(shipmentRows.querySelectorAll("[data-delete-shipment]")).forEach((button) => {
+              bindDeleteButton(button);
+            });
+          }
+
+          function bindDeleteButton(button) {
+            if (!button) {
               return;
             }
-            openShipment(row.dataset.row);
-          });
-        });
-        Array.from(shipmentRows.querySelectorAll("[data-delete-shipment]")).forEach((button) => {
-          button.addEventListener("click", (event) => {
-            event.stopPropagation();
-            deleteShipment(button.dataset.deleteShipment);
-          });
-        });
-      }
+            button.addEventListener("click", (event) => {
+              event.stopPropagation();
+              showDeleteConfirmation(button);
+            });
+          }
 
-      function blankShipment() {
+          function bindOrderStatusControls() {
+            Array.from(shipmentRows.querySelectorAll("[data-order-status-shipment]")).forEach((select) => {
+              select.addEventListener("click", (event) => event.stopPropagation());
+              select.addEventListener("change", (event) => {
+                event.stopPropagation();
+                updateOrderStatus(select);
+              });
+            });
+          }
+
+          function showDeleteConfirmation(button) {
+            const row = button.closest("tr[data-row]");
+            if (!row) {
+              return;
+            }
+            const shipmentId = button.dataset.deleteShipment || row.dataset.row || "";
+            const cell = row.querySelector("[data-actions-cell]");
+            if (!cell || !shipmentId) {
+              return;
+            }
+            row.dataset.deleteConfirming = "1";
+            cell.innerHTML = [
+              '<div class="delete-confirmation" data-delete-confirmation>',
+              '<span>Удалить заказ?</span>',
+              '<button class="danger compact" type="button" data-delete-confirm="' + escapeHtml(shipmentId) + '" aria-label="Confirm delete order">Confirm</button>',
+              '<button class="compact" type="button" data-delete-cancel="' + escapeHtml(shipmentId) + '" aria-label="Cancel delete order">Cancel</button>',
+              '</div>'
+            ].join("");
+            const confirmButton = cell.querySelector("[data-delete-confirm]");
+            const cancelButton = cell.querySelector("[data-delete-cancel]");
+            if (confirmButton) {
+              confirmButton.addEventListener("click", (event) => {
+                event.stopPropagation();
+                deleteShipment(shipmentId);
+              });
+            }
+            if (cancelButton) {
+              cancelButton.addEventListener("click", (event) => {
+                event.stopPropagation();
+                delete row.dataset.deleteConfirming;
+                cell.innerHTML = renderActionsContent({ shipment_id: shipmentId });
+                bindDeleteButton(cell.querySelector("[data-delete-shipment]"));
+              });
+            }
+          }
+
+          async function updateOrderStatus(select) {
+            const shipmentId = select.dataset.orderStatusShipment || "";
+            const previousStatus = select.dataset.previousStatus || "production";
+            if (!shipmentId || !orderStatusLabels[select.value]) {
+              select.value = previousStatus;
+              return;
+            }
+            select.disabled = true;
+            setMessage(registryMessage, "Сохраняем статус заказа...", "");
+            try {
+              const payload = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json", Accept: "application/json" },
+                body: JSON.stringify({ order_status: select.value })
+              });
+              const savedStatus = orderStatusLabels[payload.order_status] ? payload.order_status : select.value;
+              select.value = savedStatus;
+              select.dataset.previousStatus = savedStatus;
+              setMessage(registryMessage, "Статус заказа сохранён.", "success");
+            } catch (error) {
+              select.value = previousStatus;
+              setMessage(registryMessage, error.message, "error");
+            } finally {
+              select.disabled = false;
+            }
+          }
+
+          function blankShipment() {
         return {
           shipment_id: "",
           shipment_date: "",
@@ -758,10 +914,10 @@
         setMessage(cardMessage, "", "");
       }
 
-      async function deleteShipment(shipmentId) {
-        if (!shipmentId || !confirm("从登记表删除订单？ / Delete order from registry? / Удалить заказ из реестра?")) {
-          return;
-        }
+          async function deleteShipment(shipmentId) {
+            if (!shipmentId) {
+              return;
+            }
         setMessage(registryMessage, "删除中 / Deleting / Удаляем заказ...", "");
         try {
           await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), { method: "DELETE", headers: { Accept: "application/json" } });
@@ -809,12 +965,13 @@
       if (logoutLink && config.logout_path) {
         logoutLink.href = config.logout_path;
       }
-      if (openStandaloneLink) {
-        openStandaloneLink.href = config.supplier_ui_path || "/sheet-vitrina-v1/supplier";
-        openStandaloneLink.hidden = window.self === window.top;
-      }
+          if (openStandaloneLink) {
+            openStandaloneLink.href = config.supplier_ui_path || "/sheet-vitrina-v1/supplier";
+            openStandaloneLink.hidden = window.self === window.top;
+          }
 
-      loadRegistry();
+          configureRegistryColumns();
+          loadRegistry();
     })();
   </script>
 </body>

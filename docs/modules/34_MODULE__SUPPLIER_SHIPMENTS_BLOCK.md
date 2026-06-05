@@ -49,7 +49,7 @@ related_docs:
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Supplier-facing order registry uses trilingual Chinese/English/Russian labels, shows fixed supplier in the registry only, hides Supplier/Customer and order SKU fields from the card, defaults supplier metadata to HanShang Technology, reads contract no/date from cells or drawing XML text, keeps nmId/nomenclature visible, and preserves deterministic nomenclature matching; no Google Sheets/GAS contour, no browser-local truth, no low-confidence fuzzy matching."
+update_note: "Supplier-facing order registry uses trilingual Chinese/English/Russian labels, shows fixed supplier in the registry only, hides Supplier/Customer and order SKU fields from the card, defaults supplier metadata to HanShang Technology, persists operator-owned order_status on shipment headers, reads contract no/date from cells or drawing XML text, keeps nmId/nomenclature visible, and preserves deterministic nomenclature matching; no Google Sheets/GAS contour, no browser-local truth, no low-confidence fuzzy matching."
 ---
 
 # 1. Contract
@@ -68,7 +68,9 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
   - staged uploads live under `<runtime_dir>/supplier_invoices/uploads/<upload_id>/<safe_filename>`;
   - SQLite stores upload metadata, shipment headers, editable line details and nomenclature rows.
 - `shipment_date` is the only required manual field after parse. It is rendered as `出货日期 / Shipment date / Дата отгрузки`, is required on create/save, and is validated server-side even though the UI disables save until it is present.
-- Orders can be deleted by operator role. Delete removes the DB order/lines and makes the original invoice download unavailable.
+- Shipment headers persist `order_status` in `sheet_vitrina_v1_supplier_shipments` with non-destructive default `production`. Canonical values are `production` (`На производстве`), `in_transit` (`В пути`) and `accepted_ff` (`Принято на ФФ`). List and detail API responses expose `order_status`; legacy rows without the column/value fall back to `production`.
+- In the operator embedded registry table, `Currency / Валюта` is hidden from the list, `Статус заказа` is shown after `Invoice file` and before `Actions`, and status changes use a narrow status-only PATCH so shipment lines, invoice metadata, source file pointers and matching state are not rebuilt or erased. The status selector is not rendered in the standalone supplier-only view.
+- Orders can be deleted by operator role only. Delete controls use UI-level confirmation: the first click opens an inline confirmation with cancel, and backend DELETE is called only by the explicit confirm action. While confirmation is open, row clicks do not open the order card. Confirmed delete removes the DB order/lines and makes the original invoice download unavailable.
 - Saved order cards expose `关闭 / Close / Закрыть`; the visible `重新匹配 / Re-match / Пересопоставить` action is not rendered in the supplier/order card. The rematch API remains available for internal compatibility and applies current nomenclature without overwriting manual overrides unless explicitly requested by API payload.
 
 # 2. Parser
@@ -98,12 +100,12 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
 
 # 4. Auth Boundary
 
-- Operator role can access the full WebCore shell, `Настройки`, nomenclature API and supplier shipment APIs including delete/rematch.
+- Operator role can access the full WebCore shell, `Настройки`, nomenclature API and supplier shipment APIs including delete/rematch and order-status update.
 - Supplier role is optional and configured only through runtime env:
   - `WB_CORE_SUPPLIER_AUTH_USERNAME`
   - `WB_CORE_SUPPLIER_AUTH_PASSWORD_HASH`
   - `WB_CORE_SUPPLIER_AUTH_DISPLAY_NAME`
-- Supplier role can access only `/sheet-vitrina-v1/supplier`, read/create/edit supplier shipment APIs, invoice downloads, login/logout and needed static/browser assets. It cannot access `/sheet-vitrina-v1/vitrina`, `/sheet-vitrina-v1/operator`, `/sheet-vitrina-v1/settings`, nomenclature APIs, supplier delete/rematch or unrelated `/v1/sheet-vitrina-v1/...` APIs.
+- Supplier role can access only `/sheet-vitrina-v1/supplier`, read/create/edit supplier shipment APIs, invoice downloads, login/logout and needed static/browser assets. It cannot access `/sheet-vitrina-v1/vitrina`, `/sheet-vitrina-v1/operator`, `/sheet-vitrina-v1/settings`, nomenclature APIs, supplier delete/rematch, order-status mutation or unrelated `/v1/sheet-vitrina-v1/...` APIs.
 - Supplier credentials are never committed as plaintext, hashes, cookies or tokens. A live supplier account may use machine-safe username `hanshang` and display label `HanShang Technology` / `Ханшанг`, but the password and PBKDF2-HMAC hash remain runtime-only values outside Git/log output.
 
 # 5. Factory-Order Inbound Source

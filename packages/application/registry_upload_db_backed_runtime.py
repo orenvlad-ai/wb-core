@@ -45,6 +45,7 @@ from packages.contracts.sheet_vitrina_v1 import (
     SheetVitrinaV1ManualOperatorState,
     SheetVitrinaV1RefreshResult,
 )
+from packages.contracts.supplier_shipments import ORDER_STATUS_DEFAULT
 
 ROOT = Path(__file__).resolve().parents[2]
 ARTIFACTS_DIR = ROOT / "artifacts" / "registry_upload_db_backed_runtime"
@@ -1487,6 +1488,7 @@ class RegistryUploadDbBackedRuntime:
                     created_at,
                     updated_at,
                     shipment_date,
+                    order_status,
                     invoice_no,
                     invoice_date,
                     contract_no,
@@ -1507,10 +1509,11 @@ class RegistryUploadDbBackedRuntime:
                     warnings_json,
                     errors_json
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(shipment_id) DO UPDATE SET
                     updated_at = excluded.updated_at,
                     shipment_date = excluded.shipment_date,
+                    order_status = excluded.order_status,
                     invoice_no = excluded.invoice_no,
                     invoice_date = excluded.invoice_date,
                     contract_no = excluded.contract_no,
@@ -1536,6 +1539,7 @@ class RegistryUploadDbBackedRuntime:
                     header.get("created_at"),
                     header.get("updated_at"),
                     header.get("shipment_date"),
+                    header.get("order_status") or ORDER_STATUS_DEFAULT,
                     header.get("invoice_no") or "",
                     header.get("invoice_date") or "",
                     header.get("contract_no") or "",
@@ -1628,6 +1632,7 @@ class RegistryUploadDbBackedRuntime:
                        created_at,
                        updated_at,
                        shipment_date,
+                       order_status,
                        invoice_no,
                        invoice_date,
                        supplier_name,
@@ -1672,6 +1677,32 @@ class RegistryUploadDbBackedRuntime:
                 "header": _supplier_shipment_header_to_dict(header_row),
                 "lines": [_supplier_shipment_line_to_dict(row) for row in line_rows],
             }
+
+    def update_supplier_shipment_order_status(
+        self,
+        *,
+        shipment_id: str,
+        order_status: str,
+        updated_at: str,
+    ) -> bool:
+        shipment_id = str(shipment_id or "").strip()
+        if not shipment_id:
+            raise ValueError("supplier shipment_id is required")
+        _validate_timestamp(str(updated_at or ""), field_name="updated_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            cursor = conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_supplier_shipments
+                SET order_status = ?,
+                    updated_at = ?
+                WHERE shipment_id = ?
+                """,
+                (str(order_status or ""), updated_at, shipment_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
     def delete_supplier_shipment(self, shipment_id: str) -> bool:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -3022,6 +3053,7 @@ def _supplier_shipment_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "shipment_date": row["shipment_date"],
+        "order_status": row["order_status"] or ORDER_STATUS_DEFAULT,
         "invoice_no": row["invoice_no"] or "",
         "invoice_date": row["invoice_date"] or "",
         "supplier_name": row["supplier_name"] or "",
@@ -3042,6 +3074,7 @@ def _supplier_shipment_header_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "shipment_date": row["shipment_date"],
+        "order_status": row["order_status"] or ORDER_STATUS_DEFAULT,
         "invoice_no": row["invoice_no"] or "",
         "invoice_date": row["invoice_date"] or "",
         "contract_no": row["contract_no"] or "",
@@ -3424,6 +3457,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             shipment_date TEXT NOT NULL,
+            order_status TEXT NOT NULL DEFAULT 'production',
             invoice_no TEXT,
             invoice_date TEXT,
             contract_no TEXT,
@@ -3523,6 +3557,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         table_name="sheet_vitrina_v1_manual_operator_state",
         column_name="last_manual_load_result_json",
         column_sql="TEXT",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_supplier_shipments",
+        column_name="order_status",
+        column_sql="TEXT NOT NULL DEFAULT 'production'",
     )
     _ensure_column(
         conn,
