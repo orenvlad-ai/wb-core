@@ -20,6 +20,7 @@ from packages.adapters.prices_snapshot_block import HttpBackedPricesSnapshotSour
 from packages.adapters.sales_funnel_history_block import HttpBackedSalesFunnelHistorySource
 from packages.adapters.seller_funnel_snapshot_block import HttpBackedSellerFunnelSnapshotSource
 from packages.adapters.sf_period_block import HttpBackedSfPeriodSource
+from packages.adapters.spp_proxy_block import HttpBackedPublicWbCardBuyerPriceSource
 from packages.adapters.spp_block import HttpBackedSppSource
 from packages.adapters.stocks_block import HistoricalCsvBackedStocksSource
 from packages.adapters.web_source_current_sync import ShellBackedWebSourceCurrentSync
@@ -64,6 +65,7 @@ from packages.application.sheet_vitrina_v1_temporal_policy import (
     TEMPORAL_POLICY_YESTERDAY_CLOSED_ONLY,
     source_policy_supports_slot as _canonical_source_policy_supports_slot,
 )
+from packages.application.spp_proxy_block import SppProxyBlock
 from packages.application.spp_block import SppBlock
 from packages.application.stocks_block import StocksBlock
 from packages.application.web_source_snapshot_block import WebSourceSnapshotBlock
@@ -91,6 +93,7 @@ from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryRequ
 from packages.contracts.seller_funnel_snapshot_block import SellerFunnelSnapshotRequest
 from packages.contracts.sf_period_block import SfPeriodRequest
 from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope, SheetVitrinaV1TemporalSlot
+from packages.contracts.spp_proxy_block import SppProxyRequest
 from packages.contracts.spp_block import SppRequest
 from packages.contracts.stocks_block import StocksRequest
 from packages.contracts.web_source_snapshot_block import WebSourceSnapshotRequest
@@ -122,6 +125,8 @@ EXECUTION_MODE_AUTO_DAILY = "auto_daily"
 EXECUTION_MODE_MANUAL_OPERATOR = "manual_operator"
 EXECUTION_MODE_PERSISTED_RETRY = "persisted_retry"
 STRICT_CLOSED_DAY_SOURCE_KEYS = {"seller_funnel_snapshot", "web_source_snapshot"}
+SPP_PROXY_SOURCE_KEY = "spp_proxy"
+SPP_PROXY_METRIC_KEY = "spp_proxy"
 HISTORICAL_CLOSED_DAY_SOURCE_KEYS = STRICT_CLOSED_DAY_SOURCE_KEYS | {
     "sales_funnel_history",
     "sf_period",
@@ -131,8 +136,8 @@ HISTORICAL_CLOSED_DAY_SOURCE_KEYS = STRICT_CLOSED_DAY_SOURCE_KEYS | {
     "fin_report_daily",
     ONEC_STOCKS_SOURCE_KEY,
 }
-CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "promo_by_price"}
-CURRENT_SNAPSHOT_ONLY_ROLLOVER_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "spp"}
+CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "promo_by_price", SPP_PROXY_SOURCE_KEY}
+CURRENT_SNAPSHOT_ONLY_ROLLOVER_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "spp", SPP_PROXY_SOURCE_KEY}
 ACCEPTED_CURRENT_SOURCE_KEYS = HISTORICAL_CLOSED_DAY_SOURCE_KEYS | CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS
 EXACT_DATE_RUNTIME_CACHE_SOURCE_KEYS = {"sales_funnel_history", "stocks", "promo_by_price", ONEC_STOCKS_SOURCE_KEY}
 TEMPORAL_ROLE_PROVISIONAL_CURRENT = "provisional_current_snapshot"
@@ -161,6 +166,7 @@ SOURCE_CLASSIFICATION_GROUPS = {
     "sales_funnel_history": "B_wb_api_date_period_capable",
     "sf_period": "B_wb_api_date_period_capable",
     "spp": "C_seller_portal_current_snapshot_with_accepted_current_rollover",
+    SPP_PROXY_SOURCE_KEY: "C_wb_public_card_current_snapshot_with_accepted_current_rollover",
     "stocks": "B_wb_api_date_period_capable",
     ONEC_STOCKS_SOURCE_KEY: "E_onec_product_capital_date_capable",
     "ads_compact": "B_wb_api_date_period_capable",
@@ -216,6 +222,12 @@ SOURCE_DIAGNOSTIC_SPECS = {
         "block": "SppBlock",
         "adapter": "HttpBackedSppSource",
         "endpoint": "GET /api/v1/supplier/sales?dateFrom=<YYYY-MM-DD>",
+    },
+    SPP_PROXY_SOURCE_KEY: {
+        "module": "packages.application.spp_proxy_block",
+        "block": "SppProxyBlock",
+        "adapter": "HttpBackedPublicWbCardBuyerPriceSource",
+        "endpoint": "GET https://www.wildberries.ru/catalog/{nmId}/detail.aspx + public card API fallback",
     },
     "ads_bids": {
         "module": "packages.application.ads_bids_block",
@@ -294,6 +306,7 @@ class SlotLookups:
     prices_lookup: dict[int, Any]
     sf_period_lookup: dict[int, Any]
     spp_lookup: dict[int, Any]
+    spp_proxy_lookup: dict[int, Any]
     ads_bids_lookup: dict[int, Any]
     stocks_lookup: dict[int, Any]
     onec_stocks_lookup: dict[int, dict[str, float]]
@@ -562,6 +575,12 @@ def _source_diagnostic_semantic_status(status: LiveSourceStatus) -> str:
 def _known_payload_diagnostic_counters(source_key: str, payload: Any | None) -> dict[str, Any]:
     if payload is None:
         return {}
+    if source_key == SPP_PROXY_SOURCE_KEY:
+        diagnostics = _payload_diagnostics(payload)
+        return {
+            "spp_proxy_missing_count": diagnostics.get("missing_count"),
+            "spp_proxy_covered_count": diagnostics.get("covered_count"),
+        }
     if source_key != "promo_by_price":
         return {}
     return {
@@ -848,6 +867,7 @@ class SheetVitrinaV1LivePlanBlock:
         prices_snapshot_block: PricesSnapshotBlock | None = None,
         sf_period_block: SfPeriodBlock | None = None,
         spp_block: SppBlock | None = None,
+        spp_proxy_block: SppProxyBlock | None = None,
         ads_bids_block: AdsBidsBlock | None = None,
         stocks_block: StocksBlock | None = None,
         onec_stocks_block: OnecStocksBlock | None = None,
@@ -865,6 +885,7 @@ class SheetVitrinaV1LivePlanBlock:
         self.prices_snapshot_block = prices_snapshot_block or PricesSnapshotBlock(HttpBackedPricesSnapshotSource())
         self.sf_period_block = sf_period_block or SfPeriodBlock(HttpBackedSfPeriodSource())
         self.spp_block = spp_block or SppBlock(HttpBackedSppSource())
+        self.spp_proxy_block = spp_proxy_block or SppProxyBlock(HttpBackedPublicWbCardBuyerPriceSource())
         self.ads_bids_block = ads_bids_block or AdsBidsBlock(HttpBackedAdsBidsSource())
         self.stocks_block = stocks_block or StocksBlock(HistoricalCsvBackedStocksSource())
         self.onec_stocks_block = onec_stocks_block or OnecStocksBlock(
@@ -1167,7 +1188,9 @@ class SheetVitrinaV1LivePlanBlock:
         diagnostics: dict[str, Any] | None = None,
     ) -> TemporalLiveSources:
         emit = log or _noop_live_plan_log
-        selected_source_keys = {str(item).strip() for item in (source_keys or set()) if str(item).strip()}
+        selected_source_keys = _expand_selected_source_keys_for_dependencies(
+            {str(item).strip() for item in (source_keys or set()) if str(item).strip()}
+        )
         requested_nm_ids = [item.nm_id for item in enabled_config]
         requested_groups = sorted({item.group for item in enabled_config})
         statuses: list[LiveSourceStatus] = []
@@ -1179,6 +1202,7 @@ class SheetVitrinaV1LivePlanBlock:
                 prices_lookup={},
                 sf_period_lookup={},
                 spp_lookup={},
+                spp_proxy_lookup={},
                 ads_bids_lookup={},
                 stocks_lookup={},
                 onec_stocks_lookup={},
@@ -1256,6 +1280,19 @@ class SheetVitrinaV1LivePlanBlock:
                             snapshot_type="spp",
                             snapshot_date=slot.column_date,
                             nm_ids=requested_nm_ids,
+                        )
+                    ).result,
+                ),
+                (
+                    SPP_PROXY_SOURCE_KEY,
+                    lambda slot=slot, current_lookups=current_lookups: self.spp_proxy_block.execute(
+                        SppProxyRequest(
+                            snapshot_type=SPP_PROXY_SOURCE_KEY,
+                            snapshot_date=slot.column_date,
+                            nm_ids=requested_nm_ids,
+                            price_seller_discounted_by_nm_id=_price_seller_discounted_by_nm_id(
+                                current_lookups.prices_lookup
+                            ),
                         )
                     ).result,
                 ),
@@ -1402,6 +1439,8 @@ class SheetVitrinaV1LivePlanBlock:
                     current_lookups.sf_period_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "spp":
                     current_lookups.spp_lookup = _index_items_by_nm_id(payload)
+                elif source_key == SPP_PROXY_SOURCE_KEY:
+                    current_lookups.spp_proxy_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "ads_bids":
                     current_lookups.ads_bids_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "stocks":
@@ -2755,6 +2794,7 @@ class _MetricEvaluator:
             ("sf_period_lookup", "localization_percent", 0.01),
             ("sf_period_lookup", "feedback_rating", 1.0),
             ("spp_lookup", "spp", 1.0),
+            ("spp_proxy_lookup", SPP_PROXY_METRIC_KEY, 1.0),
             ("ads_bids_lookup", "ads_bid_search", 1.0),
             ("ads_bids_lookup", "ads_bid_recommendations", 1.0),
             ("stocks_lookup", "stock_total", 1.0),
@@ -2983,6 +3023,26 @@ def _lookup_attr(slot_lookups: SlotLookups, lookup_name: str, nm_id: int, attrib
     if value is None:
         return None
     return float(value) * scale
+
+
+def _price_seller_discounted_by_nm_id(prices_lookup: Mapping[int, Any]) -> dict[int, float | None]:
+    result: dict[int, float | None] = {}
+    for nm_id, item in prices_lookup.items():
+        value = getattr(item, "price_seller_discounted", None)
+        try:
+            result[int(nm_id)] = None if value is None else float(value)
+        except (TypeError, ValueError):
+            result[int(nm_id)] = None
+    return result
+
+
+def _expand_selected_source_keys_for_dependencies(source_keys: set[str]) -> set[str]:
+    if not source_keys:
+        return set()
+    expanded = set(source_keys)
+    if SPP_PROXY_SOURCE_KEY in expanded:
+        expanded.add("prices_snapshot")
+    return expanded
 
 
 def _capture_live_source(
@@ -3483,6 +3543,8 @@ def _invalid_temporal_candidate_note(source_key: str, temporal_slot: str) -> str
         return "invalid_exact_snapshot=zero_filled_prices_snapshot"
     if temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT and source_key == "ads_bids":
         return "invalid_exact_snapshot=zero_filled_ads_bids_snapshot"
+    if temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT and source_key == SPP_PROXY_SOURCE_KEY:
+        return "invalid_exact_snapshot=empty_spp_proxy_snapshot"
     return "invalid_exact_snapshot"
 
 
@@ -3501,9 +3563,13 @@ def _is_valid_temporal_candidate(
             source_key == ONEC_STOCKS_SOURCE_KEY
             and status.kind == "incomplete"
             and status.covered_count > 0
+        ) and not (
+            source_key == SPP_PROXY_SOURCE_KEY
+            and status.kind == "incomplete"
+            and status.covered_count > 0
         ):
             return False
-    if status.kind == "incomplete" and source_key != ONEC_STOCKS_SOURCE_KEY:
+    if status.kind == "incomplete" and source_key not in {ONEC_STOCKS_SOURCE_KEY, SPP_PROXY_SOURCE_KEY}:
         return False
     if _is_invalid_temporal_web_source_payload(
         source_key=source_key,
@@ -3528,6 +3594,15 @@ def _is_valid_temporal_candidate(
         return any(
             _numeric_payload_value(getattr(item, "ads_bid_search", None)) > 0
             or _numeric_payload_value(getattr(item, "ads_bid_recommendations", None)) > 0
+            for item in items
+        )
+    if source_key == SPP_PROXY_SOURCE_KEY:
+        items = getattr(payload, "items", None)
+        if not isinstance(items, list) or not items:
+            return False
+        return any(
+            getattr(item, SPP_PROXY_METRIC_KEY, None) is not None
+            and _numeric_payload_value(getattr(item, SPP_PROXY_METRIC_KEY, None)) >= 0
             for item in items
         )
     return True

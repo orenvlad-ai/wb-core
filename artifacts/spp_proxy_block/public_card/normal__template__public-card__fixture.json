@@ -1,0 +1,22 @@
+{
+  "source": {
+    "mode": "public_wb_card_buyer_price",
+    "endpoint": "fixture public card buyer price",
+    "temporal_capability": "current_only",
+    "auth_context": "anonymous"
+  },
+  "data": {
+    "items": [
+      {
+        "nmId": 210183919,
+        "public_buyer_price": 770,
+        "parse_method": "fixture"
+      },
+      {
+        "nmId": 210184534,
+        "public_buyer_price": 1600,
+        "parse_method": "fixture"
+      }
+    ]
+  }
+}

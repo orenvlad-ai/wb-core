@@ -39,6 +39,18 @@
       "section": "Цены"
     },
     {
+      "metric_key": "spp_proxy",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "SPP-прокси",
+      "calc_type": "metric",
+      "calc_ref": "spp_proxy",
+      "show_in_data": true,
+      "format": "percent",
+      "display_order": 31,
+      "section": "Цены"
+    },
+    {
       "metric_key": "ads_views",
       "enabled": true,
       "scope": "SKU",

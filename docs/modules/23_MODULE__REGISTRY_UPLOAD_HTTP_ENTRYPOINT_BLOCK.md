@@ -305,7 +305,7 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
     - repo-owned inline calendar/preset panel with buttons `Сбросить` / `Сохранить`
     - operator-style layout: compact top panel, runtime `Автообновления`, compact summary/status strip, main vitrina table first, then filters/settings, historical controls and bottom `Действия и состояния`
     - main table display headers are Russian and include `Обновлено`; this field is a per-row last successful update timestamp in the vitrina snapshot metadata, not the business data date
-    - server-driven activity surface renders `Загрузка данных` as a grouped compact table over the same truthful source outcomes: groups `WB API`, `Seller Portal / бот`, `Прочие источники`, each with one compact date control, one `Обновить группу` action and group-level last update timestamp; rows keep server/business today/yesterday status columns, reason columns, Russian metric labels and secondary technical endpoint text. The group map covers every visible main-table metric exactly once; residual calculated/formula metrics, including proxy profit and proxy margin, belong to `Прочие источники`.
+    - server-driven activity surface renders `Загрузка данных` as a grouped compact table over the same truthful source outcomes: groups `WB API`, `Seller Portal / бот`, `WB public card / бот`, `Прочие источники`, each with one compact date control, one `Обновить группу` action and group-level last update timestamp; rows keep server/business today/yesterday status columns, reason columns, Russian metric labels and secondary technical endpoint text. The group map covers every visible main-table metric exactly once; residual calculated/formula metrics, including proxy profit and proxy margin, belong to `Прочие источники`.
     - `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` is the date-scoped web-vitrina group action seam; payload includes `{async: true, source_group_id, as_of_date}`. The client surfaces launch/loading/error state per group and writes a visible launch-failure line when the POST returns non-2xx before job creation; once the route reaches the app, it starts a job/log-backed partial refresh/load for one source group and one selected date, and must not clear, overwrite or timestamp unrelated groups or unrelated date cells. Group/global job results expose `updated_cells` metadata for transient UI highlighting: `updated` cells are green, `latest_confirmed`/fallback cells are yellow, and the styling is browser-session-only.
     - successful group-refresh writes through the shared server-side accepted/runtime contour (`ЕБД` / `единая база данных`) and selected ready snapshot, not through Google Sheets/GAS, browser UI state or localStorage; web-vitrina and reports must consume that same server-side truth layer.
     - `Seller Portal / бот` group reuses the existing seller session/recovery mechanisms for `Проверить сессию`, `Восстановить сессию` and `Скачать лаунчер`; `Лог` renders below the loading table and keeps the existing job/log download contour; the former `Обновление данных` activity block is not an active page-composition surface
@@ -345,13 +345,13 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
 - Final source matrix теперь materialized server-side как четыре группы:
   - A. bot/web-source historical / closed-day-capable = `seller_funnel_snapshot`, `web_source_snapshot`
   - B. WB API historical/date-period capable = `sales_funnel_history`, `sf_period`, `stocks`, `ads_compact`, `fin_report_daily`
-  - C. current-snapshot accepted rollover = `prices_snapshot`, `ads_bids`, `spp`
+  - C. current-snapshot accepted rollover = `prices_snapshot`, `ads_bids`, `spp`, `spp_proxy`
   - D. other/non-WB/manual/browser-collector = `cost_price`, `promo_by_price`
 - Temporal status policy now stays source-aware inside those groups instead of treating every family as "оба слота обязательны":
   - `dual_day_capable` = `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `sf_period`, `ads_compact`, `cost_price`, `promo_by_price`
   - `dual_day_intraday_tolerant` = `spp`, `fin_report_daily`
   - `yesterday_closed_only` = `stocks`
-  - `accepted_current_rollover` = `prices_snapshot`, `ads_bids`, `spp`
+  - `accepted_current_rollover` = `prices_snapshot`, `ads_bids`, `spp`, `spp_proxy`
 - Group A + B используют one-way accepted closed-day contract для `yesterday_closed`:
   - closed slot сначала читает уже сохранённый accepted snapshot/runtime cache;
   - если valid exact-date truth ещё не принят, auto/retry contour создаёт или продолжает persisted retry state `closure_pending / closure_retrying / closure_rate_limited / closure_exhausted`;
@@ -368,6 +368,7 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
   - `today_current` может long-retry-иться только в пределах текущего business day / current capture window;
   - later invalid/blank/zero candidate сохраняет и prior-day accepted truth, и earlier accepted current snapshot того же дня;
   - `spp` uses Seller Portal `discountOnSite` as this current-visible source; legacy WB Statistics sales-average SPP remains an explicit fallback mode and is not accepted as fresh current-visible truth.
+  - `spp_proxy` uses anonymous public WB card buyer price plus existing `prices_snapshot.price_seller_discounted`; missing public price, zero seller price or buyer price above seller price stays blank with diagnostics instead of fake zero.
   - только новый valid current snapshot может заменить уже accepted same-day snapshot.
 - `promo_by_price` в current checkpoint больше не остаётся blocked gap:
   - `today_current` trigger-ит bounded repo-owned promo collector run поверх existing seller session reuse contour;

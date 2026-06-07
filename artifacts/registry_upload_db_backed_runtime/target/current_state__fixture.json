@@ -1,5 +1,5 @@
 {
-  "bundle_version": "registry_upload_bundle_v1__2026-04-13T12:00:00Z",
+  "bundle_version": "registry_upload_bundle_v1__2026-06-08T00:00:00Z",
   "activated_at": "2026-04-13T12:00:02Z",
   "config_v2": [
     {
@@ -449,6 +449,18 @@
       "show_in_data": true,
       "format": "percent",
       "display_order": 180,
+      "section": "Цены"
+    },
+    {
+      "metric_key": "avg_spp_proxy",
+      "enabled": true,
+      "scope": "TOTAL",
+      "label_ru": "SPP-прокси средняя",
+      "calc_type": "metric",
+      "calc_ref": "spp_proxy",
+      "show_in_data": true,
+      "format": "percent",
+      "display_order": 185,
       "section": "Цены"
     },
     {
@@ -1049,6 +1061,18 @@
       "show_in_data": true,
       "format": "percent",
       "display_order": 680,
+      "section": "Цены"
+    },
+    {
+      "metric_key": "spp_proxy",
+      "enabled": true,
+      "scope": "SKU",
+      "label_ru": "SPP-прокси",
+      "calc_type": "metric",
+      "calc_ref": "spp_proxy",
+      "show_in_data": true,
+      "format": "percent",
+      "display_order": 685,
       "section": "Цены"
     },
     {
