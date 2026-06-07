@@ -72,10 +72,16 @@ def main() -> None:
         'id="dailyReportPeriod"',
         'id="stockReportPeriod"',
         'id="stockReportSkuSelector"',
+        'id="stockReportSalesAvgPeriodDays"',
         'id="stockReportApplyButton"',
         'id="stockReportSkuValidation"',
         'id="stockReportSelectAllButton"',
         'id="stockReportClearAllButton"',
+        "Период усреднения продаж",
+        "stock-report-table",
+        "data-stock-report-sort",
+        "STOCK_REPORT_TABLE_COLUMNS",
+        'url.searchParams.set("sales_avg_period_days", readStockReportSalesAvgPeriodDays());',
         'id="planReportPeriodSelect"',
         'id="planReportH1Input"',
         'id="planReportH2Input"',
@@ -109,8 +115,12 @@ def main() -> None:
         raise AssertionError("misleading single-day daily-report wording must not remain in the template")
     if "current business day и slot <code>today_current</code>" in html:
         raise AssertionError("stock-report UI must no longer describe current-day today_current seam as the default")
-    if "latest persisted ready snapshot не новее default closed day и slot <code>yesterday_closed</code>" not in html:
+    if "persisted ready snapshot / DATA_VITRINA / yesterday_closed" not in html:
         raise AssertionError("stock-report UI must disclose latest persisted ready snapshot yesterday_closed seam")
+    if "SKU с низким остатком по округам" in html or "stock-report-list" in html or "stock-report-item" in html:
+        raise AssertionError("stock-report old low-stock card/list UI must be removed")
+    if "Показываем только SKU, где хотя бы по одному supported district stock меньше 50 единиц" in html:
+        raise AssertionError("stock-report UI must no longer present <50 as row inclusion copy")
     if len(re.findall(r"<h1>", html)) != 0:
         raise AssertionError("duplicated top-level headings must be removed from panel bodies")
     if "let stockReportSelectedSkuIds = resolveRestoredStockReportDraftSkuIds(persistedOperatorUiState);" not in html:
@@ -162,6 +172,14 @@ def main() -> None:
         raise AssertionError("supply subsection must restore from persisted browser state")
     if 'setStockReportValidation("Выберите хотя бы один SKU");' not in html:
         raise AssertionError("stock-report selector must reject empty SKU selection before recalculation")
+    if 'stockReportSortState.direction === "asc" ? "desc" : "asc"' not in html:
+        raise AssertionError("stock-report header clicks must toggle sort direction")
+    if 'compareStockReportRows(left, right, column, stockReportSortState.direction)' not in html:
+        raise AssertionError("stock-report sorting must use raw row values before rendering")
+    if 'column.key.indexOf("stock:") === 0' not in html or 'column.key.indexOf("days:") === 0' not in html:
+        raise AssertionError("stock-report sort helpers must cover district stock and district days columns")
+    if 'promotion_participation_label' not in html:
+        raise AssertionError("stock-report UI must render promotion participation labels")
 
     config_payload = _extract_operator_ui_config(html)
     if config_payload.get("stock_report_active_skus") != active_skus:
@@ -180,18 +198,24 @@ def main() -> None:
         raise AssertionError("reports UI config must expose the plan-report baseline status route")
 
     fake_rows = [
-        {"nm_id": 1001, "identity_label": "SKU Alpha · nmId 1001"},
-        {"nm_id": 1002, "identity_label": "SKU Beta · nmId 1002"},
+        {"nm_id": 1001, "identity_label": "SKU Alpha · nmId 1001", "stock_total": 20, "promotion_participation": True},
+        {"nm_id": 1002, "identity_label": "SKU Beta · nmId 1002", "stock_total": 10, "promotion_participation": False},
     ]
     selected_nm_ids = {1003}
     filtered_rows = [row for row in fake_rows if int(row["nm_id"]) in selected_nm_ids]
     if filtered_rows:
         raise AssertionError("stock-report selector semantics must exclude deselected SKU from the rendered row set")
+    stock_sorted = sorted(fake_rows, key=lambda item: (item["stock_total"], item["identity_label"]))
+    if [item["nm_id"] for item in stock_sorted] != [1002, 1001]:
+        raise AssertionError("stock-report numeric sort smoke must reorder by raw stock_total")
+    promo_sorted_desc = sorted(fake_rows, key=lambda item: (0 if item["promotion_participation"] else 1, item["identity_label"]))
+    if [item["nm_id"] for item in promo_sorted_desc] != [1001, 1002]:
+        raise AssertionError("stock-report promo sort smoke must order Да before Нет for descending semantics")
 
     print("reports_ui_sections: ok -> Обновление данных / Поставки / Отчёты")
     print("reports_ui_subsections: ok -> daily / stock / plan")
     print("reports_ui_plan_baseline_controls: ok -> template / upload / status")
-    print("reports_ui_stock_selector: ok -> full active SKU config, default=all, empty-selection validation")
+    print("reports_ui_stock_table: ok -> period input, sortable table, promo column, no old low-stock list")
     print("reports_ui_heading_dedup: ok -> no panel-body h1 duplicates")
 
 

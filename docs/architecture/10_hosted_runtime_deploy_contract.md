@@ -386,6 +386,10 @@ Public probe validates:
 - `GET /v1/sheet-vitrina-v1/stock-report` returns `200` + JSON for both states:
   - without explicit `as_of_date`, `status=available` when the latest persisted ready snapshot `<= default_business_as_of_date(now)` contains a valid `yesterday_closed` slot;
   - with explicit `as_of_date`, the route stays strict exact-read and returns `status=unavailable` when that exact ready snapshot or `yesterday_closed` slot is missing/stale;
+  - optional `sales_avg_period_days=<positive integer>` controls the availability-adjusted `orderCount` averaging period; missing/empty uses the supply default `14`, non-integer returns controlled JSON `422`, and non-positive values follow the existing supply default semantics;
+  - `rows[]` is the full active `config_v2` SKU table, not a legacy low-stock `<50` subset. Rows expose raw numeric sort fields: `stock_total`, `zero_district_count`, `avg_sales_per_day`, `days_left_total`, and per-district `stock`, `avg_daily_burn`, `days_left`;
+  - `promotion_participation` is read from canonical `promo_participation` in the persisted ready snapshot: numeric `>0` = `Да`, numeric `0` = `Нет`, missing = `н/д`/`null`;
+  - district days-left uses persisted ready-snapshot depletion only: positive decreases between consecutive `yesterday_closed` district stock snapshots are averaged; missing, gap, restock/increase and zero-depletion days are diagnostics and are not fabricated as district расход;
   - route stays read-only and must not trigger refresh/upstream fetch from the public read path
 - `GET /v1/sheet-vitrina-v1/plan-report` returns `200` + JSON for valid primary query params `period`, `h1_buyout_plan_rub`, `h2_buyout_plan_rub`, `plan_drr_pct`, optional `as_of_date` and optional boolean `annual_plan_evenly_distributed`; legacy complete `q1_buyout_plan_rub`..`q4_buyout_plan_rub` may be accepted only as transitional fallback:
   - response contains `selected_period`, `month_to_date`, `quarter_to_date`, `year_to_date` blocks;

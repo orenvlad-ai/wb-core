@@ -8,6 +8,7 @@ import socket
 import sys
 from tempfile import TemporaryDirectory
 import threading
+from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,6 +80,8 @@ def main() -> None:
             for token in (
                 "Ежедневные отчёты",
                 "Отчёт по остаткам",
+                "Период усреднения продаж",
+                "stock-report-table",
                 DEFAULT_SHEET_DAILY_REPORT_PATH,
                 DEFAULT_SHEET_STOCK_REPORT_PATH,
             ):
@@ -93,15 +96,25 @@ def main() -> None:
             if daily_payload.get("newer_closed_date") != "2026-05-09":
                 raise AssertionError(f"daily route must use latest persisted ready date, got {daily_payload}")
 
-            stock_code, stock_payload = _get_json(f"{base_url}{DEFAULT_SHEET_STOCK_REPORT_PATH}")
+            stock_code, stock_payload = _get_json(f"{base_url}{DEFAULT_SHEET_STOCK_REPORT_PATH}?sales_avg_period_days=14")
             if stock_code != 200 or stock_payload.get("status") != "available":
                 raise AssertionError(f"stock report browser route must be available, got {stock_code} {stock_payload}")
             if stock_payload.get("requested_as_of_date") != "2026-05-10" or stock_payload.get("report_date") != "2026-05-09":
                 raise AssertionError(f"stock route default must fallback to persisted ready date, got {stock_payload}")
+            if stock_payload.get("sales_avg_period_days") != 14:
+                raise AssertionError(f"stock route must accept sales_avg_period_days, got {stock_payload}")
+            if "promotion_participation" not in (stock_payload.get("rows") or [{}])[0]:
+                raise AssertionError(f"stock route must expose promotion participation field, got {stock_payload}")
+            if "districts" not in (stock_payload.get("rows") or [{}])[0]:
+                raise AssertionError(f"stock route must expose district stock/days fields, got {stock_payload}")
 
-            strict_code, strict_payload = _get_json(f"{base_url}{DEFAULT_SHEET_STOCK_REPORT_PATH}?as_of_date=2026-05-10")
+            strict_code, strict_payload = _get_json(f"{base_url}{DEFAULT_SHEET_STOCK_REPORT_PATH}?as_of_date=2026-05-10&sales_avg_period_days=14")
             if strict_code != 200 or strict_payload.get("status") != "unavailable":
                 raise AssertionError(f"explicit stock route must stay strict unavailable, got {strict_code} {strict_payload}")
+
+            invalid_code, invalid_payload = _get_json_allow_error(f"{base_url}{DEFAULT_SHEET_STOCK_REPORT_PATH}?sales_avg_period_days=abc")
+            if invalid_code != 422 or "Период усреднения продаж" not in str(invalid_payload.get("error")):
+                raise AssertionError(f"invalid sales_avg_period_days must return controlled 422 JSON, got {invalid_code} {invalid_payload}")
 
             print("reports_ready_browser_operator: ok -> reports tab rendered")
             print("reports_ready_browser_daily: ok -> requested 2026-05-10 selected 2026-05-09")
@@ -127,6 +140,13 @@ def _post_json(url: str, payload: dict[str, object]) -> tuple[int, dict[str, obj
 def _get_json(url: str) -> tuple[int, dict[str, object]]:
     with urllib_request.urlopen(url, timeout=10) as response:
         return response.status, json.loads(response.read().decode("utf-8"))
+
+
+def _get_json_allow_error(url: str) -> tuple[int, dict[str, object]]:
+    try:
+        return _get_json(url)
+    except urllib_error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
 def _get_text(url: str) -> tuple[int, str]:

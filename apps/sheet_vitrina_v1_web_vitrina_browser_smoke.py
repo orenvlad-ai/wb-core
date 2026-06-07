@@ -2792,7 +2792,7 @@ def _check_embedded_operator_dark_layout(page: object, embedded_tab: str) -> dic
           const activeSubsection = activePanel ? activePanel.querySelector(".subsection-button.is-active") : null;
           const primary = activePanel ? activePanel.querySelector(".primary-button") : null;
           const secondary = activePanel ? activePanel.querySelector(".secondary-button") : null;
-          const card = activePanel ? activePanel.querySelector(".dataset-card, .report-card, .plan-report-card, .stock-report-item") : null;
+          const card = activePanel ? activePanel.querySelector(".dataset-card, .report-card, .plan-report-card") : null;
           const tableSurface = activePanel ? activePanel.querySelector(".district-table-wrap, .plan-report-table-wrap, .log-viewport") : null;
           const primaryRgb = primary ? numbers(getComputedStyle(primary).backgroundColor) : [];
           const primaryBorderRgb = primary ? numbers(getComputedStyle(primary).borderTopColor) : [];

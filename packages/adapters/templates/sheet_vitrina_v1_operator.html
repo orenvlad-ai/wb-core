@@ -547,42 +547,6 @@
       color: var(--muted);
     }
 
-    .stock-report-list {
-      list-style: none;
-      margin: 0;
-      padding: 0;
-      display: grid;
-      gap: 12px;
-    }
-
-    .stock-report-item {
-      display: grid;
-      gap: 10px;
-      padding: 14px 16px;
-      border-radius: 14px;
-      border: 1px solid rgba(15, 23, 42, 0.08);
-      background: #ffffff;
-    }
-
-    .stock-report-chip-list {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-
-    .stock-report-chip {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      padding: 7px 10px;
-      border-radius: 999px;
-      background: var(--error-bg);
-      color: var(--error-text);
-      font-size: 12px;
-      font-weight: 700;
-      white-space: nowrap;
-    }
-
     .stock-report-toolbar {
       display: flex;
       align-items: flex-end;
@@ -594,6 +558,22 @@
     .stock-selector-field {
       flex: 1 1 320px;
       min-width: 280px;
+    }
+
+    .stock-report-period-field {
+      flex: 0 0 220px;
+      min-width: 190px;
+    }
+
+    .stock-report-period-input {
+      width: 100%;
+      min-height: 44px;
+      border: 1px solid rgba(15, 23, 42, 0.12);
+      border-radius: 12px;
+      padding: 10px 12px;
+      font: inherit;
+      color: var(--text);
+      background: #ffffff;
     }
 
     .stock-selector-label {
@@ -723,6 +703,79 @@
       font-size: 13px;
       line-height: 1.5;
       color: var(--muted);
+    }
+
+    .stock-report-table-wrap {
+      width: 100%;
+      overflow: auto;
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      border-radius: 12px;
+      background: #ffffff;
+    }
+
+    .stock-report-table {
+      width: 100%;
+      min-width: 1380px;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    .stock-report-table th,
+    .stock-report-table td {
+      padding: 9px 10px;
+      border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+      text-align: right;
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+
+    .stock-report-table th:first-child,
+    .stock-report-table td:first-child {
+      text-align: left;
+      min-width: 220px;
+      max-width: 320px;
+      white-space: normal;
+    }
+
+    .stock-report-table thead th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: #f8fafc;
+      color: var(--muted-strong);
+      font-weight: 800;
+    }
+
+    .stock-report-table tbody tr:hover td {
+      background: #f8fafc;
+    }
+
+    .stock-report-sort-button {
+      width: 100%;
+      border: 0;
+      padding: 0;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      font-weight: 800;
+      text-align: inherit;
+      cursor: pointer;
+    }
+
+    .stock-report-sort-button.is-active {
+      color: var(--accent);
+    }
+
+    .stock-report-promo {
+      font-weight: 800;
+    }
+
+    .stock-report-promo.is-yes {
+      color: var(--success-text);
+    }
+
+    .stock-report-promo.is-no {
+      color: var(--muted-strong);
     }
 
     .plan-report-toolbar {
@@ -1459,7 +1512,6 @@
     .dataset-card,
     .report-hero-card,
     .report-card,
-    .stock-report-item,
     .plan-report-card,
     .district-table-wrap,
     .log-viewport,
@@ -1487,7 +1539,6 @@
     .block,
     .dataset-card,
     .report-card,
-    .stock-report-item,
     .plan-report-card {
       border-radius: var(--radius);
       background: var(--panel-subtle);
@@ -1708,6 +1759,12 @@
       box-shadow: var(--shadow);
     }
 
+    .stock-report-period-input {
+      color: var(--text);
+      background: var(--control-bg);
+      border-color: var(--border);
+    }
+
     .stock-selector-action {
       border-radius: 999px;
       color: #ddd6fe;
@@ -1729,23 +1786,28 @@
     .plan-report-baseline,
     .plan-report-table th,
     .plan-report-table td,
+    .stock-report-table th,
+    .stock-report-table td,
     .district-table th,
     .district-table td {
       border-color: var(--border);
     }
 
     .plan-report-table thead th,
+    .stock-report-table thead th,
     .district-table th {
       background: #1b1e26;
     }
 
     .plan-report-table tbody tr:hover td,
+    .stock-report-table tbody tr:hover td,
     .district-table tbody tr:hover td {
       background: #181c23;
     }
 
     .log-viewport,
     .district-table-wrap,
+    .stock-report-table-wrap,
     .plan-report-table-wrap {
       background: var(--control-bg);
       border-color: var(--border);
@@ -1761,10 +1823,6 @@
     .plan-report-status-badge.is-unknown {
       background: var(--idle-bg);
       color: var(--idle-text);
-    }
-
-    .stock-report-chip {
-      border: 1px solid rgba(248, 113, 113, 0.34);
     }
 
     .supplier-shipments-frame {
@@ -2017,7 +2075,7 @@
               <h2 class="block-title">Отчёт по остаткам</h2>
               <p id="stockReportPeriod" class="report-period">Дата отчёта: -</p>
               <p id="stockReportLead" class="field-note">
-                Показываем только SKU, где хотя бы по одному supported district stock меньше 50 единиц.
+                Полная таблица active SKU по persisted ready snapshot / DATA_VITRINA / yesterday_closed.
               </p>
               <div class="stock-report-toolbar">
                 <div class="stock-selector-field">
@@ -2035,15 +2093,15 @@
                   <p class="stock-selector-hint">Список строится из current active SKU truth (`config_v2`). Изменения применяются после кнопки «Рассчитать».</p>
                   <p id="stockReportSkuValidation" class="stock-selector-validation" hidden>Выберите хотя бы один SKU</p>
                 </div>
+                <label class="stock-selector-field stock-report-period-field" for="stockReportSalesAvgPeriodDays">
+                  <span class="stock-selector-label">Период усреднения продаж</span>
+                  <input id="stockReportSalesAvgPeriodDays" class="stock-report-period-input" type="number" min="1" step="1" value="14" inputmode="numeric">
+                </label>
                 <button id="stockReportApplyButton" class="action-button secondary-button" type="button">Рассчитать</button>
               </div>
               <p id="stockReportStatus" class="section-message">Читаем отчёт по остаткам...</p>
               <div id="stockReportContent" class="daily-report" hidden>
-                <section class="report-card">
-                  <h3>SKU с низким остатком по округам</h3>
-                  <p>Source seam остаётся server-owned: latest persisted ready snapshot не новее default closed day и slot <code>yesterday_closed</code> читаются только из persisted ready snapshot.</p>
-                  <div id="stockReportRows"></div>
-                </section>
+                <div id="stockReportRows"></div>
               </div>
               <div id="stockReportNotes" class="report-notes"></div>
             </section>
@@ -2600,6 +2658,7 @@
       const stockReportSkuValidation = document.getElementById("stockReportSkuValidation");
       const stockReportSelectAllButton = document.getElementById("stockReportSelectAllButton");
       const stockReportClearAllButton = document.getElementById("stockReportClearAllButton");
+      const stockReportSalesAvgPeriodDays = document.getElementById("stockReportSalesAvgPeriodDays");
       const stockReportApplyButton = document.getElementById("stockReportApplyButton");
       const planReportPeriod = document.getElementById("planReportPeriod");
       const planReportLead = document.getElementById("planReportLead");
@@ -2732,6 +2791,23 @@
       const VALID_SUPPLY_SECTIONS = new Set(["factory", "regional"]);
       const DEFAULT_FACTORY_INBOUND_SOURCE = "manual_excel";
       const VALID_FACTORY_INBOUND_SOURCES = new Set(["manual_excel", "supplier_registry"]);
+      const STOCK_REPORT_DISTRICT_COLUMNS = [
+        { metric_key: "stock_ru_central", label: "Центральный" },
+        { metric_key: "stock_ru_northwest", label: "Северо-Западный" },
+        { metric_key: "stock_ru_volga", label: "Приволжский" },
+        { metric_key: "stock_ru_ural", label: "Уральский" },
+        { metric_key: "stock_ru_south_caucasus", label: "Юг/СКФО" }
+      ];
+      const STOCK_REPORT_TABLE_COLUMNS = [
+        { key: "identity_label", label: "SKU", kind: "string" },
+        { key: "promotion_participation", label: "Акция", kind: "promo" },
+        { key: "stock_total", label: "Остаток всего", kind: "number", format: "stock" },
+        { key: "zero_district_count", label: "Ноль в округах", kind: "number", format: "integer" },
+        ...STOCK_REPORT_DISTRICT_COLUMNS.map((item) => ({ key: "stock:" + item.metric_key, label: item.label, kind: "number", format: "stock", metric_key: item.metric_key })),
+        { key: "avg_sales_per_day", label: "Сред. продаж/день", kind: "number", format: "avg" },
+        { key: "days_left_total", label: "Дней всего", kind: "number", format: "days" },
+        ...STOCK_REPORT_DISTRICT_COLUMNS.map((item) => ({ key: "days:" + item.metric_key, label: "Дней: " + item.label, kind: "number", format: "days", metric_key: item.metric_key }))
+      ];
       const VALID_PLAN_REPORT_PERIODS = new Set([
         "yesterday",
         "last_7_days",
@@ -2763,6 +2839,7 @@
       let stockReportSelectedSkuIds = resolveRestoredStockReportDraftSkuIds(persistedOperatorUiState);
       let stockReportAppliedSkuIds = resolveRestoredStockReportAppliedSkuIds(persistedOperatorUiState);
       let stockReportPayload = null;
+      let stockReportSortState = { key: "active_order", direction: "asc" };
       let planReportPayload = null;
 
       function readPersistedOperatorUiState() {
@@ -3425,7 +3502,7 @@
           stock_report_applied_sku_ids: stockReportAppliedSkuIds.slice(),
         });
         closeOperatorFloatingControls();
-        renderStockReport(stockReportPayload);
+        loadStockReport();
       }
 
       function deltaClass(direction) {
@@ -3612,7 +3689,7 @@
 
       function renderStockReportUnavailable(payload, fallbackMessage) {
         stockReportPeriod.textContent = "Дата отчёта: " + formatHumanDate(payload && payload.report_date);
-        stockReportLead.textContent = "Показываем только SKU, где хотя бы по одному supported district stock меньше 50 единиц.";
+        stockReportLead.textContent = "Полная таблица active SKU по persisted ready snapshot / DATA_VITRINA / yesterday_closed.";
         stockReportStatus.textContent = valueOrDash((payload && payload.reason) || fallbackMessage || "Отчёт по остаткам пока недоступен.");
         stockReportStatus.className = "section-message";
         stockReportContent.hidden = true;
@@ -3620,32 +3697,161 @@
         renderStockReportNotes(payload && payload.notes);
       }
 
+      function readStockReportSalesAvgPeriodDays() {
+        const raw = String(stockReportSalesAvgPeriodDays ? stockReportSalesAvgPeriodDays.value : "").trim();
+        if (!raw) {
+          return "14";
+        }
+        return raw;
+      }
+
+      function buildStockReportUrl() {
+        const url = new URL(config.stock_report_path, window.location.href);
+        url.searchParams.set("sales_avg_period_days", readStockReportSalesAvgPeriodDays());
+        return url.toString();
+      }
+
+      function getStockReportDistrict(item, metricKey) {
+        const districts = Array.isArray(item && item.districts) ? item.districts : [];
+        return districts.find((district) => String(district && district.metric_key) === String(metricKey)) || {};
+      }
+
+      function stockReportNumericValue(value) {
+        if (value === null || value === undefined || value === "") {
+          return null;
+        }
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? numeric : null;
+      }
+
+      function stockReportSortValue(item, column) {
+        if (!column || column.key === "active_order") {
+          return stockReportNumericValue(item && item.active_order);
+        }
+        if (column.key.indexOf("stock:") === 0) {
+          return stockReportNumericValue(getStockReportDistrict(item, column.metric_key).stock);
+        }
+        if (column.key.indexOf("days:") === 0) {
+          return stockReportNumericValue(getStockReportDistrict(item, column.metric_key).days_left);
+        }
+        if (column.kind === "promo") {
+          if (item && item.promotion_participation === true) {
+            return 1;
+          }
+          if (item && item.promotion_participation === false) {
+            return 0;
+          }
+          return null;
+        }
+        if (column.kind === "string") {
+          return String((item && item.identity_label) || "").toLocaleLowerCase("ru");
+        }
+        return stockReportNumericValue(item && item[column.key]);
+      }
+
+      function compareStockReportRows(left, right, column, direction) {
+        const leftValue = stockReportSortValue(left, column);
+        const rightValue = stockReportSortValue(right, column);
+        const leftMissing = leftValue === null || leftValue === "";
+        const rightMissing = rightValue === null || rightValue === "";
+        if (leftMissing && !rightMissing) {
+          return 1;
+        }
+        if (!leftMissing && rightMissing) {
+          return -1;
+        }
+        let comparison = 0;
+        if (!leftMissing && !rightMissing) {
+          if (typeof leftValue === "number" && typeof rightValue === "number") {
+            comparison = leftValue === rightValue ? 0 : (leftValue < rightValue ? -1 : 1);
+          } else {
+            comparison = String(leftValue).localeCompare(String(rightValue), "ru");
+          }
+        }
+        if (comparison !== 0) {
+          return direction === "desc" ? -comparison : comparison;
+        }
+        const leftOrder = stockReportNumericValue(left && left.active_order);
+        const rightOrder = stockReportNumericValue(right && right.active_order);
+        if (leftOrder !== null && rightOrder !== null && leftOrder !== rightOrder) {
+          return leftOrder < rightOrder ? -1 : 1;
+        }
+        return String((left && left.identity_label) || "").localeCompare(String((right && right.identity_label) || ""), "ru");
+      }
+
+      function sortedStockReportRows(rows) {
+        const items = Array.isArray(rows) ? rows.slice() : [];
+        const column = STOCK_REPORT_TABLE_COLUMNS.find((item) => item.key === stockReportSortState.key) || { key: "active_order", kind: "number" };
+        return items.sort((left, right) => compareStockReportRows(left, right, column, stockReportSortState.direction));
+      }
+
+      function formatStockReportNumber(value, formatKind) {
+        const numeric = stockReportNumericValue(value);
+        if (numeric === null) {
+          return "н/д";
+        }
+        if (formatKind === "integer") {
+          return integerFormatter.format(Math.round(numeric));
+        }
+        if (formatKind === "days") {
+          return new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 }).format(numeric);
+        }
+        return numberFormatter.format(numeric);
+      }
+
+      function stockReportCellMarkup(item, column) {
+        if (column.kind === "string") {
+          return escapeHtml(item && item.identity_label ? item.identity_label : "-");
+        }
+        if (column.kind === "promo") {
+          const label = String((item && item.promotion_participation_label) || "н/д");
+          const className = item && item.promotion_participation === true
+            ? "stock-report-promo is-yes"
+            : (item && item.promotion_participation === false ? "stock-report-promo is-no" : "stock-report-promo");
+          return "<span class=\"" + className + "\">" + escapeHtml(label) + "</span>";
+        }
+        if (column.key.indexOf("stock:") === 0) {
+          return escapeHtml(formatStockReportNumber(getStockReportDistrict(item, column.metric_key).stock, column.format));
+        }
+        if (column.key.indexOf("days:") === 0) {
+          return escapeHtml(formatStockReportNumber(getStockReportDistrict(item, column.metric_key).days_left, column.format));
+        }
+        return escapeHtml(formatStockReportNumber(item && item[column.key], column.format));
+      }
+
+      function stockReportHeaderMarkup(column) {
+        const isActive = stockReportSortState.key === column.key;
+        const indicator = isActive ? (stockReportSortState.direction === "asc" ? " ↑" : " ↓") : "";
+        const ariaSort = isActive ? (stockReportSortState.direction === "asc" ? "ascending" : "descending") : "none";
+        return "<th aria-sort=\"" + ariaSort + "\"><button class=\"stock-report-sort-button" + (isActive ? " is-active" : "") + "\" type=\"button\" data-stock-report-sort=\"" + escapeHtml(column.key) + "\">" + escapeHtml(column.label + indicator) + "</button></th>";
+      }
+
       function renderStockReportRows(rows) {
-        if (!Array.isArray(rows) || !rows.length) {
+        const sortedRows = sortedStockReportRows(rows);
+        if (!Array.isArray(sortedRows) || !sortedRows.length) {
           const emptyMessage = stockReportActiveSkus.length
             && stockReportAppliedSkuIds.length
             && stockReportAppliedSkuIds.length < stockReportActiveSkus.length
-            ? "Для выбранных SKU district stock меньше 50 единиц не найдено."
-            : "SKU с district stock меньше 50 единиц сейчас не найдено.";
+            ? "Для выбранных SKU строки отчёта не найдены."
+            : "Active SKU для отчёта по остаткам пока не найдены.";
           stockReportRows.innerHTML = "<p class=\"report-empty\">" + escapeHtml(emptyMessage) + "</p>";
           return;
         }
         stockReportRows.innerHTML = [
-          "<ol class=\"stock-report-list\">",
-          rows.map((item) => [
-            "<li class=\"stock-report-item\">",
-            "<div class=\"report-list-main\">",
-            "<div class=\"report-list-title\">" + escapeHtml(item.identity_label || "-") + "</div>",
-            "<div class=\"report-list-meta\">Общий остаток: " + escapeHtml(formatNumber(item.stock_total)) + "</div>",
-            "</div>",
-            "<div class=\"stock-report-chip-list\">",
-            ((Array.isArray(item.breached_districts) ? item.breached_districts : []).map((district) => (
-              "<span class=\"stock-report-chip\">" + escapeHtml(String(district.label || "-") + " — " + formatNumber(district.stock)) + "</span>"
-            )).join("")),
-            "</div>",
-            "</li>",
+          "<div class=\"stock-report-table-wrap\" data-stock-report-table-wrap>",
+          "<table class=\"stock-report-table\" data-stock-report-table>",
+          "<thead><tr>",
+          STOCK_REPORT_TABLE_COLUMNS.map(stockReportHeaderMarkup).join(""),
+          "</tr></thead>",
+          "<tbody>",
+          sortedRows.map((item) => [
+            "<tr>",
+            STOCK_REPORT_TABLE_COLUMNS.map((column) => "<td>" + stockReportCellMarkup(item, column) + "</td>").join(""),
+            "</tr>"
           ].join("")).join(""),
-          "</ol>"
+          "</tbody>",
+          "</table>",
+          "</div>"
         ].join("");
       }
 
@@ -3660,7 +3866,7 @@
           ? " SKU в фильтре: " + selectedCount + " из " + stockReportActiveSkus.length + "."
           : "";
         stockReportPeriod.textContent = "Дата отчёта: " + formatHumanDate(payload.report_date) + ".";
-        stockReportLead.textContent = "Closed business day: " + valueOrDash(payload.report_date) + ". Порог риска: остаток < " + valueOrDash(payload.threshold_lt) + "." + selectionSummary;
+        stockReportLead.textContent = "Closed business day: " + valueOrDash(payload.report_date) + ". Период усреднения продаж: " + valueOrDash(payload.sales_avg_period_days) + "." + selectionSummary;
         stockReportStatus.textContent = "Source of truth: persisted ready snapshot / DATA_VITRINA / yesterday_closed.";
         stockReportStatus.className = "section-message";
         stockReportContent.hidden = false;
@@ -4584,8 +4790,10 @@
       }
 
       async function loadStockReport() {
+        stockReportApplyButton.disabled = true;
+        stockReportApplyButton.textContent = "Считаем...";
         try {
-          const response = await fetch(config.stock_report_path, {
+          const response = await fetch(buildStockReportUrl(), {
             method: "GET",
             headers: { "Accept": "application/json" }
           });
@@ -4605,6 +4813,9 @@
             },
             "Отчёт по остаткам пока недоступен."
           );
+        } finally {
+          stockReportApplyButton.disabled = !stockReportActiveSkus.length;
+          stockReportApplyButton.textContent = "Рассчитать";
         }
       }
 
@@ -5228,6 +5439,20 @@
           stock_report_selected_sku_ids: [],
           stock_report_applied_sku_ids: stockReportAppliedSkuIds.slice(),
         });
+      });
+      stockReportRows.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-stock-report-sort]");
+        if (!button) {
+          return;
+        }
+        const key = String(button.getAttribute("data-stock-report-sort") || "");
+        if (!key) {
+          return;
+        }
+        stockReportSortState = stockReportSortState.key === key
+          ? { key, direction: stockReportSortState.direction === "asc" ? "desc" : "asc" }
+          : { key, direction: "asc" };
+        renderStockReport(stockReportPayload);
       });
       stockReportApplyButton.addEventListener("click", applyStockReportSelection);
       planReportApplyButton.addEventListener("click", loadPlanReport);
