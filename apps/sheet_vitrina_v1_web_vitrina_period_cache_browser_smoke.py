@@ -16,6 +16,7 @@ from apps.sheet_vitrina_v1_web_vitrina_browser_smoke import (  # noqa: E402
     LocalWebVitrinaFixtureServer,
 )
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
 )
 
@@ -36,6 +37,7 @@ def main() -> None:
     print("web_vitrina_period_cache_base_url: ok ->", result["base_url"])
     print("web_vitrina_period_cache_no_query_default: ok ->", result["no_query_default"])
     print("web_vitrina_period_cache_stale_april_reset: ok ->", result["stale_april_reset"])
+    print("web_vitrina_period_cache_operator_default: ok ->", result["operator_default"])
     print("web_vitrina_period_cache_explicit_period: ok ->", result["explicit_period"])
 
 
@@ -61,6 +63,7 @@ def run_browser_check(base_url: str) -> dict[str, object]:
                 raise AssertionError(f"no-query load must reset obsolete period state, got {stale_april_reset}")
             if "is-stale-loading" in stale_april_reset["freshnessClass"] or "is-stale-error" in stale_april_reset["freshnessClass"]:
                 raise AssertionError(f"no-query load must not be driven by stale cache freshness, got {stale_april_reset}")
+            operator_default = _open_and_assert_no_query_default(page, base_url + DEFAULT_SHEET_OPERATOR_UI_PATH)
             explicit_period = _assert_explicit_period_cache(page, page_url)
         finally:
             context.close()
@@ -70,6 +73,7 @@ def run_browser_check(base_url: str) -> dict[str, object]:
         "base_url": base_url,
         "no_query_default": no_query_default,
         "stale_april_reset": stale_april_reset,
+        "operator_default": operator_default,
         "explicit_period": explicit_period,
     }
 

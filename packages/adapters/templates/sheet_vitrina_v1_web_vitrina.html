@@ -8160,6 +8160,9 @@
         current_mode: "default",
         status_text: "Исторический доступ недоступен.",
         default_as_of_date: "",
+        default_date_from: "",
+        default_date_to: "",
+        default_preset_id: "two_weeks",
         url_state_mode: "query_string",
         browser_state_persistence: "none",
         supported_query_mode: "date_window",
@@ -8188,6 +8191,8 @@
         valueOrDash(historical.supported_query_mode) +
         " · default as_of_date: " +
         valueOrDash(historical.default_as_of_date) +
+        " · default preset: " +
+        valueOrDash(historical.default_preset_id) +
         " · route state: " +
         valueOrDash(historical.url_state_mode);
       historyCalendarDetailNode.textContent =
@@ -8313,6 +8318,19 @@
     }
 
     function defaultHistoryRange(payload) {
+      const historical = (payload && payload.historical_access) || {};
+      const serverDefaultFrom = normalizeIsoDate(historical.default_date_from || "");
+      const serverDefaultTo = normalizeIsoDate(historical.default_date_to || "");
+      if (
+        serverDefaultFrom &&
+        serverDefaultTo &&
+        serverDefaultFrom <= serverDefaultTo &&
+        state.history.availableDateSet.has(serverDefaultFrom) &&
+        state.history.availableDateSet.has(serverDefaultTo) &&
+        isContinuousAvailableRange(serverDefaultFrom, serverDefaultTo)
+      ) {
+        return {dateFrom: serverDefaultFrom, dateTo: serverDefaultTo};
+      }
       const meta = (payload && payload.meta) || {};
       const endCandidate = normalizeIsoDate(meta.today_current_date || meta.snapshot_as_of_date || meta.as_of_date || state.history.defaultAsOfDate || "");
       if (!endCandidate) {

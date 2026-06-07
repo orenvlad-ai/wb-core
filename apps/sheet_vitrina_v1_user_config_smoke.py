@@ -81,11 +81,16 @@ def main() -> None:
                 "base_revision": 0,
                 "config": {
                     "version": 2,
+                    "date_from": "2026-04-20",
+                    "date_to": "2026-04-24",
+                    "preset": "legacy",
                     "scopes": {
                         "sku": {
                             "order": ["ctr_current", "ctr_current", ""],
                             "display": {"ctr_current": "unsupported", "views_current": "shown", "orders_current": "hidden"},
                             "manual": "yes",
+                            "date_from": "2026-04-20",
+                            "date_to": "2026-04-24",
                         }
                     },
                     "expanded_anchors": ["sku::ctr_current", "sku::ctr_current"],
@@ -98,8 +103,11 @@ def main() -> None:
             raise AssertionError(f"unsupported/shown display values must be sanitized, got {sanitized}")
         if sanitized["config"]["expanded_anchors"] != ["sku::ctr_current"]:
             raise AssertionError(f"expanded anchors must be deduplicated, got {sanitized}")
+        sanitized_raw = str(sanitized["config"])
+        if "2026-04-20" in sanitized_raw or "2026-04-24" in sanitized_raw or "legacy" in sanitized_raw:
+            raise AssertionError(f"legacy period fields must not survive server user-config sanitization, got {sanitized}")
 
-    print({"status": "ok", "checks": ["missing", "save", "reload", "multi_user", "conflict", "sanitize"]})
+    print({"status": "ok", "checks": ["missing", "save", "reload", "multi_user", "conflict", "sanitize", "legacy_period_drop"]})
 
 
 if __name__ == "__main__":

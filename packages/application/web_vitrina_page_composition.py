@@ -13,6 +13,8 @@ from packages.contracts.web_vitrina_view_model import WebVitrinaViewModelV1
 WEB_VITRINA_PAGE_COMPOSITION_NAME = "web_vitrina_page_composition"
 WEB_VITRINA_PAGE_COMPOSITION_VERSION = "v1"
 WEB_VITRINA_PAGE_STATE_NAMESPACE = "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1"
+WEB_VITRINA_DEFAULT_PRESET_ID = "two_weeks"
+WEB_VITRINA_DEFAULT_PRESET_LABEL = "2 недели"
 _ALL_OPTION_VALUE = "__all__"
 
 
@@ -28,6 +30,9 @@ def build_web_vitrina_page_composition(
     selected_as_of_date: str | None,
     selected_date_from: str | None,
     selected_date_to: str | None,
+    default_date_from: str | None = None,
+    default_date_to: str | None = None,
+    default_preset_id: str = WEB_VITRINA_DEFAULT_PRESET_ID,
     activity_surface: Mapping[str, Any] | None = None,
     include_table_data: bool = True,
 ) -> dict[str, Any]:
@@ -101,6 +106,9 @@ def build_web_vitrina_page_composition(
             selected_as_of_date=selected_as_of_date,
             selected_date_from=selected_date_from,
             selected_date_to=selected_date_to,
+            default_date_from=default_date_from,
+            default_date_to=default_date_to,
+            default_preset_id=default_preset_id,
         ),
         "status_badge": status_badge,
         "summary_cards": [
@@ -207,6 +215,9 @@ def build_web_vitrina_page_error_composition(
     selected_as_of_date: str | None,
     selected_date_from: str | None,
     selected_date_to: str | None,
+    default_date_from: str | None = None,
+    default_date_to: str | None = None,
+    default_preset_id: str = WEB_VITRINA_DEFAULT_PRESET_ID,
     activity_surface: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     time_model = _build_error_time_model(
@@ -251,6 +262,9 @@ def build_web_vitrina_page_error_composition(
             selected_as_of_date=selected_as_of_date,
             selected_date_from=selected_date_from,
             selected_date_to=selected_date_to,
+            default_date_from=default_date_from,
+            default_date_to=default_date_to,
+            default_preset_id=default_preset_id,
         ),
         "status_badge": {
             "label": "Ошибка",
@@ -850,10 +864,18 @@ def _build_historical_access(
     selected_as_of_date: str | None,
     selected_date_from: str | None,
     selected_date_to: str | None,
+    default_date_from: str | None,
+    default_date_to: str | None,
+    default_preset_id: str,
 ) -> dict[str, Any]:
     selected_date = str(selected_as_of_date or "").strip()
     selected_from = str(selected_date_from or "").strip()
     selected_to = str(selected_date_to or "").strip()
+    default_from = str(default_date_from or "").strip()
+    default_to = str(default_date_to or "").strip()
+    normalized_default_preset_id = str(default_preset_id or WEB_VITRINA_DEFAULT_PRESET_ID).strip()
+    if normalized_default_preset_id != WEB_VITRINA_DEFAULT_PRESET_ID:
+        normalized_default_preset_id = WEB_VITRINA_DEFAULT_PRESET_ID
     explicit_range = bool(selected_from and selected_to)
     explicit_single_date = bool(selected_date) and not explicit_range
     if selected_from and not selected_to:
@@ -884,6 +906,15 @@ def _build_historical_access(
         status_text = f"Открыт historical snapshot на {active_label}."
     else:
         status_text = f"Открыт текущий cheap daily mode на {active_label} без explicit as_of_date."
+    preset_options = [
+        {"preset_id": "week", "label": "Неделя"},
+        {"preset_id": "two_weeks", "label": "2 недели"},
+        {"preset_id": "month", "label": "Месяц"},
+        {"preset_id": "quarter", "label": "Квартал"},
+        {"preset_id": "year", "label": "Год"},
+    ]
+    for option in preset_options:
+        option["is_default"] = option["preset_id"] == normalized_default_preset_id
     return {
         "state_namespace": WEB_VITRINA_PAGE_STATE_NAMESPACE,
         "browser_state_persistence": "none",
@@ -891,6 +922,11 @@ def _build_historical_access(
         "supported_query_mode": "date_window",
         "page_route": page_route,
         "default_as_of_date": default_as_of_date,
+        "default_date_from": default_from,
+        "default_date_to": default_to,
+        "default_preset_id": normalized_default_preset_id,
+        "default_preset_label": WEB_VITRINA_DEFAULT_PRESET_LABEL,
+        "default_period_semantics": "rolling_two_week_period_ending_backend_today",
         "selected_as_of_date": selected_date,
         "selected_date_from": selected_from,
         "selected_date_to": selected_to,
@@ -899,13 +935,7 @@ def _build_historical_access(
         "available_date_min": options[-1]["value"] if options else "",
         "available_date_max": options[0]["value"] if options else "",
         "options": options,
-        "preset_options": [
-            {"preset_id": "week", "label": "Неделя"},
-            {"preset_id": "two_weeks", "label": "2 недели"},
-            {"preset_id": "month", "label": "Месяц"},
-            {"preset_id": "quarter", "label": "Квартал"},
-            {"preset_id": "year", "label": "Год"},
-        ],
+        "preset_options": preset_options,
         "empty_message": "Исторические ready snapshots пока не materialized.",
     }
 

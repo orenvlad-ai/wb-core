@@ -744,6 +744,7 @@ class RegistryUploadHttpEntrypoint:
         default_as_of_date = default_business_as_of_date(self.now_factory())
         selected_date_from = date_from
         selected_date_to = date_to
+        canonical_default_range: tuple[str, str] | None = None
         try:
             if not as_of_date and not date_from and not date_to:
                 seed_contract = self.web_vitrina_block.build(
@@ -757,6 +758,7 @@ class RegistryUploadHttpEntrypoint:
                     seed_contract,
                     available_snapshot_dates=available_snapshot_dates,
                 )
+                canonical_default_range = default_range
                 if default_range is not None:
                     selected_date_from, selected_date_to = default_range
                     contract = self.web_vitrina_block.build(
@@ -775,6 +777,11 @@ class RegistryUploadHttpEntrypoint:
                     as_of_date=as_of_date,
                     date_from=date_from,
                     date_to=date_to,
+                )
+            if canonical_default_range is None:
+                canonical_default_range = _default_web_vitrina_page_period(
+                    contract,
+                    available_snapshot_dates=available_snapshot_dates,
                 )
             view_model = build_web_vitrina_view_model(contract)
             adapter = build_web_vitrina_gravity_table_adapter(view_model)
@@ -800,6 +807,8 @@ class RegistryUploadHttpEntrypoint:
                     selected_as_of_date=as_of_date,
                     selected_date_from=selected_date_from,
                     selected_date_to=selected_date_to,
+                    default_date_from=(canonical_default_range or ("", ""))[0],
+                    default_date_to=(canonical_default_range or ("", ""))[1],
                     activity_surface=activity_surface,
                 ),
                 started_perf=page_composition_started_perf,
@@ -869,6 +878,8 @@ class RegistryUploadHttpEntrypoint:
                 selected_as_of_date=as_of_date,
                 selected_date_from=selected_date_from,
                 selected_date_to=selected_date_to,
+                default_date_from=(canonical_default_range or ("", ""))[0],
+                default_date_to=(canonical_default_range or ("", ""))[1],
                 contract=contract,
                 view_model=view_model,
                 adapter=adapter,
